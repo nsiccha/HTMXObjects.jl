@@ -1,0 +1,192 @@
+using Test, HTMXObjects, HTTP
+
+# Define test structs at module scope (Julia requires structs outside local scopes)
+@htmx struct TestApp
+    title = "Test"
+    @get index = h.h1(title)
+    @get item[id] = h.p("Item: $id")
+end
+
+@htmx struct IndexApp
+    @get index = h.h1("home")
+end
+
+@testset "HTMXObjects.jl" begin
+
+    @testset "auto - HTML rendering" begin
+        # Node renders to HTML string
+        result = auto(h.div("hello"); wrap=identity)
+        @test contains(result, "<div>")
+        @test contains(result, "hello")
+
+        # Plain string passes through unchanged
+        @test auto("<p>test</p>"; wrap=identity) == "<p>test</p>"
+
+        # Array: fragments are joined
+        result = auto([h.p("a"), h.p("b")]; wrap=identity)
+        @test contains(result, "<p>a</p>")
+        @test contains(result, "<p>b</p>")
+
+        # Pair: out-of-band swap — wraps content with id + hx-swap-oob="true"
+        result = auto(h.span("new") => "my-id"; wrap=identity)
+        @test contains(result, "id=\"my-id\"")
+        @test contains(result, "hx-swap-oob=\"true\"")
+        @test contains(result, "new")
+    end
+
+    @testset "to_response" begin
+        # Node → 200 HTML response
+        resp = to_response(h.div("hello"))
+        @test resp.status == 200
+        @test contains(String(resp.body), "<div>")
+        @test any(p.first == "Content-Type" && contains(p.second, "text/html")
+                  for p in resp.headers)
+
+        # Plain string → 200 HTML response
+        resp = to_response("<p>test</p>")
+        @test resp.status == 200
+        @test String(resp.body) == "<p>test</p>"
+
+        # Array → joined fragments
+        resp = to_response([h.p("a"), h.p("b")])
+        @test contains(String(resp.body), "<p>a</p>")
+
+        # HTTP.Response → passthrough (not wrapped)
+        orig = HTTP.Response(201; body="custom")
+        @test to_response(orig) === orig
+    end
+
+    @testset "pathparams" begin
+        @test pathparams(HTTP.Request("GET", "/post/42"), "/post/{id}") ==
+              Dict("id" => "42")
+
+        @test pathparams(HTTP.Request("GET", "/user/alice/post/1"), "/user/{name}/post/{id}") ==
+              Dict("name" => "alice", "id" => "1")
+
+        @test pathparams(HTTP.Request("GET", "/about?foo=bar"), "/about") ==
+              Dict{String,String}()
+
+        # Query string is stripped before matching
+        @test pathparams(HTTP.Request("GET", "/item/7?page=2"), "/item/{id}") ==
+              Dict("id" => "7")
+    end
+
+    @testset "HTMX request header inspection" begin
+        htmx_req = HTTP.Request("GET", "/",
+            ["HX-Request" => "true", "HX-Target" => "#result",
+             "HX-Trigger" => "btn", "HX-Current-URL" => "http://localhost/",
+             "HX-Boosted" => "true", "HX-Prompt" => "yes"])
+
+        @test is_htmx(htmx_req)
+        @test hx_target(htmx_req) == "#result"
+        @test hx_trigger(htmx_req) == "btn"
+        @test hx_current_url(htmx_req) == "http://localhost/"
+        @test hx_boosted(htmx_req)
+        @test hx_prompt(htmx_req) == "yes"
+
+        plain_req = HTTP.Request("GET", "/")
+        @test !is_htmx(plain_req)
+        @test hx_target(plain_req) == ""
+        @test !hx_boosted(plain_req)
+    end
+
+    @testset "hx_response headers" begin
+        base = h.div("content")
+
+        resp = hx_response(base; trigger="myEvent")
+        @test any(p.first == "HX-Trigger" && p.second == "myEvent"
+                  for p in resp.headers)
+
+        resp = hx_response(base; push_url="/new-path")
+        @test any(p.first == "HX-Push-Url" && p.second == "/new-path"
+                  for p in resp.headers)
+
+        resp = hx_response(base; replace_url="/replaced")
+        @test any(p.first == "HX-Replace-Url" for p in resp.headers)
+
+        resp = hx_response(base; redirect="/other")
+        @test any(p.first == "HX-Redirect" for p in resp.headers)
+
+        resp = hx_response(base; refresh=true)
+        @test any(p.first == "HX-Refresh" && p.second == "true"
+                  for p in resp.headers)
+
+        resp = hx_response(base; retarget="#foo", reswap="outerHTML")
+        @test any(p.first == "HX-Retarget" && p.second == "#foo" for p in resp.headers)
+        @test any(p.first == "HX-Reswap" && p.second == "outerHTML" for p in resp.headers)
+
+        # Body is preserved
+        @test contains(String(resp.body), "<div>")
+
+        # No extra headers when nothing set
+        resp0 = hx_response(base)
+        @test !any(startswith(p.first, "HX-") for p in resp0.headers)
+    end
+
+    @testset "@htmx struct — property access" begin
+        app = TestApp()
+
+        # Non-route property
+        @test app.title == "Test"
+
+        # @get property: non-indexed
+        html = repr("text/html", app.index)
+        @test contains(html, "Test")
+
+        # @get property: indexed
+        html = repr("text/html", app.item["foo"])
+        @test contains(html, "foo")
+
+        # Only @get properties are marked
+        props = DynamicObjects.meta(TestApp)
+        @test Symbol("@get") in props[:index].macros
+        @test !(Symbol("@get") in props[:title].macros)
+    end
+
+    @testset ":index → / routing" begin
+        app = IndexApp()
+        props = DynamicObjects.meta(IndexApp)
+        @test haskey(props, :index)
+        @test Symbol("@get") in props[:index].macros
+    end
+
+    @testset "htmx() full-page template" begin
+        page = htmx(h.main("content"))
+        html = repr("text/html", page)
+        @test contains(html, "htmx.org")          # HTMX included by default
+        @test contains(html, "hyperscript.org")   # Hyperscript included by default
+        @test contains(html, "<html")
+        @test contains(html, "content")
+        @test !contains(html, "pico")             # PicoCSS off by default
+
+        # Opt in to PicoCSS
+        html_pico = repr("text/html", htmx(h.main(); pico_version="2"))
+        @test contains(html_pico, "pico")
+
+        # Disable HTMX script
+        html_bare = repr("text/html", htmx(h.main(); htmx_version=nothing))
+        @test !contains(html_bare, "htmx.org")
+
+        # extra_head injects arbitrary head content
+        html_extra = repr("text/html", htmx(h.main(); extra_head=(h.style("body{margin:0}"),)))
+        @test contains(html_extra, "body{margin:0}")
+    end
+
+    @testset "save_response" begin
+        mktempdir() do dir
+            resp = HTTP.Response(200, ["Content-Type" => "text/html"]; body="<p>hi</p>")
+
+            # Root URL → index.html
+            dest = save_response(dir, "/", resp)
+            @test isfile(dest)
+            @test endswith(dest, "index.html")
+            @test read(dest, String) == "<p>hi</p>"
+
+            # Nested URL → mirrored path
+            dest2 = save_response(dir, "/post/42", resp)
+            @test isfile(dest2)
+            @test endswith(dest2, joinpath("post", "42.html"))
+        end
+    end
+
+end
