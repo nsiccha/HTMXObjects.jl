@@ -27,12 +27,12 @@ struct fields; properties with a RHS are computed lazily and cached.
 
 ```julia
 @htmx struct MyApp
-    base_url = "http://localhost:8080"   # plain field
+    title = "My App"                         # derived property (cached)
 
-    title = "My App"                     # cached computed property
+    nav = h.nav(h.strong(title))             # references `title` by name
 
-    @get index = htmx(h.main(h.h1(title)))   # also a GET route
-    @get post[id] = htmx(h.main(h.p(id)))    # indexed route: GET /post/{id}
+    @get index = htmx(h.main(nav, h.h1(title)))  # also a GET route
+    @get post[id] = htmx(h.main(h.p(id)))        # indexed route: GET /post/{id}
 end
 ```
 
@@ -84,22 +84,60 @@ htmx(body_content;
 )
 ```
 
+### Derived properties and cross-references
+
+Properties defined with `=` are lazily computed and cached. Crucially, any
+reference to another property name in the RHS is **automatically rewritten** to
+`__self__.<name>` — so properties can reference each other by bare name:
+
+```julia
+@htmx struct BlogApp
+    posts = [(id="1", title="Hello", body="...")]
+
+    # `posts` here automatically becomes `__self__.posts`
+    post_list = h.ul([h.li(p.title) for p in posts])
+
+    @get index = htmx(h.main(post_list))
+end
+```
+
+This means data, reusable UI fragments, and routes can all live inside the
+struct — no global `const`s or standalone functions needed.
+
+### Reusable fragments with indexed properties
+
+Define parameterised helpers as indexed properties using function-call syntax.
+These act like methods that can reference other properties:
+
+```julia
+@htmx struct CounterApp
+    counter_ui(n) = h.div(id="counter")(
+        h.p("Count: $n"),
+        h.button(hx_get="/increment/$n", hx_target="#counter", hx_swap="outerHTML")("+"),
+    )
+
+    @get index        = htmx(h.main(counter_ui(0)))
+    @get increment[n] = counter_ui(parse(Int, n) + 1)
+end
+```
+
+Both `prop(args)` and `prop[args]` define indexed properties, but the calling
+convention differs:
+
+| Syntax              | Caching behaviour                         |
+|---------------------|-------------------------------------------|
+| `app.prop[args]`    | Cached per index — same args return same result |
+| `app.prop(args)`    | Fresh computation each time               |
+
+Use `()` for UI fragments (which should render fresh) and `[]` for routes or
+expensive lookups.
+
 ### HTMX partial updates
 
 Return a fragment (not a full page) from an indexed route; the browser page
-uses `hx-target` and `hx-swap` to insert it:
-
-```julia
-counter_ui(n) = h.div(id="counter")(
-    h.p("Count: $n"),
-    h.button(hx_get="/increment/$n", hx_target="#counter", hx_swap="outerHTML")("+"),
-)
-
-@htmx struct CounterApp
-    @get index     = htmx(h.main(counter_ui(0)))
-    @get increment[n] = counter_ui(parse(Int, n) + 1)  # fragment only
-end
-```
+uses `hx-target` and `hx-swap` to insert it. See the counter example above —
+`increment[n]` returns only the updated `#counter` div, which HTMX swaps in
+without a full page reload.
 
 ### Out-of-band swaps
 
@@ -179,6 +217,118 @@ end
 
 Cached properties are serialised to `cache/<hash>/<index>.sjl` and skipped on
 subsequent calls. See DynamicObjects.jl for full caching documentation.
+
+## Mutable state with `@cached` and `@persist`
+
+For apps that need mutable state (e.g. a timer, a to-do list), combine
+`@cached` properties with assignment and `@persist`:
+
+```julia
+@htmx struct TimerApp
+    @cached running = false
+    @cached current_log = nothing
+
+    toggle[req] = begin
+        if running
+            current_log = nothing
+            running = false
+        else
+            current_log = (1, time())
+            running = true
+        end
+        @persist running
+        @persist current_log
+        timer_content
+    end
+
+    timer_content = h.div(id="timer")(
+        h.p(running ? "Running..." : "Stopped"),
+        h.button(hx_post="/toggle", hx_target="#timer", hx_swap="outerHTML")(
+            running ? "Stop" : "Start"
+        ),
+    )
+end
+```
+
+**How it works:**
+
+- Writing `running = false` inside a property RHS is rewritten by
+  `walk_rhs` to `__self__.running = false`, which calls `setproperty!`
+  and updates the in-memory cache.
+- `@persist running` serialises the current value to disk, so it survives
+  server restarts.
+- `@cached` properties share their disk cache across all instances with
+  the same fixed fields, so creating a fresh `TimerApp()` in each request
+  handler still sees the persisted state.
+
+## Fresh instance per request
+
+A common pattern for apps with `@cached` state: create a fresh struct
+instance in each route handler. Non-cached derived properties (like HTML
+fragments) recompute on every request, while `@cached` properties are
+loaded from disk:
+
+```julia
+@post "/toggle" function(req::HTTP.Request; context)
+    TimerApp().toggle[req] |> to_response
+end
+
+@get "/" function(req::HTTP.Request; context)
+    to_response(TimerApp().root)
+end
+```
+
+This avoids stale HTML — each request sees up-to-date state.
+
+## Custom routes alongside `@get`
+
+`@get` only handles GET routes registered via `route!`. For POST, DELETE,
+or other methods, use Oxygen's macros directly and access properties on a
+fresh struct instance:
+
+```julia
+@htmx struct RecipeApp
+    context
+    @get index = htmx(h.main(recipe_grid))
+    form_content[url] = begin ... end   # not @get — used from custom route
+end
+
+@post "/recipes" function(req::HTTP.Request; context)
+    RecipeApp(context.context).form_content[formdata(req)["url"]] |> to_response
+end
+
+@delete "/recipes" function(req::HTTP.Request; context)
+    pop!(RecipeApp(context.context).data, queryparams(req)["url"])
+    to_response("")
+end
+```
+
+## What belongs inside vs outside the struct
+
+**Inside (as derived properties):**
+
+- HTML fragments and page layouts — they benefit from cross-referencing
+  other properties by name
+- Data collections (`items`, `posts`) — replaces global `const`s
+- State (`@cached running`, `@cached log`) — persisted across requests
+- Action handlers (`toggle[req]`, `add_item[req]`) — they modify state
+  and return updated UI
+
+**Outside (as standalone functions or types):**
+
+- Pure utilities that don't reference any property (`fmt_hms(seconds)`,
+  `flat_texts(node)`)
+- Custom types (`PersistentSet`, data models)
+- Route handler registrations (`@post`, `@delete`) — until route markers
+  for other HTTP methods are added
+
+## Downstream dependency note
+
+When using `@oxidize` in a package that depends on HTMXObjects, Oxygen
+must be listed as a **direct** dependency in that package's Project.toml —
+not just as a transitive dependency through HTMXObjects. This is because
+`@oxidize` is a macro that runs at precompile time and needs to resolve
+in the downstream module's namespace.
 
 ## API reference
 
