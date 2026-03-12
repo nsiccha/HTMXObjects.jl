@@ -7,21 +7,21 @@
 # Run with:  julia examples/counter.jl
 # Then open: http://localhost:8080
 
-import Pkg; Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+import Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
 using HTMXObjects
 
-# Reusable fragment — returned by both the initial page and the HTMX update.
-# The `id="counter"` is the swap target; hx-swap="outerHTML" replaces the whole div.
-counter_ui(n::Int) = h.div(id="counter")(
-    h.p("Count: $n"),
-    h.button(
-        hx_get="/increment/$n",
-        hx_target="#counter",
-        hx_swap="outerHTML",
-    )("+"),
-)
-
 @htmx struct CounterApp
+    # Reusable fragment — returned by both the initial page and the HTMX update.
+    # The `id="counter"` is the swap target; hx-swap="outerHTML" replaces the whole div.
+    counter_ui(n) = h.div(id="counter")(
+        h.p("Count: $n"),
+        h.button(
+            hx_get="/increment/$n",
+            hx_target="#counter",
+            hx_swap="outerHTML",
+        )("+"),
+    )
+
     # Full page — wraps the fragment for the initial browser load.
     @get index = htmx(
         h.main(class="container")(

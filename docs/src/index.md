@@ -6,6 +6,21 @@ recorded static file.
 
 ## Quick start
 
+Scaffold a new app:
+
+```julia
+using HTMXObjects
+create_app("MyApp.jl")
+```
+
+Then run it:
+
+```bash
+cd MyApp.jl && julia -i --project=app app/main.jl
+```
+
+Or create an app manually:
+
 ```julia
 using HTMXObjects
 
@@ -21,8 +36,9 @@ serve()
 
 ### `@htmx struct`
 
-`@htmx` is an alias for `@dynamicstruct` (from DynamicObjects.jl) that signals
-the struct's intended use as a web app. Properties without a RHS are regular
+`@htmx` wraps `@dynamicstruct` (from DynamicObjects.jl) and appends a
+`_reroute!` call so that Revise-triggered re-evaluation automatically
+re-registers routes — no server restart needed. Properties without a RHS are regular
 struct fields; properties with a RHS are computed lazily and cached.
 
 ```julia
@@ -31,15 +47,17 @@ struct fields; properties with a RHS are computed lazily and cached.
 
     nav = h.nav(h.strong(title))             # references `title` by name
 
-    @get index = htmx(h.main(nav, h.h1(title)))  # also a GET route
-    @get post[id] = htmx(h.main(h.p(id)))        # indexed route: GET /post/{id}
+    @get index = htmx(h.main(nav, h.h1(title)))       # also a GET route
+    @get post[id] = htmx(h.main(h.p(id)))             # indexed route: GET /post/{id}
+    @get page[id::Int] = htmx(h.main(h.p("Page $id")))  # typed: id auto-parsed to Int
 end
 ```
 
-### `@get` marker
+### Route markers
 
-Properties marked `@get` inside `@htmx struct` are registered as Oxygen GET
-routes by `route!`. Unmarked properties remain internal.
+Properties marked with `@get`, `@post`, `@put`, `@patch`, or `@delete` inside
+`@htmx struct` are registered as Oxygen routes by `route!`. Unmarked properties
+remain internal.
 
 ### `route!`
 
@@ -51,12 +69,18 @@ route!(app; prefix="api")            # mount under /api/...
 
 Property-to-route mapping:
 
-| Property           | Route              |
-|--------------------|--------------------|
-| `@get index`       | `GET /`            |
-| `@get about`       | `GET /about`       |
-| `@get post[id]`    | `GET /post/{id}`   |
-| `@get item[a, b]`  | `GET /item/{a}/{b}`|
+| Property                  | Route(s)                               |
+|---------------------------|----------------------------------------|
+| `@get index`              | `GET /`                                |
+| `@get about`              | `GET /about`                           |
+| `@get post[id]`           | `GET /post/{id}` (id is a String)      |
+| `@get post[id::Int]`      | `GET /post/{id}` (id auto-parsed to Int) |
+| `@get item[a, b]`         | `GET /item/{a}/{b}`                    |
+| `@get filter[a, b=1]`     | `GET /filter/{a}/{b}` + `GET /filter/{a}` (b defaults to 1) |
+| `@get search(; q="", page::Int=1)` | `GET /search` (q, page from query string) |
+| `@post submit(; name="")`  | `POST /submit` (name from form data)   |
+| `@get items(category; sort="name")` | `GET /items/{category}` (sort from query string) |
+| `@delete remove[id]`      | `DELETE /remove/{id}`                  |
 
 ### HTML generation
 
@@ -116,8 +140,8 @@ These act like methods that can reference other properties:
         h.button(hx_get="/increment/$n", hx_target="#counter", hx_swap="outerHTML")("+"),
     )
 
-    @get index        = htmx(h.main(counter_ui(0)))
-    @get increment[n] = counter_ui(parse(Int, n) + 1)
+    @get index            = htmx(h.main(counter_ui(0)))
+    @get increment[n::Int] = counter_ui(n + 1)  # n auto-parsed from URL string
 end
 ```
 
@@ -131,6 +155,31 @@ convention differs:
 
 Use `()` for UI fragments (which should render fresh) and `[]` for routes or
 expensive lookups.
+
+### Query params & form data via kwargs
+
+Use **call syntax** `()` with keyword arguments to automatically extract values
+from query parameters (GET/DELETE) or form data (POST/PUT/PATCH):
+
+```julia
+@htmx struct SearchApp
+    # kwargs-only: GET /search?q=foo&page=2
+    @get search(; q="", page::Int=1) = h.p("q=$q page=$page")
+
+    # mixed positional + kwargs: GET /filter/{category}?sort=name
+    @get filter(category; sort="name") = h.p("$category sorted by $sort")
+
+    # POST form data: name and email extracted from form fields
+    @post submit(; name="", email="") = h.p("Hello $name")
+end
+```
+
+**Important**: Use `()` call syntax, NOT `[]` bracket syntax. In Julia,
+semicolons inside `[]` mean array concatenation — `prop[; q=""]` does **not**
+create kwargs. Only `prop(; q="")` works.
+
+Type annotations apply: `page::Int=1` parses the query string value to `Int`.
+Missing kwargs use the default value from the signature.
 
 ### HTMX partial updates
 
@@ -186,7 +235,7 @@ hx_response(content;
 
 ### Recording for static replay
 
-When `record_dir` is given to `route!`, every GET response is written to disk
+When `record_dir` is given to `route!`, every response is written to disk
 mirroring the URL path:
 
 ```
@@ -263,43 +312,30 @@ end
 
 ## Fresh instance per request
 
-A common pattern for apps with `@cached` state: create a fresh struct
-instance in each route handler. Non-cached derived properties (like HTML
-fragments) recompute on every request, while `@cached` properties are
-loaded from disk:
-
-```julia
-@post "/toggle" function(req::HTTP.Request; context)
-    TimerApp().toggle[req] |> to_response
-end
-
-@get "/" function(req::HTTP.Request; context)
-    to_response(TimerApp().root)
-end
-```
-
+`route!` creates a fresh `T(; req=request)` for every incoming request.
+Non-cached derived properties (like HTML fragments) recompute each time,
+while `@cached` properties are loaded from the shared disk cache.
 This avoids stale HTML — each request sees up-to-date state.
 
-## Custom routes alongside `@get`
+## All HTTP verbs via route markers
 
-`@get` only handles GET routes registered via `route!`. For POST, DELETE,
-or other methods, use Oxygen's macros directly and access properties on a
-fresh struct instance:
+`route!` registers properties marked with any of `@get`, `@post`, `@put`,
+`@patch`, or `@delete`:
 
 ```julia
 @htmx struct RecipeApp
-    context
+    req = nothing
     @get index = htmx(h.main(recipe_grid))
-    form_content[url] = begin ... end   # not @get — used from custom route
-end
-
-@post "/recipes" function(req::HTTP.Request; context)
-    RecipeApp(context.context).form_content[formdata(req)["url"]] |> to_response
-end
-
-@delete "/recipes" function(req::HTTP.Request; context)
-    pop!(RecipeApp(context.context).data, queryparams(req)["url"])
-    to_response("")
+    @post add_recipe = begin
+        url = formdata(req)["url"]
+        # ... handle add ...
+        recipe_grid
+    end
+    @delete remove_recipe = begin
+        url = queryparam(req, "url")
+        # ... handle remove ...
+        to_response("")
+    end
 end
 ```
 
@@ -319,8 +355,7 @@ end
 - Pure utilities that don't reference any property (`fmt_hms(seconds)`,
   `flat_texts(node)`)
 - Custom types (`PersistentSet`, data models)
-- Route handler registrations (`@post`, `@delete`) — until route markers
-  for other HTTP methods are added
+- Pure standalone logic that doesn't fit as a property
 
 ## Downstream dependency note
 

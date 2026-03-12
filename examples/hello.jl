@@ -3,7 +3,7 @@
 # Run with:  julia examples/hello.jl
 # Then open: http://localhost:8080
 
-import Pkg; Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+import Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
 using HTMXObjects
 
 @htmx struct HelloApp
