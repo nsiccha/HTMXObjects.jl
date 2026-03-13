@@ -25,6 +25,11 @@ end
     @get typed[n::Int] = h.p("N=$n")
 end
 
+@htmx struct NothingDefaultApp
+    req = nothing
+    @get filtered(; filter=nothing) = h.p("filter=$(repr(filter))")
+end
+
 @testset "HTMXObjects.jl" begin
 
     @testset "auto - HTML rendering" begin
@@ -446,6 +451,26 @@ end
 
         # Missing with default default ("")
         @test queryparam(req_miss, "absent") == ""
+    end
+
+    @testset "nothing default in kwargs route" begin
+        # Register the app with nothing-default kwarg
+        route!(NothingDefaultApp())
+        serve(; port=8098, async=true)
+        try
+            # No filter param → should get actual nothing, not :nothing
+            r = HTTP.get("http://127.0.0.1:8098/filtered")
+            body = String(r.body)
+            @test contains(body, "filter=nothing")
+            @test !contains(body, "filter=:nothing")
+
+            # With filter param → should get the string value
+            r2 = HTTP.get("http://127.0.0.1:8098/filtered?filter=active")
+            body2 = String(r2.body)
+            @test contains(body2, "filter=\"active\"") || contains(body2, "filter=&quot;active&quot;")
+        finally
+            terminate()
+        end
     end
 
     @testset "_convert_param with vectors" begin
