@@ -27,6 +27,14 @@ jobs:
           version: ${{ matrix.julia-version }}
           arch: ${{ matrix.julia-arch }}
       - uses: julia-actions/cache@v2
-      - name: Build package
-        run: julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.build()'
+      - name: Install unregistered dependencies
+        run: |
+          julia --project -e '
+            using Pkg
+            Pkg.develop([
+              PackageSpec(url="https://github.com/nsiccha/DynamicObjects.jl"),
+              PackageSpec(url="https://github.com/nsiccha/HTMX.jl"),
+            ])
+          '
+      - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
