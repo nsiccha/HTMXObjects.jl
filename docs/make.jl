@@ -46,6 +46,6 @@ end
 
 DocumenterVitepress.deploydocs(
     repo = "github.com/nsiccha/HTMXObjects.jl",
-    devbranch = "main",
+    devbranch = "dev",
     push_preview = true,
 )
