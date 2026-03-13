@@ -215,7 +215,8 @@ end
             # Nested URL → mirrored path
             dest2 = save_response(dir, "/post/42", resp)
             @test isfile(dest2)
-            @test endswith(dest2, joinpath("post", "42.html"))
+            @test basename(dest2) == "42.html"
+            @test basename(dirname(dest2)) == "post"
         end
     end
 
