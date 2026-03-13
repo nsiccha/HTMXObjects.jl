@@ -12,12 +12,6 @@ Oxygen = "df9a0d86-3283-4920-82dc-4555fc0d1d8b"
 [compat]
 julia = "1"
 
-[sources.DynamicObjects]
-url = "https://github.com/nsiccha/DynamicObjects.jl.git"
-
-[sources.HTMX]
-url = "https://github.com/nsiccha/HTMX.jl.git"
-
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
