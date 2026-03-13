@@ -9,6 +9,9 @@ HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 Oxygen = "df9a0d86-3283-4920-82dc-4555fc0d1d8b"
 
+[compat]
+julia = "1"
+
 [sources.DynamicObjects]
 url = "https://github.com/nsiccha/DynamicObjects.jl.git"
 
