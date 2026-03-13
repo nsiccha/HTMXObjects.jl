@@ -2,7 +2,7 @@ module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path
 export create_app
-export HTTP, queryparams, formdata
+export HTTP, queryparams, queryparams_all, formdata
 export terminate, serve, staticfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
 export route!, to_response, save_response, static_transform
@@ -12,7 +12,6 @@ export hx_link, queryparam, htmx_or, pathparams
 
 using DynamicObjects, HTTP
 import DynamicObjects: @persist
-import HTTP: queryparams
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString
 
@@ -53,6 +52,53 @@ staticfiles(
     headers::Vector=[],
     loadfile::Nullable{Function}=nothing
 ) = Oxygen.Core.staticfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
+
+# --- Query parameter parsing (multi-value aware) ---
+
+"""
+    queryparams(req::HTTP.Request) -> Dict{String, Union{String, Vector{String}}}
+
+Parse query parameters from the request URL. Unlike `HTTP.queryparams` (which
+returns `Dict{String,String}` and drops duplicate keys), this preserves all
+values: single-value keys map to a `String`, duplicate keys map to a
+`Vector{String}`.
+
+    queryparams("http://x/?a=1&b=2&b=3")  #=> Dict("a" => "1", "b" => ["2", "3"])
+"""
+function queryparams(req::HTTP.Request)
+    query = HTTP.URI(req.target).query
+    isempty(query) && return Dict{String, Union{String, Vector{String}}}()
+    d = Dict{String, Union{String, Vector{String}}}()
+    for part in split(query, "&", keepempty=false)
+        kv = split(part, "=", limit=2)
+        k = String(HTTP.URIs.unescapeuri(kv[1]))
+        v = length(kv) >= 2 ? String(HTTP.URIs.unescapeuri(kv[2])) : ""
+        if haskey(d, k)
+            existing = d[k]
+            if existing isa String
+                d[k] = [existing, v]
+            else
+                push!(existing, v)
+            end
+        else
+            d[k] = v
+        end
+    end
+    d
+end
+
+"""
+    queryparams_all(req::HTTP.Request, name::AbstractString) -> Vector{String}
+
+Return all values for query parameter `name` as a vector.
+Returns an empty vector if the parameter is absent.
+"""
+function queryparams_all(req::HTTP.Request, name::AbstractString)
+    qp = queryparams(req)
+    val = get(qp, name, nothing)
+    isnothing(val) && return String[]
+    val isa String ? [val] : val
+end
 
 """
     @htmx struct MyApp ... end
@@ -260,9 +306,14 @@ hx_link(url; kwargs...) = h.a(; href=url, hx_get=url, kwargs...)
 """
     queryparam(req, name, default="")
 
-Read a single query parameter by name. Shorthand for `get(queryparams(req), name, default)`.
+Read a single query parameter by name. Always returns a single `String`:
+if the parameter appears multiple times, returns the first value.
 """
-queryparam(req::HTTP.Request, name, default="") = get(queryparams(req), name, default)
+function queryparam(req::HTTP.Request, name, default="")
+    val = get(queryparams(req), name, nothing)
+    isnothing(val) && return default
+    val isa String ? val : first(val)
+end
 
 """
     htmx_or(full_page_fn, req, fragment)
@@ -372,6 +423,9 @@ end
 _convert_param(val, ::Nothing) = val
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
+_convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
+_convert_param(val::AbstractVector, T::Type{<:AbstractString}) = first(val)  # multi-value → first string
+_convert_param(val::AbstractVector, T::Type) = parse(T, first(val))  # multi-value → parse first
 _convert_param(val, ::Type) = val  # already converted (e.g. default value)
 
 # Determine whether kwargs come from queryparams (GET/DELETE) or formdata (POST/PUT/PATCH).
