@@ -22,6 +22,12 @@ using Oxygen.Core: ServerContext, register, Nullable
 
 const CONTEXT :: Ref{ServerContext} = Ref(ServerContext(; mod=@__MODULE__))
 
+"""
+    serve(; host="127.0.0.1", port=8080, async=false, revise=nothing, kwargs...)
+
+Start the HTTP server. Passes all keyword arguments through to `Oxygen.Core.serve`.
+When `async=false` (the default), blocks until interrupted and calls [`terminate`](@ref) on exit.
+"""
 function serve(; kwargs...)
     async = Base.get(kwargs, :async, false)
     try
@@ -33,8 +39,14 @@ function serve(; kwargs...)
     end
 end
 
+"""Stop the HTTP server started by [`serve`](@ref)."""
 terminate() = Oxygen.Core.terminate(CONTEXT[])
 
+"""
+    staticfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
+
+Serve static files from `folder` at the URL prefix `mountdir`.
+"""
 staticfiles(
     folder::String,
     mountdir::String="static";
@@ -269,11 +281,17 @@ end
 # --- HTMX request header inspection ---
 # All return "" / false when the header is absent (i.e. for non-HTMX requests).
 
+"""Return `true` if the request was made by HTMX (has `HX-Request: true` header)."""
 is_htmx(req::HTTP.Request)       = HTTP.header(req, "HX-Request",      "") == "true"
+"""Return `true` if the request was boosted by HTMX (`HX-Boosted: true` header)."""
 hx_boosted(req::HTTP.Request)    = HTTP.header(req, "HX-Boosted",       "") == "true"
+"""Return the `HX-Target` header value (the `id` of the target element), or `""`."""
 hx_target(req::HTTP.Request)     = HTTP.header(req, "HX-Target",        "")
+"""Return the `HX-Trigger` header value (the `id` of the triggering element), or `""`."""
 hx_trigger(req::HTTP.Request)    = HTTP.header(req, "HX-Trigger",       "")
+"""Return the `HX-Current-URL` header value (the browser URL at the time of the request), or `""`."""
 hx_current_url(req::HTTP.Request)= HTTP.header(req, "HX-Current-URL",   "")
+"""Return the `HX-Prompt` header value (the user's response to `hx-prompt`), or `""`."""
 hx_prompt(req::HTTP.Request)     = HTTP.header(req, "HX-Prompt",        "")
 
 """

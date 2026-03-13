@@ -17,6 +17,14 @@ end
     @get viz[pn=""] = h.p("Viz: $(isempty(pn) ? "all" : pn)")
 end
 
+@htmx struct PostApp
+    @post submit(; name="") = h.p("Hello $name")
+end
+
+@htmx struct TypedApp
+    @get typed[n::Int] = h.p("N=$n")
+end
+
 @testset "HTMXObjects.jl" begin
 
     @testset "auto - HTML rendering" begin
@@ -256,6 +264,118 @@ end
                 terminate()
             end
         end
+    end
+
+    @testset "hx_link helper" begin
+        # Basic usage — produces <a> with both href and hx-get
+        link = hx_link("/about")
+        html = repr("text/html", link)
+        @test contains(html, "href=\"/about\"")
+        @test contains(html, "hx-get=\"/about\"")
+        @test contains(html, "<a")
+
+        # With extra kwargs
+        link2 = hx_link("/search"; hx_target="#main", class="nav-link")
+        html2 = repr("text/html", link2)
+        @test contains(html2, "href=\"/search\"")
+        @test contains(html2, "hx-get=\"/search\"")
+        @test contains(html2, "hx-target=\"#main\"")
+        @test contains(html2, "class=\"nav-link\"")
+    end
+
+    @testset "queryparam helper" begin
+        # Request with query param present
+        req_with_q = HTTP.Request("GET", "/search?q=hello")
+        @test queryparam(req_with_q, "q", "default") == "hello"
+
+        # Request without the query param — returns default
+        req_without_q = HTTP.Request("GET", "/search")
+        @test queryparam(req_without_q, "q", "default") == "default"
+
+        # Default default is ""
+        @test queryparam(req_without_q, "q") == ""
+    end
+
+    @testset "htmx_or helper" begin
+        fragment = h.p("partial content")
+
+        # HTMX request — returns the fragment directly
+        htmx_req = HTTP.Request("GET", "/", ["HX-Request" => "true"])
+        resp = htmx_or(htmx_req, fragment) do
+            htmx(h.main(fragment))
+        end
+        body = String(resp.body)
+        @test contains(body, "partial content")
+        # Should NOT contain full page wrapper for HTMX requests
+        @test !contains(body, "<html")
+
+        # Non-HTMX request — calls the full_page_fn
+        plain_req = HTTP.Request("GET", "/")
+        resp2 = htmx_or(plain_req, fragment) do
+            htmx(h.main(fragment))
+        end
+        body2 = String(resp2.body)
+        @test contains(body2, "partial content")
+        # Should contain full page wrapper
+        @test contains(body2, "<html")
+        @test contains(body2, "htmx.org")
+    end
+
+    @testset "static_transform" begin
+        # hx-post is stripped (non-GET verb)
+        btn = h.button("Toggle"; hx_post="/toggle")
+        transformed = static_transform(btn)
+        html = repr("text/html", transformed)
+        @test !contains(html, "hx-post")
+        @test contains(html, "data-static-disabled")
+
+        # hx-get to a path route is preserved
+        link = h.a("About"; hx_get="/about")
+        transformed_link = static_transform(link)
+        html_link = repr("text/html", transformed_link)
+        @test contains(html_link, "hx-get=\"/about\"")
+        @test !contains(html_link, "data-static-disabled")
+
+        # Disabled elements get data-static-disabled attribute
+        del_btn = h.button("Delete"; hx_delete="/item/1")
+        transformed_del = static_transform(del_btn)
+        html_del = repr("text/html", transformed_del)
+        @test contains(html_del, "data-static-disabled")
+        @test !contains(html_del, "hx-delete")
+
+        # A <head> element gets the injected style
+        head_node = h.head(h.title("Test"))
+        transformed_head = static_transform(head_node)
+        html_head = repr("text/html", transformed_head)
+        @test contains(html_head, "data-static-disabled")  || contains(html_head, "pointer-events")
+        # The style block for disabled elements should be injected
+        @test contains(html_head, "pointer-events:none")
+    end
+
+    @testset "@post route verb metadata" begin
+        props = DynamicObjects.meta(PostApp)
+        @test haskey(props, :submit)
+        @test Symbol("@post") in props[:submit].macros
+        @test !(Symbol("@get") in props[:submit].macros)
+    end
+
+    @testset "type conversion in indexed routes" begin
+        app = TypedApp()
+        # Accessing via property with Int index should work
+        html = repr("text/html", app.typed[42])
+        @test contains(html, "N=42")
+
+        # Metadata should have @get and Int type info
+        props = DynamicObjects.meta(TypedApp)
+        @test haskey(props, :typed)
+        @test Symbol("@get") in props[:typed].macros
+    end
+
+    @testset "hx_response with location" begin
+        resp = hx_response(h.div("content"); location="/new")
+        @test any(p.first == "HX-Location" && p.second == "/new"
+                  for p in resp.headers)
+        @test contains(String(resp.body), "<div>")
     end
 
 end
