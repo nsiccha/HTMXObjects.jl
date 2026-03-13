@@ -474,12 +474,12 @@ function _register_indexed_route(T, method, name, path, param_strs, param_types,
     # Generate a wrapper whose arg names match the route's {params}.
     # URL params arrive as strings — convert typed params before calling the handler.
     param_syms = Symbol.(param_strs)
-    defaults = QuoteNode.(suffix_defaults)
+    defaults = [isnothing(d) ? :nothing : QuoteNode(d) for d in suffix_defaults]
     func_args = [:_req_ ; param_syms]
     # Build conversion expressions: _convert_param(x, Type) for typed, x for untyped
     all_types = param_types  # types for URL params (suffix defaults already have correct types)
     converted = [isnothing(t) ? s : :($_convert_param($s, $t)) for (s, t) in zip(param_syms, all_types)]
-    default_converted = [QuoteNode(d) for d in suffix_defaults]
+    default_converted = [isnothing(d) ? :nothing : QuoteNode(d) for d in suffix_defaults]
     # Build kwargs extraction code
     kwargs_code = if isempty(kwargs_info)
         :(Pair{Symbol,Any}[])
@@ -489,7 +489,7 @@ function _register_indexed_route(T, method, name, path, param_strs, param_types,
             val_expr = if isnothing(default_val)
                 :($(src_expr)[$kwname])
             else
-                :(get($(src_expr), $kwname, $(QuoteNode(default_val))))
+                :(get($(src_expr), $kwname, $(isnothing(default_val) ? :nothing : QuoteNode(default_val))))
             end
             converted_expr = if isnothing(kwtype)
                 val_expr
