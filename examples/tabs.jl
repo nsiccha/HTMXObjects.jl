@@ -5,13 +5,14 @@
 #     in a single response (no full-page reload, nav stays in sync)
 #   - hx_response with push_url to keep the browser URL in sync with the active tab
 #
-# Run with:  julia examples/tabs.jl
+# Run with:  julia --project examples/tabs.jl
 # Then open: http://localhost:8080
 
-import Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
 using HTMXObjects
 
 @htmx struct TabsApp
+    req = nothing
+
     tabs = [
         (id="home",    label="Home",    body="Welcome! This is the home tab."),
         (id="about",   label="About",   body="HTMXObjects.jl makes server-side Julia web apps easy."),
@@ -29,7 +30,6 @@ using HTMXObjects
         ])
     )
 
-    # Panel wrapped in an `id` so HTMX can swap it in as the primary target.
     tab_panel(t) = h.div(id="panel")(
         h.h2(t.label),
         h.p(t.body),
@@ -56,6 +56,13 @@ using HTMXObjects
     end
 end
 
-app = TabsApp()
-route!(app)
-serve()
+record     = length(ARGS) >= 1 && ARGS[1] == "record"
+record_dir = record && length(ARGS) >= 2 ? ARGS[2] : "site"
+port       = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+
+function __init__()
+    route!(TabsApp(); record_dir=record ? record_dir : nothing)
+end
+
+__init__()
+serve(; port)

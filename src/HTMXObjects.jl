@@ -5,10 +5,10 @@ export create_app
 export HTTP, queryparams, formdata
 export terminate, serve, staticfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
-export route!, to_response, save_response
+export route!, to_response, save_response, static_transform
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
-export hx_link, queryparam, htmx_or
+export hx_link, queryparam, htmx_or, pathparams
 
 using DynamicObjects, HTTP
 import DynamicObjects: @persist
@@ -131,6 +131,108 @@ function save_response(record_dir::String, url_path::String, response::HTTP.Resp
     mkpath(dirname(dest))
     write(dest, response.body)
     dest
+end
+
+# Paths that use kwargs (query params) and thus can't vary by query string on static servers.
+# Populated by route! when record_dir is set; used by _disable_for_static to strip hx-get to these paths.
+const _static_kwargs_paths = Set{String}()
+
+const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45;pointer-events:none;cursor:not-allowed}")
+
+# Non-GET hx attribute names that are non-functional on a static server.
+# Cobweb converts underscores to hyphens in attribute names, so these use hyphens.
+const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-patch"), Symbol("hx-delete")])
+
+import HTMX: Cobweb
+
+"""
+    _disable_for_static(val) -> val
+
+Walk a Node tree and disable elements that won't work on a static server:
+- Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
+- Strip `hx-get` attributes whose URL contains `?` (query-param routes)
+- Strip `hx-get` attributes pointing to kwargs routes (from `_static_kwargs_paths`)
+- Mark affected elements with `data-static-disabled` and `disabled`
+
+Non-Node values pass through unchanged.
+"""
+_disable_for_static(val) = val
+_disable_for_static(val::AbstractArray) = _disable_for_static.(val)
+_disable_for_static(val::Tuple) = _disable_for_static.(val)
+_disable_for_static((content, id)::Pair) = _disable_for_static(content) => id
+
+function _disable_for_static(node::Node)
+    cn = parent(node)
+    attrs = Cobweb.attrs(cn)
+    children = Cobweb.children(cn)
+
+    # Check if this element needs disabling
+    disabled = false
+    new_attrs = copy(attrs)
+
+    # Remove non-GET hx attributes
+    for attr in _HX_NONGET_ATTRS
+        if haskey(new_attrs, attr)
+            delete!(new_attrs, attr)
+            disabled = true
+        end
+    end
+
+    # Remove hx-get with query string or pointing to kwargs route
+    hx_get_sym = Symbol("hx-get")
+    if haskey(new_attrs, hx_get_sym)
+        url = new_attrs[hx_get_sym]
+        if occursin('?', url) || url in _static_kwargs_paths
+            delete!(new_attrs, hx_get_sym)
+            disabled = true
+        end
+    end
+
+    if disabled
+        new_attrs[Symbol("data-static-disabled")] = "true"  # renders as data-static-disabled
+        new_attrs[:disabled] = "true"                        # renders as boolean attribute
+    end
+
+    # Recurse into children
+    new_children = map(children) do child
+        child isa Node ? _disable_for_static(child) :
+        child isa Cobweb.Node ? parent(_disable_for_static(Node(child))) :
+        child
+    end
+
+    Node(Cobweb.Node(Cobweb.tag(cn), new_attrs, new_children))
+end
+
+"""
+    _inject_static_style(val)
+
+If val is a full HTML page (contains a `<head>`), inject the disabled-element style block.
+"""
+_inject_static_style(val) = val
+function _inject_static_style(node::Node)
+    cn = parent(node)
+    if Cobweb.tag(cn) == :head
+        new_children = vcat(Cobweb.children(cn), [parent(_STATIC_DISABLED_STYLE)])
+        return Node(Cobweb.Node(:head, copy(Cobweb.attrs(cn)), new_children))
+    end
+    # Recurse into children looking for <head>
+    new_children = map(Cobweb.children(cn)) do child
+        child isa Node ? parent(_inject_static_style(child)) :
+        child isa Cobweb.Node ? parent(_inject_static_style(Node(child))) :
+        child
+    end
+    Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
+end
+
+"""
+    static_transform(val)
+
+Transform a value for static recording: disable non-functional elements and inject
+the disabled-element style block.
+"""
+function static_transform(val)
+    result = _disable_for_static(val)
+    _inject_static_style(result)
 end
 
 # --- Convenience helpers ---
@@ -292,7 +394,7 @@ function _register_indexed_route(T, method, name, path, param_strs, param_types,
         resp = to_response(val)
         if !isnothing(record_dir)
             save_path = "/" * join(vcat(string(name), string.(idx_vals)), "/")
-            save_response(record_dir, save_path, resp)
+            save_response(record_dir, save_path, to_response(static_transform(val)))
         end
         resp
     end)
@@ -380,12 +482,14 @@ function _register_routes(T; prefix="", record_dir=nothing)
         let name=name, param_strs=param_strs, param_types=param_types, path=path, record_dir=record_dir, method=method, defaults=defaults, kwargs_info=kwargs_info
             if isempty(param_strs) && isempty(kwargs_info)
                 register(CONTEXT[], method, path, function(req)
-                    resp = to_response(getproperty(T(; req), name))
-                    isnothing(record_dir) || save_response(record_dir, path, resp)
+                    val = getproperty(T(; req), name)
+                    resp = to_response(val)
+                    isnothing(record_dir) || save_response(record_dir, path, to_response(static_transform(val)))
                     resp
                 end)
             elseif isempty(param_strs) && !isempty(kwargs_info)
                 # kwargs-only route (no path params)
+                !isnothing(record_dir) && push!(_static_kwargs_paths, path)
                 _register_indexed_route(T, method, name, path, String[], Any[], Any[], kwargs_info, record_dir)
             else
                 # Register the full route (all params explicit)
@@ -411,6 +515,7 @@ end
 function route!(obj; prefix="", record_dir=nothing)
     T = typeof(obj)
     _registered_types[T] = (; prefix, record_dir)
+    !isnothing(record_dir) && empty!(_static_kwargs_paths)
     _register_routes(T; prefix, record_dir)
     obj
 end

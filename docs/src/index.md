@@ -254,6 +254,28 @@ HTMX fragment requests are recorded too, so partial updates are replayed
 correctly — the static server returns the pre-recorded fragment and HTMX
 handles the DOM swap client-side.
 
+#### Automatic disabling of non-functional elements
+
+Recorded responses are automatically transformed by `static_transform` to
+disable elements that won't work on a static server:
+
+- **Non-GET verbs** (`hx-post`, `hx-put`, `hx-patch`, `hx-delete`) are stripped
+- **Query-param routes** (`hx-get` pointing to kwargs routes like `@get search(; q="")`)
+  are stripped, since the static server can't vary its response by query string
+- **Plain GET path routes** (`hx-get="/post/1"`) are preserved — they work fine
+- Affected elements receive `data-static-disabled` and `disabled` attributes
+- A `<style>` block is injected to dim disabled elements (opacity 0.45, no pointer events)
+
+The transform operates on the Node tree before serialization — no regex on HTML.
+
+You can also call `static_transform(node)` manually to preview the effect:
+
+```julia
+app = MyApp()
+original = app.index
+static_version = static_transform(original)
+```
+
 ## Caching
 
 Properties can be cached to disk with `@cached` (from DynamicObjects):

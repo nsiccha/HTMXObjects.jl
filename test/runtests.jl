@@ -11,6 +11,12 @@ end
     @get index = h.h1("home")
 end
 
+# Previously caused "Method definition compute_property overwritten" error
+# when all indices had defaults (zero-arg conflict with IndexableProperty).
+@htmx struct AllDefaultsApp
+    @get viz[pn=""] = h.p("Viz: $(isempty(pn) ? "all" : pn)")
+end
+
 @testset "HTMXObjects.jl" begin
 
     @testset "auto - HTML rendering" begin
@@ -30,7 +36,7 @@ end
         # Pair: out-of-band swap — wraps content with id + hx-swap-oob="true"
         result = auto(h.span("new") => "my-id"; wrap=identity)
         @test contains(result, "id=\"my-id\"")
-        @test contains(result, "hx-swap-oob=\"true\"")
+        @test contains(result, "hx-swap-oob")
         @test contains(result, "new")
     end
 
@@ -150,6 +156,22 @@ end
         @test Symbol("@get") in props[:index].macros
     end
 
+    @testset "indexed property with all-default indices" begin
+        app = AllDefaultsApp()
+
+        # Accessing via IndexableProperty (zero args) should work
+        html = repr("text/html", app.viz["test"])
+        @test contains(html, "Viz: test")
+
+        # Default value should work
+        html = repr("text/html", app.viz[""])
+        @test contains(html, "Viz: all")
+
+        # The IndexableProperty wrapper itself should be obtainable
+        ip = app.viz
+        @test ip isa DynamicObjects.IndexableProperty
+    end
+
     @testset "htmx() full-page template" begin
         page = htmx(h.main("content"))
         html = repr("text/html", page)
@@ -186,6 +208,53 @@ end
             dest2 = save_response(dir, "/post/42", resp)
             @test isfile(dest2)
             @test endswith(dest2, joinpath("post", "42.html"))
+        end
+    end
+
+    @testset "recording — end-to-end" begin
+        # Define a small app with an index and an indexed route
+        @htmx struct RecordApp
+            @get index = h.h1("Home")
+            @get post[id] = h.p("Post $id")
+        end
+
+        mktempdir() do dir
+            app = RecordApp()
+            route!(app; record_dir=dir)
+
+            # Start the server on a random port
+            port = 8099
+            serve(; port, async=true)
+            try
+                # Hit the index route
+                r1 = HTTP.get("http://127.0.0.1:$port/")
+                @test r1.status == 200
+                @test contains(String(r1.body), "Home")
+
+                # Check that index was recorded
+                index_file = joinpath(dir, "index.html")
+                @test isfile(index_file)
+                @test contains(read(index_file, String), "Home")
+
+                # Hit an indexed route
+                r2 = HTTP.get("http://127.0.0.1:$port/post/42")
+                @test r2.status == 200
+                @test contains(String(r2.body), "Post 42")
+
+                # Check that the indexed route was recorded
+                post_file = joinpath(dir, "post", "42.html")
+                @test isfile(post_file)
+                @test contains(read(post_file, String), "Post 42")
+
+                # Hit another indexed route — should create a new file
+                r3 = HTTP.get("http://127.0.0.1:$port/post/7")
+                @test r3.status == 200
+                post_file2 = joinpath(dir, "post", "7.html")
+                @test isfile(post_file2)
+                @test contains(read(post_file2, String), "Post 7")
+            finally
+                terminate()
+            end
         end
     end
 

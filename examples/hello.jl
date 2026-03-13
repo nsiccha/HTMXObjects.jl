@@ -1,9 +1,8 @@
 # Minimal "Hello World" HTMXObjects app.
 #
-# Run with:  julia examples/hello.jl
+# Run with:  julia --project examples/hello.jl
 # Then open: http://localhost:8080
 
-import Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
 using HTMXObjects
 
 @htmx struct HelloApp
@@ -11,10 +10,18 @@ using HTMXObjects
         h.main(class="container")(
             h.h1("Hello, World!"),
             h.p("Built with ", h.a(href="https://github.com/nsiccha/HTMXObjects.jl")("HTMXObjects.jl")),
-        )
+        );
+        pico_version="2",
     )
 end
 
-app = HelloApp()
-route!(app)
-serve()
+record     = length(ARGS) >= 1 && ARGS[1] == "record"
+record_dir = record && length(ARGS) >= 2 ? ARGS[2] : "site"
+port       = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+
+function __init__()
+    route!(HelloApp(); record_dir=record ? record_dir : nothing)
+end
+
+__init__()
+serve(; port)
