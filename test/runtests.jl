@@ -379,4 +379,94 @@ end
         @test contains(String(resp.body), "<div>")
     end
 
+    @testset "queryparams — multi-value support" begin
+        # Single value per key
+        req = HTTP.Request("GET", "/search?q=hello&page=1")
+        qp = queryparams(req)
+        @test qp["q"] == "hello"
+        @test qp["page"] == "1"
+
+        # Duplicate keys → Vector{String}
+        req_multi = HTTP.Request("GET", "/filter?tag=a&tag=b&tag=c")
+        qp_multi = queryparams(req_multi)
+        @test qp_multi["tag"] isa Vector{String}
+        @test qp_multi["tag"] == ["a", "b", "c"]
+
+        # Mixed: some single, some multi
+        req_mixed = HTTP.Request("GET", "/x?solo=1&dup=a&dup=b")
+        qp_mixed = queryparams(req_mixed)
+        @test qp_mixed["solo"] == "1"
+        @test qp_mixed["dup"] isa Vector{String}
+        @test qp_mixed["dup"] == ["a", "b"]
+
+        # Empty query string → empty dict
+        req_empty = HTTP.Request("GET", "/nothing")
+        qp_empty = queryparams(req_empty)
+        @test isempty(qp_empty)
+        @test qp_empty isa Dict{String, Union{String, Vector{String}}}
+
+        # URL-encoded values are decoded
+        req_enc = HTTP.Request("GET", "/s?q=hello%20world&name=a%26b")
+        qp_enc = queryparams(req_enc)
+        @test qp_enc["q"] == "hello world"
+        @test qp_enc["name"] == "a&b"
+
+        # Key without value gets empty string
+        req_noval = HTTP.Request("GET", "/x?flag")
+        qp_noval = queryparams(req_noval)
+        @test qp_noval["flag"] == ""
+    end
+
+    @testset "queryparams_all" begin
+        # Single value → wrapped in vector
+        req = HTTP.Request("GET", "/x?color=red")
+        @test queryparams_all(req, "color") == ["red"]
+
+        # Multiple values → all returned
+        req_multi = HTTP.Request("GET", "/x?id=1&id=2&id=3")
+        @test queryparams_all(req_multi, "id") == ["1", "2", "3"]
+
+        # Missing parameter → empty vector
+        req_miss = HTTP.Request("GET", "/x?other=yes")
+        @test queryparams_all(req_miss, "missing") == String[]
+    end
+
+    @testset "queryparam — multi-value behaviour" begin
+        # Single value returned as-is
+        req = HTTP.Request("GET", "/x?name=alice")
+        @test queryparam(req, "name", "default") == "alice"
+
+        # Multi-value returns first
+        req_multi = HTTP.Request("GET", "/x?v=first&v=second")
+        @test queryparam(req_multi, "v", "default") == "first"
+
+        # Missing returns default
+        req_miss = HTTP.Request("GET", "/x")
+        @test queryparam(req_miss, "absent", "fallback") == "fallback"
+
+        # Missing with default default ("")
+        @test queryparam(req_miss, "absent") == ""
+    end
+
+    @testset "_convert_param with vectors" begin
+        cp = HTMXObjects._convert_param
+
+        # Untyped vector stays as vector
+        v = ["a", "b", "c"]
+        @test cp(v, nothing) === v
+
+        # Typed as String → unwraps to first element
+        @test cp(["first", "second"], String) == "first"
+
+        # Typed as Int → parses first element
+        @test cp(["42", "99"], Int) == 42
+
+        # Typed as Float64 → parses first element
+        @test cp(["3.14", "2.72"], Float64) == 3.14
+
+        # Single-element vector also works
+        @test cp(["only"], String) == "only"
+        @test cp(["7"], Int) == 7
+    end
+
 end
