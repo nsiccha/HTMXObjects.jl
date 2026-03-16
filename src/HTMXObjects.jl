@@ -9,8 +9,9 @@ export route!, to_response, save_response, static_transform
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
+export wants_markdown, markdown_response, render_table, sortable_table_js
 
-using DynamicObjects, HTTP
+using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString
@@ -407,6 +408,7 @@ const _http_verbs = Dict(
     Symbol("@put") => "PUT",
     Symbol("@patch") => "PATCH",
     Symbol("@delete") => "DELETE",
+    Symbol("@ws") => "WEBSOCKET",
 )
 
 # Store registered types so _reroute! can re-register after Revise updates
@@ -552,7 +554,14 @@ function _register_routes(T; prefix="", record_dir=nothing)
 
         # Capture loop variables to avoid closure-over-mutable-variable issues
         let name=name, param_strs=param_strs, param_types=param_types, path=path, record_dir=record_dir, method=method, defaults=defaults, kwargs_info=kwargs_info
-            if isempty(param_strs) && isempty(kwargs_info)
+            if method == "WEBSOCKET"
+                # WebSocket handlers take (ws,) not (req,) and don't return a response.
+                # The property value must be a callable: ws -> ...
+                register(CONTEXT[], "WEBSOCKET", path, function(ws)
+                    handler = getproperty(T(; req=nothing), name)
+                    handler(ws)
+                end)
+            elseif isempty(param_strs) && isempty(kwargs_info)
                 register(CONTEXT[], method, path, function(req)
                     val = getproperty(T(; req), name)
                     resp = to_response(val)
@@ -710,6 +719,108 @@ end
         @info "Next steps:" setup="cd $(joinpath(path, "app")) && julia --project=. -e 'using Pkg; Pkg.develop([Pkg.PackageSpec(path=\"$htmxobjects_path\"), Pkg.PackageSpec(path=\"..\")]); Pkg.instantiate()'" run="cd $path && julia -i --project=app app/main.jl $port"
     end
     path
+end
+
+# --- Plain/rich response helpers ---
+
+"""
+    wants_markdown(req::HTTP.Request) -> Bool
+
+Return `true` if the client wants a markdown response (for LLM/CLI consumption).
+Checks for `Accept: text/markdown` or `text/plain` header, or a `?plain` / `?markdown`
+query parameter.
+"""
+wants_markdown(req::HTTP.Request) = let accept = HTTP.header(req, "Accept", ""), qp = queryparams(req)
+    contains(accept, "text/markdown") || contains(accept, "text/plain") ||
+    haskey(qp, "markdown") || haskey(qp, "plain")
+end
+
+"""
+    markdown_response(text) -> HTTP.Response
+
+Create a `text/markdown` HTTP response from a string.
+"""
+markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; charset=utf-8"], body=text)
+
+# --- Table rendering ---
+
+"""
+    sortable_table_js()
+
+Return an `h.script(...)` node containing the `sortTable` JavaScript function
+for click-to-sort table headers. Include this once per page (e.g. in `extra_head`).
+
+The JS finds the `<tbody>` relative to the clicked header (no hardcoded ID),
+so multiple sortable tables can coexist on the same page. Numeric values are
+sorted numerically; everything else uses `localeCompare`.
+"""
+function sortable_table_js()
+    h.script(raw"""
+function sortTable(col, th) {
+    const tbody = th.closest('table').querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    const asc = th.dataset.sortDir !== 'asc';
+    th.dataset.sortDir = asc ? 'asc' : 'desc';
+    th.closest('tr').querySelectorAll('th').forEach(h => { if (h !== th) delete h.dataset.sortDir; });
+    rows.sort((a, b) => {
+        const av = a.cells[col].textContent.trim();
+        const bv = b.cells[col].textContent.trim();
+        const an = parseFloat(av), bn = parseFloat(bv);
+        if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+        return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+    rows.forEach(r => tbody.appendChild(r));
+    th.closest('tr').querySelectorAll('th').forEach(h => {
+        h.textContent = h.textContent.replace(/ [▲▼]$/, '');
+    });
+    th.textContent += asc ? ' ▲' : ' ▼';
+}
+""")
+end
+
+"""
+    render_table(table; id=nothing, sortable=true, cell=nothing, class="striped", kwargs...)
+
+Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
+as an `h.table` HTML node.
+
+# Keyword arguments
+- `id`: tbody element id (auto-generated if `nothing`)
+- `sortable`: add click-to-sort headers (default `true`; requires `sortable_table_js()` on the page)
+- `cell(value, column_name, row_index)`: custom cell renderer (default: `string(value)`)
+- `class`: table CSS class (default `"striped"`)
+- Extra kwargs are forwarded to `h.table()`
+
+# Example
+```julia
+df = DataFrame(name=["Alice", "Bob"], score=[95, 87])
+page = htmx(
+    h.body(render_table(df), sortable_table_js());
+    pico_version="2"
+)
+```
+"""
+function render_table(table; id=nothing, sortable=true, cell=nothing, class="striped", kwargs...)
+    cols = Tables.columnnames(Tables.columns(table))
+    isnothing(id) && (id = "tbl-" * string(hash(cols), base=16))
+
+    headers = if sortable
+        [h.th(string(c); _="on click call sortTable($(i-1), me)", style="cursor:pointer")
+         for (i, c) in enumerate(cols)]
+    else
+        [h.th(string(c)) for c in cols]
+    end
+
+    body_rows = [
+        h.tr([h.td(isnothing(cell) ? string(Tables.getcolumn(row, c)) : cell(Tables.getcolumn(row, c), c, ri))
+              for c in cols]...)
+        for (ri, row) in enumerate(Tables.rows(table))
+    ]
+
+    h.table(; class, role="grid", kwargs...)(
+        h.thead(h.tr(headers...)),
+        h.tbody(body_rows...; id)
+    )
 end
 
 end # module HTMXObjects
