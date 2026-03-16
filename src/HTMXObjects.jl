@@ -555,29 +555,18 @@ function _register_routes(T; prefix="", record_dir=nothing)
         # Capture loop variables to avoid closure-over-mutable-variable issues
         let name=name, param_strs=param_strs, param_types=param_types, path=path, record_dir=record_dir, method=method, defaults=defaults, kwargs_info=kwargs_info
             if method == "WEBSOCKET"
-                # WebSocket handlers take (ws, params...) not (req, params...) and don't return a response.
-                # The property value must be a callable: (ws, params...) -> ...
-                if isempty(param_strs)
-                    register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        handler = getproperty(T(; req=nothing), name)
-                        handler(ws)
-                    end)
-                else
-                    # Indexed WS route: generate wrapper with named params like HTTP routes
-                    push!(_route_handlers, (idx_vals, ws) -> begin
-                        handler = getproperty(T(; req=nothing), name)
-                        handler(ws, idx_vals...)
-                    end)
-                    key = length(_route_handlers)
-                    param_syms = Symbol.(param_strs)
-                    func_args = [:_ws_; param_syms]
-                    converted = [isnothing(t) ? s : :($_convert_param($s, $t)) for (s, t) in zip(param_syms, param_types)]
-                    register(CONTEXT[], "WEBSOCKET", path,
-                        eval(:(($(func_args...),) -> _route_handlers[$key](
-                            [$(converted...)], _ws_
-                        )))
-                    )
+                # WebSocket handlers: the property value must be a callable ws -> ...
+                # Path params and kwargs are NOT supported via [] or () syntax because
+                # DynamicObjects wraps indexed properties in IndexableProperty, which
+                # conflicts with the WS handler pattern. Instead, access ws.request
+                # in the handler to get query params: HTTP.queryparams(ws.request).
+                if !isempty(param_strs) || !isempty(kwargs_info)
+                    @warn "@ws routes do not support path params or kwargs. Use ws.request query params instead." name path
                 end
+                register(CONTEXT[], "WEBSOCKET", path, function(ws)
+                    handler = getproperty(T(; req=nothing), name)
+                    handler(ws)
+                end)
             elseif isempty(param_strs) && isempty(kwargs_info)
                 register(CONTEXT[], method, path, function(req)
                     val = getproperty(T(; req), name)
