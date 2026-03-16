@@ -102,12 +102,44 @@ function queryparams_all(req::HTTP.Request, name::AbstractString)
 end
 
 """
+    _wrap_ws_bodies!(struct_expr)
+
+Pre-process the struct body: for any `@ws` property, wrap the RHS in `(__ws__) -> RHS`.
+This lets users write `@ws feed = begin ... __ws__ ... end` and have `__ws__` available
+as the WebSocket variable, while DynamicObjects stores a callable `(__ws__) -> body`.
+"""
+function _wrap_ws_bodies!(struct_expr)
+    body = struct_expr.args[3]
+    for (i, arg) in enumerate(body.args)
+        arg isa Expr || continue
+        # Walk through nested macrocall layers to find @ws
+        expr = arg
+        depth = 0
+        while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@ws")
+            expr = expr.args[end]
+            depth += 1
+        end
+        Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@ws") || continue
+        # Found @ws — the inner expression is an assignment: name = rhs
+        inner = expr.args[end]
+        inner isa Expr || continue
+        if inner.head == :(=)
+            rhs = inner.args[2]
+            inner.args[2] = Expr(:(->), :__ws__, rhs)
+        end
+    end
+    struct_expr
+end
+
+"""
     @htmx struct MyApp ... end
 
 Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
 re-evaluation automatically re-registers routes without a server restart.
+`@ws` property bodies are automatically wrapped in `(__ws__) -> body`.
 """
 macro htmx(args...)
+    _wrap_ws_bodies!(args[end])
     struct_block = DynamicObjects.dynamicstruct(args[end]; (length(args) > 1 ? (docstring=args[1],) : (;))...)
     # Extract the type name from the struct expression
     struct_expr = args[end]
@@ -555,18 +587,51 @@ function _register_routes(T; prefix="", record_dir=nothing)
         # Capture loop variables to avoid closure-over-mutable-variable issues
         let name=name, param_strs=param_strs, param_types=param_types, path=path, record_dir=record_dir, method=method, defaults=defaults, kwargs_info=kwargs_info
             if method == "WEBSOCKET"
-                # WebSocket handlers: the property value must be a callable ws -> ...
-                # Path params and kwargs are NOT supported via [] or () syntax because
-                # DynamicObjects wraps indexed properties in IndexableProperty, which
-                # conflicts with the WS handler pattern. Instead, access ws.request
-                # in the handler to get query params: HTTP.queryparams(ws.request).
-                if !isempty(param_strs) || !isempty(kwargs_info)
-                    @warn "@ws routes do not support path params or kwargs. Use ws.request query params instead." name path
+                # WebSocket handlers: @htmx wraps @ws bodies in (__ws__) -> body,
+                # so the property value is always a callable. We evaluate the property
+                # (with path params + kwargs) to get the lambda, then call it with ws.
+                # This reuses the same getproperty/getindex pattern as HTTP routes.
+                if isempty(param_strs) && isempty(kwargs_info)
+                    register(CONTEXT[], "WEBSOCKET", path, function(ws)
+                        lambda = getproperty(T(; req=nothing), name)
+                        lambda(ws)
+                    end)
+                else
+                    # Indexed/kwargs WS route: same pattern as HTTP but call lambda(ws)
+                    push!(_route_handlers, (idx_vals, kw_pairs, ws) -> begin
+                        prop = getproperty(T(; req=ws.request), name)
+                        lambda = if isempty(kw_pairs)
+                            prop[idx_vals...]
+                        else
+                            Base.getindex(prop, idx_vals...; NamedTuple(kw_pairs)...)
+                        end
+                        lambda(ws)
+                    end)
+                    key = length(_route_handlers)
+                    param_syms = Symbol.(param_strs)
+                    func_args = [:_ws_; param_syms]
+                    converted = [isnothing(t) ? s : :($_convert_param($s, $t)) for (s, t) in zip(param_syms, param_types)]
+                    kwargs_code = if isempty(kwargs_info)
+                        :(Pair{Symbol,Any}[])
+                    else
+                        kw_exprs = map(kwargs_info) do (kwname, kwtype, default_val)
+                            src_expr = :(_kwargs_source(_ws_.request, "GET"))
+                            val_expr = if isnothing(default_val)
+                                :($(src_expr)[$kwname])
+                            else
+                                :(get($(src_expr), $kwname, $(default_val === :nothing ? :nothing : QuoteNode(default_val))))
+                            end
+                            converted_expr = isnothing(kwtype) ? val_expr : :($_convert_param($val_expr, $kwtype))
+                            :($(QuoteNode(Symbol(kwname))) => $converted_expr)
+                        end
+                        :(Pair{Symbol,Any}[$(kw_exprs...)])
+                    end
+                    register(CONTEXT[], "WEBSOCKET", path,
+                        eval(:(($(func_args...),) -> _route_handlers[$key](
+                            [$(converted...)], $kwargs_code, _ws_
+                        )))
+                    )
                 end
-                register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                    handler = getproperty(T(; req=nothing), name)
-                    handler(ws)
-                end)
             elseif isempty(param_strs) && isempty(kwargs_info)
                 register(CONTEXT[], method, path, function(req)
                     val = getproperty(T(; req), name)
