@@ -939,12 +939,12 @@ Returns e.g. `"1.23ns"`, `"456μs"`, `"78.9ms"`, `"1.23s"`, `"5.0min"`, `"2.5hr"
 """
 function fmt_time(t)
     t < 0 && return "-" * fmt_time(-t)
-    t < 1e-6 && return string(round(t * 1e9; sigdigits=3)) * "ns"
-    t < 1e-3 && return string(round(t * 1e6; sigdigits=3)) * "μs"
-    t < 1.0  && return string(round(t * 1e3; sigdigits=3)) * "ms"
-    t < 60   && return string(round(t; sigdigits=3)) * "s"
-    t < 3600 && return string(round(t / 60; sigdigits=3)) * "min"
-    return string(round(t / 3600; sigdigits=3)) * "hr"
+    t < 1e-6 && return string(round(t * 1e9; sigdigits=2)) * "ns"
+    t < 1e-3 && return string(round(t * 1e6; sigdigits=2)) * "μs"
+    t < 1.0  && return string(round(t * 1e3; sigdigits=2)) * "ms"
+    t < 60   && return string(round(t; sigdigits=2)) * "s"
+    t < 3600 && return string(round(t / 60; sigdigits=2)) * "min"
+    return string(round(t / 3600; sigdigits=2)) * "hr"
 end
 
 """
@@ -955,18 +955,18 @@ Format a byte count `n` with appropriate binary units (B, KB, MB, GB, TB).
 function fmt_bytes(n)
     n < 0 && return "-" * fmt_bytes(-n)
     n < 1024 && return string(Int(n)) * " B"
-    n < 1024^2 && return string(round(n / 1024; sigdigits=3)) * " KB"
-    n < 1024^3 && return string(round(n / 1024^2; sigdigits=3)) * " MB"
-    n < 1024^4 && return string(round(n / 1024^3; sigdigits=3)) * " GB"
-    return string(round(n / 1024^4; sigdigits=3)) * " TB"
+    n < 1024^2 && return string(round(n / 1024; sigdigits=2)) * " KB"
+    n < 1024^3 && return string(round(n / 1024^2; sigdigits=2)) * " MB"
+    n < 1024^4 && return string(round(n / 1024^3; sigdigits=2)) * " GB"
+    return string(round(n / 1024^4; sigdigits=2)) * " TB"
 end
 
 """
-    fmt_number(x; sigdigits=3) -> String
+    fmt_number(x; sigdigits=2) -> String
 
 Format a number with SI suffixes (K, M, B, T) or scientific notation for very small values.
 """
-function fmt_number(x; sigdigits=3)
+function fmt_number(x; sigdigits=2)
     isnan(x) && return "NaN"
     isinf(x) && return x > 0 ? "∞" : "-∞"
     x < 0 && return "-" * fmt_number(-x; sigdigits)
