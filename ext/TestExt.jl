@@ -10,9 +10,89 @@ struct TestError
     backtrace::Any
 end
 
+# Lightweight result loaded from disk (quacks like a TestSet for format_test_status)
+struct PersistedResult
+    n_passed::Int
+    anynonpass::Bool
+    total::Int
+    results::Vector{Any}  # empty — no detailed results after restart
+end
+
 # Duration tracking (separate from the test module's cache to avoid interface changes)
 _durations() = _dur
 _dur = Dict{Tuple{UInt, Symbol}, Float64}()  # (objectid(mod), test_name) => seconds
+
+# --- Disk persistence ---
+
+function _cache_path(tests_mod)
+    dir = joinpath(first(DEPOT_PATH), "test_cache")
+    mkpath(dir)
+    joinpath(dir, string(nameof(tests_mod)) * ".tsv")
+end
+
+function _persist_result!(tests_mod, name::Symbol)
+    c = tests_mod.cached(name)
+    isnothing(c) && return
+    ts, result = c
+    dur = get(_durations(), (objectid(tests_mod), name), 0.0)
+    status, n_passed, total = if result isa TestError
+        ("error", 0, 0)
+    elseif result isa PersistedResult
+        (result.anynonpass ? "fail" : "pass", result.n_passed, result.total)
+    else
+        np = result.n_passed
+        tot = np + count(r -> !(r isa Test.Pass), result.results)
+        (result.anynonpass ? "fail" : "pass", np, tot)
+    end
+    # Read existing entries, update/add this one, write back
+    entries = _read_cache_file(tests_mod)
+    entries[name] = (ts, status, n_passed, total, dur)
+    _write_cache_file(tests_mod, entries)
+end
+
+function _read_cache_file(tests_mod)
+    path = _cache_path(tests_mod)
+    entries = Dict{Symbol, Tuple{Float64, String, Int, Int, Float64}}()
+    isfile(path) || return entries
+    for line in eachline(path)
+        parts = split(line, '\t')
+        length(parts) >= 5 || continue
+        name = Symbol(parts[1])
+        ts = tryparse(Float64, parts[2])
+        status = String(parts[3])
+        np = tryparse(Int, parts[4])
+        tot = tryparse(Int, parts[5])
+        dur = length(parts) >= 6 ? tryparse(Float64, parts[6]) : 0.0
+        (isnothing(ts) || isnothing(np) || isnothing(tot)) && continue
+        entries[name] = (ts, status, np, tot, something(dur, 0.0))
+    end
+    entries
+end
+
+function _write_cache_file(tests_mod, entries)
+    path = _cache_path(tests_mod)
+    open(path, "w") do io
+        for (name, (ts, status, np, tot, dur)) in sort!(collect(entries); by=first∘last, rev=true)
+            println(io, name, '\t', ts, '\t', status, '\t', np, '\t', tot, '\t', dur)
+        end
+    end
+end
+
+function _load_persisted!(tests_mod)
+    # Only load if the in-memory cache is empty
+    isempty(tests_mod.cache()) || return
+    entries = _read_cache_file(tests_mod)
+    for (name, (ts, status, np, tot, dur)) in entries
+        anynonpass = status != "pass"
+        tests_mod.cache()[name] = (ts, PersistedResult(np, anynonpass, tot, []))
+        _durations()[(objectid(tests_mod), name)] = dur
+    end
+end
+
+function _clear_persisted!(tests_mod)
+    path = _cache_path(tests_mod)
+    isfile(path) && rm(path)
+end
 
 # --- Safe test execution (wraps the test module's run_test!) ---
 
@@ -26,6 +106,7 @@ function _safe_run!(tests_mod, name::Symbol)
         nothing
     end
     _durations()[(objectid(tests_mod), name)] = time() - t0
+    _persist_result!(tests_mod, name)
 end
 
 function _safe_run_all!(tests_mod)
@@ -60,11 +141,6 @@ function _format_duration(dt)
     "$(round(dt / 60; digits=1))m"
 end
 
-function _count_total(result)
-    # Count total tests from a DefaultTestSet
-    result.n_passed + length(result.results) - result.n_passed
-end
-
 function format_test_status(tests_mod, name::Symbol)
     c = tests_mod.cached(name)
     dur = get(_durations(), (objectid(tests_mod), name), nothing)
@@ -79,6 +155,12 @@ function format_test_status(tests_mod, name::Symbol)
         bt = sprint(Base.show_backtrace, result.backtrace)
         full_detail = msg * "\n" * bt
         return (; status="error", icon="!", age, detail=short, duration=dur_str, error_detail=full_detail)
+    end
+    if result isa PersistedResult
+        status = result.anynonpass ? "fail" : "pass"
+        icon = result.anynonpass ? "✗" : "✓"
+        detail = "$(result.n_passed)/$(result.total)"
+        return (; status, icon, age, detail, duration=dur_str, error_detail="")
     end
     np = result.n_passed
     total = np + count(r -> !(r isa Test.Pass), result.results)
@@ -179,14 +261,17 @@ function _test_result(tests_mod, md)
     md ? markdown_response(tests_plain_text(tests_mod)) : tests_html_table(tests_mod)
 end
 
-test_list(tests_mod, md) = if md
-    markdown_response(tests_plain_text(tests_mod))
-else
-    htmx(h.main(class="container")(
-        h.h1("Tests"),
-        h.p(h.a(href="/")("Back to index")),
-        tests_html_table(tests_mod),
-    ); pico_version="2")
+test_list(tests_mod, md) = begin
+    _load_persisted!(tests_mod)
+    if md
+        markdown_response(tests_plain_text(tests_mod))
+    else
+        htmx(h.main(class="container")(
+            h.h1("Tests"),
+            h.p(h.a(href="/")("Back to index")),
+            tests_html_table(tests_mod),
+        ); pico_version="2")
+    end
 end
 
 test_run!(tests_mod, name, md) = begin
@@ -217,6 +302,7 @@ end
 
 test_clear_cache!(tests_mod, md) = begin
     tests_mod.clear_cache!()
+    _clear_persisted!(tests_mod)
     _test_result(tests_mod, md)
 end
 
