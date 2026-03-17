@@ -10,6 +10,7 @@ export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
+export fmt_time, fmt_bytes, fmt_number
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 
 using DynamicObjects, HTTP, Tables
@@ -139,7 +140,40 @@ Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
 re-evaluation automatically re-registers routes without a server restart.
 `@ws` property bodies are automatically wrapped in `(__ws__) -> body`.
 """
+_route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("@patch"), Symbol("@delete"), Symbol("@ws")])
+
+"""
+    _warn_bracket_routes!(struct_expr)
+
+Emit deprecation warnings for route properties using `[]` (ref) syntax instead of `()` (call) syntax.
+`route[key]` cannot be combined with kwargs and should be replaced with `route(key)`.
+"""
+function _warn_bracket_routes!(struct_expr)
+    body = struct_expr.args[3]
+    route_macros = _route_macros()
+    for arg in body.args
+        arg isa Expr || continue
+        # Walk through nested macrocall layers to find route markers
+        expr = arg
+        has_route_macro = false
+        while Meta.isexpr(expr, :macrocall)
+            expr.args[1] in route_macros && (has_route_macro = true)
+            expr = expr.args[end]
+        end
+        has_route_macro || continue
+        # expr is now the inner assignment: name[key] = rhs or name(key) = rhs
+        expr isa Expr && expr.head == :(=) || continue
+        lhs = expr.args[1]
+        if Meta.isexpr(lhs, :ref)
+            name = lhs.args[1]
+            @warn "Deprecated: @get/$name uses [] syntax which cannot combine with kwargs. Use () instead: $name($(join(lhs.args[2:end], ", ")))" maxlog=1
+        end
+    end
+    struct_expr
+end
+
 macro htmx(args...)
+    _warn_bracket_routes!(args[end])
     _wrap_ws_bodies!(args[end])
     struct_block = DynamicObjects.dynamicstruct(args[end]; (length(args) > 1 ? (docstring=args[1],) : (;))...)
     # Extract the type name from the struct expression
@@ -893,6 +927,56 @@ function render_table(table; id=nothing, sortable=true, cell=nothing, class="str
         h.thead(h.tr(headers...)),
         h.tbody(body_rows...; id)
     )
+end
+
+# --- Formatting helpers ---
+
+"""
+    fmt_time(t) -> String
+
+Format a time duration `t` (in seconds) with appropriate SI units.
+Returns e.g. `"1.23ns"`, `"456μs"`, `"78.9ms"`, `"1.23s"`, `"5.0min"`, `"2.5hr"`.
+"""
+function fmt_time(t)
+    t < 0 && return "-" * fmt_time(-t)
+    t < 1e-6 && return string(round(t * 1e9; sigdigits=3)) * "ns"
+    t < 1e-3 && return string(round(t * 1e6; sigdigits=3)) * "μs"
+    t < 1.0  && return string(round(t * 1e3; sigdigits=3)) * "ms"
+    t < 60   && return string(round(t; sigdigits=3)) * "s"
+    t < 3600 && return string(round(t / 60; sigdigits=3)) * "min"
+    return string(round(t / 3600; sigdigits=3)) * "hr"
+end
+
+"""
+    fmt_bytes(n) -> String
+
+Format a byte count `n` with appropriate binary units (B, KB, MB, GB, TB).
+"""
+function fmt_bytes(n)
+    n < 0 && return "-" * fmt_bytes(-n)
+    n < 1024 && return string(Int(n)) * " B"
+    n < 1024^2 && return string(round(n / 1024; sigdigits=3)) * " KB"
+    n < 1024^3 && return string(round(n / 1024^2; sigdigits=3)) * " MB"
+    n < 1024^4 && return string(round(n / 1024^3; sigdigits=3)) * " GB"
+    return string(round(n / 1024^4; sigdigits=3)) * " TB"
+end
+
+"""
+    fmt_number(x; sigdigits=3) -> String
+
+Format a number with SI suffixes (K, M, B, T) or scientific notation for very small values.
+"""
+function fmt_number(x; sigdigits=3)
+    isnan(x) && return "NaN"
+    isinf(x) && return x > 0 ? "∞" : "-∞"
+    x < 0 && return "-" * fmt_number(-x; sigdigits)
+    x == 0 && return "0"
+    x < 1e-3 && return string(round(x; sigdigits))
+    x < 1e3  && return string(round(x; sigdigits))
+    x < 1e6  && return string(round(x / 1e3; sigdigits)) * "K"
+    x < 1e9  && return string(round(x / 1e6; sigdigits)) * "M"
+    x < 1e12 && return string(round(x / 1e9; sigdigits)) * "B"
+    return string(round(x / 1e12; sigdigits)) * "T"
 end
 
 # --- Test UI stubs (implemented by TestExt when Test is loaded) ---
