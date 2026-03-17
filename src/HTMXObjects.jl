@@ -10,6 +10,7 @@ export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
+export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist
@@ -412,8 +413,8 @@ updates the struct.
 
 - Non-indexed properties map to `METHOD /name` (e.g. `obj.about` → `GET /about`)
 - Indexed properties map to `METHOD /name/{p1}/{p2}/...`
-- Type annotations auto-parse URL strings: `@get item[id::Int]` parses `id` to `Int`
-- Trailing defaults register shortened routes: `@get filter[a, b=1]` registers
+- Type annotations auto-parse URL strings: `@get item(id::Int)` parses `id` to `Int`
+- Trailing defaults register shortened routes: `@get filter(a, b=1)` registers
   both `GET /filter/{a}/{b}` and `GET /filter/{a}` (with `b=1` filled in)
 - Kwargs (via call syntax) auto-extract from query params or form data:
   `@get search(; q="", page::Int=1)` extracts `q` and `page` from the query string
@@ -893,5 +894,14 @@ function render_table(table; id=nothing, sortable=true, cell=nothing, class="str
         h.tbody(body_rows...; id)
     )
 end
+
+# --- Test UI stubs (implemented by TestExt when Test is loaded) ---
+function test_list end
+function test_run! end
+function test_run_all! end
+function test_run_batch! end
+function test_run_failed! end
+function test_run_missing! end
+function test_clear_cache! end
 
 end # module HTMXObjects
