@@ -12,6 +12,7 @@ export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
 export fmt_time, fmt_bytes, fmt_number
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
+export TestRoutes
 
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist
@@ -1087,5 +1088,20 @@ function test_run_batch! end
 function test_run_failed! end
 function test_run_missing! end
 function test_clear_cache! end
+
+# --- Shared route structs for @include ---
+
+@htmx struct TestRoutes
+    req = nothing
+    test_module = nothing
+    md = wants_markdown(req)
+    @get index = test_list(test_module, md)
+    @post run(name) = test_run!(test_module, name, md)
+    @post run_all = test_run_all!(test_module, md)
+    @post run_failed = test_run_failed!(test_module, md)
+    @post run_missing = test_run_missing!(test_module, md)
+    @post run_batch(; names="") = test_run_batch!(test_module, names, md)
+    @post clear_cache = test_clear_cache!(test_module, md)
+end
 
 end # module HTMXObjects
