@@ -17,6 +17,9 @@ TestModules = "63c02187-99fd-4e5c-aaf0-4d6bfebc181c"
 [extensions]
 TestModulesExt = ["Test", "TestModules"]
 
+[sources]
+TestModules = {url = "https://github.com/nsiccha/TestModules.jl"}
+
 [compat]
 julia = "1"
 
