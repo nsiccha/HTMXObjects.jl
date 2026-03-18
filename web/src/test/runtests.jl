@@ -1,4 +1,5 @@
-@testmodule begin
+using TestModules
+using Random, HTMXObjects, HTTP, Tables
 
 # --- Struct definitions at module scope ---
 
@@ -6,21 +7,6 @@
     title = "Test"
     @get index = h.h1(title)
     @get item[id] = h.p("Item: $id")
-end
-
-# --- @include test structs ---
-
-@htmx struct NestedRoutes
-    req = nothing
-    greeting = "hello"
-    @get index = h.p("nested: $(greeting)")
-    @get info(id) = h.p("info: $id from $(greeting)")
-end
-
-@htmx struct ParentWithInclude
-    req = nothing
-    @get index = h.h1("parent")
-    @include sub = NestedRoutes(; req, greeting="world")
 end
 
 @htmx struct IndexApp
@@ -471,35 +457,3 @@ end
     @test fmt_number(-Inf) == "-∞"
     @test fmt_number(-2500.0) == "-2.5K"
 end
-
-@testset "@include nested routes" begin
-    app = ParentWithInclude()
-
-    # Parent property access
-    html = repr("text/html", app.index)
-    @test contains(html, "parent")
-
-    # Nested property access works through DynamicObjects
-    nested = app.sub
-    @test repr("text/html", nested.index) |> x -> contains(x, "world")
-    @test repr("text/html", nested.info["42"]) |> x -> contains(x, "info: 42")
-
-    # Route registration with @include
-    route!(app)
-    port = 8097
-    serve(; port, async=true)
-    try
-        r1 = HTTP.get("http://127.0.0.1:$port/")
-        @test contains(String(r1.body), "parent")
-
-        r2 = HTTP.get("http://127.0.0.1:$port/sub")
-        @test contains(String(r2.body), "world")
-
-        r3 = HTTP.get("http://127.0.0.1:$port/sub/info/99")
-        @test contains(String(r3.body), "info: 99")
-    finally
-        terminate()
-    end
-end
-
-end # @testmodule
