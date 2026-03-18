@@ -39,4 +39,5 @@ jobs:
             ])
           '
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+      - name: Run tests
+        run: julia --project=. -e 'include("test/runtests.jl")'
