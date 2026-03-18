@@ -244,6 +244,19 @@ already an `HTTP.Response` pass through unchanged.
 to_response(val::HTTP.Response) = val
 to_response(val) = auto(val; wrap=_html_response)
 
+# Convert a value to markdown text. Defaults to repr(MIME"text/markdown"(), val).
+# Node gets a show(io, MIME"text/markdown", node) method in HTMX.jl.
+# Users can extend with show(io, MIME"text/markdown", val::MyType).
+to_markdown_string(val) = try
+    repr(MIME"text/markdown"(), val)
+catch
+    string(val)
+end
+
+# TODO: HTMX.jl should define show(io, MIME"text/markdown", node::Node) that
+# converts HTML structure to proper markdown (h1→#, p→text, ul/li→-, table→|, etc.)
+# For now, the try/catch fallback in to_markdown_string handles Nodes via string().
+
 """
     save_response(record_dir, url_path, response)
 
@@ -543,22 +556,59 @@ end
 _register_handler(method, path, handler) =
     HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, handler)
 
+"""
+    _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
+
+Convert a route handler's return value to an HTTP response, automatically
+handling markdown, HTMX fragment, and full-page modes.
+
+Convention-based properties on `obj`:
+- `page(content)` — wraps fragment in full page (for direct browser requests)
+- `to_markdown(val)` — custom markdown serializer
+
+If the route returns an `HTTP.Response` directly, it passes through unchanged.
+"""
+function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
+    # Opt-out: route already produced a response
+    val isa HTTP.Response && return val
+
+    # Record static version if requested
+    if !isnothing(record_dir) && !isnothing(save_path)
+        save_response(record_dir, save_path, to_response(static_transform(val)))
+    end
+
+    # Markdown mode
+    if wants_markdown(req)
+        if hasproperty(obj, :to_markdown)
+            return to_response(getproperty(obj, :to_markdown)[val])
+        else
+            return markdown_response(to_markdown_string(val))
+        end
+    end
+
+    # HTMX fragment or no page wrapper defined → return as-is
+    fragment_resp = to_response(val)
+    if is_htmx(req) || !hasproperty(obj, :page)
+        return fragment_resp
+    end
+
+    # Full page wrap for direct browser navigation
+    to_response(getproperty(obj, :page)[val])
+end
+
 function _register_indexed_route(T, method, name, path, param_strs, param_types, suffix_defaults, kwargs_info, record_dir)
     _register_handler(method, path, function(req)
         idx_vals = _extract_path_params(req, path, param_strs, param_types, suffix_defaults)
         kw_pairs = _extract_kwargs(req, method, kwargs_info)
-        prop = getproperty(T(; req), name)
+        obj = T(; req)
+        prop = getproperty(obj, name)
         val = if isempty(kw_pairs)
             prop[idx_vals...]
         else
             Base.getindex(prop, idx_vals...; NamedTuple(kw_pairs)...)
         end
-        resp = to_response(val)
-        if !isnothing(record_dir)
-            save_path = "/" * join(vcat(string(name), string.(idx_vals)), "/")
-            save_response(record_dir, save_path, to_response(static_transform(val)))
-        end
-        resp
+        save_path = !isnothing(record_dir) ? "/" * join(vcat(string(name), string.(idx_vals)), "/") : nothing
+        _resolve_response(obj, req, val; record_dir, save_path)
     end)
 end
 
@@ -652,10 +702,9 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 end
             elseif isempty(param_strs) && isempty(kwargs_info)
                 register(CONTEXT[], method, path, function(req)
-                    val = getproperty(T(; req), name)
-                    resp = to_response(val)
-                    isnothing(record_dir) || save_response(record_dir, path, to_response(static_transform(val)))
-                    resp
+                    obj = T(; req)
+                    val = getproperty(obj, name)
+                    _resolve_response(obj, req, val; record_dir, save_path=record_dir !== nothing ? path : nothing)
                 end)
             elseif isempty(param_strs) && !isempty(kwargs_info)
                 # kwargs-only route (no path params)
@@ -743,12 +792,8 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
                 else
                     Base.getindex(getproperty(nested, name), idx_vals...; NamedTuple(kw_pairs)...)
                 end
-                resp = to_response(val)
-                if !isnothing(record_dir)
-                    save_path = "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/")
-                    save_response(record_dir, save_path, to_response(static_transform(val)))
-                end
-                resp
+                sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
+                _resolve_response(parent, req, val; record_dir, save_path=sp)
             end)
         end
     end
