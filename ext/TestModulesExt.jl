@@ -209,7 +209,7 @@ function _html_escape(s)
     replace(s, "&" => "&amp;", "<" => "&lt;", ">" => "&gt;")
 end
 
-function tests_html_table(tests_mod)
+function tests_html_table(tests_mod; prefix="/tests")
     counts = _summary_counts(tests_mod)
     rows = map(tests_mod.test_names()) do name
         s = format_test_status(tests_mod, name)
@@ -230,7 +230,7 @@ function tests_html_table(tests_mod)
             detail_cell,
             h.td(s.duration),
             h.td(s.age),
-            h.td(h.button("Run"; hx_post="/tests_run/$(name)", hx_target="#tests-container", hx_swap="innerHTML")),
+            h.td(h.button("Run"; hx_post="$(prefix)/run/$(name)", hx_target="#tests-container", hx_swap="innerHTML")),
         )
     end
 
@@ -243,10 +243,10 @@ function tests_html_table(tests_mod)
 
     h.div(; id="tests-container")(
         h.div(; style="margin-bottom:1rem")(
-            h.button("Run All"; hx_post="/tests_run_all", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
-            h.button("Run Missing"; hx_post="/tests_run_missing", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
-            h.button("Run Failed"; hx_post="/tests_run_failed", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
-            h.button("Clear Cache"; hx_post="/tests_clear_cache", hx_target="#tests-container", hx_swap="innerHTML"),
+            h.button("Run All"; hx_post="$(prefix)/run_all", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
+            h.button("Run Missing"; hx_post="$(prefix)/run_missing", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
+            h.button("Run Failed"; hx_post="$(prefix)/run_failed", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
+            h.button("Clear Cache"; hx_post="$(prefix)/clear_cache", hx_target="#tests-container", hx_swap="innerHTML"),
             h.span(; style="margin-left:1rem;font-size:0.9em;color:#666")(summary_text),
         ),
         h.table(; role="grid")(
@@ -258,11 +258,11 @@ end
 
 # --- Route handler helpers ---
 
-function _test_result(tests_mod, md)
-    md ? markdown_response(tests_plain_text(tests_mod)) : tests_html_table(tests_mod)
+function _test_result(tests_mod, md; prefix="/tests")
+    md ? markdown_response(tests_plain_text(tests_mod)) : tests_html_table(tests_mod; prefix)
 end
 
-test_list(tests_mod, md) = begin
+test_list(tests_mod, md; prefix="/tests") = begin
     _load_persisted!(tests_mod)
     if md
         markdown_response(tests_plain_text(tests_mod))
@@ -270,41 +270,41 @@ test_list(tests_mod, md) = begin
         htmx(h.main(class="container")(
             h.h1("Tests"),
             h.p(h.a(href="/")("Back to index")),
-            tests_html_table(tests_mod),
+            tests_html_table(tests_mod; prefix),
         ); pico_version="2")
     end
 end
 
-test_run!(tests_mod, name, md) = begin
+test_run!(tests_mod, name, md; prefix="/tests") = begin
     _safe_run!(tests_mod, Symbol(name))
-    _test_result(tests_mod, md)
+    _test_result(tests_mod, md; prefix)
 end
 
-test_run_all!(tests_mod, md) = begin
+test_run_all!(tests_mod, md; prefix="/tests") = begin
     _safe_run_all!(tests_mod)
-    _test_result(tests_mod, md)
+    _test_result(tests_mod, md; prefix)
 end
 
-test_run_failed!(tests_mod, md) = begin
+test_run_failed!(tests_mod, md; prefix="/tests") = begin
     _safe_run_batch!(tests_mod, _failed_names(tests_mod))
-    _test_result(tests_mod, md)
+    _test_result(tests_mod, md; prefix)
 end
 
-test_run_missing!(tests_mod, md) = begin
+test_run_missing!(tests_mod, md; prefix="/tests") = begin
     _safe_run_batch!(tests_mod, _missing_names(tests_mod))
-    _test_result(tests_mod, md)
+    _test_result(tests_mod, md; prefix)
 end
 
-test_run_batch!(tests_mod, names_str, md) = begin
+test_run_batch!(tests_mod, names_str, md; prefix="/tests") = begin
     ns = Symbol.(filter(!isempty, split(names_str, ",")))
     _safe_run_batch!(tests_mod, ns)
-    _test_result(tests_mod, md)
+    _test_result(tests_mod, md; prefix)
 end
 
-test_clear_cache!(tests_mod, md) = begin
+test_clear_cache!(tests_mod, md; prefix="/tests") = begin
     tests_mod.clear_cache!()
     _clear_persisted!(tests_mod)
-    _test_result(tests_mod, md)
+    _test_result(tests_mod, md; prefix)
 end
 
 end # module TestModulesExt

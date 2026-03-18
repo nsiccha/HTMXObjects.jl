@@ -1094,14 +1094,15 @@ function test_clear_cache! end
 @htmx struct TestRoutes
     req = nothing
     test_module = nothing
+    prefix = "/tests"
     md = wants_markdown(req)
-    @get index = test_list(test_module, md)
-    @post run(name) = test_run!(test_module, name, md)
-    @post run_all = test_run_all!(test_module, md)
-    @post run_failed = test_run_failed!(test_module, md)
-    @post run_missing = test_run_missing!(test_module, md)
-    @post run_batch(; names="") = test_run_batch!(test_module, names, md)
-    @post clear_cache = test_clear_cache!(test_module, md)
+    @get index = test_list(test_module, md; prefix)
+    @post run(name) = test_run!(test_module, name, md; prefix)
+    @post run_all = test_run_all!(test_module, md; prefix)
+    @post run_failed = test_run_failed!(test_module, md; prefix)
+    @post run_missing = test_run_missing!(test_module, md; prefix)
+    @post run_batch(; names="") = test_run_batch!(test_module, names, md; prefix)
+    @post clear_cache = test_clear_cache!(test_module, md; prefix)
 end
 
 end # module HTMXObjects
