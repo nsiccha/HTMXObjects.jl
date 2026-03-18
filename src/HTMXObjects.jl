@@ -578,9 +578,30 @@ function _register_indexed_route(T, method, name, path, param_strs, param_types,
     )
 end
 
-function _register_routes(T; prefix="", record_dir=nothing)
+function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[])
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
+
+        # Handle @include: recursively register nested @htmx struct's routes
+        if Symbol("@include") in info.macros
+            # Extract nested type from RHS (e.g. TestRoutes from TestRoutes(; req, ...))
+            nested_type = nothing
+            try
+                # Construct a dummy instance to discover the nested type
+                dummy = T(; req=nothing)
+                nested_val = getproperty(dummy, name)
+                nested_type = typeof(nested_val)
+            catch
+            end
+            if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
+                nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
+                chain = vcat(parent_chain, [name])
+                # Register nested routes with chained handlers
+                _register_included_routes(T, nested_type, chain, nested_prefix, record_dir)
+            end
+            continue
+        end
+
         method = nothing
         for (macro_sym, m) in _http_verbs
             macro_sym in info.macros && (method = m; break)
@@ -694,6 +715,108 @@ function _register_routes(T; prefix="", record_dir=nothing)
                     name == :index && isempty(prefix) && isempty(short_params) && (short_path = "/")
                     _register_indexed_route(T, method, name, short_path, short_params, short_types, suffix_vals, kwargs_info, record_dir)
                 end
+            end
+        end
+    end
+end
+
+# Register routes from a nested @include struct with chained property access through the parent.
+function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir)
+    for (name, info) in DynamicObjects.meta(NestedT)
+        DynamicObjects.isfixed(info) && continue
+
+        # Recurse into nested @include within the included struct
+        if Symbol("@include") in info.macros
+            nested_type = nothing
+            try
+                dummy = ParentT(; req=nothing)
+                obj = foldl((o, n) -> getproperty(o, n), chain; init=dummy)
+                nested_val = getproperty(obj, name)
+                nested_type = typeof(nested_val)
+            catch
+            end
+            if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
+                _register_included_routes(ParentT, nested_type, vcat(chain, [name]),
+                    prefix * "/" * string(name), record_dir)
+            end
+            continue
+        end
+
+        method = nothing
+        for (macro_sym, m) in _http_verbs
+            macro_sym in info.macros && (method = m; break)
+        end
+        isnothing(method) && continue
+
+        # Build path
+        positional_indices = Any[]
+        kwargs_info = Tuple{String, Any, Any}[]
+        for idx in info.indices
+            if Meta.isexpr(idx, :parameters)
+                kwargs_info = _extract_kwargs(idx.args)
+            else
+                push!(positional_indices, idx)
+            end
+        end
+
+        param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
+        param_types = [_extract_type(idx) for idx in positional_indices]
+
+        base = "/" * prefix * "/" * string(name)
+        path = isempty(param_strs) ? base :
+            base * "/" * join("{" .* param_strs .* "}", "/")
+        # :index on nested struct → just the prefix path
+        name == :index && (path = "/" * prefix)
+
+        let name=name, chain=chain, param_strs=param_strs, param_types=param_types, path=path, method=method, kwargs_info=kwargs_info, record_dir=record_dir
+            # Create handler that chains through the parent
+            push!(_route_handlers, (idx_vals, kw_pairs, req) -> begin
+                parent = ParentT(; req)
+                nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
+                val = if isempty(idx_vals) && isempty(kw_pairs)
+                    getproperty(nested, name)
+                elseif isempty(kw_pairs)
+                    getproperty(nested, name)[idx_vals...]
+                else
+                    Base.getindex(getproperty(nested, name), idx_vals...; NamedTuple(kw_pairs)...)
+                end
+                resp = to_response(val)
+                if !isnothing(record_dir)
+                    save_path = "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/")
+                    save_response(record_dir, save_path, to_response(static_transform(val)))
+                end
+                resp
+            end)
+            key = length(_route_handlers)
+
+            if isempty(param_strs) && isempty(kwargs_info)
+                register(CONTEXT[], method, path, function(req)
+                    _route_handlers[key]([], Pair{Symbol,Any}[], req)
+                end)
+            else
+                param_syms = Symbol.(param_strs)
+                func_args = [:_req_; param_syms]
+                converted = [isnothing(t) ? s : :($_convert_param($s, $t)) for (s, t) in zip(param_syms, param_types)]
+                kwargs_code = if isempty(kwargs_info)
+                    :(Pair{Symbol,Any}[])
+                else
+                    kw_exprs = map(kwargs_info) do (kwname, kwtype, default_val)
+                        src_expr = :(_kwargs_source(_req_, $method))
+                        val_expr = if isnothing(default_val)
+                            :($(src_expr)[$kwname])
+                        else
+                            :(get($(src_expr), $kwname, $(default_val === :nothing ? :nothing : QuoteNode(default_val))))
+                        end
+                        converted_expr = isnothing(kwtype) ? val_expr : :($_convert_param($val_expr, $kwtype))
+                        :($(QuoteNode(Symbol(kwname))) => $converted_expr)
+                    end
+                    :(Pair{Symbol,Any}[$(kw_exprs...)])
+                end
+                register(CONTEXT[], method, path,
+                    eval(:(($(func_args...),) -> _route_handlers[$key](
+                        [$(converted...)], $kwargs_code, _req_
+                    )))
+                )
             end
         end
     end
