@@ -462,12 +462,7 @@ static HTTP server.
 Returns `obj`.
 """
 
-# Oxygen 1.10+ validates that the handler function's argument names match the
-# path parameter names in the route string (e.g. {id} → an `id` argument).
-# Since those names are only known at runtime we cannot spell them out in a
-# do-block literal.  Instead we store the real handler closure here and use
-# eval to generate a thin wrapper whose argument list carries the right names.
-const _route_handlers = Any[]
+_route_handlers() = nothing  # legacy, unused — handlers are now plain closures via pathparams()
 
 const _http_verbs = Dict(
     Symbol("@get") => "GET",
@@ -522,14 +517,40 @@ function _extract_kwargs(params_args)
     result
 end
 
+# Extract path params from request URL, convert types, append suffix defaults.
+function _extract_path_params(req, path, param_strs, param_types, suffix_defaults)
+    pp = pathparams(req, path)
+    idx_vals = Any[_convert_param(get(pp, p, ""), t) for (p, t) in zip(param_strs, param_types)]
+    append!(idx_vals, suffix_defaults)
+    idx_vals
+end
+
+# Extract kwargs from query params (GET/DELETE) or form data (POST/PUT/PATCH).
+function _extract_kwargs(req, method, kwargs_info)
+    isempty(kwargs_info) && return Pair{Symbol,Any}[]
+    src = _kwargs_source(req, method)
+    Pair{Symbol,Any}[
+        Symbol(kwname) => _convert_param(
+            isnothing(default_val) ? src[kwname] : get(src, kwname, default_val),
+            kwtype
+        )
+        for (kwname, kwtype, default_val) in kwargs_info
+    ]
+end
+
+# Register a route handler directly on the HTTP router, bypassing Oxygen's
+# argument-name validation. We extract path params ourselves via pathparams().
+_register_handler(method, path, handler) =
+    HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, handler)
+
 function _register_indexed_route(T, method, name, path, param_strs, param_types, suffix_defaults, kwargs_info, record_dir)
-    # Store the real handler (captures name/etc. by closure).
-    push!(_route_handlers, (idx_vals, kw_pairs, req) -> begin
+    _register_handler(method, path, function(req)
+        idx_vals = _extract_path_params(req, path, param_strs, param_types, suffix_defaults)
+        kw_pairs = _extract_kwargs(req, method, kwargs_info)
         prop = getproperty(T(; req), name)
         val = if isempty(kw_pairs)
             prop[idx_vals...]
         else
-            # Use function call form — prop[a; kw=v] is vcat in Julia, not getindex
             Base.getindex(prop, idx_vals...; NamedTuple(kw_pairs)...)
         end
         resp = to_response(val)
@@ -539,43 +560,6 @@ function _register_indexed_route(T, method, name, path, param_strs, param_types,
         end
         resp
     end)
-    key = length(_route_handlers)
-    # Generate a wrapper whose arg names match the route's {params}.
-    # URL params arrive as strings — convert typed params before calling the handler.
-    param_syms = Symbol.(param_strs)
-    defaults = [d === :nothing ? :nothing : QuoteNode(d) for d in suffix_defaults]
-    func_args = [:_req_ ; param_syms]
-    # Build conversion expressions: _convert_param(x, Type) for typed, x for untyped
-    all_types = param_types  # types for URL params (suffix defaults already have correct types)
-    converted = [isnothing(t) ? s : :($_convert_param($s, $t)) for (s, t) in zip(param_syms, all_types)]
-    default_converted = [d === :nothing ? :nothing : QuoteNode(d) for d in suffix_defaults]
-    # Build kwargs extraction code
-    kwargs_code = if isempty(kwargs_info)
-        :(Pair{Symbol,Any}[])
-    else
-        kw_exprs = map(kwargs_info) do (kwname, kwtype, default_val)
-            src_expr = :(_kwargs_source(_req_, $method))
-            val_expr = if isnothing(default_val)
-                :($(src_expr)[$kwname])
-            else
-                :(get($(src_expr), $kwname, $(default_val === :nothing ? :nothing : QuoteNode(default_val))))
-            end
-            converted_expr = if isnothing(kwtype)
-                val_expr
-            else
-                :($_convert_param($val_expr, $kwtype))
-            end
-            :($(QuoteNode(Symbol(kwname))) => $converted_expr)
-        end
-        :(Pair{Symbol,Any}[$(kw_exprs...)])
-    end
-    register(CONTEXT[], method, path,
-        eval(:(($(func_args...),) -> _route_handlers[$key](
-            [$(converted...), $(default_converted...)],
-            $kwargs_code,
-            _req_
-        )))
-    )
 end
 
 function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[])
@@ -653,8 +637,10 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                         lambda(ws)
                     end)
                 else
-                    # Indexed/kwargs WS route: same pattern as HTTP but call lambda(ws)
-                    push!(_route_handlers, (idx_vals, kw_pairs, ws) -> begin
+                    # Indexed/kwargs WS route: extract params from ws.request
+                    register(CONTEXT[], "WEBSOCKET", path, function(ws)
+                        idx_vals = _extract_path_params(ws.request, path, param_strs, param_types, Any[])
+                        kw_pairs = _extract_kwargs(ws.request, "GET", kwargs_info)
                         prop = getproperty(T(; req=ws.request), name)
                         lambda = if isempty(kw_pairs)
                             prop[idx_vals...]
@@ -663,30 +649,6 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                         end
                         lambda(ws)
                     end)
-                    key = length(_route_handlers)
-                    param_syms = Symbol.(param_strs)
-                    func_args = [:_ws_; param_syms]
-                    converted = [isnothing(t) ? s : :($_convert_param($s, $t)) for (s, t) in zip(param_syms, param_types)]
-                    kwargs_code = if isempty(kwargs_info)
-                        :(Pair{Symbol,Any}[])
-                    else
-                        kw_exprs = map(kwargs_info) do (kwname, kwtype, default_val)
-                            src_expr = :(_kwargs_source(_ws_.request, "GET"))
-                            val_expr = if isnothing(default_val)
-                                :($(src_expr)[$kwname])
-                            else
-                                :(get($(src_expr), $kwname, $(default_val === :nothing ? :nothing : QuoteNode(default_val))))
-                            end
-                            converted_expr = isnothing(kwtype) ? val_expr : :($_convert_param($val_expr, $kwtype))
-                            :($(QuoteNode(Symbol(kwname))) => $converted_expr)
-                        end
-                        :(Pair{Symbol,Any}[$(kw_exprs...)])
-                    end
-                    register(CONTEXT[], "WEBSOCKET", path,
-                        eval(:(($(func_args...),) -> _route_handlers[$key](
-                            [$(converted...)], $kwargs_code, _ws_
-                        )))
-                    )
                 end
             elseif isempty(param_strs) && isempty(kwargs_info)
                 register(CONTEXT[], method, path, function(req)
@@ -769,8 +731,9 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         name == :index && (path = "/" * prefix)
 
         let name=name, chain=chain, param_strs=param_strs, param_types=param_types, path=path, method=method, kwargs_info=kwargs_info, record_dir=record_dir
-            # Create handler that chains through the parent
-            push!(_route_handlers, (idx_vals, kw_pairs, req) -> begin
+            _register_handler(method, path, function(req)
+                idx_vals = _extract_path_params(req, path, param_strs, param_types, Any[])
+                kw_pairs = _extract_kwargs(req, method, kwargs_info)
                 parent = ParentT(; req)
                 nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
                 val = if isempty(idx_vals) && isempty(kw_pairs)
@@ -787,37 +750,6 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
                 end
                 resp
             end)
-            key = length(_route_handlers)
-
-            if isempty(param_strs) && isempty(kwargs_info)
-                register(CONTEXT[], method, path, function(req)
-                    _route_handlers[key]([], Pair{Symbol,Any}[], req)
-                end)
-            else
-                param_syms = Symbol.(param_strs)
-                func_args = [:_req_; param_syms]
-                converted = [isnothing(t) ? s : :($_convert_param($s, $t)) for (s, t) in zip(param_syms, param_types)]
-                kwargs_code = if isempty(kwargs_info)
-                    :(Pair{Symbol,Any}[])
-                else
-                    kw_exprs = map(kwargs_info) do (kwname, kwtype, default_val)
-                        src_expr = :(_kwargs_source(_req_, $method))
-                        val_expr = if isnothing(default_val)
-                            :($(src_expr)[$kwname])
-                        else
-                            :(get($(src_expr), $kwname, $(default_val === :nothing ? :nothing : QuoteNode(default_val))))
-                        end
-                        converted_expr = isnothing(kwtype) ? val_expr : :($_convert_param($val_expr, $kwtype))
-                        :($(QuoteNode(Symbol(kwname))) => $converted_expr)
-                    end
-                    :(Pair{Symbol,Any}[$(kw_exprs...)])
-                end
-                register(CONTEXT[], method, path,
-                    eval(:(($(func_args...),) -> _route_handlers[$key](
-                        [$(converted...)], $kwargs_code, _req_
-                    )))
-                )
-            end
         end
     end
 end
