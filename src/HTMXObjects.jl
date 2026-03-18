@@ -499,6 +499,7 @@ end
 
 # Convert a string value to the target type. Strings pass through as-is.
 _convert_param(val, ::Nothing) = val
+_convert_param(val, T::Symbol) = _convert_param(val, Core.eval(Main, T))  # raw AST type from macro
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
