@@ -10,7 +10,7 @@ export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
-export fmt_time, fmt_bytes, fmt_number
+export fmt_time, fmt_bytes, fmt_number, query_url
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1114,5 +1114,14 @@ function test_clear_cache! end
     @post run_batch(; names="") = test_run_batch!(test_module, names, md; prefix)
     @post clear_cache = test_clear_cache!(test_module, md; prefix)
 end
+
+"""
+    query_url(path; kwargs...) -> String
+
+Build a URL with properly escaped query parameters.
+
+    query_url("/search"; q="hello world", page=2)  # → "/search?q=hello%20world&page=2"
+"""
+query_url(path; kwargs...) = isempty(kwargs) ? path : path * "?" * HTTP.URIs.escapeuri(kwargs)
 
 end # module HTMXObjects
