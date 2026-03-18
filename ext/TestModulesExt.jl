@@ -32,7 +32,7 @@ function _cache_path(tests_mod)
 end
 
 function _persist_result!(tests_mod, name::Symbol)
-    c = tests_mod.cached(name)
+    c = TestModules.cached(tests_mod, name)
     isnothing(c) && return
     ts, result = c
     dur = get(_durations(), (objectid(tests_mod), name), 0.0)
@@ -81,11 +81,11 @@ end
 
 function _load_persisted!(tests_mod)
     # Only load if the in-memory cache is empty
-    isempty(tests_mod.cache()) || return
+    isempty(TestModules.cache(tests_mod)) || return
     entries = _read_cache_file(tests_mod)
     for (name, (ts, status, np, tot, dur)) in entries
         anynonpass = status != "pass"
-        tests_mod.cache()[name] = (ts, PersistedResult(np, anynonpass, tot, []))
+        TestModules.cache(tests_mod)[name] = (ts, PersistedResult(np, anynonpass, tot, []))
         _durations()[(objectid(tests_mod), name)] = dur
     end
 end
@@ -100,10 +100,10 @@ end
 function _safe_run!(tests_mod, name::Symbol)
     t0 = time()
     try
-        tests_mod.run_test!(name)
+        TestModules.run_test!(tests_mod, name)
     catch e
         # Store the error in the cache so it's visible in the UI
-        tests_mod.cache()[name] = (time(), TestError(e, catch_backtrace()))
+        TestModules.cache(tests_mod)[name] = (time(), TestError(e, catch_backtrace()))
         nothing
     end
     _durations()[(objectid(tests_mod), name)] = time() - t0
@@ -111,21 +111,21 @@ function _safe_run!(tests_mod, name::Symbol)
 end
 
 function _safe_run_all!(tests_mod)
-    for name in tests_mod.test_names()
+    for name in TestModules.test_names(tests_mod)
         _safe_run!(tests_mod, name)
     end
 end
 
 function _failed_names(tests_mod)
-    Symbol[name for name in tests_mod.test_names()
-        if let c = tests_mod.cached(name)
+    Symbol[name for name in TestModules.test_names(tests_mod)
+        if let c = TestModules.cached(tests_mod, name)
             !isnothing(c) && (c[2] isa TestError || c[2].anynonpass)
         end
     ]
 end
 
 function _missing_names(tests_mod)
-    Symbol[name for name in tests_mod.test_names() if isnothing(tests_mod.cached(name))]
+    Symbol[name for name in TestModules.test_names(tests_mod) if isnothing(TestModules.cached(tests_mod, name))]
 end
 
 function _safe_run_batch!(tests_mod, names)
@@ -143,7 +143,7 @@ function _format_duration(dt)
 end
 
 function format_test_status(tests_mod, name::Symbol)
-    c = tests_mod.cached(name)
+    c = TestModules.cached(tests_mod, name)
     dur = get(_durations(), (objectid(tests_mod), name), nothing)
     dur_str = isnothing(dur) ? "" : _format_duration(dur)
     isnothing(c) && return (; status="pending", icon="·", age="", detail="", duration=dur_str, error_detail="")
@@ -181,7 +181,7 @@ end
 
 function _summary_counts(tests_mod)
     pass = fail = error = pending = 0
-    for name in tests_mod.test_names()
+    for name in TestModules.test_names(tests_mod)
         s = format_test_status(tests_mod, name)
         if s.status == "pass"; pass += 1
         elseif s.status == "fail"; fail += 1
@@ -198,7 +198,7 @@ function tests_plain_text(tests_mod)
     push!(lines, "")
     push!(lines, rpad("Test", 40) * rpad("Status", 8) * rpad("Detail", 15) * rpad("Duration", 12) * "Age")
     push!(lines, "-"^85)
-    for name in tests_mod.test_names()
+    for name in TestModules.test_names(tests_mod)
         s = format_test_status(tests_mod, name)
         push!(lines, rpad(string(name), 40) * rpad(s.icon, 8) * rpad(s.detail, 15) * rpad(s.duration, 12) * s.age)
     end
@@ -211,7 +211,7 @@ end
 
 function tests_html_table(tests_mod; prefix="/tests")
     counts = _summary_counts(tests_mod)
-    rows = map(tests_mod.test_names()) do name
+    rows = map(TestModules.test_names(tests_mod)) do name
         s = format_test_status(tests_mod, name)
         color = s.status == "pass" ? "green" : s.status == "fail" ? "red" : s.status == "error" ? "orange" : "gray"
         detail_cell = if !isempty(s.error_detail)
@@ -302,7 +302,7 @@ test_run_batch!(tests_mod, names_str, md; prefix="/tests") = begin
 end
 
 test_clear_cache!(tests_mod, md; prefix="/tests") = begin
-    tests_mod.clear_cache!()
+    TestModules.clear_cache!(tests_mod)
     _clear_persisted!(tests_mod)
     _test_result(tests_mod, md; prefix)
 end

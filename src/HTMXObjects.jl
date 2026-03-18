@@ -513,12 +513,21 @@ _kwargs_source(req, method) = method in _queryparams_verbs ? queryparams(req) : 
 
 # Extract kwarg info from a :parameters node's args.
 # Returns [(name::String, type_or_nothing, default_value), ...]
+# Sentinel for "no default provided" (distinct from `nothing` as a default value).
+_no_default() = _NO_DEFAULT
+_NO_DEFAULT = :__no_default__
+
+# Evaluate simple AST literals to their Julia values.
+# :nothing → nothing, :true → true, :false → false, numbers/strings pass through.
+_eval_literal(x::Symbol) = x === :nothing ? nothing : x === :true ? true : x === :false ? false : x
+_eval_literal(x) = x
+
 function _extract_kwargs(params_args)
     result = Tuple{String, Any, Any}[]
     for arg in params_args
         if Meta.isexpr(arg, :kw)
             kwname_expr = arg.args[1]
-            default_val = arg.args[2]
+            default_val = _eval_literal(arg.args[2])
             kwtype = _extract_type(arg)
             kwname = string(first(DynamicObjects.extractnames(kwname_expr)))
             push!(result, (kwname, kwtype, default_val))
@@ -526,7 +535,7 @@ function _extract_kwargs(params_args)
             # Bare kwarg without default (rare but possible): prop(; q)
             kwtype = _extract_type(arg)
             kwname = string(first(DynamicObjects.extractnames(arg)))
-            push!(result, (kwname, kwtype, nothing))
+            push!(result, (kwname, kwtype, _no_default()))
         end
     end
     result
@@ -546,7 +555,7 @@ function _extract_kwargs(req, method, kwargs_info)
     src = _kwargs_source(req, method)
     Pair{Symbol,Any}[
         Symbol(kwname) => _convert_param(
-            isnothing(default_val) ? src[kwname] : get(src, kwname, default_val),
+            default_val === _no_default() ? src[kwname] : get(src, kwname, default_val),
             kwtype
         )
         for (kwname, kwtype, default_val) in kwargs_info
