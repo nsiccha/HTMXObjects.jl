@@ -1,6 +1,6 @@
 module HTMXObjects
 
-export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, fetchindex
+export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, fetchindex, getstatus
 export create_app
 export HTTP, queryparams, queryparams_all, formdata
 export terminate, serve, staticfiles
@@ -15,7 +15,7 @@ export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!,
 export TestRoutes
 
 using DynamicObjects, HTTP, Tables
-import DynamicObjects: @persist, fetchindex
+import DynamicObjects: @persist, fetchindex, getstatus
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString
 
