@@ -29,12 +29,14 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Install unregistered dependencies
         run: |
+          git clone -b dev https://github.com/nsiccha/DynamicObjects.jl.git
+          git clone -b dev https://github.com/nsiccha/HTMX.jl.git
           git clone https://github.com/nsiccha/TestModules.jl.git
           julia --project -e '
             using Pkg
             Pkg.develop([
-              PackageSpec(url="https://github.com/nsiccha/DynamicObjects.jl", rev="dev"),
-              PackageSpec(url="https://github.com/nsiccha/HTMX.jl", rev="dev"),
+              PackageSpec(path="DynamicObjects.jl"),
+              PackageSpec(path="HTMX.jl"),
               PackageSpec(path="TestModules.jl"),
             ])
           '
