@@ -1,6 +1,6 @@
 module HTMXObjects
 
-export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, fetchindex, getstatus
+export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, PropertyComputationError, unwrap_error
 export create_app
 export HTTP, queryparams, queryparams_all, formdata
 export terminate, serve, staticfiles
@@ -221,8 +221,12 @@ end
 
 # --- Route registration and recording ---
 
-# Parse path parameters by matching request URL segments against the route template.
-# Uses only req.target (public HTTP.Request field) — no Oxygen/HTTP internals.
+"""
+    pathparams(req::HTTP.Request, template::AbstractString) -> Dict{String, String}
+
+Extract path parameters from the request URL by matching segments against a route template.
+Template segments wrapped in `{...}` are treated as parameter names.
+"""
 function pathparams(req::HTTP.Request, template::AbstractString)
     req_parts  = split(split(req.target, "?")[1], "/", keepempty=false)
     tmpl_parts = split(template, "/", keepempty=false)
@@ -1101,6 +1105,9 @@ function test_clear_cache! end
 
 # --- Shared route structs for @include ---
 
+# Provides web routes for running tests registered via TestModules. Include in an
+# @htmx struct with `@include tests = TestRoutes(; req, test_module=@__MODULE__)`
+# to add test listing, running, and cache management endpoints under /tests/.
 @htmx struct TestRoutes
     req = nothing
     test_module = nothing
