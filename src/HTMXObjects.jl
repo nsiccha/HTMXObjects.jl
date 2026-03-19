@@ -10,7 +10,7 @@ export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
-export fmt_time, fmt_bytes, fmt_number, query_url
+export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1123,6 +1123,53 @@ function test_clear_cache! end
     @post run_missing = test_run_missing!(test_module, md; prefix)
     @post run_batch(; names="") = test_run_batch!(test_module, names, md; prefix)
     @post clear_cache = test_clear_cache!(test_module, md; prefix)
+end
+
+"""
+    hidden_inputs(; kwargs...) -> Vector{Node}
+
+Generate hidden `<input>` elements for each keyword argument. Splat into a form
+to pass parameters to `@post` routes via `formdata`:
+
+    h.form(; hx_post="/foo", hx_target="#list", hx_swap="innerHTML")(
+        hidden_inputs(; script=path, worktree=wt)...,
+        h.button(; class="btn", type="submit")("Go"),
+    )
+"""
+hidden_inputs(; kwargs...) = [h.input(; type="hidden", name=string(k), value=string(v)) for (k, v) in kwargs]
+
+"""
+    post_form(url, label="Submit"; btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", kwargs...)
+
+Generate a complete inline POST form with hidden inputs and a submit button.
+Extra keyword arguments become hidden `<input>` fields passed via `formdata`.
+
+    post_form("/respond/my-slug/approved", "Approve";
+        btn_class="btn btn-approve",
+        hx_target="#proposals-list", hx_swap="innerHTML",
+        msg="APPROVED. Open a draft PR.",
+    )
+
+is equivalent to:
+
+    h.form(; hx_post="/respond/my-slug/approved",
+        hx_target="#proposals-list", hx_swap="innerHTML",
+        style="display:inline",
+    )(
+        h.input(; type="hidden", name="msg", value="APPROVED. Open a draft PR."),
+        h.button(; class="btn btn-approve", type="submit")("Approve"),
+    )
+"""
+function post_form(url, label="Submit"; btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", kwargs...)
+    form_attrs = Dict{Symbol,String}(:hx_post => url, :style => "display:inline")
+    !isempty(hx_target) && (form_attrs[:hx_target] = hx_target)
+    !isempty(hx_swap) && (form_attrs[:hx_swap] = hx_swap)
+    !isempty(hx_include) && (form_attrs[:hx_include] = hx_include)
+    !isempty(confirm) && (form_attrs[:hx_confirm] = confirm)
+    h.form(; form_attrs...)(
+        hidden_inputs(; kwargs...)...,
+        h.button(; class=btn_class, type="submit")(label),
+    )
 end
 
 """
