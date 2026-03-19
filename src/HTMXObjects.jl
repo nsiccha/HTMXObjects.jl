@@ -513,7 +513,10 @@ _convert_param(val, ::Type) = val  # already converted (e.g. default value)
 
 # Determine whether kwargs come from queryparams (GET/DELETE) or formdata (POST/PUT/PATCH).
 const _queryparams_verbs = Set(["GET", "DELETE"])
-_kwargs_source(req, method) = method in _queryparams_verbs ? queryparams(req) : formdata(req)
+function _kwargs_source(req, method)
+    method in _queryparams_verbs && return queryparams(req)
+    isempty(HTTP.payload(req)) ? Dict{String, Any}() : formdata(req)
+end
 
 # Extract kwarg info from a :parameters node's args.
 # Returns [(name::String, type_or_nothing, default_value), ...]
