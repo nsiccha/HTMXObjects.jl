@@ -457,3 +457,139 @@ end
     @test fmt_number(-Inf) == "-∞"
     @test fmt_number(-2500.0) == "-2.5K"
 end
+
+@testset "Long" begin
+    @test Long("study_cohort") == "study cohort"
+    @test Long(:hello_world) == "hello world"
+    @test Long("single") == "single"
+end
+
+@testset "sinput" begin
+    node = sinput("color", ["red", "green", "blue"]; value="green")
+    html = repr("text/html", node)
+    @test contains(html, "<label>")
+    @test contains(html, "<select")
+    @test contains(html, "name=\"color\"")
+    # selected option: HTMX.jl renders boolean `selected` as bare attr (not selected="true")
+    @test contains(html, "<option value=\"green\" selected>")
+    @test !contains(html, "<option value=\"red\" selected")
+end
+
+@testset "soption" begin
+    # plain value
+    node = soption("apple")
+    html = repr("text/html", node)
+    @test contains(html, "<option")
+    @test contains(html, "apple")
+    # Pair: value => label
+    node2 = soption("us" => "United States")
+    html2 = repr("text/html", node2)
+    @test contains(html2, "value=\"us\"")
+    @test contains(html2, "United States")
+    # selected
+    node3 = soption("x"; selected_value="x")
+    html3 = repr("text/html", node3)
+    @test contains(html3, "selected>")
+end
+
+@testset "linput" begin
+    node = linput("email")
+    html = repr("text/html", node)
+    @test contains(html, "<label>")
+    @test contains(html, "<input")
+    @test contains(html, "name=\"email\"")
+    @test contains(html, "placeholder=\"email\"")
+end
+
+@testset "loading_indicator_script" begin
+    node = loading_indicator_script()
+    @test node isa Node
+    html = repr("text/html", node)
+    @test contains(html, "<script>")
+    @test contains(html, "htmx:beforeRequest")
+    @test contains(html, "aria-busy")
+end
+
+@testset "tabset" begin
+    node = tabset("Tab A" => h.p("Content A"), "Tab B" => h.p("Content B"))
+    html = repr("text/html", node)
+    @test contains(html, "Tab A")
+    @test contains(html, "Tab B")
+    @test contains(html, "Content A")
+    @test contains(html, "Content B")
+    # first tab active by default
+    @test contains(html, "class=\"contrast\"")
+    @test contains(html, "class=\"secondary\"")
+    # tab panels
+    @test contains(html, "tab-panel")
+    @test contains(html, "display:none")
+    # lazy tabs: string content → hx-get with revealed trigger
+    lazy = tabset("Eager" => h.p("here"), "Lazy" => "/api/lazy")
+    lhtml = repr("text/html", lazy)
+    @test contains(lhtml, "here")           # eager content rendered
+    @test !contains(lhtml, "/api/lazy\">")  # URL not rendered as text
+    @test contains(lhtml, "hx-get=\"/api/lazy\"")
+    @test contains(lhtml, "revealed once")
+    # all-lazy
+    lazy2 = tabset("A" => "/a", "B" => "/b")
+    lhtml2 = repr("text/html", lazy2)
+    @test contains(lhtml2, "hx-get=\"/a\"")
+    @test contains(lhtml2, "hx-get=\"/b\"")
+end
+
+@testset "status_badge" begin
+    node = status_badge(:running)
+    html = repr("text/html", node)
+    @test contains(html, "Running")
+    @test contains(html, "color:orange")
+
+    node2 = status_badge(:done)
+    html2 = repr("text/html", node2)
+    @test contains(html2, "Done")
+    @test contains(html2, "color:green")
+
+    node3 = status_badge(:failed; label="Error!")
+    html3 = repr("text/html", node3)
+    @test contains(html3, "Error!")
+    @test contains(html3, "color:red")
+
+    # unknown state falls back to inherit
+    node4 = status_badge(:unknown)
+    html4 = repr("text/html", node4)
+    @test contains(html4, "color:inherit")
+end
+
+@testset "nav_sidebar" begin
+    node = nav_sidebar(["Home" => "/", "About" => "/about"]; prefix="/app")
+    html = repr("text/html", node)
+    @test contains(html, "<aside>")
+    @test contains(html, "<nav>")
+    @test contains(html, "href=\"/app/\"")
+    @test contains(html, "href=\"/app/about\"")
+    @test contains(html, "hx-get=\"/app/\"")
+    @test contains(html, "hx-push-url=\"/app/about\"")
+    @test contains(html, "hx-target=\"#content\"")
+
+    # tuple form
+    node2 = nav_sidebar(("X" => "/x",))
+    html2 = repr("text/html", node2)
+    @test contains(html2, "href=\"/x\"")
+end
+
+@testset "@query_url" begin
+    # bare symbol
+    @test (@query_url index) == "/"
+    @test (@query_url fit) == "/fit"
+    # kwargs only
+    @test (@query_url fit(; dataset="foo", model="bar")) == "/fit?dataset=foo&model=bar"
+    # positional args
+    @test (@query_url item(42)) == "/item/42"
+    @test (@query_url item("hello")) == "/item/hello"
+    # positional + kwargs
+    @test (@query_url item(42; format="json")) == "/item/42?format=json"
+    # variable interpolation
+    let id = 99, ds = "mydata"
+        @test (@query_url item(id)) == "/item/99"
+        @test (@query_url fit(; dataset=ds)) == "/fit?dataset=mydata"
+    end
+end

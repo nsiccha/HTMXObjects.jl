@@ -10,7 +10,8 @@ export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
-export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form
+export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
+export Long, sinput, soption, linput, loading_indicator_script, tabset, status_badge, nav_sidebar
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1161,12 +1162,10 @@ With visible form elements:
     )
 """
 function post_form(url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
-    form_attrs = Dict{Symbol,String}(:hx_post => url, :style => "display:inline")
-    !isempty(hx_target) && (form_attrs[:hx_target] = hx_target)
-    !isempty(hx_swap) && (form_attrs[:hx_swap] = hx_swap)
-    !isempty(hx_include) && (form_attrs[:hx_include] = hx_include)
-    !isempty(confirm) && (form_attrs[:hx_confirm] = confirm)
-    !isempty(form_class) && (form_attrs[:class] = form_class)
+    form_attrs = filter(((_, v),) -> !isempty(v), pairs((;
+        hx_post=url, style="display:inline",
+        hx_target, hx_swap, hx_include, hx_confirm=confirm, class=form_class,
+    )))
     h.form(; form_attrs...)(
         hidden_inputs(; kwargs...)...,
         children...,
@@ -1182,5 +1181,235 @@ Build a URL with properly escaped query parameters.
     query_url("/search"; q="hello world", page=2)  # → "/search?q=hello%20world&page=2"
 """
 query_url(path; kwargs...) = isempty(kwargs) ? path : path * "?" * HTTP.URIs.escapeuri(kwargs)
+
+"""
+    @query_url prop(pos1, pos2; kw1=val1, kw2=val2)
+
+Build a `query_url` from a property-call expression, following the same conventions as
+`@get` route definitions. Positional args become path segments, kwargs become query params.
+
+Designed for use inside `@htmx`/`@dynamicstruct` bodies, where it intercepts the call
+before `walk_rhs` turns it into a property access.
+
+    @query_url fit(; dataset="foo", model="bar")    # → query_url("/fit"; dataset="foo", model="bar")
+    @query_url item(42)                              # → query_url("/item/42")
+    @query_url item(id; format="json")               # → query_url("/item/\$(id)"; format="json")
+    @query_url index                                 # → query_url("/")
+"""
+macro query_url(expr)
+    _query_url = GlobalRef(@__MODULE__, :query_url)
+    if expr isa Symbol
+        path = expr === :index ? "/" : "/$expr"
+        return esc(:($(_query_url)($path)))
+    end
+    expr isa Expr && expr.head === :call || error("@query_url expects a call expression like `prop(args...; kwargs...)`")
+    name = expr.args[1]
+    name isa Symbol || error("@query_url: property name must be a symbol, got $name")
+
+    # Separate positional args and kwargs
+    positional = []
+    kwargs = []
+    for arg in expr.args[2:end]
+        if arg isa Expr && arg.head === :parameters
+            append!(kwargs, arg.args)
+        elseif arg isa Expr && arg.head === :kw
+            push!(kwargs, arg)
+        else
+            push!(positional, arg)
+        end
+    end
+
+    # Build path: "/name" or "/name/$arg1/$arg2"
+    base = name === :index ? "/" : "/$name"
+    if isempty(positional)
+        path_expr = base
+    else
+        segments = [base; [:("/" * string($(esc(a)))) for a in positional]...]
+        path_expr = Expr(:call, :*, segments...)
+    end
+
+    # Build query_url call
+    if isempty(kwargs)
+        return :($(_query_url)($path_expr))
+    else
+        kw_exprs = [Expr(:kw, kw.args[1], esc(kw.args[2])) for kw in kwargs]
+        return DynamicObjects.fixcall(Expr(:call, _query_url, path_expr, Expr(:parameters, kw_exprs...)))
+    end
+end
+
+# --- Label humanization ---
+
+"""
+    Long(x)
+
+Convert a symbol/string to a human-readable label by replacing underscores with spaces.
+Add methods for custom labels: `Long(::Val{:pk}) = "Pharmacokinetics"`.
+"""
+Long(x) = replace(string(x), "_" => " ")
+
+# --- Form input helpers ---
+
+"""
+    linput(name, placeholder=Long(name); label=Long(name), kwargs...)
+
+A labeled text `<input>` wrapped in a `<label>`.
+All extra `kwargs` (e.g. `hx_get`, `hx_target`) are passed to the `<input>`.
+"""
+linput(name, placeholder=Long(name); label=Long(name), kwargs...) = h.label(
+    label,
+    h.input(; name, placeholder, kwargs...)
+)
+
+"""
+    sinput(name, options; label=Long(name), value=nothing, kwargs...)
+
+A labeled `<select>` wrapped in a `<label>`. Each element of `options` is rendered
+via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
+"""
+sinput(name, options; label=Long(name), value=nothing, kwargs...) = h.label(
+    label,
+    h.select([
+        soption(option; selected_value=value) for option in options
+    ]...; name, aria_label=label, kwargs...)
+)
+
+"""
+    soption(option; value=option, selected_value=nothing, kwargs...)
+    soption((value, label)::Union{Tuple,Pair}; kwargs...)
+
+Render an `<option>` tag. When given a `Pair` or `Tuple`, the first element is the
+value attribute and the second is the display label.
+"""
+soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, kwargs...)
+soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
+    option; value, selected=string(value == selected_value), kwargs...
+)
+
+# --- Loading indicator ---
+
+"""
+    loading_indicator_script()
+
+Return a `Node` `<script>` that sets `aria-busy` on HTMX target elements during
+requests. Pico CSS renders a spinner automatically for `aria-busy` elements.
+"""
+loading_indicator_script() = h.script("""
+document.body.addEventListener('htmx:beforeRequest', function(e) {
+    e.detail.elt.setAttribute('aria-busy', 'true');
+});
+document.body.addEventListener('htmx:afterRequest', function(e) {
+    e.detail.elt.removeAttribute('aria-busy');
+});
+""")
+
+# --- Tabset ---
+
+"""
+    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))")
+
+Client-side tabs using Pico CSS nav + hyperscript.
+
+Eager (content rendered immediately):
+
+    tabset("Tab 1" => content1, "Tab 2" => content2; active=1)
+
+Lazy (content is a URL string, fetched via HTMX on first tab click):
+
+    tabset("Tab 1" => "/api/tab1", "Tab 2" => "/api/tab2")
+
+Mixed (eager + lazy):
+
+    tabset("Summary" => render_summary(), "Details" => "/api/details")
+"""
+function _tabset_panel(content::AbstractString, i, active)
+    # String content = URL → lazy load via hx-get on first reveal
+    base_style = i == active ? "width:100%;" : "display:none; width:100%;"
+    h.div(;
+        class="tab-panel",
+        data_panel="tab-$i",
+        style=base_style,
+        hx_get=content,
+        hx_trigger="revealed once",
+        hx_swap="innerHTML",
+    )
+end
+function _tabset_panel(content, i, active)
+    # Non-string content = eager render
+    h.div(content;
+        class="tab-panel",
+        data_panel="tab-$i",
+        style = i == active ? "width:100%;" : "display:none; width:100%;",
+    )
+end
+
+tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id)(
+    h.nav(
+        h.ul([
+            h.li(h.a(label;
+                href="#",
+                class = i == active ? "contrast" : "secondary",
+                _="on click
+                    remove .contrast from <a/> in closest <nav/>
+                    add .secondary to <a/> in closest <nav/>
+                    remove .secondary from me
+                    add .contrast to me
+                    set panel to my @data-panel
+                    hide <div.tab-panel/> in closest <div/>
+                    show <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
+                ",
+                data_panel="tab-$i",
+            ))
+            for (i, (label, _)) in enumerate(tabs)
+        ]...)
+    ),
+    [_tabset_panel(content, i, active) for (i, (_, content)) in enumerate(tabs)]...
+)
+
+# --- Status badge ---
+
+const _DEFAULT_STATUS_COLORS = (running="orange", finishing="orange", done="green", failed="red", pending="gray")
+
+"""
+    status_badge(state::Symbol; colors=_DEFAULT_STATUS_COLORS, label=nothing)
+
+Render a colored `<span>` badge for a status state. Uses Pico-friendly inline styles.
+Override the display text with `label`, or it defaults to the titlecased state name.
+
+    status_badge(:running)                       # orange "Running"
+    status_badge(:failed; label="Error!")         # red "Error!"
+    status_badge(:custom; colors=Dict(:custom => "blue"))
+"""
+function status_badge(state::Symbol; colors=_DEFAULT_STATUS_COLORS, label=nothing)
+    color = get(colors, state, "inherit")
+    text = something(label, titlecase(string(state)))
+    h.span(text; style="color:$color;")
+end
+
+# --- Nav sidebar ---
+
+"""
+    nav_sidebar(items::Vector{<:Pair}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
+
+Render a Pico CSS sidebar `<aside>` with HTMX-enabled navigation links.
+Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active styling.
+
+    nav_sidebar(["Overview" => "/overview", "Settings" => "/settings"]; prefix="/app")
+"""
+function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
+    h.aside(
+        h.nav(
+            h.ul(
+                [h.li(h.a(label;
+                    href=prefix * path,
+                    hx_get=prefix * path,
+                    hx_target=target,
+                    hx_push_url=prefix * path,
+                    _="on click remove .$active_class from <a/> in closest <nav/> then add .$inactive_class to <a/> in closest <nav/> then remove .$inactive_class from me then add .$active_class to me",
+                    class=inactive_class,
+                )) for (label, path) in items]...
+            )
+        )
+    )
+end
 
 end # module HTMXObjects
