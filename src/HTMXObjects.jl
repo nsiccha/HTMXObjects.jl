@@ -1351,7 +1351,7 @@ macro query_url(expr)
     if isempty(kwargs)
         return :($(_query_url)($path_expr))
     else
-        kw_exprs = [Expr(:kw, kw.args[1], esc(kw.args[2])) for kw in kwargs]
+        kw_exprs = [kw isa Symbol ? Expr(:kw, kw, esc(kw)) : Expr(:kw, kw.args[1], esc(kw.args[2])) for kw in kwargs]
         return DynamicObjects.fixcall(Expr(:call, _query_url, path_expr, Expr(:parameters, kw_exprs...)))
     end
 end
