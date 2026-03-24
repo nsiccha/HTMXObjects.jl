@@ -611,7 +611,8 @@ end
 
 # Convert a string value to the target type. Strings pass through as-is.
 _convert_param(val, ::Nothing) = val
-_convert_param(val, T::Symbol) = _convert_param(val, Core.eval(Main, T))  # raw AST type from macro
+_convert_param(val, T::Symbol) = _convert_param(val, Core.eval(Main, T))  # raw AST type name from macro
+_convert_param(val, T::Expr) = _convert_param(val, Core.eval(Main, T))  # raw AST type expr from macro (e.g. Vector{String})
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
@@ -637,6 +638,7 @@ _NO_DEFAULT = :__no_default__
 # Evaluate simple AST literals to their Julia values.
 # :nothing → nothing, :true → true, :false → false, numbers/strings pass through.
 _eval_literal(x::Symbol) = x === :nothing ? nothing : x === :true ? true : x === :false ? false : x
+_eval_literal(x::Expr) = Core.eval(Main, x)  # evaluate complex defaults (e.g. String[], Dict())
 _eval_literal(x) = x
 
 function _extract_kwargs(params_args)
