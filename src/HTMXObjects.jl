@@ -669,16 +669,34 @@ function _extract_path_params(req, path, param_strs, param_types, suffix_default
 end
 
 # Extract kwargs from query params (GET/DELETE) or form data (POST/PUT/PATCH).
+# For non-queryparams verbs, falls back to URL query params when a value is
+# missing or empty in the primary source (form data).
 function _extract_kwargs(req, method, kwargs_info)
     isempty(kwargs_info) && return Pair{Symbol,Any}[]
     src = _kwargs_source(req, method)
+    # For POST/PUT/PATCH, fall back to query params if form data is missing/empty
+    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
     Pair{Symbol,Any}[
         Symbol(kwname) => _convert_param(
-            default_val === _no_default() ? src[kwname] : get(src, kwname, default_val),
+            _get_kwarg(src, fallback, kwname, default_val),
             kwtype
         )
         for (kwname, kwtype, default_val) in kwargs_info
     ]
+end
+
+# Look up a kwarg value from the primary source, falling back to a secondary
+# source when the primary value is missing or empty.
+function _get_kwarg(src, fallback, kwname, default_val)
+    val = default_val === _no_default() ? get(src, kwname, nothing) : get(src, kwname, nothing)
+    if (val === nothing || val == "") && fallback !== nothing
+        val = get(fallback, kwname, nothing)
+    end
+    if val === nothing
+        default_val === _no_default() ? src[kwname] : default_val  # original error path for required kwargs
+    else
+        val
+    end
 end
 
 # Register a route handler directly on the HTTP router, bypassing Oxygen's
