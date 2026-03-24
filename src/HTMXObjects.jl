@@ -136,6 +136,107 @@ function _wrap_ws_bodies!(struct_expr)
 end
 
 """
+    _extract_inline_includes!(struct_expr)
+
+Pre-process: convert `@include name = begin ... end` into a standalone `@htmx struct`
+definition + constructor call. The inline struct receives all parent properties lazily via
+a `__parent__` reference, so parent properties are accessible without explicit forwarding.
+"""
+function _extract_inline_includes!(struct_expr)
+    @assert struct_expr.head == :struct
+    parent_name = struct_expr.args[2]
+    Meta.isexpr(parent_name, :(<:)) && (parent_name = parent_name.args[1])
+    Meta.isexpr(parent_name, :(curly)) && (parent_name = parent_name.args[1])
+    body = struct_expr.args[3]
+
+    # Collect parent property names (properties with RHS, excluding @include ones)
+    parent_props = Symbol[]
+    for arg in body.args
+        arg isa Expr || continue
+        expr = arg
+        has_include = false
+        while Meta.isexpr(expr, :macrocall)
+            expr.args[1] == Symbol("@include") && (has_include = true)
+            expr = expr.args[end]
+        end
+        has_include && continue
+        # Extract property name from assignment
+        a = expr
+        Meta.isexpr(a, :(=)) || continue
+        lhs = a.args[1]
+        # Unwrap call/ref syntax: prop(args) or prop[idx]
+        Meta.isexpr(lhs, (:call, :ref)) && (lhs = lhs.args[1])
+        # Unwrap type annotation: prop::T
+        Meta.isexpr(lhs, :(::)) && (lhs = lhs.args[1])
+        lhs isa Symbol && push!(parent_props, lhs)
+    end
+
+    extracted = Expr[]
+    for (i, arg) in enumerate(body.args)
+        arg isa Expr || continue
+        # Find @include macrocall
+        expr = arg
+        is_include = false
+        while Meta.isexpr(expr, :macrocall)
+            expr.args[1] == Symbol("@include") && (is_include = true; break)
+            expr = expr.args[end]
+        end
+        !is_include && continue
+        # expr.args[end] should be `name = RHS`
+        assign = expr.args[end]
+        Meta.isexpr(assign, :(=)) || continue
+        prop_name = assign.args[1]
+        # Unwrap call/ref syntax on prop_name
+        Meta.isexpr(prop_name, (:call, :ref)) && (prop_name = prop_name.args[1])
+        rhs = assign.args[2]
+        # Only process begin...end blocks
+        Meta.isexpr(rhs, :block) || continue
+
+        # Generate deterministic struct name
+        gen_name = Symbol("_Include_", parent_name, "_", prop_name)
+
+        # Collect inline block property names to avoid collision with parent forwarding
+        inline_props = Set{Symbol}()
+        for a in rhs.args
+            a isa Expr || continue
+            ia = a
+            while Meta.isexpr(ia, :macrocall); ia = ia.args[end]; end
+            Meta.isexpr(ia, :(=)) || continue
+            ilhs = ia.args[1]
+            Meta.isexpr(ilhs, (:call, :ref)) && (ilhs = ilhs.args[1])
+            Meta.isexpr(ilhs, :(::)) && (ilhs = ilhs.args[1])
+            ilhs isa Symbol && push!(inline_props, ilhs)
+        end
+
+        # Build inline struct body:
+        # 1. __parent__ = nothing
+        # 2. prop = __parent__.prop for each parent property (skip collisions)
+        # 3. inline block contents
+        inline_body = Expr(:block)
+        push!(inline_body.args, :(__parent__ = nothing))
+        for pp in parent_props
+            pp in inline_props && continue
+            push!(inline_body.args, :($pp = __parent__.$pp))
+        end
+        for a in rhs.args
+            push!(inline_body.args, a)
+        end
+
+        # Build @dynamicstruct expression (not @htmx — no _reroute! needed,
+        # routes are registered through the parent's route!)
+        inline_struct = Expr(:macrocall, Expr(:., :DynamicObjects, QuoteNode(Symbol("@dynamicstruct"))),
+            LineNumberNode(0, Symbol("inline_include")),
+            Expr(:struct, false, gen_name, inline_body))
+        push!(extracted, inline_struct)
+
+        # Replace RHS: @include prop = GenName(; __parent__=__self__)
+        assign.args[2] = :($gen_name(; __parent__=__self__))
+    end
+
+    extracted
+end
+
+"""
     @htmx struct MyApp ... end
 
 Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
@@ -177,6 +278,8 @@ end
 macro htmx(args...)
     _warn_bracket_routes!(args[end])
     _wrap_ws_bodies!(args[end])
+    # Extract inline @include begin...end blocks into standalone @htmx struct definitions
+    inline_structs = _extract_inline_includes!(args[end])
     struct_block = DynamicObjects.dynamicstruct(args[end]; (length(args) > 1 ? (docstring=args[1],) : (;))...)
     # Extract the type name from the struct expression
     struct_expr = args[end]
@@ -186,6 +289,10 @@ macro htmx(args...)
     Meta.isexpr(type_name, :(curly)) && (type_name = type_name.args[1])
     # struct_block is already esc'd by dynamicstruct, so append to its inner block
     @assert Meta.isexpr(struct_block, :escape)
+    # Prepend extracted inline struct definitions before the parent struct
+    for s in reverse(inline_structs)
+        pushfirst!(struct_block.args[1].args, s)
+    end
     push!(struct_block.args[1].args, :($(_reroute!)($type_name)))
     struct_block
 end
@@ -509,7 +616,9 @@ _convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
 _convert_param(val::AbstractVector, T::Type{<:AbstractString}) = first(val)  # multi-value → first string
+_convert_param(val::AbstractVector, T::Type{<:AbstractVector}) = val  # multi-value + Vector annotation → keep as-is
 _convert_param(val::AbstractVector, T::Type) = parse(T, first(val))  # multi-value → parse first
+_convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # single/empty → vector
 _convert_param(val, ::Type) = val  # already converted (e.g. default value)
 
 # Determine whether kwargs come from queryparams (GET/DELETE) or formdata (POST/PUT/PATCH).
