@@ -1314,8 +1314,16 @@ macro query_url(expr)
         return esc(:($(_query_url)($path)))
     end
     expr isa Expr && expr.head === :call || error("@query_url expects a call expression like `prop(args...; kwargs...)`")
-    name = expr.args[1]
-    name isa Symbol || error("@query_url: property name must be a symbol, got $name")
+    name_expr = expr.args[1]
+    # In DO/HTMXO context, name may be __self__.prop (a :. expression) — extract the symbol
+    if name_expr isa Expr && name_expr.head === :.
+        name = name_expr.args[2]
+        name = name isa QuoteNode ? name.value : name
+    elseif name_expr isa Symbol
+        name = name_expr
+    else
+        error("@query_url: property name must be a symbol, got $name_expr")
+    end
 
     # Separate positional args and kwargs
     positional = []
