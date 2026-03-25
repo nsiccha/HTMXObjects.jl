@@ -1309,7 +1309,10 @@ Build a URL with properly escaped query parameters.
 
     query_url("/search"; q="hello world", page=2)  # → "/search?q=hello%20world&page=2"
 """
-query_url(path; kwargs...) = isempty(kwargs) ? path : path * "?" * HTTP.URIs.escapeuri(kwargs)
+query_url(path; kwargs...) = begin
+    filtered = filter(p -> !isnothing(p.second), pairs(kwargs))
+    isempty(filtered) ? path : path * "?" * HTTP.URIs.escapeuri(filtered)
+end
 
 """
     @query_url prop(pos1, pos2; kw1=val1, kw2=val2)
