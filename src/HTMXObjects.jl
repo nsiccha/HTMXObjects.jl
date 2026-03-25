@@ -11,7 +11,7 @@ export hx_response
 export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
-export Long, sinput, soption, linput, loading_indicator_script, tabset, status_badge, nav_sidebar
+export Long, sinput, soption, linput, loading_indicator_script, show_when_script, tabset, status_badge, nav_sidebar
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1401,17 +1401,25 @@ linput(name, placeholder=Long(name); label=Long(name), kwargs...) = h.label(
 )
 
 """
-    sinput(name, options; label=Long(name), value=nothing, kwargs...)
+    sinput(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...)
 
 A labeled `<select>` wrapped in a `<label>`. Each element of `options` is rendered
 via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
+
+When `show_when=(field, op, value)` is set, the label gets `data-show-when-*`
+attributes and `style="display:none"`. Include [`show_when_script`](@ref) once per
+page to wire up the client-side visibility logic.
 """
-sinput(name, options; label=Long(name), value=nothing, kwargs...) = h.label(
-    label,
-    h.select([
-        soption(option; selected_value=value) for option in options
-    ]...; name, aria_label=label, kwargs...)
-)
+sinput(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    h.label(
+        label,
+        h.select([
+            soption(option; selected_value=value) for option in options
+        ]...; name, aria_label=label, kwargs...);
+        show_attrs...
+    )
+end
 
 """
     soption(option; value=option, selected_value=nothing, kwargs...)
@@ -1424,6 +1432,64 @@ soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, 
 soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
     option; value, selected=string(value == selected_value), kwargs...
 )
+
+# --- Conditional visibility (show_when) ---
+
+const _SHOW_WHEN_OPS = Dict{Function,String}(
+    (==) => "eq", (!=) => "neq",
+    startswith => "startswith", endswith => "endswith",
+)
+
+function _show_when_attrs((field, op, value))
+    op_name = get(_SHOW_WHEN_OPS, op, nothing)
+    isnothing(op_name) && error("show_when: unsupported predicate $op; use ==, !=, startswith, or endswith")
+    (;  data_show_when_field=string(field),
+        data_show_when_op=op_name,
+        data_show_when_value=string(value),
+        style="display:none")
+end
+
+"""
+    show_when_script()
+
+Return a `<script>` that wires `change` listeners for all `[data-show-when-field]`
+elements. Include once per page (like [`loading_indicator_script`](@ref)).
+
+Evaluates visibility on load and re-initializes on `htmx:afterSettle` for
+dynamically swapped content.
+"""
+show_when_script() = h.script(raw"""
+(function() {
+  function evalShowWhen(el) {
+    var field = el.dataset.showWhenField;
+    var op = el.dataset.showWhenOp;
+    var val = el.dataset.showWhenValue;
+    var form = el.closest('form') || el.closest('[hx-target]') || document.body;
+    var ctrl = form.querySelector('[name="' + field + '"]');
+    if (!ctrl) return;
+    var cv = ctrl.value;
+    var show = op === 'eq' ? cv === val
+             : op === 'neq' ? cv !== val
+             : op === 'startswith' ? cv.startsWith(val)
+             : op === 'endswith' ? cv.endsWith(val)
+             : false;
+    el.style.display = show ? '' : 'none';
+  }
+  function initShowWhen(root) {
+    (root || document).querySelectorAll('[data-show-when-field]').forEach(function(el) {
+      if (el.dataset.showWhenBound) return;
+      el.dataset.showWhenBound = '1';
+      evalShowWhen(el);
+      var field = el.dataset.showWhenField;
+      var form = el.closest('form') || el.closest('[hx-target]') || document.body;
+      var ctrl = form.querySelector('[name="' + field + '"]');
+      if (ctrl) ctrl.addEventListener('change', function() { evalShowWhen(el); });
+    });
+  }
+  initShowWhen();
+  document.body.addEventListener('htmx:afterSettle', function(e) { initShowWhen(e.detail.elt); });
+})();
+""")
 
 # --- Loading indicator ---
 
