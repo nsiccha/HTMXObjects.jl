@@ -394,6 +394,10 @@ to_response(::MarkdownOnly) = to_response("")
 auto(val::HtmlOnly; wrap) = auto(val.content; wrap)
 auto(::MarkdownOnly; wrap) = ""
 
+# HTML rendering via show dispatch — HtmlOnly renders content, MarkdownOnly is invisible
+Base.show(io::IO, m::MIME"text/html", val::HtmlOnly) = show(io, m, val.content)
+Base.show(io::IO, ::MIME"text/html", ::MarkdownOnly) = nothing
+
 # Markdown rendering via show dispatch — HtmlOnly skipped, MarkdownOnly prints text
 Base.show(io::IO, ::MIME"text/markdown", ::HtmlOnly) = nothing
 Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text)
