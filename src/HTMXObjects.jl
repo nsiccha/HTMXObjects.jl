@@ -1395,14 +1395,10 @@ Long(x) = replace(string(x), "_" => " ")
 A labeled text `<input>` wrapped in a `<label>`.
 All extra `kwargs` (e.g. `hx_get`, `hx_target`) are passed to the `<input>`.
 """
-linput(name, placeholder=Long(name); label=Long(name), show_when=nothing, kwargs...) = begin
-    lbl = h.label(
-        label,
-        h.input(; name, placeholder, kwargs...)
-    )
-    isnothing(show_when) && return lbl
-    _wrap_show_when(lbl, show_when)
-end
+linput(name, placeholder=Long(name); label=Long(name), kwargs...) = h.label(
+    label,
+    h.input(; name, placeholder, kwargs...)
+)
 
 """
     sinput(name, options; label=Long(name), value=nothing, kwargs...)
@@ -1410,16 +1406,12 @@ end
 A labeled `<select>` wrapped in a `<label>`. Each element of `options` is rendered
 via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
 """
-sinput(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...) = begin
-    lbl = h.label(
-        label,
-        h.select([
-            soption(option; selected_value=value) for option in options
-        ]...; name, aria_label=label, kwargs...)
-    )
-    isnothing(show_when) && return lbl
-    _wrap_show_when(lbl, show_when)
-end
+sinput(name, options; label=Long(name), value=nothing, kwargs...) = h.label(
+    label,
+    h.select([
+        soption(option; selected_value=value) for option in options
+    ]...; name, aria_label=label, kwargs...)
+)
 
 """
     soption(option; value=option, selected_value=nothing, kwargs...)
@@ -1432,71 +1424,6 @@ soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, 
 soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
     option; value, selected=string(value == selected_value), kwargs...
 )
-
-# --- Conditional visibility (show_when) ---
-
-# Map Julia predicates to JS operator names used by _show_when_script().
-const _SHOW_WHEN_OPS = Dict{Function,String}(
-    (==) => "eq", (!=) => "neq",
-    startswith => "startswith", endswith => "endswith",
-)
-
-"""
-    _wrap_show_when(node, (field, op, value))
-
-Wrap `node` in a `<div>` with `data-show-when-*` attributes and inject
-the shared visibility script (once per page via htmx:afterSettle dedup).
-"""
-function _wrap_show_when(node, (field, op, value))
-    op_name = get(_SHOW_WHEN_OPS, op, nothing)
-    isnothing(op_name) && error("show_when: unsupported predicate $op; use ==, !=, startswith, or endswith")
-    h.div(node, show_when_script();
-        data_show_when_field=string(field),
-        data_show_when_op=op_name,
-        data_show_when_value=string(value),
-        style="display:none",
-    )
-end
-
-"""
-    show_when_script()
-
-Return a `<script>` that wires `change` listeners for all `[data-show-when-field]`
-elements. Idempotent — the script guards against double-init.
-"""
-show_when_script() = h.script(raw"""
-if (!window.__showWhenInit) {
-  window.__showWhenInit = true;
-  function evalShowWhen(el) {
-    var field = el.dataset.showWhenField;
-    var op = el.dataset.showWhenOp;
-    var val = el.dataset.showWhenValue;
-    var form = el.closest('form') || el.closest('[hx-target]') || document.body;
-    var ctrl = form.querySelector('[name="' + field + '"]');
-    if (!ctrl) return;
-    var cv = ctrl.value;
-    var show = op === 'eq' ? cv === val
-             : op === 'neq' ? cv !== val
-             : op === 'startswith' ? cv.startsWith(val)
-             : op === 'endswith' ? cv.endsWith(val)
-             : false;
-    el.style.display = show ? '' : 'none';
-  }
-  function initShowWhen(root) {
-    (root || document).querySelectorAll('[data-show-when-field]').forEach(function(el) {
-      if (el.dataset.showWhenBound) return;
-      el.dataset.showWhenBound = '1';
-      evalShowWhen(el);
-      var field = el.dataset.showWhenField;
-      var form = el.closest('form') || el.closest('[hx-target]') || document.body;
-      var ctrl = form.querySelector('[name="' + field + '"]');
-      if (ctrl) ctrl.addEventListener('change', function() { evalShowWhen(el); });
-    });
-  }
-  initShowWhen();
-  document.body.addEventListener('htmx:afterSettle', function(e) { initShowWhen(e.detail.elt); });
-}
-""")
 
 # --- Loading indicator ---
 
