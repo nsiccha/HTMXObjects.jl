@@ -10,6 +10,7 @@ export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
+export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
 export Long, sinput, soption, linput, loading_indicator_script, show_when_script, tabset, status_badge, nav_sidebar
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
@@ -357,18 +358,46 @@ already an `HTTP.Response` pass through unchanged.
 to_response(val::HTTP.Response) = val
 to_response(val) = auto(val; wrap=_html_response)
 
-# Convert a value to markdown text. Defaults to repr(MIME"text/markdown"(), val).
-# Node gets a show(io, MIME"text/markdown", node) method in HTMX.jl.
-# Users can extend with show(io, MIME"text/markdown", val::MyType).
-to_markdown_string(val) = try
-    repr(MIME"text/markdown"(), val)
-catch
-    string(val)
-end
+# Convert a value to markdown text via show(io, MIME"text/markdown"(), val).
+# HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
+to_markdown_string(val) = sprint(show, MIME"text/markdown"(), val)
 
-# TODO: HTMX.jl should define show(io, MIME"text/markdown", node::Node) that
-# converts HTML structure to proper markdown (h1→#, p→text, ul/li→-, table→|, etc.)
-# For now, the try/catch fallback in to_markdown_string handles Nodes via string().
+# --- Dual-view wrappers: html_only / markdown_only ---
+
+"""
+    html_only(content)
+
+Wrap content that should only appear in HTML responses. In markdown mode,
+this produces an empty string. Use for interactive elements, styling, badges,
+etc. that have no meaningful text representation.
+"""
+struct HtmlOnly
+    content
+end
+html_only(content) = HtmlOnly(content)
+
+"""
+    markdown_only(text)
+
+Wrap text that should only appear in markdown responses. In HTML mode,
+this is invisible (renders as empty string). Use for structured markdown
+output (code blocks with markers, custom formatting) that has no HTML equivalent.
+"""
+struct MarkdownOnly
+    text::String
+end
+markdown_only(text) = MarkdownOnly(text)
+
+# HTML rendering: HtmlOnly renders its content, MarkdownOnly is invisible
+to_response(val::HtmlOnly) = to_response(val.content)
+to_response(::MarkdownOnly) = to_response("")
+auto(val::HtmlOnly; wrap) = auto(val.content; wrap)
+auto(::MarkdownOnly; wrap) = ""
+
+# Markdown rendering via show dispatch — HtmlOnly skipped, MarkdownOnly prints text
+Base.show(io::IO, ::MIME"text/markdown", ::HtmlOnly) = nothing
+Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text)
+
 
 """
     save_response(record_dir, url_path, response)
