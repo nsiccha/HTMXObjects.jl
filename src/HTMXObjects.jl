@@ -9,7 +9,7 @@ export route!, to_response, save_response, static_transform
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, queryparam, htmx_or, pathparams
-export wants_markdown, markdown_response, render_table, sortable_table_js
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
 export Long, sinput, soption, linput, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, status_badge, nav_sidebar
@@ -756,6 +756,12 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
     # Opt-out: route already produced a response
     val isa HTTP.Response && return val
 
+    # Error filter: keep only data-error nodes (applied before markdown/rich)
+    if wants_errors(req)
+        val = filter_errors(val)
+        isnothing(val) && return markdown_response("(no errors)")
+    end
+
     # Record static version if requested
     if !isnothing(record_dir) && !isnothing(save_path)
         save_response(record_dir, save_path, to_response(static_transform(val)))
@@ -1123,6 +1129,70 @@ query parameter.
 wants_markdown(req::HTTP.Request) = let accept = HTTP.header(req, "Accept", ""), qp = queryparams(req)
     contains(accept, "text/markdown") || contains(accept, "text/plain") ||
     haskey(qp, "markdown") || haskey(qp, "plain")
+end
+
+"""
+    wants_errors(req::HTTP.Request) -> Bool
+
+Return `true` if the client wants only error-tagged elements (via `?error` query parameter).
+"""
+wants_errors(req::HTTP.Request) = haskey(queryparams(req), "error")
+
+"""
+    e
+
+Error-tagged HTML builder. Works exactly like `h`, but adds `data-error="true"` to
+every element. Elements with this attribute survive the `?error` filter.
+
+    e.div(id="foo")("content")  # <div id="foo" data-error="true">content</div>
+    e.span("error!")             # <span data-error="true">error!</span>
+"""
+e(tag, args...; kwargs...) = h(tag, args...; data_error="true", kwargs...)
+Base.getproperty(::typeof(e), tag::Symbol) = (args...; kwargs...) -> e(tag, args...; kwargs...)
+
+"""
+    filter_errors(val)
+
+Walk a Node tree and keep only nodes that have `data-error="true"` or contain
+a descendant with `data-error="true"`. Non-error branches are removed.
+Non-Node values pass through unchanged.
+"""
+filter_errors(val) = val
+filter_errors(val::AbstractArray) = filter(!isnothing, filter_errors.(val))
+filter_errors(val::Tuple) = filter(!isnothing, filter_errors.(val))
+filter_errors((content, id)::Pair) = let filtered = filter_errors(content)
+    isnothing(filtered) ? nothing : filtered => id
+end
+
+function _has_error_attr(node::Node)
+    cn = parent(node)
+    attrs = Cobweb.attrs(cn)
+    get(attrs, Symbol("data-error"), nothing) == "true"
+end
+_has_error_attr(node::Cobweb.Node) = _has_error_attr(Node(node))
+_has_error_attr(::Any) = false
+
+function filter_errors(node::Node)
+    # If this node is an error node, keep it entirely
+    _has_error_attr(node) && return node
+
+    # Otherwise, recurse into children and keep only error-containing branches
+    cn = parent(node)
+    children = Cobweb.children(cn)
+    new_children = []
+    for child in children
+        if child isa Node || child isa Cobweb.Node
+            filtered = filter_errors(child isa Cobweb.Node ? Node(child) : child)
+            !isnothing(filtered) && push!(new_children, parent(filtered))
+        end
+        # Drop non-Node children (text) in non-error nodes
+    end
+
+    # If no error children survived, prune this branch
+    isempty(new_children) && return nothing
+
+    # Keep this node as a structural wrapper with only error children
+    Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
 end
 
 """
@@ -1537,11 +1607,11 @@ brief color flash on success/failure.
 """
 request_feedback_style() = h.style("""
 @keyframes htmx-pulse {
-    0%, 100% { outline-color: color-mix(in srgb, currentColor 30%, transparent); }
-    50% { outline-color: color-mix(in srgb, currentColor 80%, transparent); }
+    0%, 100% { outline-color: color-mix(in srgb, #4a90d9 30%, transparent); }
+    50% { outline-color: #4a90d9; }
 }
 .htmx-request-active {
-    outline: 2px solid currentColor;
+    outline: 2px solid #4a90d9;
     outline-offset: -2px;
     animation: htmx-pulse 1s ease-in-out infinite;
 }
@@ -1553,7 +1623,6 @@ request_feedback_style() = h.style("""
 .htmx-request-error {
     outline: 2px solid #e76f51;
     outline-offset: -2px;
-    background-color: color-mix(in srgb, #e76f51 5%, transparent);
     animation: htmx-fade-error 2s ease-out forwards;
 }
 @keyframes htmx-fade-success {
@@ -1561,8 +1630,8 @@ request_feedback_style() = h.style("""
     100% { outline-color: transparent; }
 }
 @keyframes htmx-fade-error {
-    0% { outline-color: #e76f51; background-color: color-mix(in srgb, #e76f51 5%, transparent); }
-    100% { outline-color: transparent; background-color: transparent; }
+    0% { outline-color: #e76f51; }
+    100% { outline-color: transparent; }
 }
 """)
 
@@ -1600,6 +1669,17 @@ document.addEventListener('DOMContentLoaded', function() {
         var t = getTarget(e);
         clearFeedback(t);
         t.classList.add('htmx-request-active');
+        if (t !== elt) {
+            clearFeedback(elt);
+            elt.classList.add('htmx-request-active');
+        }
+    });
+    document.body.addEventListener('htmx:oobAfterSwap', function(e) {
+        var t = e.detail.target || e.detail.elt;
+        if (!t) return;
+        clearFeedback(t);
+        t.classList.add('htmx-request-success');
+        setTimeout(function() { clearFeedback(t); }, 1000);
     });
     document.body.addEventListener('htmx:afterRequest', function(e) {
         var elt = e.detail.elt;
@@ -1608,10 +1688,20 @@ document.addEventListener('DOMContentLoaded', function() {
         t.classList.remove('htmx-request-active');
         if (e.detail.successful) {
             t.classList.add('htmx-request-success');
+            setTimeout(function() { clearFeedback(t); }, 1000);
+            if (t !== elt) {
+                elt.classList.remove('htmx-request-active');
+                elt.classList.add('htmx-request-success');
+                setTimeout(function() { clearFeedback(elt); }, 1000);
+            }
         } else {
             t.classList.add('htmx-request-error');
+            setTimeout(function() { clearFeedback(t); }, 2000);
+            if (t !== elt) {
+                elt.classList.add('htmx-request-error');
+                setTimeout(function() { clearFeedback(elt); }, 2000);
+            }
         }
-        setTimeout(function() { clearFeedback(t); }, e.detail.successful ? 1000 : 2000);
     });
 });
 """)
