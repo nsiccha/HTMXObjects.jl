@@ -886,12 +886,15 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                         lambda(ws)
                     end)
                 end
-            elseif isempty(param_strs) && isempty(kwargs_info)
+            elseif isempty(param_strs) && isempty(kwargs_info) && !info.indexed
                 register(CONTEXT[], method, path, function(req)
                     obj = T(; req)
                     val = getproperty(obj, name)
                     _resolve_response(obj, req, val; record_dir, save_path=record_dir !== nothing ? path : nothing)
                 end)
+            elseif isempty(param_strs) && isempty(kwargs_info)
+                # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
+                _register_indexed_route(T, method, name, path, String[], Any[], Any[], kwargs_info, record_dir)
             elseif isempty(param_strs) && !isempty(kwargs_info)
                 # kwargs-only route (no path params)
                 !isnothing(record_dir) && push!(_static_kwargs_paths, path)
@@ -924,11 +927,12 @@ function _register_included_handler(ParentT, method, name, chain, path, param_st
         kw_pairs = _extract_kwargs(req, method, kwargs_info)
         parent = ParentT(; req)
         nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
-        prop = getproperty(nested, name)
-        val = if isempty(idx_vals) && isempty(kw_pairs)
-            prop
-        else
-            prop(idx_vals...; NamedTuple(kw_pairs)...)
+        val = let prop = getproperty(nested, name)
+            if isempty(idx_vals) && isempty(kw_pairs) && !(prop isa DynamicObjects.IndexableProperty)
+                prop
+            else
+                prop(idx_vals...; NamedTuple(kw_pairs)...)
+            end
         end
         sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
         _resolve_response(parent, req, val; record_dir, save_path=sp)
