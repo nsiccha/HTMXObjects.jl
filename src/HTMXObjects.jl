@@ -190,7 +190,11 @@ function _extract_inline_includes!(struct_expr)
         # Unwrap call/ref syntax on prop_name
         Meta.isexpr(prop_name, (:call, :ref)) && (prop_name = prop_name.args[1])
         rhs = assign.args[2]
-        # Only process begin...end blocks
+        # Auto-forward req shorthand: @include sub = SubRoutes → SubRoutes(; req)
+        if rhs isa Symbol
+            assign.args[2] = Expr(:call, Expr(:parameters, Expr(:kw, :req, :req)), rhs)
+        end
+        # Only process begin...end blocks (pre-defined structs are handled at route registration time)
         Meta.isexpr(rhs, :block) || continue
 
         # Generate deterministic struct name
@@ -792,11 +796,7 @@ function _register_indexed_route(T, method, name, path, param_strs, param_types,
         kw_pairs = _extract_kwargs(req, method, kwargs_info)
         obj = T(; req)
         prop = getproperty(obj, name)
-        val = if isempty(kw_pairs)
-            prop[idx_vals...]
-        else
-            Base.getindex(prop, idx_vals...; NamedTuple(kw_pairs)...)
-        end
+        val = prop(idx_vals...; NamedTuple(kw_pairs)...)
         save_path = !isnothing(record_dir) ? "/" * join(vcat(string(name), string.(idx_vals)), "/") : nothing
         _resolve_response(obj, req, val; record_dir, save_path)
     end)
@@ -882,11 +882,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                         idx_vals = _extract_path_params(ws.request, path, param_strs, param_types, Any[])
                         kw_pairs = _extract_kwargs(ws.request, "GET", kwargs_info)
                         prop = getproperty(T(; req=ws.request), name)
-                        lambda = if isempty(kw_pairs)
-                            prop[idx_vals...]
-                        else
-                            Base.getindex(prop, idx_vals...; NamedTuple(kw_pairs)...)
-                        end
+                        lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
                         lambda(ws)
                     end)
                 end
@@ -919,6 +915,24 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
             end
         end
     end
+end
+
+# Register a single included route handler with chained property access through the parent.
+function _register_included_handler(ParentT, method, name, chain, path, param_strs, param_types, suffix_defaults, kwargs_info, record_dir)
+    _register_handler(method, path, function(req)
+        idx_vals = _extract_path_params(req, path, param_strs, param_types, suffix_defaults)
+        kw_pairs = _extract_kwargs(req, method, kwargs_info)
+        parent = ParentT(; req)
+        nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
+        prop = getproperty(nested, name)
+        val = if isempty(idx_vals) && isempty(kw_pairs)
+            prop
+        else
+            prop(idx_vals...; NamedTuple(kw_pairs)...)
+        end
+        sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
+        _resolve_response(parent, req, val; record_dir, save_path=sp)
+    end)
 end
 
 # Register routes from a nested @include struct with chained property access through the parent.
@@ -969,22 +983,35 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         # :index on nested struct → just the prefix path
         name == :index && (path = "/" * prefix)
 
-        let name=name, chain=chain, param_strs=param_strs, param_types=param_types, path=path, method=method, kwargs_info=kwargs_info, record_dir=record_dir
-            _register_handler(method, path, function(req)
-                idx_vals = _extract_path_params(req, path, param_strs, param_types, Any[])
-                kw_pairs = _extract_kwargs(req, method, kwargs_info)
-                parent = ParentT(; req)
-                nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
-                val = if isempty(idx_vals) && isempty(kw_pairs)
-                    getproperty(nested, name)
-                elseif isempty(kw_pairs)
-                    getproperty(nested, name)[idx_vals...]
-                else
-                    Base.getindex(getproperty(nested, name), idx_vals...; NamedTuple(kw_pairs)...)
-                end
-                sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
-                _resolve_response(parent, req, val; record_dir, save_path=sp)
-            end)
+        # Track kwargs-only paths for static recording
+        !isnothing(record_dir) && isempty(param_strs) && !isempty(kwargs_info) && push!(_static_kwargs_paths, path)
+
+        # Detect trailing default values (same logic as _register_routes)
+        defaults = Pair{Int, Any}[]
+        for (j, idx) in enumerate(positional_indices)
+            if Meta.isexpr(idx, :kw)
+                push!(defaults, j => idx.args[2])
+            elseif !isempty(defaults)
+                empty!(defaults)
+                break
+            end
+        end
+
+        let name=name, chain=chain, param_strs=param_strs, param_types=param_types, path=path, method=method, kwargs_info=kwargs_info, record_dir=record_dir, defaults=defaults, base=base
+            # Register the full route
+            _register_included_handler(ParentT, method, name, chain, path, param_strs, param_types, Any[], kwargs_info, record_dir)
+
+            # Register shortened routes for trailing defaults
+            for k in length(defaults):-1:1
+                cut = first(defaults[k])
+                short_params = param_strs[1:cut-1]
+                short_types = param_types[1:cut-1]
+                suffix_vals = [last(d) for d in defaults[k:end]]
+                short_path = isempty(short_params) ? base :
+                    base * "/" * join("{" .* short_params .* "}", "/")
+                name == :index && isempty(short_params) && (short_path = "/" * prefix)
+                _register_included_handler(ParentT, method, name, chain, short_path, short_params, short_types, suffix_vals, kwargs_info, record_dir)
+            end
         end
     end
 end
