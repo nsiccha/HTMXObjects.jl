@@ -12,7 +12,7 @@ export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, markdown_response, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
-export Long, sinput, soption, linput, loading_indicator_script, show_when_script, tabset, status_badge, nav_sidebar
+export Long, sinput, soption, linput, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, status_badge, nav_sidebar
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -299,10 +299,11 @@ macro htmx(args...)
 end
 
 """
-    htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", pico_version=nothing, extra_head=())
+    htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", pico_version=nothing, feedback=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
+Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 """
 function htmx(args...;
     head = h.head,
@@ -310,6 +311,7 @@ function htmx(args...;
     htmx_version        = "2.0.8",
     hyperscript_version = "0.9.14",
     pico_version        = nothing,
+    feedback             = true,
     extra_head          = (),
 )
     cdn = []
@@ -322,6 +324,7 @@ function htmx(args...;
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
             h.meta(name="color-scheme", content="light dark"),
             cdn...,
+            (feedback ? request_feedback() : ())...,
             extra_head...,
         ),
         body(args...),
@@ -1524,13 +1527,111 @@ show_when_script() = h.script(raw"""
 })();
 """)
 
-# --- Loading indicator ---
+# --- Request feedback ---
+
+"""
+    request_feedback_style()
+
+CSS for automatic HTMX request feedback: pulsating border while in-flight,
+brief color flash on success/failure.
+"""
+request_feedback_style() = h.style("""
+@keyframes htmx-pulse {
+    0%, 100% { outline-color: color-mix(in srgb, currentColor 30%, transparent); }
+    50% { outline-color: color-mix(in srgb, currentColor 80%, transparent); }
+}
+.htmx-request-active {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
+    animation: htmx-pulse 1s ease-in-out infinite;
+}
+.htmx-request-success {
+    outline: 2px solid #2a9d8f;
+    outline-offset: -2px;
+    animation: htmx-fade-success 1s ease-out forwards;
+}
+.htmx-request-error {
+    outline: 2px solid #e76f51;
+    outline-offset: -2px;
+    background-color: color-mix(in srgb, #e76f51 5%, transparent);
+    animation: htmx-fade-error 2s ease-out forwards;
+}
+@keyframes htmx-fade-success {
+    0% { outline-color: #2a9d8f; }
+    100% { outline-color: transparent; }
+}
+@keyframes htmx-fade-error {
+    0% { outline-color: #e76f51; background-color: color-mix(in srgb, #e76f51 5%, transparent); }
+    100% { outline-color: transparent; background-color: transparent; }
+}
+""")
+
+"""
+    request_feedback_script()
+
+JS that hooks into HTMX events to add visual feedback classes on the target element
+of each request.
+"""
+request_feedback_script() = h.script("""
+document.addEventListener('DOMContentLoaded', function() {
+    function getTarget(evt) {
+        var elt = evt.detail.elt;
+        var targetSel = elt.getAttribute('hx-target');
+        if (targetSel) {
+            if (targetSel === 'this') return elt;
+            var found = document.querySelector(targetSel);
+            if (found) return found;
+        }
+        return elt;
+    }
+    function isPolling(elt) {
+        var trigger = elt.getAttribute('hx-trigger') || '';
+        return trigger.indexOf('every') !== -1;
+    }
+    function isPollingRelated(elt) {
+        return isPolling(elt) || (elt.querySelector && !!elt.querySelector('[hx-trigger*="every"]'));
+    }
+    function clearFeedback(el) {
+        el.classList.remove('htmx-request-active', 'htmx-request-success', 'htmx-request-error');
+    }
+    document.body.addEventListener('htmx:beforeRequest', function(e) {
+        var elt = e.detail.elt;
+        if (isPolling(elt)) return;
+        var t = getTarget(e);
+        clearFeedback(t);
+        t.classList.add('htmx-request-active');
+    });
+    document.body.addEventListener('htmx:afterRequest', function(e) {
+        var elt = e.detail.elt;
+        if (isPollingRelated(elt)) return;
+        var t = getTarget(e);
+        t.classList.remove('htmx-request-active');
+        if (e.detail.successful) {
+            t.classList.add('htmx-request-success');
+        } else {
+            t.classList.add('htmx-request-error');
+        }
+        setTimeout(function() { clearFeedback(t); }, e.detail.successful ? 1000 : 2000);
+    });
+});
+""")
+
+"""
+    request_feedback()
+
+Combined style + script nodes for automatic HTMX request feedback.
+Included by default in `htmx()`.
+"""
+request_feedback() = (request_feedback_style(), request_feedback_script())
 
 """
     loading_indicator_script()
 
 Return a `Node` `<script>` that sets `aria-busy` on HTMX target elements during
 requests. Pico CSS renders a spinner automatically for `aria-busy` elements.
+
+!!! note
+    Deprecated in favor of `request_feedback()` which provides richer visual feedback.
 """
 loading_indicator_script() = h.script("""
 document.body.addEventListener('htmx:beforeRequest', function(e) {
