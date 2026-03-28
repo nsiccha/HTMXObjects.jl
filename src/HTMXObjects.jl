@@ -12,7 +12,7 @@ export hx_link, queryparam, htmx_or, pathparams
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
-export Long, sinput, soption, linput, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, status_badge, nav_sidebar
+export Long, sinput, soption, linput, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, status_badge, nav_sidebar, lazy
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1438,6 +1438,25 @@ function post_form(url, children...; label="Submit", btn_class="btn", confirm=""
         h.button(; class=btn_class, type="submit")(label),
     )
 end
+
+"""
+    lazy(url; tag=h.div, swap="outerHTML", kwargs...)
+
+Return a placeholder element that fetches `url` via HTMX on page load and
+replaces itself with the response (`hx-swap="outerHTML"`).
+
+Useful for "render immediately, fill in asynchronously" patterns where each
+item in a list independently loads its own content after the page appears.
+
+```julia
+# Status cell that loads asynchronously after the table renders
+lazy(query_url("/pod_status"; pod=pod_id); tag=h.td, id="status-\$pod_id")
+```
+
+Extra `kwargs` (e.g. `id`, `style`, `class`) are forwarded to the element.
+"""
+lazy(url; tag=h.div, swap="outerHTML", kwargs...) =
+    tag(; hx_get=url, hx_trigger="load", hx_swap=swap, kwargs...)()
 
 """
     query_url(path; kwargs...) -> String
