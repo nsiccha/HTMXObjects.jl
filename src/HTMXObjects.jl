@@ -886,7 +886,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                         lambda(ws)
                     end)
                 end
-            elseif isempty(param_strs) && isempty(kwargs_info) && !get(info, :indexed, !isempty(info.indices))
+            elseif isempty(param_strs) && isempty(kwargs_info) && !info.indexed
                 register(CONTEXT[], method, path, function(req)
                     obj = T(; req)
                     val = getproperty(obj, name)
