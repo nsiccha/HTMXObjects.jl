@@ -190,10 +190,6 @@ function _extract_inline_includes!(struct_expr)
         # Unwrap call/ref syntax on prop_name
         Meta.isexpr(prop_name, (:call, :ref)) && (prop_name = prop_name.args[1])
         rhs = assign.args[2]
-        # Auto-forward req shorthand: @include sub = SubRoutes → SubRoutes(; req)
-        if rhs isa Symbol
-            assign.args[2] = Expr(:call, Expr(:parameters, Expr(:kw, :req, :req)), rhs)
-        end
         # Only process begin...end blocks (pre-defined structs are handled at route registration time)
         Meta.isexpr(rhs, :block) || continue
 
@@ -641,6 +637,8 @@ const _http_verbs = Dict(
 
 # Store registered types so _reroute! can re-register after Revise updates
 const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tuple{String, Any}}}()
+# Reverse lookup: included sub-struct type → set of registered parent types
+const _included_type_parents = Dict{DataType, Set{DataType}}()
 
 # Extract the type annotation from an index expression, or nothing if untyped.
 # Handles: id::Int, id::Int=1, id, id=1
@@ -941,6 +939,8 @@ end
 
 # Register routes from a nested @include struct with chained property access through the parent.
 function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir)
+    # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
+    push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     for (name, info) in DynamicObjects.meta(NestedT)
         DynamicObjects.isfixed(info) && continue
 
@@ -1030,9 +1030,18 @@ end
 
 # Called by @htmx macro expansion — re-registers routes when Revise updates the struct
 function _reroute!(T::DataType)
-    haskey(_registered_types, T) || return
-    args = _registered_types[T]
-    _register_routes(T; args.prefix, args.record_dir)
+    if haskey(_registered_types, T)
+        args = _registered_types[T]
+        _register_routes(T; args.prefix, args.record_dir)
+    end
+    # If T is an @include'd sub-struct, re-register its parent(s)
+    if haskey(_included_type_parents, T)
+        for ParentT in _included_type_parents[T]
+            haskey(_registered_types, ParentT) || continue
+            args = _registered_types[ParentT]
+            _register_routes(ParentT; args.prefix, args.record_dir)
+        end
+    end
 end
 
 # --- App scaffolding ---
