@@ -1467,7 +1467,18 @@ Build a URL with properly escaped query parameters.
 """
 query_url(path; kwargs...) = begin
     filtered = filter(p -> !isnothing(p.second), pairs(kwargs))
-    isempty(filtered) ? path : path * "?" * HTTP.URIs.escapeuri(filtered)
+    isempty(filtered) && return path
+    parts = String[]
+    for (k, v) in filtered
+        if v isa AbstractVector
+            for item in v
+                push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(item)))
+            end
+        else
+            push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(v)))
+        end
+    end
+    isempty(parts) ? path : path * "?" * join(parts, "&")
 end
 
 """
