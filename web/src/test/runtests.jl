@@ -66,17 +66,6 @@ end
     @test to_response(orig) === orig
 end
 
-@testset "pathparams" begin
-    @test pathparams(HTTP.Request("GET", "/post/42"), "/post/{id}") ==
-          Dict("id" => "42")
-    @test pathparams(HTTP.Request("GET", "/user/alice/post/1"), "/user/{name}/post/{id}") ==
-          Dict("name" => "alice", "id" => "1")
-    @test pathparams(HTTP.Request("GET", "/about?foo=bar"), "/about") ==
-          Dict{String,String}()
-    @test pathparams(HTTP.Request("GET", "/item/7?page=2"), "/item/{id}") ==
-          Dict("id" => "7")
-end
-
 @testset "HTMX request header inspection" begin
     htmx_req = HTTP.Request("GET", "/",
         ["HX-Request" => "true", "HX-Target" => "#result",
@@ -220,14 +209,6 @@ end
     @test contains(html2, "class=\"nav-link\"")
 end
 
-@testset "queryparam helper" begin
-    req_with_q = HTTP.Request("GET", "/search?q=hello")
-    @test queryparam(req_with_q, "q", "default") == "hello"
-    req_without_q = HTTP.Request("GET", "/search")
-    @test queryparam(req_without_q, "q", "default") == "default"
-    @test queryparam(req_without_q, "q") == ""
-end
-
 @testset "htmx_or helper" begin
     fragment = h.p("partial content")
     htmx_req = HTTP.Request("GET", "/", ["HX-Request" => "true"])
@@ -318,25 +299,6 @@ end
     req_noval = HTTP.Request("GET", "/x?flag")
     qp_noval = queryparams(req_noval)
     @test qp_noval["flag"] == ""
-end
-
-@testset "queryparams_all" begin
-    req = HTTP.Request("GET", "/x?color=red")
-    @test queryparams_all(req, "color") == ["red"]
-    req_multi = HTTP.Request("GET", "/x?id=1&id=2&id=3")
-    @test queryparams_all(req_multi, "id") == ["1", "2", "3"]
-    req_miss = HTTP.Request("GET", "/x?other=yes")
-    @test queryparams_all(req_miss, "missing") == String[]
-end
-
-@testset "queryparam - multi-value behaviour" begin
-    req = HTTP.Request("GET", "/x?name=alice")
-    @test queryparam(req, "name", "default") == "alice"
-    req_multi = HTTP.Request("GET", "/x?v=first&v=second")
-    @test queryparam(req_multi, "v", "default") == "first"
-    req_miss = HTTP.Request("GET", "/x")
-    @test queryparam(req_miss, "absent", "fallback") == "fallback"
-    @test queryparam(req_miss, "absent") == ""
 end
 
 @testset "nothing default in kwargs route" begin

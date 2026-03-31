@@ -2,13 +2,13 @@ module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, PropertyComputationError, unwrap_error
 export create_app
-export HTTP, queryparams, queryparams_all, formdata
+export HTTP, queryparams, formdata
 export terminate, serve, staticfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
 export route!, to_response, save_response, static_transform
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
-export hx_link, queryparam, htmx_or, pathparams
+export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
@@ -94,19 +94,6 @@ function queryparams(req::HTTP.Request)
 end
 
 """
-    queryparams_all(req::HTTP.Request, name::AbstractString) -> Vector{String}
-
-Return all values for query parameter `name` as a vector.
-Returns an empty vector if the parameter is absent.
-"""
-function queryparams_all(req::HTTP.Request, name::AbstractString)
-    qp = queryparams(req)
-    val = get(qp, name, nothing)
-    isnothing(val) && return String[]
-    val isa String ? [val] : val
-end
-
-"""
     _wrap_ws_bodies!(struct_expr)
 
 Pre-process the struct body: for any `@ws` property, wrap the RHS in `(__ws__) -> RHS`.
@@ -136,115 +123,182 @@ function _wrap_ws_bodies!(struct_expr)
     struct_expr
 end
 
-"""
-    _extract_inline_includes!(struct_expr)
-
-Pre-process: convert `@include name = begin ... end` into a standalone `@htmx struct`
-definition + constructor call. The inline struct receives all parent properties lazily via
-a `__parent__` reference, so parent properties are accessible without explicit forwarding.
-"""
-function _extract_inline_includes!(struct_expr)
-    @assert struct_expr.head == :struct
-    parent_name = struct_expr.args[2]
-    Meta.isexpr(parent_name, :(<:)) && (parent_name = parent_name.args[1])
-    Meta.isexpr(parent_name, :(curly)) && (parent_name = parent_name.args[1])
+# Find inline struct properties: prop = struct Name ... end
+# Returns list of property name Symbols.
+function _find_inline_structs(struct_expr)
     body = struct_expr.args[3]
-
-    # Collect parent property names (properties with RHS, excluding @include ones)
-    parent_props = Symbol[]
+    result = Symbol[]
     for arg in body.args
         arg isa Expr || continue
-        expr = arg
-        has_include = false
-        while Meta.isexpr(expr, :macrocall)
-            expr.args[1] == Symbol("@include") && (has_include = true)
-            expr = expr.args[end]
+        if Meta.isexpr(arg, :(=)) && Meta.isexpr(arg.args[2], :struct)
+            lhs = arg.args[1]
+            Meta.isexpr(lhs, (:call, :ref)) && (lhs = lhs.args[1])
+            Meta.isexpr(lhs, :(::)) && (lhs = lhs.args[1])
+            lhs isa Symbol && push!(result, lhs)
         end
-        has_include && continue
-        # Extract property name from assignment
-        a = expr
-        Meta.isexpr(a, :(=)) || continue
-        lhs = a.args[1]
-        # Unwrap call/ref syntax: prop(args) or prop[idx]
-        Meta.isexpr(lhs, (:call, :ref)) && (lhs = lhs.args[1])
-        # Unwrap type annotation: prop::T
-        Meta.isexpr(lhs, :(::)) && (lhs = lhs.args[1])
-        lhs isa Symbol && push!(parent_props, lhs)
     end
-
-    extracted = Expr[]
-    for (i, arg) in enumerate(body.args)
-        arg isa Expr || continue
-        # Find @include macrocall
-        expr = arg
-        is_include = false
-        while Meta.isexpr(expr, :macrocall)
-            expr.args[1] == Symbol("@include") && (is_include = true; break)
-            expr = expr.args[end]
-        end
-        !is_include && continue
-        # expr.args[end] should be `name = RHS`
-        assign = expr.args[end]
-        Meta.isexpr(assign, :(=)) || continue
-        prop_name = assign.args[1]
-        # Unwrap call/ref syntax on prop_name
-        Meta.isexpr(prop_name, (:call, :ref)) && (prop_name = prop_name.args[1])
-        rhs = assign.args[2]
-        # Only process begin...end blocks (pre-defined structs are handled at route registration time)
-        Meta.isexpr(rhs, :block) || continue
-
-        # Generate deterministic struct name
-        gen_name = Symbol("_Include_", parent_name, "_", prop_name)
-
-        # Collect inline block property names to avoid collision with parent forwarding
-        inline_props = Set{Symbol}()
-        for a in rhs.args
-            a isa Expr || continue
-            ia = a
-            while Meta.isexpr(ia, :macrocall); ia = ia.args[end]; end
-            Meta.isexpr(ia, :(=)) || continue
-            ilhs = ia.args[1]
-            Meta.isexpr(ilhs, (:call, :ref)) && (ilhs = ilhs.args[1])
-            Meta.isexpr(ilhs, :(::)) && (ilhs = ilhs.args[1])
-            ilhs isa Symbol && push!(inline_props, ilhs)
-        end
-
-        # Build inline struct body:
-        # 1. __parent__ = nothing
-        # 2. prop = __parent__.prop for each parent property (skip collisions)
-        # 3. inline block contents
-        inline_body = Expr(:block)
-        push!(inline_body.args, :(__parent__ = nothing))
-        for pp in parent_props
-            pp in inline_props && continue
-            push!(inline_body.args, :($pp = __parent__.$pp))
-        end
-        for a in rhs.args
-            push!(inline_body.args, a)
-        end
-
-        # Build @dynamicstruct expression (not @htmx — no _reroute! needed,
-        # routes are registered through the parent's route!)
-        inline_struct = Expr(:macrocall, Expr(:., :DynamicObjects, QuoteNode(Symbol("@dynamicstruct"))),
-            LineNumberNode(0, Symbol("inline_include")),
-            Expr(:struct, false, gen_name, inline_body))
-        push!(extracted, inline_struct)
-
-        # Replace RHS: @include prop = GenName(; __parent__=__self__)
-        assign.args[2] = :($gen_name(; __parent__=__self__))
-    end
-
-    extracted
+    result
 end
 
-"""
-    @htmx struct MyApp ... end
+# Extract type name from a struct expression.
+function _struct_type_name(struct_expr)
+    type_name = struct_expr.args[2]
+    Meta.isexpr(type_name, :(<:)) && (type_name = type_name.args[1])
+    Meta.isexpr(type_name, :(curly)) && (type_name = type_name.args[1])
+    type_name
+end
 
-Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
-re-evaluation automatically re-registers routes without a server restart.
-`@ws` property bodies are automatically wrapped in `(__ws__) -> body`.
-"""
+# Default: no inline struct properties.
+_inline_struct_props(::Type) = ()
+
+function _htmx_transform(struct_expr; reroute=true, kwargs...)
+    _warn_bracket_routes!(struct_expr)
+    _wrap_ws_bodies!(struct_expr)
+    inline_props = _find_inline_structs(struct_expr)
+    route_info = _extract_route_info(struct_expr)
+    block = DynamicObjects.dynamicstruct(struct_expr;
+        child_handler=s -> _htmx_transform(s; reroute=false), kwargs...)
+    type_name = _struct_type_name(struct_expr)
+    @assert Meta.isexpr(block, :escape)
+    # Emit _extract_args methods for each route property
+    for ri in route_info
+        push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.pos_params, ri.kw_params))
+    end
+    # Emit _inline_struct_props so _register_routes knows which properties to recurse into
+    if !isempty(inline_props)
+        _fname = Expr(:., @__MODULE__, QuoteNode(:_inline_struct_props))
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _fname, :(::Type{$type_name})),
+            Tuple(inline_props)))
+    end
+    reroute && push!(block.args[1].args, :($(_reroute!)($type_name)))
+    block
+end
+
 _route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("@patch"), Symbol("@delete"), Symbol("@ws")])
+
+# Extract route property info from the struct body AST at macro expansion time.
+# Returns [(prop_name::Symbol, positional_params, kwargs_params), ...]
+# where positional_params = [(name::Symbol, type_expr_or_nothing), ...]
+# and   kwargs_params     = [(name::Symbol, type_expr_or_nothing, has_default::Bool), ...]
+function _extract_route_info(struct_expr)
+    body = struct_expr.args[3]
+    route_macros = _route_macros()
+    routes = @NamedTuple{prop_name::Symbol, pos_params::Vector, kw_params::Vector}[]
+    for arg in body.args
+        arg isa Expr || continue
+        # Walk macrocall layers to find route markers
+        expr = arg
+        has_route = false
+        while Meta.isexpr(expr, :macrocall)
+            expr.args[1] in route_macros && (has_route = true)
+            expr = expr.args[end]
+        end
+        has_route || continue
+        # expr is the inner assignment: name(...) = rhs
+        expr isa Expr && expr.head == :(=) || continue
+        lhs = expr.args[1]
+        Meta.isexpr(lhs, (:call, :ref)) || continue  # skip non-indexed routes
+        prop_name = lhs.args[1]
+        Meta.isexpr(prop_name, :(::)) && (prop_name = prop_name.args[1])
+
+        pos_params = Tuple{Symbol, Any}[]
+        kw_params = Tuple{Symbol, Any, Bool}[]
+        for idx in lhs.args[2:end]
+            if Meta.isexpr(idx, :parameters)
+                for kw_arg in idx.args
+                    if Meta.isexpr(kw_arg, :kw)
+                        kw_name_expr = kw_arg.args[1]
+                        kw_type = _macro_extract_type(kw_arg)
+                        kw_name = first(DynamicObjects.extractnames(kw_name_expr))
+                        push!(kw_params, (kw_name, kw_type, true))
+                    else
+                        kw_type = _macro_extract_type(kw_arg)
+                        kw_name = first(DynamicObjects.extractnames(kw_arg))
+                        push!(kw_params, (kw_name, kw_type, false))
+                    end
+                end
+            else
+                p_type = _macro_extract_type(idx)
+                p_name = first(DynamicObjects.extractnames(idx))
+                push!(pos_params, (p_name, p_type))
+            end
+        end
+        push!(routes, (prop_name=prop_name, pos_params=pos_params, kw_params=kw_params))
+    end
+    routes
+end
+
+# Extract type annotation from a parameter AST node (macro-time version of _extract_type).
+function _macro_extract_type(idx)
+    expr = Meta.isexpr(idx, :kw) ? idx.args[1] : idx
+    Meta.isexpr(expr, :(::)) && length(expr.args) == 2 ? expr.args[2] : nothing
+end
+
+# Generate a _extract_args method definition for a route property.
+# Types are left as AST expressions — Julia's compiler resolves them in the user's module.
+function _generate_extract_args(type_name, prop_name, pos_params, kw_params)
+    # Build positional param conversion statements (by URL segment position)
+    pos_stmts = Expr[]
+    for (i, (pname, ptype)) in enumerate(pos_params)
+        segment_expr = :(__parts__[__base_segments__ + $i])
+        convert_call = ptype === nothing ?
+            :($(_convert_param)($segment_expr, nothing)) :
+            :($(_convert_param)($segment_expr, $ptype))
+        push!(pos_stmts, :($i <= __n_params__ && push!(__idx__, $convert_call)))
+    end
+
+    # Build kwarg conversion statements
+    kw_stmts = Expr[]
+    for (kname, ktype, has_default) in kw_params
+        kname_str = string(kname)
+        convert_call = ktype === nothing ? :(__v__) : :($(_convert_param)(__v__, $ktype))
+        lookup_expr = quote
+            __v__ = get(__src__, $kname_str, nothing)
+            (__v__ === nothing || __v__ == "") && __fallback__ !== nothing && (__v__ = get(__fallback__, $kname_str, nothing))
+        end
+        if has_default
+            push!(kw_stmts, quote
+                let __v__ = nothing
+                    $lookup_expr
+                    if __v__ !== nothing && __v__ != ""
+                        push!(__kw__, $(QuoteNode(kname)) => $convert_call)
+                    end
+                end
+            end)
+        else
+            push!(kw_stmts, quote
+                let __v__ = nothing
+                    $lookup_expr
+                    if __v__ === nothing || __v__ == ""
+                        __src__[$kname_str]  # KeyError for missing required kwarg
+                    end
+                    push!(__kw__, $(QuoteNode(kname)) => $convert_call)
+                end
+            end)
+        end
+    end
+
+    _M = @__MODULE__
+    _fname = Expr(:., _M, QuoteNode(:_extract_args))
+    _call = Expr(:call, _fname,
+        :(::Type{$type_name}), :(::Val{$(QuoteNode(prop_name))}),
+        :__req__, :__method__, :(__base_segments__::Int), :(__n_params__::Int))
+    _body = quote
+        __parts__ = split(split(__req__.target, "?")[1], "/", keepempty=false)
+        __src__ = $(_kwargs_source)(__req__, __method__)
+        __fallback__ = __method__ in $(_queryparams_verbs) ? nothing : $(queryparams)(__req__)
+        __idx__ = Any[]
+        $(pos_stmts...)
+        __kw__ = Pair{Symbol,Any}[]
+        $(kw_stmts...)
+        (__idx__, __kw__)
+    end
+    Expr(:(=), _call, _body)
+end
+
+# Dispatch target for generated route arg extraction methods.
+function _extract_args end
 
 """
     _warn_bracket_routes!(struct_expr)
@@ -276,26 +330,16 @@ function _warn_bracket_routes!(struct_expr)
     struct_expr
 end
 
+"""
+    @htmx struct MyApp ... end
+
+Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
+re-evaluation automatically re-registers routes without a server restart.
+`@ws` property bodies are automatically wrapped in `(__ws__) -> body`.
+Inline `prop = struct ... end` definitions are processed as nested route structs.
+"""
 macro htmx(args...)
-    _warn_bracket_routes!(args[end])
-    _wrap_ws_bodies!(args[end])
-    # Extract inline @include begin...end blocks into standalone @htmx struct definitions
-    inline_structs = _extract_inline_includes!(args[end])
-    struct_block = DynamicObjects.dynamicstruct(args[end]; (length(args) > 1 ? (docstring=args[1],) : (;))...)
-    # Extract the type name from the struct expression
-    struct_expr = args[end]
-    @assert struct_expr.head == :struct
-    type_name = struct_expr.args[2]
-    Meta.isexpr(type_name, :(<:)) && (type_name = type_name.args[1])
-    Meta.isexpr(type_name, :(curly)) && (type_name = type_name.args[1])
-    # struct_block is already esc'd by dynamicstruct, so append to its inner block
-    @assert Meta.isexpr(struct_block, :escape)
-    # Prepend extracted inline struct definitions before the parent struct
-    for s in reverse(inline_structs)
-        pushfirst!(struct_block.args[1].args, s)
-    end
-    push!(struct_block.args[1].args, :($(_reroute!)($type_name)))
-    struct_block
+    _htmx_transform(args[end]; (length(args) > 1 ? (docstring=args[1],) : (;))...)
 end
 
 """
@@ -332,22 +376,6 @@ function htmx(args...;
 end
 
 # --- Route registration and recording ---
-
-"""
-    pathparams(req::HTTP.Request, template::AbstractString) -> Dict{String, String}
-
-Extract path parameters from the request URL by matching segments against a route template.
-Template segments wrapped in `{...}` are treated as parameter names.
-"""
-function pathparams(req::HTTP.Request, template::AbstractString)
-    req_parts  = split(split(req.target, "?")[1], "/", keepempty=false)
-    tmpl_parts = split(template, "/", keepempty=false)
-    Dict(
-        tmpl_part[2:end-1] => String(req_part)
-        for (req_part, tmpl_part) in zip(req_parts, tmpl_parts)
-        if startswith(tmpl_part, "{") && endswith(tmpl_part, "}")
-    )
-end
 
 const _html_response = s -> HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body=s)
 
@@ -534,18 +562,6 @@ Create an `h.a` with both `href` and `hx-get` set to `url`. Extra kwargs
 hx_link(url; kwargs...) = h.a(; href=url, hx_get=url, kwargs...)
 
 """
-    queryparam(req, name, default="")
-
-Read a single query parameter by name. Always returns a single `String`:
-if the parameter appears multiple times, returns the first value.
-"""
-function queryparam(req::HTTP.Request, name, default="")
-    val = get(queryparams(req), name, nothing)
-    isnothing(val) && return default
-    val isa String ? val : first(val)
-end
-
-"""
     htmx_or(full_page_fn, req, fragment)
 
 Return `fragment` directly for HTMX requests; call `full_page_fn()` and wrap
@@ -624,7 +640,6 @@ static HTTP server.
 Returns `obj`.
 """
 
-_route_handlers() = nothing  # legacy, unused — handlers are now plain closures via pathparams()
 
 const _http_verbs = Dict(
     Symbol("@get") => "GET",
@@ -640,17 +655,9 @@ const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tupl
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
 
-# Extract the type annotation from an index expression, or nothing if untyped.
-# Handles: id::Int, id::Int=1, id, id=1
-function _extract_type(idx)
-    expr = Meta.isexpr(idx, :kw) ? idx.args[1] : idx
-    Meta.isexpr(expr, :(::)) && length(expr.args) == 2 ? expr.args[2] : nothing
-end
-
 # Convert a string value to the target type. Strings pass through as-is.
+# Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
-_convert_param(val, T::Symbol) = _convert_param(val, Core.eval(Main, T))  # raw AST type name from macro
-_convert_param(val, T::Expr) = _convert_param(val, Core.eval(Main, T))  # raw AST type expr from macro (e.g. Vector{String})
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
@@ -658,7 +665,6 @@ _convert_param(val::AbstractVector, T::Type{<:AbstractString}) = first(val)  # m
 _convert_param(val::AbstractVector, T::Type{<:AbstractVector}) = val  # multi-value + Vector annotation → keep as-is
 _convert_param(val::AbstractVector, T::Type) = parse(T, first(val))  # multi-value → parse first
 _convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # single/empty → vector
-_convert_param(val, ::Type) = val  # already converted (e.g. default value)
 
 # Determine whether kwargs come from queryparams (GET/DELETE) or formdata (POST/PUT/PATCH).
 const _queryparams_verbs = Set(["GET", "DELETE"])
@@ -667,78 +673,8 @@ function _kwargs_source(req, method)
     isempty(HTTP.payload(req)) ? Dict{String, Any}() : formdata(req)
 end
 
-# Extract kwarg info from a :parameters node's args.
-# Returns [(name::String, type_or_nothing, default_value), ...]
-# Sentinel for "no default provided" (distinct from `nothing` as a default value).
-_no_default() = _NO_DEFAULT
-_NO_DEFAULT = :__no_default__
-
-# Evaluate simple AST literals to their Julia values.
-# :nothing → nothing, :true → true, :false → false, numbers/strings pass through.
-_eval_literal(x::Symbol) = x === :nothing ? nothing : x === :true ? true : x === :false ? false : x
-_eval_literal(x::Expr) = Core.eval(Main, x)  # evaluate complex defaults (e.g. String[], Dict())
-_eval_literal(x) = x
-
-function _extract_kwargs(params_args)
-    result = Tuple{String, Any, Any}[]
-    for arg in params_args
-        if Meta.isexpr(arg, :kw)
-            kwname_expr = arg.args[1]
-            default_val = _eval_literal(arg.args[2])
-            kwtype = _extract_type(arg)
-            kwname = string(first(DynamicObjects.extractnames(kwname_expr)))
-            push!(result, (kwname, kwtype, default_val))
-        else
-            # Bare kwarg without default (rare but possible): prop(; q)
-            kwtype = _extract_type(arg)
-            kwname = string(first(DynamicObjects.extractnames(arg)))
-            push!(result, (kwname, kwtype, _no_default()))
-        end
-    end
-    result
-end
-
-# Extract path params from request URL, convert types, append suffix defaults.
-function _extract_path_params(req, path, param_strs, param_types, suffix_defaults)
-    pp = pathparams(req, path)
-    idx_vals = Any[_convert_param(get(pp, p, ""), t) for (p, t) in zip(param_strs, param_types)]
-    append!(idx_vals, suffix_defaults)
-    idx_vals
-end
-
-# Extract kwargs from query params (GET/DELETE) or form data (POST/PUT/PATCH).
-# For non-queryparams verbs, falls back to URL query params when a value is
-# missing or empty in the primary source (form data).
-function _extract_kwargs(req, method, kwargs_info)
-    isempty(kwargs_info) && return Pair{Symbol,Any}[]
-    src = _kwargs_source(req, method)
-    # For POST/PUT/PATCH, fall back to query params if form data is missing/empty
-    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
-    Pair{Symbol,Any}[
-        Symbol(kwname) => _convert_param(
-            _get_kwarg(src, fallback, kwname, default_val),
-            kwtype
-        )
-        for (kwname, kwtype, default_val) in kwargs_info
-    ]
-end
-
-# Look up a kwarg value from the primary source, falling back to a secondary
-# source when the primary value is missing or empty.
-function _get_kwarg(src, fallback, kwname, default_val)
-    val = default_val === _no_default() ? get(src, kwname, nothing) : get(src, kwname, nothing)
-    if (val === nothing || val == "") && fallback !== nothing
-        val = get(fallback, kwname, nothing)
-    end
-    if val === nothing
-        default_val === _no_default() ? src[kwname] : default_val  # original error path for required kwargs
-    else
-        val
-    end
-end
-
 # Register a route handler directly on the HTTP router, bypassing Oxygen's
-# argument-name validation. We extract path params ourselves via pathparams().
+# argument-name validation. We extract path params ourselves via positional URL segment indexing.
 _register_handler(method, path, handler) =
     HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, handler)
 
@@ -788,10 +724,12 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
     to_response(getproperty(obj, :page)[val])
 end
 
-function _register_indexed_route(T, method, name, path, param_strs, param_types, suffix_defaults, kwargs_info, record_dir)
+_base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempty=false))
+
+function _register_indexed_route(T, method, name, path, n_params, record_dir)
+    base = _base_segments(path)
     _register_handler(method, path, function(req)
-        idx_vals = _extract_path_params(req, path, param_strs, param_types, suffix_defaults)
-        kw_pairs = _extract_kwargs(req, method, kwargs_info)
+        idx_vals, kw_pairs = _extract_args(T, Val(name), req, method, base, n_params)
         obj = T(; req)
         prop = getproperty(obj, name)
         val = prop(idx_vals...; NamedTuple(kw_pairs)...)
@@ -804,8 +742,8 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
 
-        # Handle @include: recursively register nested @htmx struct's routes
-        if Symbol("@include") in info.macros
+        # Handle nested structs: @include or inline struct definitions
+        if Symbol("@include") in info.macros || name in _inline_struct_props(T)
             # Extract nested type from RHS (e.g. TestRoutes from TestRoutes(; req, ...))
             nested_type = nothing
             try
@@ -832,86 +770,79 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
 
         # Separate positional indices from kwargs (:parameters node)
         positional_indices = Any[]
-        kwargs_info = Tuple{String, Any, Any}[]  # [(name, type_or_nothing, default), ...]
+        has_kwargs = false
         for idx in info.indices
             if Meta.isexpr(idx, :parameters)
-                kwargs_info = _extract_kwargs(idx.args)
+                has_kwargs = true
             else
                 push!(positional_indices, idx)
             end
         end
 
         param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
-        param_types = [_extract_type(idx) for idx in positional_indices]
+        n_params = length(param_strs)
 
         base = "/" * (isempty(prefix) ? "" : prefix * "/") * string(name)
         path = isempty(param_strs) ? base :
             base * "/" * join("{" .* param_strs .* "}", "/")
         name == :index && isempty(prefix) && (path = "/")
 
-        # Detect trailing default values: prop[a, b=1, c=2]
-        # Find the first index with a default — all after it must also have defaults
-        defaults = Pair{Int, Any}[]  # [(position => default_value), ...]
+        # Detect trailing defaults for shortened route registration
+        # Only need positions, not values — DynamicObjects handles defaults
+        default_positions = Int[]
         for (j, idx) in enumerate(positional_indices)
             if Meta.isexpr(idx, :kw)
-                push!(defaults, j => idx.args[2])
-            elseif !isempty(defaults)
-                # Non-default after default — can only shorten trailing defaults
-                empty!(defaults)
+                push!(default_positions, j)
+            elseif !isempty(default_positions)
+                empty!(default_positions)
                 break
             end
         end
 
         # Capture loop variables to avoid closure-over-mutable-variable issues
-        let name=name, param_strs=param_strs, param_types=param_types, path=path, record_dir=record_dir, method=method, defaults=defaults, kwargs_info=kwargs_info
+        let name=name, param_strs=param_strs, n_params=n_params, path=path, record_dir=record_dir, method=method, default_positions=default_positions, has_kwargs=has_kwargs
             if method == "WEBSOCKET"
-                # WebSocket handlers: @htmx wraps @ws bodies in (__ws__) -> body,
-                # so the property value is always a callable. We evaluate the property
-                # (with path params + kwargs) to get the lambda, then call it with ws.
-                # This reuses the same getproperty/getindex pattern as HTTP routes.
-                if isempty(param_strs) && isempty(kwargs_info)
+                if isempty(param_strs) && !has_kwargs && !info.indexed
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
                         lambda = getproperty(T(; req=nothing), name)
                         lambda(ws)
                     end)
                 else
                     # Indexed/kwargs WS route: extract params from ws.request
+                    ws_base = _base_segments(path)
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        idx_vals = _extract_path_params(ws.request, path, param_strs, param_types, Any[])
-                        kw_pairs = _extract_kwargs(ws.request, "GET", kwargs_info)
+                        idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
                         prop = getproperty(T(; req=ws.request), name)
                         lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
                         lambda(ws)
                     end)
                 end
-            elseif isempty(param_strs) && isempty(kwargs_info) && !info.indexed
+            elseif isempty(param_strs) && !has_kwargs && !info.indexed
                 register(CONTEXT[], method, path, function(req)
                     obj = T(; req)
                     val = getproperty(obj, name)
                     _resolve_response(obj, req, val; record_dir, save_path=record_dir !== nothing ? path : nothing)
                 end)
-            elseif isempty(param_strs) && isempty(kwargs_info)
+            elseif isempty(param_strs) && !has_kwargs
                 # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
-                _register_indexed_route(T, method, name, path, String[], Any[], Any[], kwargs_info, record_dir)
-            elseif isempty(param_strs) && !isempty(kwargs_info)
+                _register_indexed_route(T, method, name, path, 0, record_dir)
+            elseif isempty(param_strs) && has_kwargs
                 # kwargs-only route (no path params)
                 !isnothing(record_dir) && push!(_static_kwargs_paths, path)
-                _register_indexed_route(T, method, name, path, String[], Any[], Any[], kwargs_info, record_dir)
+                _register_indexed_route(T, method, name, path, 0, record_dir)
             else
                 # Register the full route (all params explicit)
-                _register_indexed_route(T, method, name, path, param_strs, param_types, [], kwargs_info, record_dir)
+                _register_indexed_route(T, method, name, path, n_params, record_dir)
 
                 # Register shortened routes for trailing defaults
-                # e.g. filter[a, b=1, c=2] → also /filter/{a}/{b} and /filter/{a}
-                for k in length(defaults):-1:1
-                    cut = first(defaults[k])  # position of first omitted param
+                # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
+                for k in length(default_positions):-1:1
+                    cut = default_positions[k]  # position of first omitted param
                     short_params = param_strs[1:cut-1]
-                    short_types = param_types[1:cut-1]
-                    suffix_vals = [last(d) for d in defaults[k:end]]
                     short_path = isempty(short_params) ? base :
                         base * "/" * join("{" .* short_params .* "}", "/")
                     name == :index && isempty(prefix) && isempty(short_params) && (short_path = "/")
-                    _register_indexed_route(T, method, name, short_path, short_params, short_types, suffix_vals, kwargs_info, record_dir)
+                    _register_indexed_route(T, method, name, short_path, length(short_params), record_dir)
                 end
             end
         end
@@ -919,10 +850,10 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
 end
 
 # Register a single included route handler with chained property access through the parent.
-function _register_included_handler(ParentT, method, name, chain, path, param_strs, param_types, suffix_defaults, kwargs_info, record_dir)
+function _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
+    base = _base_segments(path)
     _register_handler(method, path, function(req)
-        idx_vals = _extract_path_params(req, path, param_strs, param_types, suffix_defaults)
-        kw_pairs = _extract_kwargs(req, method, kwargs_info)
+        idx_vals, kw_pairs = _extract_args(NestedT, Val(name), req, method, base, n_params)
         parent = ParentT(; req)
         nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
         val = let prop = getproperty(nested, name)
@@ -944,8 +875,8 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
     for (name, info) in DynamicObjects.meta(NestedT)
         DynamicObjects.isfixed(info) && continue
 
-        # Recurse into nested @include within the included struct
-        if Symbol("@include") in info.macros
+        # Recurse into nested structs: @include or inline struct definitions
+        if Symbol("@include") in info.macros || name in _inline_struct_props(NestedT)
             nested_type = nothing
             try
                 dummy = ParentT(; req=nothing)
@@ -969,17 +900,17 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
 
         # Build path
         positional_indices = Any[]
-        kwargs_info = Tuple{String, Any, Any}[]
+        has_kwargs = false
         for idx in info.indices
             if Meta.isexpr(idx, :parameters)
-                kwargs_info = _extract_kwargs(idx.args)
+                has_kwargs = true
             else
                 push!(positional_indices, idx)
             end
         end
 
         param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
-        param_types = [_extract_type(idx) for idx in positional_indices]
+        n_params = length(param_strs)
 
         base = "/" * prefix * "/" * string(name)
         path = isempty(param_strs) ? base :
@@ -988,33 +919,31 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         name == :index && (path = "/" * prefix)
 
         # Track kwargs-only paths for static recording
-        !isnothing(record_dir) && isempty(param_strs) && !isempty(kwargs_info) && push!(_static_kwargs_paths, path)
+        !isnothing(record_dir) && isempty(param_strs) && has_kwargs && push!(_static_kwargs_paths, path)
 
-        # Detect trailing default values (same logic as _register_routes)
-        defaults = Pair{Int, Any}[]
+        # Detect trailing defaults (only positions — DynamicObjects handles values)
+        default_positions = Int[]
         for (j, idx) in enumerate(positional_indices)
             if Meta.isexpr(idx, :kw)
-                push!(defaults, j => idx.args[2])
-            elseif !isempty(defaults)
-                empty!(defaults)
+                push!(default_positions, j)
+            elseif !isempty(default_positions)
+                empty!(default_positions)
                 break
             end
         end
 
-        let name=name, chain=chain, param_strs=param_strs, param_types=param_types, path=path, method=method, kwargs_info=kwargs_info, record_dir=record_dir, defaults=defaults, base=base
+        let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, base=base
             # Register the full route
-            _register_included_handler(ParentT, method, name, chain, path, param_strs, param_types, Any[], kwargs_info, record_dir)
+            _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
 
             # Register shortened routes for trailing defaults
-            for k in length(defaults):-1:1
-                cut = first(defaults[k])
+            for k in length(default_positions):-1:1
+                cut = default_positions[k]
                 short_params = param_strs[1:cut-1]
-                short_types = param_types[1:cut-1]
-                suffix_vals = [last(d) for d in defaults[k:end]]
                 short_path = isempty(short_params) ? base :
                     base * "/" * join("{" .* short_params .* "}", "/")
                 name == :index && isempty(short_params) && (short_path = "/" * prefix)
-                _register_included_handler(ParentT, method, name, chain, short_path, short_params, short_types, suffix_vals, kwargs_info, record_dir)
+                _register_included_handler(ParentT, NestedT, method, name, chain, short_path, length(short_params), record_dir)
             end
         end
     end
