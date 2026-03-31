@@ -152,7 +152,6 @@ end
 _inline_struct_props(::Type) = ()
 
 function _htmx_transform(struct_expr; reroute=true, kwargs...)
-    _warn_bracket_routes!(struct_expr)
     _wrap_ws_bodies!(struct_expr)
     inline_props = _find_inline_structs(struct_expr)
     route_info = _extract_route_info(struct_expr)
@@ -185,44 +184,52 @@ function _extract_route_info(struct_expr)
     body = struct_expr.args[3]
     route_macros = _route_macros()
     routes = @NamedTuple{prop_name::Symbol, pos_params::Vector, kw_params::Vector}[]
+    lnn = nothing
     for arg in body.args
+        isa(arg, LineNumberNode) && (lnn = arg; continue)
         arg isa Expr || continue
         # Walk macrocall layers to find route markers
         expr = arg
         has_route = false
         while Meta.isexpr(expr, :macrocall)
             expr.args[1] in route_macros && (has_route = true)
+            # macrocall args[2] is often a LineNumberNode
+            expr.args[2] isa LineNumberNode && (lnn = expr.args[2])
             expr = expr.args[end]
         end
         has_route || continue
         # expr is the inner assignment: name(...) = rhs
         expr isa Expr && expr.head == :(=) || continue
         lhs = expr.args[1]
-        Meta.isexpr(lhs, (:call, :ref)) || continue  # skip non-indexed routes
-        prop_name = lhs.args[1]
-        Meta.isexpr(prop_name, :(::)) && (prop_name = prop_name.args[1])
-
         pos_params = Tuple{Symbol, Any}[]
         kw_params = Tuple{Symbol, Any, Bool}[]
-        for idx in lhs.args[2:end]
-            if Meta.isexpr(idx, :parameters)
-                for kw_arg in idx.args
-                    if Meta.isexpr(kw_arg, :kw)
-                        kw_name_expr = kw_arg.args[1]
-                        kw_type = _macro_extract_type(kw_arg)
-                        kw_name = first(DynamicObjects.extractnames(kw_name_expr))
-                        push!(kw_params, (kw_name, kw_type, true))
-                    else
-                        kw_type = _macro_extract_type(kw_arg)
-                        kw_name = first(DynamicObjects.extractnames(kw_arg))
-                        push!(kw_params, (kw_name, kw_type, false))
+        if Meta.isexpr(lhs, (:call, :ref))
+            prop_name = lhs.args[1]
+            Meta.isexpr(prop_name, :(::)) && (prop_name = prop_name.args[1])
+            for idx in lhs.args[2:end]
+                if Meta.isexpr(idx, :parameters)
+                    for kw_arg in idx.args
+                        if Meta.isexpr(kw_arg, :kw)
+                            kw_name_expr = kw_arg.args[1]
+                            kw_type = _macro_extract_type(kw_arg)
+                            kw_name = first(DynamicObjects.extractnames(kw_name_expr))
+                            push!(kw_params, (kw_name, kw_type, true))
+                        else
+                            kw_type = _macro_extract_type(kw_arg)
+                            kw_name = first(DynamicObjects.extractnames(kw_arg))
+                            push!(kw_params, (kw_name, kw_type, false))
+                        end
                     end
+                else
+                    p_type = _macro_extract_type(idx)
+                    p_name = first(DynamicObjects.extractnames(idx))
+                    push!(pos_params, (p_name, p_type))
                 end
-            else
-                p_type = _macro_extract_type(idx)
-                p_name = first(DynamicObjects.extractnames(idx))
-                push!(pos_params, (p_name, p_type))
             end
+        else
+            # Non-indexed route: @get name = ... (plain Symbol LHS)
+            prop_name = lhs
+            Meta.isexpr(prop_name, :(::)) && (prop_name = prop_name.args[1])
         end
         push!(routes, (prop_name=prop_name, pos_params=pos_params, kw_params=kw_params))
     end
@@ -300,35 +307,6 @@ end
 # Dispatch target for generated route arg extraction methods.
 function _extract_args end
 
-"""
-    _warn_bracket_routes!(struct_expr)
-
-Emit deprecation warnings for route properties using `[]` (ref) syntax instead of `()` (call) syntax.
-`route[key]` cannot be combined with kwargs and should be replaced with `route(key)`.
-"""
-function _warn_bracket_routes!(struct_expr)
-    body = struct_expr.args[3]
-    route_macros = _route_macros()
-    for arg in body.args
-        arg isa Expr || continue
-        # Walk through nested macrocall layers to find route markers
-        expr = arg
-        has_route_macro = false
-        while Meta.isexpr(expr, :macrocall)
-            expr.args[1] in route_macros && (has_route_macro = true)
-            expr = expr.args[end]
-        end
-        has_route_macro || continue
-        # expr is now the inner assignment: name[key] = rhs or name(key) = rhs
-        expr isa Expr && expr.head == :(=) || continue
-        lhs = expr.args[1]
-        if Meta.isexpr(lhs, :ref)
-            name = lhs.args[1]
-            @warn "Deprecated: @get/$name uses [] syntax which cannot combine with kwargs. Use () instead: $name($(join(lhs.args[2:end], ", ")))" maxlog=1
-        end
-    end
-    struct_expr
-end
 
 """
     @htmx struct MyApp ... end
