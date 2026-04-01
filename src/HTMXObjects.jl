@@ -12,7 +12,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
-export Long, sinput, soption, linput, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, status_badge, nav_sidebar, lazy
+export Long, sinput, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, status_badge, nav_sidebar, lazy
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1515,6 +1515,96 @@ soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, 
 soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
     option; value, selected=string(value == selected_value), kwargs...
 )
+
+"""
+    rinput(name; label=Long(name), value=50, min=0, max=100, step=1, show_when=nothing, kwargs...)
+
+A labeled range slider `<input type="range">` with a live `<output>` display.
+Extra `kwargs` go on the `<input>`.
+"""
+rinput(name; label=Long(name), value=50, min=0, max=100, step=1, show_when=nothing, kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    h.label(
+        label,
+        h.span(
+            h.input(; type="range", name, value, min, max, step,
+                oninput="this.nextElementSibling.textContent=this.value", kwargs...),
+            h.output(string(value));
+            style="display:flex;align-items:center;gap:0.5ch"
+        );
+        show_attrs...
+    )
+end
+
+"""
+    ninput(name; label=Long(name), value=0, min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...)
+
+A labeled number `<input type="number">`. Only `min`, `max`, `step` that are
+not `nothing` are included as attributes. Extra `kwargs` go on the `<input>`.
+"""
+ninput(name; label=Long(name), value=0, min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    num_attrs = filter(((_, v),) -> !isnothing(v), pairs((; min, max, step)))
+    h.label(
+        label,
+        h.input(; type="number", name, value, num_attrs..., kwargs...);
+        show_attrs...
+    )
+end
+
+"""
+    cinput(name; label=Long(name), checked=false, switch=false, show_when=nothing, kwargs...)
+
+A labeled checkbox `<input type="checkbox">`. Set `switch=true` to use Pico CSS's
+toggle-switch style (`role="switch"`). Extra `kwargs` go on the `<input>`.
+"""
+cinput(name; label=Long(name), checked=false, switch=false, show_when=nothing, kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    check_attrs = checked ? (; checked="true") : (;)
+    role_attrs = switch ? (; role="switch") : (;)
+    h.label(
+        h.input(; type="checkbox", name, check_attrs..., role_attrs..., kwargs...),
+        label;
+        show_attrs...
+    )
+end
+
+"""
+    tinput(name; label=Long(name), value="", placeholder=Long(name), rows=3, show_when=nothing, kwargs...)
+
+A labeled `<textarea>`. Extra `kwargs` go on the `<textarea>`.
+"""
+tinput(name; label=Long(name), value="", placeholder=Long(name), rows=3, show_when=nothing, kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    h.label(
+        label,
+        h.textarea(value; name, placeholder, rows, kwargs...);
+        show_attrs...
+    )
+end
+
+"""
+    radio_group(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...)
+
+A `<fieldset>` of radio buttons. Each element of `options` becomes
+`<label><input type="radio" .../> Label</label>`. Options can be plain values
+or `value => label` pairs. Extra `kwargs` go on each `<input>`.
+"""
+radio_group(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    h.fieldset(
+        h.legend(label),
+        [begin
+            opt_value, opt_label = option isa Union{Tuple,Pair} ? option : (option, option)
+            checked_attrs = string(opt_value) == string(value) ? (; checked="true") : (;)
+            h.label(
+                h.input(; type="radio", name, value=opt_value, checked_attrs..., kwargs...),
+                string(opt_label)
+            )
+        end for option in options]...;
+        show_attrs...
+    )
+end
 
 # --- Conditional visibility (show_when) ---
 
