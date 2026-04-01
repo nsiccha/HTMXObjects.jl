@@ -3,7 +3,7 @@ module HTMXObjects
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
 export create_app
 export HTTP, queryparams, formdata
-export terminate, serve, staticfiles
+export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
 export route!, to_response, save_response, static_transform
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
@@ -58,6 +58,19 @@ staticfiles(
     headers::Vector=[],
     loadfile::Nullable{Function}=nothing
 ) = Oxygen.Core.staticfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
+
+"""
+    dynamicfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
+
+Serve dynamic files from `folder` at the URL prefix `mountdir`.
+Files are re-read from disk on each request (no caching).
+"""
+dynamicfiles(
+    folder::String,
+    mountdir::String="static";
+    headers::Vector=[],
+    loadfile::Nullable{Function}=nothing
+) = Oxygen.Core.dynamicfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
 
 # --- Query parameter parsing (multi-value aware) ---
 
