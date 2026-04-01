@@ -639,9 +639,11 @@ _convert_param(val, ::Nothing) = val
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
-_convert_param(val::AbstractVector, T::Type{<:AbstractString}) = first(val)  # multi-value → first string
+_convert_param(val::AbstractVector, T::Type{<:AbstractString}) =
+    error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
 _convert_param(val::AbstractVector, T::Type{<:AbstractVector}) = val  # multi-value + Vector annotation → keep as-is
-_convert_param(val::AbstractVector, T::Type) = parse(T, first(val))  # multi-value → parse first
+_convert_param(val::AbstractVector, T::Type) =
+    error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
 _convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # single/empty → vector
 
 # Determine whether kwargs come from queryparams (GET/DELETE) or formdata (POST/PUT/PATCH).
