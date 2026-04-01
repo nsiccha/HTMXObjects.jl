@@ -1532,8 +1532,10 @@ Render an `<option>` tag. When given a `Pair` or `Tuple`, the first element is t
 value attribute and the second is the display label.
 """
 soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, kwargs...)
+_is_selected(value, selected_value) = value == selected_value
+_is_selected(value, selected_value::AbstractVector) = string(value) in string.(selected_value)
 soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
-    option; value, selected=string(value == selected_value), kwargs...
+    option; value, selected=string(_is_selected(value, selected_value)), kwargs...
 )
 
 """
