@@ -12,7 +12,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
-export Long, sinput, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, status_badge, nav_sidebar, lazy
+export Long, sinput, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1866,6 +1866,28 @@ tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id)
     ),
     [_tabset_panel(content, i, active) for (i, (_, content)) in enumerate(tabs)]...
 )
+
+"""
+    htmx_tabset(items; active=nothing, target="#content", ...)
+
+HTMX-driven tab row: each tab click fetches content from the server.
+`items` is a collection of `"Label" => url` pairs.
+`tab_attrs(label)` returns extra per-tab named-tuple attributes (e.g. hx_include).
+"""
+function htmx_tabset(items; active=nothing, target="#content",
+                     active_class="primary", inactive_class="secondary",
+                     btn_class="outline btn-xs",
+                     tab_attrs=Returns(NamedTuple()))
+    h.div(; class="tab-row")(
+        [h.a(label; role="button",
+            class=((active == label ? active_class : inactive_class) * " " * btn_class),
+            hx_get=url,
+            hx_target=target, hx_swap="outerHTML",
+            _="on click remove .$active_class from <a/> in closest <.tab-row/> then add .$inactive_class to <a/> in closest <.tab-row/> then remove .$inactive_class from me then add .$active_class to me",
+            tab_attrs(label)...)
+         for (label, url) in items]...
+    )
+end
 
 # --- Status badge ---
 
