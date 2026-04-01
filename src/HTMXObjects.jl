@@ -1377,9 +1377,14 @@ lazy(url; tag=h.div, swap="outerHTML", kwargs...) =
 """
     query_url(path; kwargs...) -> String
 
-Build a URL with properly escaped query parameters.
+Build a URL with properly escaped query parameters. Parameters with `nothing`
+values are omitted. Vector values produce repeated keys (`a=1&a=2`).
+
+New parameters are always **appended** — existing query parameters in `path`
+are preserved as-is (no deduplication or override).
 
     query_url("/search"; q="hello world", page=2)  # → "/search?q=hello%20world&page=2"
+    query_url("/search?q=hello"; page=2)            # → "/search?q=hello&page=2"
 """
 query_url(path; kwargs...) = begin
     filtered = filter(p -> !isnothing(p.second), pairs(kwargs))
@@ -1394,7 +1399,7 @@ query_url(path; kwargs...) = begin
             push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(v)))
         end
     end
-    isempty(parts) ? path : path * "?" * join(parts, "&")
+    isempty(parts) ? path : path * (occursin('?', path) ? "&" : "?") * join(parts, "&")
 end
 
 """
