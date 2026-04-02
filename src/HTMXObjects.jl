@@ -28,19 +28,51 @@ using Oxygen.Core: ServerContext, register, Nullable
 const CONTEXT :: Ref{ServerContext} = Ref(ServerContext(; mod=@__MODULE__))
 
 """
-    serve(; host="127.0.0.1", port=8080, async=false, revise=nothing, kwargs...)
+    serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing, kwargs...)
 
 Start the HTTP server. Passes all keyword arguments through to `Oxygen.Core.serve`.
 When `async=false` (the default), blocks until interrupted and calls [`terminate`](@ref) on exit.
+
+`parallel` controls request concurrency:
+- `false` — single-threaded (default)
+- `true` — multi-threaded on the `:default` threadpool (Oxygen's `serveparallel`)
+- `:interactive` — multi-threaded on the `:interactive` threadpool, leaving `:default`
+  free for heavy computation. Launch julia with e.g. `julia -t 8,4` for 8 computation
+  threads and 4 request-handling threads.
 """
-function serve(; kwargs...)
+function serve(; parallel=false, kwargs...)
     async = Base.get(kwargs, :async, false)
+    serve_kwargs = if parallel === :interactive
+        if Threads.nthreads(:interactive) <= 1
+            @warn "Only 1 interactive thread available. Launch julia with e.g. \"julia -t 8,4\" to add more interactive threads for request handling."
+        end
+        (; handler=_interactive_stream_handler, parallel=false, kwargs...)
+    else
+        (; parallel, kwargs...)
+    end
     try
-        return Oxygen.Core.serve(CONTEXT[]; kwargs...)
+        return Oxygen.Core.serve(CONTEXT[]; serve_kwargs...)
     finally
         if !async
             terminate()
         end
+    end
+end
+
+"""
+    _interactive_stream_handler(middleware::Function)
+
+Like Oxygen's `stream_handler` + `parallel_stream_handler`, but spawns each
+request on the `:interactive` threadpool instead of `:default`.
+"""
+function _interactive_stream_handler(middleware::Function)
+    base_handler = Oxygen.Core.stream_handler(middleware)
+    function (stream::HTTP.Stream)
+        task = Threads.@spawn :interactive begin
+            handle = @async base_handler(stream)
+            wait(handle)
+        end
+        wait(task)
     end
 end
 
