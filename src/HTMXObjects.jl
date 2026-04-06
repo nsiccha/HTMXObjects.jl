@@ -763,6 +763,11 @@ function _register_indexed_route(T, method, name, path, n_params, record_dir)
     end)
 end
 
+function _warn_docs_prefix(path, name)
+    startswith(lstrip(path, '/'), "docs") &&
+        @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — Oxygen reserves this prefix for its Swagger UI. The route will silently 404. Rename the route to avoid the \"/docs\" prefix."
+end
+
 function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[])
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
@@ -811,6 +816,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
         path = isempty(param_strs) ? base :
             base * "/" * join("{" .* param_strs .* "}", "/")
         name == :index && isempty(prefix) && (path = "/")
+        _warn_docs_prefix(path, name)
 
         # Detect trailing defaults for shortened route registration
         # Only need positions, not values — DynamicObjects handles defaults
@@ -942,6 +948,7 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
             base * "/" * join("{" .* param_strs .* "}", "/")
         # :index on nested struct → just the prefix path
         name == :index && (path = "/" * prefix)
+        _warn_docs_prefix(path, name)
 
         # Track kwargs-only paths for static recording
         !isnothing(record_dir) && isempty(param_strs) && has_kwargs && push!(_static_kwargs_paths, path)
