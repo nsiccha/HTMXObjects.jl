@@ -1481,8 +1481,10 @@ lazy(query_url("/pod_status"; pod=pod_id); tag=h.td, id="status-\$pod_id")
 
 Extra `kwargs` (e.g. `id`, `style`, `class`) are forwarded to the element.
 """
-lazy(url; tag=h.div, swap="outerHTML", kwargs...) =
-    tag(; hx_get=url, hx_trigger="load", hx_swap=swap, kwargs...)()
+lazy(url, content...; tag=h.div, swap="outerHTML", kwargs...) =
+    tag(; hx_get=url, hx_trigger="load", hx_swap=swap, kwargs...)(
+        (isempty(content) ? (h.progress(),) : content)...
+    )
 
 """
     query_url(path; kwargs...) -> String
