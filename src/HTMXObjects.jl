@@ -2034,7 +2034,7 @@ Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active
     nav_sidebar(["Overview" => "/overview", "Settings" => "/settings"]; prefix="/app")
 """
 function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
-    h.aside(
+    h.aside(; style="max-height:100vh; overflow-y:auto; position:sticky; top:0;")(
         h.nav(
             h.ul(
                 [h.li(h.a(label;
