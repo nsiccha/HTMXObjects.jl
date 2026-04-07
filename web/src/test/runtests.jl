@@ -6,7 +6,7 @@ using Random, HTMXObjects, HTTP, Tables
 @htmx struct TestApp
     title = "Test"
     @get index = h.h1(title)
-    @get item[id] = h.p("Item: $id")
+    @get item(id) = h.p("Item: $id")
 end
 
 @htmx struct IndexApp
@@ -14,7 +14,7 @@ end
 end
 
 @htmx struct AllDefaultsApp
-    @get viz[pn=""] = h.p("Viz: $(isempty(pn) ? "all" : pn)")
+    @get viz(; pn="") = h.p("Viz: $(isempty(pn) ? "all" : pn)")
 end
 
 @htmx struct PostApp
@@ -22,7 +22,7 @@ end
 end
 
 @htmx struct TypedApp
-    @get typed[n::Int] = h.p("N=$n")
+    @get typed(n::Int) = h.p("N=$n")
 end
 
 @htmx struct NothingDefaultApp
@@ -32,7 +32,7 @@ end
 
 @htmx struct RecordApp
     @get index = h.h1("Home")
-    @get post[id] = h.p("Post $id")
+    @get post(id) = h.p("Post $id")
 end
 
 # --- Tests ---
@@ -111,7 +111,7 @@ end
     @test app.title == "Test"
     html = repr("text/html", app.index)
     @test contains(html, "Test")
-    html = repr("text/html", app.item["foo"])
+    html = repr("text/html", app.item("foo"))
     @test contains(html, "foo")
     props = DynamicObjects.meta(TestApp)
     @test Symbol("@get") in props[:index].macros
@@ -127,12 +127,10 @@ end
 
 @testset "indexed property with all-default indices" begin
     app = AllDefaultsApp()
-    html = repr("text/html", app.viz["test"])
+    html = repr("text/html", app.viz(; pn="test"))
     @test contains(html, "Viz: test")
-    html = repr("text/html", app.viz[""])
+    html = repr("text/html", app.viz(; pn=""))
     @test contains(html, "Viz: all")
-    ip = app.viz
-    @test ip isa DynamicObjects.IndexableProperty
 end
 
 @testset "htmx() full-page template" begin
@@ -260,7 +258,7 @@ end
 
 @testset "type conversion in indexed routes" begin
     app = TypedApp()
-    html = repr("text/html", app.typed[42])
+    html = repr("text/html", app.typed(42))
     @test contains(html, "N=42")
     props = DynamicObjects.meta(TypedApp)
     @test haskey(props, :typed)

@@ -169,18 +169,46 @@ function _wrap_ws_bodies!(struct_expr)
 end
 
 # Find inline struct properties: prop = struct Name ... end
-# Returns list of property name Symbols.
+# Returns list of (prop_name, child_struct_name) pairs.
 function _find_inline_structs(struct_expr)
+    parent_name = _struct_type_name(struct_expr)
     body = struct_expr.args[3]
-    result = Symbol[]
+    result = Tuple{Symbol, Symbol}[]
     for arg in body.args
         arg isa Expr || continue
         if Meta.isexpr(arg, :(=)) && Meta.isexpr(arg.args[2], :struct)
             lhs = arg.args[1]
             Meta.isexpr(lhs, (:call, :ref)) && (lhs = lhs.args[1])
             Meta.isexpr(lhs, :(::)) && (lhs = lhs.args[1])
-            lhs isa Symbol && push!(result, lhs)
+            child_name = arg.args[2].args[2]  # struct Name from `prop = struct Name ... end`
+            # DO renames child to Parent_ChildName
+            gen_name = Symbol(parent_name, "_", child_name)
+            lhs isa Symbol && push!(result, (lhs, gen_name))
         end
+    end
+    result
+end
+
+# Find @include external struct properties: @include prop = ExternalStruct(; ...)
+# Returns list of (prop_name, type_name_expr) pairs.
+function _find_include_externals(struct_expr)
+    body = struct_expr.args[3]
+    result = Tuple{Symbol, Any}[]
+    for arg in body.args
+        arg isa Expr || continue
+        expr = arg
+        while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@include")
+            expr = expr.args[end]
+        end
+        Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@include") || continue
+        inner = expr.args[end]
+        inner isa Expr && inner.head == :(=) || continue
+        prop_name = inner.args[1]
+        rhs = inner.args[2]
+        # RHS should be a call like ExternalStruct(; req, ...) — extract the type
+        Meta.isexpr(rhs, :call) || continue
+        type_expr = rhs.args[1]
+        push!(result, (prop_name, type_expr))
     end
     result
 end
@@ -195,10 +223,45 @@ end
 
 # Default: no inline struct properties.
 _inline_struct_props(::Type) = ()
+# Default: no nested struct type known.
+_nested_struct_type(::Type, ::Val) = nothing
+
+"""
+    _convert_include_to_struct!(struct_expr)
+
+Pre-process: convert `@include prop = begin...end` to `prop = struct _Include_prop ... end`.
+`@include prop = ExternalStruct(...)` is left as-is (just a metadata marker for route registration).
+"""
+function _convert_include_to_struct!(struct_expr)
+    body = struct_expr.args[3]
+    for (i, arg) in enumerate(body.args)
+        arg isa Expr || continue
+        # Walk through nested macrocall layers to find @include
+        expr = arg
+        while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@include")
+            expr = expr.args[end]
+        end
+        Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@include") || continue
+        inner = expr.args[end]
+        inner isa Expr && inner.head == :(=) || continue
+        prop_name = inner.args[1]
+        rhs = inner.args[2]
+        # Only convert begin...end blocks; leave ExternalStruct(...) calls as-is
+        Meta.isexpr(rhs, :block) || continue
+        # Convert to: prop = struct _Include_prop ... end
+        struct_name = Symbol("_Include_", prop_name)
+        child_struct = Expr(:struct, false, struct_name, rhs)
+        # Replace the @include macrocall with the struct assignment
+        body.args[i] = :($prop_name = $child_struct)
+    end
+    struct_expr
+end
 
 function _htmx_transform(struct_expr; reroute=true, kwargs...)
+    _convert_include_to_struct!(struct_expr)
     _wrap_ws_bodies!(struct_expr)
     inline_props = _find_inline_structs(struct_expr)
+    include_externals = _find_include_externals(struct_expr)
     route_info = _extract_route_info(struct_expr)
     block = DynamicObjects.dynamicstruct(struct_expr;
         child_handler=s -> _htmx_transform(s; reroute=false), kwargs...)
@@ -208,12 +271,25 @@ function _htmx_transform(struct_expr; reroute=true, kwargs...)
     for ri in route_info
         push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.pos_params, ri.kw_params))
     end
-    # Emit _inline_struct_props so _register_routes knows which properties to recurse into
-    if !isempty(inline_props)
+    # Emit _nested_struct_type methods for inline structs and @include externals
+    _type_fname = Expr(:., @__MODULE__, QuoteNode(:_nested_struct_type))
+    for (prop, child_type) in inline_props
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
+            child_type))
+    end
+    for (prop, type_expr) in include_externals
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
+            type_expr))
+    end
+    # Emit _inline_struct_props for backward compat
+    all_nested = Symbol[p for (p, _) in inline_props]
+    if !isempty(all_nested)
         _fname = Expr(:., @__MODULE__, QuoteNode(:_inline_struct_props))
         push!(block.args[1].args, Expr(:(=),
             Expr(:call, _fname, :(::Type{$type_name})),
-            Tuple(inline_props)))
+            Tuple(all_nested)))
     end
     reroute && push!(block.args[1].args, :($(_reroute!)($type_name)))
     block
@@ -772,23 +848,12 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
 
-        # Handle nested structs: @include or inline struct definitions
-        if Symbol("@include") in info.macros || name in _inline_struct_props(T)
-            # Extract nested type from RHS (e.g. TestRoutes from TestRoutes(; req, ...))
-            nested_type = nothing
-            try
-                # Construct a dummy instance to discover the nested type
-                dummy = T(; req=nothing)
-                nested_val = getproperty(dummy, name)
-                nested_type = typeof(nested_val)
-            catch
-            end
-            if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
-                nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
-                chain = vcat(parent_chain, [name])
-                # Register nested routes with chained handlers
-                _register_included_routes(T, nested_type, chain, nested_prefix, record_dir)
-            end
+        # Handle nested structs: inline struct definitions or @include externals
+        nested_type = _nested_struct_type(T, Val(name))
+        if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
+            nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
+            chain = vcat(parent_chain, [name])
+            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir)
             continue
         end
 
@@ -906,20 +971,11 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
     for (name, info) in DynamicObjects.meta(NestedT)
         DynamicObjects.isfixed(info) && continue
 
-        # Recurse into nested structs: @include or inline struct definitions
-        if Symbol("@include") in info.macros || name in _inline_struct_props(NestedT)
-            nested_type = nothing
-            try
-                dummy = ParentT(; req=nothing)
-                obj = foldl((o, n) -> getproperty(o, n), chain; init=dummy)
-                nested_val = getproperty(obj, name)
-                nested_type = typeof(nested_val)
-            catch
-            end
-            if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
-                _register_included_routes(ParentT, nested_type, vcat(chain, [name]),
-                    prefix * "/" * string(name), record_dir)
-            end
+        # Recurse into nested structs: inline struct definitions or @include externals
+        nested_type = _nested_struct_type(NestedT, Val(name))
+        if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
+            _register_included_routes(ParentT, nested_type, vcat(chain, [name]),
+                prefix * "/" * string(name), record_dir)
             continue
         end
 
