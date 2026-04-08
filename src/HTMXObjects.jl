@@ -980,20 +980,33 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
     end)
 end
 
-"""Collect all objects along the property chain that define a `page` property, in order from root to leaf."""
+"""
+    _collect_page_chain(root, chain) -> Vector
+
+Walk the property chain from `root` and collect objects that define a `page` property.
+Deduplicates inherited pages: if a nested struct's `page` property type matches its
+parent's (i.e. inherited via inline struct), it is skipped.
+
+Never use `DynamicObjects.meta` to inspect properties — use `hasproperty` and type checks.
+"""
 function _collect_page_chain(root, chain)
     pages = Any[]
-    has_root = hasproperty(root, :page)
-    has_root && push!(pages, root)
-    @debug "page_chain" root_type=typeof(root) has_root chain
+    hasproperty(root, :page) && push!(pages, root)
     obj = root
     for name in chain
+        prev_type = typeof(obj)
         obj = getproperty(obj, name)
-        has = hasproperty(obj, :page)
-        has && push!(pages, obj)
-        @debug "page_chain step" name obj_type=typeof(obj) has_page=has
+        if hasproperty(obj, :page)
+            # Skip if the page property is inherited (same defining type as parent)
+            prev_type == typeof(obj) && continue
+            # Skip if the page property type is a child of the previous page owner
+            # (inline structs inherit parent properties — detect by type name prefix)
+            obj_name = string(nameof(typeof(obj)))
+            prev_name = string(nameof(prev_type))
+            startswith(obj_name, prev_name * "_") && continue
+            push!(pages, obj)
+        end
     end
-    @debug "page_chain result" n_pages=length(pages) types=typeof.(pages)
     pages
 end
 
