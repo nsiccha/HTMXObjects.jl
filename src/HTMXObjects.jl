@@ -983,12 +983,17 @@ end
 """Collect all objects along the property chain that define a `page` property, in order from root to leaf."""
 function _collect_page_chain(root, chain)
     pages = Any[]
-    hasproperty(root, :page) && push!(pages, root)
+    has_root = hasproperty(root, :page)
+    has_root && push!(pages, root)
+    @debug "page_chain" root_type=typeof(root) has_root chain
     obj = root
     for name in chain
         obj = getproperty(obj, name)
-        hasproperty(obj, :page) && push!(pages, obj)
+        has = hasproperty(obj, :page)
+        has && push!(pages, obj)
+        @debug "page_chain step" name obj_type=typeof(obj) has_page=has
     end
+    @debug "page_chain result" n_pages=length(pages) types=typeof.(pages)
     pages
 end
 
