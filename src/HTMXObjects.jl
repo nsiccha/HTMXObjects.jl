@@ -946,6 +946,20 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
 end
 
 # Register a single included route handler with chained property access through the parent.
+"""
+    _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
+
+Register a route handler for a nested `@include` struct property.
+
+For direct browser visits (non-HTMX), the response is wrapped by nesting all `page`
+wrappers found along the property chain from root to leaf. If the root defines `page`
+and a nested struct also defines `page`, the result is
+`root.page(nested.page(fragment))` — innermost wraps first, then each ancestor.
+
+# TODO: add an API to opt out of page nesting for specific structs (e.g. a `page_nest=false`
+# property or a `_page_passthrough` convention) for cases where a nested struct wants to
+# fully replace the parent's page rather than compose with it.
+"""
 function _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
     base = _base_segments(path)
     _register_handler(method, path, function(req)
@@ -960,8 +974,49 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
             end
         end
         sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
-        _resolve_response(parent, req, val; record_dir, save_path=sp)
+        # Collect page wrappers along the chain (root → ... → nested) for nesting.
+        page_chain = _collect_page_chain(parent, chain)
+        _resolve_response_nested(page_chain, req, val; record_dir, save_path=sp)
     end)
+end
+
+"""Collect all objects along the property chain that define a `page` property, in order from root to leaf."""
+function _collect_page_chain(root, chain)
+    pages = Any[]
+    hasproperty(root, :page) && push!(pages, root)
+    obj = root
+    for name in chain
+        obj = getproperty(obj, name)
+        hasproperty(obj, :page) && push!(pages, obj)
+    end
+    pages
+end
+
+"""Like `_resolve_response`, but applies nested page wrappers (innermost first, then outward)."""
+function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save_path=nothing)
+    val isa HTTP.Response && return val
+    if wants_errors(req)
+        val = filter_errors(val)
+        isnothing(val) && return markdown_response("(no errors)")
+    end
+    if !isnothing(record_dir) && !isnothing(save_path)
+        save_response(record_dir, save_path, to_response(static_transform(val)))
+    end
+    if wants_markdown(req)
+        # Use the innermost (last) struct for markdown, if any
+        obj = isempty(page_chain) ? nothing : last(page_chain)
+        if !isnothing(obj) && hasproperty(obj, :to_markdown)
+            return to_response(getproperty(obj, :to_markdown)[val])
+        else
+            return markdown_response(to_markdown_string(val))
+        end
+    end
+    is_htmx(req) && return to_response(val)
+    # Apply page wrappers: innermost (last) wraps first, then each outer one
+    for obj in reverse(page_chain)
+        val = getproperty(obj, :page)[val]
+    end
+    to_response(val)
 end
 
 # Register routes from a nested @include struct with chained property access through the parent.
