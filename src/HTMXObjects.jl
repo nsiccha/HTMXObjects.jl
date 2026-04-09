@@ -120,10 +120,16 @@ function queryparams(req::HTTP.Request)
     query = HTTP.URI(req.target).query
     isempty(query) && return Dict{String, Union{String, Vector{String}}}()
     d = Dict{String, Union{String, Vector{String}}}()
+    # Query strings are form-encoded: '+' represents a space. `unescapeuri` only
+    # does percent-decoding, so translate '+' → ' ' before unescaping. Without
+    # this, URLs written via JS `URLSearchParams.toString()` (which form-encodes
+    # spaces as '+') round-trip spaces as literal '+' characters and break
+    # downstream lookups.
+    _form_unescape(s) = String(HTTP.URIs.unescapeuri(replace(s, '+' => ' ')))
     for part in split(query, "&", keepempty=false)
         kv = split(part, "=", limit=2)
-        k = String(HTTP.URIs.unescapeuri(kv[1]))
-        v = length(kv) >= 2 ? String(HTTP.URIs.unescapeuri(kv[2])) : ""
+        k = _form_unescape(kv[1])
+        v = length(kv) >= 2 ? _form_unescape(kv[2]) : ""
         if haskey(d, k)
             existing = d[k]
             if existing isa String
