@@ -1401,7 +1401,7 @@ function render_table(table; id=nothing, sortable=true, cell=nothing, class="str
     isnothing(id) && (id = "tbl-" * string(hash(cols), base=16))
 
     headers = if sortable
-        [h.th(string(c); _="on click call sortTable($(i-1), me)", style="cursor:pointer")
+        [h.th(string(c); onclick="sortTable($(i-1), this)", style="cursor:pointer")
          for (i, c) in enumerate(cols)]
     else
         [h.th(string(c)) for c in cols]
