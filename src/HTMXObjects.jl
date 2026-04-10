@@ -12,7 +12,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
-export Long, sinput, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
+export Long, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -1696,6 +1696,55 @@ sinput(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs
         h.select([
             soption(option; selected_value=value) for option in options
         ]...; name, aria_label=label, kwargs...);
+        show_attrs...
+    )
+end
+
+"""
+    sinput_custom(name, options; label=Long(name), value=nothing, show_when=nothing, placeholder="Add custom…", kwargs...)
+
+Like [`sinput`](@ref), but includes a text input and button for adding custom
+options client-side. The custom value is appended to the `<select>` and
+auto-selected so it is included in form submissions. Duplicates are skipped.
+
+Extra `kwargs` go on the `<select>`.
+"""
+sinput_custom(name, options; label=Long(name), value=nothing, show_when=nothing, placeholder="Add custom…", kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    # unique id suffix for wiring the JS
+    uid = string(hash(name), base=16)
+    sel_id = "sinput_custom_sel_$(uid)"
+    inp_id = "sinput_custom_inp_$(uid)"
+    # Include any selected values not in the predefined options
+    option_values = Set(string.([o isa Pair ? first(o) : o for o in options]))
+    extra_options = isnothing(value) ? [] : [v for v in (value isa AbstractVector ? value : [value]) if !(string(v) in option_values)]
+    all_options = vcat(options, extra_options)
+    h.label(
+        label,
+        h.div(
+            h.select([
+                soption(option; selected_value=value) for option in all_options
+            ]...; id=sel_id, name, aria_label=label, kwargs...),
+            h.span(
+                h.input(; id=inp_id, type="text", placeholder,
+                    style="min-width:0;flex:1",
+                    onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click()}"),
+                h.button("Add"; type="button", onclick="""
+                    (function(){
+                        var inp=document.getElementById('$(inp_id)');
+                        var sel=document.getElementById('$(sel_id)');
+                        var v=inp.value.trim();
+                        if(!v) return;
+                        for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){sel.options[i].selected=true;inp.value='';return;}}
+                        var o=document.createElement('option');
+                        o.value=v;o.text=v;o.selected=true;
+                        sel.add(o);inp.value='';
+                        sel.dispatchEvent(new Event('change',{bubbles:true}));
+                    })()
+                """);
+                style="display:flex;gap:0.25em;margin-top:0.25em"
+            )
+        );
         show_attrs...
     )
 end
