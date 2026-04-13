@@ -1,6 +1,6 @@
 # Blog app demonstrating:
 #   - derived properties for data and UI fragments
-#   - indexed routes (@get post[id])
+#   - indexed routes (@get post(id))
 #   - mutable state with @cached and @persist
 #   - @post for adding new posts via a form
 #   - recording to a static site (non-GET actions greyed out)
@@ -43,7 +43,7 @@ using HTMXObjects
         ),
     )
 
-    page[content] = htmx(
+    page(content) = htmx(
         h.main(class="container")(
             nav,
             h.div(class="grid")(
@@ -54,11 +54,11 @@ using HTMXObjects
         pico_version="2",
     )
 
-    @get index = page[h.p("Select a post from the list.")]
+    @get index = page(h.p("Select a post from the list."))
 
     # Fragment: renders the post body into #content via hx-target.
     # The sidebar remains untouched — only #content is swapped.
-    @get post[id] = let p = posts[findfirst(p -> p.id == id, posts)]
+    @get post(id) = let p = posts[findfirst(p -> p.id == id, posts)]
         fragment = h.article(
             h.header(h.h2(p.title)),
             h.p(p.body),
@@ -66,7 +66,7 @@ using HTMXObjects
         if is_htmx(req)
             fragment
         else
-            page[fragment]
+            page(fragment)
         end
     end
 
