@@ -35,6 +35,38 @@ end
     @get post(id) = h.p("Post $id")
 end
 
+@htmx struct ParamApp
+    req = nothing
+    @param vessels::Vector{String} = ["Tablet-20"]
+    @param n_bootstrap::String = "10"
+    @param note = "default-note"
+    @get index = h.div("vessels=$(join(vessels, ",")) n=$n_bootstrap note=$note")
+    child = struct ChildView
+        @get show = h.p("child sees: $(join(vessels, ",")) / $n_bootstrap")
+    end
+end
+
+@htmx struct ParamBlockApp
+    req = nothing
+    @param begin
+        a::Int = 1
+        b::String = "x"
+    end
+    @get index = h.p("a=$a b=$b")
+end
+
+@htmx struct ParamRequiredApp
+    req = nothing
+    @param fit_key::String
+    @get index = h.p("fit=$fit_key")
+end
+
+@htmx struct ParamPostApp
+    req = nothing
+    @param name::String = "anon"
+    @post submit = h.p("submit $name")
+end
+
 # --- Tests ---
 
 @testset "auto - HTML rendering" begin
@@ -534,6 +566,107 @@ end
     node2 = nav_sidebar(("X" => "/x",))
     html2 = repr("text/html", node2)
     @test contains(html2, "href=\"/x\"")
+end
+
+@testset "@param — basic" begin
+    # Defaults when request has nothing
+    req = HTTP.Request("GET", "/")
+    app = ParamApp(; req)
+    @test app.vessels == ["Tablet-20"]
+    @test app.n_bootstrap == "10"
+    @test app.note == "default-note"
+
+    # Typed vector param with repeated key
+    req = HTTP.Request("GET", "/?vessels=A&vessels=B&n_bootstrap=42")
+    app = ParamApp(; req)
+    @test app.vessels == ["A", "B"]
+    @test app.n_bootstrap == "42"
+    @test app.note == "default-note"
+
+    # Single value promoted to vector for Vector{String} type
+    req = HTTP.Request("GET", "/?vessels=solo")
+    app = ParamApp(; req)
+    @test app.vessels == ["solo"]
+end
+
+@testset "@param — inline child inherits params" begin
+    req = HTTP.Request("GET", "/?vessels=X&vessels=Y&n_bootstrap=5")
+    app = ParamApp(; req)
+    @test app.child.vessels == ["X", "Y"]
+    @test app.child.n_bootstrap == "5"
+end
+
+@testset "@param — block form" begin
+    req = HTTP.Request("GET", "/?a=42&b=hello")
+    app = ParamBlockApp(; req)
+    @test app.a == 42
+    @test app.b == "hello"
+
+    req = HTTP.Request("GET", "/")
+    app = ParamBlockApp(; req)
+    @test app.a == 1
+    @test app.b == "x"
+end
+
+@testset "@param — required throws on miss" begin
+    req = HTTP.Request("GET", "/")
+    app = ParamRequiredApp(; req)
+    @test_throws KeyError app.fit_key
+
+    req = HTTP.Request("GET", "/?fit_key=abc")
+    app = ParamRequiredApp(; req)
+    @test app.fit_key == "abc"
+end
+
+@testset "@param — POST reads formdata" begin
+    req = HTTP.Request("POST", "/submit",
+        ["Content-Type" => "application/x-www-form-urlencoded"],
+        "name=bob")
+    app = ParamPostApp(; req)
+    @test app.name == "bob"
+
+    req = HTTP.Request("POST", "/submit",
+        ["Content-Type" => "application/x-www-form-urlencoded"], "")
+    app = ParamPostApp(; req)
+    @test app.name == "anon"
+end
+
+@testset "_param_names emission" begin
+    @test HTMXObjects._param_names(ParamApp) == (:vessels, :n_bootstrap, :note)
+    # Inline child inherits parent's param names
+    child_type = HTMXObjects._nested_struct_type(ParamApp, Val(:child))
+    @test HTMXObjects._param_names(child_type) == (:vessels, :n_bootstrap, :note)
+    # Structs without any @param get the default empty tuple
+    @test HTMXObjects._param_names(TestApp) == ()
+end
+
+@testset "query_url(path, obj)" begin
+    # Only params actually present in the request are emitted
+    req = HTTP.Request("GET", "/?vessels=A&vessels=B")
+    app = ParamApp(; req)
+    url = query_url("/plot", app)
+    @test contains(url, "vessels=A")
+    @test contains(url, "vessels=B")
+    @test !contains(url, "n_bootstrap")
+    @test !contains(url, "note")
+
+    # Nothing present → bare path
+    req = HTTP.Request("GET", "/")
+    app = ParamApp(; req)
+    @test query_url("/plot", app) == "/plot"
+
+    # Overrides always win, even when absent from request
+    req = HTTP.Request("GET", "/")
+    app = ParamApp(; req)
+    url = query_url("/plot", app; note="forced")
+    @test contains(url, "note=forced")
+
+    # Override replaces a present value
+    req = HTTP.Request("GET", "/?n_bootstrap=10")
+    app = ParamApp(; req)
+    url = query_url("/plot", app; n_bootstrap="99")
+    @test contains(url, "n_bootstrap=99")
+    @test !contains(url, "n_bootstrap=10")
 end
 
 @testset "@query_url" begin

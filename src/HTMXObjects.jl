@@ -263,14 +263,109 @@ function _convert_include_to_struct!(struct_expr)
     struct_expr
 end
 
-function _htmx_transform(struct_expr; reroute=true, kwargs...)
+# Default: no @param properties declared.
+_param_names(::Type) = ()
+
+"""
+    _convert_params!(struct_expr) -> Vector{Symbol}
+
+Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
+to plain derived-property assignments that call `_extract_param(req, ...)` at
+property-access time. Supports:
+
+    @param vessels::Vector{String} = ["Tablet-20"]
+    @param fit_key::String                             # required, errors on miss
+    @param note = "hi"                                 # untyped, with default
+    @param begin
+        vessels::Vector{String} = ["Tablet-20"]
+        n_bootstrap::String     = "10"
+    end
+
+Returns the ordered list of declared param names for later `_param_names` emission.
+Assumes the enclosing struct exposes `req` as a property (the standard
+`req = nothing` idiom).
+"""
+function _convert_params!(struct_expr)
+    body = struct_expr.args[3]
+    names = Symbol[]
+    new_args = Any[]
+    for arg in body.args
+        if !(arg isa Expr)
+            push!(new_args, arg); continue
+        end
+        if Meta.isexpr(arg, :macrocall) && arg.args[1] === Symbol("@param")
+            # Strip the LineNumberNode that follows the macro name
+            payload = [a for a in arg.args[2:end] if !(a isa LineNumberNode)]
+            # Block form: @param begin ... end → expand each line
+            if length(payload) == 1 && Meta.isexpr(payload[1], :block)
+                for inner in payload[1].args
+                    inner isa LineNumberNode && (push!(new_args, inner); continue)
+                    rewritten = _rewrite_param_line(inner)
+                    rewritten === nothing && continue
+                    push!(names, rewritten[1])
+                    push!(new_args, rewritten[2])
+                end
+            else
+                # Single-line form: @param vessels::T = default
+                # Multiple payload elements are a tuple literal (comma-separated)
+                for inner in payload
+                    rewritten = _rewrite_param_line(inner)
+                    rewritten === nothing && continue
+                    push!(names, rewritten[1])
+                    push!(new_args, rewritten[2])
+                end
+            end
+        else
+            push!(new_args, arg)
+        end
+    end
+    body.args = new_args
+    names
+end
+
+# Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
+# and return `(name_sym, rewritten_assignment)` or `nothing` if unrecognized.
+function _rewrite_param_line(expr)
+    default_expr = nothing
+    type_expr = nothing
+    lhs = expr
+    if Meta.isexpr(expr, :(=))
+        lhs = expr.args[1]
+        default_expr = expr.args[2]
+    end
+    name_sym = nothing
+    if lhs isa Symbol
+        name_sym = lhs
+    elseif Meta.isexpr(lhs, :(::)) && length(lhs.args) == 2 && lhs.args[1] isa Symbol
+        name_sym = lhs.args[1]
+        type_expr = lhs.args[2]
+    else
+        return nothing
+    end
+    t = type_expr === nothing ? :nothing : type_expr
+    rhs = default_expr === nothing ?
+        :($(_extract_param)(req, $(QuoteNode(name_sym)), $t)) :
+        :($(_extract_param)(req, $(QuoteNode(name_sym)), $t, $default_expr))
+    (name_sym, Expr(:(=), name_sym, rhs))
+end
+
+function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwargs...)
     _convert_include_to_struct!(struct_expr)
     _wrap_ws_bodies!(struct_expr)
+    own_params = _convert_params!(struct_expr)
+    # Merge: parent params first (preserve order), then own, deduplicated.
+    param_names = Symbol[]
+    for n in parent_params
+        n in param_names || push!(param_names, n)
+    end
+    for n in own_params
+        n in param_names || push!(param_names, n)
+    end
     inline_props = _find_inline_structs(struct_expr)
     include_externals = _find_include_externals(struct_expr)
     route_info = _extract_route_info(struct_expr)
     block = DynamicObjects.dynamicstruct(struct_expr;
-        child_handler=s -> _htmx_transform(s; reroute=false), kwargs...)
+        child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names), kwargs...)
     type_name = _struct_type_name(struct_expr)
     @assert Meta.isexpr(block, :escape)
     # Emit _extract_args methods for each route property
@@ -288,6 +383,13 @@ function _htmx_transform(struct_expr; reroute=true, kwargs...)
         push!(block.args[1].args, Expr(:(=),
             Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
             type_expr))
+    end
+    # Emit _param_names method if this struct declared any @param properties
+    if !isempty(param_names)
+        _pn_fname = Expr(:., @__MODULE__, QuoteNode(:_param_names))
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _pn_fname, :(::Type{$type_name})),
+            Tuple(param_names)))
     end
     # Emit _inline_struct_props for backward compat
     all_nested = Symbol[p for (p, _) in inline_props]
@@ -382,32 +484,23 @@ function _generate_extract_args(type_name, prop_name, pos_params, kw_params)
         push!(pos_stmts, :($i <= __n_params__ && push!(__idx__, $convert_call)))
     end
 
-    # Build kwarg conversion statements
+    # Build kwarg conversion statements — delegate per-key lookup to `_lookup_param`
+    # so @param, @get, @post, etc. share one parsing path.
     kw_stmts = Expr[]
     for (kname, ktype, has_default) in kw_params
-        kname_str = string(kname)
-        convert_call = ktype === nothing ? :(__v__) : :($(_convert_param)(__v__, $ktype))
-        lookup_expr = quote
-            __v__ = get(__src__, $kname_str, nothing)
-            (__v__ === nothing || __v__ == "") && __fallback__ !== nothing && (__v__ = get(__fallback__, $kname_str, nothing))
-        end
+        type_expr = ktype === nothing ? :nothing : ktype
+        lookup_call = :($(_lookup_param)(__src__, __fallback__, $(QuoteNode(kname)), $type_expr))
         if has_default
             push!(kw_stmts, quote
-                let __v__ = nothing
-                    $lookup_expr
-                    if __v__ !== nothing && __v__ != ""
-                        push!(__kw__, $(QuoteNode(kname)) => $convert_call)
-                    end
+                let __v__ = $lookup_call
+                    __v__ isa $(_NoDefault) || push!(__kw__, $(QuoteNode(kname)) => __v__)
                 end
             end)
         else
             push!(kw_stmts, quote
-                let __v__ = nothing
-                    $lookup_expr
-                    if __v__ === nothing || __v__ == ""
-                        __src__[$kname_str]  # KeyError for missing required kwarg
-                    end
-                    push!(__kw__, $(QuoteNode(kname)) => $convert_call)
+                let __v__ = $lookup_call
+                    __v__ isa $(_NoDefault) && throw(KeyError($(QuoteNode(kname))))
+                    push!(__kw__, $(QuoteNode(kname)) => __v__)
                 end
             end)
         end
@@ -778,6 +871,54 @@ const _queryparams_verbs = Set(["GET", "DELETE"])
 function _kwargs_source(req, method)
     method in _queryparams_verbs && return queryparams(req)
     isempty(HTTP.payload(req)) ? Dict{String, Any}() : formdata(req)
+end
+
+# Sentinel for "no default provided" / "key was absent". Distinguishes required
+# params from those defaulting to `nothing`, and acts as the missing-marker
+# returned by `_lookup_param`.
+struct _NoDefault end
+const _NO_DEFAULT = _NoDefault()
+
+"""
+    _lookup_param(src, fallback, name, T) -> value or _NO_DEFAULT
+
+Low-level parameter lookup shared by `_extract_param` and the route-macro's
+generated `_extract_args` methods. Given a precomputed primary source dict and
+optional fallback dict (e.g. queryparams for POST), look up `name`, apply
+`_convert_param(value, T)` when present, or return the `_NO_DEFAULT` sentinel
+when the key is absent/empty so callers can decide between default or error.
+"""
+function _lookup_param(src, fallback, name, T)
+    key = String(name)
+    v = get(src, key, nothing)
+    if (v === nothing || v == "") && fallback !== nothing
+        v = get(fallback, key, nothing)
+    end
+    (v === nothing || v == "") && return _NO_DEFAULT
+    _convert_param(v, T)
+end
+
+"""
+    _extract_param(req, name, T, default=_NO_DEFAULT) -> value
+
+Extract a single typed parameter from an HTTP request, mirroring the behavior of
+`@get`/`@post` kwarg extraction. Looks up `name` in the method-appropriate source
+(`queryparams` for GET/DELETE, `formdata` for POST/PUT/PATCH with a `queryparams`
+fallback), converts via `_convert_param(value, T)`, and returns `default` when the
+key is absent or empty. Throws `KeyError(name)` if no default was supplied.
+
+`T` may be `nothing` for untyped params (raw `String`/`Vector{String}`).
+"""
+function _extract_param(req, name, T, default=_NO_DEFAULT)
+    method = req.method
+    src = _kwargs_source(req, method)
+    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
+    v = _lookup_param(src, fallback, name, T)
+    if v isa _NoDefault
+        default isa _NoDefault && throw(KeyError(name))
+        return default
+    end
+    v
 end
 
 # Register a route handler directly on the HTTP router, bypassing Oxygen's
@@ -1591,6 +1732,35 @@ query_url(path; kwargs...) = begin
         end
     end
     isempty(parts) ? path : path * (occursin('?', path) ? "&" : "?") * join(parts, "&")
+end
+
+"""
+    query_url(path, obj; overrides...) -> String
+
+Build a URL from `path`, auto-collecting every `@param` declared on `obj`'s type
+that is actually present in the inbound request (`obj.req`). Params with no
+declared `@param` are ignored; params not present in the request are omitted
+(so the URL only carries what the user explicitly set, and defaults remain
+implicit). Explicit `overrides` always win and are emitted even if absent from
+the request.
+
+Presence is checked against `queryparams(obj.req)` regardless of the inbound
+request method — `query_url` always builds GET-style URLs.
+"""
+function query_url(path, obj; overrides...)
+    names = _param_names(typeof(obj))
+    override_keys = Set(keys(overrides))
+    present = queryparams(obj.req)
+    kws = Pair{Symbol,Any}[]
+    for n in names
+        n in override_keys && continue
+        haskey(present, String(n)) || continue
+        push!(kws, n => getproperty(obj, n))
+    end
+    for (k, v) in pairs(overrides)
+        push!(kws, k => v)
+    end
+    query_url(path; kws...)
 end
 
 """
