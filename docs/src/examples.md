@@ -40,8 +40,6 @@ page reload.
 
 ```julia
 @htmx struct CounterApp
-    req = nothing
-
     counter_ui[n::Int] = h.div(id="counter")(
         h.p("Count: $n"),
         h.button(hx_get="/increment/$n", hx_target="#counter", hx_swap="outerHTML")("+"),

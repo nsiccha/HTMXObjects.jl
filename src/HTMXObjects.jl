@@ -176,15 +176,15 @@ function _wrap_ws_bodies!(struct_expr)
 end
 
 """
-    _warn_legacy_page_name!(struct_expr)
+    _warn_legacy_name!(struct_expr, legacy::Symbol, replacement::Symbol)
 
-Scan the struct body for property definitions named `page` and emit a
-deprecation `@warn`. The framework-managed name is `__page__`; the legacy
-`page` still resolves at runtime via `_page_wrapper`, but new code should use
-the dunder form. The warning includes the `file:line` from the nearest
+Scan the struct body for top-level property definitions named `legacy` and
+emit a deprecation `@warn` pointing at `replacement`. Skips route-marked
+properties (so `@get legacy(...)` — a user route literally named `legacy` —
+is not flagged). The warning includes `file:line` from the nearest
 `LineNumberNode` so the fix is mechanical.
 """
-function _warn_legacy_page_name!(struct_expr)
+function _warn_legacy_name!(struct_expr, legacy::Symbol, replacement::Symbol)
     body = struct_expr.args[3]
     route_macros = _route_macros()
     lnn = nothing
@@ -194,17 +194,13 @@ function _warn_legacy_page_name!(struct_expr)
             continue
         end
         arg isa Expr || continue
-        # Skip route-marked properties entirely — `@get page(...)` is a user
-        # route named "page", not the framework wrapper.
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
             continue
         end
-        # Peel non-route macrocall wrappers
         inner = arg
         while Meta.isexpr(inner, :macrocall)
             inner = inner.args[end]
         end
-        # Property definitions are assignments; extract the LHS name symbol
         Meta.isexpr(inner, :(=)) || continue
         lhs = inner.args[1]
         name = if lhs isa Symbol
@@ -216,10 +212,111 @@ function _warn_legacy_page_name!(struct_expr)
         else
             nothing
         end
-        if name === :page
+        if name === legacy
             loc = isnothing(lnn) ? "" : " (near $(lnn.file):$(lnn.line))"
-            @warn "Deprecated: `page` is a legacy framework property name — rename to `__page__`$loc. The legacy name still works but will be emitted as a warning on every macro expansion."
+            @warn "Deprecated: `$legacy` is a legacy framework property name — rename to `$replacement`$loc. The legacy name still works but will be emitted as a warning on every macro expansion."
         end
+    end
+    struct_expr
+end
+
+_warn_legacy_page_name!(struct_expr) = _warn_legacy_name!(struct_expr, :page, :__page__)
+_warn_legacy_req_name!(struct_expr)  = _warn_legacy_name!(struct_expr, :req,  :__req__)
+
+"""
+    _warn_redundant_req_decl!(struct_expr)
+
+Warn when the user explicitly writes `__req__ = nothing`. `_inject_req_aliases!`
+adds this line automatically when no `req`/`__req__` is declared, so an explicit
+declaration is redundant noise.
+"""
+function _warn_redundant_req_decl!(struct_expr)
+    body = struct_expr.args[3]
+    route_macros = _route_macros()
+    lnn = nothing
+    for arg in body.args
+        if arg isa LineNumberNode
+            lnn = arg
+            continue
+        end
+        arg isa Expr || continue
+        if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
+            continue
+        end
+        inner = arg
+        while Meta.isexpr(inner, :macrocall)
+            inner = inner.args[end]
+        end
+        Meta.isexpr(inner, :(=)) || continue
+        lhs = inner.args[1]
+        lhs === :__req__ || continue
+        rhs = inner.args[2]
+        rhs === :nothing || (rhs isa QuoteNode && rhs.value === nothing) || continue
+        loc = isnothing(lnn) ? "" : " (near $(lnn.file):$(lnn.line))"
+        @warn "Redundant: `__req__ = nothing` is injected automatically by `@htmx` — remove this line$loc."
+    end
+    struct_expr
+end
+
+"""
+    _inject_req_aliases!(struct_expr)
+
+Ensure that `@htmx` struct bodies always declare both `req` and `__req__`
+as properties so that:
+
+1. `walk_rhs` rewrites bare references to either name in sibling property
+   bodies (including the `@include ext = Ext(; req)` / `@include ext = Ext(; __req__)`
+   shorthand — `req=req` / `__req__=__req__` desugars to a bare-symbol
+   kwarg value that must resolve via `__self__`).
+2. Route handlers can pass either kwarg name and have the other fall
+   through to the alias.
+
+Canonically, `__req__` holds the request and `req` is an alias property
+that returns `__self__.__req__`. If the user explicitly declared only
+`req = ...` (legacy), we inject `__req__ = req`. If neither is declared,
+we inject `__req__ = nothing` and `req = __req__`. Injected lines carry
+no `LineNumberNode`, so the legacy-name walker (which ran earlier) only
+ever sees user-written assignments.
+"""
+function _inject_req_aliases!(struct_expr)
+    body = struct_expr.args[3]
+    route_macros = _route_macros()
+    has_req = false
+    has_dunder = false
+    for arg in body.args
+        arg isa Expr || continue
+        if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
+            continue
+        end
+        inner = arg
+        while Meta.isexpr(inner, :macrocall)
+            inner = inner.args[end]
+        end
+        Meta.isexpr(inner, :(=)) || continue
+        lhs = inner.args[1]
+        name = if lhs isa Symbol
+            lhs
+        elseif Meta.isexpr(lhs, (:call, :ref))
+            first(lhs.args) isa Symbol ? first(lhs.args) : nothing
+        elseif Meta.isexpr(lhs, :(::)) && length(lhs.args) >= 1
+            lhs.args[1] isa Symbol ? lhs.args[1] : nothing
+        else
+            nothing
+        end
+        name === :req    && (has_req = true)
+        name === :__req__ && (has_dunder = true)
+    end
+    prepend = Any[]
+    if !has_dunder && !has_req
+        push!(prepend, :(__req__ = nothing))
+        push!(prepend, :(req = __req__))
+    elseif !has_dunder
+        push!(prepend, :(__req__ = req))
+    elseif !has_req
+        push!(prepend, :(req = __req__))
+    end
+    if !isempty(prepend)
+        body.args = vcat(prepend, body.args)
     end
     struct_expr
 end
@@ -320,8 +417,8 @@ _param_names(::Type) = ()
     _convert_params!(struct_expr) -> Vector{Symbol}
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
-to plain derived-property assignments that call `_extract_param(req, ...)` at
-property-access time. Supports:
+to plain derived-property assignments that call
+`_extract_param(_req_of(__self__), ...)` at property-access time. Supports:
 
     @param vessels::Vector{String} = ["Tablet-20"]
     @param fit_key::String                             # required, errors on miss
@@ -332,8 +429,8 @@ property-access time. Supports:
     end
 
 Returns the ordered list of declared param names for later `_param_names` emission.
-Assumes the enclosing struct exposes `req` as a property (the standard
-`req = nothing` idiom).
+`_req_of(__self__)` picks up whichever of `__req__` or legacy `req` is
+populated on the enclosing instance.
 """
 function _convert_params!(struct_expr)
     body = struct_expr.args[3]
@@ -393,9 +490,10 @@ function _rewrite_param_line(expr)
         return nothing
     end
     t = type_expr === nothing ? :nothing : type_expr
+    req_expr = :($(_req_of)(__self__))
     rhs = default_expr === nothing ?
-        :($(_extract_param)(req, $(QuoteNode(name_sym)), $t)) :
-        :($(_extract_param)(req, $(QuoteNode(name_sym)), $t, $default_expr))
+        :($(_extract_param)($req_expr, $(QuoteNode(name_sym)), $t)) :
+        :($(_extract_param)($req_expr, $(QuoteNode(name_sym)), $t, $default_expr))
     (name_sym, Expr(:(=), name_sym, rhs))
 end
 
@@ -403,6 +501,9 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
     _convert_include_to_struct!(struct_expr)
     _wrap_ws_bodies!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
+    _warn_legacy_req_name!(struct_expr)
+    reroute && _warn_redundant_req_decl!(struct_expr)
+    reroute && _inject_req_aliases!(struct_expr)
     own_params = _convert_params!(struct_expr)
     # Merge: parent params first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -1146,7 +1247,7 @@ function _register_indexed_route(T, method, name, path, n_params, record_dir)
     _register_handler(method, path, function(req)
         local obj
         try
-            obj = T(; req)
+            obj = T(; req, __req__=req)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1225,7 +1326,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
             if method == "WEBSOCKET"
                 if isempty(param_strs) && !has_kwargs && !info.indexed
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        lambda = getproperty(T(; req=nothing), name)
+                        lambda = getproperty(T(; req=nothing, __req__=nothing), name)
                         lambda(ws)
                     end)
                 else
@@ -1233,7 +1334,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     ws_base = _base_segments(path)
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
                         idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
-                        prop = getproperty(T(; req=ws.request), name)
+                        prop = getproperty(T(; req=ws.request, __req__=ws.request), name)
                         lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
                         lambda(ws)
                     end)
@@ -1242,7 +1343,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 register(CONTEXT[], method, path, function(req)
                     local obj
                     try
-                        obj = T(; req)
+                        obj = T(; req, __req__=req)
                     catch err
                         return _route_error_response(req, err, catch_backtrace())
                     end
@@ -1302,7 +1403,7 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
     _register_handler(method, path, function(req)
         local parent, nested
         try
-            parent = ParentT(; req)
+            parent = ParentT(; req, __req__=req)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1355,6 +1456,25 @@ end
 True if `obj` defines either `__page__` or the legacy `page` property.
 """
 _has_page(obj) = hasproperty(obj, :__page__) || hasproperty(obj, :page)
+
+"""
+    _req_of(obj) -> HTTP.Request or nothing
+
+Look up the framework-managed request on `obj`, preferring the canonical
+`__req__` name over the legacy `req` name. Prefers whichever is non-nothing
+so that `@include ext = Ext(; req)` call sites (which only populate `req`
+even on migrated child structs whose body declares `__req__ = nothing`)
+still surface the real request rather than the compute-default `nothing`.
+The legacy `req` name is deprecated — the `@htmx` macro emits a warning at
+expansion time when it sees a `req` property (see `_warn_legacy_req_name!`).
+"""
+function _req_of(obj)
+    if hasproperty(obj, :__req__)
+        r = getproperty(obj, :__req__)
+        isnothing(r) || return r
+    end
+    hasproperty(obj, :req) ? getproperty(obj, :req) : nothing
+end
 
 """
     _collect_page_chain(root, chain) -> Vector
@@ -1569,8 +1689,6 @@ HTMXObjects = \"$_HTMXOBJECTS_UUID\"
 using HTMXObjects
 
 @htmx struct AppContext
-    req = nothing
-
     @get index = htmx(h.main(
         h.h1(\"$module_name\"),
         h.p(\"Edit src/$module_name.jl and Revise will reload automatically.\"),
@@ -1853,13 +1971,12 @@ function test_clear_cache! end
 # --- Shared route structs for @include ---
 
 # Provides web routes for running tests registered via TestModules. Include in an
-# @htmx struct with `@include tests = TestRoutes(; req, test_module=@__MODULE__)`
+# @htmx struct with `@include tests = TestRoutes(; __req__, test_module=@__MODULE__)`
 # to add test listing, running, and cache management endpoints under /tests/.
 @htmx struct TestRoutes
-    req = nothing
     test_module = nothing
     prefix = "/tests"
-    md = wants_markdown(req)
+    md = wants_markdown(__req__)
     @get index = test_list(test_module, md; prefix)
     @post run(name) = test_run!(test_module, name, md; prefix)
     @post run_all = test_run_all!(test_module, md; prefix)
@@ -1969,19 +2086,19 @@ end
     query_url(path, obj; overrides...) -> String
 
 Build a URL from `path`, auto-collecting every `@param` declared on `obj`'s type
-that is actually present in the inbound request (`obj.req`). Params with no
-declared `@param` are ignored; params not present in the request are omitted
+that is actually present in the inbound request (`_req_of(obj)`). Params with
+no declared `@param` are ignored; params not present in the request are omitted
 (so the URL only carries what the user explicitly set, and defaults remain
 implicit). Explicit `overrides` always win and are emitted even if absent from
 the request.
 
-Presence is checked against `queryparams(obj.req)` regardless of the inbound
-request method — `query_url` always builds GET-style URLs.
+Presence is checked against `queryparams(_req_of(obj))` regardless of the
+inbound request method — `query_url` always builds GET-style URLs.
 """
 function query_url(path, obj; overrides...)
     names = _param_names(typeof(obj))
     override_keys = Set(keys(overrides))
-    present = queryparams(obj.req)
+    present = queryparams(_req_of(obj))
     kws = Pair{Symbol,Any}[]
     for n in names
         n in override_keys && continue

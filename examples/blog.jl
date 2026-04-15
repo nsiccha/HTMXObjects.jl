@@ -16,7 +16,6 @@
 using HTMXObjects
 
 @htmx struct BlogApp
-    req = nothing
     cache_path = joinpath(@__DIR__, "cache")
 
     @cached posts = [
@@ -63,7 +62,7 @@ using HTMXObjects
             h.header(h.h2(p.title)),
             h.p(p.body),
         )
-        if is_htmx(req)
+        if is_htmx(__req__)
             fragment
         else
             __page__(fragment)

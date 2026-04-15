@@ -11,8 +11,6 @@
 using HTMXObjects
 
 @htmx struct TabsApp
-    req = nothing
-
     tabs = [
         (id="home",    label="Home",    body="Welcome! This is the home tab."),
         (id="about",   label="About",   body="HTMXObjects.jl makes server-side Julia web apps easy."),

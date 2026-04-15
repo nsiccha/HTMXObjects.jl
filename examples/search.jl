@@ -9,8 +9,6 @@
 using HTMXObjects
 
 @htmx struct SearchApp
-    req = nothing
-
     fruits = [
         "Apple", "Apricot", "Avocado", "Banana", "Blueberry",
         "Cherry", "Coconut", "Date", "Fig", "Grape",
@@ -54,7 +52,7 @@ using HTMXObjects
     @get results(; q="") = let
         matches = filter(f -> occursin(lowercase(q), lowercase(f)), fruits)
         fragment = (search_input(q), results_list(matches, q))
-        if is_htmx(req)
+        if is_htmx(__req__)
             results_list(matches, q)
         else
             __page__(fragment)

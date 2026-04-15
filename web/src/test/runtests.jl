@@ -26,7 +26,6 @@ end
 end
 
 @htmx struct NothingDefaultApp
-    req = nothing
     @get filtered(; filter=nothing) = h.p("filter=$(repr(filter))")
 end
 
@@ -36,7 +35,6 @@ end
 end
 
 @htmx struct ParamApp
-    req = nothing
     @param vessels::Vector{String} = ["Tablet-20"]
     @param n_bootstrap::String = "10"
     @param note = "default-note"
@@ -47,7 +45,6 @@ end
 end
 
 @htmx struct ParamBlockApp
-    req = nothing
     @param begin
         a::Int = 1
         b::String = "x"
@@ -56,13 +53,11 @@ end
 end
 
 @htmx struct ParamRequiredApp
-    req = nothing
     @param fit_key::String
     @get index = h.p("fit=$fit_key")
 end
 
 @htmx struct ParamPostApp
-    req = nothing
     @param name::String = "anon"
     @post submit = h.p("submit $name")
 end

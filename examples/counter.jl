@@ -10,8 +10,6 @@
 using HTMXObjects
 
 @htmx struct CounterApp
-    req = nothing
-
     # Reusable fragment — returned by both the initial page and the HTMX update.
     # The `id="counter"` is the swap target; hx-swap="outerHTML" replaces the whole div.
     counter_ui[n::Int] = h.div(id="counter")(

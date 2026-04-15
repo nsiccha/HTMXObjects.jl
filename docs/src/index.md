@@ -346,15 +346,14 @@ This avoids stale HTML — each request sees up-to-date state.
 
 ```julia
 @htmx struct RecipeApp
-    req = nothing
     @get index = htmx(h.main(recipe_grid))
     @post add_recipe = begin
-        url = formdata(req)["url"]
+        url = formdata(__req__)["url"]
         # ... handle add ...
         recipe_grid
     end
     @delete remove_recipe = begin
-        url = queryparam(req, "url")
+        url = queryparam(__req__, "url")
         # ... handle remove ...
         to_response("")
     end
