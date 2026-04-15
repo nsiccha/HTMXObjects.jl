@@ -43,7 +43,7 @@ using HTMXObjects
         ),
     )
 
-    page(content) = htmx(
+    __page__(content) = htmx(
         h.main(class="container")(
             nav,
             h.div(class="grid")(
@@ -54,7 +54,7 @@ using HTMXObjects
         pico_version="2",
     )
 
-    @get index = page(h.p("Select a post from the list."))
+    @get index = __page__(h.p("Select a post from the list."))
 
     # Fragment: renders the post body into #content via hx-target.
     # The sidebar remains untouched — only #content is swapped.
@@ -66,7 +66,7 @@ using HTMXObjects
         if is_htmx(req)
             fragment
         else
-            page(fragment)
+            __page__(fragment)
         end
     end
 

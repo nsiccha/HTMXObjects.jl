@@ -54,7 +54,7 @@ end
 
 ## Blog
 
-Shows derived properties for data, a `page[content]` wrapper, `is_htmx(req)`
+Shows derived properties for data, a `__page__(content)` wrapper, `is_htmx(req)`
 for returning fragments vs full pages, and mutable state with `@cached`/`@persist`.
 Includes a `@post` form for adding new posts — in the recorded static version,
 the form is automatically greyed out.

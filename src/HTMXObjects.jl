@@ -175,6 +175,55 @@ function _wrap_ws_bodies!(struct_expr)
     struct_expr
 end
 
+"""
+    _warn_legacy_page_name!(struct_expr)
+
+Scan the struct body for property definitions named `page` and emit a
+deprecation `@warn`. The framework-managed name is `__page__`; the legacy
+`page` still resolves at runtime via `_page_wrapper`, but new code should use
+the dunder form. The warning includes the `file:line` from the nearest
+`LineNumberNode` so the fix is mechanical.
+"""
+function _warn_legacy_page_name!(struct_expr)
+    body = struct_expr.args[3]
+    route_macros = _route_macros()
+    lnn = nothing
+    for arg in body.args
+        if arg isa LineNumberNode
+            lnn = arg
+            continue
+        end
+        arg isa Expr || continue
+        # Skip route-marked properties entirely — `@get page(...)` is a user
+        # route named "page", not the framework wrapper.
+        if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
+            continue
+        end
+        # Peel non-route macrocall wrappers
+        inner = arg
+        while Meta.isexpr(inner, :macrocall)
+            inner = inner.args[end]
+        end
+        # Property definitions are assignments; extract the LHS name symbol
+        Meta.isexpr(inner, :(=)) || continue
+        lhs = inner.args[1]
+        name = if lhs isa Symbol
+            lhs
+        elseif Meta.isexpr(lhs, (:call, :ref))
+            first(lhs.args) isa Symbol ? first(lhs.args) : nothing
+        elseif Meta.isexpr(lhs, :(::)) && length(lhs.args) >= 1
+            lhs.args[1] isa Symbol ? lhs.args[1] : nothing
+        else
+            nothing
+        end
+        if name === :page
+            loc = isnothing(lnn) ? "" : " (near $(lnn.file):$(lnn.line))"
+            @warn "Deprecated: `page` is a legacy framework property name — rename to `__page__`$loc. The legacy name still works but will be emitted as a warning on every macro expansion."
+        end
+    end
+    struct_expr
+end
+
 # Find inline struct properties: prop = struct Name ... end
 # Returns list of (prop_name, child_struct_name) pairs.
 function _find_inline_structs(struct_expr)
@@ -353,6 +402,7 @@ end
 function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwargs...)
     _convert_include_to_struct!(struct_expr)
     _wrap_ws_bodies!(struct_expr)
+    _warn_legacy_page_name!(struct_expr)
     own_params = _convert_params!(struct_expr)
     # Merge: parent params first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -1010,7 +1060,8 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     end
     is_htmx(req) && return to_response(err_val)
     for obj in reverse(page_chain)
-        err_val = getproperty(obj, :page)[err_val]
+        wrapper = _page_wrapper(obj)
+        isnothing(wrapper) || (err_val = wrapper[err_val])
     end
     to_response(err_val)
 end
@@ -1048,7 +1099,7 @@ Convert a route handler's return value to an HTTP response, automatically
 handling markdown, HTMX fragment, and full-page modes.
 
 Convention-based properties on `obj`:
-- `page(content)` — wraps fragment in full page (for direct browser requests)
+- `__page__(content)` — wraps fragment in full page (for direct browser requests). Legacy name `page` still works with a deprecation warning.
 - `to_markdown(val)` — custom markdown serializer
 
 If the route returns an `HTTP.Response` directly, it passes through unchanged.
@@ -1079,12 +1130,13 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
 
     # HTMX fragment or no page wrapper defined → return as-is
     fragment_resp = to_response(val)
-    if is_htmx(req) || !hasproperty(obj, :page)
+    wrapper = _page_wrapper(obj)
+    if is_htmx(req) || isnothing(wrapper)
         return fragment_resp
     end
 
     # Full page wrap for direct browser navigation
-    to_response(getproperty(obj, :page)[val])
+    to_response(wrapper[val])
 end
 
 _base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempty=false))
@@ -1106,7 +1158,7 @@ function _register_indexed_route(T, method, name, path, n_params, record_dir)
             return _resolve_response(obj, req, val; record_dir, save_path)
         catch err
             bt = catch_backtrace()
-            page_chain = hasproperty(obj, :page) ? Any[obj] : Any[]
+            page_chain = _has_page(obj) ? Any[obj] : Any[]
             return _route_error_response(req, err, bt; error_obj=obj, page_chain)
         end
     end)
@@ -1199,7 +1251,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                         return _resolve_response(obj, req, val; record_dir, save_path=record_dir !== nothing ? path : nothing)
                     catch err
                         bt = catch_backtrace()
-                        page_chain = hasproperty(obj, :page) ? Any[obj] : Any[]
+                        page_chain = _has_page(obj) ? Any[obj] : Any[]
                         return _route_error_response(req, err, bt; error_obj=obj, page_chain)
                     end
                 end)
@@ -1235,10 +1287,11 @@ end
 
 Register a route handler for a nested `@include` struct property.
 
-For direct browser visits (non-HTMX), the response is wrapped by nesting all `page`
-wrappers found along the property chain from root to leaf. If the root defines `page`
-and a nested struct also defines `page`, the result is
-`root.page(nested.page(fragment))` — innermost wraps first, then each ancestor.
+For direct browser visits (non-HTMX), the response is wrapped by nesting all
+`__page__` wrappers (or legacy `page`) found along the property chain from
+root to leaf. If the root defines `__page__` and a nested struct also defines
+one, the result is `root.__page__(nested.__page__(fragment))` — innermost
+wraps first, then each ancestor.
 
 # TODO: add an API to opt out of page nesting for specific structs (e.g. a `page_nest=false`
 # property or a `_page_passthrough` convention) for cases where a nested struct wants to
@@ -1257,7 +1310,7 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
             nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
         catch err
             bt = catch_backtrace()
-            page_chain = hasproperty(parent, :page) ? Any[parent] : Any[]
+            page_chain = _has_page(parent) ? Any[parent] : Any[]
             return _route_error_response(req, err, bt; error_obj=parent, page_chain)
         end
         try
@@ -1282,22 +1335,45 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
 end
 
 """
+    _page_wrapper(obj) -> wrapper or nothing
+
+Look up the "page" wrapper on `obj`, preferring the framework-managed
+`__page__` name over the legacy `page` name. Returns `nothing` if neither is
+defined. The legacy `page` name is deprecated — the `@htmx` macro emits a
+warning at expansion time when it sees a `page` property (see
+`_warn_legacy_page_name!`).
+"""
+function _page_wrapper(obj)
+    hasproperty(obj, :__page__) && return getproperty(obj, :__page__)
+    hasproperty(obj, :page)     && return getproperty(obj, :page)
+    nothing
+end
+
+"""
+    _has_page(obj) -> Bool
+
+True if `obj` defines either `__page__` or the legacy `page` property.
+"""
+_has_page(obj) = hasproperty(obj, :__page__) || hasproperty(obj, :page)
+
+"""
     _collect_page_chain(root, chain) -> Vector
 
-Walk the property chain from `root` and collect objects that define a `page` property.
-Deduplicates inherited pages: if a nested struct's `page` property type matches its
-parent's (i.e. inherited via inline struct), it is skipped.
+Walk the property chain from `root` and collect objects that define a
+`__page__` (or legacy `page`) property. Deduplicates inherited pages: if a
+nested struct's page property is inherited from its parent (inline struct),
+it is skipped.
 
 Never use `DynamicObjects.meta` to inspect properties — use `hasproperty` and type checks.
 """
 function _collect_page_chain(root, chain)
     pages = Any[]
-    hasproperty(root, :page) && push!(pages, root)
+    _has_page(root) && push!(pages, root)
     obj = root
     for name in chain
         prev_type = typeof(obj)
         obj = getproperty(obj, name)
-        if hasproperty(obj, :page)
+        if _has_page(obj)
             # Skip if the page property is inherited (same defining type as parent)
             prev_type == typeof(obj) && continue
             # Skip if the page property type is a child of the previous page owner
@@ -1333,7 +1409,8 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
     is_htmx(req) && return to_response(val)
     # Apply page wrappers: innermost (last) wraps first, then each outer one
     for obj in reverse(page_chain)
-        val = getproperty(obj, :page)[val]
+        wrapper = _page_wrapper(obj)
+        isnothing(wrapper) || (val = wrapper[val])
     end
     to_response(val)
 end

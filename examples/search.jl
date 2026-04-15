@@ -40,7 +40,7 @@ using HTMXObjects
     )
 
     # Full page wrapper.
-    page(content) = htmx(
+    __page__(content) = htmx(
         h.main(class="container")(
             h.h1("Fruit Search"),
             content,
@@ -48,7 +48,7 @@ using HTMXObjects
         pico_version="2",
     )
 
-    @get index = page((search_input(""), results_list([], "")))
+    @get index = __page__((search_input(""), results_list([], "")))
 
     # Kwargs auto-extract `q` from the query string for GET requests.
     @get results(; q="") = let
@@ -57,7 +57,7 @@ using HTMXObjects
         if is_htmx(req)
             results_list(matches, q)
         else
-            page(fragment)
+            __page__(fragment)
         end
     end
 end
