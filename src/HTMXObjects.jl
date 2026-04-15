@@ -6,6 +6,7 @@ export HTTP, queryparams, formdata
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
 export route!, to_response, save_response, static_transform
+export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
@@ -926,6 +927,120 @@ end
 _register_handler(method, path, handler) =
     HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, handler)
 
+# --- Error handling ---
+
+"""
+    ERROR_DIR
+
+Directory where HTMXObjects writes per-error log files. Initialized in `__init__`
+from the `HTMXO_ERROR_DIR` environment variable, falling back to
+`joinpath(tempdir(), "htmxo_errors")`. Can be reassigned at runtime.
+"""
+const ERROR_DIR = Ref{String}("")
+
+# Short unique id derived from the high-resolution clock. No UUID dep needed;
+# `time_ns()` advances monotonically, so collisions require two calls in the
+# same nanosecond from different threads — we hash it anyway for uniform width.
+_error_uid() = string(hash(time_ns()); base=16)
+
+"""
+    _record_error(err, bt, req) -> (uid, path)
+
+Write a detailed error report to `joinpath(ERROR_DIR[], "<uid>.log")` and return
+both the short uid and the full file path. Also emits an `@error` log entry
+that includes the full path so the recorded file is one click away in the
+terminal/log viewer.
+"""
+function _record_error(err, bt, req)
+    dir = ERROR_DIR[]
+    isempty(dir) && (dir = joinpath(tempdir(), "htmxo_errors"))
+    isdir(dir) || mkpath(dir)
+    uid = _error_uid()
+    path = joinpath(dir, uid * ".log")
+    open(path, "w") do io
+        println(io, "# HTMXObjects error")
+        println(io, "uid:       ", uid)
+        println(io, "timestamp: ", Libc.strftime("%Y-%m-%dT%H:%M:%S", time()))
+        if req isa HTTP.Request
+            println(io, "method:    ", req.method)
+            println(io, "target:    ", req.target)
+        end
+        println(io)
+        showerror(io, err, bt)
+        println(io)
+    end
+    @error "HTMXObjects caught an error: $path"
+    (uid, path)
+end
+
+"""
+    _default_error_render(uid, path)
+
+Default rendering for a caught error — a small article pointing at the recorded
+error id. Override by defining `__error__` on the route's enclosing struct
+(or, to disable catching entirely, set `__error__ = rethrow`).
+"""
+_default_error_render(uid, path) = h.article(
+    h.header(h.strong("Error")),
+    h.p("Something went wrong. Error ID: ", h.code(uid)),
+)
+
+# Invoke the user's `__error__` hook if present, else fall back to the default.
+# The hook is called with just the exception, so `__error__ = rethrow` works.
+function _invoke_error_handler(obj, err, uid, path)
+    if obj !== nothing && hasproperty(obj, :__error__)
+        return getproperty(obj, :__error__)(err)
+    end
+    _default_error_render(uid, path)
+end
+
+"""
+    _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
+
+Record the error, invoke the user's `__error__` hook (or the default), and
+return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
+`page` wrappers the same way a successful response would.
+"""
+function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
+    uid, path = _record_error(err, bt, req)
+    err_val = _invoke_error_handler(error_obj, err, uid, path)
+    err_val isa HTTP.Response && return err_val
+    if wants_markdown(req)
+        return markdown_response(to_markdown_string(err_val))
+    end
+    is_htmx(req) && return to_response(err_val)
+    for obj in reverse(page_chain)
+        err_val = getproperty(obj, :page)[err_val]
+    end
+    to_response(err_val)
+end
+
+"""
+    safely(f; obj=nothing, req=nothing)
+
+Run `f()` and return its result; on exception, record the error and return
+the same renderable that `__error__` would produce at the route level. Use
+this for widget-level error containment — e.g. one of several panels composed
+inside a route handler where a failure in one panel should not take down the
+whole page.
+
+    safely(; obj=__self__) do
+        h.article(... expensive rendering ...)
+    end
+
+If `obj` defines `__error__`, that hook is used; otherwise the default article
+with the recorded uid is returned.
+"""
+function safely(f::Function; obj=nothing, req=nothing)
+    try
+        return f()
+    catch err
+        bt = catch_backtrace()
+        uid, path = _record_error(err, bt, req)
+        return _invoke_error_handler(obj, err, uid, path)
+    end
+end
+
 """
     _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
 
@@ -977,12 +1092,23 @@ _base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempt
 function _register_indexed_route(T, method, name, path, n_params, record_dir)
     base = _base_segments(path)
     _register_handler(method, path, function(req)
-        idx_vals, kw_pairs = _extract_args(T, Val(name), req, method, base, n_params)
-        obj = T(; req)
-        prop = getproperty(obj, name)
-        val = prop(idx_vals...; NamedTuple(kw_pairs)...)
-        save_path = !isnothing(record_dir) ? "/" * join(vcat(string(name), string.(idx_vals)), "/") : nothing
-        _resolve_response(obj, req, val; record_dir, save_path)
+        local obj
+        try
+            obj = T(; req)
+        catch err
+            return _route_error_response(req, err, catch_backtrace())
+        end
+        try
+            idx_vals, kw_pairs = _extract_args(T, Val(name), req, method, base, n_params)
+            prop = getproperty(obj, name)
+            val = prop(idx_vals...; NamedTuple(kw_pairs)...)
+            save_path = !isnothing(record_dir) ? "/" * join(vcat(string(name), string.(idx_vals)), "/") : nothing
+            return _resolve_response(obj, req, val; record_dir, save_path)
+        catch err
+            bt = catch_backtrace()
+            page_chain = hasproperty(obj, :page) ? Any[obj] : Any[]
+            return _route_error_response(req, err, bt; error_obj=obj, page_chain)
+        end
     end)
 end
 
@@ -1062,9 +1188,20 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 end
             elseif isempty(param_strs) && !has_kwargs && !info.indexed
                 register(CONTEXT[], method, path, function(req)
-                    obj = T(; req)
-                    val = getproperty(obj, name)
-                    _resolve_response(obj, req, val; record_dir, save_path=record_dir !== nothing ? path : nothing)
+                    local obj
+                    try
+                        obj = T(; req)
+                    catch err
+                        return _route_error_response(req, err, catch_backtrace())
+                    end
+                    try
+                        val = getproperty(obj, name)
+                        return _resolve_response(obj, req, val; record_dir, save_path=record_dir !== nothing ? path : nothing)
+                    catch err
+                        bt = catch_backtrace()
+                        page_chain = hasproperty(obj, :page) ? Any[obj] : Any[]
+                        return _route_error_response(req, err, bt; error_obj=obj, page_chain)
+                    end
                 end)
             elseif isempty(param_strs) && !has_kwargs
                 # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
@@ -1110,20 +1247,37 @@ and a nested struct also defines `page`, the result is
 function _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
     base = _base_segments(path)
     _register_handler(method, path, function(req)
-        idx_vals, kw_pairs = _extract_args(NestedT, Val(name), req, method, base, n_params)
-        parent = ParentT(; req)
-        nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
-        val = let prop = getproperty(nested, name)
-            if isempty(idx_vals) && isempty(kw_pairs) && !(prop isa DynamicObjects.IndexableProperty)
-                prop
-            else
-                prop(idx_vals...; NamedTuple(kw_pairs)...)
-            end
+        local parent, nested
+        try
+            parent = ParentT(; req)
+        catch err
+            return _route_error_response(req, err, catch_backtrace())
         end
-        sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
-        # Collect page wrappers along the chain (root → ... → nested) for nesting.
-        page_chain = _collect_page_chain(parent, chain)
-        _resolve_response_nested(page_chain, req, val; record_dir, save_path=sp)
+        try
+            nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
+        catch err
+            bt = catch_backtrace()
+            page_chain = hasproperty(parent, :page) ? Any[parent] : Any[]
+            return _route_error_response(req, err, bt; error_obj=parent, page_chain)
+        end
+        try
+            idx_vals, kw_pairs = _extract_args(NestedT, Val(name), req, method, base, n_params)
+            val = let prop = getproperty(nested, name)
+                if isempty(idx_vals) && isempty(kw_pairs) && !(prop isa DynamicObjects.IndexableProperty)
+                    prop
+                else
+                    prop(idx_vals...; NamedTuple(kw_pairs)...)
+                end
+            end
+            sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
+            # Collect page wrappers along the chain (root → ... → nested) for nesting.
+            page_chain = _collect_page_chain(parent, chain)
+            return _resolve_response_nested(page_chain, req, val; record_dir, save_path=sp)
+        catch err
+            bt = catch_backtrace()
+            page_chain = _collect_page_chain(parent, chain)
+            return _route_error_response(req, err, bt; error_obj=nested, page_chain)
+        end
     end)
 end
 
@@ -2346,6 +2500,10 @@ function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; 
             )
         )
     )
+end
+
+function __init__()
+    ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
 end
 
 end # module HTMXObjects
