@@ -2192,14 +2192,39 @@ _aname(name::AbstractString) = name
 _avalue(nt::NamedTuple, default=nothing) = first(nt)
 _avalue(::AbstractString, default=nothing) = default
 
+"""
+    ainput(nv; kwargs...)
+
+Smart `h.input` wrapper that accepts a `NamedTuple` or `String`. A `NamedTuple`
+like `(; fit_key)` extracts name and value automatically:
+
+    ainput((; fit_key); type="hidden")
+    # equivalent to: h.input(; name="fit_key", value=fit_key, type="hidden")
+"""
 ainput(nt::NamedTuple; value=first(nt), kwargs...) = h.input(; name=_aname(nt), value, kwargs...)
 ainput(name::AbstractString; kwargs...) = h.input(; name, kwargs...)
 
+"""
+    linput(nv, placeholder=Long(nv); label=Long(nv), kwargs...)
+
+A labeled text `<input>` wrapped in a `<label>`.
+All extra `kwargs` (e.g. `hx_get`, `hx_target`) are passed to the `<input>`.
+"""
 linput(nv, placeholder=Long(nv); label=Long(nv), kwargs...) = h.label(
     label,
     ainput(nv; placeholder, kwargs...)
 )
 
+"""
+    sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...)
+
+A labeled `<select>` wrapped in a `<label>`. Each element of `options` is rendered
+via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
+
+When `show_when=(field, op, value)` is set, the label gets `data-show-when-*`
+attributes and `style="display:none"`. Include [`show_when_script`](@ref) once per
+page to wire up the client-side visibility logic.
+"""
 sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
     name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
@@ -2212,6 +2237,14 @@ sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs
     )
 end
 
+"""
+    sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, placeholder="Add custom…", kwargs...)
+
+Like [`sinput`](@ref), but includes a text input and button for adding custom
+options client-side. The custom value is appended to the `<select>` and
+auto-selected so it is included in form submissions. Duplicates are skipped.
+Extra `kwargs` go on the `<select>`.
+"""
 sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, placeholder="Add custom…", kwargs...) = begin
     name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
@@ -2265,6 +2298,12 @@ soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
     option; value, selected=string(_is_selected(value, selected_value)), kwargs...
 )
 
+"""
+    rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_when=nothing, kwargs...)
+
+A labeled range slider `<input type="range">` with a live `<output>` display.
+Extra `kwargs` go on the `<input>`.
+"""
 rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_when=nothing, kwargs...) = begin
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     h.label(
@@ -2279,6 +2318,12 @@ rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_w
     )
 end
 
+"""
+    ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...)
+
+A labeled number `<input type="number">`. Only `min`, `max`, `step` that are
+not `nothing` are included as attributes. Extra `kwargs` go on the `<input>`.
+"""
 ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...) = begin
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     num_attrs = filter(((_, v),) -> !isnothing(v), pairs((; min, max, step)))
@@ -2289,6 +2334,12 @@ ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=
     )
 end
 
+"""
+    cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=nothing, kwargs...)
+
+A labeled checkbox `<input type="checkbox">`. Set `switch=true` to use Pico CSS's
+toggle-switch style (`role="switch"`). Extra `kwargs` go on the `<input>`.
+"""
 cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=nothing, kwargs...) = begin
     name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
@@ -2301,6 +2352,11 @@ cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=n
     )
 end
 
+"""
+    tinput(nv; label=Long(nv), value=_avalue(nv, ""), placeholder=Long(nv), rows=3, show_when=nothing, kwargs...)
+
+A labeled `<textarea>`. Extra `kwargs` go on the `<textarea>`.
+"""
 tinput(nv; label=Long(nv), value=_avalue(nv, ""), placeholder=Long(nv), rows=3, show_when=nothing, kwargs...) = begin
     name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
@@ -2311,6 +2367,13 @@ tinput(nv; label=Long(nv), value=_avalue(nv, ""), placeholder=Long(nv), rows=3, 
     )
 end
 
+"""
+    radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...)
+
+A `<fieldset>` of radio buttons. Each element of `options` becomes
+`<label><input type="radio" .../> Label</label>`. Options can be plain values
+or `value => label` pairs. Extra `kwargs` go on each `<input>`.
+"""
 radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
     name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
