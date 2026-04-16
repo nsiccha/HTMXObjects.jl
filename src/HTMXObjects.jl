@@ -12,7 +12,7 @@ export hx_response
 export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
-export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
+export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
@@ -2000,30 +2000,15 @@ to pass parameters to `@post` routes via `formdata`:
 hidden_inputs(; kwargs...) = [h.input(; type="hidden", name=string(k), value=string(v)) for (k, v) in kwargs]
 
 """
-    post_form(url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
+    _form(method, url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
 
-Generate a complete inline POST form. Extra keyword arguments become hidden
-`<input>` fields. Positional `children` are inserted before the submit button.
-
-Simple (hidden inputs only):
-
-    post_form("/respond/slug/approved";
-        label="Approve", btn_class="btn btn-approve",
-        hx_target="#list", hx_swap="innerHTML",
-        msg="APPROVED.",
-    )
-
-With visible form elements:
-
-    post_form("/add_comment/slug",
-        h.input(; type="text", name="msg", placeholder="Add a note...");
-        label="Comment", form_class="comment-form",
-        hx_target="#list", hx_swap="innerHTML",
-    )
+Shared implementation for `get_form` and `post_form`. `method` is `:hx_get` or
+`:hx_post`. Extra keyword arguments become hidden `<input>` fields. Positional
+`children` are inserted before the submit button.
 """
-function post_form(url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
+function _form(method, url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
     form_attrs = filter(((_, v),) -> !isempty(v), pairs((;
-        hx_post=url, style="display:inline",
+        method => url, style="display:inline",
         hx_target, hx_swap, hx_include, hx_confirm=confirm, class=form_class,
     )))
     h.form(; form_attrs...)(
@@ -2032,6 +2017,35 @@ function post_form(url, children...; label="Submit", btn_class="btn", confirm=""
         h.button(; class=btn_class, type="submit")(label),
     )
 end
+
+"""
+    post_form(url, children...; kwargs...)
+
+Generate a complete inline POST form. Extra keyword arguments become hidden
+`<input>` fields. Positional `children` are inserted before the submit button.
+
+    post_form("/respond/slug/approved";
+        label="Approve", btn_class="btn btn-approve",
+        hx_target="#list", hx_swap="innerHTML",
+        msg="APPROVED.",
+    )
+"""
+post_form(url, children...; kwargs...) = _form(:hx_post, url, children...; kwargs...)
+
+"""
+    get_form(url, children...; kwargs...)
+
+Generate a complete inline GET form. Same API as [`post_form`](@ref) but uses
+`hx-get` instead of `hx-post`.
+
+    get_form("/analysis/dose_response",
+        sinput((; sources), source_options; multiple=true),
+        sinput((; outcomes), outcome_options; multiple=true);
+        hx_target="#results", hx_swap="innerHTML",
+        fit_key, top_chains=string(top_chains),
+    )
+"""
+get_form(url, children...; kwargs...) = _form(:hx_get, url, children...; kwargs...)
 
 """
     lazy(url; tag=h.div, swap="outerHTML", kwargs...)
