@@ -13,7 +13,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, @query_url
-export Long, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -2183,31 +2183,25 @@ Convert a symbol/string to a human-readable label by replacing underscores with 
 Add methods for custom labels: `Long(::Val{:pk}) = "Pharmacokinetics"`.
 """
 Long(x) = replace(string(x), "_" => " ")
+Long(nt::NamedTuple) = Long(_aname(nt))
 
 # --- Form input helpers ---
 
-"""
-    linput(name, placeholder=Long(name); label=Long(name), kwargs...)
+_aname(nt::NamedTuple) = string(first(keys(nt)))
+_aname(name::AbstractString) = name
+_avalue(nt::NamedTuple, default=nothing) = first(nt)
+_avalue(::AbstractString, default=nothing) = default
 
-A labeled text `<input>` wrapped in a `<label>`.
-All extra `kwargs` (e.g. `hx_get`, `hx_target`) are passed to the `<input>`.
-"""
-linput(name, placeholder=Long(name); label=Long(name), kwargs...) = h.label(
+ainput(nt::NamedTuple; value=first(nt), kwargs...) = h.input(; name=_aname(nt), value, kwargs...)
+ainput(name::AbstractString; kwargs...) = h.input(; name, kwargs...)
+
+linput(nv, placeholder=Long(nv); label=Long(nv), kwargs...) = h.label(
     label,
-    h.input(; name, placeholder, kwargs...)
+    ainput(nv; placeholder, kwargs...)
 )
 
-"""
-    sinput(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...)
-
-A labeled `<select>` wrapped in a `<label>`. Each element of `options` is rendered
-via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
-
-When `show_when=(field, op, value)` is set, the label gets `data-show-when-*`
-attributes and `style="display:none"`. Include [`show_when_script`](@ref) once per
-page to wire up the client-side visibility logic.
-"""
-sinput(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...) = begin
+sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
+    name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     h.label(
         label,
@@ -2218,22 +2212,12 @@ sinput(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs
     )
 end
 
-"""
-    sinput_custom(name, options; label=Long(name), value=nothing, show_when=nothing, placeholder="Add custom…", kwargs...)
-
-Like [`sinput`](@ref), but includes a text input and button for adding custom
-options client-side. The custom value is appended to the `<select>` and
-auto-selected so it is included in form submissions. Duplicates are skipped.
-
-Extra `kwargs` go on the `<select>`.
-"""
-sinput_custom(name, options; label=Long(name), value=nothing, show_when=nothing, placeholder="Add custom…", kwargs...) = begin
+sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, placeholder="Add custom…", kwargs...) = begin
+    name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
-    # unique id suffix for wiring the JS
     uid = string(hash(name), base=16)
     sel_id = "sinput_custom_sel_$(uid)"
     inp_id = "sinput_custom_inp_$(uid)"
-    # Include any selected values not in the predefined options
     option_values = Set(string.([o isa Pair ? first(o) : o for o in options]))
     extra_options = isnothing(value) ? [] : [v for v in (value isa AbstractVector ? value : [value]) if !(string(v) in option_values)]
     all_options = vcat(options, extra_options)
@@ -2281,18 +2265,12 @@ soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
     option; value, selected=string(_is_selected(value, selected_value)), kwargs...
 )
 
-"""
-    rinput(name; label=Long(name), value=50, min=0, max=100, step=1, show_when=nothing, kwargs...)
-
-A labeled range slider `<input type="range">` with a live `<output>` display.
-Extra `kwargs` go on the `<input>`.
-"""
-rinput(name; label=Long(name), value=50, min=0, max=100, step=1, show_when=nothing, kwargs...) = begin
+rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_when=nothing, kwargs...) = begin
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     h.label(
         label,
         h.span(
-            h.input(; type="range", name, value, min, max, step,
+            ainput(nv; type="range", value, min, max, step,
                 oninput="this.nextElementSibling.textContent=this.value", kwargs...),
             h.output(string(value));
             style="display:flex;align-items:center;gap:0.5ch"
@@ -2301,29 +2279,18 @@ rinput(name; label=Long(name), value=50, min=0, max=100, step=1, show_when=nothi
     )
 end
 
-"""
-    ninput(name; label=Long(name), value=0, min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...)
-
-A labeled number `<input type="number">`. Only `min`, `max`, `step` that are
-not `nothing` are included as attributes. Extra `kwargs` go on the `<input>`.
-"""
-ninput(name; label=Long(name), value=0, min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...) = begin
+ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...) = begin
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     num_attrs = filter(((_, v),) -> !isnothing(v), pairs((; min, max, step)))
     h.label(
         label,
-        h.input(; type="number", name, value, num_attrs..., kwargs...);
+        ainput(nv; type="number", value, num_attrs..., kwargs...);
         show_attrs...
     )
 end
 
-"""
-    cinput(name; label=Long(name), checked=false, switch=false, show_when=nothing, kwargs...)
-
-A labeled checkbox `<input type="checkbox">`. Set `switch=true` to use Pico CSS's
-toggle-switch style (`role="switch"`). Extra `kwargs` go on the `<input>`.
-"""
-cinput(name; label=Long(name), checked=false, switch=false, show_when=nothing, kwargs...) = begin
+cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=nothing, kwargs...) = begin
+    name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     check_attrs = checked ? (; checked="true") : (;)
     role_attrs = switch ? (; role="switch") : (;)
@@ -2334,12 +2301,8 @@ cinput(name; label=Long(name), checked=false, switch=false, show_when=nothing, k
     )
 end
 
-"""
-    tinput(name; label=Long(name), value="", placeholder=Long(name), rows=3, show_when=nothing, kwargs...)
-
-A labeled `<textarea>`. Extra `kwargs` go on the `<textarea>`.
-"""
-tinput(name; label=Long(name), value="", placeholder=Long(name), rows=3, show_when=nothing, kwargs...) = begin
+tinput(nv; label=Long(nv), value=_avalue(nv, ""), placeholder=Long(nv), rows=3, show_when=nothing, kwargs...) = begin
+    name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     h.label(
         label,
@@ -2348,14 +2311,8 @@ tinput(name; label=Long(name), value="", placeholder=Long(name), rows=3, show_wh
     )
 end
 
-"""
-    radio_group(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...)
-
-A `<fieldset>` of radio buttons. Each element of `options` becomes
-`<label><input type="radio" .../> Label</label>`. Options can be plain values
-or `value => label` pairs. Extra `kwargs` go on each `<input>`.
-"""
-radio_group(name, options; label=Long(name), value=nothing, show_when=nothing, kwargs...) = begin
+radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
+    name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     h.fieldset(
         h.legend(label),
