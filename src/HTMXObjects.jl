@@ -1997,7 +1997,9 @@ to pass parameters to `@post` routes via `formdata`:
         h.button(; class="btn", type="submit")("Go"),
     )
 """
-hidden_inputs(; kwargs...) = [h.input(; type="hidden", name=string(k), value=string(v)) for (k, v) in kwargs]
+_hidden_input(k, v) = [h.input(; type="hidden", name=string(k), value=string(v))]
+_hidden_input(k, v::AbstractVector) = [h.input(; type="hidden", name=string(k), value=string(x)) for x in v]
+hidden_inputs(; kwargs...) = vcat([_hidden_input(k, v) for (k, v) in kwargs]...)
 
 """
     _form(method, url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
@@ -2006,15 +2008,21 @@ Shared implementation for `get_form` and `post_form`. `method` is `:hx_get` or
 `:hx_post`. Extra keyword arguments become hidden `<input>` fields. Positional
 `children` are inserted before the submit button.
 """
-function _form(method, url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
-    form_attrs = filter(((_, v),) -> !isempty(v), pairs((;
+const _FORM_KEYS = Set([:label, :btn_class, :confirm, :form_class])
+_is_form_attr(k) = startswith(String(k), "hx_") || k in (:id, :class, :style, :enctype)
+
+function _form(method, url, children...; label="Submit", btn_class="btn", confirm="", form_class="", kwargs...)
+    form_kw = filter(((k, _),) -> _is_form_attr(k), pairs(kwargs))
+    hidden_kw = filter(((k, _),) -> !_is_form_attr(k), pairs(kwargs))
+    base_attrs = filter(((_, v),) -> !isempty(string(v)), pairs((;
         method => url, style="display:inline",
-        hx_target, hx_swap, hx_include, hx_confirm=confirm, class=form_class,
+        hx_confirm=confirm, class=form_class,
     )))
-    h.form(; form_attrs...)(
-        hidden_inputs(; kwargs...)...,
+    btn = isnothing(label) ? [] : [h.button(; class=btn_class, type="submit")(label)]
+    h.form(; base_attrs..., form_kw...)(
+        hidden_inputs(; hidden_kw...)...,
         children...,
-        h.button(; class=btn_class, type="submit")(label),
+        btn...,
     )
 end
 
@@ -2045,7 +2053,7 @@ Generate a complete inline GET form. Same API as [`post_form`](@ref) but uses
         fit_key, top_chains=string(top_chains),
     )
 """
-get_form(url, children...; kwargs...) = _form(:hx_get, url, children...; kwargs...)
+get_form(url, children...; label=nothing, kwargs...) = _form(:hx_get, url, children...; label, kwargs...)
 
 """
     lazy(url; tag=h.div, swap="outerHTML", kwargs...)
