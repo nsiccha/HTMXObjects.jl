@@ -1975,7 +1975,7 @@ function downloadTableCsv(btn, filename) {
 end
 
 """
-    render_table(table; id=nothing, sortable=true, download=false, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
+    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node.
@@ -1983,7 +1983,7 @@ as an `h.table` HTML node.
 # Keyword arguments
 - `id`: tbody element id (auto-generated if `nothing`)
 - `sortable`: add click-to-sort headers (default `true`; requires `sortable_table_js()` on the page)
-- `download`: add a "⬇ CSV" button (default `false`; requires `download_table_js()` on the page).
+- `download`: add a "⬇ CSV" button (default `true`; requires `download_table_js()` on the page).
   Placed in the caption header when `caption` is given, otherwise above the table.
 - `download_filename`: filename for the CSV download (default: `id * ".csv"`)
 - `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
@@ -2004,7 +2004,7 @@ page = htmx(
 )
 ```
 """
-function render_table(table; id=nothing, sortable=true, download=false, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
+function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
     cols = Tables.columnnames(Tables.columns(table))
     isnothing(id) && (id = "tbl-" * string(hash(cols), base=16))
 
