@@ -10,7 +10,7 @@ export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
@@ -1828,6 +1828,78 @@ Create a `text/markdown` HTTP response from a string.
 """
 markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; charset=utf-8"], body=text)
 
+# --- Captions ---
+
+"""
+    CaptionSpec(; title, short="", long=nothing)
+
+Caption metadata for a figure or table. `title` is a short bold heading,
+`short` is a one-line summary (typically built from live state so every
+parameter is visible), and `long` is an optional longer description shown
+behind a `<details>` toggle inside the `<figcaption>`.
+
+`long` may be a `String` or any HTMX `Node` (e.g. `h.div(h.p(...), h.p(...))`).
+"""
+struct CaptionSpec
+    title::String
+    short::String
+    long::Any
+end
+CaptionSpec(; title, short="", long=nothing) = CaptionSpec(title, short, long)
+
+"""
+    caption_style()
+
+Return a `<style>` node with default CSS for `render_caption` / `with_caption`:
+flex layout for the caption header (title left, actions right) and small
+spacing for the `<details>` body. Include once per page.
+"""
+caption_style() = h.style("""
+figure.captioned { margin: 0 0 1rem 0; }
+figcaption.caption { margin-bottom: 0.5rem; }
+.caption-header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.caption-actions { display: inline-flex; gap: 0.25rem; flex-shrink: 0; }
+.caption-action { padding: 0.1rem 0.5rem; font-size: 0.85em; margin: 0; }
+.caption-long { margin-top: 0.25rem; }
+.caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
+""")
+
+"""
+    render_caption(spec::CaptionSpec; actions=())
+
+Return a `<figcaption>` node for `spec`. `actions` is an iterable of nodes
+(buttons, links, …) rendered on the right side of the caption header.
+
+Use `with_caption(spec, content; actions)` to wrap content in a `<figure>` —
+this function returns just the `<figcaption>` so it can be embedded in a
+custom layout if needed.
+"""
+function render_caption(spec::CaptionSpec; actions=())
+    header_kids = Any[h.span(h.strong(spec.title), isempty(spec.short) ? "" : " — ", spec.short)]
+    if !isempty(actions)
+        push!(header_kids, h.span(; class="caption-actions")(actions...))
+    end
+    header = h.div(; class="caption-header")(header_kids...)
+    body = isnothing(spec.long) ? "" :
+        h.details(; class="caption-long")(
+            h.summary("More"),
+            spec.long isa AbstractString ? h.div(spec.long) : spec.long,
+        )
+    h.figcaption(; class="caption")(header, body)
+end
+
+"""
+    with_caption(spec::CaptionSpec, content; actions=())
+
+Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
+caption rendered above it. Returns `nothing` for `spec` is not allowed —
+use `content` directly if there is no caption.
+"""
+function with_caption(spec::CaptionSpec, content; actions=())
+    children = (content isa Tuple || content isa AbstractVector) ? content : (content,)
+    h.figure(; class="captioned")(render_caption(spec; actions), children...)
+end
+
 # --- Table rendering ---
 
 """
@@ -1865,7 +1937,45 @@ function sortTable(col, th) {
 end
 
 """
-    render_table(table; id=nothing, sortable=true, cell=nothing, class="striped", kwargs...)
+    download_table_js()
+
+Return an `h.script(...)` node containing the `downloadTableCsv` JavaScript function
+used by `render_table(...; download=true)`. Include this once per page (e.g. in `extra_head`).
+
+The JS reads the closest `<table>` relative to the clicked button, serializes the
+visible header cells and body rows to CSV (escaping `"`, `,`, and newlines), and
+triggers a Blob download. Sort indicator arrows (` ▲`/` ▼`) added by
+`sortable_table_js()` are stripped from header text.
+"""
+function download_table_js()
+    h.script(raw"""
+function downloadTableCsv(btn, filename) {
+    const wrap = btn.closest('figure, .table-wrap') || btn.parentElement;
+    const table = wrap.querySelector('table');
+    const esc = s => {
+        s = String(s);
+        return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const headers = Array.from(table.querySelectorAll('thead th'))
+        .map(th => esc(th.textContent.replace(/ [▲▼]$/, '').trim()));
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr =>
+        Array.from(tr.cells).map(td => esc(td.textContent.trim())).join(','));
+    const csv = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'table.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+""")
+end
+
+"""
+    render_table(table; id=nothing, sortable=true, download=false, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node.
@@ -1873,6 +1983,10 @@ as an `h.table` HTML node.
 # Keyword arguments
 - `id`: tbody element id (auto-generated if `nothing`)
 - `sortable`: add click-to-sort headers (default `true`; requires `sortable_table_js()` on the page)
+- `download`: add a "⬇ CSV" button (default `false`; requires `download_table_js()` on the page).
+  Placed in the caption header when `caption` is given, otherwise above the table.
+- `download_filename`: filename for the CSV download (default: `id * ".csv"`)
+- `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
 - `cell(value, column_name, row_index)`: custom cell renderer (default: `string(value)`)
 - `class`: table CSS class (default `"striped"`)
 - Extra kwargs are forwarded to `h.table()`
@@ -1880,13 +1994,17 @@ as an `h.table` HTML node.
 # Example
 ```julia
 df = DataFrame(name=["Alice", "Bob"], score=[95, 87])
+cap = CaptionSpec(; title="Scores", short="Ranked test scores.", long="Data collected 2026-Q1.")
 page = htmx(
-    h.body(render_table(df), sortable_table_js());
+    h.body(
+        render_table(df; download=true, caption=cap),
+        sortable_table_js(), download_table_js()
+    );
     pico_version="2"
 )
 ```
 """
-function render_table(table; id=nothing, sortable=true, cell=nothing, class="striped", kwargs...)
+function render_table(table; id=nothing, sortable=true, download=false, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
     cols = Tables.columnnames(Tables.columns(table))
     isnothing(id) && (id = "tbl-" * string(hash(cols), base=16))
 
@@ -1903,10 +2021,28 @@ function render_table(table; id=nothing, sortable=true, cell=nothing, class="str
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
-    h.table(; class, role="grid", kwargs...)(
+    table_node = h.table(; class, role="grid", kwargs...)(
         h.thead(h.tr(headers...)),
         h.tbody(body_rows...; id)
     )
+
+    fname = something(download_filename, id * ".csv")
+    download_btn = download ? h.button("⬇ CSV"; type="button", class="outline caption-action",
+                                        onclick="downloadTableCsv(this, '$(fname)')") : nothing
+
+    if !isnothing(caption)
+        actions = download ? (download_btn,) : ()
+        with_caption(caption, table_node; actions)
+    elseif download
+        h.figure(; class="captioned")(
+            h.figcaption(; class="caption")(
+                h.div(; class="caption-header")(h.span(""), h.span(; class="caption-actions")(download_btn))
+            ),
+            table_node,
+        )
+    else
+        table_node
+    end
 end
 
 # --- Formatting helpers ---
