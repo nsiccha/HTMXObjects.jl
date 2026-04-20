@@ -497,6 +497,17 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
     inline_props = _find_inline_structs(struct_expr)
     include_externals = _find_include_externals(struct_expr)
     route_info = _extract_route_info(struct_expr)
+    # Catch duplicate route property names early — two `@get foo = ...` lines
+    # silently overwrite each other in DynamicObjects' meta dict and produce a
+    # confusing "Method overwriting is not permitted during precompilation"
+    # error from the duplicate `_extract_args` methods.
+    let seen = Set{Symbol}(), dups = Symbol[]
+        for ri in route_info
+            ri.prop_name in seen && push!(dups, ri.prop_name)
+            push!(seen, ri.prop_name)
+        end
+        isempty(dups) || error("@htmx struct $(_struct_type_name(struct_expr)): duplicate route property name(s) $(unique(dups)). Each @get/@post/@ws/etc. property must have a unique name. Rename one (e.g. /todo list vs /todo_item/{slug}).")
+    end
     block = DynamicObjects.dynamicstruct(struct_expr;
         child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names), kwargs...)
     type_name = _struct_type_name(struct_expr)
