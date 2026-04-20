@@ -1310,12 +1310,21 @@ end
 
 _base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempty=false))
 
+# When `route!` is called without an explicit `prefix=` kwarg, mount_prefix is "".
+# In that case we must NOT pass `__prefix__=""` to the constructor — that would
+# clobber any default the struct itself sets in its body (e.g. an env-driven
+# `__prefix__ = get(ENV, "BASEPATH", "/proxy/8000")`). Only override when the
+# caller actually supplied a prefix. Children get their `__prefix__` via the
+# `@include` desugar reading `__self__.__prefix__`, so the resolved root value
+# propagates either way.
+_prefix_kw(mp) = isempty(mp) ? NamedTuple() : (; __prefix__=mp)
+
 function _register_indexed_route(T, method, name, path, n_params, record_dir; mount_prefix="")
     base = _base_segments(path)
     _register_handler(method, path, function(req)
         local obj
         try
-            obj = T(; __req__=req, __prefix__=mount_prefix)
+            obj = T(; __req__=req, _prefix_kw(mount_prefix)...)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1395,7 +1404,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
             if method == "WEBSOCKET"
                 if isempty(param_strs) && !has_kwargs && !info.indexed
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        lambda = getproperty(T(; __req__=nothing, __prefix__=mount_prefix), name)
+                        lambda = getproperty(T(; __req__=nothing, _prefix_kw(mount_prefix)...), name)
                         lambda(ws)
                     end)
                 else
@@ -1403,7 +1412,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     ws_base = _base_segments(path)
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
                         idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
-                        prop = getproperty(T(; __req__=ws.request, __prefix__=mount_prefix), name)
+                        prop = getproperty(T(; __req__=ws.request, _prefix_kw(mount_prefix)...), name)
                         lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
                         lambda(ws)
                     end)
@@ -1412,7 +1421,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 register(CONTEXT[], method, path, function(req)
                     local obj
                     try
-                        obj = T(; __req__=req, __prefix__=mount_prefix)
+                        obj = T(; __req__=req, _prefix_kw(mount_prefix)...)
                     catch err
                         return _route_error_response(req, err, catch_backtrace())
                     end
@@ -1472,7 +1481,7 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
     _register_handler(method, path, function(req)
         local parent, nested
         try
-            parent = ParentT(; __req__=req, __prefix__=root_prefix)
+            parent = ParentT(; __req__=req, _prefix_kw(root_prefix)...)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end

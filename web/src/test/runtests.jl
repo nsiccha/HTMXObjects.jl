@@ -86,6 +86,15 @@ const _SINGLETON_APPDATA = (; counter=Ref(7), label="singleton")
     @include sub = MountSubRoutes()
 end
 
+# Struct-body-default __prefix__ — must survive route!() with no explicit
+# `prefix=` kwarg. The conditional-prefix logic in _register_routes is what
+# keeps the struct's own default from being clobbered by an empty mount_prefix.
+@htmx struct PrefixDefaultApp
+    __prefix__ = "/baked-in"
+    @get index = h.p("root: $(__self__/"foo")")
+    @include sub = MountSubRoutes()
+end
+
 # --- Tests ---
 
 @testset "auto - HTML rendering" begin
@@ -717,6 +726,26 @@ end
     @test app.__appdata__ === appdata
     @test app.sub.__appdata__ === appdata
     @test app.sub.__parent__ === app
+end
+
+@testset "__prefix__ struct-body default survives route!() with no prefix kwarg" begin
+    # Direct construction: default obviously applies.
+    app = PrefixDefaultApp()
+    @test app.__prefix__ == "/baked-in"
+    @test app / "foo" == "/baked-in/foo"
+    @test app.sub / "bar" == "/baked-in/sub/bar"
+
+    # After route!() with no prefix=, the struct's own default must survive
+    # request-time construction. Mimic the handler's call shape:
+    rebuilt = PrefixDefaultApp(; __req__=nothing)   # NO __prefix__ kwarg
+    @test rebuilt.__prefix__ == "/baked-in"
+    @test rebuilt / "foo" == "/baked-in/foo"
+    @test rebuilt.sub / "bar" == "/baked-in/sub/bar"
+
+    # An explicit prefix= still wins over the struct default.
+    overridden = PrefixDefaultApp(; __prefix__="/override")
+    @test overridden / "foo" == "/override/foo"
+    @test overridden.sub / "bar" == "/override/sub/bar"
 end
 
 @testset "__appdata__ singleton via struct-body default" begin
