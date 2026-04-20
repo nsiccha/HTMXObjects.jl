@@ -680,45 +680,39 @@ end
 end
 
 @testset "__self__/\"path\" mount-prefix operator" begin
+    # Default construction: no parent, no prefix
     app = MountRootApp()
-    # Before route!: no mount registered, prefix is ""
     @test app / "foo" == "/foo"
-    @test app.sub / "bar" == "/bar"
+    @test app.sub / "bar" == "/sub/bar"  # @include desugar still appends "/sub"
 
-    route!(app; prefix="proxy/8000")
-    try
-        @test app / "foo" == "/proxy/8000/foo"
-        @test app / "/leading" == "/proxy/8000/leading"
-        @test app.sub / "bar" == "/proxy/8000/sub/bar"
-        # Route bodies see the qualified path via __self__
-        @test contains(repr("text/html", app.index), "/proxy/8000/foo")
-        @test contains(repr("text/html", app.sub.show), "/proxy/8000/sub/x")
-    finally
-        # Reset mount so other tests aren't affected
-        empty!(HTMXObjects._mount_prefixes)
-    end
+    # Threaded prefix: as the route handler constructs it
+    rooted = MountRootApp(; __prefix__="/proxy/8000")
+    @test rooted / "foo" == "/proxy/8000/foo"
+    @test rooted / "/leading" == "/proxy/8000/leading"
+    @test rooted.sub / "bar" == "/proxy/8000/sub/bar"
+    # Route bodies see the qualified path via __self__
+    @test contains(repr("text/html", rooted.index), "/proxy/8000/foo")
+    @test contains(repr("text/html", rooted.sub.show), "/proxy/8000/sub/x")
 end
 
-@testset "__appdata__ injection" begin
-    # Default: no appdata registered → __appdata__ is nothing
+@testset "__appdata__ injection via __parent__ chain" begin
+    # Default: no appdata → __appdata__ is nothing
     app0 = AppDataApp()
+    @test app0.__appdata__ === nothing
+    @test app0.sub.__appdata__ === nothing
     @test contains(repr("text/html", app0.index), "nothing")
 
+    # Construct with appdata: child sees it via __parent__ chain
     appdata = (; counter=Ref(42), label="hello")
+    app = AppDataApp(; __appdata__=appdata)
+    @test app.__appdata__ === appdata
+    @test app.sub.__appdata__ === appdata
+    @test app.sub.__parent__ === app
+
+    # route!(...; appdata=...) records appdata for handler closures
     route!(AppDataApp(); appdata)
-    try
-        # New instance built without explicit __appdata__ still gets default `nothing`,
-        # but the routed handler threads `_registered_appdata(T)`.
-        T = AppDataApp
-        registered = HTMXObjects._registered_appdata(T)
-        @test registered === appdata
-        # Construct as the route handler does and verify it propagates to children.
-        app = T(; __req__=nothing, __appdata__=registered)
-        @test app.__appdata__ === appdata
-        @test app.sub.__appdata__ === appdata
-    finally
-        empty!(HTMXObjects._mount_prefixes)
-    end
+    args = HTMXObjects._registered_types[AppDataApp]
+    @test args.appdata === appdata
 end
 
 @testset "@query_url" begin
@@ -738,3 +732,4 @@ end
         @test (@query_url fit(; dataset=ds)) == "/fit?dataset=mydata"
     end
 end
+

@@ -260,19 +260,28 @@ end
 """
     _inject_dunder_props!(struct_expr)
 
-Ensure that `@htmx` struct bodies always declare `__req__` and `__appdata__`
-as properties (defaulting to `nothing` when not user-declared) so that route
-bodies can reference them and `@include ext = Ext(; __req__)` shorthand
-resolves via `__self__.__req__`.
+Ensure that `@htmx` struct bodies always declare `__parent__`, `__prefix__`,
+`__req__`, and `__appdata__` as properties so route bodies can reference them
+and so the `__parent__` chain threads request context, appdata, and the mount
+prefix down through `@include`d sub-structs.
 
-The legacy short names `req` / `appdata` are no longer recognised — use the
-dunder names everywhere.
+Defaults:
+- `__parent__ = nothing` — set by `@include` desugar to point at the enclosing struct.
+- `__prefix__ = ""` — root-level mount path (no leading `/`); `@include` builds
+  `parent.__prefix__ * "/childname"` for each nested sub-struct.
+- `__req__` / `__appdata__` — fall through `__parent__` if present, else `nothing`.
+  Direct construction with `T(; __req__=req, __appdata__=appdata)` overrides the
+  default by pre-populating the cache.
+
+The legacy short names `req` / `appdata` are no longer recognised.
 """
 function _inject_dunder_props!(struct_expr)
     body = struct_expr.args[3]
     route_macros = _route_macros()
     has_req = false
     has_appdata = false
+    has_parent = false
+    has_prefix = false
     for arg in body.args
         arg isa Expr || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
@@ -295,10 +304,14 @@ function _inject_dunder_props!(struct_expr)
         end
         name === :__req__     && (has_req = true)
         name === :__appdata__ && (has_appdata = true)
+        name === :__parent__  && (has_parent = true)
+        name === :__prefix__  && (has_prefix = true)
     end
     prepend = Any[]
-    has_req     || push!(prepend, :(__req__ = nothing))
-    has_appdata || push!(prepend, :(__appdata__ = nothing))
+    has_parent  || push!(prepend, :(__parent__ = nothing))
+    has_prefix  || push!(prepend, :(__prefix__ = ""))
+    has_req     || push!(prepend, :(__req__     = isnothing(__parent__) ? nothing : __parent__.__req__))
+    has_appdata || push!(prepend, :(__appdata__ = isnothing(__parent__) ? nothing : __parent__.__appdata__))
     if !isempty(prepend)
         body.args = vcat(prepend, body.args)
     end
@@ -366,8 +379,15 @@ _nested_struct_type(::Type, ::Val) = nothing
 """
     _convert_include_to_struct!(struct_expr)
 
-Pre-process: convert `@include prop = begin...end` to `prop = struct _Include_prop ... end`.
-`@include prop = ExternalStruct(...)` is left as-is (just a metadata marker for route registration).
+Pre-process `@include` lines:
+
+- `@include prop = begin...end` is rewritten to `prop = struct _Include_prop ... end`
+  so DO's inline-struct machinery wires `__parent__=__self__` automatically.
+- `@include prop = ExternalStruct(; ...)` keeps the external call but its kwargs
+  are augmented with `__parent__=__self__, __prefix__=__self__.__prefix__ * "/prop"`
+  so the sub-struct receives the request/appdata chain (via `__parent__`) and the
+  correct mount prefix at construction time. User-provided values for these kwargs
+  win; we only fill them in if absent.
 """
 function _convert_include_to_struct!(struct_expr)
     body = struct_expr.args[3]
@@ -383,15 +403,49 @@ function _convert_include_to_struct!(struct_expr)
         inner isa Expr && inner.head == :(=) || continue
         prop_name = inner.args[1]
         rhs = inner.args[2]
-        # Only convert begin...end blocks; leave ExternalStruct(...) calls as-is
-        Meta.isexpr(rhs, :block) || continue
-        # Convert to: prop = struct _Include_prop ... end
-        struct_name = Symbol("_Include_", prop_name)
-        child_struct = Expr(:struct, false, struct_name, rhs)
-        # Replace the @include macrocall with the struct assignment
-        body.args[i] = :($prop_name = $child_struct)
+        if Meta.isexpr(rhs, :block)
+            # Convert to: prop = struct _Include_prop ... end
+            struct_name = Symbol("_Include_", prop_name)
+            child_struct = Expr(:struct, false, struct_name, rhs)
+            body.args[i] = :($prop_name = $child_struct)
+        elseif Meta.isexpr(rhs, :call)
+            # External-struct form: inject parent/prefix kwargs so the sub-struct
+            # sees the parent chain and gets the right mount prefix.
+            _inject_include_chain_kwargs!(rhs, prop_name)
+            body.args[i] = :($prop_name = $rhs)
+        end
     end
     struct_expr
+end
+
+"""
+    _inject_include_chain_kwargs!(call_expr, prop_name)
+
+Mutate the kwargs of `SomeStruct(args...; ...)` so that `__parent__=__self__`
+and `__prefix__=__self__.__prefix__ * "/prop_name"` are present (without
+overriding any user-provided values). Walks `walk_rhs` later, so bare
+`__self__` is left alone (it's the parameter name, not a property).
+"""
+function _inject_include_chain_kwargs!(call_expr, prop_name)
+    # Find or create the :parameters node (first arg after the function in :call)
+    params_idx = findfirst(a -> a isa Expr && a.head === :parameters, call_expr.args)
+    if params_idx === nothing
+        params = Expr(:parameters)
+        insert!(call_expr.args, 2, params)
+    else
+        params = call_expr.args[params_idx]
+    end
+    has_parent = false
+    has_prefix = false
+    for kw in params.args
+        name = kw isa Symbol ? kw :
+               (Meta.isexpr(kw, :kw) ? kw.args[1] : nothing)
+        name === :__parent__ && (has_parent = true)
+        name === :__prefix__ && (has_prefix = true)
+    end
+    has_parent || push!(params.args, Expr(:kw, :__parent__, :__self__))
+    has_prefix || push!(params.args, Expr(:kw, :__prefix__, :(__self__.__prefix__ * "/" * $(string(prop_name)))))
+    call_expr
 end
 
 # Default: no @param properties declared.
@@ -553,11 +607,12 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
     end
     # Emit `Base.:/(::T, ::AbstractString)` so route bodies can write
     # `__self__/"plots"` and get the fully-qualified URL relative to this
-    # struct's mount point (root prefix + nested chain). Resolves via
-    # `_mount_prefixes`, populated by `_register_routes` / `_register_included_routes`.
+    # struct's mount point. `__prefix__` is threaded through construction:
+    # the root receives it from `route!`, and `@include` desugar passes
+    # `__prefix__=__self__.__prefix__ * "/childname"` to each nested sub-struct.
     push!(block.args[1].args, :(
         Base.:/(self::$type_name, p::AbstractString) =
-            $(_mount_prefix)(self) * "/" * lstrip(p, '/')
+            self.__prefix__ * "/" * lstrip(p, '/')
     ))
     reroute && push!(block.args[1].args, :($(_reroute!)($type_name)))
     block
@@ -1008,19 +1063,12 @@ const _http_verbs = Dict(
     Symbol("@ws") => "WEBSOCKET",
 )
 
-# Store registered types so _reroute! can re-register after Revise updates
+# Store registered types so _reroute! can re-register after Revise updates.
+# Stores `(prefix, record_dir, appdata)` per root type — these are re-supplied to
+# `_register_routes` when Revise re-evaluates the struct definition.
 const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir, :appdata), Tuple{String, Any, Any}}}()
-# Per-root appdata accessor — used by handler closures to fetch the current
-# appdata at request time (so Revise updates flow through without re-registering).
-_registered_appdata(T) = haskey(_registered_types, T) ? _registered_types[T].appdata : nothing
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
-# Per-type mount prefix (root + each nested sub-struct), populated at registration.
-# Used by `Base.:/(::T, ::AbstractString)` so route bodies can write `__self__/"plots"`
-# to get a fully-qualified URL relative to that struct's own mount point.
-const _mount_prefixes = Dict{DataType, String}()
-_mount_prefix(obj) = get(_mount_prefixes, typeof(obj), "")
-
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
@@ -1258,12 +1306,12 @@ end
 
 _base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempty=false))
 
-function _register_indexed_route(T, method, name, path, n_params, record_dir)
+function _register_indexed_route(T, method, name, path, n_params, record_dir; mount_prefix="", appdata=nothing)
     base = _base_segments(path)
     _register_handler(method, path, function(req)
         local obj
         try
-            obj = T(; __req__=req, __appdata__=_registered_appdata(T))
+            obj = T(; __req__=req, __appdata__=appdata, __prefix__=mount_prefix)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1286,8 +1334,8 @@ function _warn_docs_prefix(path, name)
         @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — Oxygen reserves this prefix for its Swagger UI. The route will silently 404. Rename the route to avoid the \"/docs\" prefix."
 end
 
-function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[])
-    _mount_prefixes[T] = isempty(prefix) ? "" : "/" * prefix
+function _register_routes(T; prefix="", record_dir=nothing, appdata=nothing, parent_chain=Symbol[])
+    mount_prefix = isempty(prefix) ? "" : "/" * prefix
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
 
@@ -1296,7 +1344,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
         if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
             nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
             chain = vcat(parent_chain, [name])
-            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir)
+            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, appdata)
             continue
         end
 
@@ -1339,11 +1387,11 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
         end
 
         # Capture loop variables to avoid closure-over-mutable-variable issues
-        let name=name, param_strs=param_strs, n_params=n_params, path=path, record_dir=record_dir, method=method, default_positions=default_positions, has_kwargs=has_kwargs
+        let name=name, param_strs=param_strs, n_params=n_params, path=path, record_dir=record_dir, method=method, default_positions=default_positions, has_kwargs=has_kwargs, mount_prefix=mount_prefix, appdata=appdata
             if method == "WEBSOCKET"
                 if isempty(param_strs) && !has_kwargs && !info.indexed
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        lambda = getproperty(T(; __req__=nothing, __appdata__=_registered_appdata(T)), name)
+                        lambda = getproperty(T(; __req__=nothing, __appdata__=appdata, __prefix__=mount_prefix), name)
                         lambda(ws)
                     end)
                 else
@@ -1351,7 +1399,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     ws_base = _base_segments(path)
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
                         idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
-                        prop = getproperty(T(; __req__=ws.request, __appdata__=_registered_appdata(T)), name)
+                        prop = getproperty(T(; __req__=ws.request, __appdata__=appdata, __prefix__=mount_prefix), name)
                         lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
                         lambda(ws)
                     end)
@@ -1360,7 +1408,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 register(CONTEXT[], method, path, function(req)
                     local obj
                     try
-                        obj = T(; __req__=req, __appdata__=_registered_appdata(T))
+                        obj = T(; __req__=req, __appdata__=appdata, __prefix__=mount_prefix)
                     catch err
                         return _route_error_response(req, err, catch_backtrace())
                     end
@@ -1375,14 +1423,14 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 end)
             elseif isempty(param_strs) && !has_kwargs
                 # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
-                _register_indexed_route(T, method, name, path, 0, record_dir)
+                _register_indexed_route(T, method, name, path, 0, record_dir; mount_prefix, appdata)
             elseif isempty(param_strs) && has_kwargs
                 # kwargs-only route (no path params)
                 !isnothing(record_dir) && push!(_static_kwargs_paths, path)
-                _register_indexed_route(T, method, name, path, 0, record_dir)
+                _register_indexed_route(T, method, name, path, 0, record_dir; mount_prefix, appdata)
             else
                 # Register the full route (all params explicit)
-                _register_indexed_route(T, method, name, path, n_params, record_dir)
+                _register_indexed_route(T, method, name, path, n_params, record_dir; mount_prefix, appdata)
 
                 # Register shortened routes for trailing defaults
                 # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -1392,7 +1440,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     short_path = isempty(short_params) ? base :
                         base * "/" * join("{" .* short_params .* "}", "/")
                     name == :index && isempty(prefix) && isempty(short_params) && (short_path = "/")
-                    _register_indexed_route(T, method, name, short_path, length(short_params), record_dir)
+                    _register_indexed_route(T, method, name, short_path, length(short_params), record_dir; mount_prefix, appdata)
                 end
             end
         end
@@ -1415,12 +1463,12 @@ wraps first, then each ancestor.
 # property or a `_page_passthrough` convention) for cases where a nested struct wants to
 # fully replace the parent's page rather than compose with it.
 """
-function _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
+function _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir; root_prefix="", appdata=nothing)
     base = _base_segments(path)
     _register_handler(method, path, function(req)
         local parent, nested
         try
-            parent = ParentT(; __req__=req, __appdata__=_registered_appdata(ParentT))
+            parent = ParentT(; __req__=req, __appdata__=appdata, __prefix__=root_prefix)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1542,10 +1590,12 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
 end
 
 # Register routes from a nested @include struct with chained property access through the parent.
-function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir)
+# `root_prefix` is the parent's mount prefix (with leading "/") — passed verbatim
+# to the handler so `ParentT(; __prefix__=root_prefix)` constructs correctly,
+# and the parent's `@include` desugar then threads `/<name>` per nesting level.
+function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir; root_prefix::String="", appdata=nothing)
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
-    _mount_prefixes[NestedT] = "/" * prefix
     for (name, info) in DynamicObjects.meta(NestedT)
         DynamicObjects.isfixed(info) && continue
 
@@ -1553,7 +1603,7 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         nested_type = _nested_struct_type(NestedT, Val(name))
         if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
             _register_included_routes(ParentT, nested_type, vcat(chain, [name]),
-                prefix * "/" * string(name), record_dir)
+                prefix * "/" * string(name), record_dir; root_prefix, appdata)
             continue
         end
 
@@ -1598,9 +1648,9 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
             end
         end
 
-        let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, base=base
+        let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, base=base, root_prefix=root_prefix, appdata=appdata
             # Register the full route
-            _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
+            _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir; root_prefix, appdata)
 
             # Register shortened routes for trailing defaults
             for k in length(default_positions):-1:1
@@ -1609,7 +1659,7 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
                 short_path = isempty(short_params) ? base :
                     base * "/" * join("{" .* short_params .* "}", "/")
                 name == :index && isempty(short_params) && (short_path = "/" * prefix)
-                _register_included_handler(ParentT, NestedT, method, name, chain, short_path, length(short_params), record_dir)
+                _register_included_handler(ParentT, NestedT, method, name, chain, short_path, length(short_params), record_dir; root_prefix, appdata)
             end
         end
     end
@@ -1619,7 +1669,7 @@ function route!(obj; prefix="", record_dir=nothing, appdata=nothing)
     T = typeof(obj)
     _registered_types[T] = (; prefix, record_dir, appdata)
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
-    _register_routes(T; prefix, record_dir)
+    _register_routes(T; prefix, record_dir, appdata)
     obj
 end
 
@@ -1627,14 +1677,14 @@ end
 function _reroute!(T::DataType)
     if haskey(_registered_types, T)
         args = _registered_types[T]
-        _register_routes(T; args.prefix, args.record_dir)
+        _register_routes(T; args.prefix, args.record_dir, args.appdata)
     end
     # If T is an @include'd sub-struct, re-register its parent(s)
     if haskey(_included_type_parents, T)
         for ParentT in _included_type_parents[T]
             haskey(_registered_types, ParentT) || continue
             args = _registered_types[ParentT]
-            _register_routes(ParentT; args.prefix, args.record_dir)
+            _register_routes(ParentT; args.prefix, args.record_dir, args.appdata)
         end
     end
 end
