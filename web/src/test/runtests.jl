@@ -659,6 +659,17 @@ end
     @test app.name == "anon"
 end
 
+@testset "@include ExternalStruct emits _nested_struct_type" begin
+    # Regression: `@include sub = MountSubRoutes()` (call form, not begin-block)
+    # must still emit `_nested_struct_type(MountRootApp, Val(:sub)) = MountSubRoutes`
+    # so `_register_routes` recognizes the nested struct and mounts its routes.
+    # _convert_include_to_struct! strips the @include wrapper for call forms;
+    # _find_include_externals must run BEFORE that conversion.
+    @test HTMXObjects._nested_struct_type(MountRootApp, Val(:sub)) === MountSubRoutes
+    @test HTMXObjects._nested_struct_type(AppDataApp, Val(:sub)) === MountSubRoutes
+    @test HTMXObjects._nested_struct_type(PrefixDefaultApp, Val(:sub)) === MountSubRoutes
+end
+
 @testset "_param_names emission" begin
     @test HTMXObjects._param_names(ParamApp) == (:vessels, :n_bootstrap, :note)
     # Inline child inherits parent's param names

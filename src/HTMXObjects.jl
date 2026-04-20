@@ -537,6 +537,11 @@ function _rewrite_param_line(expr)
 end
 
 function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwargs...)
+    # Capture externals BEFORE _convert_include_to_struct! strips the @include
+    # wrapper from `@include prop = ExternalStruct(...)` lines (the begin-block
+    # form turns into an inline struct, but the call form is left as a bare
+    # assignment, so _find_include_externals would no longer recognize it).
+    include_externals = _find_include_externals(struct_expr)
     _convert_include_to_struct!(struct_expr)
     _wrap_ws_bodies!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
@@ -552,7 +557,6 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
         n in param_names || push!(param_names, n)
     end
     inline_props = _find_inline_structs(struct_expr)
-    include_externals = _find_include_externals(struct_expr)
     route_info = _extract_route_info(struct_expr)
     # Catch duplicate route property names early — two `@get foo = ...` lines
     # silently overwrite each other in DynamicObjects' meta dict and produce a
