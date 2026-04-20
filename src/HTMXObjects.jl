@@ -506,7 +506,15 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
             ri.prop_name in seen && push!(dups, ri.prop_name)
             push!(seen, ri.prop_name)
         end
-        isempty(dups) || error("@htmx struct $(_struct_type_name(struct_expr)): duplicate route property name(s) $(unique(dups)). Each @get/@post/@ws/etc. property must have a unique name. Rename one (e.g. /todo list vs /todo_item/{slug}).")
+        isempty(dups) || error("""
+            @htmx struct $(_struct_type_name(struct_expr)): duplicate route property name(s) $(unique(dups)). Each @get/@post/@ws/etc. property must have a unique name (DynamicObjects' meta dict cannot hold two properties with the same name).
+
+            If you want both `/foo` and `/foo/{x}` from one route, use a trailing-default positional arg — `_register_routes` automatically registers shortened paths for trailing defaults:
+
+                @get foo(x=nothing) = isnothing(x) ? list_view() : item_view(x)
+
+            registers BOTH `/foo` and `/foo/{x}`. Otherwise rename one of the colliding properties.
+            """)
     end
     block = DynamicObjects.dynamicstruct(struct_expr;
         child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names), kwargs...)
