@@ -62,6 +62,21 @@ end
     @post submit = h.p("submit $name")
 end
 
+# For __self__/"path" + __appdata__ smoke tests
+@htmx struct MountSubRoutes
+    @get show = h.p("sub show: $(__self__/"x")")
+end
+
+@htmx struct MountRootApp
+    @get index = h.p("root index: $(__self__/"foo")")
+    @include sub = MountSubRoutes(; __req__)
+end
+
+@htmx struct AppDataApp
+    @get index = h.p("appdata=$(repr(__appdata__))")
+    @include sub = MountSubRoutes(; __req__)
+end
+
 # --- Tests ---
 
 @testset "auto - HTML rendering" begin
@@ -662,6 +677,48 @@ end
     url = query_url("/plot", app; n_bootstrap="99")
     @test contains(url, "n_bootstrap=99")
     @test !contains(url, "n_bootstrap=10")
+end
+
+@testset "__self__/\"path\" mount-prefix operator" begin
+    app = MountRootApp()
+    # Before route!: no mount registered, prefix is ""
+    @test app / "foo" == "/foo"
+    @test app.sub / "bar" == "/bar"
+
+    route!(app; prefix="proxy/8000")
+    try
+        @test app / "foo" == "/proxy/8000/foo"
+        @test app / "/leading" == "/proxy/8000/leading"
+        @test app.sub / "bar" == "/proxy/8000/sub/bar"
+        # Route bodies see the qualified path via __self__
+        @test contains(repr("text/html", app.index), "/proxy/8000/foo")
+        @test contains(repr("text/html", app.sub.show), "/proxy/8000/sub/x")
+    finally
+        # Reset mount so other tests aren't affected
+        empty!(HTMXObjects._mount_prefixes)
+    end
+end
+
+@testset "__appdata__ injection" begin
+    # Default: no appdata registered → __appdata__ is nothing
+    app0 = AppDataApp()
+    @test contains(repr("text/html", app0.index), "nothing")
+
+    appdata = (; counter=Ref(42), label="hello")
+    route!(AppDataApp(); appdata)
+    try
+        # New instance built without explicit __appdata__ still gets default `nothing`,
+        # but the routed handler threads `_registered_appdata(T)`.
+        T = AppDataApp
+        registered = HTMXObjects._registered_appdata(T)
+        @test registered === appdata
+        # Construct as the route handler does and verify it propagates to children.
+        app = T(; req=nothing, __req__=nothing, __appdata__=registered)
+        @test app.__appdata__ === appdata
+        @test app.sub.__appdata__ === appdata
+    finally
+        empty!(HTMXObjects._mount_prefixes)
+    end
 end
 
 @testset "@query_url" begin
