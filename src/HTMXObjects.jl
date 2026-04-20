@@ -283,6 +283,8 @@ function _inject_req_aliases!(struct_expr)
     route_macros = _route_macros()
     has_req = false
     has_dunder = false
+    has_appdata = false
+    has_appdata_dunder = false
     for arg in body.args
         arg isa Expr || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
@@ -303,8 +305,10 @@ function _inject_req_aliases!(struct_expr)
         else
             nothing
         end
-        name === :req    && (has_req = true)
-        name === :__req__ && (has_dunder = true)
+        name === :req         && (has_req = true)
+        name === :__req__     && (has_dunder = true)
+        name === :appdata     && (has_appdata = true)
+        name === :__appdata__ && (has_appdata_dunder = true)
     end
     prepend = Any[]
     if !has_dunder && !has_req
@@ -314,6 +318,14 @@ function _inject_req_aliases!(struct_expr)
         push!(prepend, :(__req__ = req))
     elseif !has_req
         push!(prepend, :(req = __req__))
+    end
+    if !has_appdata_dunder && !has_appdata
+        push!(prepend, :(__appdata__ = nothing))
+        push!(prepend, :(appdata = __appdata__))
+    elseif !has_appdata_dunder
+        push!(prepend, :(__appdata__ = appdata))
+    elseif !has_appdata
+        push!(prepend, :(appdata = __appdata__))
     end
     if !isempty(prepend)
         body.args = vcat(prepend, body.args)
@@ -1009,7 +1021,10 @@ const _http_verbs = Dict(
 )
 
 # Store registered types so _reroute! can re-register after Revise updates
-const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tuple{String, Any}}}()
+const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir, :appdata), Tuple{String, Any, Any}}}()
+# Per-root appdata accessor — used by handler closures to fetch the current
+# appdata at request time (so Revise updates flow through without re-registering).
+_registered_appdata(T) = haskey(_registered_types, T) ? _registered_types[T].appdata : nothing
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
 # Per-type mount prefix (root + each nested sub-struct), populated at registration.
@@ -1260,7 +1275,7 @@ function _register_indexed_route(T, method, name, path, n_params, record_dir)
     _register_handler(method, path, function(req)
         local obj
         try
-            obj = T(; req, __req__=req)
+            obj = T(; req, __req__=req, __appdata__=_registered_appdata(T))
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1340,7 +1355,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
             if method == "WEBSOCKET"
                 if isempty(param_strs) && !has_kwargs && !info.indexed
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        lambda = getproperty(T(; req=nothing, __req__=nothing), name)
+                        lambda = getproperty(T(; req=nothing, __req__=nothing, __appdata__=_registered_appdata(T)), name)
                         lambda(ws)
                     end)
                 else
@@ -1348,7 +1363,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     ws_base = _base_segments(path)
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
                         idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
-                        prop = getproperty(T(; req=ws.request, __req__=ws.request), name)
+                        prop = getproperty(T(; req=ws.request, __req__=ws.request, __appdata__=_registered_appdata(T)), name)
                         lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
                         lambda(ws)
                     end)
@@ -1357,7 +1372,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 register(CONTEXT[], method, path, function(req)
                     local obj
                     try
-                        obj = T(; req, __req__=req)
+                        obj = T(; req, __req__=req, __appdata__=_registered_appdata(T))
                     catch err
                         return _route_error_response(req, err, catch_backtrace())
                     end
@@ -1417,7 +1432,7 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
     _register_handler(method, path, function(req)
         local parent, nested
         try
-            parent = ParentT(; req, __req__=req)
+            parent = ParentT(; req, __req__=req, __appdata__=_registered_appdata(ParentT))
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1623,9 +1638,9 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
     end
 end
 
-function route!(obj; prefix="", record_dir=nothing)
+function route!(obj; prefix="", record_dir=nothing, appdata=nothing)
     T = typeof(obj)
-    _registered_types[T] = (; prefix, record_dir)
+    _registered_types[T] = (; prefix, record_dir, appdata)
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
     _register_routes(T; prefix, record_dir)
     obj
