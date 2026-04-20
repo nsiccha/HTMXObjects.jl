@@ -551,6 +551,14 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
             Expr(:call, _fname, :(::Type{$type_name})),
             Tuple(all_nested)))
     end
+    # Emit `Base.:/(::T, ::AbstractString)` so route bodies can write
+    # `__self__/"plots"` and get the fully-qualified URL relative to this
+    # struct's mount point (root prefix + nested chain). Resolves via
+    # `_mount_prefixes`, populated by `_register_routes` / `_register_included_routes`.
+    push!(block.args[1].args, :(
+        Base.:/(self::$type_name, p::AbstractString) =
+            $(_mount_prefix)(self) * "/" * lstrip(p, '/')
+    ))
     reroute && push!(block.args[1].args, :($(_reroute!)($type_name)))
     block
 end
@@ -1004,6 +1012,11 @@ const _http_verbs = Dict(
 const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tuple{String, Any}}}()
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
+# Per-type mount prefix (root + each nested sub-struct), populated at registration.
+# Used by `Base.:/(::T, ::AbstractString)` so route bodies can write `__self__/"plots"`
+# to get a fully-qualified URL relative to that struct's own mount point.
+const _mount_prefixes = Dict{DataType, String}()
+_mount_prefix(obj) = get(_mount_prefixes, typeof(obj), "")
 
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
@@ -1271,6 +1284,7 @@ function _warn_docs_prefix(path, name)
 end
 
 function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[])
+    _mount_prefixes[T] = isempty(prefix) ? "" : "/" * prefix
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
 
@@ -1539,6 +1553,7 @@ end
 function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir)
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
+    _mount_prefixes[NestedT] = "/" * prefix
     for (name, info) in DynamicObjects.meta(NestedT)
         DynamicObjects.isfixed(info) && continue
 
