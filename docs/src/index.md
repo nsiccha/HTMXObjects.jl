@@ -65,6 +65,7 @@ remain internal.
 route!(app)                          # register routes, no recording
 route!(app; record_dir="site")       # register routes + record every response
 route!(app; prefix="api")            # mount under /api/...
+route!(app; appdata=db_handle)       # exposed inside route bodies as __appdata__
 ```
 
 Property-to-route mapping:
@@ -180,6 +181,70 @@ create kwargs. Only `prop(; q="")` works.
 
 Type annotations apply: `page::Int=1` parses the query string value to `Int`.
 Missing kwargs use the default value from the signature.
+
+### Sub-route composition with `@include`
+
+Group related routes into a sub-struct and mount it under a path segment with
+`@include`. The sub-struct's properties become routes under
+`/<parent-prefix>/<include-name>/...`:
+
+```julia
+@htmx struct AdminRoutes
+    @get index   = h.p("admin home")           # GET /admin
+    @get users   = h.p("user list")            # GET /admin/users
+end
+
+@htmx struct App
+    @get index = h.p("public home")            # GET /
+    @include admin = AdminRoutes()             # mounts AdminRoutes at /admin
+end
+```
+
+Two forms are supported:
+
+- `@include name = ExternalStruct(; ...)` — mount a separately-defined struct.
+  The kwargs `__parent__=__self__` and `__prefix__=parent.__prefix__ * "/name"`
+  are auto-injected so the sub-struct sees its parent and full mount path.
+- `@include name = begin ... end` — define an anonymous inline sub-struct
+  directly. DynamicObjects wires `__parent__` automatically for inline children.
+
+### Per-request `__appdata__`
+
+For state shared across all requests (a database handle, a thread-safe counter,
+config), pass it once at `route!` time and read it via `__appdata__` in any
+route body:
+
+```julia
+@htmx struct App
+    @get index = h.p("count: $(__appdata__.counter[])")
+end
+
+route!(App(); appdata=(; counter=Ref(0)))
+```
+
+`__appdata__` falls through the `__parent__` chain, so `@include`d sub-structs
+see the same value without any extra plumbing. Each request still constructs a
+fresh `App` instance — `appdata` is the only piece that persists.
+
+### Mount-prefix-aware URLs with `__self__/"path"`
+
+Route bodies often need to emit URLs (for `hx-get`, `href`, etc.) that include
+the app's mount prefix. Use `__self__/"path"` to get a fully-qualified URL
+relative to the current struct's mount point:
+
+```julia
+@htmx struct App
+    @get index = h.a(href = __self__/"about")("About")  # → "/proxy/8000/about"
+    @get about = h.p("About page")
+end
+
+route!(App(); prefix="proxy/8000")
+```
+
+The mount prefix is threaded through `__prefix__` at construction time — the
+root receives it from `route!`, and `@include` desugar appends `/<name>` for
+each nested level. Inside an `@include`d sub-struct, `__self__/"foo"` resolves
+to `/<root-prefix>/<include-name>/foo`.
 
 ### HTMX partial updates
 
