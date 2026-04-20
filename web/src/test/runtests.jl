@@ -69,12 +69,21 @@ end
 
 @htmx struct MountRootApp
     @get index = h.p("root index: $(__self__/"foo")")
-    @include sub = MountSubRoutes(; __req__)
+    @include sub = MountSubRoutes()
 end
 
 @htmx struct AppDataApp
     @get index = h.p("appdata=$(repr(__appdata__))")
-    @include sub = MountSubRoutes(; __req__)
+    @include sub = MountSubRoutes()
+end
+
+# Module-level singleton pattern: struct body sets __appdata__ default
+const _SINGLETON_APPDATA = (; counter=Ref(7), label="singleton")
+
+@htmx struct AppDataSingletonApp
+    __appdata__ = _SINGLETON_APPDATA
+    @get index = h.p("appdata=$(repr(__appdata__))")
+    @include sub = MountSubRoutes()
 end
 
 # --- Tests ---
@@ -708,11 +717,16 @@ end
     @test app.__appdata__ === appdata
     @test app.sub.__appdata__ === appdata
     @test app.sub.__parent__ === app
+end
 
-    # route!(...; appdata=...) records appdata for handler closures
-    route!(AppDataApp(); appdata)
-    args = HTMXObjects._registered_types[AppDataApp]
-    @test args.appdata === appdata
+@testset "__appdata__ singleton via struct-body default" begin
+    # The conventional pattern: struct sets `__appdata__ = SOME_CONST` so
+    # every constructed instance (including those built per-request by route
+    # handlers) sees the singleton, with no `appdata` kwarg on `route!`.
+    app = AppDataSingletonApp()
+    @test app.__appdata__ === _SINGLETON_APPDATA
+    @test app.sub.__appdata__ === _SINGLETON_APPDATA
+    @test contains(repr("text/html", app.index), "singleton")
 end
 
 @testset "@query_url" begin

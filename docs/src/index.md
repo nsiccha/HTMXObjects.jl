@@ -65,8 +65,11 @@ remain internal.
 route!(app)                          # register routes, no recording
 route!(app; record_dir="site")       # register routes + record every response
 route!(app; prefix="api")            # mount under /api/...
-route!(app; appdata=db_handle)       # exposed inside route bodies as __appdata__
 ```
+
+For per-app shared state (a database handle, config, caches), see the
+[`__appdata__`](#per-app-__appdata__) section below — supplied via a
+struct-body default, not a `route!` kwarg.
 
 Property-to-route mapping:
 
@@ -208,23 +211,46 @@ Two forms are supported:
 - `@include name = begin ... end` — define an anonymous inline sub-struct
   directly. DynamicObjects wires `__parent__` automatically for inline children.
 
-### Per-request `__appdata__`
+### Per-app `__appdata__`
 
 For state shared across all requests (a database handle, a thread-safe counter,
-config), pass it once at `route!` time and read it via `__appdata__` in any
-route body:
+config), set `__appdata__` as a default in the root `@htmx struct` body. Each
+request still constructs a fresh app instance, but the default points at the
+same singleton object every time:
 
 ```julia
+const APP_DATA = (; counter=Ref(0))
+
 @htmx struct App
+    __appdata__ = APP_DATA
     @get index = h.p("count: $(__appdata__.counter[])")
 end
 
-route!(App(); appdata=(; counter=Ref(0)))
+route!(App())
 ```
 
 `__appdata__` falls through the `__parent__` chain, so `@include`d sub-structs
-see the same value without any extra plumbing. Each request still constructs a
-fresh `App` instance — `appdata` is the only piece that persists.
+see the same value without any extra plumbing. There is intentionally no
+`appdata` kwarg on `route!` — the singleton lives with the struct definition,
+which keeps `route!`'s API (and the rerouting Revise hook) state-free.
+
+If `__appdata__`'s value needs runtime initialisation (file I/O, env reads),
+use a `Ref` so the const can be declared at module load and assigned later in
+`__init__`:
+
+```julia
+const APP_DATA = Ref{AppData}()
+
+@htmx struct App
+    __appdata__ = APP_DATA[]
+    # ...
+end
+
+function __init__()
+    APP_DATA[] = AppData()
+    route!(App())
+end
+```
 
 ### Mount-prefix-aware URLs with `__self__/"path"`
 
