@@ -221,13 +221,12 @@ function _warn_legacy_name!(struct_expr, legacy::Symbol, replacement::Symbol)
 end
 
 _warn_legacy_page_name!(struct_expr) = _warn_legacy_name!(struct_expr, :page, :__page__)
-_warn_legacy_req_name!(struct_expr)  = _warn_legacy_name!(struct_expr, :req,  :__req__)
 
 """
     _warn_redundant_req_decl!(struct_expr)
 
-Warn when the user explicitly writes `__req__ = nothing`. `_inject_req_aliases!`
-adds this line automatically when no `req`/`__req__` is declared, so an explicit
+Warn when the user explicitly writes `__req__ = nothing`. `_inject_dunder_props!`
+adds this line automatically when no `__req__` is declared, so an explicit
 declaration is redundant noise.
 """
 function _warn_redundant_req_decl!(struct_expr)
@@ -259,32 +258,21 @@ function _warn_redundant_req_decl!(struct_expr)
 end
 
 """
-    _inject_req_aliases!(struct_expr)
+    _inject_dunder_props!(struct_expr)
 
-Ensure that `@htmx` struct bodies always declare both `req` and `__req__`
-as properties so that:
+Ensure that `@htmx` struct bodies always declare `__req__` and `__appdata__`
+as properties (defaulting to `nothing` when not user-declared) so that route
+bodies can reference them and `@include ext = Ext(; __req__)` shorthand
+resolves via `__self__.__req__`.
 
-1. `walk_rhs` rewrites bare references to either name in sibling property
-   bodies (including the `@include ext = Ext(; req)` / `@include ext = Ext(; __req__)`
-   shorthand — `req=req` / `__req__=__req__` desugars to a bare-symbol
-   kwarg value that must resolve via `__self__`).
-2. Route handlers can pass either kwarg name and have the other fall
-   through to the alias.
-
-Canonically, `__req__` holds the request and `req` is an alias property
-that returns `__self__.__req__`. If the user explicitly declared only
-`req = ...` (legacy), we inject `__req__ = req`. If neither is declared,
-we inject `__req__ = nothing` and `req = __req__`. Injected lines carry
-no `LineNumberNode`, so the legacy-name walker (which ran earlier) only
-ever sees user-written assignments.
+The legacy short names `req` / `appdata` are no longer recognised — use the
+dunder names everywhere.
 """
-function _inject_req_aliases!(struct_expr)
+function _inject_dunder_props!(struct_expr)
     body = struct_expr.args[3]
     route_macros = _route_macros()
     has_req = false
-    has_dunder = false
     has_appdata = false
-    has_appdata_dunder = false
     for arg in body.args
         arg isa Expr || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
@@ -305,28 +293,12 @@ function _inject_req_aliases!(struct_expr)
         else
             nothing
         end
-        name === :req         && (has_req = true)
-        name === :__req__     && (has_dunder = true)
-        name === :appdata     && (has_appdata = true)
-        name === :__appdata__ && (has_appdata_dunder = true)
+        name === :__req__     && (has_req = true)
+        name === :__appdata__ && (has_appdata = true)
     end
     prepend = Any[]
-    if !has_dunder && !has_req
-        push!(prepend, :(__req__ = nothing))
-        push!(prepend, :(req = __req__))
-    elseif !has_dunder
-        push!(prepend, :(__req__ = req))
-    elseif !has_req
-        push!(prepend, :(req = __req__))
-    end
-    if !has_appdata_dunder && !has_appdata
-        push!(prepend, :(__appdata__ = nothing))
-        push!(prepend, :(appdata = __appdata__))
-    elseif !has_appdata_dunder
-        push!(prepend, :(__appdata__ = appdata))
-    elseif !has_appdata
-        push!(prepend, :(appdata = __appdata__))
-    end
+    has_req     || push!(prepend, :(__req__ = nothing))
+    has_appdata || push!(prepend, :(__appdata__ = nothing))
     if !isempty(prepend)
         body.args = vcat(prepend, body.args)
     end
@@ -370,7 +342,7 @@ function _find_include_externals(struct_expr)
         inner isa Expr && inner.head == :(=) || continue
         prop_name = inner.args[1]
         rhs = inner.args[2]
-        # RHS should be a call like ExternalStruct(; req, ...) — extract the type
+        # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type
         Meta.isexpr(rhs, :call) || continue
         type_expr = rhs.args[1]
         push!(result, (prop_name, type_expr))
@@ -441,8 +413,6 @@ to plain derived-property assignments that call
     end
 
 Returns the ordered list of declared param names for later `_param_names` emission.
-`_req_of(__self__)` picks up whichever of `__req__` or legacy `req` is
-populated on the enclosing instance.
 """
 function _convert_params!(struct_expr)
     body = struct_expr.args[3]
@@ -513,9 +483,8 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
     _convert_include_to_struct!(struct_expr)
     _wrap_ws_bodies!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
-    _warn_legacy_req_name!(struct_expr)
     reroute && _warn_redundant_req_decl!(struct_expr)
-    reroute && _inject_req_aliases!(struct_expr)
+    reroute && _inject_dunder_props!(struct_expr)
     own_params = _convert_params!(struct_expr)
     # Merge: parent params first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -1275,7 +1244,7 @@ function _register_indexed_route(T, method, name, path, n_params, record_dir)
     _register_handler(method, path, function(req)
         local obj
         try
-            obj = T(; req, __req__=req, __appdata__=_registered_appdata(T))
+            obj = T(; __req__=req, __appdata__=_registered_appdata(T))
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1355,7 +1324,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
             if method == "WEBSOCKET"
                 if isempty(param_strs) && !has_kwargs && !info.indexed
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        lambda = getproperty(T(; req=nothing, __req__=nothing, __appdata__=_registered_appdata(T)), name)
+                        lambda = getproperty(T(; __req__=nothing, __appdata__=_registered_appdata(T)), name)
                         lambda(ws)
                     end)
                 else
@@ -1363,7 +1332,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     ws_base = _base_segments(path)
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
                         idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
-                        prop = getproperty(T(; req=ws.request, __req__=ws.request, __appdata__=_registered_appdata(T)), name)
+                        prop = getproperty(T(; __req__=ws.request, __appdata__=_registered_appdata(T)), name)
                         lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
                         lambda(ws)
                     end)
@@ -1372,7 +1341,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 register(CONTEXT[], method, path, function(req)
                     local obj
                     try
-                        obj = T(; req, __req__=req, __appdata__=_registered_appdata(T))
+                        obj = T(; __req__=req, __appdata__=_registered_appdata(T))
                     catch err
                         return _route_error_response(req, err, catch_backtrace())
                     end
@@ -1432,7 +1401,7 @@ function _register_included_handler(ParentT, NestedT, method, name, chain, path,
     _register_handler(method, path, function(req)
         local parent, nested
         try
-            parent = ParentT(; req, __req__=req, __appdata__=_registered_appdata(ParentT))
+            parent = ParentT(; __req__=req, __appdata__=_registered_appdata(ParentT))
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -1489,21 +1458,10 @@ _has_page(obj) = hasproperty(obj, :__page__) || hasproperty(obj, :page)
 """
     _req_of(obj) -> HTTP.Request or nothing
 
-Look up the framework-managed request on `obj`, preferring the canonical
-`__req__` name over the legacy `req` name. Prefers whichever is non-nothing
-so that `@include ext = Ext(; req)` call sites (which only populate `req`
-even on migrated child structs whose body declares `__req__ = nothing`)
-still surface the real request rather than the compute-default `nothing`.
-The legacy `req` name is deprecated — the `@htmx` macro emits a warning at
-expansion time when it sees a `req` property (see `_warn_legacy_req_name!`).
+Look up the framework-managed request on `obj`. `@htmx` always injects
+`__req__` (defaulting to `nothing`) when not user-declared.
 """
-function _req_of(obj)
-    if hasproperty(obj, :__req__)
-        r = getproperty(obj, :__req__)
-        isnothing(r) || return r
-    end
-    hasproperty(obj, :req) ? getproperty(obj, :req) : nothing
-end
+_req_of(obj) = hasproperty(obj, :__req__) ? getproperty(obj, :__req__) : nothing
 
 """
     _collect_page_chain(root, chain) -> Vector

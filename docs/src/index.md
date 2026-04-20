@@ -334,7 +334,7 @@ end
 
 ## Fresh instance per request
 
-`route!` creates a fresh `T(; req=request)` for every incoming request.
+`route!` creates a fresh `T(; __req__=request)` for every incoming request.
 Non-cached derived properties (like HTML fragments) recompute each time,
 while `@cached` properties are loaded from the shared disk cache.
 This avoids stale HTML — each request sees up-to-date state.

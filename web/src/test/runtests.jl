@@ -581,50 +581,50 @@ end
 @testset "@param — basic" begin
     # Defaults when request has nothing
     req = HTTP.Request("GET", "/")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     @test app.vessels == ["Tablet-20"]
     @test app.n_bootstrap == "10"
     @test app.note == "default-note"
 
     # Typed vector param with repeated key
     req = HTTP.Request("GET", "/?vessels=A&vessels=B&n_bootstrap=42")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     @test app.vessels == ["A", "B"]
     @test app.n_bootstrap == "42"
     @test app.note == "default-note"
 
     # Single value promoted to vector for Vector{String} type
     req = HTTP.Request("GET", "/?vessels=solo")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     @test app.vessels == ["solo"]
 end
 
 @testset "@param — inline child inherits params" begin
     req = HTTP.Request("GET", "/?vessels=X&vessels=Y&n_bootstrap=5")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     @test app.child.vessels == ["X", "Y"]
     @test app.child.n_bootstrap == "5"
 end
 
 @testset "@param — block form" begin
     req = HTTP.Request("GET", "/?a=42&b=hello")
-    app = ParamBlockApp(; req)
+    app = ParamBlockApp(; __req__=req)
     @test app.a == 42
     @test app.b == "hello"
 
     req = HTTP.Request("GET", "/")
-    app = ParamBlockApp(; req)
+    app = ParamBlockApp(; __req__=req)
     @test app.a == 1
     @test app.b == "x"
 end
 
 @testset "@param — required throws on miss" begin
     req = HTTP.Request("GET", "/")
-    app = ParamRequiredApp(; req)
+    app = ParamRequiredApp(; __req__=req)
     @test_throws KeyError app.fit_key
 
     req = HTTP.Request("GET", "/?fit_key=abc")
-    app = ParamRequiredApp(; req)
+    app = ParamRequiredApp(; __req__=req)
     @test app.fit_key == "abc"
 end
 
@@ -632,12 +632,12 @@ end
     req = HTTP.Request("POST", "/submit",
         ["Content-Type" => "application/x-www-form-urlencoded"],
         "name=bob")
-    app = ParamPostApp(; req)
+    app = ParamPostApp(; __req__=req)
     @test app.name == "bob"
 
     req = HTTP.Request("POST", "/submit",
         ["Content-Type" => "application/x-www-form-urlencoded"], "")
-    app = ParamPostApp(; req)
+    app = ParamPostApp(; __req__=req)
     @test app.name == "anon"
 end
 
@@ -653,7 +653,7 @@ end
 @testset "query_url(path, obj)" begin
     # Only params actually present in the request are emitted
     req = HTTP.Request("GET", "/?vessels=A&vessels=B")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     url = query_url("/plot", app)
     @test contains(url, "vessels=A")
     @test contains(url, "vessels=B")
@@ -662,18 +662,18 @@ end
 
     # Nothing present → bare path
     req = HTTP.Request("GET", "/")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     @test query_url("/plot", app) == "/plot"
 
     # Overrides always win, even when absent from request
     req = HTTP.Request("GET", "/")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     url = query_url("/plot", app; note="forced")
     @test contains(url, "note=forced")
 
     # Override replaces a present value
     req = HTTP.Request("GET", "/?n_bootstrap=10")
-    app = ParamApp(; req)
+    app = ParamApp(; __req__=req)
     url = query_url("/plot", app; n_bootstrap="99")
     @test contains(url, "n_bootstrap=99")
     @test !contains(url, "n_bootstrap=10")
@@ -713,7 +713,7 @@ end
         registered = HTMXObjects._registered_appdata(T)
         @test registered === appdata
         # Construct as the route handler does and verify it propagates to children.
-        app = T(; req=nothing, __req__=nothing, __appdata__=registered)
+        app = T(; __req__=nothing, __appdata__=registered)
         @test app.__appdata__ === appdata
         @test app.sub.__appdata__ === appdata
     finally
