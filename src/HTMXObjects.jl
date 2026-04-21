@@ -468,6 +468,12 @@ to plain derived-property assignments that call
         vessels::Vector{String} = ["Tablet-20"]
         n_bootstrap::String     = "10"
     end
+    @param (; fit_key, top_chains, max_draws) = __parent__   # delegate to parent
+
+The delegation form registers each listed name as a param on this struct (so
+`query_url(__self__)` serializes them) and resolves their value at access time
+via `source.<name>` — typically `__parent__.<name>` — rather than extracting
+from the request directly. See `_rewrite_param_delegation`.
 
 Returns the ordered list of declared param names for later `_param_names` emission.
 """
@@ -475,6 +481,20 @@ function _convert_params!(struct_expr)
     body = struct_expr.args[3]
     names = Symbol[]
     new_args = Any[]
+    process_line! = inner -> begin
+        delegated = _rewrite_param_delegation(inner)
+        if delegated !== nothing
+            for (n, assign) in delegated
+                push!(names, n)
+                push!(new_args, assign)
+            end
+            return
+        end
+        rewritten = _rewrite_param_line(inner)
+        rewritten === nothing && return
+        push!(names, rewritten[1])
+        push!(new_args, rewritten[2])
+    end
     for arg in body.args
         if !(arg isa Expr)
             push!(new_args, arg); continue
@@ -486,19 +506,13 @@ function _convert_params!(struct_expr)
             if length(payload) == 1 && Meta.isexpr(payload[1], :block)
                 for inner in payload[1].args
                     inner isa LineNumberNode && (push!(new_args, inner); continue)
-                    rewritten = _rewrite_param_line(inner)
-                    rewritten === nothing && continue
-                    push!(names, rewritten[1])
-                    push!(new_args, rewritten[2])
+                    process_line!(inner)
                 end
             else
                 # Single-line form: @param vessels::T = default
                 # Multiple payload elements are a tuple literal (comma-separated)
                 for inner in payload
-                    rewritten = _rewrite_param_line(inner)
-                    rewritten === nothing && continue
-                    push!(names, rewritten[1])
-                    push!(new_args, rewritten[2])
+                    process_line!(inner)
                 end
             end
         else
@@ -507,6 +521,32 @@ function _convert_params!(struct_expr)
     end
     body.args = new_args
     names
+end
+
+# Parse a delegation form `@param (; a, b, c) = source` — register a/b/c as
+# params on this struct and resolve their values via `source.a` / `source.b`
+# / `source.c` at property-access time. Typical use: `@param (; a, b) = __parent__`
+# so the child both (a) serializes these keys through `query_url(__self__)` and
+# (b) mirrors whatever value the parent resolved them to.
+# Returns `Vector{Tuple{Symbol, Expr}}` or `nothing` if the expression isn't a
+# delegation form.
+# TODO: assert at macro-expand time that `source`'s type declares each name as
+# an `@param`, so a parent-side rename fails loudly rather than silently
+# shadowing the child's default extraction path.
+function _rewrite_param_delegation(expr)
+    Meta.isexpr(expr, :(=), 2) || return nothing
+    lhs, source = expr.args
+    Meta.isexpr(lhs, :tuple) && length(lhs.args) == 1 || return nothing
+    params = lhs.args[1]
+    Meta.isexpr(params, :parameters) || return nothing
+    out = Tuple{Symbol, Expr}[]
+    for n in params.args
+        name_sym = n isa Symbol ? n :
+                   (Meta.isexpr(n, :(::)) && n.args[1] isa Symbol ? n.args[1] : nothing)
+        name_sym === nothing && return nothing
+        push!(out, (name_sym, Expr(:(=), name_sym, Expr(:., source, QuoteNode(name_sym)))))
+    end
+    out
 end
 
 # Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
