@@ -447,6 +447,12 @@ end
     @test cp(["7"], Int) == 7
 end
 
+@testset "_convert_param for Symbol" begin
+    cp = HTMXObjects._convert_param
+    @test cp("done", Symbol) === :done
+    @test cp("", Symbol) === Symbol("")
+end
+
 @testset "fmt_time" begin
     @test fmt_time(1.5e-9) == "1.5ns"
     @test fmt_time(4.56e-6) == "4.6μs"

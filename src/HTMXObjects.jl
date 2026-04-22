@@ -1120,6 +1120,7 @@ const _included_type_parents = Dict{DataType, Set{DataType}}()
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
+_convert_param(val::AbstractString, ::Type{Symbol}) = Symbol(val)
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
 _convert_param(val::AbstractVector, T::Type{<:AbstractString}) =
