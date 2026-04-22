@@ -1243,7 +1243,7 @@ error id. Override by defining `__error__` on the route's enclosing struct
 (or, to disable catching entirely, set `__error__ = rethrow`).
 """
 _default_error_render(uid, path) = h.article(
-    h.header(h.strong("Error")),
+    h.header("Error"),
     h.p("Something went wrong. Error ID: ", h.code(uid));
     aria_invalid="true",
 )
