@@ -1240,7 +1240,14 @@ function _record_error(err, bt, req)
             println(io, "target:    ", req.target)
         end
         println(io)
-        showerror(io, err, bt)
+        # PropertyComputationError's 2-arg showerror already prints the cause's
+        # filtered backtrace; passing `bt` would make Julia's default 3-arg
+        # fallback append the outer Oxygen/HTTP trace a second time.
+        if err isa PropertyComputationError
+            showerror(io, err)
+        else
+            showerror(io, err, bt)
+        end
         println(io)
     end
     @error "HTMXObjects caught an error: $path"
