@@ -13,7 +13,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, htmx_tabset, status_badge, nav_sidebar, lazy
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -840,6 +840,7 @@ function htmx(args...;
             h.meta(name="color-scheme", content="light dark"),
             cdn...,
             (feedback ? request_feedback() : ())...,
+            tabset_styles(),
             extra_head...,
         ),
         body(args...),
@@ -2888,6 +2889,55 @@ document.body.addEventListener('htmx:afterRequest', function(e) {
 # --- Tabset ---
 
 """
+    tabset_styles()
+
+CSS that turns `tabset(...)`'s Pico `<nav>` + `.tab-panel` markup into a
+classic tab strip: the active tab's border-bottom replaces the nav's
+horizontal rule along its own width, producing one continuous line.
+
+Scoped to `.tabset` on the outer `<div>`, so plain `<nav><ul>` menus elsewhere
+are untouched. Auto-included by `htmx()`; inject manually via `extra_head`
+if you're building your own `<head>`.
+"""
+tabset_styles() = h.style("""
+.tabset > nav {
+    margin: 0;
+    padding: 0 0 0 1rem;
+    border-bottom: 2px solid var(--pico-border-color, #888);
+}
+.tabset > nav ul {
+    align-self: flex-end;
+    gap: 0.25rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.tabset > nav ul li {
+    padding: 0;
+    margin: 0;
+}
+.tabset > nav ul li a {
+    display: block;
+    padding: 0.5rem 1rem;
+    border: 2px solid transparent;
+    border-bottom: none;
+    border-radius: 0.35rem 0.35rem 0 0;
+    background: transparent;
+    text-decoration: none;
+}
+.tabset > nav ul li a.contrast {
+    border-color: var(--pico-border-color, #888);
+    background: transparent;
+}
+.tabset > .tab-panel {
+    padding: 1rem;
+    border: 2px solid var(--pico-border-color, #888);
+    border-top: none;
+    border-radius: 0 0 0.35rem 0.35rem;
+}
+""")
+
+"""
     tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))")
 
 Client-side tabs using Pico CSS nav + hyperscript.
@@ -2925,7 +2975,7 @@ function _tabset_panel(content, i, active)
     )
 end
 
-tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id)(
+tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id, class="tabset")(
     h.nav(
         h.ul([
             h.li(h.a(label;
