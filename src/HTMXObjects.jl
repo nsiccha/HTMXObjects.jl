@@ -1265,6 +1265,11 @@ Record the error, invoke the user's `__error__` hook (or the default), and
 return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 `page` wrappers the same way a successful response would.
 """
+# TODO: return HTTP 500 for caught route exceptions instead of 200. Currently
+# `to_response` / `markdown_response` default to 200, which makes server
+# errors indistinguishable from successes in logs / curl / uptime checks.
+# Needs HTMX-side config (`htmx.config.responseHandling` or response-targets
+# extension) so the error article still swaps on 4xx/5xx.
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
     uid, path = _record_error(err, bt, req)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
