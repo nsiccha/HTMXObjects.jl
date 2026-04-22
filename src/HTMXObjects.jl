@@ -608,13 +608,24 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
             push!(seen, ri.prop_name)
         end
         isempty(dups) || error("""
-            @htmx struct $(_struct_type_name(struct_expr)): duplicate route property name(s) $(unique(dups)). Each @get/@post/@ws/etc. property must have a unique name (DynamicObjects' meta dict cannot hold two properties with the same name).
+            @htmx struct $(_struct_type_name(struct_expr)): duplicate route property name(s) $(unique(dups)). Each @get/@post/@ws/etc. property must have a unique name (DynamicObjects' meta dict is keyed by name and can only hold one entry per name; additionally, two `_extract_args` methods with identical signatures would collide on precompile).
 
-            If you want both `/foo` and `/foo/{x}` from one route, use a trailing-default positional arg — `_register_routes` automatically registers shortened paths for trailing defaults:
+            Multi-method dispatch on the same route name is NOT supported. Don't write:
 
-                @get foo(x=nothing) = isnothing(x) ? list_view() : item_view(x)
+                @get foo        = list_view()          # list
+                @get foo(slug)  = item_view(slug)      # detail  ← rejected
 
-            registers BOTH `/foo` and `/foo/{x}`. Otherwise rename one of the colliding properties.
+            Instead, use ONE of these single-route patterns:
+
+            1. Trailing-default positional (registers both `/foo` and `/foo/{x}`, URL-param stays typed):
+
+                @get foo(slug::String="") = isempty(slug) ? list_view() : item_view(slug)
+
+            2. Query kwarg (one path, optional filter via `?slug=...`):
+
+                @get foo(; slug::String="") = isempty(slug) ? list_view() : item_view(slug)
+
+            Otherwise rename one of the colliding properties.
             """)
     end
     block = DynamicObjects.dynamicstruct(struct_expr;
@@ -1693,8 +1704,13 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         base = "/" * prefix * "/" * string(name)
         path = isempty(param_strs) ? base :
             base * "/" * join("{" .* param_strs .* "}", "/")
-        # :index on nested struct → just the prefix path
-        name == :index && (path = "/" * prefix)
+        # :index on nested struct collapses to the prefix path ONLY for the
+        # zero-positional-param form. With positional params (e.g.
+        # `@get index(slug)` wanting `/examples/{slug}`) we must keep the
+        # params in the path — collapsing unconditionally clobbers the detail
+        # route and triggers HTTP.jl's "replacing existing registered route"
+        # warning. Mirrors the top-level guard in `_register_routes`.
+        name == :index && isempty(param_strs) && (path = "/" * prefix)
         _warn_docs_prefix(path, name)
 
         # Track kwargs-only paths for static recording
