@@ -1218,6 +1218,26 @@ const ERROR_DIR = Ref{String}("")
 # same nanosecond from different threads — we hash it anyway for uniform width.
 _error_uid() = string(hash(time_ns()); base=16)
 
+# If Revise is loaded and has unresolved revision errors queued, append them
+# to `io`. Oxygen's `revise=:lazy` mode already logs these to the console on
+# each request; duplicating them into the per-error log lets a stale-code
+# failure be diagnosed from the recorded file alone.
+function _append_revise_errors(io)
+    rev = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), "Revise"), nothing)
+    isnothing(rev) && return
+    qe = try getfield(rev, :queue_errors) catch; return end
+    isempty(qe) && return
+    println(io)
+    println(io, "--- Pending Revise errors ($(length(qe))) ---")
+    for (key, val) in qe
+        file = key isa Tuple && length(key) >= 2 ? key[2] : key
+        println(io, "file: ", file)
+        err, bt = val isa Tuple && length(val) >= 2 ? val : (val, nothing)
+        isnothing(bt) ? showerror(io, err) : showerror(io, err, bt)
+        println(io)
+    end
+end
+
 """
     _record_error(err, bt, req) -> (uid, path)
 
@@ -1250,6 +1270,7 @@ function _record_error(err, bt, req)
             showerror(io, err, bt)
         end
         println(io)
+        _append_revise_errors(io)
     end
     @error "HTMXObjects caught an error: $path"
     (uid, path)
