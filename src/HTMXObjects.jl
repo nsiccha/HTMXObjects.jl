@@ -1,6 +1,6 @@
 module HTMXObjects
 
-export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
+export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
 export create_app
 export HTTP, queryparams, formdata
 export terminate, serve, staticfiles, dynamicfiles
