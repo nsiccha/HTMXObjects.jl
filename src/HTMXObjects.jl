@@ -3353,6 +3353,35 @@ end
         end
     end
 
+    # Atomic read-modify-write under the per-repo lock. `f(current_content)`
+    # runs inside the lock; its return value is written and committed. For
+    # partial-file edits (e.g. one key in a multi-key YAML) this avoids the
+    # read-then-write race that `write_file!`'s optimistic concurrency would
+    # report as a spurious conflict. Returns `(:ok, commit_sha)` on change or
+    # `(:nochange, current_blob_sha)` if `f` returned identical content.
+    locked_update!(relpath, f; message::AbstractString="edit " * relpath) = begin
+        Base.lock(_lock) do
+            _ensure()
+            abs = joinpath(path, relpath)
+            current = isfile(abs) ? read(abs, String) : ""
+            new_content = f(current)
+            if new_content == current
+                return (:nochange, blob_sha(relpath))
+            end
+            mkpath(dirname(abs))
+            write(abs, new_content)
+            repo = LibGit2.GitRepo(path)
+            try
+                LibGit2.add!(repo, relpath)
+                sig = _signature()
+                oid = LibGit2.commit(repo, message; author=sig, committer=sig)
+                (:ok, string(oid))
+            finally
+                close(repo)
+            end
+        end
+    end
+
     @struct editor(relpath; default_content="") = begin
         abs_path = joinpath(__parent__.path, relpath)
 
@@ -3370,6 +3399,9 @@ end
 
         write!(content; version, message="edit " * relpath) =
             __parent__.write_file!(relpath, content; version, message)
+
+        update!(f; message="edit " * relpath) =
+            __parent__.locked_update!(relpath, f; message)
     end
 end
 
