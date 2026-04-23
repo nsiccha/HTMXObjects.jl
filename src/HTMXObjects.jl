@@ -3390,7 +3390,7 @@ end
     @get form = editor_form(;
         id          = container_id,
         post_url    = __self__ / "save",
-        cancel_url  = __parent__ / "index",
+        cancel_url  = __parent__.__prefix__,
         content     = editor.current_content(),
         version     = editor.current_version(),
         input, rows, placeholder, label,
@@ -3400,7 +3400,7 @@ end
         status, value = editor.write!(content; version)
         status === :conflict ?
             _editor_conflict_fragment(editor, content, value, container_id,
-                                       __self__ / "save", __parent__ / "index") :
+                                       __self__ / "save", __parent__.__prefix__) :
             __parent__.index
     end
 
@@ -3415,7 +3415,7 @@ end
                       hx_vals="""{"sha":"$(v.sha)"}""",
                       hx_target="#" * container_id, hx_swap="outerHTML")
               ) for v in editor.versions()]...),
-        h.button("Back"; hx_get=__parent__ / "index",
+        h.button("Back"; hx_get=__parent__.__prefix__,
                  hx_target="#" * container_id, hx_swap="outerHTML"),
     )
 
