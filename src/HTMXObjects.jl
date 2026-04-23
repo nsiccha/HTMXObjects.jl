@@ -1733,13 +1733,13 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         base = "/" * prefix * "/" * string(name)
         path = isempty(param_strs) ? base :
             base * "/" * join("{" .* param_strs .* "}", "/")
-        # :index on nested struct collapses to the prefix path ONLY for the
-        # zero-positional-param form. With positional params (e.g.
-        # `@get index(slug)` wanting `/examples/{slug}`) we must keep the
-        # params in the path — collapsing unconditionally clobbers the detail
-        # route and triggers HTTP.jl's "replacing existing registered route"
-        # warning. Mirrors the top-level guard in `_register_routes`.
-        name == :index && isempty(param_strs) && (path = "/" * prefix)
+        # :index always collapses the name segment; params (if any) stay on
+        # the prefix path: `@get index(slug)` → `/examples/{slug}`, not
+        # `/examples/index/{slug}`. Bare `@get index` → `/examples`.
+        if name == :index
+            path = isempty(param_strs) ? "/" * prefix :
+                "/" * prefix * "/" * join("{" .* param_strs .* "}", "/")
+        end
         _warn_docs_prefix(path, name)
 
         # Track kwargs-only paths for static recording
@@ -1766,7 +1766,10 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
                 short_params = param_strs[1:cut-1]
                 short_path = isempty(short_params) ? base :
                     base * "/" * join("{" .* short_params .* "}", "/")
-                name == :index && isempty(short_params) && (short_path = "/" * prefix)
+                if name == :index
+                    short_path = isempty(short_params) ? "/" * prefix :
+                        "/" * prefix * "/" * join("{" .* short_params .* "}", "/")
+                end
                 _register_included_handler(ParentT, NestedT, method, name, chain, short_path, length(short_params), record_dir; root_prefix)
             end
         end
