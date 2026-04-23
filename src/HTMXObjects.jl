@@ -1316,24 +1316,29 @@ Record the error, invoke the user's `__error__` hook (or the default), and
 return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 `page` wrappers the same way a successful response would.
 """
-# TODO: return HTTP 500 for caught route exceptions instead of 200. Currently
-# `to_response` / `markdown_response` default to 200, which makes server
-# errors indistinguishable from successes in logs / curl / uptime checks.
-# Needs HTMX-side config (`htmx.config.responseHandling` or response-targets
-# extension) so the error article still swaps on 4xx/5xx.
+# Status-code policy for caught route exceptions:
+#   HTMX requests keep 200 so vanilla HTMX still swaps in the error article
+#     without needing `htmx.config.responseHandling` or response-targets.
+#   Non-HTMX (curl, direct browser nav, uptime checks, monitoring) get 500
+#     so logs / health checks / load balancers see errors as errors.
+# If the user's `__error__` hook returns an `HTTP.Response` directly, their
+# status choice is respected — not rewritten.
+_with_error_status(req, resp::HTTP.Response) =
+    is_htmx(req) ? resp : HTTP.Response(500, resp.headers; body=resp.body)
+
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
     uid, path = _record_error(err, bt, req)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     err_val isa HTTP.Response && return err_val
     if wants_markdown(req)
-        return markdown_response(to_markdown_string(err_val))
+        return _with_error_status(req, markdown_response(to_markdown_string(err_val)))
     end
-    is_htmx(req) && return to_response(err_val)
+    is_htmx(req) && return to_response(err_val)   # always 200 for HTMX
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (err_val = wrapper[err_val])
     end
-    to_response(err_val)
+    _with_error_status(req, to_response(err_val))
 end
 
 """
