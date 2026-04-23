@@ -13,7 +13,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles, GitRepo, EditorRoutes
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -25,6 +25,8 @@ import HTMX: h, auto, Node, @__str, HyperscriptString
 import Oxygen
 import Oxygen: formdata
 using Oxygen.Core: ServerContext, register, Nullable
+
+import LibGit2
 
 const CONTEXT :: Ref{ServerContext} = Ref(ServerContext(; mod=@__MODULE__))
 
@@ -3198,6 +3200,254 @@ function editor_form(;
             h.div(; class="htmxo-editor-actions")(
                 h.button("Save"; type="submit"),
                 cancel_btn,
+            ),
+        ),
+    )
+end
+
+# ── Git-backed versioned content store ──────────────────────────────────────
+
+# Parse "Name <email@example.com>" → (name, email). Fallback email keeps
+# LibGit2.Signature happy when callers pass a bare name.
+function _parse_author(s::AbstractString)
+    m = match(r"^(.*?)\s*<(.+?)>\s*$", s)
+    m === nothing ? (String(s), "noreply@localhost") : (String(m[1]), String(m[2]))
+end
+
+# GitRepo: a @dynamicstruct owning a directory managed as a git repo, used
+# as the backend for `EditorRoutes`. Auto-`git init`s on first access.
+# Mutations serialised via a per-instance ReentrantLock. Provides:
+#   blob_sha(relpath)                              — HEAD:relpath blob SHA
+#   read_blob("<sha>:<relpath>")                   — blob content by revspec
+#   list_commits(relpath)                          — commits touching file
+#   write_file!(relpath, content; version, …)      — optimistic-concurrency write
+# Per-file handle via inline `@struct editor(relpath; default_content="")`.
+@dynamicstruct struct GitRepo
+    path::String
+    author::String = "HTMXObjects <noreply@localhost>"
+    _lock = ReentrantLock()
+
+    _ensure() = begin
+        if !isdir(joinpath(path, ".git"))
+            mkpath(path)
+            close(LibGit2.init(path))
+        end
+        nothing
+    end
+
+    _signature() = begin
+        name, email = _parse_author(author)
+        LibGit2.Signature(name, email)
+    end
+
+    blob_sha(relpath) = begin
+        _ensure()
+        repo = LibGit2.GitRepo(path)
+        try
+            try
+                obj = LibGit2.GitObject(repo, "HEAD:" * relpath)
+                try
+                    string(LibGit2.GitHash(obj))
+                finally
+                    close(obj)
+                end
+            catch err
+                err isa LibGit2.GitError || rethrow()
+                ""
+            end
+        finally
+            close(repo)
+        end
+    end
+
+    read_blob(spec) = begin
+        _ensure()
+        repo = LibGit2.GitRepo(path)
+        try
+            obj = LibGit2.GitObject(repo, spec)
+            try
+                obj isa LibGit2.GitBlob || error("GitRepo.read_blob: $(spec) is not a blob")
+                String(LibGit2.rawcontent(obj))
+            finally
+                close(obj)
+            end
+        finally
+            close(repo)
+        end
+    end
+
+    list_commits(relpath) = begin
+        _ensure()
+        Base.lock(_lock) do
+            repo = LibGit2.GitRepo(path)
+            try
+                out = NamedTuple{(:sha,:timestamp,:author,:message,:blob_sha),
+                                 Tuple{String,Int64,String,String,String}}[]
+                walker = try
+                    LibGit2.GitRevWalker(repo)
+                catch err
+                    err isa LibGit2.GitError || rethrow()
+                    return out
+                end
+                try
+                    try
+                        LibGit2.push_head!(walker)
+                    catch err
+                        err isa LibGit2.GitError || rethrow()
+                        return out
+                    end
+                    prev_blob = ""
+                    for oid in walker
+                        commit = LibGit2.GitCommit(repo, oid)
+                        try
+                            blob = try
+                                o = LibGit2.GitObject(repo, string(oid) * ":" * relpath)
+                                try string(LibGit2.GitHash(o)) finally close(o) end
+                            catch err
+                                err isa LibGit2.GitError || rethrow()
+                                ""
+                            end
+                            if !isempty(blob) && blob != prev_blob
+                                sig = LibGit2.author(commit)
+                                push!(out, (
+                                    sha       = string(oid),
+                                    timestamp = Int64(sig.time),
+                                    author    = sig.name * " <" * sig.email * ">",
+                                    message   = LibGit2.message(commit),
+                                    blob_sha  = blob,
+                                ))
+                            end
+                            prev_blob = blob
+                        finally
+                            close(commit)
+                        end
+                    end
+                finally
+                    close(walker)
+                end
+                out
+            finally
+                close(repo)
+            end
+        end
+    end
+
+    write_file!(relpath, content; version::AbstractString="",
+                                   message::AbstractString="edit " * relpath) = begin
+        Base.lock(_lock) do
+            _ensure()
+            current = blob_sha(relpath)
+            current == version || return (:conflict, current)
+            abs = joinpath(path, relpath)
+            mkpath(dirname(abs))
+            write(abs, content)
+            repo = LibGit2.GitRepo(path)
+            try
+                LibGit2.add!(repo, relpath)
+                sig = _signature()
+                oid = LibGit2.commit(repo, message; author=sig, committer=sig)
+                (:ok, string(oid))
+            finally
+                close(repo)
+            end
+        end
+    end
+
+    @struct editor(relpath; default_content="") = begin
+        abs_path = joinpath(__parent__.path, relpath)
+
+        current_content() = begin
+            if !isfile(abs_path)
+                mkpath(dirname(abs_path))
+                write(abs_path, default_content)
+            end
+            read(abs_path, String)
+        end
+
+        current_version() = __parent__.blob_sha(relpath)
+        versions()        = __parent__.list_commits(relpath)
+        read_version(sha) = __parent__.read_blob(sha * ":" * relpath)
+
+        write!(content; version, message="edit " * relpath) =
+            __parent__.write_file!(relpath, content; version, message)
+    end
+end
+
+# EditorRoutes: git-backed inline editor @htmx struct. Routes:
+#   @get  form                — renders the editor form
+#   @post save(; content, version) — optimistic-concurrency write
+#   @get  history             — list prior versions with restore buttons
+#   @post restore(; sha)      — revert file to an earlier blob
+# Parent struct must expose `editor` (a GitRepo.editor(relpath) handle) and
+# `container_id` (HTML id of the wrapper) as locals.
+@htmx struct EditorRoutes
+    (; editor, container_id) = __parent__
+    input::Symbol       = :textarea
+    rows::Int           = 15
+    placeholder::String = ""
+    label               = nothing
+
+    @get form = editor_form(;
+        id          = container_id,
+        post_url    = __self__ / "save",
+        cancel_url  = __parent__ / "index",
+        content     = editor.current_content(),
+        version     = editor.current_version(),
+        input, rows, placeholder, label,
+    )
+
+    @post save(; content="", version="") = begin
+        status, value = editor.write!(content; version)
+        status === :conflict ?
+            _editor_conflict_fragment(editor, content, value, container_id,
+                                       __self__ / "save", __parent__ / "index") :
+            __parent__.index
+    end
+
+    @get history = h.div(; id=container_id)(
+        h.h3("History"),
+        h.ul([h.li(
+                  h.code(v.sha[1:min(8, length(v.sha))]), " · ",
+                  v.author, " · ",
+                  h.small(v.message), " ",
+                  h.button("Restore";
+                      hx_post=__self__ / "restore",
+                      hx_vals="""{"sha":"$(v.sha)"}""",
+                      hx_target="#" * container_id, hx_swap="outerHTML")
+              ) for v in editor.versions()]...),
+        h.button("Back"; hx_get=__parent__ / "index",
+                 hx_target="#" * container_id, hx_swap="outerHTML"),
+    )
+
+    @post restore(; sha::String="") = begin
+        content = editor.read_version(sha)
+        editor.write!(content; version=editor.current_version(),
+                      message="restore " * sha)
+        __parent__.index
+    end
+end
+
+function _editor_conflict_fragment(editor, submitted, current_version, container_id,
+                                    save_url, cancel_url)
+    current = editor.current_content()
+    h.div(; id=container_id)(
+        h.article(; class="htmxo-editor-conflict")(
+            h.header("Content changed since you opened the editor"),
+            h.p("Another save landed first. On-disk version is now ",
+                h.code(current_version[1:min(8, length(current_version))]), "."),
+            h.details(
+                h.summary("Show current on-disk content"),
+                h.pre(current),
+            ),
+            h.form(; hx_post=save_url, hx_target="#" * container_id, hx_swap="outerHTML")(
+                h.textarea(submitted; name="content", rows="15", class="htmxo-editor-input"),
+                h.input(; type="hidden", name="version", value=current_version),
+                h.div(; class="htmxo-editor-actions")(
+                    h.button("Force save (overwrite)"; type="submit"),
+                    h.button("Discard my edit";
+                        type="button", class="secondary outline",
+                        hx_get=cancel_url, hx_target="#" * container_id, hx_swap="outerHTML"),
+                ),
             ),
         ),
     )
