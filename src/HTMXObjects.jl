@@ -3424,10 +3424,14 @@ end
     placeholder::String = ""
     label               = nothing
 
+    # All URLs forward the parent's `@param` values via `query_url(path, __parent__)`
+    # so a parameterised parent (e.g. `@param name::String` picking a file) survives
+    # the round-trip through edit/save/cancel/history/restore.
+
     @get form = editor_form(;
         id          = container_id,
-        post_url    = __self__ / "save",
-        cancel_url  = __parent__.__prefix__,
+        post_url    = query_url(__self__ / "save", __parent__),
+        cancel_url  = query_url(__parent__.__prefix__, __parent__),
         content     = editor.current_content(),
         version     = editor.current_version(),
         input, rows, placeholder, label,
@@ -3437,7 +3441,8 @@ end
         status, value = editor.write!(content; version)
         status === :conflict ?
             _editor_conflict_fragment(editor, content, value, container_id,
-                                       __self__ / "save", __parent__.__prefix__) :
+                                       query_url(__self__ / "save", __parent__),
+                                       query_url(__parent__.__prefix__, __parent__)) :
             __parent__.index
     end
 
@@ -3448,10 +3453,10 @@ end
                   v.author, " · ",
                   h.small(v.message), " ",
                   h.button("Restore";
-                      hx_post=__self__ / "restore" * "?sha=" * v.sha,
+                      hx_post=query_url(__self__ / "restore", __parent__; sha=v.sha),
                       hx_target="#" * container_id, hx_swap="outerHTML")
               ) for v in editor.versions()]...),
-        h.button("Back"; hx_get=__parent__.__prefix__,
+        h.button("Back"; hx_get=query_url(__parent__.__prefix__, __parent__),
                  hx_target="#" * container_id, hx_swap="outerHTML"),
     )
 
