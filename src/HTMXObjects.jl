@@ -1445,6 +1445,22 @@ function _warn_docs_prefix(path, name)
         @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — Oxygen reserves this prefix for its Swagger UI. The route will silently 404. Rename the route to avoid the \"/docs\" prefix."
 end
 
+# Build the URL path for a route property. `prefix` is the enclosing mount
+# path without leading slash (`""` for root, `"examples"` for an @include,
+# `"app/examples"` for a nested @include). `:index` collapses its name
+# segment at any depth — bare `@get index` maps to the prefix itself,
+# `@get index(slug)` to the prefix plus the param(s) — so both the top-level
+# and `@include` registration paths go through one rule.
+function _route_path(prefix::AbstractString, name::Symbol, param_strs::AbstractVector)
+    segs = String[]
+    isempty(prefix) || push!(segs, prefix)
+    name === :index || push!(segs, string(name))
+    for p in param_strs
+        push!(segs, "{" * p * "}")
+    end
+    isempty(segs) ? "/" : "/" * join(segs, "/")
+end
+
 function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[])
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     for (name, info) in DynamicObjects.meta(T)
@@ -1479,10 +1495,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
         param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
         n_params = length(param_strs)
 
-        base = "/" * (isempty(prefix) ? "" : prefix * "/") * string(name)
-        path = isempty(param_strs) ? base :
-            base * "/" * join("{" .* param_strs .* "}", "/")
-        name == :index && isempty(prefix) && (path = "/")
+        path = _route_path(prefix, name, param_strs)
         _warn_docs_prefix(path, name)
 
         # Detect trailing defaults for shortened route registration
@@ -1548,9 +1561,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 for k in length(default_positions):-1:1
                     cut = default_positions[k]  # position of first omitted param
                     short_params = param_strs[1:cut-1]
-                    short_path = isempty(short_params) ? base :
-                        base * "/" * join("{" .* short_params .* "}", "/")
-                    name == :index && isempty(prefix) && isempty(short_params) && (short_path = "/")
+                    short_path = _route_path(prefix, name, short_params)
                     _register_indexed_route(T, method, name, short_path, length(short_params), record_dir; mount_prefix)
                 end
             end
@@ -1738,16 +1749,7 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
         n_params = length(param_strs)
 
-        base = "/" * prefix * "/" * string(name)
-        path = isempty(param_strs) ? base :
-            base * "/" * join("{" .* param_strs .* "}", "/")
-        # :index always collapses the name segment; params (if any) stay on
-        # the prefix path: `@get index(slug)` → `/examples/{slug}`, not
-        # `/examples/index/{slug}`. Bare `@get index` → `/examples`.
-        if name == :index
-            path = isempty(param_strs) ? "/" * prefix :
-                "/" * prefix * "/" * join("{" .* param_strs .* "}", "/")
-        end
+        path = _route_path(prefix, name, param_strs)
         _warn_docs_prefix(path, name)
 
         # Track kwargs-only paths for static recording
@@ -1764,7 +1766,7 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
             end
         end
 
-        let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, base=base, root_prefix=root_prefix
+        let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, prefix=prefix, root_prefix=root_prefix
             # Register the full route
             _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir; root_prefix)
 
@@ -1772,12 +1774,7 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
             for k in length(default_positions):-1:1
                 cut = default_positions[k]
                 short_params = param_strs[1:cut-1]
-                short_path = isempty(short_params) ? base :
-                    base * "/" * join("{" .* short_params .* "}", "/")
-                if name == :index
-                    short_path = isempty(short_params) ? "/" * prefix :
-                        "/" * prefix * "/" * join("{" .* short_params .* "}", "/")
-                end
+                short_path = _route_path(prefix, name, short_params)
                 _register_included_handler(ParentT, NestedT, method, name, chain, short_path, length(short_params), record_dir; root_prefix)
             end
         end
