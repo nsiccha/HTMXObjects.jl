@@ -409,6 +409,14 @@ function _convert_include_to_struct!(struct_expr)
         if Meta.isexpr(rhs, :block)
             # Convert to: prop = struct _Include_prop ... end
             struct_name = Symbol("_Include_", prop_name)
+            # Inject __prefix__ field so the inline child has its own mount
+            # segment (matching what the external-struct form gets via
+            # _inject_include_chain_kwargs!). Without this, `Base.:/(child, p)`
+            # reads `child.__prefix__` as a field — but inline children don't
+            # go through `_inject_dunder_props!` (reroute=false on recursion),
+            # so no __prefix__ field exists and `__self__/"x"` breaks.
+            pushfirst!(rhs.args,
+                :(__prefix__ = __parent__.__prefix__ * "/" * $(string(prop_name))))
             child_struct = Expr(:struct, false, struct_name, rhs)
             body.args[i] = :($prop_name = $child_struct)
         elseif Meta.isexpr(rhs, :call)
