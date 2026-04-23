@@ -3411,8 +3411,7 @@ end
                   v.author, " · ",
                   h.small(v.message), " ",
                   h.button("Restore";
-                      hx_post=__self__ / "restore",
-                      hx_vals="""{"sha":"$(v.sha)"}""",
+                      hx_post=__self__ / "restore" * "?sha=" * v.sha,
                       hx_target="#" * container_id, hx_swap="outerHTML")
               ) for v in editor.versions()]...),
         h.button("Back"; hx_get=__parent__.__prefix__,
