@@ -13,7 +13,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -849,6 +849,7 @@ function htmx(args...;
             cdn...,
             (feedback ? request_feedback() : ())...,
             tabset_styles(),
+            editor_styles(),
             extra_head...,
         ),
         body(args...),
@@ -3011,6 +3012,7 @@ tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id,
                 href="#",
                 class = i == active ? "contrast" : "secondary",
                 _="on click
+                    halt the event
                     remove .contrast from <a/> in closest <nav/>
                     add .secondary to <a/> in closest <nav/>
                     remove .secondary from me
@@ -3093,6 +3095,111 @@ function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; 
                 )) for (label, path) in items]...
             )
         )
+    )
+end
+
+"""
+    editor_styles()
+
+CSS for [`editor_form`](@ref): monospace `<textarea>`/`<input>` editor body
+(`.htmxo-editor-input`) and the Save/Cancel button row (`.htmxo-editor-actions`).
+Scoped class names, no global selectors. Auto-included by [`htmx`](@ref); inject
+manually via `extra_head` if you build your own `<head>`.
+"""
+editor_styles() = h.style("""
+.htmxo-editor-input {
+    font-family: monospace;
+    font-size: 0.85em;
+    width: 100%;
+}
+.htmxo-editor-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+""")
+
+"""
+    editor_form(; id, post_url, content="", version="", ...) -> Node
+
+Inline edit form for text content. Renders a `<textarea>` (default) or text
+`<input>` with Save/Cancel buttons and Escape-to-cancel. On submit, POSTs to
+`post_url` with form fields `content` (or `field_name`) and `version`; the
+response is swapped into `#target_id` via `hx-swap=\$swap`.
+
+`version` is a hidden conflict token — echoed back by the save handler so it
+can detect concurrent edits. Empty string is fine for apps that don't check.
+
+Cancel:
+- `cancel_url` → Cancel issues `hx-get` to that URL.
+- `cancel_onclick` → Cancel runs that JS (e.g. `"this.closest('#\$id').remove()"`).
+Exactly one must be given.
+
+# Arguments
+- `id`                   — container/form element id.
+- `tag`                  — outer tag (default `h.div`).
+- `class`                — outer element class.
+- `post_url`             — URL for Save.
+- `target_id`            — `hx-target` for Save response (default `id`).
+- `swap`                 — `hx-swap` value (default `"outerHTML"`).
+- `content`              — initial content.
+- `version`              — hidden version/hash token for conflict detection.
+- `field_name`           — form field name for the edited text (default `"content"`).
+- `input`                — `:textarea` or `:text`.
+- `rows`                 — textarea rows.
+- `placeholder`          — input placeholder.
+- `label`                — optional label rendered above the editor.
+- `cancel_url`           — URL for Cancel (`hx-get`).
+- `cancel_onclick`       — inline JS for Cancel.
+"""
+function editor_form(;
+    id,
+    tag             = h.div,
+    class           = "",
+    post_url,
+    target_id       = id,
+    swap            = "outerHTML",
+    content         = "",
+    version         = "",
+    field_name      = "content",
+    input           = :textarea,
+    rows            = 15,
+    placeholder     = "",
+    label           = nothing,
+    cancel_url      = nothing,
+    cancel_onclick  = nothing,
+)
+    (cancel_url === nothing) == (cancel_onclick === nothing) &&
+        error("editor_form: provide exactly one of `cancel_url` or `cancel_onclick`")
+
+    input_node = input === :textarea ?
+        h.textarea(content; name=field_name, rows=string(rows), class="htmxo-editor-input") :
+        input === :text ?
+            h.input(; type="text", name=field_name, value=content,
+                      placeholder, class="htmxo-editor-input") :
+            error("editor_form: `input` must be `:textarea` or `:text`, got $(repr(input))")
+
+    cancel_btn = cancel_url !== nothing ?
+        h.button("Cancel";
+            type="button", class="secondary outline",
+            data_cancel="",
+            hx_get=cancel_url, hx_target="#$target_id", hx_swap=swap) :
+        h.button("Cancel";
+            type="button", class="secondary outline",
+            data_cancel="",
+            onclick=cancel_onclick)
+
+    tag(; id, class,
+          onkeydown="if(event.key==='Escape'){this.querySelector('[data-cancel]').click()}")(
+        isnothing(label) ? "" : h.label(label),
+        h.form(; hx_post=post_url, hx_target="#$target_id", hx_swap=swap)(
+            input_node,
+            h.input(; type="hidden", name="version", value=version),
+            h.div(; class="htmxo-editor-actions")(
+                h.button("Save"; type="submit"),
+                cancel_btn,
+            ),
+        ),
     )
 end
 
