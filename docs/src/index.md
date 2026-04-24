@@ -546,9 +546,9 @@ end
 What `polling_fetchindex(ip, args...; poll_url, label, force=false) do result ... end`
 actually does:
 
-- **First call**: kicks off the `Task` for `ip[args...]` (via
-  `ThreadsafeDict.get!` — deduplicating concurrent requests for the same
-  args), and returns a progress fragment with
+- **First call**: kicks off the `Task` for `@memo ip(args...)` (via
+  `ThreadsafeDict.get!` under the hood — deduplicating concurrent
+  requests for the same args), and returns a progress fragment with
   `hx-get=poll_url` + `hx-trigger="every Ns"`. The HTMX client polls.
 - **Subsequent polls** hit `poll_url` and re-enter the handler:
   - Still running → same progress fragment.
@@ -627,11 +627,11 @@ parent, descriptions)` is a bulk helper if you'd rather skip the
 
 Inside a phase body you will often access **another IP** whose own
 computation is itself long-running and reports progress (an MCMC sampler,
-a Pathfinder init, a remote fetch). Calling `other_ip[args...]` would
-work — the inner IP kicks off its own Task and its progress attaches to
-nothing visible. What you want is for the inner IP's progress to **nest
-under the current phase** so the user sees one tree instead of orphaned
-siblings.
+a Pathfinder init, a remote fetch). Calling `@memo other_ip(args...)`
+would work — the inner IP kicks off its own Task and its progress
+attaches to nothing visible. What you want is for the inner IP's progress
+to **nest under the current phase** so the user sees one tree instead of
+orphaned siblings.
 
 `fetchindex!` is the primitive for that (exported from DynamicObjects;
 the Treebars-attaching method lives in `DynamicObjects/ext/TreebarsExt.jl`
@@ -639,13 +639,12 @@ and activates when Treebars is `using`'d):
 
 ```julia
 # Two methods:
-fetchindex!(::Nothing, ip, indices...)              # == ip[indices...] — no progress
-fetchindex!(status::ProgressNode, ip, indices...)   # attach ip's substatus under `status`
+fetchindex!(::Nothing, ip, indices...)              # cache-access only — no progress attachment
+fetchindex!(status::ProgressNode, ip, indices...)   # attach the IP's substatus under `status`
 ```
 
-The non-`nothing` form calls `Treebars.add_child!(status, getstatus(ip[indices...]))`
-before returning, so the inner IP's progress tree becomes a child of
-`status`. Used inside `with_prepared_progress`:
+The non-`nothing` form attaches the inner IP's progress subtree as a
+child of `status` before returning. Used inside `with_prepared_progress`:
 
 ```julia
 with_prepared_progress(phase) do progress
@@ -672,10 +671,10 @@ Known users of the non-`nothing` form:
 Pattern shorthand inside an IP body:
 
 - Always forward the current phase's `progress` into inner IP fetches —
-  plain `ip[args]` orphans the subtree.
+  `@memo ip(args)` on its own orphans the subtree.
 - Use `fetchindex!(progress, ip, args...)` to warm and attach; then read
-  the cached value back via plain access or `@memo ip(args)` / `ip[args]`
-  on later lines if you need the value.
+  the cached value back via `@memo ip(args)` on later lines if you need
+  it. Never reach for bare `ip[args]` — see the access-form note below.
 
 ### Translating the rules into action
 
@@ -688,19 +687,23 @@ Pattern shorthand inside an IP body:
   statically-known phases, `prepare_progress!` + `with_prepared_progress`
   (or `with_prepared_phases`) for data-driven phase sets.
 - **Nest an inner IP's progress under the current phase** →
-  `fetchindex!(status, ip, args...)`. Plain `ip[args]` skips progress
+  `fetchindex!(status, ip, args...)`. `@memo ip(args)` on its own skips
   attachment and the sub-tree floats.
 - **Call an IP from inside an HTTP request handler** → never block.
   Use `polling_fetchindex(ip, args...; poll_url, label) do result ... end`.
 - **Call an IP from inside another DO property body** → blocking is fine
   (the outer body is itself in a spawned Task). Use `fetchindex!(progress,
-  ip, args...)` so progress nests; use bare `fetchindex(ip, args...)` or
-  `ip[args...]` if you don't need progress.
-- **Access form matters on IPs too.** `o.prop(args)` is fresh-each-call
-  (re-runs the body on every access); `o.prop[args]` is ThreadsafeDict-
-  cached per key (what `fetchindex` / `polling_fetchindex` dispatch
-  through). `@memo o.prop(args)` rewrites to `o.prop[args]` for
-  readability.
+  ip, args...)` so progress nests; `fetchindex(ip, args...)` or
+  `@memo ip(args)` if you don't need progress.
+- **Prefer `@memo`, not `[]`, for cached access.** `o.prop(args)` is
+  fresh-each-call — runs the body every time. `@memo o.prop(args)` is
+  ThreadsafeDict-cached per key (what `fetchindex` / `polling_fetchindex`
+  dispatch through). `@memo` is the public face of the caching; avoid
+  reaching for bare `o.prop[args]` directly. The brackets *work* — in
+  fact `@memo` rewrites to them — but writing `[]` at the call site hides
+  the fact that something magical (Task spawn, memoised lookup) is
+  happening. Treat `prop[args]` as an implementation detail that `@memo`
+  wraps.
 
 See BRMMacroWeb (`compute_steps` IP + `PipelineRoutes.stage` route) and
 the `pathfinder` / `posterior_warmup` IPs under `AppData.run.stan` for
