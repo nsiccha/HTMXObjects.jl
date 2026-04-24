@@ -708,11 +708,38 @@ worked examples.
 
 ## Error handling
 
+### Where errors go — `/tmp/htmxo_errors/<uid>.log`
+
+**Every caught route exception writes a full report to
+`/tmp/htmxo_errors/<uid>.log` by default.** That is the first place to
+look when a route returns the framework's error article. The in-browser
+article only shows the short `<uid>` — the uid, ISO timestamp, request
+method + target, and full `showerror(io, err, bt)` backtrace all live in
+the log file on disk.
+
+```
+/tmp/htmxo_errors/<uid>.log          ← default; tempdir() + "htmxo_errors"
+$HTMXO_ERROR_DIR/<uid>.log           ← if the env var is set
+```
+
+The exact directory is held in `ERROR_DIR[]` (a `Ref{String}`), set by
+`__init__` from the `HTMXO_ERROR_DIR` environment variable, falling back
+to `joinpath(tempdir(), "htmxo_errors")` — which resolves to
+`/tmp/htmxo_errors` on Linux and macOS. You can reassign `ERROR_DIR[]` at
+runtime; no auto-rotation, no size cap.
+
+The uid is a short base-16 hash of `time_ns()` — same uid printed in the
+error article, emitted in the `@error` log line, and used as the filename.
+Grep the uid from your terminal/log viewer back to the file in one click.
+
+### What happens on exception
+
 Every route handler is wrapped in try/catch. On exception, HTMXObjects:
 
 1. Generates a short uid (`hash(time_ns())`).
-2. Writes `$ERROR_DIR/<uid>.log` with the uid, ISO timestamp, method +
-   target, and `showerror(io, err, bt)`.
+2. Writes `$ERROR_DIR[]/<uid>.log` (default `/tmp/htmxo_errors/<uid>.log`)
+   containing uid, ISO timestamp, method + target, and
+   `showerror(io, err, bt)`.
 3. Emits one `@error "HTMXObjects caught an error: <full path>"` — terse;
    the full stack trace is on disk.
 4. Feeds the result of `__error__(err)` (or the default renderer) back
@@ -726,9 +753,6 @@ Every route handler is wrapped in try/catch. On exception, HTMXObjects:
   so logs and monitors see errors as errors.
 - If your `__error__` hook returns an `HTTP.Response` directly, its status is
   respected — no rewrite.
-
-`ERROR_DIR[]` is initialised from the `HTMXO_ERROR_DIR` env var (falling back
-to `joinpath(tempdir(), "htmxo_errors")`).
 
 ### Customising
 
