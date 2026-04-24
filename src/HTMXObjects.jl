@@ -3219,14 +3219,35 @@ function _parse_author(s::AbstractString)
     m === nothing ? (String(s), "noreply@localhost") : (String(m[1]), String(m[2]))
 end
 
-# GitRepo: a @dynamicstruct owning a directory managed as a git repo, used
-# as the backend for `EditorRoutes`. Auto-`git init`s on first access.
-# Mutations serialised via a per-instance ReentrantLock. Provides:
-#   blob_sha(relpath)                              — HEAD:relpath blob SHA
-#   read_blob("<sha>:<relpath>")                   — blob content by revspec
-#   list_commits(relpath)                          — commits touching file
-#   write_file!(relpath, content; version, …)      — optimistic-concurrency write
-# Per-file handle via inline `@struct editor(relpath; default_content="")`.
+"""
+    GitRepo(; path, author="HTMXObjects <noreply@localhost>")
+
+A `@dynamicstruct` owning a directory managed as a git repo — the backend
+for [`EditorRoutes`](@ref). Auto-`git init`s on first access; mutations
+serialised via a per-instance `ReentrantLock`.
+
+# API
+- `blob_sha(relpath)` → HEAD:relpath blob SHA (or `""` if missing)
+- `read_blob("<sha>:<relpath>")` → blob content at revspec
+- `list_commits(relpath)` → commits touching the file
+- `write_file!(relpath, content; version, message)` → optimistic-concurrency
+  write: returns `(:ok, commit_sha)` or `(:conflict, current_blob_sha)`.
+- `locked_update!(f, relpath; message)` → atomic read-modify-write:
+  `f(current_content)` runs inside the per-repo lock; its return value is
+  written and committed. Function-first so `do`-blocks work:
+  ```julia
+  repo.locked_update!("metadata.yml"; message="set foo") do text
+      update_yaml_key(text, "foo", new_value)
+  end
+  ```
+  Use when the new content is composed from the current content (e.g. one
+  key of a multi-key YAML) — avoids the read-then-write race that
+  `write_file!` would surface as a spurious conflict.
+- `editor(relpath; default_content="")` → per-file handle exposing
+  `current_content()`, `current_version()`, `versions()`,
+  `read_version(sha)`, `write!(content; version, message)`, and
+  `update!(f; message)` (function-first, delegates to `locked_update!`).
+"""
 @dynamicstruct struct GitRepo
     path::String
     author::String = "HTMXObjects <noreply@localhost>"
@@ -3410,13 +3431,32 @@ end
     end
 end
 
-# EditorRoutes: git-backed inline editor @htmx struct. Routes:
-#   @get  form                — renders the editor form
-#   @post save(; content, version) — optimistic-concurrency write
-#   @get  history             — list prior versions with restore buttons
-#   @post restore(; sha)      — revert file to an earlier blob
-# Parent struct must expose `editor` (a GitRepo.editor(relpath) handle) and
-# `container_id` (HTML id of the wrapper) as locals.
+"""
+    EditorRoutes
+
+Git-backed inline editor `@htmx` struct. Mount as an `@include` under a
+parent that exposes `editor` (a [`GitRepo`](@ref) per-file handle from
+`editor(relpath)`) and `container_id::String` (HTML id of the wrapper) as
+locals. All URLs forward the parent's `@param` values via
+`query_url(path, __parent__)`, so a parameterised parent
+(`@param name::String` picking which file to edit) survives
+edit/save/cancel/history/restore round-trips with no extra wiring.
+
+# Routes
+- `@get form` — renders the editor form via [`editor_form`](@ref).
+- `@post save(; content, version)` — optimistic-concurrency write. On
+  conflict, re-renders the form with a "content changed" banner.
+- `@get history` — lists prior versions with per-version Restore buttons.
+- `@post restore(; sha)` — reverts the file to an earlier blob.
+
+# Optional struct fields
+- `input::Symbol = :textarea` (or `:text`)
+- `rows::Int = 15`
+- `placeholder::String = ""`
+- `label = nothing`
+
+See the `section_routes` demo in `HTMXObjects/web/src/git_editor_demo.jl`.
+"""
 @htmx struct EditorRoutes
     (; editor, container_id) = __parent__
     input::Symbol       = :textarea
