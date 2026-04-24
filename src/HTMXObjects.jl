@@ -3364,7 +3364,7 @@ end
     # read-then-write race that `write_file!`'s optimistic concurrency would
     # report as a spurious conflict. Returns `(:ok, commit_sha)` on change or
     # `(:nochange, current_blob_sha)` if `f` returned identical content.
-    locked_update!(relpath, f; message::AbstractString="edit " * relpath) = begin
+    locked_update!(f, relpath; message::AbstractString="edit " * relpath) = begin
         Base.lock(_lock) do
             _ensure()
             abs = joinpath(path, relpath)
@@ -3406,7 +3406,7 @@ end
             __parent__.write_file!(relpath, content; version, message)
 
         update!(f; message="edit " * relpath) =
-            __parent__.locked_update!(relpath, f; message)
+            __parent__.locked_update!(f, relpath; message)
     end
 end
 
