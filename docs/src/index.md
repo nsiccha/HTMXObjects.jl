@@ -1,391 +1,513 @@
 # HTMXObjects.jl
 
-Property-based web apps for Julia, built on [DynamicObjects.jl](https://github.com/nsiccha/DynamicObjects.jl),
+Property-based web apps for Julia. Built on
+[DynamicObjects.jl](https://github.com/nsiccha/DynamicObjects.jl),
 [Oxygen.jl](https://github.com/OxygenFramework/Oxygen.jl), and
 [HTMX.jl](https://github.com/nsiccha/HTMX.jl).
 
-An HTMXObjects app is a pair of structs per feature:
+## One idea
 
-- `XData`, a `@dynamicstruct` — holds data that lives for the server's lifetime
-  (collections, caches, config).
-- `XRoutes`, a `@htmx` struct — declares routes as properties. A fresh instance
-  is built per request.
+Every HTMXObjects app is split along a single axis:
 
-The framework wires both together so routes are Revise-reloadable, URLs respect
-mount prefixes automatically, and common request-response concerns (HTMX
-fragments, markdown negotiation, error pages) are handled without branching
-inside route bodies.
+- **Data** — persistent, lives for the server's lifetime. Collections,
+  filesystem handles, expensive computations, mutable caches. Lives on
+  `@dynamicstruct` types. This is the *backend*.
+- **Requests** — ephemeral, regenerated on every HTTP request. URL handlers,
+  HTML fragments, request-derived parameters, page layouts. Lives on `@htmx`
+  types. This is the *UI*.
+
+A fresh `@htmx` instance is built for every inbound request, injected with the
+inbound `HTTP.Request`, and discarded after the response is sent. It reaches
+through to the single long-lived `@dynamicstruct` tree for anything that needs
+to survive between requests. Nothing ephemeral leaks into data; nothing
+persistent leaks into requests.
+
+Keeping this split clean is the whole discipline:
+
+| `@dynamicstruct` (data, backend)              | `@htmx` (requests, UI)                           |
+|-----------------------------------------------|--------------------------------------------------|
+| Built once, at module init                    | Built fresh per request                          |
+| `Vector`s, `DataFrame`s, `@cached` results    | HTML fragments and page layouts                  |
+| File / DB / network handles                   | `@get` / `@post` / … route properties            |
+| Thread-safe mutation (`cache_type=:parallel`) | `@param` request-derived values                  |
+| No HTTP knowledge                             | Has `__req__`, `__prefix__`, `__appdata__`       |
+
+Everything else in this document — `@include`, `@param`, `query_url`, the
+response pipeline, error handling — exists to make that split ergonomic.
 
 ## Quick start
 
-Scaffold an app:
+Scaffold:
 
 ```julia
 using HTMXObjects
-create_app("MyApp.jl")
+create_app("MyApp.jl")    # writes Project.toml, src/MyApp.jl, app/
 ```
 
-Then run it:
+Run:
 
 ```bash
 cd MyApp.jl && julia -i --project=app app/main.jl
 ```
 
-A minimal app by hand:
+A minimal app written by hand:
 
 ```julia
-using HTMXObjects
-using HTMXObjects.DynamicObjects
+module MyApp
 
+using HTMXObjects
+
+# 1. Data — persistent, lives for the server's lifetime.
 @dynamicstruct struct AppData
-    greeting::String = "Hello!"
+    items::Vector{String} = ["alpha", "beta", "gamma"]
 end
 
 const APPDATA = AppData()
 
+# 2. Requests — fresh instance per HTTP request.
 @htmx struct AppRoutes
     __appdata__ = APPDATA
-    (; greeting) = __appdata__
+    (; items) = __appdata__
 
-    __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
+    __page__(content) = htmx(h.main(; class="container")(content); pico_version="2")
 
-    @get index = h.h1(greeting)
+    @get index = h.div(
+        h.h1("Items"),
+        h.ul([h.li(x) for x in items]...),
+    )
 end
 
 function __init__()
     route!(AppRoutes())
 end
+
+end
 ```
 
-For larger apps, split each feature into its own file exposing a
-`FeatureData`/`FeatureRoutes` pair and mount sub-routes from the root with
-`@include`. See the
-[paired data / routes architecture in the KB](https://github.com/nsiccha/Claude/blob/main/web-app-pattern.md)
-for the full conventions.
+That is the whole shape. A `@dynamicstruct` holds the list. A `@htmx` struct
+declares `/` → `GET` rendering HTML. Revise reloads on save; the server never
+needs to restart.
 
-## The two struct macros
+## Data layer — `@dynamicstruct`
 
-### `@dynamicstruct` (data)
+Persistent state. Built once when the module loads; lives until the process
+exits. Use it for anything that is expensive to build, mutable, or needs to
+outlive a single request.
 
-Holds state that outlives any single request — `Vector{String}` of items,
-handles to external resources, results of expensive computations cached to
-disk. Use one `const APPDATA = AppData()` at module top level; every
-`@htmx struct` that needs access defaults its `__appdata__` to it.
+```julia
+@dynamicstruct struct AppData
+    items::Vector{String}    = ["alpha", "beta"]
+    counter::Ref{Int}        = Ref(0)
+    dataset                  = load_big_dataframe()   # run once at construction
+    compute_result(x)        = expensive(x)           # memoised per argument
+end
 
-### `@htmx` (routes)
+const APPDATA = AppData()
+```
 
-`@htmx` wraps `@dynamicstruct` and adds a `_reroute!` call so Revise-triggered
-re-evaluation automatically re-registers the struct's routes — no server
-restart needed.
+### Conventions
 
-Properties without a RHS are fixed fields. Properties with a RHS (`name = expr`
-or `name(args) = expr` / `name[args] = expr`) are derived and lazily
-memoized per instance. Property bodies can reference siblings by bare name —
-the macro rewrites them to `__self__.sibling`.
+- **One `const APPDATA = AppData()`** at module top level. It is the only
+  module-level `const` the app needs.
+- **Feature-scoped sub-structs.** For anything non-trivial, give each feature
+  its own `XData` `@dynamicstruct` and compose them as properties of
+  `AppData`. See `BayesianRegressionModels` (`Formula`, `Dataset`,
+  `ExampleEntry`, `AppData`) for an example.
+- **No standalone top-level functions** in the web module. If a function uses
+  app state, make it a derived property on the owning `@dynamicstruct`. If it
+  is genuinely stateless, inline it or put it in the underlying package.
+- **No module-level `Dict{K,V}()`.** Oxygen serves requests concurrently. Use
+  a `@dynamicstruct` with `cache_type=:parallel` or a `ThreadsafeDict` field.
+- **No module-level mutable state.** Mutate through property accessors on
+  `AppData` so Revise can hot-reload the definition without losing data.
+
+See the [DynamicObjects docs](https://github.com/nsiccha/DynamicObjects.jl)
+for the full property grammar (`@cached`, `@persist`, indexed properties,
+inline `@struct` children, docstring interpolation).
+
+## Request layer — `@htmx`
+
+Fresh instance per request. The framework wires in `__req__`, `__prefix__`,
+and falls `__appdata__` through from the parent. Everything else is user
+code. A `@htmx` struct is a `@dynamicstruct` plus:
+
+- Route markers (`@get`, `@post`, `@put`, `@patch`, `@delete`, `@ws`) turn
+  properties into HTTP endpoints.
+- `@include` composes sub-structs under a path segment.
+- `@param` declares request-derived typed properties shared across routes.
+- A `_reroute!` hook fires on Revise re-evaluation so routes re-register
+  without a server restart.
 
 ```julia
 @htmx struct AppRoutes
-    title = "My App"                         # derived, cached
-    nav   = h.nav(h.strong(title))           # references `title`
+    __appdata__ = APPDATA
+    (; items) = __appdata__
 
-    @get index           = h.main(nav, h.h1(title))
-    @get post[id]        = h.p("post $id")       # GET /post/{id}
-    @get page[id::Int]   = h.p("page $id")       # id auto-parsed to Int
+    # Page layout — called by the response pipeline on direct browser nav.
+    __page__(content) = htmx(h.main(; class="container")(content); pico_version="2")
+
+    # Sibling references are rewritten to `__self__.x` by the macro, so a
+    # derived property can reference other properties by bare name.
+    title = "My items"
+    header = h.header(h.strong(title))
+
+    @get index    = h.main(header, h.ul([h.li(x) for x in items]...))
+    @get show(id) = h.article(h.header("Item "), h.code(id))
+end
+```
+
+A property with a RHS is derived and lazily memoised on the instance (i.e.
+for the duration of one request). A property without a RHS (`items::Vector{String}`)
+is a fixed field — rarely needed on a `@htmx` struct.
+
+Route properties can take positional path params (`show(id)`) or kwargs
+(`search(; q="")` — auto-extracted from query or form). Type annotations
+trigger `parse(T, ...)` automatically.
+
+## Wiring data to requests — `__appdata__`
+
+`__appdata__` is the bridge. The root `@htmx` struct sets it; every nested
+`@include`d struct inherits it through the `__parent__` chain. Destructure
+what you need at the top of each routes struct and refer to local names
+everywhere else.
+
+```julia
+@dynamicstruct struct AppData
+    items = ["alpha", "beta"]
+    counter = Ref(0)
+    dataset = load_big_dataframe()
+end
+const APPDATA = AppData()
+
+@htmx struct AppRoutes
+    __appdata__ = APPDATA
+    (; items, counter, dataset) = __appdata__   # destructure once
+    @get index = h.p("count: $(counter[])")
+    # use `items` / `dataset` directly — never `__appdata__.items`
+end
+```
+
+If initialisation needs runtime values (env reads, file I/O), use
+`const APPDATA = Ref{AppData}()` and assign it in `__init__`.
+
+## Composition — `@include`
+
+Group related routes into a sub-`@htmx` struct, mount it under a path
+segment.
+
+**External form** — reuse a named type:
+
+```julia
+@htmx struct PipelineRoutes
+    (; dataset) = __appdata__           # falls through via __parent__
+    @get index   = h.p("rows: $(nrow(dataset))")
+    @post submit = ...
+end
+
+@htmx struct AppRoutes
+    __appdata__ = APPDATA
+    @include pipeline = PipelineRoutes()   # mounts PipelineRoutes at /pipeline
+end
+```
+
+**Inline form** — keep a tightly scoped feature in one place:
+
+```julia
+@htmx struct AppContext
+    __appdata__ = APPDATA
+    (; examples_dir) = __appdata__
+
+    @include examples = begin
+        @struct example_store = begin     # inline DO sub-store
+            entries() = [ExampleEntry(f) for f in readdir(examples_dir; join=true)]
+            find(label) = findfirstelement(e -> e.label == label, entries())
+        end
+
+        @get index = h.ul([h.li(e.label) for e in example_store.entries()]...)
+    end
+end
+```
+
+Both forms thread `__req__`, `__appdata__`, and `__prefix__` automatically:
+
+- `__parent__ = __self__` — children see the enclosing struct.
+- `__prefix__ = parent.__prefix__ * "/<name>"` — each `@include` appends one
+  segment.
+- `__appdata__` falls through the `__parent__` chain via `getproperty`.
+
+### Destructure once at the top, reach up via `__parent__`
+
+The root destructures from `__appdata__`. Deeper children reach up through
+`__parent__` to the slices their parent already destructured. Never re-dig
+through `__appdata__.feature.items` in every route body.
+
+```julia
+@htmx struct AnalysisRoutes
+    (; dataset, fit_resolver) = __appdata__
+    (; chain_analysis, posteriors_data) = dataset
+    @include chains     = ChainsRoutes()        # sees __parent__ = this
+    @include posteriors = PosteriorsRoutes()
+end
+
+@htmx struct ChainsRoutes
+    (; chain_analysis, fit_resolver) = __parent__    # up to AnalysisRoutes
+    @param (; fit_key) = __parent__                  # see @param delegation
 end
 ```
 
 ## Routes
 
-Prefix a property with a verb marker (`@get`, `@post`, `@put`, `@patch`,
-`@delete`, `@ws`) to register it as a route when `route!(app)` is called.
-Unmarked properties stay internal.
-
-### Path and param syntax
-
-| Declaration                         | Route(s)                                       |
-|------------------------------------|------------------------------------------------|
-| `@get index`                       | `GET /`                                        |
-| `@get about`                       | `GET /about`                                   |
-| `@get item(id)`                    | `GET /item/{id}` — `id::String`                |
-| `@get item(id::Int)`               | `GET /item/{id}` — `id` auto-parsed            |
-| `@get list(a, b=1)`                | `GET /list/{a}/{b}` + `GET /list/{a}` (b=1)    |
-| `@get search(; q="", n::Int=1)`    | `GET /search?q=&n=` (query params)             |
-| `@post submit(; name="")`          | `POST /submit` (form data)                     |
-| `@get filter(cat; sort="name")`    | `GET /filter/{cat}?sort=` (mixed)              |
-| `@delete remove(id)`               | `DELETE /remove/{id}`                          |
-| `@ws feed`                         | `WEBSOCKET /feed` — body is `(__ws__) -> ...`  |
-
-Rules:
-
-- `index` maps to the struct's root (`/` at the top level, `/<prefix>` for
-  included sub-structs).
-- Call syntax `()` is required for kwargs; bracket syntax `[]` does not support
-  `;` (Julia parses it as concatenation). Prefer `()` everywhere.
-- Type annotations trigger `parse(T, str)` automatically (`_convert_param`).
-  Built-ins include `Int`, `Float64`, `Bool`, `Symbol`, `Vector{T}`.
-- Trailing positional defaults register the shortened route automatically — do
-  not define two `@get` properties.
-
-### Registering
-
-```julia
-route!(app)                              # register routes
-route!(app; record_dir="site")           # + record every response to disk
-route!(app; prefix="api")                # mount everything under /api
-```
-
-`route!` stores the type in `_registered_types` and (via the `_reroute!` hook
-emitted by `@htmx`) re-registers automatically when Revise reloads the struct.
-There is no `appdata` kwarg — shared data is threaded through `__appdata__`
-(see [App data](#app-data-__appdata__)).
-
-## Request &amp; response flow
-
-Every request creates a fresh `T(; __req__ = request, __prefix__ = ..., ...)`.
-The handler evaluates the property, and the return value flows through
-`_resolve_response`:
-
-1. `HTTP.Response` returns unchanged.
-2. `Accept: text/markdown`, `?markdown`, or `?plain` → `to_markdown_string(val)`
-   (falls back to `repr(MIME"text/markdown"(), val)`, then `string(val)`).
-3. `?errors` → `filter_errors(val)` keeps only nodes tagged with `e.<tag>`.
-4. HTMX request (`HX-Request: true`) → return the fragment as-is.
-5. Otherwise wrap in `__page__(content)` if the struct (or any parent) defines
-   one.
-
-**Return bare content from routes.** Never call `__page__(...)` from a route
-body (causes double layout) and never branch on `is_htmx(__req__)` /
-`wants_markdown(__req__)` / `wants_errors(__req__)` — the framework does all of
-this.
+A verb marker turns a property into a route. The property name becomes the
+URL path (minus the `:index` special case, which maps to the struct's mount
+point).
 
 ```julia
 @htmx struct AppRoutes
-    __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
-
-    @get index      = h.div(h.h1("Hello"), h.p("World"))
-    @get item(id)   = h.article(h.header("Item $id"))
+    @get  index         = list_view()                 # GET /
+    @get  item(id)      = render_item(id)             # GET /item/{id}  (id::String)
+    @get  page(id::Int) = render_page(id)             # GET /page/{id}  (auto-parsed to Int)
+    @get  search(; q="", n::Int=1) = ...              # GET /search?q=&n=
+    @post submit(; name="") = persist!(name)          # POST /submit (form-encoded)
+    @get  range(a, b=1) = ...                         # GET /range/{a}/{b} AND /range/{a}
+    @delete remove(id) = drop!(id)                    # DELETE /remove/{id}
+    @ws     feed = (__ws__) -> ...                    # WebSocket at /feed
 end
 ```
 
-## Magic properties
+### Rules
 
-HTMXObjects auto-injects or recognises a small set of dunder-named properties.
-Users do not need to declare them — the framework wires them up — but any route
-body may reference them.
+- **Use `()` syntax for parameters.** `@get foo[bar](; q="")` hits a DO
+  assertion — Julia parses `;` inside `[]` as matrix concatenation.
+- **Untyped params are `String`.** Annotate with `::Int`, `::Float64`,
+  `::Bool`, `::Symbol`, or `::Vector{T}` for auto-parsing. Extend
+  `_convert_param(val::AbstractString, ::Type{T})` to support new types.
+- **Trailing positional defaults register shortened routes automatically.**
+  `@get range(a, b=1)` handles both `/range/{a}/{b}` and `/range/{a}`. Do not
+  write two `@get` properties.
+- **Kwargs sourcing** — `queryparams(req)` on GET/DELETE; `formdata(req)`
+  with `queryparams` fallback on POST/PUT/PATCH.
+- **Multi-value query params** (`?tag=a&tag=b`) — untyped kwargs receive
+  `Vector{String}`; `Vector{T}`-typed kwargs coerce each element; scalar-
+  typed kwargs receive the first value.
+- **Multi-verb routes on one name are allowed** — `@get user(id)` +
+  `@put user(id)` + `@delete user(id)` all register at `/user/{id}`.
+  Internally they are renamed to `user_GET`, `user_PUT`, … and the bare
+  name is no longer a DO property. If only a single verb targets `name`,
+  the bare name stays accessible as `app.name`.
 
-| Name            | Purpose                                                                     |
-|-----------------|-----------------------------------------------------------------------------|
-| `__self__`      | The struct instance. Every sibling reference is rewritten to `__self__.x`. |
-| `__req__`       | The inbound `HTTP.Request`. `req` is a deprecated alias (warns).           |
-| `__ws__`        | Inside `@ws` bodies: the WebSocket handle.                                 |
-| `__parent__`    | In an `@include`d sub-struct: the parent instance.                         |
-| `__prefix__`    | Current mount path (threaded by `route!` + `@include`).                    |
-| `__appdata__`   | App-wide data. Falls through `__parent__` so nested structs see the same.  |
-| `__page__`      | `content -> full_page(content)` — called by `_resolve_response`.           |
-| `__error__`     | `err -> renderable` — called when a route throws (see [Errors](#error-handling)). |
-
-Use `__self__/"path"` to build mount-prefix-aware URLs:
+### Register with `route!`
 
 ```julia
-@get index = h.a(href = __self__/"about")("About")   # → "/<prefix>/about"
+route!(app)                          # register routes
+route!(app; record_dir="site")       # + record every response to disk
+route!(app; prefix="api")            # mount everything under /api
 ```
 
-## Sub-routes with `@include`
+There is no `appdata` kwarg — shared state is threaded through
+`__appdata__`. `route!` stores the type in `_registered_types`; the
+`_reroute!` hook emitted by `@htmx` re-registers automatically when Revise
+reloads the struct.
 
-Group related routes into a sub-struct and mount it at a path segment:
+## Request-derived state — `@param`
 
-```julia
-@htmx struct FeatureARoutes
-    (; feature_a) = __appdata__
-    (; items)     = feature_a
-
-    @get index        = h.ul([h.li(x) for x in items]...)   # GET /feature_a
-    @get show(id)     = h.p("showing $id")                   # GET /feature_a/show/{id}
-end
-
-@htmx struct AppRoutes
-    __appdata__ = APPDATA
-
-    @get index = h.h1("root")
-    @include feature_a = FeatureARoutes()
-end
-```
-
-### Two forms
-
-- **External:** `@include name = ExternalStruct(; kwarg=value, ...)`. Mounts a
-  struct defined elsewhere. The framework auto-injects
-  `__parent__ = __self__` and `__prefix__ = parent_prefix * "/name"` so the
-  child sees its ancestor and full URL prefix.
-- **Block:** `@include name = begin ... end`. Declares an anonymous inline
-  sub-struct. Equivalent to `name = struct _Include_name ... end`. Inline
-  children inherit all parent properties — including `@param` declarations —
-  via DynamicObjects' normal property-inheritance.
-
-### Fallthrough
-
-Because `__appdata__` is looked up through `__parent__`, nested structs see the
-same APPDATA without having to pass it explicitly. Ditto for `@param`
-properties on inline children.
-
-### Destructure at the top
-
-Pull parent / appdata slices into local names once at the top of the struct
-body. Do **not** reach through `__appdata__.feature_a.items` in every route
-body.
-
-```julia
-@htmx struct FeatureARoutes
-    (; feature_a) = __appdata__
-    (; items, item_count) = feature_a
-    # routes use `items` / `item_count` directly
-end
-```
-
-### Standalone external children — `@param` delegation
-
-An external child struct does not inherit its parent's `@param` names into its
-own `_param_names`. To both register params on the child *and* resolve them
-from the parent, use the delegation form:
-
-```julia
-@htmx struct DoseResponseRoutes
-    @param (; fit_key, top_chains) = __parent__   # register + resolve
-    (; plot_height)                 = __parent__  # plain destructure, not a @param
-    ...
-end
-```
-
-Without this, `query_url(self, self)` would only serialize the child's own
-params, and follow-up requests would silently fall back to defaults.
-
-## `@param` and `query_url`
-
-`@param` declares a request-derived, typed property — same extraction rules as
-`@get`/`@post` kwargs (`queryparams` on GET/DELETE, `formdata` with query
-fallback on POST/PUT/PATCH). Use it when multiple routes in the same struct (or
-nested inline children) need the same params.
+`@param name::T = default` is a derived property that pulls itself from the
+current request (same extraction rules as `@get`/`@post` kwargs — shared
+`_lookup_param` primitive). It is memoised per instance (i.e. per request).
+Use it when several routes in the same struct (or inline children) need the
+same params.
 
 ```julia
 @htmx struct Analysis
     @param vessels::Vector{String} = ["Tablet-20"]
-    @param n_bootstrap::Int        = 10
-    @param fit_key::String                             # required — KeyError on miss
-    @param note                    = "hi"              # untyped → raw String/Vector{String}
+    @param fit_key::String                           # required — KeyError on miss
+    @param note                    = "hi"            # untyped → raw String/Vector{String}
 
-    # Block form:
     @param begin
         subjects::Vector{String} = String[]
         top_chains::Int          = 4
     end
 
-    @get index = render(vessels, n_bootstrap)
-    @get plot  = build_plot(vessels, n_bootstrap)
+    @get index = render(vessels, subjects, top_chains)
+    @get plot  = build_plot(vessels, fit_key)
 end
 ```
 
-- `@param` properties are plain DO derived properties memoized per-request —
-  **do not `@cached` them**; that would leak values across requests.
-- Defaults are plain Julia expressions. Module-level variables and function
-  calls work (unlike `@get` kwarg defaults, which are limited by
-  `_eval_literal`).
-- Required params throw `KeyError(:name)` on access when missing.
+### Rules
 
-### `query_url(path, obj; overrides...)`
+- **Never wrap with `@cached`.** `@param` is per-request state;
+  `@cached` would persist to disk and leak across requests.
+- **Required params throw `KeyError(:name)` on access.**
+- **Defaults are full Julia expressions.** Module-level variables and
+  function calls work (unlike `@get` kwarg defaults, which are limited to
+  literals).
+- **Inline `@include` children inherit parent `@param`s for free.** External
+  children do not — use the delegation form:
 
-Build URLs that round-trip the current request's params:
+```julia
+@htmx struct ChildRoutes
+    @param (; fit_key, top_chains) = __parent__   # register + resolve
+    (; plot_height)                = __parent__   # plain destructure, not a @param
+end
+```
+
+### `query_url(path, obj)` — round-tripping params
 
 ```julia
 @get plot = begin
-    poll_url = query_url(__self__/"data", __self__)     # only params in __req__
+    poll_url = query_url(__self__ / "data", __self__)
     h.div(hx_get=poll_url, hx_trigger="every 1s")(...)
 end
 ```
 
-`query_url(path, obj)` iterates `_param_names(typeof(obj))` and emits only the
-params that are **actually present in `obj.__req__`**. Explicit overrides
-always win. The old one-arg `query_url(path; kwargs...)` still works for plain
-URL building.
+`query_url(path, obj)` iterates `_param_names(typeof(obj))` and emits only
+the params that were **actually present** in `obj.__req__`. Explicit kwarg
+overrides always win. Defaults stay implicit — the URL only carries what the
+user set.
 
-## App data (`__appdata__`)
+`query_url(path; kwargs...)` (single argument) just builds a plain URL with
+escaped query parameters.
 
-Module-level mutable state is a thread-safety and hot-reload trap. Put it on an
-`AppData` struct instead:
+## Response pipeline
+
+Every route's return value flows through `_resolve_response` unless it is
+already an `HTTP.Response`. Precedence (first match wins):
+
+1. `HTTP.Response` → returned as-is.
+2. `?error` on the query string → `filter_errors(val)` keeps only `e.*`
+   nodes and their ancestors.
+3. Markdown requested (`?markdown`, `?plain`, or `Accept: text/markdown`/
+   `text/plain`) → `to_markdown_string(val)`.
+4. HTMX request (`HX-Request: true`) → fragment returned as-is.
+5. Otherwise → wrap in `__page__(content)` if any ancestor defines one.
+
+**Never branch on request mode inside a route body.** Return bare content;
+the framework handles the rest:
 
 ```julia
-@dynamicstruct struct AppData
-    items::Vector{String} = ["alpha", "beta"]
-    counter::Ref{Int}     = Ref(0)
-end
+# BAD — double-wraps browser responses.
+@get index = __page__(h.div(...))
 
-const APPDATA = AppData()
+# BAD — the pipeline already does this.
+@get item(id) = is_htmx(__req__) ? fragment : __page__(fragment)
+@get item(id) = if wants_markdown(__req__) markdown else html end
 
-@htmx struct AppRoutes
-    __appdata__ = APPDATA
-    (; items, counter) = __appdata__
-
-    @get index = h.p("count: $(counter[])")
-end
+# GOOD
+@get index = h.div(...)
 ```
 
-`APPDATA` is the **only** `const` you need at module top level. `@dynamicstruct`
-handles Revise-compatible mutation through property accessors. There is
-intentionally no `appdata` kwarg on `route!` — the singleton lives with the
-struct definition, keeping `route!`'s API state-free.
+### `__page__` — the full-page wrapper
 
-If initialisation needs to happen at runtime (file I/O, env reads), use
-`const APPDATA = Ref{AppData}()` and assign in `__init__`.
+Define it on the root `@htmx` struct (or any ancestor). It gets called with
+whatever content a browser route returned, for full-page renders:
 
-For mutable shared state that route handlers read/write concurrently, use
-`@dynamicstruct` with `cache_type=:parallel` (ThreadsafeDict-backed) or a
-`Treebars.ThreadsafeDict` field. Never use a plain `Dict{K,V}()` — Oxygen
-handles requests concurrently.
+```julia
+__page__(content) = htmx(
+    h.div(; class="layout")(
+        nav_sidebar(["Pipeline" => "/pipeline", "Examples" => "/examples"]),
+        h.main(; class="container")(h.div(; id="content")(content)),
+    );
+    pico_version="2",
+    extra_head=(h.title("My app"), h.style(my_css)),
+)
+```
 
-## Caching with `@cached` and `@persist`
+### Same route serves humans and agents
+
+The markdown branch means the same route handles both browsers (HTML) and
+agents (markdown via `curl -H "Accept: text/markdown"` or `?plain`). For
+mode-specific bits inside shared content, wrap with `html_only(...)` /
+`markdown_only(...)`:
+
+```julia
+h.div(
+    h.h1("Dashboard"),                    # both
+    html_only(h.nav(buttons...)),         # HTML only
+    markdown_only("*hint: use ?plain*"),  # markdown only
+    h.table(data...),                     # both (auto-converts)
+)
+```
+
+## Magic properties
+
+Framework-recognised names. Users don't declare them — the macro / request
+handler injects them — but route bodies may reference them.
+
+| Name            | Set by                              | Purpose                                               |
+|-----------------|--------------------------------------|-------------------------------------------------------|
+| `__self__`      | `@dynamicstruct`                     | The current struct instance.                          |
+| `__req__`       | `route!` handler (per request)       | The inbound `HTTP.Request`.                           |
+| `__ws__`        | `@ws` body wrapper                   | The WebSocket handle inside `@ws` bodies.             |
+| `__parent__`    | `@include` desugar                   | Parent struct instance in a sub-struct.               |
+| `__prefix__`    | `route!` + `@include`                | Current mount path.                                   |
+| `__appdata__`   | User (`= APPDATA`) + `@include`      | App data; falls through the `__parent__` chain.       |
+| `__page__`      | User                                 | `content -> full_page(content)`. Called by pipeline.  |
+| `__error__`     | User (optional)                      | `err -> renderable`. Called on caught exceptions.     |
+
+## URL building — `__self__ / "path"`
+
+Every `@htmx` struct carries `__prefix__` — `route!` seeds the root,
+`@include` appends `/<name>` at each level. Build URLs through
+`__self__/"..."` or `__parent__/"..."` so mount changes
+(`route!(..; prefix="api")`) and nesting changes don't break links:
+
+```julia
+h.a(href    = __self__/"about")           # full path at this mount point
+h.form(hx_post = __self__/"submit")        # POST back to this sub-struct
+```
+
+`@query_url prop(args; kw=val)` follows `@get` conventions: positional args
+become path segments, kwargs become query params. Useful for polling:
+
+```julia
+h.div(hx_get=@query_url(stage(:bench; force=true)), hx_trigger="every 1s")(...)
+```
+
+## Caching — `@cached` and `@persist`
+
+`@cached` persists results to disk under `cache/<hash>/<index>.sjl`. The key
+includes the struct's fixed fields, so every per-request `AppRoutes()` sees
+the same persisted value.
 
 ```julia
 @htmx struct AppRoutes
     @cached running = false
 
-    toggle[__req__] = begin
-        running = !running           # rewritten to __self__.running = !running
-        @persist running             # flush to disk
+    @post toggle[__req__] = begin
+        running = !running               # rewritten to __self__.running = !running
+        @persist running                 # flush to disk
         render_ui()
     end
 end
 ```
 
-`@cached` persists to `cache/<hash>/<index>.sjl`. All instances with the same
-fixed fields share the cache, so each per-request `AppRoutes()` sees the
-persisted value. `@persist name` writes the current value to disk.
-
-## URL building — mount-prefix awareness
-
-Every struct carries `__prefix__` — `route!` seeds the root and `@include`
-appends `/<name>` at each level. Prefer `__self__/"path"` or `__parent__/"path"`
-over hand-built strings so URLs survive mount changes (`route!(..; prefix="api")`)
-and nesting changes.
-
-```julia
-h.a(href = __self__/"about")          # full path at this mount point
-h.form(hx_post = __self__/"submit")   # POST back to this sub-struct
-```
+Most `@cached` usage belongs on the *data* side (`AppData`). On `@htmx`
+structs, prefer it for genuinely app-wide toggles (running/stopped,
+last-submitted formula, etc.), never for per-request state — that is what
+`@param` is for.
 
 ## Error handling
 
 Every route handler is wrapped in try/catch. On exception, HTMXObjects:
 
-1. Generates a short uid (hash of `time_ns()`).
-2. Writes `ERROR_DIR[]/<uid>.log` with uid, ISO timestamp, method + target, and
-   `showerror(io, err, bt)`.
-3. Emits one `@error "HTMXObjects caught an error: <full path>"` — terse on
-   purpose; the full stack is on disk.
-4. Feeds the result of `__error__(err)` back through the same response
-   pipeline — browsers see the error inside `__page__`, HTMX requests see the
-   fragment, markdown requests see markdown.
+1. Generates a short uid (`hash(time_ns())`).
+2. Writes `$ERROR_DIR/<uid>.log` with the uid, ISO timestamp, method +
+   target, and `showerror(io, err, bt)`.
+3. Emits one `@error "HTMXObjects caught an error: <full path>"` — terse;
+   the full stack trace is on disk.
+4. Feeds the result of `__error__(err)` (or the default renderer) back
+   through the response pipeline.
 
-`ERROR_DIR[]` is initialised from the `HTMXO_ERROR_DIR` env var (falls back to
-`joinpath(tempdir(), "htmxo_errors")`).
+### Status codes
+
+- **HTMX requests → HTTP 200** so vanilla HTMX still swaps the error article
+  in without needing `response-targets`.
+- **Non-HTMX requests (curl, direct browser nav, uptime checks) → HTTP 500**
+  so logs and monitors see errors as errors.
+- If your `__error__` hook returns an `HTTP.Response` directly, its status is
+  respected — no rewrite.
+
+`ERROR_DIR[]` is initialised from the `HTMXO_ERROR_DIR` env var (falling back
+to `joinpath(tempdir(), "htmxo_errors")`).
 
 ### Customising
 
@@ -399,15 +521,10 @@ Every route handler is wrapped in try/catch. On exception, HTMXObjects:
 end
 ```
 
-`__error__` is looked up on the route's struct (or the innermost `@include`d
-parent), so a top-level override covers everything while nested structs can
-override for their own routes.
+### Widget-level containment — `safely`
 
-### Widget-level containment with `safely`
-
-Route-level catching still lets one exception kill a whole composite route. For
-dashboards that combine several independent panels, wrap each panel in
-`safely`:
+For composite routes (dashboards with several independent panels), wrap each
+panel in `safely` so one failure doesn't kill the others:
 
 ```julia
 @get dashboard = h.div(
@@ -415,75 +532,90 @@ dashboards that combine several independent panels, wrap each panel in
         render_ppc_plot(data)
     end,
     safely(; obj=__self__) do
-        render_summary(data)    # runs independently; failure stays local
+        render_summary(data)
     end,
 )
 ```
 
-### Error-tagged HTML (`?errors` filter)
+### Error-tagged HTML — `e.*`
 
-`e.<tag>(...)` is the error-tagged parallel to `h`. `?errors` walks the node
-tree and keeps only `data-error` nodes and their ancestors — useful for
-surfacing machine-readable error summaries from a composite page.
+`e.<tag>` is the error-tagged parallel to `h.<tag>` (adds
+`data-error="true"`). The `?error` filter keeps only `data-error` nodes and
+their ancestors — useful for exposing machine-readable error summaries from
+a composite page.
+
+## Static recording & replay
+
+```julia
+route!(app; record_dir="site")
+```
+
+Every response is saved to disk mirroring the URL path (`/post/42` →
+`site/post/42.html`). `static_transform` walks the Node tree and:
+
+- Strips `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes.
+- Strips `hx-get` attributes whose URL contains `?` or points at a
+  kwargs-only route.
+- Marks affected elements with `data-static-disabled` + `disabled`, and
+  injects a `<style>` block dimming them.
+
+After recording, replay with any static server:
+
+```bash
+python -m http.server --directory site
+```
 
 ## Revise hot-reload
 
-Confirmed empirically:
-
-| Change                                             | Hot-reloaded?                      |
-|---------------------------------------------------|------------------------------------|
-| Plain function in the package                      | Yes                                |
-| Plain function in the web module                   | Yes                                |
-| `@htmx struct` body (literal or function call)     | Yes                                |
-| New `@get`/`@post` added to a struct               | Yes (via `_reroute!`)              |
-| `@testset` body in `web/src/test/runtests.jl`      | Yes                                |
-| `@testset` via `../` path outside the pkg tree     | **No** — source-text cache mismatch |
-| `@generated` function helper                       | **No** — world-age frozen          |
-| `const` value                                      | **No** — Revise can't redefine consts |
+| Change                                             | Hot-reloaded?                       |
+|---------------------------------------------------|--------------------------------------|
+| Plain function in the package / web module         | Yes                                  |
+| `@dynamicstruct` / `@htmx` struct body              | Yes                                  |
+| New `@get`/`@post` added to a struct               | Yes (via `_reroute!`)                |
+| `@testset` body in `web/src/test/runtests.jl`      | Yes                                  |
+| `@testset` via `../` path outside the pkg tree     | **No** — source-text cache mismatch  |
+| `@generated` function helper                       | **No** — world-age frozen            |
+| `Revise.includet(SubModule, file)`                 | **Breaks all tracking** — never use  |
+| `const` value change                               | **No** — `APPDATA` must never be reassigned |
 
 ### Gotcha: renaming the root `@htmx` struct
 
-Revise does **not** re-run `__init__()`. If you rename the root struct (e.g.
-`AppContext` → `AppRoutes`), `route!(AppRoutes())` never fires and every route
-returns the framework's error article — with HTTP 200. Check `?plain` content,
-not just status codes, when triaging "all routes broken".
+Revise does **not** re-run `__init__()`. Renaming the root struct (e.g.
+`AppContext` → `AppRoutes`) means `route!(AppRoutes())` never fires, so no
+routes register. Every route returns the framework's error article with
+HTTP 200 — easy to miss if you only check status codes.
 
-**Fix without restarting:** temporarily add a bare top-level
-`route!(AppRoutes())` expression in the module file. Revise evaluates new
-top-level expressions, so routes register under the new root. Remove the line
-once verified — future Revise reloads go through `_reroute!`, which finds the
-type in `_registered_types` and re-registers correctly.
+**Triage:** `curl -s ...?plain` and check the body, not just the status.
 
-## Recording &amp; static replay
+**Fix without restart:** temporarily add a bare top-level
+`route!(AppRoutes())` line in the module file. Revise evaluates new
+top-level expressions, so routes register under the new root. Remove the
+line once verified — subsequent reloads go through `_reroute!`.
 
-`route!(app; record_dir="site")` writes every response to disk mirroring the
-URL path (`/post/42` → `site/post/42.html`). After recording, a plain static
-server replays the session (`python -m http.server --directory site`).
+## HTML building with `h`
 
-Recorded nodes pass through `static_transform` first — non-GET `hx-*`
-attributes and query-param `hx-get` links are stripped (static servers can't
-vary responses by query string), and disabled elements get a dimmed style.
-
-## HTML helpers
+`h` (re-exported from HTMX.jl) builds a Cobweb `Node` tree.
 
 ```julia
-h.div(class="container")(              # positional children, keyword attributes
+h.div(; class="container")(              # keyword attributes, positional children
     h.h1("Title"),
-    h.p(hx_get="/data", hx_target="#result")("Load"),
+    h.p(; hx_get="/data", hx_target="#result")("Load"),
 )
 ```
 
-- Attribute names use underscores; they render as hyphenated HTML
-  (`hx_get` → `hx-get`).
-- `htmx(content; pico_version, htmx_version, hyperscript_version, extra_head, feedback)`
-  builds a full HTML page. Pico CSS is opt-in (`pico_version="2"`); HTMX and
-  Hyperscript are loaded from CDN by default.
+- Underscores in attribute names become hyphens (`hx_get` → `hx-get`).
+- `htmx(content; pico_version, htmx_version, hyperscript_version,
+  extra_head, feedback)` wraps content in a full HTML page with CDN tags.
 - `@__str` embeds inline Hyperscript: `h.button(__"on click toggle .hidden on #menu")("Toggle")`.
+- HTMX inherits `hx-swap`, `hx-target`, `hx-trigger` from ancestors. Use
+  `hx-disinherit="hx-swap ..."` on a container when its children should
+  not inherit.
 
 ### HTMX headers
 
-Inspect the request with `is_htmx(req)`, `hx_target(req)`, `hx_trigger(req)`,
-`hx_current_url(req)`, `hx_boosted(req)`, `hx_prompt(req)`.
+Inspect the request with `is_htmx(req)`, `hx_target(req)`,
+`hx_trigger(req)`, `hx_current_url(req)`, `hx_boosted(req)`,
+`hx_prompt(req)`.
 
 Attach response headers with `hx_response`:
 
@@ -493,40 +625,132 @@ hx_response(content;
     push_url    = "/new/path",    # HX-Push-Url
     retarget    = "#other",       # HX-Retarget
     reswap      = "outerHTML",    # HX-Reswap
-    redirect    = "/login",       # HX-Redirect — full-page redirect
+    redirect    = "/login",       # HX-Redirect
     refresh     = true,           # HX-Refresh
-    location    = "/dashboard",   # HX-Location — client-side navigate
+    location    = "/dashboard",   # HX-Location
 )
 ```
 
 ### Out-of-band swaps
 
 `to_response` accepts `content => "id"` pairs — wraps content in a `<div>`
-with `hx-swap-oob="true"` and the given id.
+with `hx-swap-oob="true"` and the given id:
 
 ```julia
 to_response([main_body, sidebar_html => "sidebar"])
 ```
 
-## What belongs where
+## Form helpers
 
-**On a `@dynamicstruct` (`XData`):**
-- Collections (`items::Vector{...}`), caches, handles, config.
-- Anything shared across requests.
+All exported from `HTMXObjects`.
 
-**On a `@htmx struct` (`XRoutes`):**
-- HTML fragments and page layouts — they benefit from sibling references.
-- Routes marked with `@get`/`@post`/etc.
+**Inputs:** `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`,
+`ninput`, `cinput`, `tinput`, `radio_group`, `ainput`.
+
+**Forms:** `get_form`, `post_form`, `hidden_inputs`.
+
+**Tables:** `render_table(table; id, sortable, download, download_filename,
+caption, cell, class, kwargs...)` — any Tables.jl-compatible table as an
+`h.table` with click-to-sort headers and CSV download. Multi-table pages
+work automatically (`th.closest('table')`).
+
+**Widgets:** `status_badge(state::Symbol)`, `nav_sidebar(items)`,
+`htmx_tabset(items; active, target)`, `lazy(url; tag, swap, kwargs...)`,
+`tabset`, `request_feedback` (pulsating outline while in-flight, teal flash
+on success, coral on error — included by default in `htmx()`).
+
+**Conditional visibility:** `sinput(...; show_when=(field, op, value))` with
+`show_when_script()` once per page. Ops: `==`, `!=`, `startswith`,
+`endswith`.
+
+**Captions:** `CaptionSpec(; title, short, long)`, `render_caption(spec)`,
+`with_caption(spec, content)`.
+
+See the docstrings for full signatures.
+
+## Git-backed inline editors
+
+Three primitives for editable content backed by a git repository:
+
+- `GitRepo` — `@dynamicstruct` owning a working directory. Auto-`git init`s
+  on first access. API: `blob_sha`, `read_blob`, `list_commits`,
+  `write_file!`, `locked_update!`, `editor(relpath)`.
+- `editor_form(; id, post_url, content, version, ...)` — HTML form with
+  Save/Cancel buttons and Escape-to-cancel.
+- `EditorRoutes` — `@htmx` mountable via `@include` under a parent that
+  exposes `editor` (`GitRepo.editor(relpath)`) and `container_id::String`
+  locals. Ships with `@get form`, `@post save`, `@get history`,
+  `@post restore`.
+
+Parent `@param` values auto-forward through edit/save/cancel/history/
+restore via `query_url(path, __parent__)`, so a parameterised parent
+(`@param name::String` picking a file) round-trips with no extra wiring.
+
+For partial-file edits (e.g. one key of a multi-key YAML), use
+`repo.locked_update!(relpath; message) do current ... end` instead of
+`write_file!` — the former serialises under the per-repo lock and composes
+with `write_file!`, avoiding the read-then-write race that optimistic
+concurrency would surface as a spurious conflict.
+
+See `HTMXObjects/web/src/git_editor_demo.jl` for a worked example.
+
+## `serve` and threading
+
+```julia
+serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing, kwargs...)
+```
+
+- `parallel=false` → single-threaded (default).
+- `parallel=true` → Oxygen's default thread pool.
+- `parallel=:interactive` → `:interactive` threadpool, leaving `:default`
+  free for heavy computation. Launch Julia with e.g. `julia -t 8,4` for 8
+  computation threads + 4 request-handling threads.
+- `revise=:lazy` is the usual dev setting.
+
+## What belongs where — summary
+
+**On a `@dynamicstruct` (data, backend):**
+
+- Collections (`items::Vector{...}`), caches, filesystem/DB handles.
+- Expensive computations (`@cached`).
+- Shared parsers, stores, resolvers.
+- Anything that outlives a single request.
+
+**On a `@htmx` (requests, UI):**
+
+- HTML fragments and page layouts (sibling references make these ergonomic).
+- Routes (`@get`/`@post`/etc.).
 - `@param` declarations.
-- Action handlers that mutate `@cached` state and return updated UI.
+- Action handlers that mutate state on `AppData` and return updated UI.
 
 **Outside both:**
-- Pure utilities that don't reference any property.
-- Helper types (data models, `PersistentSet`).
 
-The web module should contain **only** `APPDATA`, the struct definitions, and
-`__init__`. No top-level standalone functions, no top-level `const`s besides
+- Pure utilities that don't reference any property. Prefer promoting them
+  to a property on the relevant struct anyway.
+- Types (`struct ExampleEntry`, `PersistentSet`, ...).
+
+The web module should contain only `APPDATA`, struct definitions, and
+`__init__`. No top-level functions, no module-level `const` besides
 `APPDATA`, no custom Oxygen route handlers.
+
+## Anti-patterns (observed in the wild)
+
+- Manual `formdata(req)` / `queryparams(req)` in route bodies. Use kwargs
+  or `@param` — type coercion, defaults, and multi-value handling are free.
+- `__page__(...)` inside a route body (double layout). Return bare content.
+- `is_htmx(__req__) ? fragment : full` dual-path. The pipeline does this.
+- `if wants_markdown(__req__) ... else ... end` branches. Ditto.
+- Plain `Dict{K,V}()` at module top level. Oxygen is concurrent.
+- `const FOO = ...` besides `APPDATA`.
+- Standalone `function foo(...) ... end` at module top level. Promote to a
+  property on the owning struct. Plain `function` blocks inside a
+  `@htmx`/`@dynamicstruct` body cause a parse error (the macro parses the
+  body as property definitions).
+- `Revise.includet(SubModule, file)` — clobbers Revise's pkgdata and breaks
+  all tracking.
+- `@enum X A B C` for form-driven data. Julia's `@enum` has no `parse`
+  method. Use `String` or `Symbol`.
+- Custom Oxygen route handlers alongside `route!`. Extend `route!` instead.
 
 ## Further reading
 
