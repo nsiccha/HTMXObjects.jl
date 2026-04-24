@@ -485,6 +485,104 @@ structs, prefer it for genuinely app-wide toggles (running/stopped,
 last-submitted formula, etc.), never for per-request state — that is what
 `@param` is for.
 
+## Async work and polling — IPs + `polling_fetchindex`
+
+Long-running computations (sampling, compilation, parameter fits) must not
+block the HTTP request handler. HTMXObjects apps handle this by driving
+**IndexableProperties (IPs)** on the data side through `polling_fetchindex`
+on the routes side. Three facts anchor the pattern — read carefully, because
+conflating them is the single most common async bug:
+
+1. **Every function-form DO property is an IP.** Any LHS with parens —
+   `name() = expr`, `name(x) = expr`, `name(x; kw=1) = expr` — produces an
+   IP. The parens are what matter; arguments are not required. A zero-arg
+   function form `name() = expr` **is still an IP**. IPs are backed by a
+   `ThreadsafeDict` (under `cache_type=:parallel`, the usual setting for
+   `AppData`), spawn and deduplicate `Task`s per key, and are pollable.
+2. **Bare-property form (`name = expr`) is NOT an IP.** It is a
+   lazy-memoised derived value on the instance. Not pollable. If you need
+   to poll something, lift it to function form — even if it takes no
+   arguments.
+3. **`@cached` ONLY adds disk serialisation.** It does **not** create IPs
+   and IPs do **not** require it. A function-form property is already an
+   IP and already pollable without `@cached`. Use `@cached` when (and only
+   when) you want the result to survive a server restart.
+
+### The canonical pattern
+
+```julia
+# Data side: function-form property on AppData is the IP.
+@dynamicstruct struct AppData
+    # ... fields ...
+
+    # Function form → IP. No @cached, no wrapping macro. This alone makes
+    # it a ThreadsafeDict-backed, task-spawning, pollable computation.
+    compute_steps(text, namespace, name::Symbol) = begin
+        ...                                            # slow work
+        result                                          # whatever the UI renders
+    end
+end
+
+const APPDATA = AppData(; cache_type=:parallel)
+
+# Routes side: polling_fetchindex drives the IP from an HTMX route.
+@htmx struct PipelineRoutes
+    (; compute_steps) = __appdata__
+    @param formula::String = ""
+    @param label::String   = ""
+
+    @get stage(name::Symbol; force::Bool=false) = polling_fetchindex(
+        compute_steps, formula, namespace_from(label), name;
+        poll_url = query_url(__self__/"stage/$name"; formula, label),
+        label    = "Pipeline - $name",
+        force,
+    ) do result
+        # This block runs only once the IP resolves.
+        render(result)
+    end
+end
+```
+
+What `polling_fetchindex(ip, args...; poll_url, label, force=false) do result ... end`
+actually does:
+
+- **First call**: kicks off the `Task` for `ip[args...]` (via
+  `ThreadsafeDict.get!` — deduplicating concurrent requests for the same
+  args), and returns a progress fragment with
+  `hx-get=poll_url` + `hx-trigger="every Ns"`. The HTMX client polls.
+- **Subsequent polls** hit `poll_url` and re-enter the handler:
+  - Still running → same progress fragment.
+  - Failed → error article.
+  - Resolved → the `do result` block's rendering.
+- **`force=true`** invalidates the cached entry for those args and re-runs
+  the task.
+
+The route itself is just a plain `@get` returning a fragment. No branching
+on request mode; the response pipeline handles the rest.
+
+### Translating the rule into action
+
+- **"Make this property pollable"** → lift it to function form
+  (`name(args...) = expr` or `name() = expr`). Do **not** add `@cached` for
+  pollability.
+- **"Make this property survive a restart"** → add `@cached` (disk
+  persistence), independently of whether it's an IP.
+- **Call an IP non-blockingly from inside another DO property body** →
+  `fetchindex!(progress_node, ip, args...)` (Treebars-attached) or
+  `fetchindex(ip, args...)` (bare). Blocks the current task — which is
+  fine inside an IP body because that body already runs in a spawned task.
+  Never block like this inside an HTTP request handler; use
+  `polling_fetchindex` there instead.
+- **Access form matters on IPs too.** `o.prop(args)` is fresh-each-call
+  (re-runs the body on every access); `o.prop[args]` is ThreadsafeDict-
+  cached per key (what `fetchindex` / `polling_fetchindex` dispatch
+  through). `@memo o.prop(args)` rewrites to `o.prop[args]` for
+  readability.
+
+See BRMMacroWeb (`compute_steps` IP + `PipelineRoutes.stage` route) and
+the `pathfinder` / `posterior_warmup` IPs in `AppData.run.stan` for worked
+examples.
+
 ## Error handling
 
 Every route handler is wrapped in try/catch. On exception, HTMXObjects:
