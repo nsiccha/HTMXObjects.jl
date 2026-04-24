@@ -560,19 +560,142 @@ actually does:
 The route itself is just a plain `@get` returning a fragment. No branching
 on request mode; the response pipeline handles the rest.
 
-### Translating the rule into action
+### Prepopulating the progress tree — `@progress` and `prepare_progress!`
 
-- **"Make this property pollable"** → lift it to function form
+`polling_fetchindex` gives the user a live progress view while the IP runs.
+By default they see a single node that fills in as the IP's body executes.
+For multi-stage pipelines, you almost always want **all phases visible as
+pending up front** so the user can see the whole shape before anything
+finishes. Two variants, pick by how the phase list is known:
+
+**Static list — `@progress` blocks.** When the phases are literal in the
+source, use Treebars' `@progress` macro. Every `@progress "label"` marker
+inside a `@progress begin … end` block is pre-enumerated as a pending
+child before the block starts, then starts/finishes in order:
+
+```julia
+using Treebars: @progress
+
+compute_all = (text) -> begin
+    @progress "Pipeline" begin
+        @progress "Parse";       raw  = Meta.parse(text)
+        @progress "Transform";   tx   = transform(raw)
+        @progress "Compile";     lib  = compile(tx)
+        @progress "Fit";         draws = fit(lib)
+        (; raw, tx, lib, draws)
+    end
+end
+```
+
+All four labels appear immediately as pending siblings under "Pipeline";
+each becomes active/finished as the block advances.
+
+**Data-driven list — `prepare_progress!` + `with_prepared_progress`.** When
+the phase set depends on runtime values (the user picked a stage from a
+DAG, or the chain length varies with inputs), build the pending nodes by
+hand and sandwich each phase:
+
+```julia
+using Treebars: prepare_progress!, with_prepared_progress
+
+compute_steps(text, namespace, name::Symbol) = begin      # IP on AppData
+    r      = run(text, namespace)
+    chain  = step_chain[name]                             # NamedTuple: step_key => spec
+    # Pre-create one pending ProgressNode per step, attached to this IP's
+    # own __status__. All of them show up as dim "pending" siblings
+    # immediately; the user sees the full pipeline shape before anything
+    # starts.
+    phases = [prepare_progress!(__status__; description=string(k))
+              for k in keys(chain)]
+    vals = map(pairs(chain), phases) do (step_name, spec), phase
+        # Start this phase, run the body, finalize/fail on exit.
+        with_prepared_progress(phase) do progress
+            # progress is the live ProgressNode for this phase.
+            # Work done here attaches under it (see next section).
+            resolve(r, spec)
+        end
+    end
+    merge((; data=r.df), NamedTuple{keys(chain)}(Tuple(vals)))
+end
+```
+
+This is what BRM's `compute_steps` IP does. `with_prepared_phases(f,
+parent, descriptions)` is a bulk helper if you'd rather skip the
+`prepare_progress!` / `with_prepared_progress` boilerplate.
+
+### Nesting IP progress — `fetchindex!(status, ip, args...)`
+
+Inside a phase body you will often access **another IP** whose own
+computation is itself long-running and reports progress (an MCMC sampler,
+a Pathfinder init, a remote fetch). Calling `other_ip[args...]` would
+work — the inner IP kicks off its own Task and its progress attaches to
+nothing visible. What you want is for the inner IP's progress to **nest
+under the current phase** so the user sees one tree instead of orphaned
+siblings.
+
+`fetchindex!` is the primitive for that (exported from DynamicObjects;
+the Treebars-attaching method lives in `DynamicObjects/ext/TreebarsExt.jl`
+and activates when Treebars is `using`'d):
+
+```julia
+# Two methods:
+fetchindex!(::Nothing, ip, indices...)              # == ip[indices...] — no progress
+fetchindex!(status::ProgressNode, ip, indices...)   # attach ip's substatus under `status`
+```
+
+The non-`nothing` form calls `Treebars.add_child!(status, getstatus(ip[indices...]))`
+before returning, so the inner IP's progress tree becomes a child of
+`status`. Used inside `with_prepared_progress`:
+
+```julia
+with_prepared_progress(phase) do progress
+    if step_name === :stan_fit_pathfinder
+        # Pathfinder is a function-form property (IP). Fetching it under
+        # `progress` nests the sampler's own progress subtree under this
+        # phase node.
+        fetchindex!(progress, r.stan.pathfinder, r.stan.fit_instance, r.stan.init)
+        resolve(r, spec)                   # reads the cached value via @memo
+    else
+        resolve(r, spec)
+    end
+end
+```
+
+Known users of the non-`nothing` form:
+
+- BRM's `compute_steps` — warms the `pathfinder` and `posterior_warmup`
+  IPs under the matching phase's progress.
+- bruno's `_rpkpd` (`web-pkpd/src/analysis/sim_state.jl`) — forwards the
+  caller's status into `pkpd`'s IP fetch so the sampling progress nests
+  correctly when called from a route that already opened a phase.
+
+Pattern shorthand inside an IP body:
+
+- Always forward the current phase's `progress` into inner IP fetches —
+  plain `ip[args]` orphans the subtree.
+- Use `fetchindex!(progress, ip, args...)` to warm and attach; then read
+  the cached value back via plain access or `@memo ip(args)` / `ip[args]`
+  on later lines if you need the value.
+
+### Translating the rules into action
+
+- **Make a property pollable** → lift it to function form
   (`name(args...) = expr` or `name() = expr`). Do **not** add `@cached` for
   pollability.
-- **"Make this property survive a restart"** → add `@cached` (disk
-  persistence), independently of whether it's an IP.
-- **Call an IP non-blockingly from inside another DO property body** →
-  `fetchindex!(progress_node, ip, args...)` (Treebars-attached) or
-  `fetchindex(ip, args...)` (bare). Blocks the current task — which is
-  fine inside an IP body because that body already runs in a spawned task.
-  Never block like this inside an HTTP request handler; use
-  `polling_fetchindex` there instead.
+- **Make a property survive a restart** → add `@cached` (disk persistence),
+  independently of whether it's an IP.
+- **Pre-populate the progress tree** → `@progress "label"` markers for
+  statically-known phases, `prepare_progress!` + `with_prepared_progress`
+  (or `with_prepared_phases`) for data-driven phase sets.
+- **Nest an inner IP's progress under the current phase** →
+  `fetchindex!(status, ip, args...)`. Plain `ip[args]` skips progress
+  attachment and the sub-tree floats.
+- **Call an IP from inside an HTTP request handler** → never block.
+  Use `polling_fetchindex(ip, args...; poll_url, label) do result ... end`.
+- **Call an IP from inside another DO property body** → blocking is fine
+  (the outer body is itself in a spawned Task). Use `fetchindex!(progress,
+  ip, args...)` so progress nests; use bare `fetchindex(ip, args...)` or
+  `ip[args...]` if you don't need progress.
 - **Access form matters on IPs too.** `o.prop(args)` is fresh-each-call
   (re-runs the body on every access); `o.prop[args]` is ThreadsafeDict-
   cached per key (what `fetchindex` / `polling_fetchindex` dispatch
@@ -580,8 +703,8 @@ on request mode; the response pipeline handles the rest.
   readability.
 
 See BRMMacroWeb (`compute_steps` IP + `PipelineRoutes.stage` route) and
-the `pathfinder` / `posterior_warmup` IPs in `AppData.run.stan` for worked
-examples.
+the `pathfinder` / `posterior_warmup` IPs under `AppData.run.stan` for
+worked examples.
 
 ## Error handling
 
