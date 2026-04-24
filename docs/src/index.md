@@ -472,7 +472,7 @@ the same persisted value.
 @htmx struct AppRoutes
     @cached running = false
 
-    @post toggle[__req__] = begin
+    @post toggle = begin
         running = !running               # rewritten to __self__.running = !running
         @persist running                 # flush to disk
         render_ui()
