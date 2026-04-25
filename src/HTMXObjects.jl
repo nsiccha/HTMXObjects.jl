@@ -586,7 +586,7 @@ function _rewrite_param_line(expr)
     (name_sym, Expr(:(=), name_sym, rhs))
 end
 
-function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwargs...)
+function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_child=false, kwargs...)
     # Capture externals BEFORE _convert_include_to_struct! strips the @include
     # wrapper from `@include prop = ExternalStruct(...)` lines (the begin-block
     # form turns into an inline struct, but the call form is left as a bare
@@ -639,7 +639,8 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], kwar
             """)
     end
     block = DynamicObjects.dynamicstruct(struct_expr;
-        child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names), kwargs...)
+        child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names, is_child=true),
+        is_child, kwargs...)
     type_name = _struct_type_name(struct_expr)
     @assert Meta.isexpr(block, :escape)
     # Emit _extract_args methods for each route property
