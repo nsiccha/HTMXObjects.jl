@@ -1276,16 +1276,10 @@ function _record_error(err, bt, req)
         # PropertyComputationError's 2-arg showerror already prints the cause's
         # filtered backtrace; passing `bt` would make Julia's default 3-arg
         # fallback append the outer Oxygen/HTTP trace a second time.
-        # Guarded: a broken `showerror` on a user exception would otherwise
-        # kill the route and produce an empty HTTP reply.
-        try
-            if err isa PropertyComputationError
-                showerror(io, err)
-            else
-                showerror(io, err, bt)
-            end
-        catch e_show
-            println(io, "<showerror threw ", typeof(e_show), ": ", e_show, ">")
+        if err isa PropertyComputationError
+            showerror(io, err)
+        else
+            showerror(io, err, bt)
         end
         println(io)
         _append_revise_errors(io)
@@ -1334,28 +1328,18 @@ _with_error_status(req, resp::HTTP.Response) =
     is_htmx(req) ? resp : HTTP.Response(500, resp.headers; body=resp.body)
 
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
-    # Outer guard: if anything below throws (e.g. a broken `showerror` on a
-    # user exception, or `to_response` on an un-renderable value), HTTP.jl
-    # would otherwise close the socket with no headers and the client sees
-    # an empty reply. Return a minimal 500 so the browser/curl gets something.
-    try
-        uid, path = _record_error(err, bt, req)
-        err_val = _invoke_error_handler(error_obj, err, uid, path)
-        err_val isa HTTP.Response && return err_val
-        if wants_markdown(req)
-            return _with_error_status(req, markdown_response(to_markdown_string(err_val)))
-        end
-        is_htmx(req) && return to_response(err_val)   # always 200 for HTMX
-        for obj in reverse(page_chain)
-            wrapper = _page_wrapper(obj)
-            isnothing(wrapper) || (err_val = wrapper[err_val])
-        end
-        _with_error_status(req, to_response(err_val))
-    catch err2
-        @error "HTMXObjects: error rendering itself failed" err_type=typeof(err) err2_type=typeof(err2) exception=(err2, catch_backtrace())
-        HTTP.Response(500, ["Content-Type" => "text/plain"];
-                      body="HTMXObjects: error rendering failed ($(typeof(err2)))")
+    uid, path = _record_error(err, bt, req)
+    err_val = _invoke_error_handler(error_obj, err, uid, path)
+    err_val isa HTTP.Response && return err_val
+    if wants_markdown(req)
+        return _with_error_status(req, markdown_response(to_markdown_string(err_val)))
     end
+    is_htmx(req) && return to_response(err_val)   # always 200 for HTMX
+    for obj in reverse(page_chain)
+        wrapper = _page_wrapper(obj)
+        isnothing(wrapper) || (err_val = wrapper[err_val])
+    end
+    _with_error_status(req, to_response(err_val))
 end
 
 """
