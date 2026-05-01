@@ -1276,10 +1276,21 @@ function _record_error(err, bt, req)
         # PropertyComputationError's 2-arg showerror already prints the cause's
         # filtered backtrace; passing `bt` would make Julia's default 3-arg
         # fallback append the outer Oxygen/HTTP trace a second time.
-        if err isa PropertyComputationError
-            showerror(io, err)
-        else
-            showerror(io, err, bt)
+        # Inner-only guard: if `showerror` itself throws (e.g. a user
+        # exception with a broken `Base.show` overload), we still want the
+        # file to close with the header + a marker noting what failed, and
+        # the outer @error / response path to fire normally. No extra log
+        # line on the server side — the file path itself stays the canonical
+        # record.
+        try
+            if err isa PropertyComputationError
+                showerror(io, err)
+            else
+                showerror(io, err, bt)
+            end
+        catch e_show
+            println(io, "<showerror threw ", typeof(e_show), ">: ",
+                    sprint(io2 -> showerror(io2, e_show); context=:limit=>true))
         end
         println(io)
         _append_revise_errors(io)
