@@ -111,23 +111,28 @@ h.form(; hx_post="/foo", hx_target="#list", hx_swap="innerHTML")(
 query_url("/results"; q="hello", limit=10)
 # "/results?q=hello&limit=10"
 
-@query_url(/results; q, limit)         # captures locals; macro form
+# Inside an @htmx/@dynamicstruct body, the macro resolves a property name
+# directly to its route URL — same conventions as the `@get` markers:
+@query_url results(; q="hello", limit=10)    # → query_url("/results"; q="hello", limit=10)
+@query_url item(42)                          # → query_url("/item/42")
+@query_url index                             # → query_url("/")
 ```
 
 ## Tables
 
-### `render_table(rows; …)` — sortable HTML table with optional CSV download
+### `render_table(table; …)` — sortable HTML table with optional CSV download
 
 ```julia
 render_table([
     (id=1, name="Alice", score=92),
     (id=2, name="Bob",   score=88),
 ];
-    columns = [:id, :name, :score],
-    download = "scores.csv",
-    sortable = true,
+    download_filename = "scores.csv",   # filename for CSV download (download itself is true by default)
+    sortable = true,                     # enables sortable column headers
 )
 ```
+
+Columns are auto-detected from the table (any `Tables.jl`-compatible source). Other useful kwargs: `id`, `caption`, `cell` (per-cell render override), `class` (default `"striped"`).
 
 Drop `sortable_table_js()` and `download_table_js()` once per page (typically inside `__page__`) to enable the client-side sorting and CSV download.
 
@@ -157,11 +162,17 @@ A vertical navigation panel — pass a vector of `("Label", "/url")` pairs (or `
 
 ### `status_badge` — colour-coded status pill
 
+Defaults to a small palette suited to in-flight task state:
+
 ```julia
-status_badge(:ok)            # green
-status_badge(:warning)       # amber
-status_badge(:failed)        # red
-status_badge("custom"; class="bg-blue-500 text-white")
+status_badge(:running)        # orange "Running"
+status_badge(:finishing)      # orange "Finishing"
+status_badge(:done)           # green  "Done"
+status_badge(:failed)         # red    "Failed"
+status_badge(:pending)        # gray   "Pending"
+
+status_badge(:failed; label="Error!")                            # custom label
+status_badge(:custom; colors=Dict(:custom => "blue"))            # custom palette
 ```
 
 ### `lazy(url, content…; tag=h.div, swap="outerHTML", …)` — lazy-load on view
@@ -178,21 +189,22 @@ Drop once per page to enable a centred loading indicator and click-feedback styl
 
 ## Links and links-as-actions
 
-### `hx_link(url, label; …)` — `<a>` that uses `hx-get` (HTMX boost-style)
+### `hx_link(url; …)` — `<a>` that uses `hx-get` (HTMX boost-style)
+
+`hx_link(url; kwargs...)` returns a Node — append the link text via call syntax. `hx-target`, `hx-swap`, etc. pass through as kwargs.
 
 ```julia
-hx_link("/settings", "Settings"; hx_target="#main", hx_push_url="true")
+hx_link("/settings"; hx_target="#main", hx_push_url="true")("Settings")
 ```
 
-### `htmx_or(htmx_value, full_value)`
+### `htmx_or(full_page_fn, req, fragment)`
 
-Use inside a route body when you want different content for an HTMX partial vs. a full page load:
+Inside a route body, return `fragment` for HTMX requests and call `full_page_fn()` for direct browser navigation. Typically used with do-block syntax:
 
 ```julia
-@get index = htmx_or(
-    h.div(id="main")(content),                  # HTMX partial
-    __page__(h.div(id="main")(content)),        # full page
-)
+@get index(__req__) = htmx_or(__req__, content_fragment) do
+    htmx(h.main(class="container")(h.h1("Hello"), content_fragment))
+end
 ```
 
 ## Formatting
