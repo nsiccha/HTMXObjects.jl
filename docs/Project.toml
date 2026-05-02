@@ -10,6 +10,8 @@ path = ".."
 
 [sources.DynamicObjects]
 url = "https://github.com/nsiccha/DynamicObjects.jl.git"
+rev = "dev"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl.git"
+rev = "dev"
