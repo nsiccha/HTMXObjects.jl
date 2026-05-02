@@ -5,6 +5,14 @@ Property-based web apps for Julia. Built on
 [Oxygen.jl](https://github.com/OxygenFramework/Oxygen.jl), and
 [HTMX.jl](https://github.com/nsiccha/HTMX.jl).
 
+| Page | What it covers |
+|------|----------------|
+| **This page** | The core idea (`@dynamicstruct` data + `@htmx` requests), routing, derived properties, response pipeline, error handling, async/polling, anti-patterns |
+| [Examples](examples.md) | Hello, Counter, Blog, Search, Tabs — each with source links |
+| [Components](components.md) | Catalog of every form input, table renderer, layout widget, and helper — with minimal usage snippets |
+| [Testing](testing.md) | Mounting `TestRoutes`, the `test_*` runner functions, the web-integrated test workflow |
+| [API](api.md) | Full export list grouped by use case |
+
 ## One idea
 
 Every HTMXObjects app is split along a single axis:
