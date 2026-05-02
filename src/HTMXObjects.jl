@@ -683,7 +683,12 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
         Base.:/(self::$type_name, p::AbstractString) =
             self.__prefix__ * "/" * lstrip(p, '/')
     ))
-    reroute && push!(block.args[1].args, :($(_reroute!)($type_name)))
+    # Wrap _reroute!(T) in Base.invokelatest so it always dispatches at the
+    # latest world. Without this, on Revise re-eval the call site captures the
+    # world age before the freshly-emitted `meta(::Type{T})` /
+    # `_nested_struct_type(::Type{T}, …)` methods are visible, producing
+    # `MethodError: meta(::Type{T}) (method too new …)` from `_register_routes`.
+    reroute && push!(block.args[1].args, :($Base.invokelatest($(_reroute!), $type_name)))
     block
 end
 
