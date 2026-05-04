@@ -226,6 +226,86 @@ end
 
 _warn_legacy_page_name!(struct_expr) = _warn_legacy_name!(struct_expr, :page, :__page__)
 
+# Attribute names that should be `__prefix__`-aware (and therefore should
+# not be hardcoded root-absolute strings). `hx-*` attributes get
+# underscore-to-hyphen translation by Cobweb; we match the underscore form
+# as written in source.
+const _URL_BEARING_ATTRS = (
+    :href, :src, :action, :formaction,
+    :hx_get, :hx_post, :hx_put, :hx_patch, :hx_delete,
+    :hx_post_url, :hx_target,
+)
+
+# Cheaply detect if an expression is a hardcoded root-absolute URL string —
+# i.e. `"/foo"` or `"/foo/$id"`-style interpolation that begins with `/`.
+# External (`http://…`, `//…`, `mailto:`), protocol-relative, or anchor URLs
+# (`#…`) are fine; only literal absolute paths are flagged.
+function _is_hardcoded_root_url(expr)
+    if expr isa AbstractString
+        return startswith(expr, "/") && !startswith(expr, "//")
+    elseif Meta.isexpr(expr, :string) && !isempty(expr.args)
+        first_arg = expr.args[1]
+        return first_arg isa AbstractString && startswith(first_arg, "/") && !startswith(first_arg, "//")
+    end
+    return false
+end
+
+"""
+    _warn_hardcoded_url_in_attrs!(struct_expr)
+
+Walk the struct body looking for `href="/foo"` / `hx_get="/foo"` /
+`src="/foo"` etc. — root-absolute URL string literals on URL-bearing
+attributes. Such URLs bypass `__prefix__` (so they break under any
+non-root mount, base-path deploy, or `record!` target) and bypass
+`__route__` (so updating a route's path requires hunting all literal
+references). Suggest `__self__/"…"` (cross-route) or `__route__`
+(self-link) instead.
+
+Warning, not error: the hardcoded form still works for root-mounted
+local dev. Apps adopt the prefix-aware form gradually.
+"""
+function _warn_hardcoded_url_in_attrs!(struct_expr)
+    body = struct_expr.args[3]
+    type_name = _struct_type_name(struct_expr)
+    seen = Set{Tuple{Symbol,Any}}()  # dedupe identical (attr, value) pairs across passes
+
+    function walk(node, lnn)
+        if node isa Expr
+            for arg in node.args
+                if arg isa LineNumberNode
+                    lnn = arg
+                elseif arg isa Expr
+                    if Meta.isexpr(arg, :kw) && length(arg.args) == 2 &&
+                       arg.args[1] in _URL_BEARING_ATTRS &&
+                       _is_hardcoded_root_url(arg.args[2])
+                        attr = arg.args[1]
+                        val = arg.args[2]
+                        key = (attr, val)
+                        if !(key in seen)
+                            push!(seen, key)
+                            shown = val isa AbstractString ? repr(val) :
+                                    Meta.isexpr(val, :string) ? "string interp starting with `$(val.args[1])…`" :
+                                    string(val)
+                            loc = isnothing(lnn) ? "" : " (near $(lnn.file):$(lnn.line))"
+                            @warn """
+@htmx struct $type_name: hardcoded root-absolute URL `$shown` on `$attr`$loc — bypasses `__prefix__` (breaks under non-root mounts and static deploys). Prefer:
+  `$attr=__self__/"<rest>"`           — cross-route URL, `__prefix__`-aware
+  `$attr=__route__`                   — same URL as this handler call
+  `$attr=string(__self__/"<rest>")`   — if the surrounding ctx wants a String
+"""
+                        end
+                    end
+                    walk(arg, lnn)
+                end
+            end
+        end
+        lnn
+    end
+
+    walk(body, nothing)
+    struct_expr
+end
+
 """
     _warn_redundant_req_decl!(struct_expr)
 
@@ -607,6 +687,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
     _wrap_ws_bodies!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
     reroute && _warn_redundant_req_decl!(struct_expr)
+    reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
     own_params = _convert_params!(struct_expr)
     # Merge: parent params first (preserve order), then own, deduplicated.
