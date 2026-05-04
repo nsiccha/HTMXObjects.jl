@@ -73,3 +73,26 @@ panel content and the active-tab indicator in a single response, keeping the nav
 in sync without a full reload.
 
 [View source](https://github.com/nsiccha/HTMXObjects.jl/blob/main/examples/tabs.jl)
+
+## Live HTMX inclusion (dev-mode demo)
+
+A live HTMXO fragment fetched from a running app:
+
+<div class="htmxo-embed" hx-get="/live-htmxo/" hx-trigger="load" hx-swap="innerHTML">
+  <em>Loading live HTMXO content from /live-htmxo/ …</em>
+</div>
+
+In `vitepress dev`, the placeholder above is forwarded by Vite's proxy to a
+local HTMXO server (configured in `.vitepress/config.mts` under
+`vite.server.proxy['/live-htmxo']`). HTMX's request carries
+`HX-Request: true`, so HTMXO returns a body fragment (no `<html>`/`<head>`)
+that drops directly into the page. The fragment's components pick up
+VitePress's brand colors automatically via the `--htmxo-*` bridge in the
+docs head.
+
+In production (`vitepress build`), point the same `/live-htmxo/*` URL at
+recordings produced by `docs/record_examples.jl` — same markdown source,
+no docs-side branching.
+
+Set `HTMXO_DEV_TARGET=http://localhost:PORT` to point the proxy at a
+different HTMXO app while you're working.
