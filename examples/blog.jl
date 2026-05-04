@@ -53,37 +53,32 @@ using HTMXObjects
         pico_version="2",
     )
 
-    @get index = __page__(h.p("Select a post from the list."))
+    # Body fragment — `__page__` wraps it for non-HTMX requests; bare for
+    # HTMX (and for fragment recordings).
+    @get index = h.p("Select a post from the list.")
 
     # Fragment: renders the post body into #content via hx-target.
-    # The sidebar remains untouched — only #content is swapped.
+    # The sidebar remains untouched — only #content is swapped on HTMX.
     @get post(id) = let p = posts[findfirst(p -> p.id == id, posts)]
-        fragment = h.article(
-            h.header(h.h2(p.title)),
-            h.p(p.body),
-        )
-        if is_htmx(__req__)
-            fragment
-        else
-            __page__(fragment)
-        end
+        h.article(h.header(h.h2(p.title)), h.p(p.body))
     end
 
     # Add a new post via form submission. Returns updated sidebar.
-    @post add(; title="", body="") = begin
-        id = string(length(posts) + 1)
-        posts = vcat(posts, [(; id, title, body)])
-        @persist posts
-        post_list
-    end
+    # NOTE: writing back to a `@cached` property currently trips a
+    # shadow-check in DynamicObjects ("writes to the property cache");
+    # disabled until that pattern is settled. The form is greyed-out in
+    # static recordings anyway via `_disable_for_static`, so omitting the
+    # body just means non-recording dev runs ignore submitted posts.
+    @post add(; title="", body="") = post_list
 end
 
-record     = length(ARGS) >= 1 && ARGS[1] == "record"
-record_dir = record && length(ARGS) >= 2 ? ARGS[2] : "site"
-port       = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+record      = length(ARGS) >= 1 && ARGS[1] == "record"
+record_dir  = record && length(ARGS) >= 2 ? ARGS[2] : "site"
+port        = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+record_base = record && length(ARGS) >= 4 ? ARGS[4] : ""
 
 function __init__()
-    route!(BlogApp(); record_dir=record ? record_dir : nothing)
+    record ? route!(BlogApp(); record_dir, record_base) : route!(BlogApp())
 end
 
 __init__()

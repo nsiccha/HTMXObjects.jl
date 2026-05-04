@@ -33,20 +33,18 @@ using HTMXObjects
         h.p(t.body),
     )
 
-    @get index = htmx(;
+    __page__(content) = htmx(;
         pico_version="2",
         extra_head=(h.style("nav a[aria-current] { font-weight: bold; }"),),
-    )(
-        h.main(class="container")(
-            tab_nav("home"),
-            tab_panel(tabs[1]),
-        )
-    )
+    )(h.main(class="container")(content))
+
+    # Body fragment — `__page__` wraps for non-HTMX, bare for HTMX.
+    @get index = h.div(tab_nav("home"), tab_panel(tabs[1]))
 
     # Returns the updated panel as the primary swap target (#panel),
     # plus the updated nav as an OOB swap (replaces #tab-nav in-place)
     # so the active-tab highlight stays accurate without a full reload.
-    @get tab[id] = let t = tabs[findfirst(t -> t.id == id, tabs)]
+    @get tab(id) = let t = tabs[findfirst(t -> t.id == id, tabs)]
         hx_response(
             [tab_panel(t), tab_nav(id) => "tab-nav"];
             push_url="/tab/$id",
@@ -54,12 +52,13 @@ using HTMXObjects
     end
 end
 
-record     = length(ARGS) >= 1 && ARGS[1] == "record"
-record_dir = record && length(ARGS) >= 2 ? ARGS[2] : "site"
-port       = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+record      = length(ARGS) >= 1 && ARGS[1] == "record"
+record_dir  = record && length(ARGS) >= 2 ? ARGS[2] : "site"
+port        = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+record_base = record && length(ARGS) >= 4 ? ARGS[4] : ""
 
 function __init__()
-    route!(TabsApp(); record_dir=record ? record_dir : nothing)
+    record ? route!(TabsApp(); record_dir, record_base) : route!(TabsApp())
 end
 
 __init__()
