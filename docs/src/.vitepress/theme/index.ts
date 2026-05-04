@@ -37,6 +37,16 @@ export const Theme: ThemeConfig = {
     app.component('VersionPicker', VersionPicker);
     app.component('AuthorBadge', AuthorBadge)
     app.component('Authors', Authors)
+    // VitePress is an SPA: `<div hx-trigger="load">` placeholders only fire
+    // on the initial mount. After client-side navigation between docs pages,
+    // any new HTMX placeholders need a manual `htmx.process(document.body)`
+    // to be picked up. Hook the after-route-change event for that.
+    if (typeof window !== 'undefined' && router) {
+      router.onAfterRouteChanged = () => {
+        // @ts-ignore - htmx is loaded via a `<script>` tag in head, no types.
+        if (window.htmx) window.htmx.process(document.body);
+      };
+    }
   }
 }
 export default Theme

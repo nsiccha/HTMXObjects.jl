@@ -74,25 +74,47 @@ in sync without a full reload.
 
 [View source](https://github.com/nsiccha/HTMXObjects.jl/blob/main/examples/tabs.jl)
 
-## Live HTMX inclusion (dev-mode demo)
+## Embedded examples
 
-A live HTMXO fragment fetched from a running app:
+Each app below is rendered into the docs via an HTMX placeholder
+(`<div hx-get=".../hx/" hx-trigger="load">`) that fetches a body
+fragment on page load and inlines it. Buttons inside each example point
+at neighbouring fragment recordings, so partial-update interactions work
+directly inside this page — no iframe, no separate scrollbars.
 
-<div class="htmxo-embed" hx-get="/live-htmxo/" hx-trigger="load" hx-swap="innerHTML">
-  <em>Loading live HTMXO content from /live-htmxo/ …</em>
+In `vitepress dev`, the same path can also be served live by Vite's
+proxy: set `HTMXO_DEV_TARGET=http://localhost:PORT` and Vite forwards
+`/live-htmxo/*` to a running HTMXO server, so editing a route reflects
+in the docs page immediately. In production (`vitepress build`), the
+recordings produced by `docs/record_examples.jl` take over — same
+markdown source, no docs-side branching.
+
+### Counter (live)
+
+<div class="htmxo-embed" hx-get="/HTMXObjects.jl/dev/examples/counter/hx/" hx-trigger="load" hx-swap="innerHTML">
+  <em>Loading counter…</em>
 </div>
 
-In `vitepress dev`, the placeholder above is forwarded by Vite's proxy to a
-local HTMXO server (configured in `.vitepress/config.mts` under
-`vite.server.proxy['/live-htmxo']`). HTMX's request carries
-`HX-Request: true`, so HTMXO returns a body fragment (no `<html>`/`<head>`)
-that drops directly into the page. The fragment's components pick up
-VitePress's brand colors automatically via the `--htmxo-*` bridge in the
-docs head.
+### Hello World
 
-In production (`vitepress build`), point the same `/live-htmxo/*` URL at
-recordings produced by `docs/record_examples.jl` — same markdown source,
-no docs-side branching.
+<div class="htmxo-embed" hx-get="/HTMXObjects.jl/dev/examples/hello/hx/" hx-trigger="load" hx-swap="innerHTML">
+  <em>Loading hello…</em>
+</div>
 
-Set `HTMXO_DEV_TARGET=http://localhost:PORT` to point the proxy at a
-different HTMXO app while you're working.
+### Tabs
+
+<div class="htmxo-embed" hx-get="/HTMXObjects.jl/dev/examples/tabs/hx/" hx-trigger="load" hx-swap="innerHTML">
+  <em>Loading tabs…</em>
+</div>
+
+### Search
+
+<div class="htmxo-embed" hx-get="/HTMXObjects.jl/dev/examples/search/hx/" hx-trigger="load" hx-swap="innerHTML">
+  <em>Loading search…</em>
+</div>
+
+### Blog
+
+<div class="htmxo-embed" hx-get="/HTMXObjects.jl/dev/examples/blog/hx/" hx-trigger="load" hx-swap="innerHTML">
+  <em>Loading blog…</em>
+</div>
