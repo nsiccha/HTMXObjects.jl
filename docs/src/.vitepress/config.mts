@@ -86,6 +86,11 @@ export default defineConfig({
       __DEPLOY_ABSPATH__: JSON.stringify('REPLACE_ME_DOCUMENTER_VITEPRESS_DEPLOY_ABSPATH'),
     },
     server: {
+      // Bind to all interfaces so the dev server is reachable from
+      // other devices on the local network. Vite prints the LAN IP at
+      // startup. Override via the `--host` CLI flag if you want
+      // loopback-only.
+      host: true,
       proxy: {
         // Live HTMXO app embedding (dev-mode only). `<div hx-get="/live-htmxo/…">`
         // forwards to a running HTMXO server during `vitepress dev` so the docs
