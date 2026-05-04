@@ -937,7 +937,17 @@ Save a response body to disk, mirroring the URL path structure
 """
 function save_response(record_dir::String, url_path::String, response::HTTP.Response)
     rel = lstrip(url_path, '/')
-    file = isempty(rel) ? "index.html" : rel * ".html"
+    # Trailing slash means "directory entry" — the URL `/foo/` and `/` both
+    # map to a synthetic `index.html` under the matching directory. Without
+    # this, `/hx/` becomes `hx/.html`, which is wrong (server can't serve it
+    # cleanly and `cleanUrls` defeats it).
+    file = if isempty(rel)
+        "index.html"
+    elseif endswith(rel, '/')
+        rel * "index.html"
+    else
+        rel * ".html"
+    end
     dest = joinpath(record_dir, file)
     mkpath(dirname(dest))
     write(dest, response.body)
@@ -967,12 +977,28 @@ Walk a Node tree and disable elements that won't work on a static server:
 
 Non-Node values pass through unchanged.
 """
-_disable_for_static(val) = val
-_disable_for_static(val::AbstractArray) = _disable_for_static.(val)
-_disable_for_static(val::Tuple) = _disable_for_static.(val)
-_disable_for_static((content, id)::Pair) = _disable_for_static(content) => id
+_disable_for_static(val; record_base::String="") = val
+_disable_for_static(val::AbstractArray; record_base::String="") = [_disable_for_static(x; record_base) for x in val]
+_disable_for_static(val::Tuple; record_base::String="") = Tuple(_disable_for_static(x; record_base) for x in val)
+_disable_for_static((content, id)::Pair; record_base::String="") = _disable_for_static(content; record_base) => id
 
-function _disable_for_static(node::Node)
+# Rewrite an absolute-from-root URL (`/foo/bar`) to point at the recorded
+# fragment subtree (`<record_base>/hx/foo/bar`). External URLs (`https://…`),
+# anchors (`#…`), schemes (`mailto:…`), and protocol-relative (`//…`) pass
+# through unchanged. `record_base` empty → no rewriting.
+function _rewrite_hx_url(url::AbstractString, record_base::AbstractString)
+    isempty(record_base) && return url
+    isempty(url) && return url
+    # Skip non-rooted URLs
+    if startswith(url, "//") || startswith(url, "http://") || startswith(url, "https://") ||
+       startswith(url, "#") || occursin(':', url) && !startswith(url, "/")
+        return url
+    end
+    startswith(url, "/") || return url
+    rstrip(record_base, '/') * "/hx" * url
+end
+
+function _disable_for_static(node::Node; record_base::String="")
     cn = parent(node)
     attrs = Cobweb.attrs(cn)
     children = Cobweb.children(cn)
@@ -989,13 +1015,16 @@ function _disable_for_static(node::Node)
         end
     end
 
-    # Remove hx-get with query string or pointing to kwargs route
+    # Remove hx-get with query string or pointing to kwargs route; otherwise
+    # rewrite it to the recorded-fragment subtree under `record_base`.
     hx_get_sym = Symbol("hx-get")
     if haskey(new_attrs, hx_get_sym)
         url = new_attrs[hx_get_sym]
         if occursin('?', url) || url in _static_kwargs_paths
             delete!(new_attrs, hx_get_sym)
             disabled = true
+        else
+            new_attrs[hx_get_sym] = _rewrite_hx_url(url, record_base)
         end
     end
 
@@ -1006,8 +1035,8 @@ function _disable_for_static(node::Node)
 
     # Recurse into children
     new_children = map(children) do child
-        child isa Node ? _disable_for_static(child) :
-        child isa Cobweb.Node ? parent(_disable_for_static(Node(child))) :
+        child isa Node ? _disable_for_static(child; record_base) :
+        child isa Cobweb.Node ? parent(_disable_for_static(Node(child); record_base)) :
         child
     end
 
@@ -1036,13 +1065,22 @@ function _inject_static_style(node::Node)
 end
 
 """
-    static_transform(val)
+    static_transform(val; record_base="")
 
-Transform a value for static recording: disable non-functional elements and inject
-the disabled-element style block.
+Transform a value for static recording: disable non-functional elements,
+rewrite surviving `hx-get` URLs to point at the recorded fragment subtree
+under `record_base`, and inject the disabled-element style block (full
+pages only).
+
+`record_base` is the URL prefix where the recording will be served (e.g.
+`/HTMXObjects.jl/dev/examples/counter`). Each rooted `hx-get="/foo"`
+becomes `hx-get="<record_base>/hx/foo"` so HTMX-driven sub-fetches resolve
+to the recorded fragment under `<record_dir>/hx/foo.html`. Empty
+`record_base` (default) skips rewriting — useful when recording for a
+root-served deployment, though that's rare in practice.
 """
-function static_transform(val)
-    result = _disable_for_static(val)
+function static_transform(val; record_base::String="")
+    result = _disable_for_static(val; record_base)
     _inject_static_style(result)
 end
 
@@ -1148,7 +1186,12 @@ const _http_verbs = Dict(
 # Store registered types so _reroute! can re-register after Revise updates.
 # Stores `(prefix, record_dir)` per root type — these are re-supplied to
 # `_register_routes` when Revise re-evaluates the struct definition.
+# Frozen NamedTuple shape: Julia 1.10 cannot redefine a `const` whose
+# stored type changes, so widening this without a restart is impossible.
+# Companion dict `_record_bases` carries the `record_base` URL prefix so
+# new fields can be added without touching this const.
 const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tuple{String, Any}}}()
+const _record_bases = Dict{DataType, String}()
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
 # Convert a string value to the target type. Strings pass through as-is.
@@ -1617,7 +1660,7 @@ Convention-based properties on `obj`:
 
 If the route returns an `HTTP.Response` directly, it passes through unchanged.
 """
-function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
+function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
     # Opt-out: route already produced a response
     val isa HTTP.Response && return val
 
@@ -1627,9 +1670,22 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing)
         isnothing(val) && return markdown_response("(no errors)")
     end
 
-    # Record static version if requested
+    # Record static version if requested. Two file shapes per route, driven
+    # by the request header alone (no `record_layout` knob): `HX-Request:
+    # true` saves the bare fragment under `<record_dir>/hx/<save_path>.html`,
+    # otherwise saves the page-wrapped version under
+    # `<record_dir>/<save_path>.html`. `static_transform` rewrites
+    # surviving `hx-get` URLs into the `hx/` subtree, so a click from the
+    # full-page recording still lands on a fragment recording.
     if !isnothing(record_dir) && !isnothing(save_path)
-        save_response(record_dir, save_path, to_response(static_transform(val)))
+        wrapper = _page_wrapper(obj)
+        if is_htmx(req)
+            save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
+        elseif !isnothing(wrapper)
+            save_response(record_dir, save_path, to_response(static_transform(wrapper[val]; record_base)))
+        else
+            save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
+        end
     end
 
     # Markdown mode
@@ -1686,7 +1742,7 @@ they have a different signature (`ws` instead of `req`) and skip the HTTP
 error pipeline.
 """
 function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, name,
-        path, n_params, extract_args::Bool, record_dir; root_prefix="")
+        path, n_params, extract_args::Bool, record_dir; root_prefix="", record_base::String="")
     base = _base_segments(path)
     is_included = !isempty(chain)
     _register_handler(method, path, function(req)
@@ -1739,9 +1795,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, na
 
             if is_included
                 page_chain = _collect_page_chain(root, chain)
-                return _resolve_response_nested(page_chain, req, val; record_dir, save_path)
+                return _resolve_response_nested(page_chain, req, val; record_dir, save_path, record_base)
             else
-                return _resolve_response(leaf, req, val; record_dir, save_path)
+                return _resolve_response(leaf, req, val; record_dir, save_path, record_base)
             end
         catch err
             bt = catch_backtrace()
@@ -1774,7 +1830,7 @@ function _route_path(prefix::AbstractString, name::Symbol, param_strs::AbstractV
     isempty(segs) ? "/" : "/" * join(segs, "/")
 end
 
-function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[])
+function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=Symbol[])
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
@@ -1784,7 +1840,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
         if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
             nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
             chain = vcat(parent_chain, [name])
-            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix)
+            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
             continue
         end
 
@@ -1843,17 +1899,17 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                 end
             elseif isempty(param_strs) && !has_kwargs && !info.indexed
                 # Plain non-indexed (`@get index = expr`): bare getproperty, no extract_args
-                _register_route_handler(T, T, Symbol[], method, name, path, 0, false, record_dir; root_prefix=mount_prefix)
+                _register_route_handler(T, T, Symbol[], method, name, path, 0, false, record_dir; root_prefix=mount_prefix, record_base)
             elseif isempty(param_strs) && !has_kwargs
                 # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
-                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix)
+                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix, record_base)
             elseif isempty(param_strs) && has_kwargs
                 # kwargs-only route (no path params)
                 !isnothing(record_dir) && push!(_static_kwargs_paths, path)
-                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix)
+                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix, record_base)
             else
                 # Register the full route (all params explicit)
-                _register_route_handler(T, T, Symbol[], method, name, path, n_params, true, record_dir; root_prefix=mount_prefix)
+                _register_route_handler(T, T, Symbol[], method, name, path, n_params, true, record_dir; root_prefix=mount_prefix, record_base)
 
                 # Register shortened routes for trailing defaults
                 # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -1861,7 +1917,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     cut = default_positions[k]  # position of first omitted param
                     short_params = param_strs[1:cut-1]
                     short_path = _route_path(prefix, name, short_params)
-                    _register_route_handler(T, T, Symbol[], method, name, short_path, length(short_params), true, record_dir; root_prefix=mount_prefix)
+                    _register_route_handler(T, T, Symbol[], method, name, short_path, length(short_params), true, record_dir; root_prefix=mount_prefix, record_base)
                 end
             end
         end
@@ -1942,14 +1998,26 @@ function _collect_page_chain(root, chain)
 end
 
 """Like `_resolve_response`, but applies nested page wrappers (innermost first, then outward)."""
-function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save_path=nothing)
+function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
     val isa HTTP.Response && return val
     if wants_errors(req)
         val = filter_errors(val)
         isnothing(val) && return markdown_response("(no errors)")
     end
+    # Same recording policy as `_resolve_response`: HTMX requests save the
+    # bare fragment under `<record_dir>/hx/<save_path>.html`, plain requests
+    # save the page-wrapped version under `<record_dir>/<save_path>.html`.
     if !isnothing(record_dir) && !isnothing(save_path)
-        save_response(record_dir, save_path, to_response(static_transform(val)))
+        if is_htmx(req)
+            save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
+        else
+            wrapped = val
+            for obj in reverse(page_chain)
+                wrapper = _page_wrapper(obj)
+                isnothing(wrapper) || (wrapped = wrapper[wrapped])
+            end
+            save_response(record_dir, save_path, to_response(static_transform(wrapped; record_base)))
+        end
     end
     if wants_markdown(req)
         # Use the innermost (last) struct for markdown, if any
@@ -1973,7 +2041,7 @@ end
 # `root_prefix` is the parent's mount prefix (with leading "/") — passed verbatim
 # to the handler so `ParentT(; __prefix__=root_prefix)` constructs correctly,
 # and the parent's `@include` desugar then threads `/<name>` per nesting level.
-function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir; root_prefix::String="")
+function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir; root_prefix::String="", record_base::String="")
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     for (name, info) in DynamicObjects.meta(NestedT)
@@ -1983,7 +2051,7 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         nested_type = _nested_struct_type(NestedT, Val(name))
         if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
             _register_included_routes(ParentT, nested_type, vcat(chain, [name]),
-                prefix * "/" * string(name), record_dir; root_prefix)
+                prefix * "/" * string(name), record_dir; root_prefix, record_base)
             continue
         end
 
@@ -2026,24 +2094,25 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
 
         let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, prefix=prefix, root_prefix=root_prefix
             # Register the full route
-            _register_route_handler(ParentT, NestedT, chain, method, name, path, n_params, true, record_dir; root_prefix)
+            _register_route_handler(ParentT, NestedT, chain, method, name, path, n_params, true, record_dir; root_prefix, record_base)
 
             # Register shortened routes for trailing defaults
             for k in length(default_positions):-1:1
                 cut = default_positions[k]
                 short_params = param_strs[1:cut-1]
                 short_path = _route_path(prefix, name, short_params)
-                _register_route_handler(ParentT, NestedT, chain, method, name, short_path, length(short_params), true, record_dir; root_prefix)
+                _register_route_handler(ParentT, NestedT, chain, method, name, short_path, length(short_params), true, record_dir; root_prefix, record_base)
             end
         end
     end
 end
 
-function route!(obj; prefix="", record_dir=nothing)
+function route!(obj; prefix="", record_dir=nothing, record_base="")
     T = typeof(obj)
     _registered_types[T] = (; prefix, record_dir)
+    _record_bases[T] = record_base
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
-    _register_routes(T; prefix, record_dir)
+    _register_routes(T; prefix, record_dir, record_base)
     obj
 end
 
@@ -2051,14 +2120,14 @@ end
 function _reroute!(T::DataType)
     if haskey(_registered_types, T)
         args = _registered_types[T]
-        _register_routes(T; args.prefix, args.record_dir)
+        _register_routes(T; args.prefix, args.record_dir, record_base=get(_record_bases, T, ""))
     end
     # If T is an @include'd sub-struct, re-register its parent(s)
     if haskey(_included_type_parents, T)
         for ParentT in _included_type_parents[T]
             haskey(_registered_types, ParentT) || continue
             args = _registered_types[ParentT]
-            _register_routes(ParentT; args.prefix, args.record_dir)
+            _register_routes(ParentT; args.prefix, args.record_dir, record_base=get(_record_bases, ParentT, ""))
         end
     end
 end
