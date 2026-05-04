@@ -265,9 +265,10 @@ end
     _inject_dunder_props!(struct_expr)
 
 Ensure that `@htmx` struct bodies always declare `__parent__`, `__prefix__`,
-`__req__`, and `__appdata__` as properties so route bodies can reference them
-and so the `__parent__` chain threads request context, appdata, and the mount
-prefix down through `@include`d sub-structs.
+`__req__`, `__appdata__`, and `__route__` as properties so route bodies can
+reference them and so the `__parent__` chain threads request context, appdata,
+the mount prefix, and the per-request route URL down through `@include`d
+sub-structs.
 
 Defaults:
 - `__parent__ = nothing` — set by `@include` desugar to point at the enclosing struct.
@@ -279,6 +280,11 @@ Defaults:
   inside the root `@htmx struct` body (`__appdata__ = APP_DATA` with
   `const APP_DATA = AppData()` at module scope) so the singleton is part of the
   struct's definition, not of `route!`'s API.
+- `__route__ = ""` — defaults to empty; `_register_route_handler` sets it to
+  `req.target` (with query string stripped) when constructing the struct for
+  a real request, so route bodies can write `hx_get=__route__` /
+  `href=__route__` instead of recomputing `__self__/"name/$id"`. For
+  non-request constructions (e.g., `route!` at module init) it stays `""`.
 
 The legacy short names `req` / `appdata` are no longer recognised.
 """
@@ -289,6 +295,7 @@ function _inject_dunder_props!(struct_expr)
     has_appdata = false
     has_parent = false
     has_prefix = false
+    has_route = false
     for arg in body.args
         arg isa Expr || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
@@ -313,12 +320,14 @@ function _inject_dunder_props!(struct_expr)
         name === :__appdata__ && (has_appdata = true)
         name === :__parent__  && (has_parent = true)
         name === :__prefix__  && (has_prefix = true)
+        name === :__route__   && (has_route = true)
     end
     prepend = Any[]
     has_parent  || push!(prepend, :(__parent__ = nothing))
     has_prefix  || push!(prepend, :(__prefix__ = ""))
     has_req     || push!(prepend, :(__req__     = isnothing(__parent__) ? nothing : __parent__.__req__))
     has_appdata || push!(prepend, :(__appdata__ = isnothing(__parent__) ? nothing : __parent__.__appdata__))
+    has_route   || push!(prepend, :(__route__   = isnothing(__parent__) ? "" : __parent__.__route__))
     if !isempty(prepend)
         body.args = vcat(prepend, body.args)
     end
@@ -1770,6 +1779,17 @@ _base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempt
 # propagates either way.
 _prefix_kw(mp) = isempty(mp) ? NamedTuple() : (; __prefix__=mp)
 
+# Per-request URL of the route being handled, with query string stripped —
+# used to populate `__route__` on the struct so route bodies can write
+# `hx_get=__route__` / `href=__route__` instead of recomputing
+# `__self__/"name/$id"`. Falls back to `req.target` if URL parsing fails.
+function _request_route_path(req::HTTP.Request)
+    target = req.target
+    isempty(target) && return ""
+    qi = findfirst('?', target)
+    isnothing(qi) ? target : target[1:qi-1]
+end
+
 """
     _register_route_handler(RootT, LeafT, chain, method, name, path, n_params, extract_args, record_dir; root_prefix="")
 
@@ -1799,7 +1819,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, na
     _register_handler(method, path, function(req)
         local root, leaf
         try
-            root = RootT(; __req__=req, _prefix_kw(root_prefix)...)
+            root = RootT(; __req__=req, __route__=_request_route_path(req), _prefix_kw(root_prefix)...)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
