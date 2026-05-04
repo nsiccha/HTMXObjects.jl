@@ -1,18 +1,13 @@
 # Search app demonstrating:
-#   - derived properties for data and reusable UI fragments
-#   - live search using kwargs for query-parameter extraction
-#   - is_htmx to return a fragment for HTMX requests and the full page otherwise
-#
-# Run with:  julia --project examples/search.jl
-# Then open: http://localhost:8080
+#   - cross-route `@param` for query-string extraction
+#   - live search via debounced HTMX input
+#   - canonical __page__ shape so HX requests get just the swap target
+
+module Search
 
 using HTMXObjects
 
-@htmx struct SearchApp
-    # Cross-route param: `q` is auto-extracted from the request's query
-    # string on every request, so all properties — `search_input`,
-    # `results_list`, the page wrapper — see the same value without each
-    # route declaring it as a kwarg.
+@htmx struct App
     @param q::String = ""
 
     fruits = [
@@ -25,8 +20,6 @@ using HTMXObjects
 
     matches = filter(f -> occursin(lowercase(q), lowercase(f)), fruits)
 
-    # The input triggers a live GET /results?q=... on every keystroke (debounced).
-    # HTMX serialises the input's value as a query parameter automatically.
     search_input = h.input(
         id="query",
         name="q",
@@ -45,9 +38,6 @@ using HTMXObjects
                              h.ul([h.li(m) for m in matches])
     )
 
-    # Page wrapper bakes in the search input + h1, so any route's body lands
-    # below as the results region. HTMX requests bypass this and get just
-    # the route's `val` (the results_list fragment).
     __page__(content) = htmx(
         h.main(class="container")(
             h.h1("Fruit Search"),
@@ -58,22 +48,22 @@ using HTMXObjects
     )
 
     @get index = results_list
-
-    # Same fragment as index — `q` is `@param`-extracted from the URL
-    # automatically. HTMX requests get the bare fragment (swap target
-    # `#results` matches by id); browser navigation gets the full page
-    # wrapped by `__page__` with the input pre-populated.
     @get results = results_list
 end
 
-record      = length(ARGS) >= 1 && ARGS[1] == "record"
-record_dir  = record && length(ARGS) >= 2 ? ARGS[2] : "site"
-port        = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
-record_base = record && length(ARGS) >= 4 ? ARGS[4] : ""
+gallery_paths() = ["/", "/results"]
 
-function __init__()
-    record ? route!(SearchApp(); record_dir, record_base) : route!(SearchApp())
+function main(; record=false, record_dir="site", port=8080, record_base="")
+    record ? route!(App(); record_dir, record_base) : route!(App())
+    serve(; port)
 end
 
-__init__()
-serve(; port)
+end # module Search
+
+if abspath(PROGRAM_FILE) == @__FILE__
+    record      = length(ARGS) >= 1 && ARGS[1] == "record"
+    record_dir  = record && length(ARGS) >= 2 ? ARGS[2] : "site"
+    port        = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+    record_base = record && length(ARGS) >= 4 ? ARGS[4] : ""
+    Search.main(; record, record_dir, port, record_base)
+end

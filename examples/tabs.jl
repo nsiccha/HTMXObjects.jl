@@ -1,24 +1,20 @@
 # Tabs app demonstrating:
-#   - derived properties for data and reusable UI fragments
-#   - tab navigation via @get tab[id]
+#   - tab navigation via @get tab(id)
 #   - OOB swap: updating both the panel content and the active-tab indicator
 #     in a single response (no full-page reload, nav stays in sync)
-#   - hx_response with push_url to keep the browser URL in sync with the active tab
-#
-# Run with:  julia --project examples/tabs.jl
-# Then open: http://localhost:8080
+#   - hx_response with push_url to keep the browser URL in sync
+
+module Tabs
 
 using HTMXObjects
 
-@htmx struct TabsApp
+@htmx struct App
     tabs = [
         (id="home",    label="Home",    body="Welcome! This is the home tab."),
         (id="about",   label="About",   body="HTMXObjects.jl makes server-side Julia web apps easy."),
         (id="contact", label="Contact", body="Reach us at hello@example.com."),
     ]
 
-    # Nav bar wrapped in an `id` so it can be targeted by the OOB swap.
-    # The active tab gets the `aria-current` attribute for styling.
     tab_nav(active_id) = h.nav(id="tab-nav")(
         h.ul([
             let extra = t.id == active_id ? (aria_current="page",) : (;)
@@ -38,12 +34,8 @@ using HTMXObjects
         extra_head=(h.style("nav a[aria-current] { font-weight: bold; }"),),
     )(h.main(class="container")(content))
 
-    # Body fragment — `__page__` wraps for non-HTMX, bare for HTMX.
     @get index = h.div(tab_nav("home"), tab_panel(tabs[1]))
 
-    # Returns the updated panel as the primary swap target (#panel),
-    # plus the updated nav as an OOB swap (replaces #tab-nav in-place)
-    # so the active-tab highlight stays accurate without a full reload.
     @get tab(id) = let t = tabs[findfirst(t -> t.id == id, tabs)]
         hx_response(
             [tab_panel(t), tab_nav(id) => "tab-nav"];
@@ -52,14 +44,19 @@ using HTMXObjects
     end
 end
 
-record      = length(ARGS) >= 1 && ARGS[1] == "record"
-record_dir  = record && length(ARGS) >= 2 ? ARGS[2] : "site"
-port        = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
-record_base = record && length(ARGS) >= 4 ? ARGS[4] : ""
+gallery_paths() = ["/", "/tab/home", "/tab/about", "/tab/contact"]
 
-function __init__()
-    record ? route!(TabsApp(); record_dir, record_base) : route!(TabsApp())
+function main(; record=false, record_dir="site", port=8080, record_base="")
+    record ? route!(App(); record_dir, record_base) : route!(App())
+    serve(; port)
 end
 
-__init__()
-serve(; port)
+end # module Tabs
+
+if abspath(PROGRAM_FILE) == @__FILE__
+    record      = length(ARGS) >= 1 && ARGS[1] == "record"
+    record_dir  = record && length(ARGS) >= 2 ? ARGS[2] : "site"
+    port        = record && length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8080
+    record_base = record && length(ARGS) >= 4 ? ARGS[4] : ""
+    Tabs.main(; record, record_dir, port, record_base)
+end

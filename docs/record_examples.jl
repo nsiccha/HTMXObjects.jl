@@ -1,81 +1,31 @@
-# Record each example app's HTML output into docs/public/examples/<name>/
-# so VitePress can serve them as static pages. Each route is hit twice
-# per app: once plain (records under <name>/<route>.html as the full
-# page) and once with `HX-Request: true` (records under
-# <name>/hx/<route>.html as a body fragment). All `hx-get` URLs in
-# either shape are rewritten by `static_transform` to point into the
-# `hx/` subtree under `record_base`, so the recordings work both as a
-# standalone-host entry (full page) and as VitePress-embed targets
-# (fragments).
+# Record each example app's output into docs/public/examples/<name>/.
+# Uses HTMXObjects.record! to drive each route in-process — no subprocess,
+# no port, no warmup. For each app and each route, writes:
+#   <name>/<route>.html         full page (plain GET)
+#   <name>/hx/<route>.html      body fragment (HX-Request: true)
+#   <name>/md/<route>.md        markdown view (Accept: text/markdown)
 #
-# Run with: julia --project docs/record_examples.jl
-# Override the URL prefix the recordings will be served under via
-# `RECORD_BASE_PREFIX`, defaults to `/HTMXObjects.jl/dev/examples`.
+# Run with: julia --project=docs docs/record_examples.jl
+# Override the URL prefix via `RECORD_BASE_PREFIX`,
+# default `/HTMXObjects.jl/dev/examples`.
 
 using HTMXObjects
 
 EXAMPLES_DIR = joinpath(dirname(@__DIR__), "examples")
 OUTPUT_DIR   = joinpath(@__DIR__, "public", "examples")
+BASE_PREFIX  = get(ENV, "RECORD_BASE_PREFIX", "/HTMXObjects.jl/dev/examples")
 
-# Clean previous recordings
 isdir(OUTPUT_DIR) && rm(OUTPUT_DIR; recursive=true)
 
-# Each example: (name, routes_to_visit). The index ("/") is always hit;
-# `routes` lists additional sub-routes that should be recorded.
-EXAMPLES = [
-    ("hello",   String[]),
-    ("counter", ["/increment/0", "/increment/1", "/increment/2"]),
-    ("blog",    ["/post/1", "/post/2", "/post/3"]),
-    ("search",  String[]),
-    ("tabs",    ["/tab/home", "/tab/about", "/tab/contact"]),
-]
-
-PORT = 18765
-BASE_PREFIX = get(ENV, "RECORD_BASE_PREFIX", "/HTMXObjects.jl/dev/examples")
-
-for (name, routes) in EXAMPLES
-    println("Recording $name...")
+# Each example file is a module exposing `App` (the @htmx struct) and
+# `gallery_paths()` (the URL list to record).
+for name in ("hello", "counter", "blog", "search", "tabs")
+    println("Recording $name…")
+    include(joinpath(EXAMPLES_DIR, "$name.jl"))
+    mod = getproperty(@__MODULE__, Symbol(uppercasefirst(name)))
     record_dir  = joinpath(OUTPUT_DIR, name)
     record_base = BASE_PREFIX * "/" * name
-    file        = joinpath(EXAMPLES_DIR, "$name.jl")
-
-    # Launch example as a subprocess with record_dir + record_base via ARGS
-    proc = open(`julia --project $(dirname(EXAMPLES_DIR)) -e """
-        push!(ARGS, "record", "$record_dir", "$PORT", "$record_base")
-        include("$file")
-    """`, "r")
-
-    # Poll until the server is ready (Julia needs ~20s cold start to load
-    # HTMXObjects + parse the example). Bail after 60s.
-    deadline = time() + 60
-    while time() < deadline
-        try
-            HTTP.get("http://127.0.0.1:$PORT"; retry=false, readtimeout=1)
-            break
-        catch
-            sleep(0.5)
-        end
-    end
-
-    # Hit each route twice: plain (full page recording) and with
-    # `HX-Request: true` (fragment recording).
-    base = "http://127.0.0.1:$PORT"
-    hx_headers = ["HX-Request" => "true"]
-    try
-        HTTP.get(base; retry=false, readtimeout=5)
-        HTTP.get(base; retry=false, readtimeout=5, headers=hx_headers)
-        for route in routes
-            HTTP.get(base * route; retry=false, readtimeout=5)
-            HTTP.get(base * route; retry=false, readtimeout=5, headers=hx_headers)
-        end
-    catch e
-        @warn "Error recording $name" exception=e
-    end
-
-    # Kill the subprocess
-    kill(proc)
-    wait(proc)
-
+    record!(mod.App(); record_dir, record_base, paths=mod.gallery_paths())
     println("  → $record_dir  (base=$record_base)")
 end
 

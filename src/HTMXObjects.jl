@@ -5,7 +5,7 @@ export create_app
 export HTTP, queryparams, formdata
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
-export route!, to_response, save_response, static_transform
+export route!, record!, to_response, save_response, static_transform
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -930,23 +930,25 @@ Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text
 
 
 """
-    save_response(record_dir, url_path, response)
+    save_response(record_dir, url_path, response; ext=".html")
 
 Save a response body to disk, mirroring the URL path structure
-(`/post/42` → `record_dir/post/42.html`). Enables later replay via a static file server.
+(`/post/42` → `record_dir/post/42<ext>`). Enables later replay via a
+static file server. Pass `ext=".md"` for markdown recordings (under the
+`/md/` subtree).
 """
-function save_response(record_dir::String, url_path::String, response::HTTP.Response)
+function save_response(record_dir::String, url_path::String, response::HTTP.Response; ext::String=".html")
     rel = lstrip(url_path, '/')
     # Trailing slash means "directory entry" — the URL `/foo/` and `/` both
-    # map to a synthetic `index.html` under the matching directory. Without
-    # this, `/hx/` becomes `hx/.html`, which is wrong (server can't serve it
+    # map to a synthetic `index<ext>` under the matching directory. Without
+    # this, `/hx/` becomes `hx/<ext>`, which is wrong (server can't serve it
     # cleanly and `cleanUrls` defeats it).
     file = if isempty(rel)
-        "index.html"
+        "index" * ext
     elseif endswith(rel, '/')
-        rel * "index.html"
+        rel * "index" * ext
     else
-        rel * ".html"
+        rel * ext
     end
     dest = joinpath(record_dir, file)
     mkpath(dirname(dest))
@@ -1670,16 +1672,25 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         isnothing(val) && return markdown_response("(no errors)")
     end
 
-    # Record static version if requested. Two file shapes per route, driven
-    # by the request header alone (no `record_layout` knob): `HX-Request:
-    # true` saves the bare fragment under `<record_dir>/hx/<save_path>.html`,
-    # otherwise saves the page-wrapped version under
-    # `<record_dir>/<save_path>.html`. `static_transform` rewrites
-    # surviving `hx-get` URLs into the `hx/` subtree, so a click from the
-    # full-page recording still lands on a fragment recording.
+    # Record static version if requested. Three file shapes per route,
+    # driven by the request header alone (no `record_layout` knob):
+    #  * `Accept: text/markdown` (or `?plain` / `?markdown`) — saves the
+    #    `to_markdown_string(val)` output under `<record_dir>/md/<save_path>.md`.
+    #  * `HX-Request: true` — saves the bare fragment under
+    #    `<record_dir>/hx/<save_path>.html`.
+    #  * otherwise — saves the page-wrapped version under
+    #    `<record_dir>/<save_path>.html`.
+    # `static_transform` rewrites surviving `hx-get` URLs into the `hx/`
+    # subtree, so a click from the full-page recording still lands on a
+    # fragment recording.
     if !isnothing(record_dir) && !isnothing(save_path)
         wrapper = _page_wrapper(obj)
-        if is_htmx(req)
+        if wants_markdown(req)
+            md = try to_markdown_string(val) catch; nothing end
+            isnothing(md) || save_response(record_dir, "/md" * save_path,
+                HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
+                ext=".md")
+        elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
             save_response(record_dir, save_path, to_response(static_transform(wrapper[val]; record_base)))
@@ -2004,11 +2015,15 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
         val = filter_errors(val)
         isnothing(val) && return markdown_response("(no errors)")
     end
-    # Same recording policy as `_resolve_response`: HTMX requests save the
-    # bare fragment under `<record_dir>/hx/<save_path>.html`, plain requests
-    # save the page-wrapped version under `<record_dir>/<save_path>.html`.
+    # Same recording policy as `_resolve_response`: markdown / HX-fragment /
+    # full-page-wrapped, picked by the request header alone.
     if !isnothing(record_dir) && !isnothing(save_path)
-        if is_htmx(req)
+        if wants_markdown(req)
+            md = try to_markdown_string(val) catch; nothing end
+            isnothing(md) || save_response(record_dir, "/md" * save_path,
+                HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
+                ext=".md")
+        elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         else
             wrapped = val
@@ -2114,6 +2129,71 @@ function route!(obj; prefix="", record_dir=nothing, record_base="")
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
     _register_routes(T; prefix, record_dir, record_base)
     obj
+end
+
+"""
+    record!(app; record_dir, record_base="", paths=["/"], full=true, hx=true, markdown=true)
+
+Drive each path through the in-process route handler with one or more
+header sets, writing recordings under `record_dir`. No subprocess, no
+HTTP listener — looks each path up via `HTTP.Handlers.gethandler` on
+`CONTEXT[].service.router` and invokes the handler with a manufactured
+`HTTP.Request`. The handler's existing save logic in `_resolve_response`
+writes the appropriate file shape.
+
+Each path is hit once per enabled variant:
+
+  * `full=true`     — plain GET. Saves the page-wrapped HTML at `<record_dir>/<path>.html`.
+  * `hx=true`       — `HX-Request: true`. Saves the body fragment at `<record_dir>/hx/<path>.html`.
+  * `markdown=true` — `Accept: text/markdown`. Saves the markdown view at `<record_dir>/md/<path>.md` (only if the route's `to_markdown_string(val)` succeeds; otherwise skipped).
+
+Calls `route!(app; record_dir, record_base)` first to register the
+handlers with the recording config. Returns `app`.
+
+Use this in place of the subprocess+HTTP recorder when you can drive an
+app from the same Julia process — much faster (no port, no warmup) and
+deterministic in CI.
+"""
+function record!(app;
+        record_dir::String,
+        record_base::String="",
+        paths::AbstractVector{<:AbstractString}=String["/"],
+        full::Bool=true,
+        hx::Bool=true,
+        markdown::Bool=true,
+    )
+    route!(app; record_dir, record_base)
+    isdir(record_dir) || mkpath(record_dir)
+    router = CONTEXT[].service.router
+    for path in paths
+        full     && _drive_record_path(router, String(path), Pair{String,String}[])
+        hx       && _drive_record_path(router, String(path), ["HX-Request" => "true"])
+        markdown && _drive_record_path(router, String(path), ["Accept" => "text/markdown"])
+    end
+    app
+end
+
+# In-process equivalent of an HTTP request: locate the registered handler
+# in the router's trie, invoke it with a synthesized Request. The
+# handler's normal save_response side effects still run.
+function _drive_record_path(router, path::AbstractString, headers)
+    req = HTTP.Request("GET", path, headers, UInt8[])
+    found = try
+        HTTP.Handlers.gethandler(router, req)
+    catch e
+        @warn "record!: gethandler failed" path exception=(e, catch_backtrace())
+        return
+    end
+    handler = first(found)
+    if handler === HTTP.Handlers.default404 || handler === nothing
+        @warn "record!: no route registered" path
+        return
+    end
+    try
+        handler(req)
+    catch e
+        @warn "record!: handler threw" path headers exception=(e, catch_backtrace())
+    end
 end
 
 # Called by @htmx macro expansion — re-registers routes when Revise updates the struct
