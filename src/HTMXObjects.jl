@@ -15,6 +15,7 @@ export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles, GitRepo, EditorRoutes
 export htmxo_theme, pico_bridge, vitepress_bridge
+export GalleryItem, Gallery, gallery_grid, default_gallery_card, find_item, section_items, parse_gallery_metadata
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -3742,6 +3743,244 @@ serialised via a per-instance `ReentrantLock`.
   `read_version(sha)`, `write!(content; version, message)`, and
   `update!(f; message)` (function-first, delegates to `locked_update!`).
 """
+# --- File-based galleries ---
+
+"""
+    parse_gallery_metadata(raw::AbstractString) -> Dict{String,String}
+
+Parse `# key: value` header lines from a Julia source file. Stops at
+the first non-comment line. Comment lines without a `:` are ignored.
+Keys are lowercased. Standard keys: `title`, `description`, `id`,
+`section`. Apps may read additional keys directly from `item.metadata`.
+"""
+function parse_gallery_metadata(raw::AbstractString)
+    md = Dict{String,String}()
+    for line in split(raw, '\n')
+        s = lstrip(line)
+        if isempty(strip(line))
+            isempty(md) ? continue : break
+        end
+        startswith(s, "#") || break
+        body = strip(s[2:end])
+        idx = findfirst(==(':'), body)
+        isnothing(idx) && continue
+        key = lowercase(strip(body[1:idx-1]))
+        val = strip(body[idx+1:end])
+        isempty(key) && continue
+        md[String(key)] = String(val)
+    end
+    md
+end
+
+# Strip the leading metadata block (comment + blank lines) and return
+# the rest of the file body verbatim. Used as `code_string` so docs can
+# show "the actual code" without the docs frontmatter.
+function _strip_gallery_header(raw::AbstractString)
+    lines = split(raw, '\n')
+    i = 1
+    while i <= length(lines)
+        s = lstrip(lines[i])
+        if isempty(strip(lines[i]))
+            i += 1
+        elseif startswith(s, "#")
+            body = strip(s[2:end])
+            occursin(':', body) || break  # comment without `key:` ends the header
+            i += 1
+        else
+            break
+        end
+    end
+    join(lines[i:end], '\n')
+end
+
+"""
+    GalleryItem(path)
+
+Single gallery entry parsed from a Julia source file at `path`. Reads
+the metadata header (`# key: value` lines) and captures the rest of the
+file as `code_string`. The body is `Base.include`-able by the app so it
+can be eval'd to produce a value (Vega-Lite spec, Stan model, formula
+text, …) the app's renderer turns into HTML.
+
+Standard properties:
+
+  * `path`         — absolute file path.
+  * `id`           — defaults to filename without extension; override via `# id: …`.
+  * `title`        — defaults to `id`; override via `# title: …`.
+  * `description`  — `# description: …` or empty.
+  * `section`      — `# section: …` or the parent directory's basename.
+  * `metadata`     — full parsed header dict.
+  * `code_string`  — file body with the header stripped.
+
+`Base.show(io, MIME"text/markdown"(), item)` produces the agent-friendly
+view: `## title \\n *description* \\n ```julia\\ncode\\n``` `.
+"""
+@dynamicstruct struct GalleryItem
+    path::String
+    raw = read(path, String)
+    metadata = parse_gallery_metadata(raw)
+    id = get(metadata, "id", first(splitext(basename(path))))
+    title = get(metadata, "title", id)
+    description = get(metadata, "description", "")
+    section = get(metadata, "section", basename(dirname(path)))
+    code_string = _strip_gallery_header(raw)
+end
+
+function Base.show(io::IO, ::MIME"text/markdown", item::GalleryItem)
+    println(io, "## ", item.title)
+    println(io)
+    isempty(item.description) || (println(io, "*", item.description, "*"); println(io))
+    println(io, "```julia")
+    print(io, rstrip(item.code_string))
+    println(io)
+    println(io, "```")
+end
+
+# `_section.md` per directory: either a `# Title` first-line markdown,
+# a `title: Foo` key/value, or the file content interpreted as the
+# section title. Returns `(section_id => title)` for each subdir that
+# has a `_section.md`. Subdir basename is the section id; matches the
+# default `section` for items without an explicit `# section:` header.
+function _read_section_title(path::AbstractString)
+    text = read(path, String)
+    for line in split(text, '\n')
+        s = strip(line)
+        isempty(s) && continue
+        # `# Foo` heading
+        if startswith(s, "#")
+            body = strip(s[2:end])
+            startswith(body, "#") && (body = strip(lstrip(body, '#')))
+            isempty(body) && continue
+            occursin(':', body) || return String(body)
+            # `title: Foo` key/value disguised as a comment
+            idx = findfirst(==(':'), body)
+            key = lowercase(strip(body[1:idx-1]))
+            key == "title" && return String(strip(body[idx+1:end]))
+            continue
+        end
+        # `title: Foo` plain key/value
+        if occursin(':', s)
+            idx = findfirst(==(':'), s)
+            key = lowercase(strip(s[1:idx-1]))
+            key == "title" && return String(strip(s[idx+1:end]))
+        end
+        # First non-empty non-comment line is the title
+        return String(s)
+    end
+    return ""
+end
+
+# Walk a gallery directory, return (items::Vector{GalleryItem},
+# section_titles::Dict{section_id => title}). Items are sorted by
+# (section, filename) so the gallery has stable order.
+function _collect_gallery(gallery_dir::AbstractString)
+    items = GalleryItem[]
+    section_titles = Dict{String,String}()
+    for (root, dirs, files) in walkdir(gallery_dir)
+        sort!(files)
+        sort!(dirs)
+        for f in files
+            if f == "_section.md"
+                sec_id = basename(root)
+                section_titles[sec_id] = _read_section_title(joinpath(root, f))
+            elseif endswith(f, ".jl")
+                push!(items, GalleryItem(; path=joinpath(root, f)))
+            end
+        end
+    end
+    items, section_titles
+end
+
+"""
+    Gallery(gallery_dir)
+
+Walks `gallery_dir` recursively and builds one `GalleryItem` per `.jl`
+file. Reads section titles from `_section.md` files in each
+subdirectory (first non-empty line, or `title: …` key/value).
+
+Items are sorted by `(section, filename)` for stable gallery order.
+
+`find_item(g, id)` returns the item with the given id, or `nothing`.
+`section_items(g, section)` returns the items belonging to that section.
+"""
+@dynamicstruct struct Gallery
+    gallery_dir::String
+    _walk = _collect_gallery(gallery_dir)
+    items = first(_walk)
+    section_titles = last(_walk)
+end
+
+function find_item(g::Gallery, id::AbstractString)
+    for it in g.items
+        it.id == id && return it
+    end
+    nothing
+end
+
+section_items(g::Gallery, section::AbstractString) =
+    filter(it -> it.section == section, g.items)
+
+"""
+    gallery_grid(items; section_titles=Dict(), card_renderer=default_gallery_card, columns=4)
+
+Render a 2D grid of `card_renderer(item)` cards, grouped by section.
+Sections appear in directory-traversal order (preserved by
+`Gallery.items`). The section heading uses
+`section_titles[section_id]` if present, falling back to the bare
+section id (typically the directory basename).
+
+Standard CSS classes: `htmxo-gallery`, `htmxo-gallery-section`,
+`htmxo-gallery-section-heading`, `htmxo-gallery-grid`, `htmxo-gallery-card`,
+`htmxo-gallery-card-title`, `htmxo-gallery-card-description`,
+`htmxo-gallery-card-code`. Override styling by adding CSS rules at the
+host page level — the layer is unscoped so any host wins automatically.
+"""
+function gallery_grid(items::AbstractVector{GalleryItem};
+        section_titles::AbstractDict=Dict{String,String}(),
+        card_renderer::Function=default_gallery_card,
+        columns::Int=4)
+    seen = String[]
+    groups = Dict{String,Vector{GalleryItem}}()
+    for it in items
+        if !haskey(groups, it.section)
+            push!(seen, it.section)
+            groups[it.section] = GalleryItem[]
+        end
+        push!(groups[it.section], it)
+    end
+    sections = map(seen) do sec
+        title = get(section_titles, sec, sec)
+        h.div(; class="htmxo-gallery-section")(
+            h.h3(title; class="htmxo-gallery-section-heading"),
+            h.div(; class="htmxo-gallery-grid",
+                  style="display:grid; grid-template-columns:repeat($columns, 1fr); gap:0.5rem;")(
+                [card_renderer(it) for it in groups[sec]]...
+            ),
+        )
+    end
+    h.div(; class="htmxo-gallery")(sections...)
+end
+
+"""
+    default_gallery_card(item::GalleryItem)
+
+Default card layout: title + description + collapsible code block. No
+rich rendering of the item value — apps wrap this with their own
+`card_renderer = item -> h.article(default_gallery_card(item),
+my_render(item))` to add Vega-Lite plots, PPC plots, etc.
+"""
+default_gallery_card(item::GalleryItem) = h.article(; class="htmxo-gallery-card")(
+    h.header(; class="htmxo-gallery-card-header")(
+        h.a(item.title; href="#" * item.id, class="htmxo-gallery-card-title"),
+    ),
+    isempty(item.description) ? h.span() :
+        h.p(item.description; class="htmxo-gallery-card-description"),
+    h.details(; class="htmxo-gallery-card-code")(
+        h.summary("Code"),
+        h.pre(h.code(item.code_string)),
+    ),
+)
+
 @dynamicstruct struct GitRepo
     path::String
     author::String = "HTMXObjects <noreply@localhost>"
