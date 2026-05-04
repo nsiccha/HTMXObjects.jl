@@ -1657,25 +1657,92 @@ _base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempt
 # propagates either way.
 _prefix_kw(mp) = isempty(mp) ? NamedTuple() : (; __prefix__=mp)
 
-function _register_indexed_route(T, method, name, path, n_params, record_dir; mount_prefix="")
+"""
+    _register_route_handler(RootT, LeafT, chain, method, name, path, n_params, extract_args, record_dir; root_prefix="")
+
+Single chokepoint for HTTP route handler registration. Covers all three
+shapes that previously each had their own near-duplicate closure:
+
+- **Plain non-indexed** (`@get index = expr`): `RootT === LeafT`, `chain == Symbol[]`,
+  `extract_args=false`. Returns `getproperty(leaf, name)` bare.
+- **Indexed / kwargs** (`@get item(id; q="")`): `RootT === LeafT`, `chain == Symbol[]`,
+  `extract_args=true`. Calls `_extract_args` then `prop(idx_vals...; kw...)` (with
+  the zero-args-and-not-IP fallback that returns `prop` bare).
+- **`@include`'d nested**: `RootT` is the registered root, `LeafT` is the type
+  that owns the property, `chain` walks from root to leaf,
+  `extract_args=true`. Same compute-val branch; uses `_resolve_response_nested`
+  with the page chain collected via `_collect_page_chain`.
+
+Error handling: construction errors return immediately; chain-walk errors
+get `error_obj=root`; compute/resolve errors get `error_obj=leaf` plus the
+appropriate page_chain. WebSocket handlers do not go through this path —
+they have a different signature (`ws` instead of `req`) and skip the HTTP
+error pipeline.
+"""
+function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, name,
+        path, n_params, extract_args::Bool, record_dir; root_prefix="")
     base = _base_segments(path)
+    is_included = !isempty(chain)
     _register_handler(method, path, function(req)
-        local obj
+        local root, leaf
         try
-            obj = T(; __req__=req, _prefix_kw(mount_prefix)...)
+            root = RootT(; __req__=req, _prefix_kw(root_prefix)...)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
+
+        if is_included
+            try
+                leaf = foldl((o, n) -> getproperty(o, n), chain; init=root)
+            catch err
+                bt = catch_backtrace()
+                page_chain = _has_page(root) ? Any[root] : Any[]
+                return _route_error_response(req, err, bt; error_obj=root, page_chain)
+            end
+        else
+            leaf = root
+        end
+
         try
-            idx_vals, kw_pairs = _extract_args(T, Val(name), req, method, base, n_params)
-            prop = getproperty(obj, name)
-            val = prop(idx_vals...; NamedTuple(kw_pairs)...)
-            save_path = !isnothing(record_dir) ? "/" * join(vcat(string(name), string.(idx_vals)), "/") : nothing
-            return _resolve_response(obj, req, val; record_dir, save_path)
+            local idx_vals
+            val = if extract_args
+                local kw_pairs
+                idx_vals, kw_pairs = _extract_args(LeafT, Val(name), req, method, base, n_params)
+                prop = getproperty(leaf, name)
+                # Zero-args + non-IP → return prop bare (e.g. `@get index() = ...`
+                # on a parent struct that exposes `index` as a derived property).
+                if isempty(idx_vals) && isempty(kw_pairs) && !(prop isa DynamicObjects.IndexableProperty)
+                    prop
+                else
+                    prop(idx_vals...; NamedTuple(kw_pairs)...)
+                end
+            else
+                idx_vals = String[]
+                getproperty(leaf, name)
+            end
+
+            save_path = if isnothing(record_dir)
+                nothing
+            elseif is_included
+                "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/")
+            elseif extract_args
+                "/" * join(vcat(string(name), string.(idx_vals)), "/")
+            else
+                path
+            end
+
+            if is_included
+                page_chain = _collect_page_chain(root, chain)
+                return _resolve_response_nested(page_chain, req, val; record_dir, save_path)
+            else
+                return _resolve_response(leaf, req, val; record_dir, save_path)
+            end
         catch err
             bt = catch_backtrace()
-            page_chain = _has_page(obj) ? Any[obj] : Any[]
-            return _route_error_response(req, err, bt; error_obj=obj, page_chain)
+            page_chain = is_included ?
+                _collect_page_chain(root, chain) :
+                (_has_page(leaf) ? Any[leaf] : Any[])
+            return _route_error_response(req, err, bt; error_obj=leaf, page_chain)
         end
     end)
 end
@@ -1769,32 +1836,18 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     end)
                 end
             elseif isempty(param_strs) && !has_kwargs && !info.indexed
-                _register_handler(method, path, function(req)
-                    local obj
-                    try
-                        obj = T(; __req__=req, _prefix_kw(mount_prefix)...)
-                    catch err
-                        return _route_error_response(req, err, catch_backtrace())
-                    end
-                    try
-                        val = getproperty(obj, name)
-                        return _resolve_response(obj, req, val; record_dir, save_path=record_dir !== nothing ? path : nothing)
-                    catch err
-                        bt = catch_backtrace()
-                        page_chain = _has_page(obj) ? Any[obj] : Any[]
-                        return _route_error_response(req, err, bt; error_obj=obj, page_chain)
-                    end
-                end)
+                # Plain non-indexed (`@get index = expr`): bare getproperty, no extract_args
+                _register_route_handler(T, T, Symbol[], method, name, path, 0, false, record_dir; root_prefix=mount_prefix)
             elseif isempty(param_strs) && !has_kwargs
                 # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
-                _register_indexed_route(T, method, name, path, 0, record_dir; mount_prefix)
+                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix)
             elseif isempty(param_strs) && has_kwargs
                 # kwargs-only route (no path params)
                 !isnothing(record_dir) && push!(_static_kwargs_paths, path)
-                _register_indexed_route(T, method, name, path, 0, record_dir; mount_prefix)
+                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix)
             else
                 # Register the full route (all params explicit)
-                _register_indexed_route(T, method, name, path, n_params, record_dir; mount_prefix)
+                _register_route_handler(T, T, Symbol[], method, name, path, n_params, true, record_dir; root_prefix=mount_prefix)
 
                 # Register shortened routes for trailing defaults
                 # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -1802,66 +1855,25 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     cut = default_positions[k]  # position of first omitted param
                     short_params = param_strs[1:cut-1]
                     short_path = _route_path(prefix, name, short_params)
-                    _register_indexed_route(T, method, name, short_path, length(short_params), record_dir; mount_prefix)
+                    _register_route_handler(T, T, Symbol[], method, name, short_path, length(short_params), true, record_dir; root_prefix=mount_prefix)
                 end
             end
         end
     end
 end
 
-# Register a single included route handler with chained property access through the parent.
-"""
-    _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir)
-
-Register a route handler for a nested `@include` struct property.
-
-For direct browser visits (non-HTMX), the response is wrapped by nesting all
-`__page__` wrappers (or legacy `page`) found along the property chain from
-root to leaf. If the root defines `__page__` and a nested struct also defines
-one, the result is `root.__page__(nested.__page__(fragment))` — innermost
-wraps first, then each ancestor.
-
-# TODO: add an API to opt out of page nesting for specific structs (e.g. a `page_nest=false`
-# property or a `_page_passthrough` convention) for cases where a nested struct wants to
-# fully replace the parent's page rather than compose with it.
-"""
-function _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir; root_prefix="")
-    base = _base_segments(path)
-    _register_handler(method, path, function(req)
-        local parent, nested
-        try
-            parent = ParentT(; __req__=req, _prefix_kw(root_prefix)...)
-        catch err
-            return _route_error_response(req, err, catch_backtrace())
-        end
-        try
-            nested = foldl((o, n) -> getproperty(o, n), chain; init=parent)
-        catch err
-            bt = catch_backtrace()
-            page_chain = _has_page(parent) ? Any[parent] : Any[]
-            return _route_error_response(req, err, bt; error_obj=parent, page_chain)
-        end
-        try
-            idx_vals, kw_pairs = _extract_args(NestedT, Val(name), req, method, base, n_params)
-            val = let prop = getproperty(nested, name)
-                if isempty(idx_vals) && isempty(kw_pairs) && !(prop isa DynamicObjects.IndexableProperty)
-                    prop
-                else
-                    prop(idx_vals...; NamedTuple(kw_pairs)...)
-                end
-            end
-            sp = !isnothing(record_dir) ? "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/") : nothing
-            # Collect page wrappers along the chain (root → ... → nested) for nesting.
-            page_chain = _collect_page_chain(parent, chain)
-            return _resolve_response_nested(page_chain, req, val; record_dir, save_path=sp)
-        catch err
-            bt = catch_backtrace()
-            page_chain = _collect_page_chain(parent, chain)
-            return _route_error_response(req, err, bt; error_obj=nested, page_chain)
-        end
-    end)
-end
-
+# `@include`'d nested route registration goes through `_register_route_handler`
+# with a non-empty `chain`. Page-wrapper nesting: for direct browser visits
+# (non-HTMX), the response is wrapped by nesting all `__page__` wrappers (or
+# legacy `page`) found along the property chain from root to leaf. If the root
+# defines `__page__` and a nested struct also defines one, the result is
+# `root.__page__(nested.__page__(fragment))` — innermost wraps first, then
+# each ancestor.
+#
+# TODO: add an API to opt out of page nesting for specific structs (e.g. a
+# `page_nest=false` property or a `_page_passthrough` convention) for cases
+# where a nested struct wants to fully replace the parent's page rather than
+# compose with it.
 """
     _page_wrapper(obj) -> wrapper or nothing
 
@@ -2008,14 +2020,14 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
 
         let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, prefix=prefix, root_prefix=root_prefix
             # Register the full route
-            _register_included_handler(ParentT, NestedT, method, name, chain, path, n_params, record_dir; root_prefix)
+            _register_route_handler(ParentT, NestedT, chain, method, name, path, n_params, true, record_dir; root_prefix)
 
             # Register shortened routes for trailing defaults
             for k in length(default_positions):-1:1
                 cut = default_positions[k]
                 short_params = param_strs[1:cut-1]
                 short_path = _route_path(prefix, name, short_params)
-                _register_included_handler(ParentT, NestedT, method, name, chain, short_path, length(short_params), record_dir; root_prefix)
+                _register_route_handler(ParentT, NestedT, chain, method, name, short_path, length(short_params), true, record_dir; root_prefix)
             end
         end
     end
@@ -2043,6 +2055,17 @@ function _reroute!(T::DataType)
             _register_routes(ParentT; args.prefix, args.record_dir)
         end
     end
+end
+
+# Re-register every previously registered root type. Top-level so Revise
+# evaluates it as a new expression once; on initial load the dict is empty
+# (no-op). On running servers, this rebuilds all route handler closures
+# after a HTMXObjects refactor that invalidates the captured ones (e.g.
+# the `_register_indexed_route` / `_register_included_handler` →
+# `_register_route_handler` unification). `HTTP.register!` is idempotent
+# (overwrites), so re-running this on initial load too is harmless.
+for T in collect(keys(_registered_types))
+    _reroute!(T)
 end
 
 # --- App scaffolding ---
