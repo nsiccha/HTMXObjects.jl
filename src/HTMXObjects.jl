@@ -1509,12 +1509,28 @@ end
 Default rendering for a caught error — a small article pointing at the recorded
 error id. Override by defining `__error__` on the route's enclosing struct
 (or, to disable catching entirely, set `__error__ = rethrow`).
+
+In dev (Revise loaded), include the full log path so the article matches
+the `@error` line on stderr (`HTMXObjects caught an error: <path>`) — the
+same string is already in the server log, including it here lets the
+developer / agent open the file in one step from the in-browser article.
+In prod (Revise not loaded), keep just the uid.
 """
-_default_error_render(uid, path) = h.article(
-    h.header("Error"),
-    h.p("Something went wrong. Error ID: ", h.code(uid));
-    aria_invalid="true",
-)
+function _default_error_render(uid, path)
+    if _revise_module() !== nothing
+        h.article(
+            h.header("Error"),
+            h.p("HTMXObjects caught an error: ", h.code(path));
+            aria_invalid="true",
+        )
+    else
+        h.article(
+            h.header("Error"),
+            h.p("Something went wrong. Error ID: ", h.code(uid));
+            aria_invalid="true",
+        )
+    end
+end
 
 # Invoke the user's `__error__` hook if present, else fall back to the default.
 # The hook is called with just the exception, so `__error__ = rethrow` works.
