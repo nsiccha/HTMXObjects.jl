@@ -45,8 +45,17 @@ for (name, routes) in EXAMPLES
         include("$file")
     """`, "r")
 
-    # Wait for server to start
-    sleep(4)
+    # Poll until the server is ready (Julia needs ~20s cold start to load
+    # HTMXObjects + parse the example). Bail after 60s.
+    deadline = time() + 60
+    while time() < deadline
+        try
+            HTTP.get("http://127.0.0.1:$PORT"; retry=false, readtimeout=1)
+            break
+        catch
+            sleep(0.5)
+        end
+    end
 
     # Hit each route twice: plain (full page recording) and with
     # `HX-Request: true` (fragment recording).
