@@ -363,7 +363,7 @@ Defaults:
 - `__route__ = ""` — defaults to empty; `_register_route_handler` sets it to
   `req.target` (with query string stripped) when constructing the struct for
   a real request, so route bodies can write `hx_get=__route__` /
-  `href=__route__` instead of recomputing `__self__/"name/$id"`. For
+  `href=__route__` instead of recomputing `__self__/"name/\$id"`. For
   non-request constructions (e.g., `route!` at module init) it stays `""`.
 
 The legacy short names `req` / `appdata` are no longer recognised.
