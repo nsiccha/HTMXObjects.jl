@@ -775,6 +775,15 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
         Base.:/(self::$type_name, p::AbstractString) =
             self.__prefix__ * "/" * lstrip(p, '/')
     ))
+    # Emit `Base.print(io, ::T)` so route bodies can write
+    # `href=__self__` (the struct's index URL — `__prefix__` for non-root
+    # mounts, `"/"` for the root). Cobweb stringifies attribute values via
+    # `print(io, val)`, so this is what makes `href=__self__` resolve to a
+    # bare URL rather than the struct's default Julia repr.
+    push!(block.args[1].args, :(
+        Base.print(io::IO, self::$type_name) =
+            print(io, isempty(self.__prefix__) ? "/" : self.__prefix__)
+    ))
     # Wrap _reroute!(T) in Base.invokelatest so it always dispatches at the
     # latest world. Without this, on Revise re-eval the call site captures the
     # world age before the freshly-emitted `meta(::Type{T})` /
