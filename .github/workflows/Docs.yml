@@ -34,6 +34,14 @@ jobs:
         run: |
           git clone https://github.com/nsiccha/TestModules.jl.git
           julia --project=docs -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="TestModules.jl")]); Pkg.instantiate()'
+      - name: Record example apps
+        # Produces docs/public/examples/<name>/{,hx/}*.html — HTMXO recordings
+        # with hx-get URLs rewritten under the GitHub Pages base. `make.jl`
+        # copies these into the build output so VitePress serves them at
+        # the same site origin (and `examples.md` embeds them via
+        # `<div hx-get="…/hx/" hx-trigger="load">`).
+        run: julia --project=docs docs/record_examples.jl
+
       - name: Build and deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
