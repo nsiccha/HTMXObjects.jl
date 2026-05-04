@@ -931,12 +931,39 @@ Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text
 
 
 """
+    _save_typed_response(record_dir, url_path, response)
+
+Save an `HTTP.Response` body using a file extension derived from its
+Content-Type header. Used by the recording flow to capture routes that
+hand-roll their response (`/aov_runtime_js` → `.js`, `/spec/<id>` → `.json`,
+etc.) so the deployed static site serves them with the right MIME.
+"""
+function _save_typed_response(record_dir::String, url_path::String, response::HTTP.Response)
+    ct = HTTP.header(response, "Content-Type", "")
+    ext = if occursin("application/javascript", ct) || occursin("text/javascript", ct)
+        ".js"
+    elseif occursin("application/json", ct)
+        ".json"
+    elseif occursin("text/css", ct)
+        ".css"
+    elseif occursin("text/markdown", ct) || occursin("text/plain", ct)
+        ".md"
+    elseif occursin("image/svg", ct)
+        ".svg"
+    else
+        ".html"
+    end
+    save_response(record_dir, url_path, response; ext)
+end
+
+"""
     save_response(record_dir, url_path, response; ext=".html")
 
 Save a response body to disk, mirroring the URL path structure
 (`/post/42` → `record_dir/post/42<ext>`). Enables later replay via a
 static file server. Pass `ext=".md"` for markdown recordings (under the
-`/md/` subtree).
+`/md/` subtree); see also [`_save_typed_response`](@ref) which picks
+the extension from the response's Content-Type.
 """
 function save_response(record_dir::String, url_path::String, response::HTTP.Response; ext::String=".html")
     rel = lstrip(url_path, '/')
@@ -985,21 +1012,24 @@ _disable_for_static(val::AbstractArray; record_base::String="") = [_disable_for_
 _disable_for_static(val::Tuple; record_base::String="") = Tuple(_disable_for_static(x; record_base) for x in val)
 _disable_for_static((content, id)::Pair; record_base::String="") = _disable_for_static(content; record_base) => id
 
-# Rewrite an absolute-from-root URL (`/foo/bar`) to point at the recorded
-# fragment subtree (`<record_base>/hx/foo/bar`). External URLs (`https://…`),
-# anchors (`#…`), schemes (`mailto:…`), and protocol-relative (`//…`) pass
-# through unchanged. `record_base` empty → no rewriting.
-function _rewrite_hx_url(url::AbstractString, record_base::AbstractString)
-    isempty(record_base) && return url
+# Rewrite an absolute-from-root URL (`/foo/bar`) by prepending `prefix`.
+# External URLs (`https://…`), anchors (`#…`), schemes (`mailto:…`), and
+# protocol-relative (`//…`) pass through unchanged. Empty `prefix` is a no-op.
+function _rewrite_static_url(url::AbstractString, prefix::AbstractString)
+    isempty(prefix) && return url
     isempty(url) && return url
-    # Skip non-rooted URLs
     if startswith(url, "//") || startswith(url, "http://") || startswith(url, "https://") ||
        startswith(url, "#") || occursin(':', url) && !startswith(url, "/")
         return url
     end
     startswith(url, "/") || return url
-    rstrip(record_base, '/') * "/hx" * url
+    rstrip(prefix, '/') * url
 end
+
+# `hx-get` URLs in recordings should fetch fragments — they live under
+# the `/hx/` subtree of `record_base`. Convenience wrapper.
+_rewrite_hx_url(url::AbstractString, record_base::AbstractString) =
+    _rewrite_static_url(url, isempty(record_base) ? "" : (rstrip(record_base, '/') * "/hx"))
 
 function _disable_for_static(node::Node; record_base::String="")
     cn = parent(node)
@@ -1029,6 +1059,18 @@ function _disable_for_static(node::Node; record_base::String="")
         else
             new_attrs[hx_get_sym] = _rewrite_hx_url(url, record_base)
         end
+    end
+
+    # Rewrite `<a href="/foo">` to `record_base * /foo` so links from a
+    # recorded page land on the matching full-page recording (not the
+    # `/hx/` fragment subtree — full pages link to other full pages).
+    href_sym = Symbol("href")
+    if haskey(new_attrs, href_sym)
+        new_attrs[href_sym] = _rewrite_static_url(new_attrs[href_sym], record_base)
+    end
+    src_sym = Symbol("src")
+    if haskey(new_attrs, src_sym)
+        new_attrs[src_sym] = _rewrite_static_url(new_attrs[src_sym], record_base)
     end
 
     if disabled
@@ -1664,6 +1706,30 @@ Convention-based properties on `obj`:
 If the route returns an `HTTP.Response` directly, it passes through unchanged.
 """
 function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
+    # Recording happens FIRST so it can capture `HTTP.Response` values
+    # too — JS/JSON routes that hand-roll their response (e.g.
+    # `/aov_runtime_js` returning `application/javascript`) wouldn't get
+    # saved otherwise. The Content-Type drives the saved file extension.
+    if !isnothing(record_dir) && !isnothing(save_path)
+        if val isa HTTP.Response
+            _save_typed_response(record_dir, save_path, val)
+        else
+            wrapper = _page_wrapper(obj)
+            if wants_markdown(req)
+                md = try to_markdown_string(val) catch; nothing end
+                isnothing(md) || save_response(record_dir, "/md" * save_path,
+                    HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
+                    ext=".md")
+            elseif is_htmx(req)
+                save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
+            elseif !isnothing(wrapper)
+                save_response(record_dir, save_path, to_response(static_transform(wrapper[val]; record_base)))
+            else
+                save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
+            end
+        end
+    end
+
     # Opt-out: route already produced a response
     val isa HTTP.Response && return val
 
@@ -1671,33 +1737,6 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     if wants_errors(req)
         val = filter_errors(val)
         isnothing(val) && return markdown_response("(no errors)")
-    end
-
-    # Record static version if requested. Three file shapes per route,
-    # driven by the request header alone (no `record_layout` knob):
-    #  * `Accept: text/markdown` (or `?plain` / `?markdown`) — saves the
-    #    `to_markdown_string(val)` output under `<record_dir>/md/<save_path>.md`.
-    #  * `HX-Request: true` — saves the bare fragment under
-    #    `<record_dir>/hx/<save_path>.html`.
-    #  * otherwise — saves the page-wrapped version under
-    #    `<record_dir>/<save_path>.html`.
-    # `static_transform` rewrites surviving `hx-get` URLs into the `hx/`
-    # subtree, so a click from the full-page recording still lands on a
-    # fragment recording.
-    if !isnothing(record_dir) && !isnothing(save_path)
-        wrapper = _page_wrapper(obj)
-        if wants_markdown(req)
-            md = try to_markdown_string(val) catch; nothing end
-            isnothing(md) || save_response(record_dir, "/md" * save_path,
-                HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
-                ext=".md")
-        elseif is_htmx(req)
-            save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
-        elseif !isnothing(wrapper)
-            save_response(record_dir, save_path, to_response(static_transform(wrapper[val]; record_base)))
-        else
-            save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
-        end
     end
 
     # Markdown mode
@@ -3884,7 +3923,7 @@ function _collect_gallery(gallery_dir::AbstractString)
                 sec_id = basename(root)
                 section_titles[sec_id] = _read_section_title(joinpath(root, f))
             elseif endswith(f, ".jl")
-                push!(items, GalleryItem(; path=joinpath(root, f)))
+                push!(items, GalleryItem(joinpath(root, f)))
             end
         end
     end
