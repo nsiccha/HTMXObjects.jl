@@ -1249,12 +1249,16 @@ const ERROR_DIR = Ref{String}("")
 # same nanosecond from different threads — we hash it anyway for uniform width.
 _error_uid() = string(hash(time_ns()); base=16)
 
+# Revise is loaded? Returns the module or `nothing`. Used by every Revise-
+# diagnostic helper below.
+_revise_module() = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), "Revise"), nothing)
+
 # If Revise is loaded and has unresolved revision errors queued, append them
 # to `io`. Oxygen's `revise=:lazy` mode already logs these to the console on
 # each request; duplicating them into the per-error log lets a stale-code
 # failure be diagnosed from the recorded file alone.
 function _append_revise_errors(io)
-    rev = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), "Revise"), nothing)
+    rev = _revise_module()
     isnothing(rev) && return
     qe = try getfield(rev, :queue_errors) catch; return end
     isempty(qe) && return
@@ -1269,13 +1273,140 @@ function _append_revise_errors(io)
     end
 end
 
-# If Revise has unresolved revision errors, throw — the existing per-route
-# try/catch turns it into an error article + log entry (with the queue
-# errors themselves appended via `_append_revise_errors`). Without this,
-# requests run silently against stale code whose latest edit failed to
-# revise, which routinely sends agents on phantom debugging chases.
-# Revise should only be loaded in dev, so this is safe to gate on
-# `_revise_module() !== nothing`.
+# For each tracked source file, return `(full_path, seen_time::Float64)`
+# where `seen_time` is Revise's most recent observation of that file.
+# Handles both `Revise.WatchList` layouts:
+#   * newer (HiWo5+):  per-file `wl.file_ctimes[basename]`
+#   * older (brhA5 etc): per-directory `wl.timestamp` (shared across the dir)
+# Either is the same precision Revise's own dir-watcher uses internally,
+# so comparing `stat(file).mtime/ctime` against `seen_time` reproduces the
+# missed-event check at `pkgs.jl:335` of older Revise.
+function _revise_seen_per_file(rev)
+    out = Tuple{String,Float64}[]
+    try
+        watched_files = getfield(rev, :watched_files)
+        watched_files_lock = getfield(rev, :watched_files_lock)
+        Base.lock(watched_files_lock)
+        try
+            for (dir, wl) in watched_files
+                T = typeof(wl)
+                if hasfield(T, :file_ctimes)
+                    for (basename, ct) in getfield(wl, :file_ctimes)
+                        push!(out, (joinpath(dir, basename), ct))
+                    end
+                elseif hasfield(T, :timestamp) && hasfield(T, :trackedfiles)
+                    ts = getfield(wl, :timestamp)
+                    for (basename, _id) in getfield(wl, :trackedfiles)
+                        push!(out, (joinpath(dir, basename), ts))
+                    end
+                end
+            end
+        finally
+            Base.unlock(watched_files_lock)
+        end
+    catch
+    end
+    out
+end
+
+# Find tracked source files whose on-disk `mtime`/`ctime` is newer than
+# Revise's recorded view (per `_revise_seen_per_file`). A mismatch means
+# the OS-level FS-watch event silently dropped — Revise believes the file
+# is unchanged but the user already edited it. Returns
+# `Vector{Tuple{file, age_seconds}}`.
+#
+# Files currently in `revision_queue` are excluded — Revise has noticed
+# them, just hasn't processed yet. `MISSED_EDIT_GRACE_S` absorbs the
+# watcher's normal latency between a save and the inotify/kqueue event
+# firing.
+const MISSED_EDIT_GRACE_S = 1.0
+function _revise_missed_edits()
+    rev = _revise_module()
+    isnothing(rev) && return Tuple{String,Float64}[]
+    try
+        revision_queue = getfield(rev, :revision_queue)
+        revision_queue_lock = getfield(rev, :revision_queue_lock)
+        queued = Set{String}()
+        Base.lock(revision_queue_lock)
+        try
+            for (pkgdata, relfile) in revision_queue
+                base = try getfield(pkgdata, :info).basedir catch; "" end
+                full = isempty(base) || isabspath(relfile) ? String(relfile) : joinpath(base, String(relfile))
+                push!(queued, full)
+            end
+        finally
+            Base.unlock(revision_queue_lock)
+        end
+
+        missed = Tuple{String,Float64}[]
+        for (full, seen_time) in _revise_seen_per_file(rev)
+            full in queued && continue
+            isfile(full) || continue
+            s = stat(full)
+            delta = max(s.mtime, s.ctime) - seen_time
+            delta > MISSED_EDIT_GRACE_S && push!(missed, (full, delta))
+        end
+        sort!(missed; by = x -> -x[2])
+        return missed
+    catch
+        # Revise's internals are not API; if the field shapes change in a
+        # future version, fail open rather than break every request.
+        return Tuple{String,Float64}[]
+    end
+end
+
+# Append a "Revise freshness" section to the error log: most-recent file
+# Revise has noticed, files in revision_queue (pending), and any files
+# whose disk mtime/ctime exceeds Revise's recorded view (missed by the
+# watcher). Shares the layout-aware lookup with `_revise_missed_edits`.
+function _append_revise_freshness(io)
+    rev = _revise_module()
+    isnothing(rev) && return
+    seen = _revise_seen_per_file(rev)
+    latest = 0.0; latest_file = ""
+    for (full, st) in seen
+        st > latest && (latest = st; latest_file = full)
+    end
+    queued = String[]
+    try
+        revision_queue = getfield(rev, :revision_queue)
+        revision_queue_lock = getfield(rev, :revision_queue_lock)
+        Base.lock(revision_queue_lock)
+        try
+            for (_pkgdata, relfile) in revision_queue
+                push!(queued, String(relfile))
+            end
+        finally
+            Base.unlock(revision_queue_lock)
+        end
+    catch
+    end
+    missed = _revise_missed_edits()
+    println(io)
+    println(io, "--- Revise freshness ---")
+    if latest > 0.0
+        age = max(0.0, time() - latest)
+        println(io, "last_seen_change: ", Libc.strftime("%Y-%m-%dT%H:%M:%S", latest),
+                " (", round(age; digits=1), "s ago) — ", latest_file)
+    else
+        println(io, "last_seen_change: (Revise has not recorded any timestamps yet)")
+    end
+    if !isempty(queued)
+        println(io, "revision_queue (", length(queued), " pending):")
+        for f in queued; println(io, "  - ", f); end
+    end
+    if !isempty(missed)
+        println(io, "missed_edits (", length(missed), " — disk newer than Revise's view):")
+        for (f, age) in missed; println(io, "  - ", f, "  (+", round(age; digits=1), "s)"); end
+    end
+end
+
+# Both checks: queue errors (Revise tried but failed to revise) and missed
+# edits (the FS watcher silently dropped a save). Either condition means
+# the running code is stale — throw so the per-route try/catch turns it
+# into the framework's error article + log entry. The log itself includes
+# `_append_revise_errors` and `_append_revise_freshness` sections so the
+# agent / developer sees exactly what's stale and why.
 struct ReviseHasErrors <: Exception
     files::Vector{String}
 end
@@ -1287,16 +1418,39 @@ function Base.showerror(io::IO, e::ReviseHasErrors)
     end
     print(io, "See the 'Pending Revise errors' section below for the failures, then fix them and re-request.")
 end
-function _check_revise_errors!()
-    rev = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), "Revise"), nothing)
-    isnothing(rev) && return
-    qe = try getfield(rev, :queue_errors) catch; return end
-    isempty(qe) && return
-    files = String[]
-    for k in keys(qe)
-        push!(files, string(k isa Tuple && length(k) >= 2 ? k[2] : k))
+
+struct ReviseMissedEdits <: Exception
+    files::Vector{Tuple{String,Float64}}
+end
+function Base.showerror(io::IO, e::ReviseMissedEdits)
+    print(io, "Revise's file watcher missed ", length(e.files),
+          " edit(s) — the running code is stale, and Revise will not catch up on its own.")
+    println(io)
+    for (f, age) in e.files
+        println(io, "  - ", f, "  (disk +", round(age; digits=1), "s newer than Revise's view)")
     end
-    throw(ReviseHasErrors(files))
+    print(io, "Fix: re-save the file(s) above (`touch <path>` is enough) so Revise's directory watcher refires. ")
+    print(io, "See 'Revise freshness' below for the same data.")
+end
+
+function _check_revise_errors!()
+    # Both checks: queue errors (Revise tried but failed) and missed edits
+    # (FS watcher silently dropped a save). Either condition means the
+    # running code is stale.
+    rev = _revise_module()
+    isnothing(rev) && return
+    # Queue errors first: a failed revision is the more direct staleness signal.
+    qe = try getfield(rev, :queue_errors) catch; nothing end
+    if qe !== nothing && !isempty(qe)
+        files = String[]
+        for k in keys(qe)
+            push!(files, string(k isa Tuple && length(k) >= 2 ? k[2] : k))
+        end
+        throw(ReviseHasErrors(files))
+    end
+    # Missed-by-watcher edits: silent staleness.
+    missed = _revise_missed_edits()
+    isempty(missed) || throw(ReviseMissedEdits(missed))
 end
 
 """
@@ -1343,6 +1497,7 @@ function _record_error(err, bt, req)
         end
         println(io)
         _append_revise_errors(io)
+        _append_revise_freshness(io)
     end
     @error "HTMXObjects caught an error: $path"
     (uid, path)
