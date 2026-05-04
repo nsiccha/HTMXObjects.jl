@@ -1149,7 +1149,7 @@ its result for direct browser navigation. Typical usage:
         htmx(h.main(search_input(q), fragment))
     end
 """
-function htmx_or(full_page_fn::Function, req::HTTP.Request, fragment)
+function htmx_or(full_page_fn, req::HTTP.Request, fragment)
     to_response(is_htmx(req) ? fragment : full_page_fn())
 end
 
@@ -1683,7 +1683,7 @@ whole page.
 If `obj` defines `__error__`, that hook is used; otherwise the default article
 with the recorded uid is returned.
 """
-function safely(f::Function; obj=nothing, req=nothing)
+function safely(f; obj=nothing, req=nothing)
     try
         return f()
     catch err
@@ -3976,7 +3976,7 @@ host page level — the layer is unscoped so any host wins automatically.
 """
 function gallery_grid(items::AbstractVector{GalleryItem};
         section_titles::AbstractDict=Dict{String,String}(),
-        card_renderer::Function=default_gallery_card,
+        card_renderer=default_gallery_card,
         columns::Int=4)
     seen = String[]
     groups = Dict{String,Vector{GalleryItem}}()
