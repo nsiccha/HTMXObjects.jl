@@ -20,9 +20,20 @@ end
             " for the markdown view (each item's metadata + body).",
         ),
         h.p(
+            "Routes: ",
             h.a("/items"; href=__self__/"items"), " — list as a table; ",
             h.a("/item/scatter"; href=__self__/"item/scatter"), " — single item; ",
-            h.a("/recorded"; href=__self__/"recorded"), " — stat /tmp/htmxo-record-test/.",
+            h.a("/record_test"; href=__self__/"record_test"), " — drive ", h.code("record!"), "; ",
+            h.a("/recorded"; href=__self__/"recorded"), " — stat /tmp/htmxo-gallery-demo-record/.",
+        ),
+        h.p(
+            h.strong("See also: "),
+            h.a("AoV gallery"; href="http://localhost:8092"),
+            " (100+ items at ", h.code(":8092"), "), ",
+            h.a("BRM gallery"; href="http://localhost:8121/pipeline/gallery"),
+            " (PPC cards, lazy-loaded). Both built on the same ",
+            h.code("HTMXObjects.Gallery"),
+            " primitive demonstrated here.",
         ),
         gallery_grid(gallery.items; section_titles=gallery.section_titles),
     )
