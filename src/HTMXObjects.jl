@@ -14,6 +14,7 @@ export wants_markdown, wants_errors, markdown_response, e, filter_errors, render
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles, GitRepo, EditorRoutes
+export htmxo_theme, pico_bridge, vitepress_bridge
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -855,6 +856,11 @@ function htmx(args...;
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
             h.meta(name="color-scheme", content="light dark"),
             cdn...,
+            # Theme defaults: declared at zero specificity inside `@layer htmxo`
+            # so any subsequent `:root { --htmxo-...: ... }` (host-supplied or
+            # via `pico_bridge` / `vitepress_bridge`) wins automatically.
+            htmxo_theme(),
+            isnothing(pico_version) ? () : pico_bridge(),
             (feedback ? request_feedback() : ())...,
             tabset_styles(),
             editor_styles(),
@@ -2291,6 +2297,7 @@ flex layout for the caption header (title left, actions right) and small
 spacing for the `<details>` body. Include once per page.
 """
 caption_style() = h.style("""
+@layer htmxo {
 figure.captioned { margin: 0 0 1rem 0; }
 figcaption.caption { margin-bottom: 0.5rem; }
 .caption-header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
@@ -2298,6 +2305,7 @@ figcaption.caption { margin-bottom: 0.5rem; }
 .caption-action { padding: 0.1rem 0.5rem; font-size: 0.85em; margin: 0; }
 .caption-long { margin-top: 0.25rem; }
 .caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
+}
 """)
 
 """
@@ -3043,41 +3051,110 @@ show_when_script() = h.script(raw"""
 })();
 """)
 
+# --- Theme ---
+
+"""
+    htmxo_theme()
+
+`<style>` block with HTMXO's framework-agnostic CSS theme variables.
+
+Defines the `--htmxo-*` custom properties that every HTMXO-emitted style
+consumes (`request_feedback_style`, `tabset_styles`, `status_badge`, …).
+Defaults are sensible standalone (the values that have shipped historically),
+and are declared at zero specificity (`:where(:root)`) inside `@layer htmxo`
+so any host's `:root { --htmxo-...: ... }` override wins automatically — no
+specificity wars, no host detection in component code. See [`pico_bridge`](@ref)
+and [`vitepress_bridge`](@ref) for one-line adapters.
+"""
+htmxo_theme() = h.style("""
+@layer htmxo {
+    :where(:root) {
+        --htmxo-accent:  #4a90d9;
+        --htmxo-success: #2a9d8f;
+        --htmxo-warning: #e9a23b;
+        --htmxo-error:   #e76f51;
+        --htmxo-border:  currentColor;
+        --htmxo-muted:   color-mix(in srgb, currentColor 60%, transparent);
+    }
+}
+""")
+
+"""
+    pico_bridge()
+
+`<style>` block remapping `--htmxo-*` to Pico CSS's color tokens. Include
+once at the page level when an HTMXO app uses Pico CSS, so HTMXO components
+pick up the host's accent / borders / status colors. Loaded automatically by
+[`htmx`](@ref) when `pico_version` is non-`nothing`.
+"""
+pico_bridge() = h.style("""
+:root {
+    --htmxo-accent:  var(--pico-primary, #4a90d9);
+    --htmxo-success: var(--pico-color-green-550, #2a9d8f);
+    --htmxo-warning: var(--pico-color-amber-550, #e9a23b);
+    --htmxo-error:   var(--pico-color-red-550, #e76f51);
+    --htmxo-border:  var(--pico-border-color, currentColor);
+    --htmxo-muted:   var(--pico-muted-color, color-mix(in srgb, currentColor 60%, transparent));
+}
+""")
+
+"""
+    vitepress_bridge()
+
+`<style>` block remapping `--htmxo-*` to VitePress's brand/state tokens.
+Include in VitePress's `head` (via `config.mts`) when embedding HTMXO
+recordings/fragments inside docs pages, so HTMXO components match the docs
+theme automatically. Falls back to HTMXO defaults when a token is missing.
+"""
+vitepress_bridge() = h.style("""
+:root {
+    --htmxo-accent:  var(--vp-c-brand-1, #4a90d9);
+    --htmxo-success: var(--vp-c-success-1, #2a9d8f);
+    --htmxo-warning: var(--vp-c-warning-1, #e9a23b);
+    --htmxo-error:   var(--vp-c-danger-1, #e76f51);
+    --htmxo-border:  var(--vp-c-divider, currentColor);
+    --htmxo-muted:   var(--vp-c-text-3, color-mix(in srgb, currentColor 60%, transparent));
+}
+""")
+
 # --- Request feedback ---
 
 """
     request_feedback_style()
 
 CSS for automatic HTMX request feedback: pulsating border while in-flight,
-brief color flash on success/failure.
+brief color flash on success/failure. Themed via `--htmxo-accent`,
+`--htmxo-success`, `--htmxo-error` (see [`htmxo_theme`](@ref)).
 """
 request_feedback_style() = h.style("""
+@layer htmxo {
 @keyframes htmx-pulse {
-    0%, 100% { outline-color: color-mix(in srgb, #4a90d9 30%, transparent); }
-    50% { outline-color: #4a90d9; }
+    0%, 100% { outline-color: color-mix(in srgb, var(--htmxo-accent) 30%, transparent); }
+    50% { outline-color: var(--htmxo-accent); }
 }
 .htmx-request-active {
-    outline: 2px solid #4a90d9;
+    outline: 2px solid var(--htmxo-accent);
     outline-offset: -2px;
     animation: htmx-pulse 1s ease-in-out infinite;
 }
 .htmx-request-success {
-    outline: 2px solid #2a9d8f;
+    outline: 2px solid var(--htmxo-success);
     outline-offset: -2px;
     animation: htmx-fade-success 1s ease-out forwards;
 }
 .htmx-request-error {
-    outline: 2px solid #e76f51;
+    outline: 2px solid var(--htmxo-error);
     outline-offset: -2px;
     animation: htmx-fade-error 2s ease-out forwards;
 }
 @keyframes htmx-fade-success {
-    0% { outline-color: #2a9d8f; }
+    0% { outline-color: var(--htmxo-success); }
     100% { outline-color: transparent; }
 }
 @keyframes htmx-fade-error {
-    0% { outline-color: #e76f51; }
+    0% { outline-color: var(--htmxo-error); }
     100% { outline-color: transparent; }
+}
 }
 """)
 
@@ -3192,10 +3269,11 @@ are untouched. Auto-included by `htmx()`; inject manually via `extra_head`
 if you're building your own `<head>`.
 """
 tabset_styles() = h.style("""
+@layer htmxo {
 .tabset > nav {
     margin: 0;
     padding: 0 0 0 1rem;
-    border-bottom: 2px solid var(--pico-border-color, #888);
+    border-bottom: 2px solid var(--htmxo-border);
 }
 .tabset > nav ul {
     align-self: flex-end;
@@ -3218,14 +3296,15 @@ tabset_styles() = h.style("""
     text-decoration: none;
 }
 .tabset > nav ul li a.contrast {
-    border-color: var(--pico-border-color, #888);
+    border-color: var(--htmxo-border);
     background: transparent;
 }
 .tabset > .tab-panel {
     padding: 1rem;
-    border: 2px solid var(--pico-border-color, #888);
+    border: 2px solid var(--htmxo-border);
     border-top: none;
     border-radius: 0 0 0.35rem 0.35rem;
+}
 }
 """)
 
@@ -3315,7 +3394,16 @@ end
 
 # --- Status badge ---
 
-const _DEFAULT_STATUS_COLORS = (running="orange", finishing="orange", done="green", failed="red", pending="gray")
+# Default mapping uses the framework-agnostic `--htmxo-*` theme variables
+# (see `htmxo_theme`). Each entry provides a fallback color literal for
+# environments where the theme block isn't loaded (e.g. raw HTML excerpts).
+const _DEFAULT_STATUS_COLORS = (
+    running   = "var(--htmxo-warning, orange)",
+    finishing = "var(--htmxo-warning, orange)",
+    done      = "var(--htmxo-success, green)",
+    failed    = "var(--htmxo-error, red)",
+    pending   = "var(--htmxo-muted, gray)",
+)
 
 """
     status_badge(state::Symbol; colors=_DEFAULT_STATUS_COLORS, label=nothing)
@@ -3369,6 +3457,7 @@ Scoped class names, no global selectors. Auto-included by [`htmx`](@ref); inject
 manually via `extra_head` if you build your own `<head>`.
 """
 editor_styles() = h.style("""
+@layer htmxo {
 .htmxo-editor-input {
     font-family: monospace;
     font-size: 0.85em;
@@ -3378,6 +3467,7 @@ editor_styles() = h.style("""
     display: flex;
     gap: 0.5rem;
     margin-top: 0.5rem;
+}
 }
 """)
 
