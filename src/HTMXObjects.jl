@@ -1216,8 +1216,22 @@ end
 
 # Register a route handler directly on the HTTP router, bypassing Oxygen's
 # argument-name validation. We extract path params ourselves via positional URL segment indexing.
-_register_handler(method, path, handler) =
-    HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, handler)
+# Wraps the handler so that pending Revise errors are surfaced as the
+# framework's standard error article (see `_check_revise_errors!`) — this is
+# the single chokepoint for all HTTP route registrations, so the check
+# applies uniformly to plain, indexed, and `@include`'d routes. WebSocket
+# handlers go through `Oxygen.register` directly and are not covered.
+function _register_handler(method, path, handler)
+    wrapped = function(req)
+        try
+            _check_revise_errors!()
+        catch err
+            return _route_error_response(req, err, catch_backtrace())
+        end
+        handler(req)
+    end
+    HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, wrapped)
+end
 
 # --- Error handling ---
 
@@ -1253,6 +1267,36 @@ function _append_revise_errors(io)
         isnothing(bt) ? showerror(io, err) : showerror(io, err, bt)
         println(io)
     end
+end
+
+# If Revise has unresolved revision errors, throw — the existing per-route
+# try/catch turns it into an error article + log entry (with the queue
+# errors themselves appended via `_append_revise_errors`). Without this,
+# requests run silently against stale code whose latest edit failed to
+# revise, which routinely sends agents on phantom debugging chases.
+# Revise should only be loaded in dev, so this is safe to gate on
+# `_revise_module() !== nothing`.
+struct ReviseHasErrors <: Exception
+    files::Vector{String}
+end
+function Base.showerror(io::IO, e::ReviseHasErrors)
+    print(io, "Revise has ", length(e.files), " unresolved revision error(s); the running code is stale.")
+    println(io)
+    for f in e.files
+        println(io, "  - ", f)
+    end
+    print(io, "See the 'Pending Revise errors' section below for the failures, then fix them and re-request.")
+end
+function _check_revise_errors!()
+    rev = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), "Revise"), nothing)
+    isnothing(rev) && return
+    qe = try getfield(rev, :queue_errors) catch; return end
+    isempty(qe) && return
+    files = String[]
+    for k in keys(qe)
+        push!(files, string(k isa Tuple && length(k) >= 2 ? k[2] : k))
+    end
+    throw(ReviseHasErrors(files))
 end
 
 """
@@ -1554,7 +1598,7 @@ function _register_routes(T; prefix="", record_dir=nothing, parent_chain=Symbol[
                     end)
                 end
             elseif isempty(param_strs) && !has_kwargs && !info.indexed
-                register(CONTEXT[], method, path, function(req)
+                _register_handler(method, path, function(req)
                     local obj
                     try
                         obj = T(; __req__=req, _prefix_kw(mount_prefix)...)
