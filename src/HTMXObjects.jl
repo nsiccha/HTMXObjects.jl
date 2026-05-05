@@ -4437,15 +4437,18 @@ function gallery_toolbar(; search::Bool=true, pagination::Bool=true,
         placeholder=search_placeholder,
         autocomplete="off"))
     if pagination
-        ps_options = [(v == 0 ? h.option("all"; value="0", selected=(v == page_size)) :
-                                h.option(string(v); value=string(v), selected=(v == page_size)))
+        # `selected` is a boolean HTML attribute — its mere presence
+        # selects, regardless of value. Only emit it on the matching
+        # option (and via `selected="selected"` so renderers that
+        # require a string value still emit the attribute).
+        _opt(label, value) = (value == string(page_size)) ?
+            h.option(label; value=value, selected="selected") :
+            h.option(label; value=value)
+        ps_options = [v == 0 ? _opt("all", "0") : _opt(string(v), string(v))
                       for v in page_sizes]
         push!(parts, h.div(; class="htmxo-gallery-pagination")(
-            h.label("Page size: ";
-                class="htmxo-gallery-page-size-label",
-                for_="htmxo-gallery-page-size"),
-            h.select(; class="htmxo-gallery-page-size",
-                       id="htmxo-gallery-page-size")(ps_options...),
+            h.span("Page size: "; class="htmxo-gallery-page-size-label"),
+            h.select(; class="htmxo-gallery-page-size")(ps_options...),
             h.button("←"; type="button", class="htmxo-gallery-prev",
                      aria_label="Previous page"),
             h.span("Page 1"; class="htmxo-gallery-page-info"),
