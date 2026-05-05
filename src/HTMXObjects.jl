@@ -2386,22 +2386,13 @@ end
 # handler's normal save_response side effects still run.
 function _drive_record_path(router, path::AbstractString, headers)
     req = HTTP.Request("GET", path, headers, UInt8[])
-    found = try
-        HTTP.Handlers.gethandler(router, req)
-    catch e
-        @warn "record!: gethandler failed" path exception=(e, catch_backtrace())
-        return
-    end
+    found = HTTP.Handlers.gethandler(router, req)
     handler = first(found)
     if handler === HTTP.Handlers.default404 || handler === nothing
         @warn "record!: no route registered" path
         return
     end
-    try
-        handler(req)
-    catch e
-        @warn "record!: handler threw" path headers exception=(e, catch_backtrace())
-    end
+    handler(req)
 end
 
 # Recording shims. Implementation is held in mutable `Ref`s so the

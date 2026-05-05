@@ -69,30 +69,26 @@ end
         # routes that pass `?plain` cleanly through to_markdown_string.
         # Construct a fresh registered app and record the index + a few
         # items.
-        try
-            paths = ["/items", ["/item/$(it.id)" for it in gallery.items]...]
-            # Ad-hoc: mount a copy of THIS struct under /gd and record it.
-            # (record! re-registers via route!, so it'd clobber our running
-            # routes if we reused __self__. Use a separate mounted prefix.)
-            record!(GalleryDemoRoutes(; __appdata__=__appdata__);
-                    record_dir=out_dir,
-                    record_base="/gallery_demo_recordings",
-                    paths)
-            files = String[]
-            for (root, _, fs) in walkdir(out_dir)
-                for f in fs
-                    push!(files, relpath(joinpath(root, f), out_dir))
-                end
+        paths = ["/items", ["/item/$(it.id)" for it in gallery.items]...]
+        # Ad-hoc: mount a copy of THIS struct under /gd and record it.
+        # (record! re-registers via route!, so it'd clobber our running
+        # routes if we reused __self__. Use a separate mounted prefix.)
+        record!(GalleryDemoRoutes(; __appdata__=__appdata__);
+                record_dir=out_dir,
+                record_base="/gallery_demo_recordings",
+                paths)
+        files = String[]
+        for (root, _, fs) in walkdir(out_dir)
+            for f in fs
+                push!(files, relpath(joinpath(root, f), out_dir))
             end
-            sort!(files)
-            h.div(
-                h.h2("record! produced:"),
-                h.p(h.code(out_dir)),
-                h.ul([h.li(h.code(f)) for f in files]...),
-            )
-        catch err
-            h.div(h.h2("record! threw"), h.pre(sprint(showerror, err)))
         end
+        sort!(files)
+        h.div(
+            h.h2("record! produced:"),
+            h.p(h.code(out_dir)),
+            h.ul([h.li(h.code(f)) for f in files]...),
+        )
     end
 
     @get recorded = let
