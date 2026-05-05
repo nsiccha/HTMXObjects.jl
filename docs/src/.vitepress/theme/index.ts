@@ -16,6 +16,11 @@ import Banner from '@/Banner.vue'
 
 import { enhanceAppWithTabs } from 'vitepress-plugin-tabs/client'
 
+// Synced from HTMXObjects/assets/vitepress/htmxo-embed.ts by
+// `HTMXObjects.vitepress_theme_install` in make.jl. Don't edit in place
+// — edit the upstream and re-run make.jl.
+import { setupHtmxoEmbed } from './htmxo-embed'
+
 import '@nolebase/vitepress-plugin-enhanced-readabilities/client/style.css'
 import './style.css' // You could setup your own, or else a default will be copied.
 import './docstrings.css' // You could setup your own, or else a default will be copied.
@@ -37,16 +42,9 @@ export const Theme: ThemeConfig = {
     app.component('VersionPicker', VersionPicker);
     app.component('AuthorBadge', AuthorBadge)
     app.component('Authors', Authors)
-    // VitePress is an SPA: `<div hx-trigger="load">` placeholders only fire
-    // on the initial mount. After client-side navigation between docs pages,
-    // any new HTMX placeholders need a manual `htmx.process(document.body)`
-    // to be picked up. Hook the after-route-change event for that.
-    if (typeof window !== 'undefined' && router) {
-      router.onAfterRouteChanged = () => {
-        // @ts-ignore - htmx is loaded via a `<script>` tag in head, no types.
-        if (window.htmx) window.htmx.process(document.body);
-      };
-    }
+    // HTMXObjects embed wiring: data-hx-base resolution + SPA route
+    // re-process + .htmxo-embed link rewriting.
+    setupHtmxoEmbed(router);
   }
 }
 export default Theme
