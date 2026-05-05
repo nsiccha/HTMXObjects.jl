@@ -5,7 +5,8 @@ export create_app
 export HTTP, queryparams, formdata
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
-export route!, record!, to_response, save_response, static_transform, MIMEResponse
+export route!, record!, to_response, save_response, static_transform, MIMEResponse,
+    RecordingState, RecordingRoutes, RECORDING_STATE
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -14,8 +15,10 @@ export wants_markdown, wants_errors, markdown_response, e, filter_errors, render
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles, GitRepo, EditorRoutes
-export htmxo_theme, pico_bridge, vitepress_bridge
-export GalleryItem, Gallery, gallery_grid, default_gallery_card, find_item, section_items, parse_gallery_metadata
+export htmxo_theme, pico_bridge, vitepress_bridge,
+    vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
+    vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
+export GalleryItem, Gallery, gallery_grid, default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -960,7 +963,7 @@ function htmx(args...;
             # so any subsequent `:root { --htmxo-...: ... }` (host-supplied or
             # via `pico_bridge` / `vitepress_bridge`) wins automatically.
             htmxo_theme(),
-            isnothing(pico_version) ? () : pico_bridge(),
+            (isnothing(pico_version) ? () : (pico_bridge(),))...,
             (feedback ? request_feedback() : ())...,
             tabset_styles(),
             editor_styles(),
@@ -1853,8 +1856,13 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         end
     end
 
-    # Opt-out: route already produced a response
+    # Opt-out: route already produced a response. `MIMEResponse` is
+    # the framework-level escape hatch for routes returning a non-HTML
+    # body (JS, JSON, CSS, …) — it must NOT be wrapped in `__page__`
+    # since the page wrapper would emit `<html>…</html>` around the
+    # raw bytes and break the Content-Type contract.
     val isa HTTP.Response && return val
+    val isa MIMEResponse && return to_response(val)
 
     # Error filter: keep only data-error nodes (applied before markdown/rich)
     if wants_errors(req)
@@ -2370,6 +2378,32 @@ function _drive_record_path(router, path::AbstractString, headers)
     end
 end
 
+# Recording shims. Implementation is held in mutable `Ref`s so the
+# Treebars extension can swap them in at `__init__` time without
+# triggering Julia's "method overwriting during precompile" rule
+# (which forbids redefining same-signature methods across the core
+# and an extension). Without the ext: each shim no-ops or runs
+# synchronously — the route returns the summary article in one go.
+# With the ext loaded: each Ref points at a `Treebars.*` call, so
+# the route renders a live `polling_fetchindex` tree while recording
+# runs.  The actual `RecordingState` / `RecordingRoutes` definitions
+# live below `_reroute!` because the `@htmx` macro interpolates
+# `_reroute!` at expansion time.
+const _recording_progress_init_impl  = Ref{Any}(() -> nothing)
+const _recording_progress_phase_impl = Ref{Any}((parent, description) -> nothing)
+const _recording_run_phase_impl      = Ref{Any}((f, phase) -> f(phase))
+const _recording_polling_impl        = Ref{Any}(
+    (render_result, ip, indices...; poll_url=nothing, label=nothing,
+        force::Bool=false, poll_interval=nothing, cancel_url=nothing, kwargs...) ->
+        render_result(ip(indices...; kwargs...))
+)
+
+_recording_progress_init()  = _recording_progress_init_impl[]()
+_recording_progress_phase(parent, description::AbstractString) =
+    _recording_progress_phase_impl[](parent, description)
+_recording_run_phase(f, phase) = _recording_run_phase_impl[](f, phase)
+_recording_polling(args...; kwargs...) = _recording_polling_impl[](args...; kwargs...)
+
 # Called by @htmx macro expansion — re-registers routes when Revise updates the struct
 function _reroute!(T::DataType)
     if haskey(_registered_types, T)
@@ -2395,6 +2429,106 @@ end
 # (overwrites), so re-running this on initial load too is harmless.
 for T in collect(keys(_registered_types))
     _reroute!(T)
+end
+
+# --- Recording: state + mountable routes ---
+
+@dynamicstruct struct RecordingState
+    __status__ = _recording_progress_init()
+
+    # Drive `record!` against a fresh app of `app_type`, one path at a
+    # time, with a per-path phase marker so the progress tree shows
+    # full per-path state (pending → running → finished) when Treebars
+    # is loaded. The IP runs once per (app_type, paths, record_dir,
+    # record_base) tuple thanks to `:parallel` cache; `?force=true` on
+    # the route invalidates and re-runs.
+    record(app_type::DataType, paths::Tuple, record_dir::String, record_base::String) = begin
+        phases = [_recording_progress_phase(__status__, p) for p in paths]
+        # Clean slate so stale files from a previous run don't pollute
+        # the output. The recording closures rebuild everything we
+        # care about.
+        isdir(record_dir) && rm(record_dir; recursive=true)
+        mkpath(record_dir)
+        # Install recording closures once; restore live (non-recording)
+        # routes via the `finally` so subsequent live requests don't
+        # keep writing to disk.
+        app = app_type()
+        route!(app; record_dir, record_base)
+        try
+            router = CONTEXT[].service.router
+            for (p, phase) in zip(paths, phases)
+                _recording_run_phase(phase) do _
+                    _drive_record_path(router, p, Pair{String,String}[])
+                    _drive_record_path(router, p, ["HX-Request" => "true"])
+                end
+            end
+        finally
+            route!(app)
+        end
+        n_html = n_js = n_json = n_other = 0
+        for (_, _, files) in walkdir(record_dir)
+            for f in files
+                ext = lowercase(splitext(f)[2])
+                if     ext == ".html" n_html += 1
+                elseif ext == ".js"   n_js   += 1
+                elseif ext == ".json" n_json += 1
+                else                  n_other += 1
+                end
+            end
+        end
+        (; n_paths=length(paths), n_html, n_js, n_json, n_other, record_dir)
+    end
+end
+
+const RECORDING_STATE = RecordingState(; cache_type=:parallel)
+
+"""
+    @include record_gallery = RecordingRoutes(;
+        app_type=AppContext,
+        paths=String["/", "/page", "/plot/foo"],
+        record_dir="docs/src/public/live-app",
+        record_base="/MyPkg.jl/dev/live-app",
+    )
+
+Mountable routes for the docs-build flow. Provides one route at the
+mount prefix:
+
+  GET <prefix>/         — fires the recording IP. `?force=true`
+                          invalidates the cache and re-records.
+                          With Treebars loaded, returns a live
+                          `polling_fetchindex` progress tree until
+                          done; without it, blocks until done and
+                          returns the summary article.
+"""
+@htmx struct RecordingRoutes
+    app_type::DataType
+    paths::Vector{String} = String["/"]
+    record_dir::String
+    record_base::String = ""
+    label::String = "Recording"
+
+    @get index(; force::Bool=false) = _recording_polling(
+            RECORDING_STATE.record, app_type, Tuple(paths), record_dir, record_base;
+            poll_url=query_url(__route__),
+            label,
+            force) do summary
+        h.article(
+            h.header(h.h2("Recording done")),
+            h.p("Wrote ", h.code(string(summary.n_paths)),
+                " routes (× full + HX shapes) into ", h.code(summary.record_dir), "."),
+            h.ul(
+                h.li(h.code(string(summary.n_html)),  "  .html"),
+                h.li(h.code(string(summary.n_js)),    "  .js"),
+                h.li(h.code(string(summary.n_json)),  "  .json"),
+                h.li(h.code(string(summary.n_other)), "  other"),
+            ),
+            h.p(h.strong("Next: "),
+                h.code("git add $(summary.record_dir) && git commit && git push"),
+                " — CI deploys the rest."),
+            h.p("Re-record (overwrites cache): ",
+                h.a("?force=true"; href=query_url(__route__; force=true))),
+        )
+    end
 end
 
 # --- App scaffolding ---
@@ -3440,6 +3574,114 @@ vitepress_bridge() = h.style("""
 }
 """)
 
+# --- VitePress integration helpers ---
+
+const _VITEPRESS_ASSETS_DIR = joinpath(dirname(@__DIR__), "assets", "vitepress")
+
+"""
+    vitepress_asset_dir() -> String
+
+Absolute path of the bundled VitePress assets directory inside HTMXObjects.
+Contains `htmxo-embed.ts`, the canonical theme module that powers
+`<div data-hx-base="…">` placeholders and `.htmxo-embed` link rewriting.
+"""
+vitepress_asset_dir() = abspath(_VITEPRESS_ASSETS_DIR)
+
+"""
+    vitepress_theme_install(theme_dir; force=true) -> String
+
+Copy the bundled `htmxo-embed.ts` into a VitePress theme directory.
+Call from `make.jl` before DocumenterVitepress runs:
+
+    HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
+
+Then in the theme's `index.ts`:
+
+    import { setupHtmxoEmbed } from './htmxo-embed';
+    // …inside enhanceApp({ router }):
+    setupHtmxoEmbed(router);
+
+Returns the destination path. Overwrites by default so the asset stays in
+sync with the installed HTMXObjects version.
+"""
+function vitepress_theme_install(theme_dir::AbstractString; force::Bool=true)
+    isdir(theme_dir) || mkpath(theme_dir)
+    asset_dir = vitepress_asset_dir()
+    dst_dir = abspath(theme_dir)
+    # All sibling assets in `assets/vitepress/` get mirrored — currently
+    # `htmxo-embed.ts` (the embed wiring) and `htmxo-gallery.css` (the
+    # canonical gallery layout). Both load together because
+    # `htmxo-embed.ts` does a side-effect `import './htmxo-gallery.css'`.
+    for f in ("htmxo-embed.ts", "htmxo-gallery.css", "htmxo-syntax.css")
+        cp(joinpath(asset_dir, f), joinpath(dst_dir, f); force)
+    end
+    joinpath(dst_dir, "htmxo-embed.ts")
+end
+
+"""
+    htmxo_embed_html(; base, swap="innerHTML", placeholder="Loading…", class_="htmxo-embed")
+
+Build the placeholder `<div>` that `setupHtmxoEmbed` resolves at runtime.
+`base` is the path suffix below the deploy abspath (e.g. `"live-aov/"`)
+— in dev it resolves to `"/<base>"` (Vite proxy), in prod to
+`"<deploy-abspath>/<base>"` (committed recordings).
+
+Use as a Cobweb `Node` from a Julia-driven page, or stringify and embed
+in markdown:
+
+    println(io, htmxo_embed_html(; base="live-aov/"))
+"""
+htmxo_embed_html(; base::AbstractString,
+                   swap::AbstractString="innerHTML",
+                   placeholder::AbstractString="Loading…",
+                   class_::AbstractString="htmxo-embed") =
+    h.div(; class=class_, data_hx_base=base, hx_trigger="load", hx_swap=swap)(
+        h.em(placeholder),
+    )
+
+"""
+    vitepress_theme_enhanceapp_snippet() -> String
+
+The canonical TS snippet to paste into a VitePress theme's
+`enhanceApp({ router })`. Already split into the import line and the
+function call so it slots into existing themes without restructuring.
+"""
+vitepress_theme_enhanceapp_snippet() = """
+// At the top of theme/index.ts:
+import { setupHtmxoEmbed } from './htmxo-embed';
+
+// Inside enhanceApp({ router }):
+setupHtmxoEmbed(router);
+"""
+
+"""
+    vitepress_head_scripts(; htmx_version="2.0.8") -> String
+
+The canonical `head` entries for VitePress's `config.mts` — loads
+HTMX from the jsdelivr CDN. Paste into the `head: [ … ]` list.
+"""
+vitepress_head_scripts(; htmx_version::AbstractString="2.0.8") = """
+    ['script', { src: 'https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js' }],
+"""
+
+"""
+    vitepress_proxy_config(; prefix="/live-htmxo", target_env="HTMXO_DEV_TARGET",
+                              default_target="http://localhost:8101") -> String
+
+The canonical `vite.server.proxy` entry forwarding `<prefix>/*` to a
+running HTMXObjects app during `vitepress dev`. In production the same
+markdown is backed by static recordings, so no proxy is needed.
+"""
+vitepress_proxy_config(; prefix::AbstractString="/live-htmxo",
+                         target_env::AbstractString="HTMXO_DEV_TARGET",
+                         default_target::AbstractString="http://localhost:8101") = """
+        '$prefix': {
+            target: process.env.$target_env || '$default_target',
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^$prefix/, ''),
+        }
+"""
+
 # --- Request feedback ---
 
 """
@@ -4110,8 +4352,7 @@ host page level — the layer is unscoped so any host wins automatically.
 """
 function gallery_grid(items::AbstractVector{GalleryItem};
         section_titles::AbstractDict=Dict{String,String}(),
-        card_renderer=default_gallery_card,
-        columns::Int=4)
+        card_renderer=default_gallery_card)
     seen = String[]
     groups = Dict{String,Vector{GalleryItem}}()
     for it in items
@@ -4123,12 +4364,9 @@ function gallery_grid(items::AbstractVector{GalleryItem};
     end
     sections = map(seen) do sec
         title = get(section_titles, sec, sec)
-        h.div(; class="htmxo-gallery-section")(
+        h.section(; class="htmxo-gallery-section")(
             h.h3(title; class="htmxo-gallery-section-heading"),
-            h.div(; class="htmxo-gallery-grid",
-                  style="display:grid; grid-template-columns:repeat($columns, 1fr); gap:0.5rem;")(
-                [card_renderer(it) for it in groups[sec]]...
-            ),
+            [card_renderer(it) for it in groups[sec]]...,
         )
     end
     h.div(; class="htmxo-gallery")(sections...)
@@ -4137,22 +4375,63 @@ end
 """
     default_gallery_card(item::GalleryItem)
 
-Default card layout: title + description + collapsible code block. No
-rich rendering of the item value — apps wrap this with their own
+Default card layout: title heading + description (always visible) +
+inline source code block. No collapsible details — important info
+is visible directly. Apps wrap this with their own
 `card_renderer = item -> h.article(default_gallery_card(item),
 my_render(item))` to add Vega-Lite plots, PPC plots, etc.
 """
 default_gallery_card(item::GalleryItem) = h.article(; class="htmxo-gallery-card")(
-    h.header(; class="htmxo-gallery-card-header")(
-        h.a(item.title; href="#" * item.id, class="htmxo-gallery-card-title"),
+    h.h4(; class="htmxo-gallery-card-title")(
+        h.a(item.title; href="#" * item.id),
     ),
     isempty(item.description) ? h.span() :
         h.p(item.description; class="htmxo-gallery-card-description"),
-    h.details(; class="htmxo-gallery-card-code")(
-        h.summary("Code"),
-        h.pre(h.code(item.code_string)),
-    ),
+    h.pre(h.code(item.code_string); class="htmxo-gallery-card-code"),
 )
+
+"""
+    htmxo_gallery_styles()
+
+`<style>` block with the canonical gallery layout: single-column,
+flat (no card frame), proper heading hierarchy, themed via `--htmxo-*`
+tokens. Include via `extra_head` in `htmx(...)` so all HTMXO apps
+present galleries the same way.
+
+Source of truth is
+`HTMXObjects/assets/vitepress/htmxo-gallery.css` — same file is
+imported by `htmxo-embed.ts` so the docs-embedded fragment matches.
+"""
+htmxo_gallery_styles() = h.style(
+    read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-gallery.css"), String))
+
+"""
+    htmxo_syntax_head(; languages=("julia", "stan"))
+
+Head elements (script tags + theme-aware `<style>`) for client-side
+PrismJS syntax highlighting that flips with the host theme
+(VitePress `html.dark`, Pico `data-theme="dark"`). Any `<code
+class="language-…">` that PrismJS recognizes will be tokenized; the
+token coloring uses `--htmxo-syntax-*` CSS variables which adapt
+automatically.
+
+Use as a splat in `extra_head=` of `htmx(...)`:
+
+    extra_head=(htmxo_gallery_styles(), htmxo_syntax_head()...)
+
+The same token CSS gets shipped to docs themes via
+`vitepress_theme_install` (alongside `htmxo-embed.ts`/`htmxo-gallery.css`)
+so embedded fragments inherit the theme-aware coloring without
+needing the script tags from the fragment to execute (which they
+wouldn't, since `innerHTML` swaps don't run scripts).
+"""
+function htmxo_syntax_head(; languages=("julia", "stan"))
+    base = "https://cdn.jsdelivr.net/npm/prismjs@1"
+    syntax_css = read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-syntax.css"), String)
+    (h.script(; src="$base/prism.min.js"),
+     (h.script(; src="$base/components/prism-$lang.min.js") for lang in languages)...,
+     h.style(syntax_css))
+end
 
 @dynamicstruct struct GitRepo
     path::String
