@@ -213,12 +213,12 @@ function tests_html_table(tests_mod; prefix="/tests")
     counts = _summary_counts(tests_mod)
     rows = map(TestModules.test_names(tests_mod)) do name
         s = format_test_status(tests_mod, name)
-        color = s.status == "pass" ? "green" : s.status == "fail" ? "red" : s.status == "error" ? "orange" : "gray"
+        color_class = s.status == "pass" ? "u-text-success" : s.status == "fail" ? "u-text-error" : s.status == "error" ? "u-text-warning" : "u-text-muted"
         detail_cell = if !isempty(s.error_detail)
             h.td(
                 h.details(
-                    h.summary(; style=s.status == "error" ? "font-size:0.8em;color:orange;cursor:pointer" : "cursor:pointer")(s.detail),
-                    h.pre(; style="font-size:0.75em;max-height:300px;overflow:auto;white-space:pre-wrap;margin-top:0.5em")(_html_escape(s.error_detail)),
+                    h.summary(; class=s.status == "error" ? "u-text-xs u-text-warning u-pointer" : "u-pointer")(s.detail),
+                    h.pre(; class="u-text-xs u-scroll-y u-pre-wrap u-mt-2")(_html_escape(s.error_detail)),
                 ),
             )
         else
@@ -226,7 +226,7 @@ function tests_html_table(tests_mod; prefix="/tests")
         end
         h.tr(
             h.td(string(name)),
-            h.td(s.icon; style="color:$color;font-weight:bold"),
+            h.td(s.icon; class="$color_class u-text-bold"),
             detail_cell,
             h.td(s.duration),
             h.td(s.age),
@@ -242,12 +242,12 @@ function tests_html_table(tests_mod; prefix="/tests")
     summary_text = join(summary_parts, ", ") * " ($(counts.total) total)"
 
     h.div(; id="tests-container")(
-        h.div(; style="margin-bottom:1rem")(
-            h.button("Run All"; hx_post="$(prefix)/run_all", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
-            h.button("Run Missing"; hx_post="$(prefix)/run_missing", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
-            h.button("Run Failed"; hx_post="$(prefix)/run_failed", hx_target="#tests-container", hx_swap="innerHTML", style="margin-right:0.5rem"),
+        h.div(; class="u-mb-4")(
+            h.button("Run All"; hx_post="$(prefix)/run_all", hx_target="#tests-container", hx_swap="innerHTML", class="u-mr-2"),
+            h.button("Run Missing"; hx_post="$(prefix)/run_missing", hx_target="#tests-container", hx_swap="innerHTML", class="u-mr-2"),
+            h.button("Run Failed"; hx_post="$(prefix)/run_failed", hx_target="#tests-container", hx_swap="innerHTML", class="u-mr-2"),
             h.button("Clear Cache"; hx_post="$(prefix)/clear_cache", hx_target="#tests-container", hx_swap="innerHTML"),
-            h.span(; style="margin-left:1rem;font-size:0.9em;color:#666")(summary_text),
+            h.span(; class="u-ml-4 u-text-sm u-text-muted")(summary_text),
         ),
         h.table(; role="grid")(
             h.thead(h.tr(h.th("Test"), h.th("Status"), h.th("Detail"), h.th("Duration"), h.th("Age"), h.th("Action"))),

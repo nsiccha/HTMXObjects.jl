@@ -37,7 +37,7 @@ end
     @get index = begin
         max_ms = maximum(timings.mean_ms)
         bar_w(v) = round(Int, 400 * v / max_ms)
-        bars = h.svg(; width=480, height=20*nrow(timings)+10, style="background:#f8f8f8")(
+        bars = h.svg(; width=480, height=20*nrow(timings)+10, class="u-bg-soft")(
             [h.g()(
                 h.rect(; x=80, y=20*(i-1)+5, width=bar_w(timings.mean_ms[i]), height=14, fill="#3b82f6"),
                 h.text(timings.stage[i]; x=5, y=20*(i-1)+16, font_size=12),

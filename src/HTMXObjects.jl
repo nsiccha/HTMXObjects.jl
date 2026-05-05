@@ -14,7 +14,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles, GitRepo, EditorRoutes
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -966,6 +966,7 @@ function htmx(args...;
             htmxo_theme(),
             (isnothing(pico_version) ? () : (pico_bridge(),))...,
             (feedback ? request_feedback() : ())...,
+            htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
             extra_head...,
@@ -2935,7 +2936,7 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     isnothing(id) && (id = "tbl-" * string(hash(cols), base=16))
 
     headers = if sortable
-        [h.th(string(c); onclick="sortTable($(i-1), this)", style="cursor:pointer")
+        [h.th(string(c); onclick="sortTable($(i-1), this)", class="u-pointer")
          for (i, c) in enumerate(cols)]
     else
         [h.th(string(c)) for c in cols]
@@ -3076,9 +3077,10 @@ _is_form_attr(k) = startswith(String(k), "hx_") || k in (:id, :class, :style, :e
 function _form(method, url, children...; label="Submit", btn_class="btn", confirm="", form_class="", kwargs...)
     form_kw = filter(((k, _),) -> _is_form_attr(k), pairs(kwargs))
     hidden_kw = filter(((k, _),) -> !_is_form_attr(k), pairs(kwargs))
+    merged_class = isempty(form_class) ? "u-inline" : "u-inline $form_class"
     base_attrs = filter(((_, v),) -> !isempty(string(v)), pairs((;
-        method => url, style="display:inline",
-        hx_confirm=confirm, class=form_class,
+        method => url,
+        hx_confirm=confirm, class=merged_class,
     )))
     btn = isnothing(label) ? [] : [h.button(; class=btn_class, type="submit")(label)]
     h.form(; base_attrs..., form_kw...)(
@@ -3306,7 +3308,7 @@ A labeled `<select>` wrapped in a `<label>`. Each element of `options` is render
 via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
 
 When `show_when=(field, op, value)` is set, the label gets `data-show-when-*`
-attributes and `style="display:none"`. Include [`show_when_script`](@ref) once per
+attributes and `class="u-hidden"`. Include [`show_when_script`](@ref) once per
 page to wire up the client-side visibility logic.
 """
 sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
@@ -3346,7 +3348,7 @@ sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
             ]...; id=sel_id, name, aria_label=label, kwargs...),
             h.span(
                 h.input(; id=inp_id, type="text", placeholder,
-                    style="min-width:0;flex:1",
+                    class="u-grow",
                     onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click()}"),
                 h.button("Add"; type="button", onclick="""
                     (function(){
@@ -3361,7 +3363,7 @@ sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
                         sel.dispatchEvent(new Event('change',{bubbles:true}));
                     })()
                 """);
-                style="display:flex;gap:0.25em;margin-top:0.25em"
+                class="u-flex-tight u-mt-1"
             )
         );
         show_attrs...
@@ -3396,7 +3398,7 @@ rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_w
             ainput(nv; type="range", value, min, max, step,
                 oninput="this.nextElementSibling.textContent=this.value", kwargs...),
             h.output(string(value));
-            style="display:flex;align-items:center;gap:0.5ch"
+            class="u-flex-tight"
         );
         show_attrs...
     )
@@ -3488,7 +3490,7 @@ function _show_when_attrs((field, op, value))
     (;  data_show_when_field=string(field),
         data_show_when_op=op_name,
         data_show_when_value=string(value),
-        style="display:none")
+        class="u-hidden")
 end
 
 """
@@ -3515,7 +3517,7 @@ show_when_script() = h.script(raw"""
              : op === 'startswith' ? cv.startsWith(val)
              : op === 'endswith' ? cv.endsWith(val)
              : false;
-    el.style.display = show ? '' : 'none';
+    el.classList.toggle('u-hidden', !show);
   }
   function initShowWhen(root) {
     (root || document).querySelectorAll('[data-show-when-field]').forEach(function(el) {
@@ -3706,6 +3708,105 @@ vitepress_proxy_config(; prefix::AbstractString="/live-htmxo",
             rewrite: (path) => path.replace(/^$prefix/, ''),
         }
 """
+
+# --- Utility classes ---
+
+"""
+    htmxo_utility_styles()
+
+`<style>` block with HTMXO's small utility-class set. Replaces inline
+`style="..."` on common patterns: visibility, cursor, flex/grid layout,
+spacing, typography, and theme-aware text colors. All classes are scoped
+under `@layer htmxo` so host stylesheets always win on conflict.
+
+Class prefixes:
+- `u-`            general utilities (display, layout, typography, spacing)
+- `u-text-*`      semantic text colors mapped to `--htmxo-*` tokens
+- `u-mt-*` etc.   margin / padding scale: `0`, `1` (0.25rem), `2` (0.5rem),
+                  `3` (0.75rem), `4` (1rem), `5` (1.5rem), `6` (2rem)
+"""
+htmxo_utility_styles() = h.style("""
+@layer htmxo {
+.u-hidden { display: none; }
+.u-inline { display: inline; }
+.u-inline-block { display: inline-block; }
+.u-block { display: block; }
+.u-flex { display: flex; align-items: center; gap: 0.5rem; }
+.u-flex-tight { display: flex; align-items: center; gap: 0.25rem; }
+.u-flex-wide { display: flex; align-items: center; gap: 1rem; }
+.u-flex-wrap { flex-wrap: wrap; }
+.u-flex-between { display: flex; justify-content: space-between; align-items: center; }
+.u-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.u-stack-tight { display: flex; flex-direction: column; gap: 0.25rem; }
+.u-stack-wide { display: flex; flex-direction: column; gap: 1rem; }
+.u-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.u-grid-auto { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
+.u-bg-soft { background: var(--pico-card-background-color, #f8f8f8); }
+.u-btn-sm { padding: 0.3rem 0.8rem; }
+.u-btn-xs { padding: 0.2rem 0.6rem; }
+.u-input-grow { flex: 1; min-width: 20rem; max-width: 500px; }
+.u-link-plain { text-decoration: none; color: inherit; }
+.u-my-2 { margin: 0.5rem 0; }
+.u-my-1 { margin: 0.25rem 0; }
+.u-my-4 { margin: 1rem 0; }
+.u-pointer { cursor: pointer; }
+.u-w-full { width: 100%; }
+.u-grow { flex: 1; min-width: 0; }
+.u-min-w-0 { min-width: 0; }
+.u-narrow { max-width: 900px; }
+.u-truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.u-pre-wrap { white-space: pre-wrap; }
+.u-mono { font-family: monospace; }
+.u-no-border { border: none; }
+.u-text-bold { font-weight: bold; }
+.u-text-normal { font-weight: normal; }
+.u-text-xs { font-size: 0.75em; }
+.u-text-sm { font-size: 0.85em; }
+.u-text-lg { font-size: 1.1em; }
+.u-text-muted { color: var(--htmxo-muted); }
+.u-text-success { color: var(--htmxo-success); }
+.u-text-error { color: var(--htmxo-error); }
+.u-text-warning { color: var(--htmxo-warning); }
+.u-text-accent { color: var(--htmxo-accent); }
+.u-text-center { text-align: center; }
+.u-text-left { text-align: left; }
+.u-text-right { text-align: right; }
+.u-mt-0 { margin-top: 0; }
+.u-mt-1 { margin-top: 0.25rem; }
+.u-mt-2 { margin-top: 0.5rem; }
+.u-mt-3 { margin-top: 0.75rem; }
+.u-mt-4 { margin-top: 1rem; }
+.u-mt-5 { margin-top: 1.5rem; }
+.u-mt-6 { margin-top: 2rem; }
+.u-mb-0 { margin-bottom: 0; }
+.u-mb-1 { margin-bottom: 0.25rem; }
+.u-mb-2 { margin-bottom: 0.5rem; }
+.u-mb-3 { margin-bottom: 0.75rem; }
+.u-mb-4 { margin-bottom: 1rem; }
+.u-mb-5 { margin-bottom: 1.5rem; }
+.u-mb-6 { margin-bottom: 2rem; }
+.u-ml-1 { margin-left: 0.25rem; }
+.u-ml-2 { margin-left: 0.5rem; }
+.u-ml-4 { margin-left: 1rem; }
+.u-mr-1 { margin-right: 0.25rem; }
+.u-mr-2 { margin-right: 0.5rem; }
+.u-mr-3 { margin-right: 0.75rem; }
+.u-m-0 { margin: 0; }
+.u-p-0 { padding: 0; }
+.u-p-2 { padding: 0.5rem; }
+.u-p-4 { padding: 1rem; }
+.u-sticky-top { position: sticky; top: 0; max-height: 100vh; overflow-y: auto; }
+.u-scroll-y { max-height: 300px; overflow: auto; }
+.u-scroll-y-lg { max-height: 400px; overflow: auto; }
+.u-card { background: var(--pico-card-background-color, transparent); padding: 1rem; border-radius: 0.5rem; }
+.u-code-block { background: var(--pico-code-background-color, #f6f8fa); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; }
+.u-status-callout { padding: 0.5rem 1rem; margin-bottom: 0.5rem; min-width: 0; overflow: hidden; background: var(--pico-card-background-color, transparent); border-left: 4px solid var(--htmxo-border); }
+.u-status-callout.u-status-success { border-left-color: var(--htmxo-success); }
+.u-status-callout.u-status-error   { border-left-color: var(--htmxo-error); }
+.u-status-callout.u-status-warning { border-left-color: var(--htmxo-warning); }
+.u-status-callout.u-status-accent  { border-left-color: var(--htmxo-accent); }
+}
+""")
 
 # --- Request feedback ---
 
@@ -3917,11 +4018,9 @@ Mixed (eager + lazy):
 """
 function _tabset_panel(content::AbstractString, i, active)
     # String content = URL → lazy load via hx-get on first reveal
-    base_style = i == active ? "width:100%;" : "display:none; width:100%;"
     h.div(;
-        class="tab-panel",
+        class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
-        style=base_style,
         hx_get=content,
         hx_trigger="revealed once",
         hx_swap="innerHTML",
@@ -3930,9 +4029,8 @@ end
 function _tabset_panel(content, i, active)
     # Non-string content = eager render
     h.div(content;
-        class="tab-panel",
+        class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
-        style = i == active ? "width:100%;" : "display:none; width:100%;",
     )
 end
 
@@ -3949,8 +4047,8 @@ tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id,
                     remove .secondary from me
                     add .contrast to me
                     set panel to my @data-panel
-                    hide <div.tab-panel/> in closest <div/>
-                    show <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
+                    add .u-hidden to <div.tab-panel/> in closest <div/>
+                    remove .u-hidden from <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
                 ",
                 data_panel="tab-$i",
             ))
@@ -4022,7 +4120,7 @@ Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active
     nav_sidebar(["Overview" => "/overview", "Settings" => "/settings"]; prefix="/app")
 """
 function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
-    h.aside(; style="max-height:100vh; overflow-y:auto; position:sticky; top:0;")(
+    h.aside(; class="u-sticky-top")(
         h.nav(
             h.ul(
                 [h.li(h.a(label;
