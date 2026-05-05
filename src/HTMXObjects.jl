@@ -3061,7 +3061,7 @@ to pass parameters to `@post` routes via `formdata`:
 """
 _hidden_input(k, v) = [h.input(; type="hidden", name=string(k), value=string(v))]
 _hidden_input(k, v::AbstractVector) = [h.input(; type="hidden", name=string(k), value=string(x)) for x in v]
-hidden_inputs(; kwargs...) = vcat([_hidden_input(k, v) for (k, v) in kwargs]...)
+hidden_inputs(; kwargs...) = mapreduce(((k, v),) -> _hidden_input(k, v), vcat, kwargs; init=[])
 
 """
     _form(method, url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
