@@ -1012,6 +1012,16 @@ end
 to_response(m::MIMEResponse) =
     HTTP.Response(200, ["Content-Type" => m.content_type]; body=m.body)
 
+# Dispatch hook used by `_resolve_response` / `_resolve_response_nested`
+# to bypass the HTML-page pipeline for handler return values that are
+# already a final HTTP response shape. Methods return the finalized
+# `HTTP.Response` (or `nothing` for values that should still flow
+# through the normal HTML / markdown / HX pipeline). Add a method to
+# this function to teach the framework about a new escape-hatch type.
+_finalized_response(::Any) = nothing
+_finalized_response(r::HTTP.Response) = r
+_finalized_response(m::MIMEResponse) = to_response(m)
+
 # Convert a value to markdown text via show(io, MIME"text/markdown"(), val).
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
 to_markdown_string(val) = sprint(show, MIME"text/markdown"(), val)
@@ -1833,37 +1843,39 @@ Convention-based properties on `obj`:
 If the route returns an `HTTP.Response` directly, it passes through unchanged.
 """
 function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
-    # Recording happens FIRST so it can capture `HTTP.Response` values
-    # too — JS/JSON routes that hand-roll their response (e.g.
-    # `/aov_runtime_js` returning `application/javascript`) wouldn't get
-    # saved otherwise. The Content-Type drives the saved file extension.
-    if !isnothing(record_dir) && !isnothing(save_path)
-        if val isa HTTP.Response
-            _save_typed_response(record_dir, save_path, val)
-        else
-            wrapper = _page_wrapper(obj)
-            if wants_markdown(req)
-                md = try to_markdown_string(val) catch; nothing end
-                isnothing(md) || save_response(record_dir, "/md" * save_path,
-                    HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
-                    ext=".md")
-            elseif is_htmx(req)
-                save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
-            elseif !isnothing(wrapper)
-                save_response(record_dir, save_path, to_response(static_transform(wrapper[val]; record_base)))
-            else
-                save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
+    # Pre-finalized values (a route handler returning an `HTTP.Response`
+    # or a `MIMEResponse` escape hatch for non-HTML bodies) bypass the
+    # `__page__` wrap entirely — adding `<html>…</html>` around raw JS
+    # / JSON / CSS bytes would break the Content-Type contract. Dispatch
+    # on `_finalized_response`: the method on bare values returns
+    # `nothing` so we fall through to the regular pipeline.
+    let finalized = _finalized_response(val)
+        if !isnothing(finalized)
+            if !isnothing(record_dir) && !isnothing(save_path)
+                _save_typed_response(record_dir, save_path, finalized)
             end
+            return finalized
         end
     end
 
-    # Opt-out: route already produced a response. `MIMEResponse` is
-    # the framework-level escape hatch for routes returning a non-HTML
-    # body (JS, JSON, CSS, …) — it must NOT be wrapped in `__page__`
-    # since the page wrapper would emit `<html>…</html>` around the
-    # raw bytes and break the Content-Type contract.
-    val isa HTTP.Response && return val
-    val isa MIMEResponse && return to_response(val)
+    # Recording for the regular HTML pipeline. Mirrors the runtime branches
+    # below (markdown / HX-fragment / wrapped page) so the on-disk shape
+    # matches what a live request would produce.
+    if !isnothing(record_dir) && !isnothing(save_path)
+        wrapper = _page_wrapper(obj)
+        if wants_markdown(req)
+            md = try to_markdown_string(val) catch; nothing end
+            isnothing(md) || save_response(record_dir, "/md" * save_path,
+                HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
+                ext=".md")
+        elseif is_htmx(req)
+            save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
+        elseif !isnothing(wrapper)
+            save_response(record_dir, save_path, to_response(static_transform(wrapper[val]; record_base)))
+        else
+            save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
+        end
+    end
 
     # Error filter: keep only data-error nodes (applied before markdown/rich)
     if wants_errors(req)
@@ -2193,7 +2205,19 @@ end
 
 """Like `_resolve_response`, but applies nested page wrappers (innermost first, then outward)."""
 function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
-    val isa HTTP.Response && return val
+    # Same finalized-value passthrough as `_resolve_response`. Routes
+    # inside `@include`d substructs (e.g. `PipelineRoutes.aov_runtime_js`
+    # returning `MIMEResponse("application/javascript", …)`) land here,
+    # not in the top-level resolver — without this dispatch the raw body
+    # would get wrapped in `__page__` and served with text/html.
+    let finalized = _finalized_response(val)
+        if !isnothing(finalized)
+            if !isnothing(record_dir) && !isnothing(save_path)
+                _save_typed_response(record_dir, save_path, finalized)
+            end
+            return finalized
+        end
+    end
     if wants_errors(req)
         val = filter_errors(val)
         isnothing(val) && return markdown_response("(no errors)")
