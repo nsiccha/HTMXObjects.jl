@@ -99,3 +99,77 @@
 .aov-flag-button.is-flagged {
     color: var(--htmxo-error, currentColor);
 }
+
+/* Toolbar (search + pagination). Sticks to the top of the gallery so
+ * controls remain reachable while the user scrolls long lists. */
+.htmxo-gallery-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    margin: 0 0 1rem;
+    border-bottom: 1px solid var(--htmxo-border, currentColor);
+    position: sticky;
+    top: 0;
+    background: var(--htmxo-bg, var(--vp-c-bg, white));
+    z-index: 5;
+}
+.htmxo-gallery-search {
+    flex: 1 1 16rem;
+    min-width: 8rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--htmxo-border, currentColor);
+    border-radius: 0.25rem;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+}
+.htmxo-gallery-search.is-literal {
+    border-color: var(--htmxo-warning, var(--htmxo-error, currentColor));
+}
+.htmxo-gallery-pagination {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85em;
+    color: var(--htmxo-muted, currentColor);
+}
+.htmxo-gallery-pagination button {
+    padding: 0.2rem 0.55rem;
+    border: 1px solid var(--htmxo-border, currentColor);
+    border-radius: 0.2rem;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+}
+.htmxo-gallery-pagination button[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.htmxo-gallery-page-size {
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--htmxo-border, currentColor);
+    border-radius: 0.2rem;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+}
+.htmxo-gallery-page-info {
+    white-space: nowrap;
+}
+.htmxo-gallery-empty {
+    padding: 1rem 0;
+    color: var(--htmxo-muted, currentColor);
+    font-style: italic;
+}
+
+/* Visibility hooks. The controller toggles classes (rather than inline
+ * `display`) so search and pagination compose without stomping each
+ * other, and so a host page can override either independently. */
+.htmxo-gallery-card.is-search-hidden,
+.htmxo-gallery-card.is-page-hidden,
+.htmxo-gallery-section.is-empty {
+    display: none;
+}

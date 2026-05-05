@@ -38,6 +38,17 @@ interface HtmxoEmbedOptions {
      *  `.htmxo-embed` containers. Per-page override via
      *  `<meta name="htmxo-embed-prefix" content="/live-foo">`. */
     proxyPrefix?: string;
+    /** Optional list of extra `<script src="…">` URLs to inject into
+     *  the docs page head — e.g. vega + vega-embed CDN, plus an
+     *  app-served runtime that defines `window.AoV.embed` (or
+     *  whatever the swapped fragments call). Loaded in order via
+     *  chained `onload` so dependencies resolve. After all are loaded,
+     *  htmx-swapped script tags that referenced them retroactively
+     *  succeed (htmx's auto script-eval already ran them and they
+     *  errored — but inline `<script>AoV.embed(…)>` is a fire-and-
+     *  forget call; the second card swap re-runs the same script and
+     *  succeeds). */
+    extraScripts?: string[];
 }
 
 /**
@@ -146,18 +157,59 @@ export function setupHtmxoEmbed(router: any, options: HtmxoEmbedOptions = {}) {
     };
     document.body.addEventListener('htmx:afterSwap', (e: any) => {
         const tgt = e?.detail?.target as HTMLElement | undefined;
-        if (!tgt) return;
-        const embed = tgt.closest('.htmxo-embed');
-        if (!embed) return;
-        rewriteRootRefs(embed as HTMLElement, resolveProxyPrefix());
-        // (4) Re-tokenize syntax-highlighted code blocks. PrismJS is
-        // loaded once below; this hook reruns it on the freshly-swapped
-        // subtree so live-app fragments get colored just like markdown
-        // code blocks elsewhere on the docs page.
-        // @ts-ignore - prismjs loaded via dynamic <script>; no types
-        const Prism = (window as any).Prism;
-        if (Prism?.highlightAllUnder) Prism.highlightAllUnder(embed);
+        // Find the enclosing embed. With hx-swap="outerHTML" on per-card
+        // shells the original target may have been detached and have no
+        // parent — fall back to all embeds on the page.
+        const embed = tgt?.closest?.('.htmxo-embed');
+        const embeds = embed ? [embed as HTMLElement]
+                             : Array.from(document.querySelectorAll<HTMLElement>('.htmxo-embed'));
+        for (const el of embeds) {
+            rewriteRootRefs(el, resolveProxyPrefix());
+            // (4) Re-tokenize syntax-highlighted code blocks. PrismJS
+            // is loaded once below; this hook reruns it on every embed
+            // so live-app fragments get colored just like markdown
+            // code blocks elsewhere on the docs page.
+            // @ts-ignore - prismjs loaded via dynamic <script>; no types
+            const Prism = (window as any).Prism;
+            if (Prism?.highlightAllUnder) Prism.highlightAllUnder(el);
+        }
     });
+
+    // Inject any caller-supplied `extraScripts` (vega + vega-embed +
+    // an app-served AoV runtime, typically — see BRM's docs theme).
+    // Chained via `onload` so dependencies resolve in order. Once
+    // they're all loaded, any inline `<script>` tags inside existing
+    // embeds get re-executed: htmx's auto script-eval already ran
+    // them at swap time and they errored on `AoV.embed(…)` because
+    // the runtime hadn't loaded yet — re-running succeeds.
+    if (options.extraScripts && options.extraScripts.length > 0 &&
+            !document.querySelector('script[data-htmxo-extra]')) {
+        const reExecuteScripts = (root: ParentNode) => {
+            root.querySelectorAll('script').forEach(old => {
+                const s = document.createElement('script');
+                for (const a of Array.from(old.attributes)) {
+                    s.setAttribute(a.name, a.value);
+                }
+                s.textContent = old.textContent;
+                old.parentNode?.replaceChild(s, old);
+            });
+        };
+        const sources = [...options.extraScripts];
+        let i = 0;
+        const loadNext = () => {
+            if (i >= sources.length) {
+                document.querySelectorAll<HTMLElement>('.htmxo-embed')
+                    .forEach(el => reExecuteScripts(el));
+                return;
+            }
+            const s = document.createElement('script');
+            s.src = sources[i++];
+            s.dataset.htmxoExtra = '1';
+            s.onload = s.onerror = () => loadNext();
+            document.head.appendChild(s);
+        };
+        loadNext();
+    }
 
     // Inject PrismJS once. Dynamic-script `defer` doesn't preserve
     // ordering — language components reference `Prism.languages.*`

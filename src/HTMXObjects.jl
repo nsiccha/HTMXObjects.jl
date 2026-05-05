@@ -18,7 +18,8 @@ export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cin
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
-export GalleryItem, Gallery, gallery_grid, default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
+export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_script,
+    default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
 export TestRoutes
 
@@ -4238,6 +4239,11 @@ view: `## title \\n *description* \\n ```julia\\ncode\\n``` `.
     title = get(metadata, "title", id)
     description = get(metadata, "description", "")
     section = get(metadata, "section", basename(dirname(path)))
+    # `# tags: foo, bar baz` — comma- or whitespace-separated. Empty if
+    # the header doesn't declare any. Drives both the searchable text
+    # corpus (so `tag:` matches without users having to know the field)
+    # and any future tag-chip filter UI.
+    tags = String[String(t) for t in split(get(metadata, "tags", ""), r"[,\s]+"; keepempty=false)]
     code_string = _strip_gallery_header(raw)
 end
 
@@ -4336,23 +4342,54 @@ section_items(g::Gallery, section::AbstractString) =
     filter(it -> it.section == section, g.items)
 
 """
-    gallery_grid(items; section_titles=Dict(), card_renderer=default_gallery_card, columns=4)
+    gallery_grid(items; section_titles=Dict(), card_renderer=default_gallery_card,
+                        controls=true, search=true, pagination=true,
+                        page_size=25, page_sizes=(10, 25, 50, 100, 0),
+                        search_placeholder="Search (regex; literal fallback)…")
 
-Render a 2D grid of `card_renderer(item)` cards, grouped by section.
-Sections appear in directory-traversal order (preserved by
+Render a single-column grid of `card_renderer(item)` cards, grouped by
+section. Sections appear in directory-traversal order (preserved by
 `Gallery.items`). The section heading uses
 `section_titles[section_id]` if present, falling back to the bare
 section id (typically the directory basename).
 
-Standard CSS classes: `htmxo-gallery`, `htmxo-gallery-section`,
-`htmxo-gallery-section-heading`, `htmxo-gallery-grid`, `htmxo-gallery-card`,
-`htmxo-gallery-card-title`, `htmxo-gallery-card-description`,
-`htmxo-gallery-card-code`. Override styling by adding CSS rules at the
-host page level — the layer is unscoped so any host wins automatically.
+When `controls=true` (default), the result is wrapped in a
+`.htmxo-gallery-root` that also carries a sticky toolbar with a search
+box and pagination controls. The toolbar is driven by an inline
+controller script that toggles `is-search-hidden` / `is-page-hidden`
+classes on cards (and `is-empty` on sections whose visible-card count
+drops to zero). The controller works identically in:
+
+  * Live HTMXObjects pages (browser executes the inline `<script>` as
+    part of normal page load).
+  * Recorded fragments embedded into VitePress docs (HTMX innerHTML
+    swaps don't auto-execute scripts, but `setupHtmxoEmbed` from
+    `htmxo-embed.ts` re-executes inline scripts inside `.htmxo-embed`
+    after every swap so the controller wires up there too).
+
+URL state: the search query mirrors `?q=`, the current page mirrors
+`?page=`, and the page size mirrors `?ps=` — so a deep-link to a
+filtered/paginated view round-trips.
+
+Pass `controls=false` to opt out and recover the original bare
+`.htmxo-gallery` `<div>` (used by apps that want to compose their own
+toolbar).
+
+Standard CSS classes: `htmxo-gallery-root`, `htmxo-gallery-toolbar`,
+`htmxo-gallery-search`, `htmxo-gallery-pagination`, `htmxo-gallery`,
+`htmxo-gallery-section`, `htmxo-gallery-section-heading`,
+`htmxo-gallery-card`, `htmxo-gallery-card-title`,
+`htmxo-gallery-card-description`, `htmxo-gallery-card-code`.
 """
 function gallery_grid(items::AbstractVector{GalleryItem};
         section_titles::AbstractDict=Dict{String,String}(),
-        card_renderer=default_gallery_card)
+        card_renderer=default_gallery_card,
+        controls::Bool=true,
+        search::Bool=true,
+        pagination::Bool=true,
+        page_size::Int=25,
+        page_sizes=(10, 25, 50, 100, 0),
+        search_placeholder::AbstractString="Search (regex; literal fallback)…")
     seen = String[]
     groups = Dict{String,Vector{GalleryItem}}()
     for it in items
@@ -4364,13 +4401,207 @@ function gallery_grid(items::AbstractVector{GalleryItem};
     end
     sections = map(seen) do sec
         title = get(section_titles, sec, sec)
-        h.section(; class="htmxo-gallery-section")(
+        h.section(; class="htmxo-gallery-section", data_section=sec)(
             h.h3(title; class="htmxo-gallery-section-heading"),
             [card_renderer(it) for it in groups[sec]]...,
         )
     end
-    h.div(; class="htmxo-gallery")(sections...)
+    inner = h.div(; class="htmxo-gallery")(sections...)
+    (controls && (search || pagination)) || return inner
+    h.div(; class="htmxo-gallery-root")(
+        gallery_toolbar(; search, pagination, page_size, page_sizes,
+                          search_placeholder),
+        inner,
+        h.div("No items match the current filter."; class="htmxo-gallery-empty"),
+        h.script(gallery_controls_script()),
+    )
 end
+
+"""
+    gallery_toolbar(; search=true, pagination=true,
+                       page_size=25, page_sizes=(10, 25, 50, 100, 0),
+                       search_placeholder="Search…")
+
+Build the gallery toolbar fragment used by `gallery_grid(; controls=true)`.
+Exposed standalone so apps that compose their own gallery wrapper can
+reuse the same controls. `0` in `page_sizes` is shown as "all" — the
+controller reads `parseInt(value)` and treats `<=0` as "no pagination".
+"""
+function gallery_toolbar(; search::Bool=true, pagination::Bool=true,
+        page_size::Int=25, page_sizes=(10, 25, 50, 100, 0),
+        search_placeholder::AbstractString="Search (regex; literal fallback)…")
+    parts = []
+    search && push!(parts, h.input(;
+        class="htmxo-gallery-search",
+        type="search",
+        placeholder=search_placeholder,
+        autocomplete="off"))
+    if pagination
+        ps_options = [(v == 0 ? h.option("all"; value="0", selected=(v == page_size)) :
+                                h.option(string(v); value=string(v), selected=(v == page_size)))
+                      for v in page_sizes]
+        push!(parts, h.div(; class="htmxo-gallery-pagination")(
+            h.label("Page size: ";
+                class="htmxo-gallery-page-size-label",
+                for_="htmxo-gallery-page-size"),
+            h.select(; class="htmxo-gallery-page-size",
+                       id="htmxo-gallery-page-size")(ps_options...),
+            h.button("←"; type="button", class="htmxo-gallery-prev",
+                     aria_label="Previous page"),
+            h.span("Page 1"; class="htmxo-gallery-page-info"),
+            h.button("→"; type="button", class="htmxo-gallery-next",
+                     aria_label="Next page"),
+        ))
+    end
+    h.div(; class="htmxo-gallery-toolbar")(parts...)
+end
+
+# Inline controller for the gallery toolbar. Emitted as a `<script>` so
+# it runs both:
+#   * As part of normal page load (live app), and
+#   * As part of an htmx swap into `.htmxo-embed` — but only because
+#     `setupHtmxoEmbed` re-executes inline scripts after the swap, since
+#     `innerHTML` assignment does not run `<script>` tags by default.
+#
+# The controller is scoped to `document.currentScript.closest('.htmxo-gallery-root')`
+# so multiple galleries on the same page get independent state.
+"""
+    gallery_controls_script() -> String
+
+The inline JS that wires up the gallery toolbar. Returned as a string
+so it can be embedded as `h.script(gallery_controls_script())`. Idempotent:
+running it multiple times against the same root is harmless (each run
+re-binds listeners on the same elements; classes are re-derived from
+the current input/select state).
+"""
+gallery_controls_script() = """
+(() => {
+    // Initialize every uninitialized `.htmxo-gallery-root` on the page,
+    // not just the closest one to the current script. htmx may execute
+    // a swapped `<script>` body via `eval` (no `currentScript`) or by
+    // re-inserting it elsewhere, so closest-based scoping is fragile.
+    // Instead each script invocation scans the document and wires up
+    // any roots it finds; the `data-htmxo-controls-init` sentinel keeps
+    // re-runs idempotent.
+    const initRoot = (root) => {
+        if (root.dataset.htmxoControlsInit === '1') return;
+        root.dataset.htmxoControlsInit = '1';
+        const gallery = root.querySelector('.htmxo-gallery');
+        const search  = root.querySelector('.htmxo-gallery-search');
+        const psSel   = root.querySelector('.htmxo-gallery-page-size');
+        const prevBtn = root.querySelector('.htmxo-gallery-prev');
+        const nextBtn = root.querySelector('.htmxo-gallery-next');
+        const pageInfo= root.querySelector('.htmxo-gallery-page-info');
+        const empty   = root.querySelector('.htmxo-gallery-empty');
+        if (!gallery) return;
+
+        const cards    = () => Array.from(gallery.querySelectorAll('.htmxo-gallery-card'));
+        const sections = () => Array.from(gallery.querySelectorAll('.htmxo-gallery-section'));
+        const params   = new URLSearchParams(window.location.search);
+        let page = Math.max(0, (parseInt(params.get('page') || '1', 10) || 1) - 1);
+
+        if (search && params.get('q'))  search.value = params.get('q');
+        if (psSel  && params.get('ps')) psSel.value  = params.get('ps');
+
+        const haystack = c => (c.dataset.searchText
+            || (c.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim());
+
+        const applyFilter = () => {
+            const raw = (search && search.value || '').trim();
+            let re = null, lit = '';
+            if (raw) {
+                try { re = new RegExp(raw, 'i'); }
+                catch (_) { lit = raw.toLowerCase(); }
+            }
+            if (search) search.classList.toggle('is-literal', !!lit);
+            cards().forEach(c => {
+                const hay = haystack(c);
+                const show = !raw
+                    || (re && re.test(hay))
+                    || (lit && hay.includes(lit));
+                c.classList.toggle('is-search-hidden', !show);
+            });
+        };
+
+        const applyPagination = () => {
+            const visible = cards().filter(c => !c.classList.contains('is-search-hidden'));
+            const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
+            const total = visible.length;
+            const pages = ps > 0 ? Math.max(1, Math.ceil(total / ps)) : 1;
+            if (page >= pages) page = pages - 1;
+            if (page < 0)      page = 0;
+            visible.forEach((c, i) => {
+                const inPage = ps <= 0 || (i >= page * ps && i < (page + 1) * ps);
+                c.classList.toggle('is-page-hidden', !inPage);
+            });
+            // Search-hidden cards must not also carry is-page-hidden —
+            // when search clears, those cards re-become candidates and
+            // pagination needs to re-decide their fate.
+            cards().filter(c => c.classList.contains('is-search-hidden'))
+                   .forEach(c => c.classList.remove('is-page-hidden'));
+            if (pageInfo) pageInfo.textContent =
+                'Page ' + (page + 1) + ' / ' + pages + ' \\u2022 ' + total
+                + (total === 1 ? ' item' : ' items');
+            if (prevBtn) prevBtn.disabled = page === 0;
+            if (nextBtn) nextBtn.disabled = page >= pages - 1;
+            if (empty)   empty.style.display = total === 0 ? '' : 'none';
+        };
+
+        const applySectionVisibility = () => sections().forEach(sec => {
+            const allCards = sec.querySelectorAll('.htmxo-gallery-card');
+            const anyVisible = Array.from(allCards).some(c =>
+                !c.classList.contains('is-search-hidden')
+                && !c.classList.contains('is-page-hidden'));
+            sec.classList.toggle('is-empty', !anyVisible);
+        });
+
+        const refresh = () => { applyFilter(); applyPagination(); applySectionVisibility(); };
+
+        const syncUrl = () => {
+            // URL sync only makes sense for top-level pages (the user's
+            // address bar is the gallery's address). Inside an
+            // `.htmxo-embed` the URL belongs to the docs host and we
+            // must not stomp it.
+            if (root.closest('.htmxo-embed')) return;
+            const url = new URL(window.location.href);
+            const q = (search && search.value || '').trim();
+            if (q) url.searchParams.set('q', q); else url.searchParams.delete('q');
+            if (page > 0) url.searchParams.set('page', String(page + 1));
+            else          url.searchParams.delete('page');
+            history.replaceState(null, '', url);
+        };
+
+        if (search)  search.addEventListener('input',  () => { page = 0; refresh(); syncUrl(); });
+        if (psSel)   psSel.addEventListener('change',  () => { page = 0; refresh(); syncUrl(); });
+        if (prevBtn) prevBtn.addEventListener('click', () => { page--;   refresh(); syncUrl(); });
+        if (nextBtn) nextBtn.addEventListener('click', () => { page++;   refresh(); syncUrl(); });
+
+        // Hash navigation: clicking a card title's `#id` anchor must
+        // reveal the card even if it was filtered or paginated out.
+        // Reset search, recompute filters, jump to the page that
+        // contains the card, and scroll it into view.
+        const jumpToHash = () => {
+            const id = decodeURIComponent((window.location.hash || '').slice(1));
+            if (!id) return;
+            const sel = '.htmxo-gallery-card[data-id="' + CSS.escape(id) + '"], #' + CSS.escape(id);
+            const card = gallery.querySelector(sel);
+            if (!card) return;
+            if (search && search.value) search.value = '';
+            applyFilter();
+            const visible = cards().filter(c => !c.classList.contains('is-search-hidden'));
+            const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
+            const idx = visible.indexOf(card);
+            if (idx >= 0 && ps > 0) page = Math.floor(idx / ps);
+            applyPagination(); applySectionVisibility(); syncUrl();
+            card.scrollIntoView({ block: 'start' });
+        };
+        window.addEventListener('hashchange', jumpToHash);
+
+        refresh();
+    };
+    document.querySelectorAll('.htmxo-gallery-root').forEach(initRoot);
+})();
+"""
 
 """
     default_gallery_card(item::GalleryItem)
@@ -4381,7 +4612,19 @@ is visible directly. Apps wrap this with their own
 `card_renderer = item -> h.article(default_gallery_card(item),
 my_render(item))` to add Vega-Lite plots, PPC plots, etc.
 """
-default_gallery_card(item::GalleryItem) = h.article(; class="htmxo-gallery-card")(
+default_gallery_card(item::GalleryItem) = h.article(;
+        class="htmxo-gallery-card",
+        id=item.id,
+        data_id=item.id,
+        data_section=item.section,
+        data_tags=join(item.tags, " "),
+        # Canonical search corpus: title + description + tags + section
+        # + id, lowercased so the controller can `includes()` directly.
+        # Custom card renderers can either set their own `data-search-text`
+        # or let the controller fall back to `textContent`.
+        data_search_text=lowercase(strip(string(
+            item.title, ' ', item.description, ' ',
+            join(item.tags, ' '), ' ', item.section, ' ', item.id))))(
     h.h4(; class="htmxo-gallery-card-title")(
         h.a(item.title; href="#" * item.id),
     ),
