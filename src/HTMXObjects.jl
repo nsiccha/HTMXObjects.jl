@@ -5,7 +5,7 @@ export create_app
 export HTTP, queryparams, formdata
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
-export route!, record!, to_response, save_response, static_transform
+export route!, record!, to_response, save_response, static_transform, MIMEResponse
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -983,6 +983,30 @@ already an `HTTP.Response` pass through unchanged.
 """
 to_response(val::HTTP.Response) = val
 to_response(val) = auto(val; wrap=_html_response)
+
+"""
+    MIMEResponse(content_type, body)
+
+Small wrapper for routes that return non-HTML content (JS, JSON, CSS,
+SVG, plain text, etc.) without hand-rolling an `HTTP.Response`.
+`_resolve_response` converts it to `HTTP.Response(200,
+["Content-Type" => content_type]; body)`. The recording flow's
+`_save_typed_response` then dispatches on Content-Type to pick the
+right file extension (`.js` for `application/javascript`, `.json` for
+`application/json`, etc.). One line, fully recordable, MIME-aware.
+
+```julia
+@get aov_runtime_js = MIMEResponse("application/javascript",
+    strip_script(sprint(show, MIME"text/html"(), vega_runtime())))
+```
+"""
+struct MIMEResponse
+    content_type::String
+    body
+end
+
+to_response(m::MIMEResponse) =
+    HTTP.Response(200, ["Content-Type" => m.content_type]; body=m.body)
 
 # Convert a value to markdown text via show(io, MIME"text/markdown"(), val).
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
