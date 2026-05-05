@@ -567,22 +567,27 @@ end
     node = status_badge(:running)
     html = repr("text/html", node)
     @test contains(html, "Running")
-    @test contains(html, "color:orange")
+    @test contains(html, "u-text-warning")
 
     node2 = status_badge(:done)
     html2 = repr("text/html", node2)
     @test contains(html2, "Done")
-    @test contains(html2, "color:green")
+    @test contains(html2, "u-text-success")
 
     node3 = status_badge(:failed; label="Error!")
     html3 = repr("text/html", node3)
     @test contains(html3, "Error!")
-    @test contains(html3, "color:red")
+    @test contains(html3, "u-text-error")
 
-    # unknown state falls back to inherit
+    # unknown state falls back to muted
     node4 = status_badge(:unknown)
     html4 = repr("text/html", node4)
-    @test contains(html4, "color:inherit")
+    @test contains(html4, "u-text-muted")
+
+    # remap via `classes=`
+    node5 = status_badge(:custom; classes=Dict(:custom => "u-text-accent"))
+    html5 = repr("text/html", node5)
+    @test contains(html5, "u-text-accent")
 end
 
 @testset "nav_sidebar" begin

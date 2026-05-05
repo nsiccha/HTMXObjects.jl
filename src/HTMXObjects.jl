@@ -4093,31 +4093,31 @@ end
 
 # --- Status badge ---
 
-# Default mapping uses the framework-agnostic `--htmxo-*` theme variables
-# (see `htmxo_theme`). Each entry provides a fallback color literal for
-# environments where the theme block isn't loaded (e.g. raw HTML excerpts).
-const _DEFAULT_STATUS_COLORS = (
-    running   = "var(--htmxo-warning, orange)",
-    finishing = "var(--htmxo-warning, orange)",
-    done      = "var(--htmxo-success, green)",
-    failed    = "var(--htmxo-error, red)",
-    pending   = "var(--htmxo-muted, gray)",
+# Default mapping picks the matching `u-text-*` utility class — themed via
+# the `--htmxo-*` variables (see `htmxo_theme`) and works without inline styles.
+const _DEFAULT_STATUS_CLASSES = (
+    running   = "u-text-warning",
+    finishing = "u-text-warning",
+    done      = "u-text-success",
+    failed    = "u-text-error",
+    pending   = "u-text-muted",
 )
 
 """
-    status_badge(state::Symbol; colors=_DEFAULT_STATUS_COLORS, label=nothing)
+    status_badge(state::Symbol; classes=_DEFAULT_STATUS_CLASSES, label=nothing)
 
-Render a colored `<span>` badge for a status state. Uses Pico-friendly inline styles.
-Override the display text with `label`, or it defaults to the titlecased state name.
+Render a `<span>` badge for a status state, picking a `u-text-*` utility class matching
+the state. Override the display text with `label` (defaults to titlecased state name).
+Pass `classes=Dict(:custom => "u-text-accent")` to remap.
 
-    status_badge(:running)                       # orange "Running"
-    status_badge(:failed; label="Error!")         # red "Error!"
-    status_badge(:custom; colors=Dict(:custom => "blue"))
+    status_badge(:running)                                  # u-text-warning
+    status_badge(:failed; label="Error!")                    # u-text-error "Error!"
+    status_badge(:custom; classes=Dict(:custom => "u-text-accent"))
 """
-function status_badge(state::Symbol; colors=_DEFAULT_STATUS_COLORS, label=nothing)
-    color = get(colors, state, "inherit")
+function status_badge(state::Symbol; classes=_DEFAULT_STATUS_CLASSES, label=nothing)
     text = something(label, titlecase(string(state)))
-    h.span(text; style="color:$color;")
+    cls = get(classes, state, "u-text-muted")
+    h.span(text; class=cls)
 end
 
 # --- Nav sidebar ---
