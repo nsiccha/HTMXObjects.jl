@@ -3805,6 +3805,17 @@ htmxo_utility_styles() = h.style("""
 .u-status-callout.u-status-error   { border-left-color: var(--htmxo-error); }
 .u-status-callout.u-status-warning { border-left-color: var(--htmxo-warning); }
 .u-status-callout.u-status-accent  { border-left-color: var(--htmxo-accent); }
+.u-badge { display: inline-block; padding: 0.15em 0.5em; border-radius: 3px; font-size: 0.8em; font-weight: 600; line-height: 1.2; color: var(--htmxo-bg, #fff); background: var(--htmxo-muted); }
+.u-badge.u-badge-success { background: var(--htmxo-success); }
+.u-badge.u-badge-error   { background: var(--htmxo-error); }
+.u-badge.u-badge-warning { background: var(--htmxo-warning); }
+.u-badge.u-badge-accent  { background: var(--htmxo-accent); }
+.u-badge.u-badge-muted   { background: var(--htmxo-muted); }
+.u-badge-soft { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 1rem; font-size: 0.8em; line-height: 1.2; cursor: pointer; user-select: none; border: 1px solid transparent; background: color-mix(in srgb, var(--htmxo-muted) 25%, transparent); }
+.u-badge-soft.u-badge-success { background: color-mix(in srgb, var(--htmxo-success) 35%, transparent); }
+.u-badge-soft.u-badge-error   { background: color-mix(in srgb, var(--htmxo-error)   35%, transparent); }
+.u-badge-soft.u-badge-warning { background: color-mix(in srgb, var(--htmxo-warning) 35%, transparent); }
+.u-badge-soft.u-badge-accent  { background: color-mix(in srgb, var(--htmxo-accent)  35%, transparent); }
 }
 """)
 
