@@ -163,7 +163,7 @@ as the WebSocket variable, while DynamicObjects stores a callable `(__ws__) -> b
 function _wrap_ws_bodies!(struct_expr)
     body = struct_expr.args[3]
     for (i, arg) in enumerate(body.args)
-        arg isa Expr || continue
+        _is_expr(arg) || continue
         # Walk through nested macrocall layers to find @ws
         expr = arg
         depth = 0
@@ -174,7 +174,7 @@ function _wrap_ws_bodies!(struct_expr)
         Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@ws") || continue
         # Found @ws — the inner expression is an assignment: name = rhs
         inner = expr.args[end]
-        inner isa Expr || continue
+        _is_expr(inner) || continue
         if inner.head == :(=)
             rhs = inner.args[2]
             inner.args[2] = Expr(:(->), :__ws__, rhs)
@@ -197,6 +197,16 @@ is not flagged). The warning includes `file:line` from the nearest
 # struct body. Returns `nothing` when the LHS doesn't bind a plain symbol.
 _as_symbol(s::Symbol) = s
 _as_symbol(_) = nothing
+_is_symbol(::Symbol) = true
+_is_symbol(_) = false
+_is_expr(::Expr) = true
+_is_expr(_) = false
+_is_lnn(::LineNumberNode) = true
+_is_lnn(_) = false
+_is_abstractstring(::AbstractString) = true
+_is_abstractstring(_) = false
+_is_quotenode(::QuoteNode) = true
+_is_quotenode(_) = false
 _property_lhs_name(_) = nothing
 _property_lhs_name(lhs::Symbol) = lhs
 function _property_lhs_name(lhs::Expr)
@@ -223,7 +233,7 @@ end
 _split_param_lhs(_) = (nothing, nothing)
 _split_param_lhs(lhs::Symbol) = (lhs, nothing)
 function _split_param_lhs(lhs::Expr)
-    lhs.head === :(::) && length(lhs.args) == 2 && lhs.args[1] isa Symbol || return (nothing, nothing)
+    lhs.head === :(::) && length(lhs.args) == 2 && _is_symbol(lhs.args[1]) || return (nothing, nothing)
     (lhs.args[1], lhs.args[2])
 end
 
@@ -232,11 +242,11 @@ function _warn_legacy_name!(struct_expr, legacy::Symbol, replacement::Symbol)
     route_macros = _route_macros()
     lnn = nothing
     for arg in body.args
-        if arg isa LineNumberNode
+        if _is_lnn(arg)
             lnn = arg
             continue
         end
-        arg isa Expr || continue
+        _is_expr(arg) || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
             continue
         end
@@ -297,11 +307,11 @@ function _warn_hardcoded_url_in_attrs!(struct_expr)
     seen = Set{Tuple{Symbol,Any}}()  # dedupe identical (attr, value) pairs across passes
 
     function walk(node, lnn)
-        if node isa Expr
+        if _is_expr(node)
             for arg in node.args
-                if arg isa LineNumberNode
+                if _is_lnn(arg)
                     lnn = arg
-                elseif arg isa Expr
+                elseif _is_expr(arg)
                     if Meta.isexpr(arg, :kw) && length(arg.args) == 2 &&
                        arg.args[1] in _URL_BEARING_ATTRS &&
                        _is_hardcoded_root_url(arg.args[2])
@@ -310,7 +320,7 @@ function _warn_hardcoded_url_in_attrs!(struct_expr)
                         key = (attr, val)
                         if !(key in seen)
                             push!(seen, key)
-                            shown = val isa AbstractString ? repr(val) :
+                            shown = _is_abstractstring(val) ? repr(val) :
                                     Meta.isexpr(val, :string) ? "string interp starting with `$(val.args[1])…`" :
                                     string(val)
                             loc = isnothing(lnn) ? "" : " (near $(lnn.file):$(lnn.line))"
@@ -345,11 +355,11 @@ function _warn_redundant_req_decl!(struct_expr)
     route_macros = _route_macros()
     lnn = nothing
     for arg in body.args
-        if arg isa LineNumberNode
+        if _is_lnn(arg)
             lnn = arg
             continue
         end
-        arg isa Expr || continue
+        _is_expr(arg) || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
             continue
         end
@@ -361,7 +371,7 @@ function _warn_redundant_req_decl!(struct_expr)
         lhs = inner.args[1]
         lhs === :__req__ || continue
         rhs = inner.args[2]
-        rhs === :nothing || (rhs isa QuoteNode && rhs.value === nothing) || continue
+        rhs === :nothing || (_is_quotenode(rhs) && rhs.value === nothing) || continue
         loc = isnothing(lnn) ? "" : " (near $(lnn.file):$(lnn.line))"
         @warn "Redundant: `__req__ = nothing` is injected automatically by `@htmx` — remove this line$loc."
     end
@@ -404,7 +414,7 @@ function _inject_dunder_props!(struct_expr)
     has_prefix = false
     has_route = false
     for arg in body.args
-        arg isa Expr || continue
+        _is_expr(arg) || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
             continue
         end
@@ -439,7 +449,7 @@ function _find_inline_structs(struct_expr)
     body = struct_expr.args[3]
     result = Tuple{Symbol, Symbol}[]
     for arg in body.args
-        arg isa Expr || continue
+        _is_expr(arg) || continue
         if Meta.isexpr(arg, :(=)) && Meta.isexpr(arg.args[2], :struct)
             lhs = arg.args[1]
             Meta.isexpr(lhs, (:call, :ref)) && (lhs = lhs.args[1])
@@ -447,7 +457,7 @@ function _find_inline_structs(struct_expr)
             child_name = arg.args[2].args[2]  # struct Name from `prop = struct Name ... end`
             # DO renames child to Parent_ChildName
             gen_name = Symbol(parent_name, "_", child_name)
-            lhs isa Symbol && push!(result, (lhs, gen_name))
+            _is_symbol(lhs) && push!(result, (lhs, gen_name))
         end
     end
     result
@@ -459,14 +469,14 @@ function _find_include_externals(struct_expr)
     body = struct_expr.args[3]
     result = Tuple{Symbol, Any}[]
     for arg in body.args
-        arg isa Expr || continue
+        _is_expr(arg) || continue
         expr = arg
         while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@include")
             expr = expr.args[end]
         end
         Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@include") || continue
         inner = expr.args[end]
-        inner isa Expr && inner.head == :(=) || continue
+        _is_expr(inner) && inner.head == :(=) || continue
         prop_name = inner.args[1]
         rhs = inner.args[2]
         # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type
@@ -506,7 +516,7 @@ Pre-process `@include` lines:
 function _convert_include_to_struct!(struct_expr)
     body = struct_expr.args[3]
     for (i, arg) in enumerate(body.args)
-        arg isa Expr || continue
+        _is_expr(arg) || continue
         # Walk through nested macrocall layers to find @include
         expr = arg
         while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@include")
@@ -514,7 +524,7 @@ function _convert_include_to_struct!(struct_expr)
         end
         Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@include") || continue
         inner = expr.args[end]
-        inner isa Expr && inner.head == :(=) || continue
+        _is_expr(inner) && inner.head == :(=) || continue
         prop_name = inner.args[1]
         rhs = inner.args[2]
         if Meta.isexpr(rhs, :block)
@@ -548,7 +558,7 @@ any user-provided value). `__parent__` and `__status__` are handled by
 DynamicObjects' `@include` processing.
 """
 function _inject_include_prefix!(call_expr, prop_name)
-    params_idx = findfirst(a -> a isa Expr && a.head === :parameters, call_expr.args)
+    params_idx = findfirst(a -> Meta.isexpr(a, :parameters), call_expr.args)
     if params_idx === nothing
         params = Expr(:parameters)
         insert!(call_expr.args, 2, params)
@@ -609,16 +619,16 @@ function _convert_params!(struct_expr)
         push!(new_args, rewritten[2])
     end
     for arg in body.args
-        if !(arg isa Expr)
+        if !_is_expr(arg)
             push!(new_args, arg); continue
         end
         if Meta.isexpr(arg, :macrocall) && arg.args[1] === Symbol("@param")
             # Strip the LineNumberNode that follows the macro name
-            payload = [a for a in arg.args[2:end] if !(a isa LineNumberNode)]
+            payload = [a for a in arg.args[2:end] if !_is_lnn(a)]
             # Block form: @param begin ... end → expand each line
             if length(payload) == 1 && Meta.isexpr(payload[1], :block)
                 for inner in payload[1].args
-                    inner isa LineNumberNode && (push!(new_args, inner); continue)
+                    _is_lnn(inner) && (push!(new_args, inner); continue)
                     process_line!(inner)
                 end
             else
@@ -813,20 +823,20 @@ function _extract_route_info(struct_expr)
     routes = @NamedTuple{prop_name::Symbol, pos_params::Vector, kw_params::Vector}[]
     lnn = nothing
     for arg in body.args
-        isa(arg, LineNumberNode) && (lnn = arg; continue)
-        arg isa Expr || continue
+        _is_lnn(arg) && (lnn = arg; continue)
+        _is_expr(arg) || continue
         # Walk macrocall layers to find route markers
         expr = arg
         has_route = false
         while Meta.isexpr(expr, :macrocall)
             expr.args[1] in route_macros && (has_route = true)
             # macrocall args[2] is often a LineNumberNode
-            expr.args[2] isa LineNumberNode && (lnn = expr.args[2])
+            _is_lnn(expr.args[2]) && (lnn = expr.args[2])
             expr = expr.args[end]
         end
         has_route || continue
         # expr is the inner assignment: name(...) = rhs
-        expr isa Expr && expr.head == :(=) || continue
+        _is_expr(expr) && expr.head == :(=) || continue
         lhs = expr.args[1]
         pos_params = Tuple{Symbol, Any}[]
         kw_params = Tuple{Symbol, Any, Bool}[]
@@ -3259,11 +3269,11 @@ _query_url_kw(kw::Expr) = Expr(:kw, kw.args[1], esc(kw.args[2]))
 
 macro query_url(expr)
     _query_url = GlobalRef(@__MODULE__, :query_url)
-    if expr isa Symbol
+    if _is_symbol(expr)
         path = expr === :index ? "/" : "/$expr"
         return esc(:($(_query_url)($path)))
     end
-    expr isa Expr && expr.head === :call || error("@query_url expects a call expression like `prop(args...; kwargs...)`")
+    _is_expr(expr) && expr.head === :call || error("@query_url expects a call expression like `prop(args...; kwargs...)`")
     name = _query_url_name(expr.args[1])
 
     # Separate positional args and kwargs
