@@ -936,7 +936,9 @@ re-evaluation automatically re-registers routes without a server restart.
 Inline `prop = struct ... end` definitions are processed as nested route structs.
 """
 macro htmx(args...)
-    _htmx_transform(args[end]; (length(args) > 1 ? (docstring=args[1],) : (;))...)
+    isempty(args) && error("@htmx: missing struct definition.")
+    kwargs = Dict{Symbol,Any}(DynamicObjects._parse_macro_opt(a) for a in args[1:end-1])
+    _htmx_transform(args[end]; kwargs...)
 end
 
 """
