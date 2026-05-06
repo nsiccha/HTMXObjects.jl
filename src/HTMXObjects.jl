@@ -1217,14 +1217,14 @@ function _disable_for_static(node::Node; record_base::String="")
     end
 
     # Recurse into children
-    new_children = map(children) do child
-        child isa Node ? _disable_for_static(child; record_base) :
-        child isa Cobweb.Node ? parent(_disable_for_static(Node(child); record_base)) :
-        child
-    end
+    new_children = map(child -> _disable_child(child, record_base), children)
 
     Node(Cobweb.Node(Cobweb.tag(cn), new_attrs, new_children))
 end
+
+_disable_child(child, record_base) = child
+_disable_child(child::Node, record_base) = _disable_for_static(child; record_base)
+_disable_child(child::Cobweb.Node, record_base) = parent(_disable_for_static(Node(child); record_base))
 
 """
     _inject_static_style(val)
@@ -1239,13 +1239,13 @@ function _inject_static_style(node::Node)
         return Node(Cobweb.Node(:head, copy(Cobweb.attrs(cn)), new_children))
     end
     # Recurse into children looking for <head>
-    new_children = map(Cobweb.children(cn)) do child
-        child isa Node ? parent(_inject_static_style(child)) :
-        child isa Cobweb.Node ? parent(_inject_static_style(Node(child))) :
-        child
-    end
+    new_children = map(_inject_child, Cobweb.children(cn))
     Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
 end
+
+_inject_child(child) = child
+_inject_child(child::Node) = parent(_inject_static_style(child))
+_inject_child(child::Cobweb.Node) = parent(_inject_static_style(Node(child)))
 
 """
     static_transform(val; record_base="")
@@ -2702,6 +2702,11 @@ Non-Node values pass through unchanged.
 filter_errors(val) = val
 filter_errors(val::AbstractArray) = filter(!isnothing, filter_errors.(val))
 filter_errors(val::Tuple) = filter(!isnothing, filter_errors.(val))
+# For child-walking inside filter_errors(::Node): keep error-bearing Nodes,
+# drop everything else (text, primitives) so non-error subtrees prune away.
+_filter_errors_child(_) = nothing
+_filter_errors_child(child::Node) = filter_errors(child)
+_filter_errors_child(child::Cobweb.Node) = filter_errors(Node(child))
 filter_errors((content, id)::Pair) = let filtered = filter_errors(content)
     isnothing(filtered) ? nothing : filtered => id
 end
@@ -2723,10 +2728,8 @@ function filter_errors(node::Node)
     children = Cobweb.children(cn)
     new_children = []
     for child in children
-        if child isa Node || child isa Cobweb.Node
-            filtered = filter_errors(child isa Cobweb.Node ? Node(child) : child)
-            !isnothing(filtered) && push!(new_children, parent(filtered))
-        end
+        filtered = _filter_errors_child(child)
+        !isnothing(filtered) && push!(new_children, parent(filtered))
         # Drop non-Node children (text) in non-error nodes
     end
 
@@ -2813,9 +2816,12 @@ Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
 caption rendered above it. Returns `nothing` for `spec` is not allowed —
 use `content` directly if there is no caption.
 """
+_as_children(content) = (content,)
+_as_children(content::Tuple) = content
+_as_children(content::AbstractVector) = content
+
 function with_caption(spec::CaptionSpec, content; actions=())
-    children = (content isa Tuple || content isa AbstractVector) ? content : (content,)
-    h.figure(; class="captioned")(render_caption(spec; actions), children...)
+    h.figure(; class="captioned")(render_caption(spec; actions), _as_children(content)...)
 end
 
 # --- Table rendering ---
@@ -3269,6 +3275,17 @@ _aname(name::AbstractString) = name
 _avalue(nt::NamedTuple, default=nothing) = first(nt)
 _avalue(::AbstractString, default=nothing) = default
 
+# Normalize option entries: a plain value `v` becomes `(v, v)`; pre-paired
+# entries (Tuple or Pair) are returned as-is. Used by radio_group / sinput.
+_option_pair(o) = (o, o)
+_option_pair(o::Tuple) = o
+_option_pair(o::Pair) = o
+_option_key(o) = o
+_option_key(o::Pair) = first(o)
+# Wrap a scalar value into a single-element vector; pass vectors through.
+_as_vector(v::AbstractVector) = v
+_as_vector(v) = [v]
+
 """
     ainput(nv; kwargs...)
 
@@ -3328,8 +3345,8 @@ sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
     uid = string(hash(name), base=16)
     sel_id = "sinput_custom_sel_$(uid)"
     inp_id = "sinput_custom_inp_$(uid)"
-    option_values = Set(string.([o isa Pair ? first(o) : o for o in options]))
-    extra_options = isnothing(value) ? [] : [v for v in (value isa AbstractVector ? value : [value]) if !(string(v) in option_values)]
+    option_values = Set(string.([_option_key(o) for o in options]))
+    extra_options = isnothing(value) ? [] : [v for v in _as_vector(value) if !(string(v) in option_values)]
     all_options = vcat(options, extra_options)
     h.label(
         label,
@@ -3457,7 +3474,7 @@ radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, k
     h.fieldset(
         h.legend(label),
         [begin
-            opt_value, opt_label = option isa Union{Tuple,Pair} ? option : (option, option)
+            opt_value, opt_label = _option_pair(option)
             checked_attrs = string(opt_value) == string(value) ? (; checked="true") : (;)
             h.label(
                 h.input(; type="radio", name, value=opt_value, checked_attrs..., kwargs...),
