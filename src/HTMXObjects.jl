@@ -513,25 +513,23 @@ function _convert_include_to_struct!(struct_expr)
             child_struct = Expr(:struct, false, struct_name, rhs)
             body.args[i] = :($prop_name = $child_struct)
         elseif Meta.isexpr(rhs, :call)
-            # External-struct form: inject parent/prefix kwargs so the sub-struct
-            # sees the parent chain and gets the right mount prefix.
-            _inject_include_chain_kwargs!(rhs, prop_name)
-            body.args[i] = :($prop_name = $rhs)
+            # Only inject __prefix__ (HTMXO-specific). Leave @include in place
+            # for DO to handle __parent__ and __status__ wiring.
+            _inject_include_prefix!(rhs, prop_name)
         end
     end
     struct_expr
 end
 
 """
-    _inject_include_chain_kwargs!(call_expr, prop_name)
+    _inject_include_prefix!(call_expr, prop_name)
 
-Mutate the kwargs of `SomeStruct(args...; ...)` so that `__parent__=__self__`
-and `__prefix__=__self__.__prefix__ * "/prop_name"` are present (without
-overriding any user-provided values). Walks `walk_rhs` later, so bare
-`__self__` is left alone (it's the parameter name, not a property).
+Mutate the kwargs of `SomeStruct(args...; ...)` so that
+`__prefix__=__self__.__prefix__ * "/prop_name"` is present (without overriding
+any user-provided value). `__parent__` and `__status__` are handled by
+DynamicObjects' `@include` processing.
 """
-function _inject_include_chain_kwargs!(call_expr, prop_name)
-    # Find or create the :parameters node (first arg after the function in :call)
+function _inject_include_prefix!(call_expr, prop_name)
     params_idx = findfirst(a -> a isa Expr && a.head === :parameters, call_expr.args)
     if params_idx === nothing
         params = Expr(:parameters)
@@ -539,15 +537,12 @@ function _inject_include_chain_kwargs!(call_expr, prop_name)
     else
         params = call_expr.args[params_idx]
     end
-    has_parent = false
     has_prefix = false
     for kw in params.args
         name = kw isa Symbol ? kw :
                (Meta.isexpr(kw, :kw) ? kw.args[1] : nothing)
-        name === :__parent__ && (has_parent = true)
         name === :__prefix__ && (has_prefix = true)
     end
-    has_parent || push!(params.args, Expr(:kw, :__parent__, :__self__))
     has_prefix || push!(params.args, Expr(:kw, :__prefix__, :(__self__.__prefix__ * "/" * $(string(prop_name)))))
     call_expr
 end
