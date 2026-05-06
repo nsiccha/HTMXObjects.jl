@@ -3253,6 +3253,10 @@ function _classify_call_arg!(positional, kwargs, arg::Expr)
     nothing
 end
 
+# `kw` is either a bare Symbol (`name`) or a `:kw`/`:(=)` Expr (`name=value`).
+_query_url_kw(kw::Symbol) = Expr(:kw, kw, esc(kw))
+_query_url_kw(kw::Expr) = Expr(:kw, kw.args[1], esc(kw.args[2]))
+
 macro query_url(expr)
     _query_url = GlobalRef(@__MODULE__, :query_url)
     if expr isa Symbol
@@ -3282,7 +3286,7 @@ macro query_url(expr)
     if isempty(kwargs)
         return :($(_query_url)($path_expr))
     else
-        kw_exprs = [kw isa Symbol ? Expr(:kw, kw, esc(kw)) : Expr(:kw, kw.args[1], esc(kw.args[2])) for kw in kwargs]
+        kw_exprs = map(_query_url_kw, kwargs)
         return DynamicObjects.fixcall(Expr(:call, _query_url, path_expr, Expr(:parameters, kw_exprs...)))
     end
 end
