@@ -36,6 +36,17 @@ import LibGit2
 
 const CONTEXT :: Ref{ServerContext} = Ref(ServerContext(; mod=@__MODULE__))
 
+# Forward declaration: `@htmx struct` (defined further down in this file at
+# `RecordingRoutes`, `AppContext`, `TestRoutes`, `EditorRoutes`) emits a
+# fully-qualified method definition `HTMXObjects.query_url(self::T; …) = …`
+# during its expansion. Julia 1.10 errors with `UndefVarError: query_url not
+# defined` when adding a method to `M.f` if `f` doesn't yet exist in `M` —
+# even though the same form `f(args) = body` would create the binding when
+# unqualified. The full `query_url` implementation is defined later in the
+# file alongside the `@query_url` macro; this `function …end` just creates
+# the binding so the in-file `@htmx struct` blocks can attach methods.
+function query_url end
+
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing, kwargs...)
 
