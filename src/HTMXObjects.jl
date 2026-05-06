@@ -3215,6 +3215,27 @@ before `walk_rhs` turns it into a property access.
     @query_url item(id; format="json")               # → query_url("/item/\$(id)"; format="json")
     @query_url index                                 # → query_url("/")
 """
+_unquote(x::QuoteNode) = x.value
+_unquote(x) = x
+
+# Pull the property name out of an `@query_url` head: bare symbol, or
+# `__self__.prop` style `:.` expression. Anything else is a usage error.
+_query_url_name(x) = error("@query_url: property name must be a symbol, got $x")
+_query_url_name(s::Symbol) = s
+function _query_url_name(e::Expr)
+    e.head === :. || error("@query_url: property name must be a symbol, got $e")
+    _unquote(e.args[2])
+end
+
+# Bucket a single call argument into positional / kwargs based on its shape.
+_classify_call_arg!(positional, _, arg) = (push!(positional, arg); nothing)
+function _classify_call_arg!(positional, kwargs, arg::Expr)
+    arg.head === :parameters && return (append!(kwargs, arg.args); nothing)
+    arg.head === :kw         && return (push!(kwargs, arg); nothing)
+    push!(positional, arg)
+    nothing
+end
+
 macro query_url(expr)
     _query_url = GlobalRef(@__MODULE__, :query_url)
     if expr isa Symbol
@@ -3222,28 +3243,13 @@ macro query_url(expr)
         return esc(:($(_query_url)($path)))
     end
     expr isa Expr && expr.head === :call || error("@query_url expects a call expression like `prop(args...; kwargs...)`")
-    name_expr = expr.args[1]
-    # In DO/HTMXO context, name may be __self__.prop (a :. expression) — extract the symbol
-    if name_expr isa Expr && name_expr.head === :.
-        name = name_expr.args[2]
-        name = name isa QuoteNode ? name.value : name
-    elseif name_expr isa Symbol
-        name = name_expr
-    else
-        error("@query_url: property name must be a symbol, got $name_expr")
-    end
+    name = _query_url_name(expr.args[1])
 
     # Separate positional args and kwargs
     positional = []
     kwargs = []
     for arg in expr.args[2:end]
-        if arg isa Expr && arg.head === :parameters
-            append!(kwargs, arg.args)
-        elseif arg isa Expr && arg.head === :kw
-            push!(kwargs, arg)
-        else
-            push!(positional, arg)
-        end
+        _classify_call_arg!(positional, kwargs, arg)
     end
 
     # Build path: "/name" or "/name/$arg1/$arg2"
