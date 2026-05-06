@@ -192,6 +192,41 @@ properties (so `@get legacy(...)` — a user route literally named `legacy` —
 is not flagged). The warning includes `file:line` from the nearest
 `LineNumberNode` so the fix is mechanical.
 """
+# Resolve the bound property name from the LHS of a `name = ...` (or
+# `name(...) = ...`, `name[...] = ...`, `name::T = ...`) inside an `@htmx`
+# struct body. Returns `nothing` when the LHS doesn't bind a plain symbol.
+_as_symbol(s::Symbol) = s
+_as_symbol(_) = nothing
+_property_lhs_name(_) = nothing
+_property_lhs_name(lhs::Symbol) = lhs
+function _property_lhs_name(lhs::Expr)
+    (lhs.head === :call || lhs.head === :ref) && return _as_symbol(first(lhs.args))
+    lhs.head === :(::) && length(lhs.args) >= 1 && return _as_symbol(lhs.args[1])
+    nothing
+end
+
+# Name of a kwarg slot in a `:parameters` expr — bare `Symbol` or `:kw` Expr.
+_kwarg_name(_) = nothing
+_kwarg_name(s::Symbol) = s
+_kwarg_name(e::Expr) = e.head === :kw ? e.args[1] : nothing
+
+# Symbol name from a typed param shape: `n` or `n::T`.
+_typed_param_name(_) = nothing
+_typed_param_name(s::Symbol) = s
+function _typed_param_name(e::Expr)
+    e.head === :(::) && length(e.args) >= 1 || return nothing
+    _as_symbol(e.args[1])
+end
+
+# Split a `@param`-style LHS into `(name, type_or_nothing)`. Returns
+# `(nothing, nothing)` if the LHS is not a recognized shape.
+_split_param_lhs(_) = (nothing, nothing)
+_split_param_lhs(lhs::Symbol) = (lhs, nothing)
+function _split_param_lhs(lhs::Expr)
+    lhs.head === :(::) && length(lhs.args) == 2 && lhs.args[1] isa Symbol || return (nothing, nothing)
+    (lhs.args[1], lhs.args[2])
+end
+
 function _warn_legacy_name!(struct_expr, legacy::Symbol, replacement::Symbol)
     body = struct_expr.args[3]
     route_macros = _route_macros()
@@ -210,16 +245,7 @@ function _warn_legacy_name!(struct_expr, legacy::Symbol, replacement::Symbol)
             inner = inner.args[end]
         end
         Meta.isexpr(inner, :(=)) || continue
-        lhs = inner.args[1]
-        name = if lhs isa Symbol
-            lhs
-        elseif Meta.isexpr(lhs, (:call, :ref))
-            first(lhs.args) isa Symbol ? first(lhs.args) : nothing
-        elseif Meta.isexpr(lhs, :(::)) && length(lhs.args) >= 1
-            lhs.args[1] isa Symbol ? lhs.args[1] : nothing
-        else
-            nothing
-        end
+        name = _property_lhs_name(inner.args[1])
         if name === legacy
             loc = isnothing(lnn) ? "" : " (near $(lnn.file):$(lnn.line))"
             @warn "Deprecated: `$legacy` is a legacy framework property name — rename to `$replacement`$loc. The legacy name still works but will be emitted as a warning on every macro expansion."
@@ -390,16 +416,7 @@ function _inject_dunder_props!(struct_expr)
             inner = inner.args[end]
         end
         Meta.isexpr(inner, :(=)) || continue
-        lhs = inner.args[1]
-        name = if lhs isa Symbol
-            lhs
-        elseif Meta.isexpr(lhs, (:call, :ref))
-            first(lhs.args) isa Symbol ? first(lhs.args) : nothing
-        elseif Meta.isexpr(lhs, :(::)) && length(lhs.args) >= 1
-            lhs.args[1] isa Symbol ? lhs.args[1] : nothing
-        else
-            nothing
-        end
+        name = _property_lhs_name(inner.args[1])
         name === :__req__     && (has_req = true)
         name === :__appdata__ && (has_appdata = true)
         name === :__parent__  && (has_parent = true)
@@ -543,8 +560,7 @@ function _inject_include_prefix!(call_expr, prop_name)
     end
     has_prefix = false
     for kw in params.args
-        name = kw isa Symbol ? kw :
-               (Meta.isexpr(kw, :kw) ? kw.args[1] : nothing)
+        name = _kwarg_name(kw)
         name === :__prefix__ && (has_prefix = true)
     end
     has_prefix || push!(params.args, Expr(:kw, :__prefix__, :(__self__.__prefix__ * "/" * $(string(prop_name)))))
@@ -641,8 +657,7 @@ function _rewrite_param_delegation(expr)
     Meta.isexpr(params, :parameters) || return nothing
     out = Tuple{Symbol, Expr}[]
     for n in params.args
-        name_sym = n isa Symbol ? n :
-                   (Meta.isexpr(n, :(::)) && n.args[1] isa Symbol ? n.args[1] : nothing)
+        name_sym = _typed_param_name(n)
         name_sym === nothing && return nothing
         push!(out, (name_sym, Expr(:(=), name_sym, Expr(:., source, QuoteNode(name_sym)))))
     end
@@ -653,21 +668,13 @@ end
 # and return `(name_sym, rewritten_assignment)` or `nothing` if unrecognized.
 function _rewrite_param_line(expr)
     default_expr = nothing
-    type_expr = nothing
     lhs = expr
     if Meta.isexpr(expr, :(=))
         lhs = expr.args[1]
         default_expr = expr.args[2]
     end
-    name_sym = nothing
-    if lhs isa Symbol
-        name_sym = lhs
-    elseif Meta.isexpr(lhs, :(::)) && length(lhs.args) == 2 && lhs.args[1] isa Symbol
-        name_sym = lhs.args[1]
-        type_expr = lhs.args[2]
-    else
-        return nothing
-    end
+    name_sym, type_expr = _split_param_lhs(lhs)
+    name_sym === nothing && return nothing
     t = type_expr === nothing ? :nothing : type_expr
     req_expr = :($(_req_of)(__self__))
     rhs = default_expr === nothing ?
