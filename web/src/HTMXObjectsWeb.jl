@@ -36,14 +36,14 @@ const APPDATA = AppData()
     @get index = h.div(
         h.h1("HTMXObjectsWeb"),
         h.ul(
-            h.li(h.a(href="/tests")("Tests")),
-            h.li(h.a(href="/demo")("Feedback demo")),
-            h.li(h.a(href="/lazy_grid")("Lazy grid demo")),
-            h.li(h.a(href="/sortable_table")("Sortable table demo")),
-            h.li(h.a(href="/captions")("Captions demo")),
-            h.li(h.a(href="/editor_demo")("Editor form demo")),
-            h.li(h.a(href="/git_editor_demo")("Git-backed editor demo")),
-            h.li(h.a(href="/gallery_demo")("Gallery primitive demo")),
+            h.li(h.a(href=__self__/"tests")("Tests")),
+            h.li(h.a(href=__self__/"demo")("Feedback demo")),
+            h.li(h.a(href=__self__/"lazy_grid")("Lazy grid demo")),
+            h.li(h.a(href=__self__/"sortable_table")("Sortable table demo")),
+            h.li(h.a(href=__self__/"captions")("Captions demo")),
+            h.li(h.a(href=__self__/"editor_demo")("Editor form demo")),
+            h.li(h.a(href=__self__/"git_editor_demo")("Git-backed editor demo")),
+            h.li(h.a(href=__self__/"gallery_demo")("Gallery primitive demo")),
         ),
     )
 
