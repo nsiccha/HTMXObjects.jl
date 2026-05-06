@@ -770,6 +770,11 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
         Base.:/(self::$type_name, p::AbstractString) =
             self.__prefix__ * "/" * lstrip(p, '/')
     ))
+    _qurl_fname = Expr(:., @__MODULE__, QuoteNode(:query_url))
+    push!(block.args[1].args, :(
+        $(_qurl_fname)(self::$type_name; overrides...) =
+            $(_qurl_fname)(self.__route__, self; overrides...)
+    ))
     # Emit `Base.print(io, ::T)` so route bodies can write
     # `href=__self__` (the struct's index URL — `__prefix__` for non-root
     # mounts, `"/"` for the root). Cobweb stringifies attribute values via
