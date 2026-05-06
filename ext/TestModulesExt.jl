@@ -31,20 +31,25 @@ function _cache_path(tests_mod)
     joinpath(dir, string(nameof(tests_mod)) * ".tsv")
 end
 
+# filter predicate: true for Test results that aren't passes
+_is_nonpass(::Test.Pass) = false
+_is_nonpass(_) = true
+
+# summary of a cached test result for disk persistence
+_persist_summary(::TestError) = ("error", 0, 0)
+_persist_summary(r::PersistedResult) = (r.anynonpass ? "fail" : "pass", r.n_passed, r.total)
+function _persist_summary(r)
+    np = r.n_passed
+    tot = np + count(_is_nonpass, r.results)
+    (r.anynonpass ? "fail" : "pass", np, tot)
+end
+
 function _persist_result!(tests_mod, name::Symbol)
     c = TestModules.cached(tests_mod, name)
     isnothing(c) && return
     ts, result = c
     dur = get(_durations(), (objectid(tests_mod), name), 0.0)
-    status, n_passed, total = if result isa TestError
-        ("error", 0, 0)
-    elseif result isa PersistedResult
-        (result.anynonpass ? "fail" : "pass", result.n_passed, result.total)
-    else
-        np = result.n_passed
-        tot = np + count(r -> !(r isa Test.Pass), result.results)
-        (result.anynonpass ? "fail" : "pass", np, tot)
-    end
+    status, n_passed, total = _persist_summary(result)
     # Read existing entries, update/add this one, write back
     entries = _read_cache_file(tests_mod)
     entries[name] = (ts, status, n_passed, total, dur)
@@ -116,10 +121,14 @@ function _safe_run_all!(tests_mod)
     end
 end
 
+# A cached result counts as "failed" if it errored or had any non-pass.
+_is_failed_result(::TestError) = true
+_is_failed_result(r) = r.anynonpass
+
 function _failed_names(tests_mod)
     Symbol[name for name in TestModules.test_names(tests_mod)
         if let c = TestModules.cached(tests_mod, name)
-            !isnothing(c) && (c[2] isa TestError || c[2].anynonpass)
+            !isnothing(c) && _is_failed_result(c[2])
         end
     ]
 end
@@ -142,6 +151,37 @@ function _format_duration(dt)
     "$(round(dt / 60; digits=1))m"
 end
 
+# Render the status fields for a single cached result. `age`, `dur_str` are
+# context already computed by the caller; helpers vary the rest by result type.
+function _result_status(result::TestError, age, dur_str)
+    msg = sprint(showerror, result.exception)
+    short = first(msg, 60)
+    bt = sprint(Base.show_backtrace, result.backtrace)
+    full_detail = msg * "\n" * bt
+    (; status="error", icon="!", age, detail=short, duration=dur_str, error_detail=full_detail)
+end
+function _result_status(result::PersistedResult, age, dur_str)
+    status = result.anynonpass ? "fail" : "pass"
+    icon = result.anynonpass ? "✗" : "✓"
+    detail = "$(result.n_passed)/$(result.total)"
+    (; status, icon, age, detail, duration=dur_str, error_detail="")
+end
+function _result_status(result, age, dur_str)
+    np = result.n_passed
+    total = np + count(_is_nonpass, result.results)
+    anyf = result.anynonpass
+    status = anyf ? "fail" : "pass"
+    icon = anyf ? "✗" : "✓"
+    detail = "$(np)/$(total)"
+    error_detail = if anyf
+        fails = filter(_is_nonpass, result.results)
+        join([sprint(show, f) for f in fails], "\n")
+    else
+        ""
+    end
+    (; status, icon, age, detail, duration=dur_str, error_detail)
+end
+
 function format_test_status(tests_mod, name::Symbol)
     c = TestModules.cached(tests_mod, name)
     dur = get(_durations(), (objectid(tests_mod), name), nothing)
@@ -150,33 +190,7 @@ function format_test_status(tests_mod, name::Symbol)
     ts, result = c
     age_s = round(Int, time() - ts)
     age = age_s < 60 ? "$(age_s)s ago" : age_s < 3600 ? "$(age_s ÷ 60)m ago" : "$(age_s ÷ 3600)h ago"
-    if result isa TestError
-        msg = sprint(showerror, result.exception)
-        short = first(msg, 60)
-        bt = sprint(Base.show_backtrace, result.backtrace)
-        full_detail = msg * "\n" * bt
-        return (; status="error", icon="!", age, detail=short, duration=dur_str, error_detail=full_detail)
-    end
-    if result isa PersistedResult
-        status = result.anynonpass ? "fail" : "pass"
-        icon = result.anynonpass ? "✗" : "✓"
-        detail = "$(result.n_passed)/$(result.total)"
-        return (; status, icon, age, detail, duration=dur_str, error_detail="")
-    end
-    np = result.n_passed
-    total = np + count(r -> !(r isa Test.Pass), result.results)
-    anyf = result.anynonpass
-    status = anyf ? "fail" : "pass"
-    icon = anyf ? "✗" : "✓"
-    detail = "$(np)/$(total)"
-    # Collect failure details
-    error_detail = if anyf
-        fails = filter(r -> !(r isa Test.Pass), result.results)
-        join([sprint(show, f) for f in fails], "\n")
-    else
-        ""
-    end
-    (; status, icon, age, detail, duration=dur_str, error_detail)
+    _result_status(result, age, dur_str)
 end
 
 function _summary_counts(tests_mod)
