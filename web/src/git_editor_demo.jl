@@ -48,7 +48,10 @@ end
     # that `EditorRoutes` forwards the parent's `@param` values through
     # edit/save/cancel/history/restore round-trips.
     @include section_routes = begin
-        (; repo) = __parent__
+        # `repo` is auto-forwarded from the parent's `(; repo, notes) =
+        # __appdata__.git_editor_demo` destructure — re-declaring it
+        # here would emit a second `compute_property(…, ::Val{:repo})`
+        # method and trip the "overwritten at …" warning.
         @param name::String = "intro"
         editor       = repo.editor("sections/$name.md";
                            default_content="# $name\n\nSection content.\n")
