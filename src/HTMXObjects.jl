@@ -113,6 +113,11 @@ dynamicfiles(
     loadfile::Nullable{Function}=nothing
 ) = Oxygen.Core.dynamicfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
 
+# Append a new value to an existing query-parameter slot. String slot becomes
+# a 2-element vector; vector slot grows in place.
+_form_append(existing::String, v) = [existing, v]
+_form_append(existing::AbstractVector, v) = (push!(existing, v); existing)
+
 # --- Query parameter parsing (multi-value aware) ---
 
 """
@@ -140,12 +145,7 @@ function queryparams(req::HTTP.Request)
         k = _form_unescape(kv[1])
         v = length(kv) >= 2 ? _form_unescape(kv[2]) : ""
         if haskey(d, k)
-            existing = d[k]
-            if existing isa String
-                d[k] = [existing, v]
-            else
-                push!(existing, v)
-            end
+            d[k] = _form_append(d[k], v)
         else
             d[k] = v
         end
@@ -270,15 +270,12 @@ const _URL_BEARING_ATTRS = (
 # i.e. `"/foo"` or `"/foo/$id"`-style interpolation that begins with `/`.
 # External (`http://…`, `//…`, `mailto:`), protocol-relative, or anchor URLs
 # (`#…`) are fine; only literal absolute paths are flagged.
-function _is_hardcoded_root_url(expr)
-    if expr isa AbstractString
-        return startswith(expr, "/") && !startswith(expr, "//")
-    elseif Meta.isexpr(expr, :string) && !isempty(expr.args)
-        first_arg = expr.args[1]
-        return first_arg isa AbstractString && startswith(first_arg, "/") && !startswith(first_arg, "//")
-    end
-    return false
-end
+_is_hardcoded_root_url(expr::AbstractString) = startswith(expr, "/") && !startswith(expr, "//")
+_is_hardcoded_root_url(expr::Expr) = Meta.isexpr(expr, :string) && !isempty(expr.args) &&
+    _is_root_str_prefix(expr.args[1])
+_is_hardcoded_root_url(_) = false
+_is_root_str_prefix(s::AbstractString) = startswith(s, "/") && !startswith(s, "//")
+_is_root_str_prefix(_) = false
 
 """
     _warn_hardcoded_url_in_attrs!(struct_expr)
@@ -894,13 +891,13 @@ function _generate_extract_args(type_name, prop_name, pos_params, kw_params)
         if has_default
             push!(kw_stmts, quote
                 let __v__ = $lookup_call
-                    __v__ isa $(_NoDefault) || push!(__kw__, $(QuoteNode(kname)) => __v__)
+                    $(_is_no_default)(__v__) || push!(__kw__, $(QuoteNode(kname)) => __v__)
                 end
             end)
         else
             push!(kw_stmts, quote
                 let __v__ = $lookup_call
-                    __v__ isa $(_NoDefault) && throw(KeyError($(QuoteNode(kname))))
+                    $(_is_no_default)(__v__) && throw(KeyError($(QuoteNode(kname))))
                     push!(__kw__, $(QuoteNode(kname)) => __v__)
                 end
             end)
@@ -1410,6 +1407,8 @@ end
 # returned by `_lookup_param`.
 struct _NoDefault end
 const _NO_DEFAULT = _NoDefault()
+_is_no_default(::_NoDefault) = true
+_is_no_default(_) = false
 
 """
     _lookup_param(src, fallback, name, T) -> value or _NO_DEFAULT
@@ -1446,12 +1445,11 @@ function _extract_param(req, name, T, default=_NO_DEFAULT)
     src = _kwargs_source(req, method)
     fallback = method in _queryparams_verbs ? nothing : queryparams(req)
     v = _lookup_param(src, fallback, name, T)
-    if v isa _NoDefault
-        default isa _NoDefault && throw(KeyError(name))
-        return default
-    end
-    v
+    _resolve_extracted(v, default, name)
 end
+_resolve_extracted(::_NoDefault, ::_NoDefault, name) = throw(KeyError(name))
+_resolve_extracted(::_NoDefault, default, _) = default
+_resolve_extracted(v, _default, _name) = v
 
 # Register a route handler directly on the HTTP router, bypassing Oxygen's
 # argument-name validation. We extract path params ourselves via positional URL segment indexing.
@@ -1496,6 +1494,11 @@ _revise_module() = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), 
 # to `io`. Oxygen's `revise=:lazy` mode already logs these to the console on
 # each request; duplicating them into the per-error log lets a stale-code
 # failure be diagnosed from the recorded file alone.
+_qe_file(key::Tuple) = length(key) >= 2 ? key[2] : key
+_qe_file(key) = key
+_qe_err_bt(val::Tuple) = length(val) >= 2 ? (val[1], val[2]) : (val, nothing)
+_qe_err_bt(val) = (val, nothing)
+
 function _append_revise_errors(io)
     rev = _revise_module()
     isnothing(rev) && return
@@ -1504,9 +1507,8 @@ function _append_revise_errors(io)
     println(io)
     println(io, "--- Pending Revise errors ($(length(qe))) ---")
     for (key, val) in qe
-        file = key isa Tuple && length(key) >= 2 ? key[2] : key
-        println(io, "file: ", file)
-        err, bt = val isa Tuple && length(val) >= 2 ? val : (val, nothing)
+        println(io, "file: ", _qe_file(key))
+        err, bt = _qe_err_bt(val)
         isnothing(bt) ? showerror(io, err) : showerror(io, err, bt)
         println(io)
     end
@@ -1683,7 +1685,7 @@ function _check_revise_errors!()
     if qe !== nothing && !isempty(qe)
         files = String[]
         for k in keys(qe)
-            push!(files, string(k isa Tuple && length(k) >= 2 ? k[2] : k))
+            push!(files, string(_qe_file(k)))
         end
         throw(ReviseHasErrors(files))
     end
@@ -1700,6 +1702,15 @@ both the short uid and the full file path. Also emits an `@error` log entry
 that includes the full path so the recorded file is one click away in the
 terminal/log viewer.
 """
+_print_req_meta(io, req::HTTP.Request) =
+    (println(io, "method:    ", req.method); println(io, "target:    ", req.target))
+_print_req_meta(args...) = nothing
+
+# PropertyComputationError's 2-arg showerror prints its own filtered backtrace;
+# don't append `bt` for it. All other error types use the standard 3-arg form.
+_show_err(io, err::PropertyComputationError, _bt) = showerror(io, err)
+_show_err(io, err, bt) = showerror(io, err, bt)
+
 function _record_error(err, bt, req)
     dir = ERROR_DIR[]
     isempty(dir) && (dir = joinpath(tempdir(), "htmxo_errors"))
@@ -1710,10 +1721,7 @@ function _record_error(err, bt, req)
         println(io, "# HTMXObjects error")
         println(io, "uid:       ", uid)
         println(io, "timestamp: ", Libc.strftime("%Y-%m-%dT%H:%M:%S", time()))
-        if req isa HTTP.Request
-            println(io, "method:    ", req.method)
-            println(io, "target:    ", req.target)
-        end
+        _print_req_meta(io, req)
         println(io)
         # PropertyComputationError's 2-arg showerror already prints the cause's
         # filtered backtrace; passing `bt` would make Julia's default 3-arg
@@ -1725,11 +1733,7 @@ function _record_error(err, bt, req)
         # line on the server side — the file path itself stays the canonical
         # record.
         try
-            if err isa PropertyComputationError
-                showerror(io, err)
-            else
-                showerror(io, err, bt)
-            end
+            _show_err(io, err, bt)
         catch e_show
             println(io, "<showerror threw ", typeof(e_show), ">: ",
                     sprint(io2 -> showerror(io2, e_show); context=:limit=>true))
@@ -1797,10 +1801,19 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 _with_error_status(req, resp::HTTP.Response) =
     is_htmx(req) ? resp : HTTP.Response(500, resp.headers; body=resp.body)
 
+_passthrough_response(r::HTTP.Response) = r
+_passthrough_response(_) = nothing
+
+# Zero-arg / no-kwarg call on a non-IndexableProperty: return the bare prop
+# rather than calling it. IndexableProperty always needs the call form.
+_bare_prop_ok(::DynamicObjects.IndexableProperty) = false
+_bare_prop_ok(_) = true
+
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
     uid, path = _record_error(err, bt, req)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
-    err_val isa HTTP.Response && return err_val
+    direct = _passthrough_response(err_val)
+    isnothing(direct) || return direct
     if wants_markdown(req)
         return _with_error_status(req, markdown_response(to_markdown_string(err_val)))
     end
@@ -1987,7 +2000,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, na
                 prop = getproperty(leaf, name)
                 # Zero-args + non-IP → return prop bare (e.g. `@get index() = ...`
                 # on a parent struct that exposes `index` as a derived property).
-                if isempty(idx_vals) && isempty(kw_pairs) && !(prop isa DynamicObjects.IndexableProperty)
+                if isempty(idx_vals) && isempty(kw_pairs) && _bare_prop_ok(prop)
                     prop
                 else
                     prop(idx_vals...; NamedTuple(kw_pairs)...)
@@ -2802,6 +2815,9 @@ Use `with_caption(spec, content; actions)` to wrap content in a `<figure>` —
 this function returns just the `<figcaption>` so it can be embedded in a
 custom layout if needed.
 """
+_wrap_long(s::AbstractString) = h.div(s)
+_wrap_long(s) = s
+
 function render_caption(spec::CaptionSpec; actions=())
     header_kids = Any[h.span(h.strong(spec.title), isempty(spec.short) ? "" : " — ", spec.short)]
     if !isempty(actions)
@@ -2811,7 +2827,7 @@ function render_caption(spec::CaptionSpec; actions=())
     body = isnothing(spec.long) ? "" :
         h.details(; class="caption-long")(
             h.summary("More"),
-            spec.long isa AbstractString ? h.div(spec.long) : spec.long,
+            _wrap_long(spec.long),
         )
     h.figcaption(; class="caption")(header, body)
 end
@@ -3156,18 +3172,19 @@ are preserved as-is (no deduplication or override).
     query_url("/search"; q="hello world", page=2)  # → "/search?q=hello%20world&page=2"
     query_url("/search?q=hello"; page=2)            # → "/search?q=hello&page=2"
 """
+# Append URL-encoded query-param entries: `Vector` values produce repeated keys,
+# everything else produces one `key=value` pair.
+_push_qparam!(parts, k, v::AbstractVector) =
+    for item in v; push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(item))); end
+_push_qparam!(parts, k, v) =
+    push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(v)))
+
 query_url(path; kwargs...) = begin
     filtered = filter(p -> !isnothing(p.second), pairs(kwargs))
     isempty(filtered) && return path
     parts = String[]
     for (k, v) in filtered
-        if v isa AbstractVector
-            for item in v
-                push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(item)))
-            end
-        else
-            push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(v)))
-        end
+        _push_qparam!(parts, k, v)
     end
     isempty(parts) ? path : path * (occursin('?', path) ? "&" : "?") * join(parts, "&")
 end
@@ -4835,6 +4852,17 @@ function htmxo_syntax_head(; languages=("julia", "stan"))
      h.style(syntax_css))
 end
 
+# Discriminate `LibGit2.GitError` (the only swallowable case in GitRepo's catch
+# blocks) from anything else (which must `rethrow()` to preserve the original
+# backtrace).
+_as_git_error(e::LibGit2.GitError) = e
+_as_git_error(_) = nothing
+
+# `obj` is required to be a blob in `read_blob`; everything else is a usage
+# error.
+_as_git_blob(o::LibGit2.GitBlob) = o
+_as_git_blob(_) = nothing
+
 @dynamicstruct struct GitRepo
     path::String
     author::String = "HTMXObjects <noreply@localhost>"
@@ -4865,7 +4893,7 @@ end
                     close(obj)
                 end
             catch err
-                err isa LibGit2.GitError || rethrow()
+                isnothing(_as_git_error(err)) && rethrow()
                 ""
             end
         finally
@@ -4879,7 +4907,7 @@ end
         try
             obj = LibGit2.GitObject(repo, spec)
             try
-                obj isa LibGit2.GitBlob || error("GitRepo.read_blob: $(spec) is not a blob")
+                isnothing(_as_git_blob(obj)) && error("GitRepo.read_blob: $(spec) is not a blob")
                 String(LibGit2.rawcontent(obj))
             finally
                 close(obj)
@@ -4899,14 +4927,14 @@ end
                 walker = try
                     LibGit2.GitRevWalker(repo)
                 catch err
-                    err isa LibGit2.GitError || rethrow()
+                    isnothing(_as_git_error(err)) && rethrow()
                     return out
                 end
                 try
                     try
                         LibGit2.push_head!(walker)
                     catch err
-                        err isa LibGit2.GitError || rethrow()
+                        isnothing(_as_git_error(err)) && rethrow()
                         return out
                     end
                     prev_blob = ""
@@ -4917,7 +4945,7 @@ end
                                 o = LibGit2.GitObject(repo, string(oid) * ":" * relpath)
                                 try string(LibGit2.GitHash(o)) finally close(o) end
                             catch err
-                                err isa LibGit2.GitError || rethrow()
+                                isnothing(_as_git_error(err)) && rethrow()
                                 ""
                             end
                             if !isempty(blob) && blob != prev_blob
