@@ -1695,10 +1695,19 @@ function _check_revise_errors!()
     # Queue errors first: a failed revision is the more direct staleness signal.
     qe = try getfield(rev, :queue_errors) catch; nothing end
     if qe !== nothing && !isempty(qe)
-        files = String[]
-        for k in keys(qe)
-            push!(files, string(_qe_file(k)))
+        # Self-heal: drop entries whose underlying file no longer exists on
+        # disk (e.g. a compile-cache `.ji` was removed and the package has
+        # since recompiled to a different path). Revise doesn't auto-prune
+        # these — the queue would otherwise grow stale forever and every
+        # request would 500. Pruning is safe: if the file legitimately
+        # comes back later, Revise's watcher will re-queue.
+        for k in collect(keys(qe))
+            f = string(_qe_file(k))
+            isfile(f) || delete!(qe, k)
         end
+    end
+    if qe !== nothing && !isempty(qe)
+        files = String[string(_qe_file(k)) for k in keys(qe)]
         throw(ReviseHasErrors(files))
     end
     # Missed-by-watcher edits: silent staleness.
