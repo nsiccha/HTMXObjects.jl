@@ -532,7 +532,7 @@ function _convert_include_to_struct!(struct_expr)
             struct_name = Symbol("_Include_", prop_name)
             # Inject __prefix__ field so the inline child has its own mount
             # segment (matching what the external-struct form gets via
-            # _inject_include_chain_kwargs!). Without this, `Base.:/(child, p)`
+            # _inject_include_prefix!). Without this, `Base.:/(child, p)`
             # reads `child.__prefix__` as a field — but inline children don't
             # go through `_inject_dunder_props!` (reroute=false on recursion),
             # so no __prefix__ field exists and `__self__/"x"` breaks.
