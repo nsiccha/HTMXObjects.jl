@@ -24,7 +24,7 @@ export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!,
 export TestRoutes
 
 using DynamicObjects, HTTP, Tables
-import DynamicObjects: @persist, fetchindex, getstatus
+import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString
 
@@ -514,8 +514,6 @@ end
 
 # Default: no inline struct properties.
 _inline_struct_props(::Type) = ()
-# Default: no nested struct type known.
-_nested_struct_type(::Type, ::Val) = nothing
 
 """
     _convert_include_to_struct!(struct_expr)
@@ -793,13 +791,10 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
     for ri in route_info
         push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.pos_params, ri.kw_params))
     end
-    # Emit _nested_struct_type methods for inline structs and @include externals
-    _type_fname = Expr(:., @__MODULE__, QuoteNode(:_nested_struct_type))
-    for (prop, child_type) in inline_props
-        push!(block.args[1].args, Expr(:(=),
-            Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
-            child_type))
-    end
+    # Emit _nested_struct_type methods for @include externals.
+    # (Inline `@struct` children are emitted by DO's macro itself, on the same
+    # generic, so HTMXO only needs to add the @include-external methods here.)
+    _type_fname = Expr(:., DynamicObjects, QuoteNode(:_nested_struct_type))
     for (prop, type_expr) in include_externals
         push!(block.args[1].args, Expr(:(=),
             Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
