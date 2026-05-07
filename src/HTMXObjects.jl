@@ -14,7 +14,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, sortable_table_styles, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -1190,6 +1190,19 @@ const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45
 const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-patch"), Symbol("hx-delete")])
 
 import HTMX: Cobweb
+
+"""
+    escape_html(s) -> String
+
+Escape `&`, `"`, `'`, `<`, `>` for safe interpolation into element text or
+attribute values. Thin re-export of `Cobweb.escape` so callers don't need to
+reach through HTMX.jl's transitive dependency.
+
+Note: `h.code(s)` and friends do **not** auto-escape text content — call
+`escape_html` explicitly when interpolating untrusted or markup-bearing
+strings.
+"""
+escape_html(s::AbstractString) = Cobweb.escape(s)
 
 """
     _disable_for_static(val) -> val
