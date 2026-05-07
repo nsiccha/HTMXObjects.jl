@@ -4061,6 +4061,29 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 .u-badge-soft.u-badge-error   { background: color-mix(in srgb, var(--htmxo-error)   35%, transparent); }
 .u-badge-soft.u-badge-warning { background: color-mix(in srgb, var(--htmxo-warning) 35%, transparent); }
 .u-badge-soft.u-badge-accent  { background: color-mix(in srgb, var(--htmxo-accent)  35%, transparent); }
+
+/* Generic equal-column grid. Column count and gap are tunable per
+   instance via CSS variables on the element itself or an ancestor:
+       <div class="htmxo-grid" style="--htmxo-grid-cols:16">…</div>   /* DON'T — inline */
+   Apps should set the variables in their own scoped stylesheet:
+       .my-app-dense-grid { --htmxo-grid-cols: 16; --htmxo-grid-gap: 0.25rem; }
+       <div class="htmxo-grid my-app-dense-grid">…</div> */
+.htmxo-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--htmxo-grid-cols, 4), 1fr);
+    gap: var(--htmxo-grid-gap, 0.5rem);
+}
+
+/* "← Back" link. Subtler than a primary link; sits above content as a
+   navigation hint. Pair with `<a class="htmxo-back-link" href="…">← Back</a>`. */
+.htmxo-back-link {
+    display: inline-block;
+    margin-bottom: 0.5rem;
+    font-size: 0.9em;
+    text-decoration: none;
+    color: var(--htmxo-muted, currentColor);
+}
+.htmxo-back-link:hover { text-decoration: underline; }
 }
 """)
 
