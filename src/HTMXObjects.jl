@@ -11,10 +11,10 @@ export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, sortable_table_styles, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -465,11 +465,14 @@ function _find_inline_structs(struct_expr)
     result
 end
 
-# Find @include external struct properties: @include prop = ExternalStruct(; ...)
-# Returns list of (prop_name, type_name_expr) pairs.
+# Find @include external struct properties:
+#   @include prop = ExternalStruct(; ...)              # classic, non-indexed
+#   @include prop(args…) = ExternalStruct(args…; …)    # indexed include
+# Returns list of (prop_name, type_name_expr, index_params) tuples where
+# `index_params` is a `Vector{Symbol}` (empty for non-indexed).
 function _find_include_externals(struct_expr)
     body = struct_expr.args[3]
-    result = Tuple{Symbol, Any}[]
+    result = Tuple{Symbol, Any, Vector{Symbol}}[]
     for arg in body.args
         arg isa Expr || continue
         expr = arg
@@ -479,12 +482,24 @@ function _find_include_externals(struct_expr)
         Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@include") || continue
         inner = expr.args[end]
         Meta.isexpr(inner, :(=)) || continue
-        prop_name = inner.args[1]
+        lhs = inner.args[1]
         rhs = inner.args[2]
-        # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type
+        # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type.
         Meta.isexpr(rhs, :call) || continue
         type_expr = rhs.args[1]
-        push!(result, (prop_name, type_expr))
+        prop_name, index_params = if lhs isa Symbol
+            (lhs, Symbol[])
+        elseif Meta.isexpr(lhs, :call) && lhs.args[1] isa Symbol
+            ips = Symbol[]
+            for a in lhs.args[2:end]
+                Meta.isexpr(a, :parameters) && continue   # kwargs
+                push!(ips, Meta.isexpr(a, :(::)) ? a.args[1] : a)
+            end
+            (lhs.args[1], ips)
+        else
+            continue
+        end
+        push!(result, (prop_name, type_expr, index_params))
     end
     result
 end
@@ -527,39 +542,61 @@ function _convert_include_to_struct!(struct_expr)
         Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@include") || continue
         inner = expr.args[end]
         Meta.isexpr(inner, :(=)) || continue
-        prop_name = inner.args[1]
+        lhs = inner.args[1]
         rhs = inner.args[2]
+        prop_name, index_params, lhs_idx_exprs = if lhs isa Symbol
+            (lhs, Symbol[], Any[])
+        elseif Meta.isexpr(lhs, :call) && lhs.args[1] isa Symbol
+            ips = Symbol[]
+            idx_exprs = Any[]
+            for a in lhs.args[2:end]
+                Meta.isexpr(a, :parameters) && continue
+                push!(ips, Meta.isexpr(a, :(::)) ? a.args[1] : a)
+                push!(idx_exprs, a)   # preserve type annotations
+            end
+            (lhs.args[1], ips, idx_exprs)
+        else
+            continue
+        end
         if Meta.isexpr(rhs, :block)
-            # Convert to: prop = struct _Include_prop ... end
+            # Convert to: prop[(args…)] = struct _Include_prop ... end
+            # __prefix__ extends the parent's prefix with the include name
+            # plus any index_params interpolated at runtime — same shape as
+            # what `_inject_include_prefix!` does for the call form.
             struct_name = Symbol("_Include_", prop_name)
-            # Inject __prefix__ field so the inline child has its own mount
-            # segment (matching what the external-struct form gets via
-            # _inject_include_prefix!). Without this, `Base.:/(child, p)`
-            # reads `child.__prefix__` as a field — but inline children don't
-            # go through `_inject_dunder_props!` (reroute=false on recursion),
-            # so no __prefix__ field exists and `__self__/"x"` breaks.
-            pushfirst!(rhs.args,
-                :(__prefix__ = __parent__.__prefix__ * "/" * $(string(prop_name))))
+            prefix_expr = :(__parent__.__prefix__ * "/" * $(string(prop_name)))
+            for ip in index_params
+                prefix_expr = :($prefix_expr * "/" * string($ip))
+            end
+            pushfirst!(rhs.args, :(__prefix__ = $prefix_expr))
             child_struct = Expr(:struct, false, struct_name, rhs)
-            body.args[i] = :($prop_name = $child_struct)
+            body.args[i] = isempty(index_params) ?
+                :($prop_name = $child_struct) :
+                Expr(:(=), Expr(:call, prop_name, lhs_idx_exprs...), child_struct)
         elseif Meta.isexpr(rhs, :call)
             # Only inject __prefix__ (HTMXO-specific). Leave @include in place
-            # for DO to handle __parent__ and __status__ wiring.
-            _inject_include_prefix!(rhs, prop_name)
+            # for DO to handle __parent__ and __status__ wiring. For indexed
+            # includes, the runtime prefix interpolates the per-call arg values.
+            _inject_include_prefix!(rhs, prop_name; index_params)
         end
     end
     struct_expr
 end
 
 """
-    _inject_include_prefix!(call_expr, prop_name)
+    _inject_include_prefix!(call_expr, prop_name; index_params=Symbol[])
 
 Mutate the kwargs of `SomeStruct(args...; ...)` so that
-`__prefix__=__self__.__prefix__ * "/prop_name"` is present (without overriding
-any user-provided value). `__parent__` and `__status__` are handled by
-DynamicObjects' `@include` processing.
+`__prefix__=__self__.__prefix__ * "/prop_name"[ * "/" * string(arg)…]` is
+present (without overriding any user-provided value). For an indexed include
+(`@include prop(x, y) = External(x, y)`), the `index_params` are interpolated
+into the prefix at runtime so each invocation of the property gets the URL
+segment for its current arg values.
+
+`__parent__` and `__status__` are handled by DynamicObjects' `@include`
+processing.
 """
-function _inject_include_prefix!(call_expr, prop_name)
+function _inject_include_prefix!(call_expr, prop_name; index_params::Vector{Symbol}=Symbol[])
     params_idx = findfirst(a -> Meta.isexpr(a, :parameters), call_expr.args)
     if params_idx === nothing
         params = Expr(:parameters)
@@ -567,12 +604,14 @@ function _inject_include_prefix!(call_expr, prop_name)
     else
         params = call_expr.args[params_idx]
     end
-    has_prefix = false
-    for kw in params.args
-        name = _kwarg_name(kw)
-        name === :__prefix__ && (has_prefix = true)
+    has_prefix = any(kw -> _kwarg_name(kw) === :__prefix__, params.args)
+    if !has_prefix
+        prefix_expr = :(__self__.__prefix__ * "/" * $(string(prop_name)))
+        for ip in index_params
+            prefix_expr = :($prefix_expr * "/" * string($ip))
+        end
+        push!(params.args, Expr(:kw, :__prefix__, prefix_expr))
     end
-    has_prefix || push!(params.args, Expr(:kw, :__prefix__, :(__self__.__prefix__ * "/" * $(string(prop_name)))))
     call_expr
 end
 
@@ -1936,7 +1975,14 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     to_response(wrapper[val])
 end
 
-_base_segments(path) = count(p -> !startswith(p, "{"), split(path, "/", keepempty=false))
+# For URL paths whose only `{x}` placeholders are at the very end (the
+# common single-route case), this is equivalent to "count the fixed
+# segments" — but that fails for nested-include paths like
+# `/sub/{pn}/leaf/{x}/{y}` where include-arg placeholders are interleaved
+# with fixed segments. Computing as `total - n_leaf_args` always lands at
+# the segment immediately preceding the leaf's own args.
+_base_segments(path, n_params::Int) =
+    length(split(path, "/", keepempty=false)) - n_params
 
 # When `route!` is called without an explicit `prefix=` kwarg, mount_prefix is "".
 # In that case we must NOT pass `__prefix__=""` to the constructor — that would
@@ -1980,10 +2026,13 @@ appropriate page_chain. WebSocket handlers do not go through this path —
 they have a different signature (`ws` instead of `req`) and skip the HTTP
 error pipeline.
 """
-function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, name,
+function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         path, n_params, extract_args::Bool, record_dir; root_prefix="", record_base::String="")
-    base = _base_segments(path)
+    base = _base_segments(path, n_params)
     is_included = !isempty(chain)
+    # Number of URL segments consumed by the root prefix (e.g. "/foo/bar" → 2)
+    root_segs = isempty(root_prefix) ? 0 :
+                count(==('/'), strip(root_prefix, '/')) + 1
     _register_handler(method, path, function(req)
         local root, leaf
         try
@@ -1994,7 +2043,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, na
 
         if is_included
             try
-                leaf = foldl((o, n) -> getproperty(o, n), chain; init=root)
+                leaf = _walk_chain(root, chain, req, root_segs)
             catch err
                 bt = catch_backtrace()
                 page_chain = _has_page(root) ? Any[root] : Any[]
@@ -2033,7 +2082,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, na
             end
 
             if is_included
-                page_chain = _collect_page_chain(root, chain)
+                page_chain = _collect_page_chain(root, chain, req, root_segs)
                 return _resolve_response_nested(page_chain, req, val; record_dir, save_path, record_base)
             else
                 return _resolve_response(leaf, req, val; record_dir, save_path, record_base)
@@ -2041,7 +2090,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector{Symbol}, method, na
         catch err
             bt = catch_backtrace()
             page_chain = is_included ?
-                _collect_page_chain(root, chain) :
+                _collect_page_chain(root, chain, req, root_segs) :
                 (_has_page(leaf) ? Any[leaf] : Any[])
             return _route_error_response(req, err, bt; error_obj=leaf, page_chain)
         end
@@ -2069,7 +2118,33 @@ function _route_path(prefix::AbstractString, name::Symbol, param_strs::AbstractV
     isempty(segs) ? "/" : "/" * join(segs, "/")
 end
 
-function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=Symbol[])
+# Compute the URL prefix and the chain step (`(name, types)`) for a nested
+# include. For non-indexed includes the prefix gains one segment (`/<name>`)
+# and the step has empty `types`. For indexed includes (`@include sub(x::T) = …`)
+# the prefix also gains a `{x}` placeholder per index_param, and `types` lists
+# the resolved Julia Type per param so the request handler can convert URL
+# segments via `_convert_param`.
+function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractString)
+    pos_idx_names = String[]
+    types = Any[]
+    mod = parentmodule(OwnerT)
+    for idx in info.indices
+        Meta.isexpr(idx, :parameters) && continue
+        ex = Meta.isexpr(idx, :kw) ? idx.args[1] : idx
+        nm = first(DynamicObjects.extractnames(ex))
+        push!(pos_idx_names, string(nm))
+        type_expr = Meta.isexpr(ex, :(::)) && length(ex.args) == 2 ? ex.args[2] : nothing
+        push!(types, isnothing(type_expr) ? nothing : Core.eval(mod, type_expr))
+    end
+    nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
+    for nm in pos_idx_names
+        nested_prefix *= "/{" * nm * "}"
+    end
+    step = (name=name, types=types)
+    (nested_prefix, step)
+end
+
+function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=NamedTuple{(:name, :types), Tuple{Symbol, Vector{Any}}}[])
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     for (name, info) in DynamicObjects.meta(T)
         DynamicObjects.isfixed(info) && continue
@@ -2077,8 +2152,8 @@ function _register_routes(T; prefix="", record_dir=nothing, record_base::String=
         # Handle nested structs: inline struct definitions or @include externals
         nested_type = _nested_struct_type(T, Val(name))
         if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
-            nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
-            chain = vcat(parent_chain, [name])
+            nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
+            chain = vcat(parent_chain, [step])
             _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
             continue
         end
@@ -2128,7 +2203,7 @@ function _register_routes(T; prefix="", record_dir=nothing, record_base::String=
                     end)
                 else
                     # Indexed/kwargs WS route: extract params from ws.request
-                    ws_base = _base_segments(path)
+                    ws_base = _base_segments(path, n_params)
                     register(CONTEXT[], "WEBSOCKET", path, function(ws)
                         idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
                         prop = getproperty(T(; __req__=ws.request, _prefix_kw(mount_prefix)...), name)
@@ -2215,23 +2290,51 @@ it is skipped.
 
 Never use `DynamicObjects.meta` to inspect properties — use `hasproperty` and type checks.
 """
-function _collect_page_chain(root, chain)
-    pages = Any[]
-    _has_page(root) && push!(pages, root)
+# Walk `chain` from `root`, yielding each intermediate object so callers can
+# both construct the leaf and inspect intermediate page-bearing structs in a
+# single pass. Each step is either a `Symbol` (legacy non-indexed shape) or a
+# `NamedTuple{(:name, :types), …}` (indexed-aware shape: `types` lists the
+# URL-segment Type per index_param, with `nothing` for untyped). For indexed
+# steps the corresponding URL segments after the name segment are extracted
+# and converted via `_convert_param`, then threaded into the property call.
+function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs::Int)
+    parts = split(split(req.target, "?")[1], "/", keepempty=false)
+    cursor = root_segs
+    objs = Any[root]
     obj = root
-    for name in chain
-        prev_type = typeof(obj)
-        obj = getproperty(obj, name)
-        if _has_page(obj)
-            # Skip if the page property is inherited (same defining type as parent)
-            prev_type == typeof(obj) && continue
-            # Skip if the page property type is a child of the previous page owner
-            # (inline structs inherit parent properties — detect by type name prefix)
-            obj_name = string(nameof(typeof(obj)))
-            prev_name = string(nameof(prev_type))
-            startswith(obj_name, prev_name * "_") && continue
-            push!(pages, obj)
+    for step in chain
+        name  = step isa Symbol ? step : step.name
+        types = step isa Symbol ? Any[] : step.types
+        cursor += 1   # name segment
+        obj = if isempty(types)
+            getproperty(obj, name)
+        else
+            args = Any[_convert_param(parts[cursor + j], types[j]) for j in 1:length(types)]
+            cursor += length(types)
+            getproperty(obj, name)(args...)
         end
+        push!(objs, obj)
+    end
+    objs
+end
+
+_walk_chain(root, chain, req, root_segs) = last(_chain_steps(root, chain, req, root_segs))
+
+function _collect_page_chain(root, chain, req::HTTP.Request, root_segs::Int)
+    pages = Any[]
+    objs = _chain_steps(root, chain, req, root_segs)
+    for (i, obj) in enumerate(objs)
+        _has_page(obj) || continue
+        if i > 1
+            prev = objs[i - 1]
+            prev_type = typeof(prev)
+            obj_type = typeof(obj)
+            # Skip pages inherited from the parent (same defining type) or
+            # from an inline child (type name prefix matches parent's).
+            prev_type == obj_type && continue
+            startswith(string(nameof(obj_type)), string(nameof(prev_type)) * "_") && continue
+        end
+        push!(pages, obj)
     end
     pages
 end
@@ -2296,7 +2399,7 @@ end
 # `root_prefix` is the parent's mount prefix (with leading "/") — passed verbatim
 # to the handler so `ParentT(; __prefix__=root_prefix)` constructs correctly,
 # and the parent's `@include` desugar then threads `/<name>` per nesting level.
-function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, prefix::String, record_dir; root_prefix::String="", record_base::String="")
+function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String, record_dir; root_prefix::String="", record_base::String="")
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     for (name, info) in DynamicObjects.meta(NestedT)
@@ -2305,8 +2408,9 @@ function _register_included_routes(ParentT, NestedT, chain::Vector{Symbol}, pref
         # Recurse into nested structs: inline struct definitions or @include externals
         nested_type = _nested_struct_type(NestedT, Val(name))
         if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
-            _register_included_routes(ParentT, nested_type, vcat(chain, [name]),
-                prefix * "/" * string(name), record_dir; root_prefix, record_base)
+            nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
+            _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
+                nested_prefix, record_dir; root_prefix, record_base)
             continue
         end
 
@@ -2875,22 +2979,67 @@ function sortable_table_js()
     h.script(raw"""
 function sortTable(col, th) {
     const tbody = th.closest('table').querySelector('tbody');
-    const rows = Array.from(tbody.querySelectorAll('tr'));
+    // Paired-row pattern: a sortable row may carry a sibling row whose id
+    // starts with "detail-" instead of "row-" (or any custom prefix → the
+    // companion's id mirrors it). We sort only the primary rows and keep
+    // each detail row pinned to its parent. Rows without an id are treated
+    // as primary too. Skip primaries whose first cell is empty (sub-headers).
+    const all = Array.from(tbody.querySelectorAll('tr'));
+    const isCompanion = r => r.id && r.id.startsWith('detail-');
+    const primaries = all.filter(r => !isCompanion(r) && r.cells.length > col);
+    const companionFor = r => {
+        if (!r.id) return null;
+        const idx = r.id.indexOf('-');
+        if (idx < 0) return null;
+        return tbody.querySelector('#detail-' + r.id.slice(idx + 1));
+    };
     const asc = th.dataset.sortDir !== 'asc';
     th.dataset.sortDir = asc ? 'asc' : 'desc';
     th.closest('tr').querySelectorAll('th').forEach(h => { if (h !== th) delete h.dataset.sortDir; });
-    rows.sort((a, b) => {
+    primaries.sort((a, b) => {
         const av = a.cells[col].textContent.trim();
         const bv = b.cells[col].textContent.trim();
         const an = parseFloat(av), bn = parseFloat(bv);
         if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
         return asc ? av.localeCompare(bv) : bv.localeCompare(av);
     });
-    rows.forEach(r => tbody.appendChild(r));
+    primaries.forEach(r => {
+        tbody.appendChild(r);
+        const c = companionFor(r);
+        if (c) tbody.appendChild(c);
+    });
     th.closest('tr').querySelectorAll('th').forEach(h => {
         h.textContent = h.textContent.replace(/ [▲▼]$/, '');
     });
     th.textContent += asc ? ' ▲' : ' ▼';
+}
+""")
+end
+
+"""
+    sortable_table_styles()
+
+Return an `h.style(...)` node with the canonical CSS for tables marked
+`class="htmxo-sortable-table"`: every `<th>` gets `cursor: pointer` (sortable
+by default), and any `<th>` with a `colspan` (i.e. a group span over multiple
+columns) opts out and centres its text. Pair with [`sortable_table_js`](@ref).
+"""
+function sortable_table_styles()
+    h.style("""
+@layer htmxo {
+.htmxo-sortable-table thead th { cursor: pointer; }
+.htmxo-sortable-table thead th[colspan] { cursor: default; text-align: center; border-bottom: none; }
+/* Body cells with a hyperscript handler are clickable too (htmx-attr cells
+   already get cursor:pointer from the global rule in htmxo_utility_styles). */
+.htmxo-sortable-table tbody td[_] { cursor: pointer; }
+/* Hover-highlight primary rows. The sortable_table_js convention pairs a
+   primary row `tr#row-<id>` with a hidden detail row `tr#detail-<id>`. */
+.htmxo-sortable-table tbody tr[id^="row-"]:hover {
+    background: var(--pico-table-row-stripped-background-color);
+}
+/* Detail rows borrow the primary row's full width. The detail cell is just
+   a container; padding/border belong to the inner content. */
+.htmxo-sortable-table tbody tr[id^="detail-"] > td { padding: 0; border: none; }
 }
 """)
 end
@@ -3781,6 +3930,19 @@ Class prefixes:
 """
 htmxo_utility_styles() = h.style("""
 @layer htmxo {
+/* === Generic behavior conventions === */
+/* Any element triggering an htmx action is clickable. */
+[hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }
+
+/* `data-status` on a leaf text element (cells, badges, pills) colors the
+   text by status; on a container with `.htmxo-status-banner` it colors the
+   left border instead (see banner rules below). */
+td[data-status], th[data-status], span[data-status], small[data-status] { font-weight: bold; }
+[data-status="success"]:not(.htmxo-status-banner) { color: var(--htmxo-success); }
+[data-status="error"]:not(.htmxo-status-banner)   { color: var(--htmxo-error); }
+[data-status="warning"]:not(.htmxo-status-banner) { color: var(--htmxo-warning); }
+[data-status="muted"]:not(.htmxo-status-banner)   { color: var(--htmxo-muted); }
+
 .u-hidden { display: none; }
 .u-inline { display: inline; }
 .u-inline-block { display: inline-block; }
@@ -3795,6 +3957,23 @@ htmxo_utility_styles() = h.style("""
 .u-stack-wide { display: flex; flex-direction: column; gap: 1rem; }
 .u-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .u-grid-auto { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
+/* Sidebar + main page layout. Stacks on mobile (<1024px); becomes a 2-col
+   grid above. Inner sticky nav matches Pico docs' .is-sticky-above-lg.
+   Pair with `app_layout(sidebar, content)`. */
+.htmxo-app-layout { display: block; min-height: 100vh; }
+.htmxo-app-layout > aside { padding: 1rem 0; }
+.htmxo-app-layout > main { min-width: 0; padding: 1rem 0; }
+@media (min-width: 1024px) {
+    .htmxo-app-layout {
+        display: grid;
+        grid-template-columns: var(--htmxo-sidebar-width, 12rem) 1fr;
+        grid-template-areas: "sidebar content";
+        column-gap: 2rem;
+    }
+    .htmxo-app-layout > aside { grid-area: sidebar; padding: 1rem 1rem 1rem 0; border-right: 1px solid var(--pico-muted-border-color); }
+    .htmxo-app-layout > main { grid-area: content; }
+    .htmxo-app-layout > aside > nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; }
+}
 .u-bg-soft { background: var(--pico-card-background-color, #f8f8f8); }
 .u-btn-sm { padding: 0.3rem 0.8rem; }
 .u-btn-xs { padding: 0.2rem 0.6rem; }
@@ -3856,11 +4035,21 @@ htmxo_utility_styles() = h.style("""
 .u-scroll-y-lg { max-height: 400px; overflow: auto; }
 .u-card { background: var(--pico-card-background-color, transparent); padding: 1rem; border-radius: 0.5rem; }
 .u-code-block { background: var(--pico-code-background-color, #f6f8fa); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; }
-.u-status-callout { padding: 0.5rem 1rem; margin-bottom: 0.5rem; min-width: 0; overflow: hidden; background: var(--pico-card-background-color, transparent); border-left: 4px solid var(--htmxo-border); }
-.u-status-callout.u-status-success { border-left-color: var(--htmxo-success); }
-.u-status-callout.u-status-error   { border-left-color: var(--htmxo-error); }
-.u-status-callout.u-status-warning { border-left-color: var(--htmxo-warning); }
-.u-status-callout.u-status-accent  { border-left-color: var(--htmxo-accent); }
+/* Status banner — colored left-border callout. State via data-status. */
+.htmxo-status-banner { padding: 0.5rem 1rem; margin-bottom: 0.5rem; min-width: 0; overflow: hidden; background: var(--pico-card-background-color, transparent); border-left: 4px solid var(--htmxo-border); }
+.htmxo-status-banner[data-status="success"] { border-left-color: var(--htmxo-success); }
+.htmxo-status-banner[data-status="error"]   { border-left-color: var(--htmxo-error); }
+.htmxo-status-banner[data-status="warning"] { border-left-color: var(--htmxo-warning); }
+.htmxo-status-banner[data-status="accent"]  { border-left-color: var(--htmxo-accent); }
+
+/* Breadcrumb nav. Build with `htmxo_breadcrumb([("Home", "/", "/"), ...])`.
+   Children are <span> (current page, marked aria-current) or <a> (link).
+   Separators are generated via ::before — no separator element in markup. */
+.htmxo-breadcrumb { font-size: 0.85em; margin-bottom: 1rem; padding: 6px 0; border-bottom: 1px solid var(--pico-muted-border-color); }
+.htmxo-breadcrumb > * + *::before { content: ' / '; color: var(--pico-muted-color); margin: 0 6px; }
+.htmxo-breadcrumb [aria-current="page"] { color: var(--pico-color); font-weight: 500; }
+.htmxo-breadcrumb a { text-decoration: none; color: var(--pico-primary); }
+.htmxo-breadcrumb a:hover { text-decoration: underline; }
 .u-badge { display: inline-block; padding: 0.15em 0.5em; border-radius: 3px; font-size: 0.8em; font-weight: 600; line-height: 1.2; color: var(--htmxo-bg, #fff); background: var(--htmxo-muted); }
 .u-badge.u-badge-success { background: var(--htmxo-success); }
 .u-badge.u-badge-error   { background: var(--htmxo-error); }
@@ -4187,7 +4376,7 @@ Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active
     nav_sidebar(["Overview" => "/overview", "Settings" => "/settings"]; prefix="/app")
 """
 function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
-    h.aside(; class="u-sticky-top")(
+    h.aside(
         h.nav(
             h.ul(
                 [h.li(h.a(label;
@@ -4200,6 +4389,67 @@ function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; 
                 )) for (label, path) in items]...
             )
         )
+    )
+end
+
+"""
+    htmxo_breadcrumb(items; target="#content")
+
+Render a Pico-styled breadcrumb `<nav>`. Each `item` is a tuple
+`(label, frag_url, push_url)`. When `frag_url` is `nothing`, the segment
+renders as plain text (the current page). Otherwise it's an `<a>` that issues
+`hx-get=frag_url` into `target` and updates the URL bar via `hx-push-url=push_url`.
+
+```
+htmxo_breadcrumb([
+    ("Home",     "/",          "/"),
+    ("Projects", "/projects",  "/projects"),
+    ("Detail",   nothing,      nothing),
+])
+```
+"""
+function htmxo_breadcrumb(items; target="#content")
+    parts = []
+    for (label, frag_url, push_url) in items
+        if isnothing(frag_url)
+            push!(parts, h.span(label; aria_current="page"))
+        else
+            push!(parts, h.a(label;
+                hx_get=frag_url, hx_target=target, hx_swap="innerHTML",
+                hx_push_url=push_url))
+        end
+    end
+    h.nav(parts...; class="htmxo-breadcrumb", aria_label="breadcrumb")
+end
+
+"""
+    app_layout(sidebar, content; content_id="content")
+
+Two-column app shell — sidebar `<aside>` next to a main content column. Inspired
+by Pico's docs layout (CSS Grid with named areas, sticky inner nav, stacks on
+mobile <1024px). `sidebar` is rendered as-is (typically [`nav_sidebar`](@ref));
+`content` is wrapped in `<div class="htmxo-app-content" id=content_id>` so HTMX
+swaps targeting `#content` work out of the box.
+
+Sidebar width defaults to `12rem` via the `--htmxo-sidebar-width` CSS variable;
+apps can override it in their own scoped style:
+
+    .htmxo-app-layout { --htmxo-sidebar-width: 10rem; }
+
+```
+__page__(content) = htmx(
+    app_layout(
+        nav_sidebar(["Table" => "/", "Gallery" => "/gallery"]),
+        content,
+    );
+    pico_version="2",
+)
+```
+"""
+function app_layout(sidebar, content; content_id="content")
+    h.div(; class="htmxo-app-layout")(
+        sidebar,
+        h.main(content; id=content_id),
     )
 end
 
@@ -4326,27 +4576,6 @@ A `@dynamicstruct` owning a directory managed as a git repo — the backend
 for [`EditorRoutes`](@ref). Auto-`git init`s on first access; mutations
 serialised via a per-instance `ReentrantLock`.
 
-# API
-- `blob_sha(relpath)` → HEAD:relpath blob SHA (or `""` if missing)
-- `read_blob("<sha>:<relpath>")` → blob content at revspec
-- `list_commits(relpath)` → commits touching the file
-- `write_file!(relpath, content; version, message)` → optimistic-concurrency
-  write: returns `(:ok, commit_sha)` or `(:conflict, current_blob_sha)`.
-- `locked_update!(f, relpath; message)` → atomic read-modify-write:
-  `f(current_content)` runs inside the per-repo lock; its return value is
-  written and committed. Function-first so `do`-blocks work:
-  ```julia
-  repo.locked_update!("metadata.yml"; message="set foo") do text
-      update_yaml_key(text, "foo", new_value)
-  end
-  ```
-  Use when the new content is composed from the current content (e.g. one
-  key of a multi-key YAML) — avoids the read-then-write race that
-  `write_file!` would surface as a spurious conflict.
-- `editor(relpath; default_content="")` → per-file handle exposing
-  `current_content()`, `current_version()`, `versions()`,
-  `read_version(sha)`, `write!(content; version, message)`, and
-  `update!(f; message)` (function-first, delegates to `locked_update!`).
 """
 # --- File-based galleries ---
 
@@ -4590,8 +4819,8 @@ function gallery_grid(items::AbstractVector{GalleryItem};
     end
     sections = map(seen) do sec
         title = get(section_titles, sec, sec)
-        h.section(; class="htmxo-gallery-section", data_section=sec)(
-            h.h3(title; class="htmxo-gallery-section-heading"),
+        h.section(; data_section=sec)(
+            h.h3(title),
             [card_renderer(it) for it in groups[sec]]...,
         )
     end
@@ -4621,7 +4850,6 @@ function gallery_toolbar(; search::Bool=true, pagination::Bool=true,
         search_placeholder::AbstractString="Search (regex; literal fallback)…")
     parts = []
     search && push!(parts, h.input(;
-        class="htmxo-gallery-search",
         type="search",
         placeholder=search_placeholder,
         autocomplete="off"))
@@ -4636,12 +4864,12 @@ function gallery_toolbar(; search::Bool=true, pagination::Bool=true,
         ps_options = [v == 0 ? _opt("all", "0") : _opt(string(v), string(v))
                       for v in page_sizes]
         push!(parts, h.div(; class="htmxo-gallery-pagination")(
-            h.span("Page size: "; class="htmxo-gallery-page-size-label"),
-            h.select(; class="htmxo-gallery-page-size")(ps_options...),
-            h.button("←"; type="button", class="htmxo-gallery-prev",
+            h.span("Page size: "),
+            h.select(; data_role="page-size")(ps_options...),
+            h.button("←"; type="button", data_role="prev",
                      aria_label="Previous page"),
-            h.span("Page 1"; class="htmxo-gallery-page-info"),
-            h.button("→"; type="button", class="htmxo-gallery-next",
+            h.span("Page 1"; data_role="page-info"),
+            h.button("→"; type="button", data_role="next",
                      aria_label="Next page"),
         ))
     end
@@ -4679,16 +4907,16 @@ gallery_controls_script() = """
         if (root.dataset.htmxoControlsInit === '1') return;
         root.dataset.htmxoControlsInit = '1';
         const gallery = root.querySelector('.htmxo-gallery');
-        const search  = root.querySelector('.htmxo-gallery-search');
-        const psSel   = root.querySelector('.htmxo-gallery-page-size');
-        const prevBtn = root.querySelector('.htmxo-gallery-prev');
-        const nextBtn = root.querySelector('.htmxo-gallery-next');
-        const pageInfo= root.querySelector('.htmxo-gallery-page-info');
+        const search  = root.querySelector('.htmxo-gallery-toolbar input[type="search"]');
+        const psSel   = root.querySelector('[data-role="page-size"]');
+        const prevBtn = root.querySelector('[data-role="prev"]');
+        const nextBtn = root.querySelector('[data-role="next"]');
+        const pageInfo= root.querySelector('[data-role="page-info"]');
         const empty   = root.querySelector('.htmxo-gallery-empty');
         if (!gallery) return;
 
-        const cards    = () => Array.from(gallery.querySelectorAll('.htmxo-gallery-card'));
-        const sections = () => Array.from(gallery.querySelectorAll('.htmxo-gallery-section'));
+        const cards    = () => Array.from(gallery.querySelectorAll(':scope > section > article, :scope > article'));
+        const sections = () => Array.from(gallery.querySelectorAll(':scope > section'));
         const params   = new URLSearchParams(window.location.search);
         let page = Math.max(0, (parseInt(params.get('page') || '1', 10) || 1) - 1);
 
@@ -4698,6 +4926,10 @@ gallery_controls_script() = """
         const haystack = c => (c.dataset.searchText
             || (c.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim());
 
+        const setAttr = (el, name, on) => {
+            if (on) el.setAttribute(name, ''); else el.removeAttribute(name);
+        };
+
         const applyFilter = () => {
             const raw = (search && search.value || '').trim();
             let re = null, lit = '';
@@ -4705,18 +4937,21 @@ gallery_controls_script() = """
                 try { re = new RegExp(raw, 'i'); }
                 catch (_) { lit = raw.toLowerCase(); }
             }
-            if (search) search.classList.toggle('is-literal', !!lit);
+            if (search) {
+                if (lit) search.dataset.mode = 'literal';
+                else delete search.dataset.mode;
+            }
             cards().forEach(c => {
                 const hay = haystack(c);
                 const show = !raw
                     || (re && re.test(hay))
                     || (lit && hay.includes(lit));
-                c.classList.toggle('is-search-hidden', !show);
+                setAttr(c, 'data-search-hidden', !show);
             });
         };
 
         const applyPagination = () => {
-            const visible = cards().filter(c => !c.classList.contains('is-search-hidden'));
+            const visible = cards().filter(c => !c.hasAttribute('data-search-hidden'));
             const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
             const total = visible.length;
             const pages = ps > 0 ? Math.max(1, Math.ceil(total / ps)) : 1;
@@ -4724,27 +4959,27 @@ gallery_controls_script() = """
             if (page < 0)      page = 0;
             visible.forEach((c, i) => {
                 const inPage = ps <= 0 || (i >= page * ps && i < (page + 1) * ps);
-                c.classList.toggle('is-page-hidden', !inPage);
+                setAttr(c, 'data-page-hidden', !inPage);
             });
-            // Search-hidden cards must not also carry is-page-hidden —
+            // Search-hidden cards must not also carry data-page-hidden —
             // when search clears, those cards re-become candidates and
             // pagination needs to re-decide their fate.
-            cards().filter(c => c.classList.contains('is-search-hidden'))
-                   .forEach(c => c.classList.remove('is-page-hidden'));
+            cards().filter(c => c.hasAttribute('data-search-hidden'))
+                   .forEach(c => c.removeAttribute('data-page-hidden'));
             if (pageInfo) pageInfo.textContent =
                 'Page ' + (page + 1) + ' / ' + pages + ' \\u2022 ' + total
                 + (total === 1 ? ' item' : ' items');
             if (prevBtn) prevBtn.disabled = page === 0;
             if (nextBtn) nextBtn.disabled = page >= pages - 1;
-            if (empty)   empty.style.display = total === 0 ? '' : 'none';
+            if (empty)   empty.hidden = total !== 0;
         };
 
         const applySectionVisibility = () => sections().forEach(sec => {
-            const allCards = sec.querySelectorAll('.htmxo-gallery-card');
+            const allCards = sec.querySelectorAll(':scope > article');
             const anyVisible = Array.from(allCards).some(c =>
-                !c.classList.contains('is-search-hidden')
-                && !c.classList.contains('is-page-hidden'));
-            sec.classList.toggle('is-empty', !anyVisible);
+                !c.hasAttribute('data-search-hidden')
+                && !c.hasAttribute('data-page-hidden'));
+            setAttr(sec, 'data-empty', !anyVisible);
         });
 
         const refresh = () => { applyFilter(); applyPagination(); applySectionVisibility(); };
@@ -4775,12 +5010,12 @@ gallery_controls_script() = """
         const jumpToHash = () => {
             const id = decodeURIComponent((window.location.hash || '').slice(1));
             if (!id) return;
-            const sel = '.htmxo-gallery-card[data-id="' + CSS.escape(id) + '"], #' + CSS.escape(id);
+            const sel = 'article[data-id="' + CSS.escape(id) + '"], #' + CSS.escape(id);
             const card = gallery.querySelector(sel);
             if (!card) return;
             if (search && search.value) search.value = '';
             applyFilter();
-            const visible = cards().filter(c => !c.classList.contains('is-search-hidden'));
+            const visible = cards().filter(c => !c.hasAttribute('data-search-hidden'));
             const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
             const idx = visible.indexOf(card);
             if (idx >= 0 && ps > 0) page = Math.floor(idx / ps);
@@ -4805,7 +5040,6 @@ is visible directly. Apps wrap this with their own
 my_render(item))` to add Vega-Lite plots, PPC plots, etc.
 """
 default_gallery_card(item::GalleryItem) = h.article(;
-        class="htmxo-gallery-card",
         id=item.id,
         data_id=item.id,
         data_section=item.section,
@@ -4817,12 +5051,12 @@ default_gallery_card(item::GalleryItem) = h.article(;
         data_search_text=lowercase(strip(string(
             item.title, ' ', item.description, ' ',
             join(item.tags, ' '), ' ', item.section, ' ', item.id))))(
-    h.h4(; class="htmxo-gallery-card-title")(
+    h.h4(
         h.a(item.title; href="#" * item.id),
     ),
     isempty(item.description) ? h.span() :
-        h.p(item.description; class="htmxo-gallery-card-description"),
-    h.pre(h.code(item.code_string); class="htmxo-gallery-card-code"),
+        h.p(item.description),
+    h.pre(h.code(item.code_string)),
 )
 
 """
@@ -4868,17 +5102,6 @@ function htmxo_syntax_head(; languages=("julia", "stan"))
      h.style(syntax_css))
 end
 
-# Discriminate `LibGit2.GitError` (the only swallowable case in GitRepo's catch
-# blocks) from anything else (which must `rethrow()` to preserve the original
-# backtrace).
-_as_git_error(e::LibGit2.GitError) = e
-_as_git_error(_) = nothing
-
-# `obj` is required to be a blob in `read_blob`; everything else is a usage
-# error.
-_as_git_blob(o::LibGit2.GitBlob) = o
-_as_git_blob(_) = nothing
-
 @dynamicstruct struct GitRepo
     path::String
     author::String = "HTMXObjects <noreply@localhost>"
@@ -4897,33 +5120,13 @@ _as_git_blob(_) = nothing
         LibGit2.Signature(name, email)
     end
 
-    blob_sha(relpath) = begin
-        _ensure()
-        repo = LibGit2.GitRepo(path)
-        try
-            try
-                obj = LibGit2.GitObject(repo, "HEAD:" * relpath)
-                try
-                    string(LibGit2.GitHash(obj))
-                finally
-                    close(obj)
-                end
-            catch err
-                isnothing(_as_git_error(err)) && rethrow()
-                ""
-            end
-        finally
-            close(repo)
-        end
-    end
-
     read_blob(spec) = begin
         _ensure()
         repo = LibGit2.GitRepo(path)
         try
             obj = LibGit2.GitObject(repo, spec)
             try
-                isnothing(_as_git_blob(obj)) && error("GitRepo.read_blob: $(spec) is not a blob")
+                obj isa LibGit2.GitBlob || error("GitRepo.read_blob: $(spec) is not a blob")
                 String(LibGit2.rawcontent(obj))
             finally
                 close(obj)
@@ -4933,114 +5136,8 @@ _as_git_blob(_) = nothing
         end
     end
 
-    list_commits(relpath) = begin
-        _ensure()
-        Base.lock(_lock) do
-            repo = LibGit2.GitRepo(path)
-            try
-                out = NamedTuple{(:sha,:timestamp,:author,:message,:blob_sha),
-                                 Tuple{String,Int64,String,String,String}}[]
-                walker = try
-                    LibGit2.GitRevWalker(repo)
-                catch err
-                    isnothing(_as_git_error(err)) && rethrow()
-                    return out
-                end
-                try
-                    try
-                        LibGit2.push_head!(walker)
-                    catch err
-                        isnothing(_as_git_error(err)) && rethrow()
-                        return out
-                    end
-                    prev_blob = ""
-                    for oid in walker
-                        commit = LibGit2.GitCommit(repo, oid)
-                        try
-                            blob = try
-                                o = LibGit2.GitObject(repo, string(oid) * ":" * relpath)
-                                try string(LibGit2.GitHash(o)) finally close(o) end
-                            catch err
-                                isnothing(_as_git_error(err)) && rethrow()
-                                ""
-                            end
-                            if !isempty(blob) && blob != prev_blob
-                                sig = LibGit2.author(commit)
-                                push!(out, (
-                                    sha       = string(oid),
-                                    timestamp = Int64(sig.time),
-                                    author    = sig.name * " <" * sig.email * ">",
-                                    message   = LibGit2.message(commit),
-                                    blob_sha  = blob,
-                                ))
-                            end
-                            prev_blob = blob
-                        finally
-                            close(commit)
-                        end
-                    end
-                finally
-                    close(walker)
-                end
-                out
-            finally
-                close(repo)
-            end
-        end
-    end
-
-    write_file!(relpath, content; version::AbstractString="",
-                                   message::AbstractString="edit " * relpath) = begin
-        Base.lock(_lock) do
-            _ensure()
-            current = blob_sha(relpath)
-            current == version || return (:conflict, current)
-            abs = joinpath(path, relpath)
-            mkpath(dirname(abs))
-            write(abs, content)
-            repo = LibGit2.GitRepo(path)
-            try
-                LibGit2.add!(repo, relpath)
-                sig = _signature()
-                oid = LibGit2.commit(repo, message; author=sig, committer=sig)
-                (:ok, string(oid))
-            finally
-                close(repo)
-            end
-        end
-    end
-
-    # Atomic read-modify-write under the per-repo lock. `f(current_content)`
-    # runs inside the lock; its return value is written and committed. For
-    # partial-file edits (e.g. one key in a multi-key YAML) this avoids the
-    # read-then-write race that `write_file!`'s optimistic concurrency would
-    # report as a spurious conflict. Returns `(:ok, commit_sha)` on change or
-    # `(:nochange, current_blob_sha)` if `f` returned identical content.
-    locked_update!(f, relpath; message::AbstractString="edit " * relpath) = begin
-        Base.lock(_lock) do
-            _ensure()
-            abs = joinpath(path, relpath)
-            current = isfile(abs) ? read(abs, String) : ""
-            new_content = f(current)
-            if new_content == current
-                return (:nochange, blob_sha(relpath))
-            end
-            mkpath(dirname(abs))
-            write(abs, new_content)
-            repo = LibGit2.GitRepo(path)
-            try
-                LibGit2.add!(repo, relpath)
-                sig = _signature()
-                oid = LibGit2.commit(repo, message; author=sig, committer=sig)
-                (:ok, string(oid))
-            finally
-                close(repo)
-            end
-        end
-    end
-
     @struct editor(relpath; default_content="") = begin
-        abs_path = joinpath(__parent__.path, relpath)
+        abs_path = joinpath(path, relpath)
 
         current_content() = begin
             if !isfile(abs_path)
@@ -5050,15 +5147,137 @@ _as_git_blob(_) = nothing
             read(abs_path, String)
         end
 
-        current_version() = __parent__.blob_sha(relpath)
-        versions()        = __parent__.list_commits(relpath)
+        # IP form (`name() = …`) keeps these recomputed on every call.
+        # Bare-property form would cache per editor instance and silently go
+        # stale when the underlying git state changes.
+        current_version() = begin
+            _ensure()
+            repo = LibGit2.GitRepo(path)
+            try
+                try
+                    obj = LibGit2.GitObject(repo, "HEAD:" * relpath)
+                    try
+                        string(LibGit2.GitHash(obj))
+                    finally
+                        close(obj)
+                    end
+                catch err
+                    err isa LibGit2.GitError || rethrow()
+                    ""
+                end
+            finally
+                close(repo)
+            end
+        end
+
+        versions() = begin
+            _ensure()
+            Base.lock(_lock) do
+                repo = LibGit2.GitRepo(path)
+                try
+                    out = NamedTuple{(:sha,:timestamp,:author,:message,:blob_sha),
+                                     Tuple{String,Int64,String,String,String}}[]
+                    walker = try
+                        LibGit2.GitRevWalker(repo)
+                    catch err
+                        err isa LibGit2.GitError || rethrow()
+                        return out
+                    end
+                    try
+                        try
+                            LibGit2.push_head!(walker)
+                        catch err
+                            err isa LibGit2.GitError || rethrow()
+                            return out
+                        end
+                        prev_blob = ""
+                        for oid in walker
+                            commit = LibGit2.GitCommit(repo, oid)
+                            try
+                                blob = try
+                                    o = LibGit2.GitObject(repo, string(oid) * ":" * relpath)
+                                    try string(LibGit2.GitHash(o)) finally close(o) end
+                                catch err
+                                    err isa LibGit2.GitError || rethrow()
+                                    ""
+                                end
+                                if !isempty(blob) && blob != prev_blob
+                                    sig = LibGit2.author(commit)
+                                    push!(out, (
+                                        sha       = string(oid),
+                                        timestamp = Int64(sig.time),
+                                        author    = sig.name * " <" * sig.email * ">",
+                                        message   = LibGit2.message(commit),
+                                        blob_sha  = blob,
+                                    ))
+                                end
+                                prev_blob = blob
+                            finally
+                                close(commit)
+                            end
+                        end
+                    finally
+                        close(walker)
+                    end
+                    out
+                finally
+                    close(repo)
+                end
+            end
+        end
+
         read_version(sha) = __parent__.read_blob(sha * ":" * relpath)
 
-        write!(content; version, message="edit " * relpath) =
-            __parent__.write_file!(relpath, content; version, message)
+        # Optimistic-concurrency write: `version` must match the current
+        # blob_sha (or "" for a brand-new file). On mismatch returns
+        # `(:conflict, current_blob_sha)` without writing.
+        write!(content; version::AbstractString="",
+                        message::AbstractString="edit " * relpath) = begin
+            Base.lock(_lock) do
+                _ensure()
+                current = current_version()
+                current == version || return (:conflict, current)
+                mkpath(dirname(abs_path))
+                write(abs_path, content)
+                repo = LibGit2.GitRepo(path)
+                try
+                    LibGit2.add!(repo, relpath)
+                    sig = _signature()
+                    oid = LibGit2.commit(repo, message; author=sig, committer=sig)
+                    (:ok, string(oid))
+                finally
+                    close(repo)
+                end
+            end
+        end
 
-        update!(f; message="edit " * relpath) =
-            __parent__.locked_update!(f, relpath; message)
+        # Atomic read-modify-write under the per-repo lock. `f(current_content)`
+        # runs inside the lock; its return value is written and committed. For
+        # partial-file edits (e.g. one key in a multi-key YAML) this avoids the
+        # read-then-write race that `write!`'s optimistic concurrency would
+        # report as a spurious conflict. Returns `(:ok, commit_sha)` on change
+        # or `(:nochange, current_blob_sha)` if `f` returned identical content.
+        update!(f; message::AbstractString="edit " * relpath) = begin
+            Base.lock(_lock) do
+                _ensure()
+                current = isfile(abs_path) ? read(abs_path, String) : ""
+                new_content = f(current)
+                if new_content == current
+                    return (:nochange, current_version())
+                end
+                mkpath(dirname(abs_path))
+                write(abs_path, new_content)
+                repo = LibGit2.GitRepo(path)
+                try
+                    LibGit2.add!(repo, relpath)
+                    sig = _signature()
+                    oid = LibGit2.commit(repo, message; author=sig, committer=sig)
+                    (:ok, string(oid))
+                finally
+                    close(repo)
+                end
+            end
+        end
     end
 end
 
