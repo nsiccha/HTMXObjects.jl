@@ -1445,7 +1445,10 @@ const _included_type_parents = Dict{DataType, Set{DataType}}()
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
-_convert_param(val::AbstractString, T::Type{<:AbstractString}) = val
+# When the user wrote `@get foo(arg::String)`, the URL parser hands us a
+# SubString{String}; without a coercion the typed iscached method dispatch
+# misses (it only matches ::String, not ::SubString{String}).
+_convert_param(val::AbstractString, T::Type{<:AbstractString}) = convert(T, val)
 _convert_param(val::AbstractString, ::Type{Symbol}) = Symbol(val)
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
@@ -2154,12 +2157,19 @@ end
 
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=NamedTuple{(:name, :types), Tuple{Symbol, Vector{Any}}}[])
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
-    for (name, info) in DynamicObjects.meta(T)
+    # `Base.invokelatest` on every `meta(T)` call: during Revise's cascading
+    # re-eval of multiple files, this function may be re-entered from a
+    # caller stuck in an older world while a freshly-emitted
+    # `meta(::Type{NestedT})` lives in the new world. Without invokelatest
+    # the dispatch fails with `MethodError ... method may be too new`,
+    # which HTMXObjects' Revise gate then surfaces as a request-blocking
+    # `_check_revise_errors!` failure on every subsequent route.
+    for (name, info) in Base.invokelatest(DynamicObjects.meta, T)
         DynamicObjects.isfixed(info) && continue
 
         # Handle nested structs: inline struct definitions or @include externals
         nested_type = _nested_struct_type(T, Val(name))
-        if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
+        if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
             nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
             chain = vcat(parent_chain, [step])
             _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
@@ -2410,12 +2420,14 @@ end
 function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String, record_dir; root_prefix::String="", record_base::String="")
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
-    for (name, info) in DynamicObjects.meta(NestedT)
+    # `Base.invokelatest` on every `meta(T)` call — see comment in
+    # `_register_routes`. Same world-age risk on Revise re-eval.
+    for (name, info) in Base.invokelatest(DynamicObjects.meta, NestedT)
         DynamicObjects.isfixed(info) && continue
 
         # Recurse into nested structs: inline struct definitions or @include externals
         nested_type = _nested_struct_type(NestedT, Val(name))
-        if !isnothing(nested_type) && !isempty(DynamicObjects.meta(nested_type))
+        if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
             nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
             _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
                 nested_prefix, record_dir; root_prefix, record_base)
