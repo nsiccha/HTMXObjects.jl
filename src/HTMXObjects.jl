@@ -3908,8 +3908,6 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 .u-btn-sm { padding: 0.3rem 0.8rem; }
 .u-btn-xs { padding: 0.2rem 0.6rem; }
 .u-input-grow { flex: 1; min-width: 20rem; max-width: 500px; }
-.u-input-tight { max-width: 5rem; }
-.u-input-narrow { max-width: 8rem; }
 .u-link-plain { text-decoration: none; color: inherit; }
 .u-my-2 { margin: 0.5rem 0; }
 .u-my-1 { margin: 0.25rem 0; }
