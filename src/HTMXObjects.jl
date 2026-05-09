@@ -1947,10 +1947,14 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     if !isnothing(record_dir) && !isnothing(save_path)
         wrapper = _page_wrapper(obj)
         if wants_markdown(req)
-            md = try to_markdown_string(val) catch; nothing end
-            isnothing(md) || save_response(record_dir, "/md" * save_path,
-                HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
-                ext=".md")
+            # Recording skips markdown for values whose type doesn't define
+            # `show(::IO, ::MIME"text/markdown", ...)` — `showable` is the
+            # explicit check, rather than catching any error from rendering.
+            if showable(MIME"text/markdown"(), val)
+                save_response(record_dir, "/md" * save_path,
+                    HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
+                    ext=".md")
+            end
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
@@ -2380,10 +2384,14 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
     # full-page-wrapped, picked by the request header alone.
     if !isnothing(record_dir) && !isnothing(save_path)
         if wants_markdown(req)
-            md = try to_markdown_string(val) catch; nothing end
-            isnothing(md) || save_response(record_dir, "/md" * save_path,
-                HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=md);
-                ext=".md")
+            # Recording skips markdown for values whose type doesn't define
+            # `show(::IO, ::MIME"text/markdown", ...)` — `showable` is the
+            # explicit check, rather than catching any error from rendering.
+            if showable(MIME"text/markdown"(), val)
+                save_response(record_dir, "/md" * save_path,
+                    HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
+                    ext=".md")
+            end
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         else
