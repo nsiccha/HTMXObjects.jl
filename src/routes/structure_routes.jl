@@ -1,38 +1,24 @@
 # --- Structure browser ----------------------------------------------------
+#
+# Routes + HTML rendering only. The pure-DO compute (tree walk, lint
+# aggregation, type lookup, caller index, property metadata extraction)
+# lives in DynamicObjects's public API:
+#
+#   tree_children_map(root)     → parent→children map
+#   lint_index(root)            → per-type warn/error counts + msgs
+#   lookup_type(root, name)     → name-string → Type
+#   callers_by_name(prop, root) → call sites for a property name
+#   property_source_info(T, p)  → rhs_string, signature, macros, dependson
+#
+# Non-web consumers (REPL, scripts, other web frameworks) can use those
+# directly without loading HTMXObjects.
 
-# Tree-render helpers for StructureRoutes. Build a parent→children map from
-# DynamicObjects' parent_map, then render as nested <ul><li>.
-function _structure_children_map(root::Type)
-    parent_map = DynamicObjects._build_parent_map(root)
-    children = Dict{Type, Vector{Tuple{Symbol, Type}}}()
-    for (child, (parent, prop)) in parent_map
-        push!(get!(children, parent, Tuple{Symbol, Type}[]), (prop, child))
-    end
-    for v in values(children)
-        sort!(v; by = p -> string(p[1]))
-    end
-    children
-end
-
-function _structure_lint_index(root::Type)
-    msgs = try DynamicObjects.analyze_structure(root) catch; DynamicObjects.LintMessage[] end
-    out = Dict{Type, NamedTuple{(:warns, :errors, :msgs), Tuple{Int, Int, Vector{DynamicObjects.LintMessage}}}}()
-    for m in msgs
-        e = get!(() -> (warns=0, errors=0, msgs=DynamicObjects.LintMessage[]), out, m.type)
-        push!(e.msgs, m)
-        out[m.type] = (
-            warns  = e.warns  + (m.severity === :warn  ? 1 : 0),
-            errors = e.errors + (m.severity === :error ? 1 : 0),
-            msgs   = e.msgs,
-        )
-    end
-    out
-end
-
+# Inline lint badge text, tucked next to a type name in the tree view.
 _structure_lint_badge(warns::Int, errors::Int) =
     iszero(warns + errors) ? "" :
     string(" ", iszero(errors) ? "" : "✗$errors ", iszero(warns) ? "" : "⚠$warns")
 
+# Render the parent→children map as nested <ul><li>.
 function _render_structure_tree(T::Type, children::Dict, link_for, lints)
     name = string(nameof(T))
     info = get(lints, T, (warns=0, errors=0, msgs=DynamicObjects.LintMessage[]))
@@ -45,36 +31,17 @@ function _render_structure_tree(T::Type, children::Dict, link_for, lints)
     h.li(label_parts..., h.ul(map(p -> _render_structure_tree(p[2], children, link_for, lints), kids)...))
 end
 
-function _structure_lookup_type(root::Type, name::AbstractString)
-    for T in DynamicObjects._all_types_in_tree(root)
-        string(nameof(T)) == name && return T
-    end
-    nothing
-end
-
-function _structure_render_source(T::Type, prop::Symbol)
-    props = try DynamicObjects.meta(T) catch; nothing end
-    props === nothing && return h.p("No meta() for $(nameof(T))")
-    haskey(props, prop) || return h.p("No property $prop on $(nameof(T))")
-    info = props[prop]
-    rhs = info.rhs
-    src = rhs === nothing ? "(no rhs — forwarded/typed property)" :
-          string(Base.remove_linenums!(deepcopy(rhs)))
-    sig = isempty(info.indices) ? string(info.lhs) :
-          string(info.lhs, "(", join(info.indices, ", "), ")")
-    macros = isempty(info.macros) ? "" : join(string.(info.macros), " ") * " "
-    deps = isempty(info.dependson) ? "(none)" : join(sort!(collect(info.dependson)), ", ")
+# Render a property's source info NamedTuple (from
+# DynamicObjects.property_source_info) as an HTML block.
+function _render_property_source(T::Type, prop::Symbol)
+    info = DynamicObjects.property_source_info(T, prop)
+    info === nothing && return h.p("No meta() for $(nameof(T))")
+    deps = isempty(info.dependson) ? "(none)" : join(info.dependson, ", ")
     h.div(
-        h.h3("$macros$sig"),
+        h.h3("$(info.macros)$(info.signature)"),
         h.p(h.small("dependson: $deps")),
-        h.pre(h.code(; class="language-julia")(src)),
+        h.pre(h.code(; class="language-julia")(info.rhs_string)),
     )
-end
-
-function _structure_callers_by_name(prop::Symbol, root::Type)
-    types_in_tree = DynamicObjects._all_types_in_tree(root)
-    call_index = DynamicObjects._build_call_index(types_in_tree)
-    get(call_index, prop, Vector{Tuple{Type,Symbol,Vector{Any}}}())
 end
 
 """
@@ -117,21 +84,21 @@ on each request.
     )
 
     @get index = begin
-        local lint_index = _structure_lint_index(root)
-        local children   = _structure_children_map(root)
-        local link_for   = n -> query_url(__self__/"type"; name = n)
-        local n_warn     = sum(v.warns  for v in values(lint_index); init=0)
-        local n_err      = sum(v.errors for v in values(lint_index); init=0)
+        local lints    = DynamicObjects.lint_index(root)
+        local children = DynamicObjects.tree_children_map(root)
+        local link_for = n -> query_url(__self__/"type"; name = n)
+        local n_warn   = sum(v.warns  for v in values(lints); init=0)
+        local n_err    = sum(v.errors for v in values(lints); init=0)
         h.div(
             h.h2("DO type tree"),
             _nav_links,
             h.p(h.small("All DynamicObjects types reachable from $(string(nameof(root))). Click a type to view its dependency structure. Badges: ✗ errors / ⚠ warnings from analyze_structure(). $(n_warn) warns, $(n_err) errors total — see /structure/lints for the global dump.")),
-            h.ul(_render_structure_tree(root, children, link_for, lint_index)),
+            h.ul(_render_structure_tree(root, children, link_for, lints)),
         )
     end
 
     @get type = begin
-        T = _structure_lookup_type(root, name)
+        T = DynamicObjects.lookup_type(root, name)
         isnothing(T) && return h.div(_nav_links, h.h2("Unknown type: $name"))
         props = try DynamicObjects.meta(T) catch; nothing end
         prop_links = props === nothing ? h.div() : h.div(
@@ -155,17 +122,17 @@ on each request.
     end
 
     @get source = begin
-        T = _structure_lookup_type(root, name)
+        T = DynamicObjects.lookup_type(root, name)
         isnothing(T) && return h.div(_nav_links, h.h2("Unknown type: $name"))
         h.div(
             h.p(h.a(; href = query_url(__self__/"type"; name))("← back to $(name)")),
             h.h2("$(name).$(prop) source"),
-            _structure_render_source(T, Symbol(prop)),
+            _render_property_source(T, Symbol(prop)),
         )
     end
 
     @get callers = begin
-        sites = _structure_callers_by_name(Symbol(prop), root)
+        sites = DynamicObjects.callers_by_name(Symbol(prop), root)
         h.div(
             h.p(isempty(name) ? h.a(; href = string(__self__))("← tree") :
                                 h.a(; href = query_url(__self__/"type"; name))("← back to $(name)")),
