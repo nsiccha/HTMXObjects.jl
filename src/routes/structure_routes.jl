@@ -156,7 +156,7 @@ on each request.
     end
 
     @get lints = begin
-        msgs = try DynamicObjects.analyze_structure(root) catch; DynamicObjects.LintMessage[] end
+        msgs = DynamicObjects.analyze_structure(root)
         sev_filter = isempty(severity) ? nothing : Symbol(severity)
         filtered = sev_filter === nothing ? msgs : filter(m -> m.severity === sev_filter, msgs)
         by_type = Dict{Type, Vector{DynamicObjects.LintMessage}}()
