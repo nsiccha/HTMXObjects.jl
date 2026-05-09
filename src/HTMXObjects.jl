@@ -1611,6 +1611,9 @@ function _revise_seen_per_file(rev)
             Base.unlock(watched_files_lock)
         end
     catch
+        # why: Revise's watched_files / watched_files_lock / WatchList
+        # internals are private. Fail open (return empty list) on layout
+        # changes rather than break freshness reporting.
     end
     out
 end
