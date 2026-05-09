@@ -3887,13 +3887,12 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 .u-stack-wide { display: flex; flex-direction: column; gap: 1rem; }
 .u-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .u-grid-auto { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
-/* Sidebar + main page layout. Stacks on mobile (<1024px); becomes a 2-col
-   grid above. Inner sticky nav matches Pico docs' .is-sticky-above-lg.
-   Pair with `app_layout(sidebar, content)`. */
+/* Sidebar + main page layout. Stacks on phone-sized viewports (<768px);
+   becomes a 2-col grid above. Pair with `app_layout(sidebar, content)`. */
 .htmxo-app-layout { display: block; min-height: 100vh; }
 .htmxo-app-layout > aside { padding: 1rem 0; }
 .htmxo-app-layout > main { min-width: 0; padding: 1rem 0; }
-@media (min-width: 1024px) {
+@media (min-width: 768px) {
     .htmxo-app-layout {
         display: grid;
         grid-template-columns: var(--htmxo-sidebar-width, 12rem) 1fr;
