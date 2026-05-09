@@ -1564,6 +1564,9 @@ _qe_err_bt(val) = (val, nothing)
 function _append_revise_errors(io)
     rev = _revise_module()
     isnothing(rev) && return
+    # why: Revise.queue_errors is internal, not API. If a future Revise
+    # version renames/removes the field, fail open (skip the section)
+    # rather than break every error log.
     qe = try getfield(rev, :queue_errors) catch; return end
     isempty(qe) && return
     println(io)
@@ -1633,6 +1636,9 @@ function _revise_missed_edits()
         Base.lock(revision_queue_lock)
         try
             for (pkgdata, relfile) in revision_queue
+                # why: Revise pkgdata internals are not API. Empty basedir
+                # means we fall back to using relfile as-is — degraded but
+                # non-fatal output.
                 base = try getfield(pkgdata, :info).basedir catch; "" end
                 full = isempty(base) || isabspath(relfile) ? String(relfile) : joinpath(base, String(relfile))
                 push!(queued, full)
@@ -1683,6 +1689,9 @@ function _append_revise_freshness(io)
             Base.unlock(revision_queue_lock)
         end
     catch
+        # why: Revise's revision_queue / revision_queue_lock are private.
+        # Fail open (no queued list) rather than break the freshness
+        # section — this runs on every error-log write.
     end
     missed = _revise_missed_edits()
     println(io)
@@ -1743,6 +1752,8 @@ function _check_revise_errors!()
     rev = _revise_module()
     isnothing(rev) && return
     # Queue errors first: a failed revision is the more direct staleness signal.
+    # why: Revise.queue_errors is internal — fail open (treat as empty) on
+    # field rename rather than mask every request as having stale code.
     qe = try getfield(rev, :queue_errors) catch; nothing end
     if qe !== nothing && !isempty(qe)
         files = String[]
