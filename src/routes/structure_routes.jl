@@ -100,7 +100,11 @@ on each request.
     @get type = begin
         T = DynamicObjects.lookup_type(root, name)
         isnothing(T) && return h.div(_nav_links, h.h2("Unknown type: $name"))
-        props = try DynamicObjects.meta(T) catch; nothing end
+        # `meta(T)` only has methods for types declared via `@dynamicstruct`/
+        # `@htmx`. Plain Julia types reachable through the tree (Int, String,
+        # …) have no metadata — handle that explicitly via `hasmethod` rather
+        # than catching every possible error from `meta(T)` itself.
+        props = hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ? DynamicObjects.meta(T) : nothing
         prop_links = props === nothing ? h.div() : h.div(
             h.h3("Property source / callers"),
             h.ul(map(sort!(collect(keys(props)); by=string)) do p
