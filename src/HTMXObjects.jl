@@ -2472,9 +2472,12 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
 end
 
 # Shared iteration core: walk `meta(IterT)`, skip fixed entries, dispatch
-# nested-struct entries to `recurse_nested(name, info, nested_type)` and
-# route entries to `register_route(name, info, method)`. Both top-level and
-# included registration share this exact body.
+# nested-struct entries to `recurse_nested(name, info, nested_type, url_name)`
+# and route entries to `register_route(name, info, method, url_name)`. The
+# `url_name` argument is the URL-level (source) name recovered via
+# `_route_url_name` / `_include_url_name` for collision-mangled entries, used
+# for path building; `name` remains the internal DO key (possibly mangled).
+# Both top-level and included registration share this exact body.
 #
 # `Base.invokelatest` on every `meta(T)` call: during Revise's cascading
 # re-eval of multiple files, this function may be re-entered from a caller
