@@ -493,7 +493,8 @@ function _find_include_externals(struct_expr)
             ips = Symbol[]
             for a in lhs.args[2:end]
                 Meta.isexpr(a, :parameters) && continue   # kwargs
-                push!(ips, Meta.isexpr(a, :(::)) ? a.args[1] : a)
+                bare = Meta.isexpr(a, :kw) ? a.args[1] : a
+                push!(ips, Meta.isexpr(bare, :(::)) ? bare.args[1] : bare)
             end
             (lhs.args[1], ips)
         else
@@ -2173,24 +2174,111 @@ function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractStr
     (nested_prefix, step)
 end
 
-function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=NamedTuple{(:name, :types), Tuple{Symbol, Vector{Any}}}[])
-    mount_prefix = isempty(prefix) ? "" : "/" * prefix
-    # `Base.invokelatest` on every `meta(T)` call: during Revise's cascading
-    # re-eval of multiple files, this function may be re-entered from a
-    # caller stuck in an older world while a freshly-emitted
-    # `meta(::Type{NestedT})` lives in the new world. Without invokelatest
-    # the dispatch fails with `MethodError ... method may be too new`,
-    # which HTMXObjects' Revise gate then surfaces as a request-blocking
-    # `_check_revise_errors!` failure on every subsequent route.
-    for (name, info) in Base.invokelatest(DynamicObjects.meta, T)
+# Split `info.indices` into positional indices (excluding the `:parameters`
+# kwargs node), produce the URL-segment names, count them, and locate any
+# trailing-default positions for shortened-route emission. Identical block
+# previously inlined in both top-level and included registration paths.
+function _route_param_shape(positional_indices)
+    param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
+    n_params = length(param_strs)
+    default_positions = Int[]
+    for (j, idx) in enumerate(positional_indices)
+        if Meta.isexpr(idx, :kw)
+            push!(default_positions, j)
+        elseif !isempty(default_positions)
+            empty!(default_positions)
+            break
+        end
+    end
+    (param_strs, n_params, default_positions)
+end
+
+# Unified per-route registration: handles all five shapes (WEBSOCKET / plain
+# non-indexed / zero-arg indexed / kwargs-only / general-with-trailing-default
+# shortening) in one place. Both `_register_routes` (top-level) and
+# `_register_included_routes` (nested @include) funnel here.
+function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractString,
+                              mount_prefix::AbstractString, name::Symbol, info,
+                              method::AbstractString, record_dir, record_base::AbstractString)
+    positional_indices = Any[]
+    has_kwargs = false
+    for idx in info.indices
+        if Meta.isexpr(idx, :parameters)
+            has_kwargs = true
+        else
+            push!(positional_indices, idx)
+        end
+    end
+
+    param_strs, n_params, default_positions = _route_param_shape(positional_indices)
+    path = _route_path(prefix, name, param_strs)
+    _warn_docs_prefix(path, name)
+
+    let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
+        record_dir=record_dir, method=method, default_positions=default_positions,
+        has_kwargs=has_kwargs, mount_prefix=mount_prefix, prefix=prefix,
+        OwnerT=OwnerT, RouteT=RouteT
+        if method == "WEBSOCKET"
+            if isempty(param_strs) && !has_kwargs && !info.indexed
+                register(CONTEXT[], "WEBSOCKET", path, function(ws)
+                    lambda = getproperty(RouteT(; __req__=nothing, _prefix_kw(mount_prefix)...), name)
+                    lambda(ws)
+                end)
+            else
+                # Indexed/kwargs WS route: extract params from ws.request
+                ws_base = _base_segments(path, n_params)
+                register(CONTEXT[], "WEBSOCKET", path, function(ws)
+                    idx_vals, kw_pairs = _extract_args(RouteT, Val(name), ws.request, "GET", ws_base, n_params)
+                    prop = getproperty(RouteT(; __req__=ws.request, _prefix_kw(mount_prefix)...), name)
+                    lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
+                    lambda(ws)
+                end)
+            end
+        elseif isempty(param_strs) && !has_kwargs && !info.indexed
+            # Plain non-indexed (`@get index = expr`): bare getproperty, no extract_args
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, false, record_dir; root_prefix=mount_prefix, record_base)
+        elseif isempty(param_strs) && !has_kwargs
+            # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, true, record_dir; root_prefix=mount_prefix, record_base)
+        elseif isempty(param_strs) && has_kwargs
+            # kwargs-only route (no path params)
+            !isnothing(record_dir) && push!(_static_kwargs_paths, path)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, true, record_dir; root_prefix=mount_prefix, record_base)
+        else
+            # Register the full route (all params explicit)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, true, record_dir; root_prefix=mount_prefix, record_base)
+
+            # Register shortened routes for trailing defaults
+            # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
+            for k in length(default_positions):-1:1
+                cut = default_positions[k]  # position of first omitted param
+                short_params = param_strs[1:cut-1]
+                short_path = _route_path(prefix, name, short_params)
+                _register_route_handler(OwnerT, RouteT, chain, method, name, short_path, length(short_params), true, record_dir; root_prefix=mount_prefix, record_base)
+            end
+        end
+    end
+end
+
+# Shared iteration core: walk `meta(IterT)`, skip fixed entries, dispatch
+# nested-struct entries to `recurse_nested(name, info, nested_type)` and
+# route entries to `register_route(name, info, method)`. Both top-level and
+# included registration share this exact body.
+#
+# `Base.invokelatest` on every `meta(T)` call: during Revise's cascading
+# re-eval of multiple files, this function may be re-entered from a caller
+# stuck in an older world while a freshly-emitted `meta(::Type{NestedT})`
+# lives in the new world. Without invokelatest the dispatch fails with
+# `MethodError ... method may be too new`, which HTMXObjects' Revise gate
+# then surfaces as a request-blocking `_check_revise_errors!` failure on
+# every subsequent route.
+function _walk_route_meta(IterT, recurse_nested, register_route)
+    for (name, info) in Base.invokelatest(DynamicObjects.meta, IterT)
         DynamicObjects.isfixed(info) && continue
 
-        # Handle nested structs: inline struct definitions or @include externals
-        nested_type = _nested_struct_type(T, Val(name))
+        nested_type = _nested_struct_type(IterT, Val(name))
         if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
-            nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
-            chain = vcat(parent_chain, [step])
-            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
+            recurse_nested(name, info, nested_type)
             continue
         end
 
@@ -2200,78 +2288,20 @@ function _register_routes(T; prefix="", record_dir=nothing, record_base::String=
         end
         isnothing(method) && continue
 
-        # Separate positional indices from kwargs (:parameters node)
-        positional_indices = Any[]
-        has_kwargs = false
-        for idx in info.indices
-            if Meta.isexpr(idx, :parameters)
-                has_kwargs = true
-            else
-                push!(positional_indices, idx)
-            end
-        end
-
-        param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
-        n_params = length(param_strs)
-
-        path = _route_path(prefix, name, param_strs)
-        _warn_docs_prefix(path, name)
-
-        # Detect trailing defaults for shortened route registration
-        # Only need positions, not values — DynamicObjects handles defaults
-        default_positions = Int[]
-        for (j, idx) in enumerate(positional_indices)
-            if Meta.isexpr(idx, :kw)
-                push!(default_positions, j)
-            elseif !isempty(default_positions)
-                empty!(default_positions)
-                break
-            end
-        end
-
-        # Capture loop variables to avoid closure-over-mutable-variable issues
-        let name=name, param_strs=param_strs, n_params=n_params, path=path, record_dir=record_dir, method=method, default_positions=default_positions, has_kwargs=has_kwargs, mount_prefix=mount_prefix
-            if method == "WEBSOCKET"
-                if isempty(param_strs) && !has_kwargs && !info.indexed
-                    register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        lambda = getproperty(T(; __req__=nothing, _prefix_kw(mount_prefix)...), name)
-                        lambda(ws)
-                    end)
-                else
-                    # Indexed/kwargs WS route: extract params from ws.request
-                    ws_base = _base_segments(path, n_params)
-                    register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                        idx_vals, kw_pairs = _extract_args(T, Val(name), ws.request, "GET", ws_base, n_params)
-                        prop = getproperty(T(; __req__=ws.request, _prefix_kw(mount_prefix)...), name)
-                        lambda = prop(idx_vals...; NamedTuple(kw_pairs)...)
-                        lambda(ws)
-                    end)
-                end
-            elseif isempty(param_strs) && !has_kwargs && !info.indexed
-                # Plain non-indexed (`@get index = expr`): bare getproperty, no extract_args
-                _register_route_handler(T, T, Symbol[], method, name, path, 0, false, record_dir; root_prefix=mount_prefix, record_base)
-            elseif isempty(param_strs) && !has_kwargs
-                # Zero-arg indexed property (e.g. @get index() = ...): call () to compute
-                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix, record_base)
-            elseif isempty(param_strs) && has_kwargs
-                # kwargs-only route (no path params)
-                !isnothing(record_dir) && push!(_static_kwargs_paths, path)
-                _register_route_handler(T, T, Symbol[], method, name, path, 0, true, record_dir; root_prefix=mount_prefix, record_base)
-            else
-                # Register the full route (all params explicit)
-                _register_route_handler(T, T, Symbol[], method, name, path, n_params, true, record_dir; root_prefix=mount_prefix, record_base)
-
-                # Register shortened routes for trailing defaults
-                # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
-                for k in length(default_positions):-1:1
-                    cut = default_positions[k]  # position of first omitted param
-                    short_params = param_strs[1:cut-1]
-                    short_path = _route_path(prefix, name, short_params)
-                    _register_route_handler(T, T, Symbol[], method, name, short_path, length(short_params), true, record_dir; root_prefix=mount_prefix, record_base)
-                end
-            end
-        end
+        register_route(name, info, method)
     end
+end
+
+function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=NamedTuple{(:name, :types), Tuple{Symbol, Vector{Any}}}[])
+    mount_prefix = isempty(prefix) ? "" : "/" * prefix
+    _walk_route_meta(T,
+        (name, info, nested_type) -> begin
+            nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
+            chain = vcat(parent_chain, [step])
+            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
+        end,
+        (name, info, method) -> _register_one_route(T, T, Symbol[], prefix, mount_prefix, name, info, method, record_dir, record_base),
+    )
 end
 
 # `@include`'d nested route registration goes through `_register_route_handler`
@@ -2442,70 +2472,14 @@ end
 function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String, record_dir; root_prefix::String="", record_base::String="")
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
-    # `Base.invokelatest` on every `meta(T)` call — see comment in
-    # `_register_routes`. Same world-age risk on Revise re-eval.
-    for (name, info) in Base.invokelatest(DynamicObjects.meta, NestedT)
-        DynamicObjects.isfixed(info) && continue
-
-        # Recurse into nested structs: inline struct definitions or @include externals
-        nested_type = _nested_struct_type(NestedT, Val(name))
-        if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
+    _walk_route_meta(NestedT,
+        (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
             _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
                 nested_prefix, record_dir; root_prefix, record_base)
-            continue
-        end
-
-        method = nothing
-        for (macro_sym, m) in _http_verbs
-            macro_sym in info.macros && (method = m; break)
-        end
-        isnothing(method) && continue
-
-        # Build path
-        positional_indices = Any[]
-        has_kwargs = false
-        for idx in info.indices
-            if Meta.isexpr(idx, :parameters)
-                has_kwargs = true
-            else
-                push!(positional_indices, idx)
-            end
-        end
-
-        param_strs = [string(first(DynamicObjects.extractnames(idx))) for idx in positional_indices]
-        n_params = length(param_strs)
-
-        path = _route_path(prefix, name, param_strs)
-        _warn_docs_prefix(path, name)
-
-        # Track kwargs-only paths for static recording
-        !isnothing(record_dir) && isempty(param_strs) && has_kwargs && push!(_static_kwargs_paths, path)
-
-        # Detect trailing defaults (only positions — DynamicObjects handles values)
-        default_positions = Int[]
-        for (j, idx) in enumerate(positional_indices)
-            if Meta.isexpr(idx, :kw)
-                push!(default_positions, j)
-            elseif !isempty(default_positions)
-                empty!(default_positions)
-                break
-            end
-        end
-
-        let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path, method=method, record_dir=record_dir, default_positions=default_positions, prefix=prefix, root_prefix=root_prefix
-            # Register the full route
-            _register_route_handler(ParentT, NestedT, chain, method, name, path, n_params, true, record_dir; root_prefix, record_base)
-
-            # Register shortened routes for trailing defaults
-            for k in length(default_positions):-1:1
-                cut = default_positions[k]
-                short_params = param_strs[1:cut-1]
-                short_path = _route_path(prefix, name, short_params)
-                _register_route_handler(ParentT, NestedT, chain, method, name, short_path, length(short_params), true, record_dir; root_prefix, record_base)
-            end
-        end
-    end
+        end,
+        (name, info, method) -> _register_one_route(ParentT, NestedT, chain, prefix, root_prefix, name, info, method, record_dir, record_base),
+    )
 end
 
 function route!(obj; prefix="", record_dir=nothing, record_base="")
