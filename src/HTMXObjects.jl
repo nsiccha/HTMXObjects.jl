@@ -860,13 +860,35 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
 
     # --- Collision detection ---
     # 1. Route-vs-include same-name (e.g. `@get index` + `@include index(x)`).
-    #    DO meta holds both (Vector{Pair} migration), but `is_indexed_property`
-    #    would return true for `:index` because of the include, redirecting
-    #    `getproperty(obj, :index)` away from the route's compute_property.
-    #    Mangle the include's internal storage key to `__include_index__`;
-    #    URLs still use `:index` via `_include_url_name`.
+    #    Rejected at macro-expansion time: bare `name = ...` and
+    #    `name(args) = ...` on the same struct cannot both be accessed via
+    #    `obj.name` / `obj.name(args)` reliably (DO's compute_property kwarg
+    #    injection shadows the bare form inside the call form's body, and
+    #    `is_indexed_property` would redirect getproperty away from the
+    #    route's compute_property). Verb collisions between routes are still
+    #    supported via internal mangling (see below).
     route_name_set = Set{Symbol}(ri.prop_name for ri in route_info)
-    include_collisions = Set{Symbol}(n for n in include_src_names if n in route_name_set)
+    let collisions = Symbol[n for n in include_src_names if n in route_name_set]
+        isempty(collisions) || error("""
+            @htmx struct $(_struct_type_name(struct_expr)): name collision between route(s) and @include for $(unique(collisions)) — bare `name = ...` and `name(args) = ...` on the same struct are rejected.
+
+            Don't write:
+
+                @get foo = list_view()
+                @include foo(slug::String) = item_view(slug)   # ← rejected
+
+            Either rename one, or use a single-route pattern that handles both shapes:
+
+            1. Trailing-default positional (registers both `/foo` and `/foo/{slug}`):
+
+                @get foo(slug::String="") = isempty(slug) ? list_view() : item_view(slug)
+
+            2. Query kwarg (one path, optional filter via `?slug=...`):
+
+                @get foo(; slug::String="") = isempty(slug) ? list_view() : item_view(slug)
+            """)
+    end
+    include_collisions = Set{Symbol}()
 
     # 2. Route-vs-route verb collisions (e.g. `@get index` + `@post index`).
     #    Both produce `compute_property(::T, ::Val{:index}; ...)` with the
