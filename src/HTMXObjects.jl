@@ -2219,9 +2219,23 @@ function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractStr
         type_expr = Meta.isexpr(ex, :(::)) && length(ex.args) == 2 ? ex.args[2] : nothing
         push!(types, isnothing(type_expr) ? nothing : Core.eval(mod, type_expr))
     end
-    nested_prefix = isempty(prefix) ? string(name) : prefix * "/" * string(name)
+    # Drop `:index` from the URL segment — mirrors `_route_path`'s
+    # `name === :index || push!(segs, string(name))` rule. So
+    # `@include index(x::String) = …` inside `@include skills = …` produces
+    # `/skills/{x}`, not `/skills/index/{x}`. When prefix is empty and
+    # name === :index, the nested prefix becomes empty (root-level indexed
+    # include named `index`); the param loop below appends `/{x}` segments
+    # and the request-router formats the leading slash.
+    nested_prefix = if name === :index
+        prefix
+    elseif isempty(prefix)
+        string(name)
+    else
+        prefix * "/" * string(name)
+    end
     for nm in pos_idx_names
-        nested_prefix *= "/{" * nm * "}"
+        nested_prefix = isempty(nested_prefix) ? "{" * nm * "}" :
+                                                 nested_prefix * "/{" * nm * "}"
     end
     step = (name=name, types=types)
     (nested_prefix, step)
