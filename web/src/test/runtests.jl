@@ -173,16 +173,15 @@ end
     @test contains(html, "Test")
     html = repr("text/html", app.item("foo"))
     @test contains(html, "foo")
-    props = DynamicObjects.meta(TestApp)
-    @test Symbol("@get") in props[:index].macros
-    @test !(Symbol("@get") in props[:title].macros)
+    @test Symbol("@get") in DynamicObjects.metafirst(TestApp, :index).macros
+    @test !(Symbol("@get") in DynamicObjects.metafirst(TestApp, :title).macros)
 end
 
 @testset ":index -> / routing" begin
     app = IndexApp()
-    props = DynamicObjects.meta(IndexApp)
-    @test haskey(props, :index)
-    @test Symbol("@get") in props[:index].macros
+    info = DynamicObjects.metafirst(IndexApp, :index)
+    @test info !== nothing
+    @test Symbol("@get") in info.macros
 end
 
 @testset "indexed property with all-default indices" begin
@@ -310,19 +309,19 @@ end
 end
 
 @testset "@post route verb metadata" begin
-    props = DynamicObjects.meta(PostApp)
-    @test haskey(props, :submit)
-    @test Symbol("@post") in props[:submit].macros
-    @test !(Symbol("@get") in props[:submit].macros)
+    info = DynamicObjects.metafirst(PostApp, :submit)
+    @test info !== nothing
+    @test Symbol("@post") in info.macros
+    @test !(Symbol("@get") in info.macros)
 end
 
 @testset "type conversion in indexed routes" begin
     app = TypedApp()
     html = repr("text/html", app.typed(42))
     @test contains(html, "N=42")
-    props = DynamicObjects.meta(TypedApp)
-    @test haskey(props, :typed)
-    @test Symbol("@get") in props[:typed].macros
+    info = DynamicObjects.metafirst(TypedApp, :typed)
+    @test info !== nothing
+    @test Symbol("@get") in info.macros
 end
 
 @testset "hx_response with location" begin

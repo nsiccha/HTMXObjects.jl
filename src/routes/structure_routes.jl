@@ -107,7 +107,7 @@ on each request.
         props = hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ? DynamicObjects.meta(T) : nothing
         prop_links = props === nothing ? h.div() : h.div(
             h.h3("Property source / callers"),
-            h.ul(map(sort!(collect(keys(props)); by=string)) do p
+            h.ul(map(sort!(unique!([n for (n, _) in props]); by=string)) do p
                 ps = string(p)
                 h.li(
                     h.code(ps), " — ",
