@@ -2329,19 +2329,28 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
     for (name, info) in Base.invokelatest(DynamicObjects.meta, IterT)
         DynamicObjects.isfixed(info) && continue
 
+        # Per-entry classification: an HTTP-verb macro on this entry means it's
+        # a route (even if a same-named `@include` entry exists in meta() —
+        # `meta(T)` is a Vector{Pair} since the DO migration and can hold both
+        # a `@get index` route and a `@include index(x)` nested include under
+        # the same key, distinguished only by `info.macros`). Without this
+        # check, the route entry would be misclassified as a nested-include
+        # recurse and registered as `/skills/index/...` instead of `/skills`.
+        method = nothing
+        for (macro_sym, m) in _http_verbs
+            macro_sym in info.macros && (method = m; break)
+        end
+        if !isnothing(method)
+            register_route(name, info, method)
+            continue
+        end
+
+        # Not a route — try nested-include recursion.
         nested_type = _nested_struct_type(IterT, Val(name))
         if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
             recurse_nested(name, info, nested_type)
             continue
         end
-
-        method = nothing
-        for (macro_sym, m) in _http_verbs
-            macro_sym in info.macros && (method = m; break)
-        end
-        isnothing(method) && continue
-
-        register_route(name, info, method)
     end
 end
 
