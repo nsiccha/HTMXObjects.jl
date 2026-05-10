@@ -465,6 +465,33 @@ function _find_inline_structs(struct_expr)
     result
 end
 
+# Enumerate the source-level property names of every `@include` line in this
+# struct body — both begin-block and external-call forms, indexed or not. Used
+# pre-`_convert_include_to_struct!` to detect collisions with same-named routes
+# (`@get foo() = ...` + `@include foo(x) = ...`) so the include's internal meta
+# key can be mangled while the URL still uses the source name.
+function _find_include_source_names(struct_expr)
+    body = struct_expr.args[3]
+    names = Symbol[]
+    for arg in body.args
+        arg isa Expr || continue
+        expr = arg
+        while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@include")
+            expr = expr.args[end]
+        end
+        Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@include") || continue
+        inner = expr.args[end]
+        Meta.isexpr(inner, :(=)) || continue
+        lhs = inner.args[1]
+        if lhs isa Symbol
+            push!(names, lhs)
+        elseif Meta.isexpr(lhs, :call) && lhs.args[1] isa Symbol
+            push!(names, lhs.args[1])
+        end
+    end
+    names
+end
+
 # Find @include external struct properties:
 #   @include prop = ExternalStruct(; ...)              # classic, non-indexed
 #   @include prop(args…) = ExternalStruct(args…; …)    # indexed include
@@ -516,6 +543,17 @@ end
 # Default: no inline struct properties.
 _inline_struct_props(::Type) = ()
 
+# Map an internal include meta-key (possibly mangled by `_htmx_transform` to
+# avoid colliding with a same-named route) back to its source-level name, used
+# when constructing URL prefixes for nested includes. Default is the identity
+# (no mangling). `_htmx_transform` emits an override only for the specific keys
+# that were mangled — see the collision handling there.
+_include_url_name(::Type, ::Val{X}) where {X} = X
+
+# Internal-name mangling for an include that collides with a same-named route.
+# Pure function so all sites that need the mangled name agree.
+_include_mangled_name(name::Symbol) = Symbol("__include_", name, "__")
+
 """
     _convert_include_to_struct!(struct_expr)
 
@@ -529,7 +567,7 @@ Pre-process `@include` lines:
   correct mount prefix at construction time. User-provided values for these kwargs
   win; we only fill them in if absent.
 """
-function _convert_include_to_struct!(struct_expr)
+function _convert_include_to_struct!(struct_expr; collisions::Set{Symbol}=Set{Symbol}())
     body = struct_expr.args[3]
     for (i, arg) in enumerate(body.args)
         arg isa Expr || continue
@@ -543,7 +581,7 @@ function _convert_include_to_struct!(struct_expr)
         Meta.isexpr(inner, :(=)) || continue
         lhs = inner.args[1]
         rhs = inner.args[2]
-        prop_name, index_params, lhs_idx_exprs = if lhs isa Symbol
+        src_name, index_params, lhs_idx_exprs = if lhs isa Symbol
             (lhs, Symbol[], Any[])
         elseif Meta.isexpr(lhs, :call) && lhs.args[1] isa Symbol
             ips = Symbol[]
@@ -557,13 +595,20 @@ function _convert_include_to_struct!(struct_expr)
         else
             continue
         end
+        # If this include's source name collides with a same-named route on
+        # this struct (e.g. `@get index() = ...` + `@include index(x) = ...`),
+        # mangle the internal storage key so DO's meta dict can hold both
+        # entries. URLs still use `src_name` — recovered via `_include_url_name`.
+        prop_name = src_name in collisions ? _include_mangled_name(src_name) : src_name
+        # The runtime URL prefix segment must remain the source-level name.
+        prefix_seg = string(src_name)
         if Meta.isexpr(rhs, :block)
             # Convert to: prop[(args…)] = struct _Include_prop ... end
             # __prefix__ extends the parent's prefix with the include name
             # plus any index_params interpolated at runtime — same shape as
             # what `_inject_include_prefix!` does for the call form.
             struct_name = Symbol("_Include_", prop_name)
-            prefix_expr = :(__parent__.__prefix__ * "/" * $(string(prop_name)))
+            prefix_expr = :(__parent__.__prefix__ * "/" * $(prefix_seg))
             for ip in index_params
                 prefix_expr = :($prefix_expr * "/" * string($ip))
             end
@@ -576,7 +621,15 @@ function _convert_include_to_struct!(struct_expr)
             # Only inject __prefix__ (HTMXO-specific). Leave @include in place
             # for DO to handle __parent__ and __status__ wiring. For indexed
             # includes, the runtime prefix interpolates the per-call arg values.
-            _inject_include_prefix!(rhs, prop_name; index_params)
+            _inject_include_prefix!(rhs, src_name; index_params)
+            # On collision, also rename the LHS so DO sees the mangled key.
+            if prop_name !== src_name
+                if Meta.isexpr(inner.args[1], :call)
+                    inner.args[1].args[1] = prop_name
+                else
+                    inner.args[1] = prop_name
+                end
+            end
         end
     end
     struct_expr
