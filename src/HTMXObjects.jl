@@ -554,6 +554,30 @@ _include_url_name(::Type, ::Val{X}) where {X} = X
 # Pure function so all sites that need the mangled name agree.
 _include_mangled_name(name::Symbol) = Symbol("__include_", name, "__")
 
+# Map an internal route meta-key (possibly mangled by `_htmx_transform` to
+# avoid colliding with another same-named route on a different verb) back to
+# its source-level name, used when building URL paths. Default is identity
+# (no mangling). `_htmx_transform` emits an override only for the specific
+# (verb, name) combinations that were mangled.
+_route_url_name(::Type, ::Val{X}) where {X} = X
+
+# Internal-name mangling for a route entry that shares its prop_name with
+# another route under a different HTTP verb (e.g. `@get index` + `@post index`
+# in the same struct). Without mangling, DO would emit two
+# `compute_property(::T, ::Val{:index}; ...)` methods that share the same
+# positional dispatch signature and overwrite each other (kwargs do not
+# participate in dispatch). The mangled key keeps each route as its own
+# property; URL building goes through `_route_url_name` to recover `:index`.
+_route_mangled_name(verb::Symbol, name::Symbol) =
+    Symbol("__route_", _verb_short(verb), "_", name, "__")
+
+# Strip the `@` from a route-macro symbol for use in mangled identifiers
+# (e.g. `Symbol("@get")` → `:GET`). Mirrors `_http_verbs` mapping.
+function _verb_short(verb::Symbol)
+    s = String(verb)
+    startswith(s, "@") ? Symbol(uppercase(s[2:end])) : verb
+end
+
 """
     _convert_include_to_struct!(struct_expr)
 
@@ -630,6 +654,42 @@ function _convert_include_to_struct!(struct_expr; collisions::Set{Symbol}=Set{Sy
                     inner.args[1] = prop_name
                 end
             end
+        end
+    end
+    struct_expr
+end
+
+"""
+    _mangle_route_lhs!(struct_expr, collisions::Set{Symbol})
+
+Rewrite the LHS of every `@get`/`@post`/etc. assignment whose property name
+is in `collisions` so DO sees the mangled internal name
+(`__route_<VERB>_<name>__`). The verb is recovered from the route macrocall
+wrapper (e.g. `Symbol("@get")`). URL-side recovery is handled by the
+`_route_url_name(::T, ::Val{mangled})` overrides emitted in `_htmx_transform`.
+"""
+function _mangle_route_lhs!(struct_expr, collisions::Set{Symbol})
+    body = struct_expr.args[3]
+    route_macros = _route_macros()
+    for arg in body.args
+        arg isa Expr || continue
+        # Walk macrocall layers to find the innermost route macrocall + assignment
+        expr = arg
+        verb = Symbol("")
+        while Meta.isexpr(expr, :macrocall)
+            expr.args[1] in route_macros && (verb = expr.args[1])
+            expr = expr.args[end]
+        end
+        verb === Symbol("") && continue
+        Meta.isexpr(expr, :(=)) || continue
+        lhs = expr.args[1]
+        # Determine the prop_name and rewrite it in place.
+        if lhs isa Symbol
+            lhs in collisions || continue
+            expr.args[1] = _route_mangled_name(verb, lhs)
+        elseif Meta.isexpr(lhs, :call) && lhs.args[1] isa Symbol
+            lhs.args[1] in collisions || continue
+            lhs.args[1] = _route_mangled_name(verb, lhs.args[1])
         end
     end
     struct_expr
@@ -789,7 +849,72 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
     # form turns into an inline struct, but the call form is left as a bare
     # assignment, so _find_include_externals would no longer recognize it).
     include_externals = _find_include_externals(struct_expr)
-    _convert_include_to_struct!(struct_expr)
+    # Source-level include names (still present in the pre-conversion body)
+    # for collision detection with same-named routes.
+    include_src_names = _find_include_source_names(struct_expr)
+    # Routes still have their @get/@post/etc. macrocall wrapper at this point
+    # (only the @include lines get rewritten by `_convert_include_to_struct!`),
+    # so route extraction is safe to do either before or after; we extract
+    # before so collision detection can rewrite route LHS names too.
+    route_info = _extract_route_info(struct_expr)
+
+    # --- Collision detection ---
+    # 1. Route-vs-include same-name (e.g. `@get index` + `@include index(x)`).
+    #    DO meta holds both (Vector{Pair} migration), but `is_indexed_property`
+    #    would return true for `:index` because of the include, redirecting
+    #    `getproperty(obj, :index)` away from the route's compute_property.
+    #    Mangle the include's internal storage key to `__include_index__`;
+    #    URLs still use `:index` via `_include_url_name`.
+    route_name_set = Set{Symbol}(ri.prop_name for ri in route_info)
+    include_collisions = Set{Symbol}(n for n in include_src_names if n in route_name_set)
+
+    # 2. Route-vs-route verb collisions (e.g. `@get index` + `@post index`).
+    #    Both produce `compute_property(::T, ::Val{:index}; ...)` with the
+    #    same positional dispatch signature (kwargs don't participate), so
+    #    one would overwrite the other. Mangle each colliding route's
+    #    internal name to `__route_<VERB>_<name>__`; URL building goes
+    #    through `_route_url_name` to recover `:index`.
+    route_verb_collisions = let counts = Dict{Symbol, Int}()
+        for ri in route_info
+            counts[ri.prop_name] = get(counts, ri.prop_name, 0) + 1
+        end
+        Set{Symbol}(n for (n, c) in counts if c > 1)
+    end
+
+    # Reject same-(name, verb) pairs — these would still collide even after
+    # verb-mangling because the mangled key would be identical.
+    let seen = Set{Tuple{Symbol, Symbol}}(), dups = Tuple{Symbol, Symbol}[]
+        for ri in route_info
+            key = (ri.prop_name, ri.verb)
+            key in seen && push!(dups, key)
+            push!(seen, key)
+        end
+        isempty(dups) || error("""
+            @htmx struct $(_struct_type_name(struct_expr)): duplicate route definitions $(unique(dups)) — same property name AND same verb. Each (name, verb) pair must be unique. Routes with the same name but different verbs (e.g. `@get foo` + `@post foo`) ARE supported via internal verb-mangling — only same-(name, verb) is rejected.
+
+            Don't write:
+
+                @get foo = list_view()
+                @get foo = other_view()      # ← rejected (same verb)
+
+            Either rename one, or use a single-route pattern:
+
+            1. Trailing-default positional (registers both `/foo` and `/foo/{x}`):
+
+                @get foo(slug::String="") = isempty(slug) ? list_view() : item_view(slug)
+
+            2. Query kwarg (one path, optional filter via `?slug=...`):
+
+                @get foo(; slug::String="") = isempty(slug) ? list_view() : item_view(slug)
+            """)
+    end
+
+    # --- Apply mangling to the struct body ---
+    _convert_include_to_struct!(struct_expr; collisions=include_collisions)
+    if !isempty(route_verb_collisions)
+        _mangle_route_lhs!(struct_expr, route_verb_collisions)
+    end
+
     _wrap_ws_bodies!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
     reroute && _warn_redundant_req_decl!(struct_expr)
@@ -805,53 +930,52 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
         n in param_names || push!(param_names, n)
     end
     inline_props = _find_inline_structs(struct_expr)
-    route_info = _extract_route_info(struct_expr)
-    # Catch duplicate route property names early — two `@get foo = ...` lines
-    # silently overwrite each other in DynamicObjects' meta dict and produce a
-    # confusing "Method overwriting is not permitted during precompilation"
-    # error from the duplicate `_extract_args` methods.
-    let seen = Set{Symbol}(), dups = Symbol[]
-        for ri in route_info
-            ri.prop_name in seen && push!(dups, ri.prop_name)
-            push!(seen, ri.prop_name)
-        end
-        isempty(dups) || error("""
-            @htmx struct $(_struct_type_name(struct_expr)): duplicate route property name(s) $(unique(dups)). Each @get/@post/@ws/etc. property must have a unique name (DynamicObjects' meta dict is keyed by name and can only hold one entry per name; additionally, two `_extract_args` methods with identical signatures would collide on precompile).
 
-            Multi-method dispatch on the same route name is NOT supported. Don't write:
+    # Resolve internal storage names per route entry (mangled if verb-colliding).
+    route_internal_names = [ri.prop_name in route_verb_collisions ?
+                            _route_mangled_name(ri.verb, ri.prop_name) :
+                            ri.prop_name for ri in route_info]
 
-                @get foo        = list_view()          # list
-                @get foo(slug)  = item_view(slug)      # detail  ← rejected
-
-            Instead, use ONE of these single-route patterns:
-
-            1. Trailing-default positional (registers both `/foo` and `/foo/{x}`, URL-param stays typed):
-
-                @get foo(slug::String="") = isempty(slug) ? list_view() : item_view(slug)
-
-            2. Query kwarg (one path, optional filter via `?slug=...`):
-
-                @get foo(; slug::String="") = isempty(slug) ? list_view() : item_view(slug)
-
-            Otherwise rename one of the colliding properties.
-            """)
-    end
     block = DynamicObjects.dynamicstruct(struct_expr;
         child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names, is_child=true),
         is_child, kwargs...)
     type_name = _struct_type_name(struct_expr)
     @assert Meta.isexpr(block, :escape)
-    # Emit _extract_args methods for each route property
-    for ri in route_info
-        push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.pos_params, ri.kw_params))
+    # Emit _extract_args methods for each route property — keyed on the
+    # internal (possibly mangled) name so the route handler's
+    # `_extract_args(LeafT, Val(internal_name), ...)` call dispatches.
+    for (ri, internal_name) in zip(route_info, route_internal_names)
+        push!(block.args[1].args, _generate_extract_args(type_name, internal_name, ri.pos_params, ri.kw_params))
+    end
+    # Emit `_route_url_name` overrides for mangled route entries so
+    # `_walk_route_meta` recovers `:index` (the URL-level name) from the
+    # internal `:__route_GET_index__` (etc.) key.
+    _route_url_fname = Expr(:., @__MODULE__, QuoteNode(:_route_url_name))
+    for (ri, internal_name) in zip(route_info, route_internal_names)
+        internal_name === ri.prop_name && continue
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _route_url_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(internal_name))})),
+            QuoteNode(ri.prop_name)))
+    end
+    # Emit `_include_url_name` overrides for mangled include entries.
+    _include_url_fname = Expr(:., @__MODULE__, QuoteNode(:_include_url_name))
+    for src_name in include_collisions
+        mangled = _include_mangled_name(src_name)
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _include_url_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(mangled))})),
+            QuoteNode(src_name)))
     end
     # Emit _nested_struct_type methods for @include externals.
     # (Inline `@struct` children are emitted by DO's macro itself, on the same
     # generic, so HTMXO only needs to add the @include-external methods here.)
+    # When the include's source name collides with a route, DO sees the
+    # mangled key (`__include_<name>__`); the _nested_struct_type method must
+    # be keyed on that same mangled key so `_walk_route_meta` finds it.
     _type_fname = Expr(:., DynamicObjects, QuoteNode(:_nested_struct_type))
     for (prop, type_expr) in include_externals
+        do_key = prop in include_collisions ? _include_mangled_name(prop) : prop
         push!(block.args[1].args, Expr(:(=),
-            Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
+            Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(do_key))})),
             type_expr))
     end
     # Emit _param_names method if this struct declared any @param properties
@@ -904,13 +1028,14 @@ end
 _route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("@patch"), Symbol("@delete"), Symbol("@ws")])
 
 # Extract route property info from the struct body AST at macro expansion time.
-# Returns [(prop_name::Symbol, positional_params, kwargs_params), ...]
-# where positional_params = [(name::Symbol, type_expr_or_nothing), ...]
-# and   kwargs_params     = [(name::Symbol, type_expr_or_nothing, has_default::Bool), ...]
+# Returns [(prop_name::Symbol, verb::Symbol, positional_params, kwargs_params), ...]
+# where verb is the route macro symbol (e.g. Symbol("@get")), and
+#   positional_params = [(name::Symbol, type_expr_or_nothing), ...]
+#   kwargs_params     = [(name::Symbol, type_expr_or_nothing, has_default::Bool), ...]
 function _extract_route_info(struct_expr)
     body = struct_expr.args[3]
     route_macros = _route_macros()
-    routes = @NamedTuple{prop_name::Symbol, pos_params::Vector, kw_params::Vector}[]
+    routes = @NamedTuple{prop_name::Symbol, verb::Symbol, pos_params::Vector, kw_params::Vector}[]
     lnn = nothing
     for arg in body.args
         arg isa LineNumberNode && (lnn = arg; continue)
@@ -918,8 +1043,12 @@ function _extract_route_info(struct_expr)
         # Walk macrocall layers to find route markers
         expr = arg
         has_route = false
+        verb = Symbol("")
         while Meta.isexpr(expr, :macrocall)
-            expr.args[1] in route_macros && (has_route = true)
+            if expr.args[1] in route_macros
+                has_route = true
+                verb = expr.args[1]
+            end
             # macrocall args[2] is often a LineNumberNode
             expr.args[2] isa LineNumberNode && (lnn = expr.args[2])
             expr = expr.args[end]
@@ -958,7 +1087,7 @@ function _extract_route_info(struct_expr)
             prop_name = lhs
             Meta.isexpr(prop_name, :(::)) && (prop_name = prop_name.args[1])
         end
-        push!(routes, (prop_name=prop_name, pos_params=pos_params, kw_params=kw_params))
+        push!(routes, (prop_name=prop_name, verb=verb, pos_params=pos_params, kw_params=kw_params))
     end
     routes
 end
@@ -2207,7 +2336,13 @@ end
 # the prefix also gains a `{x}` placeholder per index_param, and `types` lists
 # the resolved Julia Type per param so the request handler can convert URL
 # segments via `_convert_param`.
-function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractString)
+#
+# `name` is the **internal** DO storage key (possibly mangled via
+# `_include_mangled_name` when it collides with a same-named route — see
+# `_htmx_transform`). `url_name` is the source-level segment that goes into
+# the URL path. They differ only for collision-mangled includes.
+function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractString;
+                                  url_name::Symbol=name)
     pos_idx_names = String[]
     types = Any[]
     mod = parentmodule(OwnerT)
@@ -2226,18 +2361,23 @@ function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractStr
     # name === :index, the nested prefix becomes empty (root-level indexed
     # include named `index`); the param loop below appends `/{x}` segments
     # and the request-router formats the leading slash.
-    nested_prefix = if name === :index
+    nested_prefix = if url_name === :index
         prefix
     elseif isempty(prefix)
-        string(name)
+        string(url_name)
     else
-        prefix * "/" * string(name)
+        prefix * "/" * string(url_name)
     end
     for nm in pos_idx_names
         nested_prefix = isempty(nested_prefix) ? "{" * nm * "}" :
                                                  nested_prefix * "/{" * nm * "}"
     end
-    step = (name=name, types=types)
+    # The step's `name` is the DO key used for `getproperty(obj, name)` in
+    # `_chain_steps`. Keep it as the internal name so dispatch lands on the
+    # actual property. `url_name` tells `_chain_steps` whether to advance the
+    # URL cursor over a name segment (skipped for `:index`, which collapses
+    # to the prefix per `_route_path`).
+    step = (name=name, types=types, url_name=url_name)
     (nested_prefix, step)
 end
 
@@ -2266,7 +2406,8 @@ end
 # `_register_included_routes` (nested @include) funnel here.
 function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractString,
                               mount_prefix::AbstractString, name::Symbol, info,
-                              method::AbstractString, record_dir, record_base::AbstractString)
+                              method::AbstractString, record_dir, record_base::AbstractString;
+                              url_name::Symbol=name)
     positional_indices = Any[]
     has_kwargs = false
     for idx in info.indices
@@ -2278,13 +2419,16 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
     end
 
     param_strs, n_params, default_positions = _route_param_shape(positional_indices)
-    path = _route_path(prefix, name, param_strs)
+    # `url_name` drives the URL path segment (handles `:index` collapse and
+    # verb-mangling recovery); `name` is the internal DO key used by
+    # `getproperty` / `_extract_args`.
+    path = _route_path(prefix, url_name, param_strs)
     _warn_docs_prefix(path, name)
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
         has_kwargs=has_kwargs, mount_prefix=mount_prefix, prefix=prefix,
-        OwnerT=OwnerT, RouteT=RouteT
+        OwnerT=OwnerT, RouteT=RouteT, url_name=url_name
         if method == "WEBSOCKET"
             if isempty(param_strs) && !has_kwargs && !info.indexed
                 register(CONTEXT[], "WEBSOCKET", path, function(ws)
@@ -2320,7 +2464,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             for k in length(default_positions):-1:1
                 cut = default_positions[k]  # position of first omitted param
                 short_params = param_strs[1:cut-1]
-                short_path = _route_path(prefix, name, short_params)
+                short_path = _route_path(prefix, url_name, short_params)
                 _register_route_handler(OwnerT, RouteT, chain, method, name, short_path, length(short_params), true, record_dir; root_prefix=mount_prefix, record_base)
             end
         end
@@ -2355,28 +2499,36 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
             macro_sym in info.macros && (method = m; break)
         end
         if !isnothing(method)
-            register_route(name, info, method)
+            # URL-side name recovery: if this route was verb-mangled (e.g.
+            # `:__route_GET_index__`), `_route_url_name` returns the
+            # source name (`:index`) for path building. Default is identity.
+            url_name = _route_url_name(IterT, Val(name))
+            register_route(name, info, method, url_name)
             continue
         end
 
         # Not a route — try nested-include recursion.
         nested_type = _nested_struct_type(IterT, Val(name))
         if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
-            recurse_nested(name, info, nested_type)
+            # URL-side name recovery for include collisions: if the include's
+            # internal name was mangled (e.g. `:__include_index__`),
+            # `_include_url_name` returns the source name (`:index`).
+            url_name = _include_url_name(IterT, Val(name))
+            recurse_nested(name, info, nested_type, url_name)
             continue
         end
     end
 end
 
-function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=NamedTuple{(:name, :types), Tuple{Symbol, Vector{Any}}}[])
+function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=Any[])
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _walk_route_meta(T,
-        (name, info, nested_type) -> begin
-            nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
+        (name, info, nested_type, url_name) -> begin
+            nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix; url_name)
             chain = vcat(parent_chain, [step])
             _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
         end,
-        (name, info, method) -> _register_one_route(T, T, Symbol[], prefix, mount_prefix, name, info, method, record_dir, record_base),
+        (name, info, method, url_name) -> _register_one_route(T, T, Symbol[], prefix, mount_prefix, name, info, method, record_dir, record_base; url_name),
     )
 end
 
@@ -2445,9 +2597,16 @@ function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs:
     objs = Any[root]
     obj = root
     for step in chain
-        name  = step isa Symbol ? step : step.name
-        types = step isa Symbol ? Any[] : step.types
-        cursor += 1   # name segment
+        name     = step isa Symbol ? step : step.name
+        types    = step isa Symbol ? Any[] : step.types
+        # `url_name` defaults to `name` for legacy step shapes; new steps
+        # (built by `_nested_prefix_and_step`) carry it explicitly. When
+        # `url_name === :index`, the URL has no name segment for this step
+        # (`_route_path` / `_nested_prefix_and_step` collapse it), so we
+        # don't advance the cursor.
+        url_name = step isa Symbol ? name :
+                   (hasproperty(step, :url_name) ? step.url_name : name)
+        url_name === :index || (cursor += 1)
         obj = if isempty(types)
             getproperty(obj, name)
         else
@@ -2549,12 +2708,12 @@ function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::Stri
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     _walk_route_meta(NestedT,
-        (name, info, nested_type) -> begin
-            nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
+        (name, info, nested_type, url_name) -> begin
+            nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix; url_name)
             _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
                 nested_prefix, record_dir; root_prefix, record_base)
         end,
-        (name, info, method) -> _register_one_route(ParentT, NestedT, chain, prefix, root_prefix, name, info, method, record_dir, record_base),
+        (name, info, method, url_name) -> _register_one_route(ParentT, NestedT, chain, prefix, root_prefix, name, info, method, record_dir, record_base; url_name),
     )
 end
 
