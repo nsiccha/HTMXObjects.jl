@@ -63,10 +63,10 @@ See the `section_routes` demo in `HTMXObjects/web/src/git_editor_demo.jl`.
                   h.small(v.message), " ",
                   h.button("Restore";
                       hx_post=query_url(__self__ / "restore", __parent__; sha=v.sha),
-                      hx_target="#" * container_id, hx_swap="outerHTML")
+                      hx_target="#$container_id", hx_swap="outerHTML")
               ) for v in editor.versions()]...),
         h.button("Back"; hx_get=query_url(__parent__.__prefix__, __parent__),
-                 hx_target="#" * container_id, hx_swap="outerHTML"),
+                 hx_target="#$container_id", hx_swap="outerHTML"),
     )
 
     @post restore(; sha::String="") = begin
@@ -89,14 +89,14 @@ function _editor_conflict_fragment(editor, submitted, current_version, container
                 h.summary("Show current on-disk content"),
                 h.pre(current),
             ),
-            h.form(; hx_post=save_url, hx_target="#" * container_id, hx_swap="outerHTML")(
+            h.form(; hx_post=save_url, hx_target="#$container_id", hx_swap="outerHTML")(
                 h.textarea(submitted; name="content", rows="15", class="htmxo-editor-input"),
                 h.input(; type="hidden", name="version", value=current_version),
                 h.div(; class="htmxo-editor-actions")(
                     h.button("Force save (overwrite)"; type="submit"),
                     h.button("Discard my edit";
                         type="button", class="secondary outline",
-                        hx_get=cancel_url, hx_target="#" * container_id, hx_swap="outerHTML"),
+                        hx_get=cancel_url, hx_target="#$container_id", hx_swap="outerHTML"),
                 ),
             ),
         ),
