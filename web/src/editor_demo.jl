@@ -2,8 +2,13 @@
     initial_text = "# Notes\n\nEdit me. Press Escape to cancel.\n"
 end
 
+const _TEXT_DEMO_URL = "https://example.com/paste-here"
+
 @htmx struct EditorDemoRoutes
     (; initial_text) = __appdata__.editor_demo
+
+    # Return the default content for a given input kind.
+    default_content(kind) = kind === :text ? _TEXT_DEMO_URL : initial_text
 
     @get index() = h.div(
         h.h1("editor_form demo"),
@@ -13,7 +18,7 @@ end
         ),
         h.section(
             h.h2("Text input"),
-            view("text-view", "https://example.com/paste-here", :text),
+            view("text-view", _TEXT_DEMO_URL, :text),
         ),
     )
 
@@ -27,18 +32,17 @@ end
 
     @get edit(id; kind::Symbol=:textarea) = editor_form(;
         id,
-        post_url   = __self__/"save"/id,
-        cancel_url = query_url(__self__/"cancel"/id; kind),
-        content    = kind === :text ? "https://example.com/paste-here" : initial_text,
-        version    = "v0",
-        input      = kind,
-        rows       = 8,
+        post_url    = __self__/"save"/id,
+        cancel_url  = query_url(__self__/"cancel"/id; kind),
+        content     = default_content(kind),
+        version     = "v0",
+        input       = kind,
+        rows        = 8,
         placeholder = kind === :text ? "URL..." : "",
-        label      = "Editing: $id",
+        label       = "Editing: $id",
     )
 
-    @get cancel(id; kind::Symbol=:textarea) =
-        view(id, kind === :text ? "https://example.com/paste-here" : initial_text, kind)
+    @get cancel(id; kind::Symbol=:textarea) = view(id, default_content(kind), kind)
 
     @post save(id; content="", version="") =
         view(id, content, id == "text-view" ? :text : :textarea)
