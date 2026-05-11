@@ -1189,6 +1189,24 @@ function htmx(args...;
     )
 end
 
+"""
+    pico_page(content; pico_version="2", class="container", extra_head=())
+
+Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
+wrap `content` in `h.main(class=class)(content)` and assemble a full
+Pico-CSS HTML page. Replaces the repeated boilerplate
+
+    __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
+
+with
+
+    __page__(content) = pico_page(content)
+    # or with extras:
+    __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
+"""
+pico_page(content; pico_version="2", class="container", extra_head=()) =
+    htmx(h.main(class=class)(content); pico_version, extra_head)
+
 # --- Route registration and recording ---
 
 const _html_response = s -> HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body=s)
