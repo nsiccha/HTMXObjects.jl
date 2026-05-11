@@ -34,7 +34,7 @@ end
     (; captions) = __appdata__
     (; scores, timings, scores_caption, timings_caption, bar_caption) = captions
 
-    @get index = begin
+    @get index() = begin
         max_ms = maximum(timings.mean_ms)
         bar_w(v) = round(Int, 400 * v / max_ms)
         bars = h.svg(; width=480, height=20*nrow(timings)+10, class="u-bg-soft")(

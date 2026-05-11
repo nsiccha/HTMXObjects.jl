@@ -13,7 +13,7 @@ end
     (; sortable_table) = __appdata__
     (; df) = sortable_table
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h1("Sortable Table Demo"),
         h.p("Click any column header to sort. Numeric columns sort numerically; string columns use locale compare. Includes ",
             h.code("missing"), ", ", h.code("nothing"),

@@ -11,7 +11,7 @@ end
 @htmx struct GalleryDemoRoutes
     (; gallery) = __appdata__.gallery_demo
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h1("Gallery primitive demo"),
         h.p(
             "Walks ", h.code("web/src/test_fixtures/gallery_demo/"),
@@ -38,7 +38,7 @@ end
         gallery_grid(gallery.items; section_titles=gallery.section_titles),
     )
 
-    @get items = h.table(
+    @get items() = h.table(
         h.thead(h.tr(h.th("section"), h.th("id"), h.th("title"), h.th("description"))),
         h.tbody([
             h.tr(h.td(it.section), h.td(it.id), h.td(it.title), h.td(it.description))
@@ -59,10 +59,16 @@ end
             )
     end
 
+    # Collect all relative file paths under `dir`, sorted.
+    dir_files(dir) = sort!(
+        [relpath(joinpath(root, f), dir)
+         for (root, _, fs) in walkdir(dir) for f in fs]
+    )
+
     # Drive `record!` against a tiny in-process app and surface the
     # produced filesystem tree. Lets us verify the recorder + the
     # markdown shape without spawning a subprocess.
-    @get record_test = let
+    @get record_test() = let
         out_dir = joinpath(tempdir(), "htmxo-gallery-demo-record")
         isdir(out_dir) && rm(out_dir; recursive=true)
         # Use the GalleryDemoRoutes itself as the recordee: it already has
@@ -77,34 +83,20 @@ end
                 record_dir=out_dir,
                 record_base="/gallery_demo_recordings",
                 paths)
-        files = String[]
-        for (root, _, fs) in walkdir(out_dir)
-            for f in fs
-                push!(files, relpath(joinpath(root, f), out_dir))
-            end
-        end
-        sort!(files)
         h.div(
             h.h2("record! produced:"),
             h.p(h.code(out_dir)),
-            h.ul([h.li(h.code(f)) for f in files]...),
+            h.ul([h.li(h.code(f)) for f in dir_files(out_dir)]...),
         )
     end
 
-    @get recorded = let
+    @get recorded() = let
         # Browseable listing of the last record_test output.
         out_dir = joinpath(tempdir(), "htmxo-gallery-demo-record")
         isdir(out_dir) || return h.p("No recordings yet — hit /gallery_demo/record_test first.")
-        files = String[]
-        for (root, _, fs) in walkdir(out_dir)
-            for f in fs
-                push!(files, relpath(joinpath(root, f), out_dir))
-            end
-        end
-        sort!(files)
         h.div(
             h.h2("Recordings under $out_dir"),
-            h.ul([h.li(h.code(f)) for f in files]...),
+            h.ul([h.li(h.code(f)) for f in dir_files(out_dir)]...),
         )
     end
 end

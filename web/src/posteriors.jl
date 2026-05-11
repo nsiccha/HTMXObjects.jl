@@ -10,11 +10,11 @@ end
         cols = isempty(filter) ? columns[1:min(max, end)] :
             filter!(c -> occursin(Regex(filter), c), copy(columns))[1:min(max, end)]
         h.div(
-            h.form(; hx_get=__prefix__, hx_target="closest div", hx_swap="outerHTML")(
+            h.form(; hx_get=__self__, hx_target="closest div", hx_swap="outerHTML")(
                 h.input(; type="text", name="filter", value=filter, placeholder="Filter columns..."),
             ),
             h.div(; class="u-grid-auto")(
-                [h.div(h.h5(col), lazy(query_url(__prefix__ * "/plot"; col)))
+                [h.div(h.h5(col), lazy(query_url(__self__/"plot"; col)))
                  for col in cols]...
             )
         )

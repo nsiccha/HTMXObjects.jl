@@ -17,7 +17,7 @@ end
         h.p("$(status): $(sha[1:min(8, length(sha))])")
     end
 
-    @get index = h.div(; id=container_id)(
+    @get index() = h.div(; id=container_id)(
         h.h2("Git-backed editor — notes.md"),
         h.p("Repo: ", h.code(repo.path)),
         h.p("Current blob: ",
@@ -59,7 +59,7 @@ end
 
         @include editor_routes = EditorRoutes(; rows=8, label=name)
 
-        @get index = h.section(; id=container_id)(
+        @get index() = h.section(; id=container_id)(
             h.h3("Section: ", h.code(name)),
             h.pre(editor.current_content()),
             h.button("Edit"; hx_get=query_url(editor_routes/"form", __self__),

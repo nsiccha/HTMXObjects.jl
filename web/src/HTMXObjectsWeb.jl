@@ -33,17 +33,19 @@ const APPDATA = AppData()
 
     __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h1("HTMXObjectsWeb"),
         h.ul(
             h.li(h.a(href=__self__/"tests")("Tests")),
             h.li(h.a(href=__self__/"demo")("Feedback demo")),
             h.li(h.a(href=__self__/"lazy_grid")("Lazy grid demo")),
+            h.li(h.a(href=__self__/"posteriors")("Posteriors / lazy-grid demo")),
             h.li(h.a(href=__self__/"sortable_table")("Sortable table demo")),
             h.li(h.a(href=__self__/"captions")("Captions demo")),
             h.li(h.a(href=__self__/"editor_demo")("Editor form demo")),
             h.li(h.a(href=__self__/"git_editor_demo")("Git-backed editor demo")),
             h.li(h.a(href=__self__/"gallery_demo")("Gallery primitive demo")),
+            h.li(h.a(href=__self__/"structure")("Type structure browser")),
         ),
     )
 
@@ -56,6 +58,7 @@ const APPDATA = AppData()
     @include git_editor_demo = GitEditorDemoRoutes()
     @include gallery_demo = GalleryDemoRoutes()
     @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
+    @include structure = StructureRoutes(; root=AppRoutes)
 end
 
 function __init__()
