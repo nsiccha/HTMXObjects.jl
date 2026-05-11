@@ -4,8 +4,7 @@
 # needed: hit these routes via curl).
 
 @dynamicstruct struct GalleryDemoData
-    fixture_dir = joinpath(@__DIR__, "test_fixtures", "gallery_demo")
-    gallery = Gallery(fixture_dir)
+    gallery = Gallery(joinpath(@__DIR__, "test_fixtures", "gallery_demo"))
 end
 
 @htmx struct GalleryDemoRoutes
