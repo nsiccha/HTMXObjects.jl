@@ -38,13 +38,12 @@ end
         gallery_grid(gallery.items; section_titles=gallery.section_titles),
     )
 
-    @get items() = h.table(
-        h.thead(h.tr(h.th("section"), h.th("id"), h.th("title"), h.th("description"))),
-        h.tbody([
-            h.tr(h.td(it.section), h.td(it.id), h.td(it.title), h.td(it.description))
-            for it in gallery.items
-        ]...),
-    )
+    @get items() = render_table(DataFrame(
+        section     = [it.section     for it in gallery.items],
+        id          = [it.id          for it in gallery.items],
+        title       = [it.title       for it in gallery.items],
+        description = [it.description for it in gallery.items],
+    ))
 
     @get item(id) = let it = find_item(gallery, id)
         isnothing(it) ?
