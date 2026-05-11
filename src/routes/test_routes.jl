@@ -1,6 +1,24 @@
-# Provides web routes for running tests registered via TestModules. Include in an
-# @htmx struct with `@include tests = TestRoutes(; __req__, test_module=@__MODULE__)`
-# to add test listing, running, and cache management endpoints under /tests/.
+"""
+    TestRoutes(; test_module, prefix="/tests")
+
+Mountable `@htmx` route bundle that wires up a test-runner UI for the
+`@testset`s defined in `test_module`. Mount it under any `@htmx struct` via:
+
+    @include tests = TestRoutes(; test_module=@__MODULE__)
+
+Provides:
+
+- `@get  index`        — render the cached test list (see [`test_list`](@ref))
+- `@post run(name)`    — re-run a single named `@testset` (see [`test_run!`](@ref))
+- `@post run_all`      — run every test (see [`test_run_all!`](@ref))
+- `@post run_failed`   — re-run only previously-failed tests
+- `@post run_missing`  — run tests with no cached result
+- `@post run_batch`    — run a comma-separated batch of named tests
+- `@post clear_cache`  — discard all cached results
+
+The underlying `test_*` functions are only available when `Test` is loaded
+(they're provided by the package's `TestExt` extension).
+"""
 @htmx struct TestRoutes
     # Mount with `@include tests = TestRoutes(; __req__, test_module=@__MODULE__)`.
     test_module = nothing

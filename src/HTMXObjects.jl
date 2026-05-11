@@ -2703,6 +2703,24 @@ function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::Stri
     )
 end
 
+"""
+    route!(app; prefix="", record_dir=nothing, record_base="")
+
+Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` route declared on
+`app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) with the
+Oxygen router. Returns `app`.
+
+- `prefix` — mount the entire app under a URL prefix (e.g. `prefix="api"` puts
+  the root route at `/api/`). Default: root (`""`).
+- `record_dir` — if set, every served response is also persisted to disk via
+  [`save_response`](@ref) under that directory; intended for static export.
+- `record_base` — URL prefix to strip from saved file paths when `record_dir`
+  is set (for deploying to a non-root subpath).
+
+`route!` stores `(prefix, record_dir)` per type in an internal registry so the
+`_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
+**you do not need to call `route!` again after editing a route body**.
+"""
 function route!(obj; prefix="", record_dir=nothing, record_base="")
     T = typeof(obj)
     _registered_types[T] = (; prefix, record_dir)
@@ -3060,6 +3078,9 @@ figcaption.caption { margin-bottom: 0.5rem; }
 }
 """)
 
+_wrap_long(s::AbstractString) = h.div(s)
+_wrap_long(s) = s
+
 """
     render_caption(spec::CaptionSpec; actions=())
 
@@ -3070,9 +3091,6 @@ Use `with_caption(spec, content; actions)` to wrap content in a `<figure>` —
 this function returns just the `<figcaption>` so it can be embedded in a
 custom layout if needed.
 """
-_wrap_long(s::AbstractString) = h.div(s)
-_wrap_long(s) = s
-
 function render_caption(spec::CaptionSpec; actions=())
     header_kids = Any[h.span(h.strong(spec.title), isempty(spec.short) ? "" : " — ", spec.short)]
     if !isempty(actions)
@@ -3087,17 +3105,17 @@ function render_caption(spec::CaptionSpec; actions=())
     h.figcaption(; class="caption")(header, body)
 end
 
-"""
-    with_caption(spec::CaptionSpec, content; actions=())
-
-Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
-caption rendered above it. Returns `nothing` for `spec` is not allowed —
-use `content` directly if there is no caption.
-"""
 _as_children(content) = (content,)
 _as_children(content::Tuple) = content
 _as_children(content::AbstractVector) = content
 
+"""
+    with_caption(spec::CaptionSpec, content; actions=())
+
+Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
+caption rendered above it. Pass `actions` (e.g. download buttons) to populate
+the right side of the caption header.
+"""
 function with_caption(spec::CaptionSpec, content; actions=())
     h.figure(; class="captioned")(render_caption(spec; actions), _as_children(content)...)
 end
@@ -3343,12 +3361,64 @@ function fmt_number(x; sigdigits=2)
 end
 
 # --- Test UI stubs (implemented by TestExt when Test is loaded) ---
+
+"""
+    test_list(test_module, md; prefix="") -> Node
+
+Render the test UI's main page: one row per `@testset` defined in
+`test_module`, with cached pass/fail/duration columns and per-row run
+buttons. Implemented by the `TestExt` extension (active when `Test` is
+loaded); mounted under `TestRoutes` at `/tests/`.
+"""
 function test_list end
+
+"""
+    test_run!(test_module, name, md; prefix="") -> Node
+
+Run a single `@testset` (identified by its display name) in `test_module`,
+update the cached result, and return the refreshed `test_list` UI fragment.
+Implemented by the `TestExt` extension.
+"""
 function test_run! end
+
+"""
+    test_run_all!(test_module, md; prefix="") -> Node
+
+Run every `@testset` in `test_module` and return the refreshed `test_list`
+UI fragment. Implemented by the `TestExt` extension.
+"""
 function test_run_all! end
+
+"""
+    test_run_batch!(test_module, names::AbstractString, md; prefix="") -> Node
+
+Run a comma-separated batch of `@testset`s in `test_module`. Used by the test
+UI's batch-run controls. Implemented by the `TestExt` extension.
+"""
 function test_run_batch! end
+
+"""
+    test_run_failed!(test_module, md; prefix="") -> Node
+
+Run every `@testset` in `test_module` whose cached result was a failure, and
+return the refreshed UI. Implemented by the `TestExt` extension.
+"""
 function test_run_failed! end
+
+"""
+    test_run_missing!(test_module, md; prefix="") -> Node
+
+Run every `@testset` in `test_module` that has no cached result yet, and
+return the refreshed UI. Implemented by the `TestExt` extension.
+"""
 function test_run_missing! end
+
+"""
+    test_clear_cache!(test_module, md; prefix="") -> Node
+
+Discard all cached test results for `test_module`, returning the refreshed
+empty-cache UI. Implemented by the `TestExt` extension.
+"""
 function test_clear_cache! end
 
 include("routes/test_routes.jl")
@@ -3356,6 +3426,9 @@ include("routes/test_routes.jl")
 include("routes/structure_routes.jl")
 
 include("routes/shared_ops_routes.jl")
+
+_hidden_input(k, v) = [h.input(; type="hidden", name=string(k), value=string(v))]
+_hidden_input(k, v::AbstractVector) = [h.input(; type="hidden", name=string(k), value=string(x)) for x in v]
 
 """
     hidden_inputs(; kwargs...) -> Vector{Node}
@@ -3367,9 +3440,9 @@ to pass parameters to `@post` routes via `formdata`:
         hidden_inputs(; script=path, worktree=wt)...,
         h.button(; class="btn", type="submit")("Go"),
     )
+
+Vector values produce repeated inputs (one `<input>` per element).
 """
-_hidden_input(k, v) = [h.input(; type="hidden", name=string(k), value=string(v))]
-_hidden_input(k, v::AbstractVector) = [h.input(; type="hidden", name=string(k), value=string(x)) for x in v]
 hidden_inputs(; kwargs...) = mapreduce(((k, v),) -> _hidden_input(k, v), vcat, kwargs; init=[])
 
 """
@@ -3506,20 +3579,6 @@ function query_url(path, obj; overrides...)
     query_url(path; kws...)
 end
 
-"""
-    @query_url prop(pos1, pos2; kw1=val1, kw2=val2)
-
-Build a `query_url` from a property-call expression, following the same conventions as
-`@get` route definitions. Positional args become path segments, kwargs become query params.
-
-Designed for use inside `@htmx`/`@dynamicstruct` bodies, where it intercepts the call
-before `walk_rhs` turns it into a property access.
-
-    @query_url fit(; dataset="foo", model="bar")    # → query_url("/fit"; dataset="foo", model="bar")
-    @query_url item(42)                              # → query_url("/item/42")
-    @query_url item(id; format="json")               # → query_url("/item/\$(id)"; format="json")
-    @query_url index                                 # → query_url("/")
-"""
 _unquote(x::QuoteNode) = x.value
 _unquote(x) = x
 
@@ -3545,6 +3604,20 @@ end
 _query_url_kw(kw::Symbol) = Expr(:kw, kw, esc(kw))
 _query_url_kw(kw::Expr) = Expr(:kw, kw.args[1], esc(kw.args[2]))
 
+"""
+    @query_url prop(pos1, pos2; kw1=val1, kw2=val2)
+
+Build a `query_url` from a property-call expression, following the same conventions as
+`@get` route definitions. Positional args become path segments, kwargs become query params.
+
+Designed for use inside `@htmx`/`@dynamicstruct` bodies, where it intercepts the call
+before `walk_rhs` turns it into a property access.
+
+    @query_url fit(; dataset="foo", model="bar")    # → query_url("/fit"; dataset="foo", model="bar")
+    @query_url item(42)                              # → query_url("/item/42")
+    @query_url item(id; format="json")               # → query_url("/item/\$(id)"; format="json")
+    @query_url index                                 # → query_url("/")
+"""
 macro query_url(expr)
     _query_url = GlobalRef(@__MODULE__, :query_url)
     if expr isa Symbol
@@ -4402,23 +4475,6 @@ tabset_styles() = h.style("""
 }
 """)
 
-"""
-    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))")
-
-Client-side tabs using Pico CSS nav + hyperscript.
-
-Eager (content rendered immediately):
-
-    tabset("Tab 1" => content1, "Tab 2" => content2; active=1)
-
-Lazy (content is a URL string, fetched via HTMX on first tab click):
-
-    tabset("Tab 1" => "/api/tab1", "Tab 2" => "/api/tab2")
-
-Mixed (eager + lazy):
-
-    tabset("Summary" => render_summary(), "Details" => "/api/details")
-"""
 function _tabset_panel(content::AbstractString, i, active)
     # String content = URL → lazy load via hx-get on first reveal
     h.div(;
@@ -4437,6 +4493,23 @@ function _tabset_panel(content, i, active)
     )
 end
 
+"""
+    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))")
+
+Client-side tabs using Pico CSS nav + hyperscript.
+
+Eager (content rendered immediately):
+
+    tabset("Tab 1" => content1, "Tab 2" => content2; active=1)
+
+Lazy (content is a URL string, fetched via HTMX on first tab click):
+
+    tabset("Tab 1" => "/api/tab1", "Tab 2" => "/api/tab2")
+
+Mixed (eager + lazy):
+
+    tabset("Summary" => render_summary(), "Details" => "/api/details")
+"""
 tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id, class="tabset")(
     h.nav(
         h.ul([

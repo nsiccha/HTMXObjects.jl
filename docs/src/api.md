@@ -8,6 +8,7 @@ The full set of HTMXObjects exports, organised by use case. For walkthroughs see
 @htmx
 create_app
 route!
+Verb
 ```
 
 | Helper | Use |
@@ -15,6 +16,7 @@ route!
 | `@htmx struct App … end` | The whole package surface — declares an app, its data, and its routes |
 | `create_app(name)`       | Scaffold a new HTMXObjects app (web/, app/, Project.toml) on disk |
 | `route!(app)`            | Register all `@get`/`@post`/`@put`/`@delete`/`@ws` markers found in the struct on the Oxygen router |
+| `Verb{V}`                | Singleton type threaded into route IPs as the first arg, lets one property host `@get`/`@post`/… simultaneously |
 | `terminate()`, `serve()`, `staticfiles(...)`, `dynamicfiles(...)` | Re-exports from Oxygen for serving |
 
 ## DynamicObjects re-exports
@@ -99,6 +101,21 @@ See the [Components catalog](components.md) for the full list with examples.
 
 `fmt_time`, `fmt_bytes`, `fmt_number` — concise human-readable formatters.
 
+## Theming & styles
+
+HTMXObjects ships its own CSS variables and matches the host environment (raw Pico, VitePress) via a small set of bridges:
+
+| Export | Purpose |
+|--------|---------|
+| `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
+| `pico_bridge()`           | Map `--htmxo-*` onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set |
+| `vitepress_bridge()`      | Map `--htmxo-*` onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
+| `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets |
+| `escape_html(s)`          | HTML-escape via Cobweb's escaper (handles entities) |
+| `html_escape(s)`          | Minimal `&` / `<` / `>` escape — used inside generated JS strings |
+
+See [`htmxo-semantic-styling`](https://github.com/nsiccha/Claude/blob/main/skills/htmxo-semantic-styling/SKILL.md) for the project's CSS philosophy.
+
 ## Editor / Git integration
 
 | Export | Purpose |
@@ -115,3 +132,32 @@ See the dedicated [Testing](testing.md) page.
 |--------|---------|
 | `TestRoutes`             | An `@htmx struct` you `@include` to mount a test runner UI under `/tests/` |
 | `test_list`, `test_run!`, `test_run_all!`, `test_run_failed!`, `test_run_missing!`, `test_run_batch!`, `test_clear_cache!` | Underlying test runner functions (call directly or via the UI) |
+
+## Gallery & static recording
+
+For docs sites that want to embed a live or recorded HTMXObjects app:
+
+| Export | Purpose |
+|--------|---------|
+| `GalleryItem(path)`            | `@dynamicstruct` wrapping one `.jl` example file (label, group, source, frontmatter) |
+| `Gallery(gallery_dir)`         | Walks a directory of example files into a vector of `GalleryItem`s |
+| `gallery_grid(items; ...)`     | Render a grid of cards (one per item) with section headings |
+| `gallery_toolbar`, `gallery_controls_script` | Toolbar widget + JS for filter/group controls in the grid |
+| `record!(app; record_dir, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants |
+| `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
+| `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
+| `MIMEResponse`                 | Coerce arbitrary content to a typed response via `to_response` |
+
+See the [`htmxo-gallery`](https://github.com/nsiccha/Claude/blob/main/skills/htmxo-gallery/SKILL.md) skill for the canonical wiring.
+
+## Built-in route bundles
+
+Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include`:
+
+| Export | Purpose |
+|--------|---------|
+| `TestRoutes`     | Test-runner UI (see Testing section) |
+| `EditorRoutes`   | Git-backed inline file editor (see Editor section) |
+| `StructureRoutes`| Introspection browser for an `@htmx`/`@dynamicstruct` tree |
+| `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
+| `RecordingRoutes`| Static-recording driver (see Gallery section) |
