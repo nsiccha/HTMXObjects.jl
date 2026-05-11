@@ -57,6 +57,9 @@ end
             )
     end
 
+    # Shared recording output dir.
+    record_dir = joinpath(tempdir(), "htmxo-gallery-demo-record")
+
     # Collect all relative file paths under `dir`, sorted.
     dir_files(dir) = sort!(
         [relpath(joinpath(root, f), dir)
@@ -67,8 +70,7 @@ end
     # produced filesystem tree. Lets us verify the recorder + the
     # markdown shape without spawning a subprocess.
     @get record_test() = let
-        out_dir = joinpath(tempdir(), "htmxo-gallery-demo-record")
-        isdir(out_dir) && rm(out_dir; recursive=true)
+        isdir(record_dir) && rm(record_dir; recursive=true)
         # Use the GalleryDemoRoutes itself as the recordee: it already has
         # routes that pass `?plain` cleanly through to_markdown_string.
         # Construct a fresh registered app and record the index + a few
@@ -78,23 +80,22 @@ end
         # (record! re-registers via route!, so it'd clobber our running
         # routes if we reused __self__. Use a separate mounted prefix.)
         record!(GalleryDemoRoutes(; __appdata__=__appdata__);
-                record_dir=out_dir,
+                record_dir,
                 record_base="/gallery_demo_recordings",
                 paths)
         h.div(
             h.h2("record! produced:"),
-            h.p(h.code(out_dir)),
-            h.ul([h.li(h.code(f)) for f in dir_files(out_dir)]...),
+            h.p(h.code(record_dir)),
+            h.ul([h.li(h.code(f)) for f in dir_files(record_dir)]...),
         )
     end
 
-    @get recorded() = let
+    @get recorded() = begin
         # Browseable listing of the last record_test output.
-        out_dir = joinpath(tempdir(), "htmxo-gallery-demo-record")
-        isdir(out_dir) || return h.p("No recordings yet — hit /gallery_demo/record_test first.")
+        isdir(record_dir) || return h.p("No recordings yet — hit /gallery_demo/record_test first.")
         h.div(
-            h.h2("Recordings under $out_dir"),
-            h.ul([h.li(h.code(f)) for f in dir_files(out_dir)]...),
+            h.h2("Recordings under $record_dir"),
+            h.ul([h.li(h.code(f)) for f in dir_files(record_dir)]...),
         )
     end
 end
