@@ -14,7 +14,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, sortable_table_styles, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -1360,6 +1360,19 @@ Note: `h.code(s)` and friends do **not** auto-escape text content — call
 strings.
 """
 escape_html(s::AbstractString) = Cobweb.escape(s)
+
+"""
+    html_escape(s) -> String
+
+Escape `&`, `<`, `>` in `s` for safe direct interpolation into raw HTML
+strings. Use only when bypassing HTMX.jl's automatic escaping (e.g. when
+building HTML via `replace(_, => "<a href=...>...")` for a `<pre>` block).
+
+For attribute values or text that may contain quotes / apostrophes, use
+[`escape_html`](@ref) (which delegates to `Cobweb.escape`) for the full
+5-character escape set.
+"""
+html_escape(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;")
 
 """
     _disable_for_static(val) -> val
