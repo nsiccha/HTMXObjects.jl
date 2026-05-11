@@ -21,7 +21,7 @@ export htmxo_theme, pico_bridge, vitepress_bridge,
 export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_script,
     default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
 export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
-export TestRoutes, StructureRoutes
+export TestRoutes, StructureRoutes, SharedOpsRoutes
 export Verb
 
 using DynamicObjects, HTTP, Tables
@@ -3354,6 +3354,8 @@ function test_clear_cache! end
 include("routes/test_routes.jl")
 
 include("routes/structure_routes.jl")
+
+include("routes/shared_ops_routes.jl")
 
 """
     hidden_inputs(; kwargs...) -> Vector{Node}
