@@ -83,7 +83,7 @@ on each request.
         h.small(h.em("?name=T&prop=p for source/callers")),
     )
 
-    @get index = begin
+    @get index() = begin
         local lints    = DynamicObjects.lint_index(root)
         local children = DynamicObjects.tree_children_map(root)
         local link_for = n -> query_url(__self__/"type"; name = n)
@@ -97,7 +97,7 @@ on each request.
         )
     end
 
-    @get type = begin
+    @get type() = begin
         T = DynamicObjects.lookup_type(root, name)
         isnothing(T) && return h.div(_nav_links, h.h2("Unknown type: $name"))
         # `meta(T)` only has methods for types declared via `@dynamicstruct`/
@@ -125,7 +125,7 @@ on each request.
         )
     end
 
-    @get source = begin
+    @get source() = begin
         T = DynamicObjects.lookup_type(root, name)
         isnothing(T) && return h.div(_nav_links, h.h2("Unknown type: $name"))
         h.div(
@@ -135,7 +135,7 @@ on each request.
         )
     end
 
-    @get callers = begin
+    @get callers() = begin
         sites = DynamicObjects.callers_by_name(Symbol(prop), root)
         h.div(
             h.p(isempty(name) ? h.a(; href = string(__self__))("← tree") :
@@ -155,7 +155,7 @@ on each request.
         )
     end
 
-    @get lints = begin
+    @get lints() = begin
         msgs = DynamicObjects.analyze_structure(root)
         sev_filter = isempty(severity) ? nothing : Symbol(severity)
         filtered = sev_filter === nothing ? msgs : filter(m -> m.severity === sev_filter, msgs)

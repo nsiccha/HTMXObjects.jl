@@ -37,7 +37,7 @@ See the `section_routes` demo in `HTMXObjects/web/src/git_editor_demo.jl`.
     # so a parameterised parent (e.g. `@param name::String` picking a file) survives
     # the round-trip through edit/save/cancel/history/restore.
 
-    @get form = editor_form(;
+    @get form() = editor_form(;
         id          = container_id,
         post_url    = query_url(__self__ / "save", __parent__),
         cancel_url  = query_url(__parent__.__prefix__, __parent__),
@@ -52,10 +52,10 @@ See the `section_routes` demo in `HTMXObjects/web/src/git_editor_demo.jl`.
             _editor_conflict_fragment(editor, content, value, container_id,
                                        query_url(__self__ / "save", __parent__),
                                        query_url(__parent__.__prefix__, __parent__)) :
-            __parent__.index
+            __parent__.index(Verb{:GET}())
     end
 
-    @get history = h.div(; id=container_id)(
+    @get history() = h.div(; id=container_id)(
         h.h3("History"),
         h.ul([h.li(
                   h.code(v.sha[1:min(8, length(v.sha))]), " · ",
@@ -73,7 +73,7 @@ See the `section_routes` demo in `HTMXObjects/web/src/git_editor_demo.jl`.
         content = editor.read_version(sha)
         editor.write!(content; version=editor.current_version(),
                       message="restore " * sha)
-        __parent__.index
+        __parent__.index(Verb{:GET}())
     end
 end
 
