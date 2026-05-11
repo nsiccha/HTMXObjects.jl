@@ -5,12 +5,12 @@ using Random, HTMXObjects, HTTP, Tables
 
 @htmx struct TestApp
     title = "Test"
-    @get index = h.h1(title)
+    @get index() = h.h1(title)
     @get item(id) = h.p("Item: $id")
 end
 
 @htmx struct IndexApp
-    @get index = h.h1("home")
+    @get index() = h.h1("home")
 end
 
 @htmx struct AllDefaultsApp
@@ -30,7 +30,7 @@ end
 end
 
 @htmx struct RecordApp
-    @get index = h.h1("Home")
+    @get index() = h.h1("Home")
     @get post(id) = h.p("Post $id")
 end
 
@@ -38,9 +38,9 @@ end
     @param vessels::Vector{String} = ["Tablet-20"]
     @param n_bootstrap::String = "10"
     @param note = "default-note"
-    @get index = h.div("vessels=$(join(vessels, ",")) n=$n_bootstrap note=$note")
+    @get index() = h.div("vessels=$(join(vessels, ",")) n=$n_bootstrap note=$note")
     child = struct ChildView
-        @get show = h.p("child sees: $(join(vessels, ",")) / $n_bootstrap")
+        @get show() = h.p("child sees: $(join(vessels, ",")) / $n_bootstrap")
     end
 end
 
@@ -49,31 +49,31 @@ end
         a::Int = 1
         b::String = "x"
     end
-    @get index = h.p("a=$a b=$b")
+    @get index() = h.p("a=$a b=$b")
 end
 
 @htmx struct ParamRequiredApp
     @param fit_key::String
-    @get index = h.p("fit=$fit_key")
+    @get index() = h.p("fit=$fit_key")
 end
 
 @htmx struct ParamPostApp
     @param name::String = "anon"
-    @post submit = h.p("submit $name")
+    @post submit() = h.p("submit $name")
 end
 
 # For __self__/"path" + __appdata__ smoke tests
 @htmx struct MountSubRoutes
-    @get show = h.p("sub show: $(__self__/"x")")
+    @get show() = h.p("sub show: $(__self__/"x")")
 end
 
 @htmx struct MountRootApp
-    @get index = h.p("root index: $(__self__/"foo")")
+    @get index() = h.p("root index: $(__self__/"foo")")
     @include sub = MountSubRoutes()
 end
 
 @htmx struct AppDataApp
-    @get index = h.p("appdata=$(repr(__appdata__))")
+    @get index() = h.p("appdata=$(repr(__appdata__))")
     @include sub = MountSubRoutes()
 end
 
@@ -82,7 +82,7 @@ const _SINGLETON_APPDATA = (; counter=Ref(7), label="singleton")
 
 @htmx struct AppDataSingletonApp
     __appdata__ = _SINGLETON_APPDATA
-    @get index = h.p("appdata=$(repr(__appdata__))")
+    @get index() = h.p("appdata=$(repr(__appdata__))")
     @include sub = MountSubRoutes()
 end
 
@@ -91,7 +91,7 @@ end
 # keeps the struct's own default from being clobbered by an empty mount_prefix.
 @htmx struct PrefixDefaultApp
     __prefix__ = "/baked-in"
-    @get index = h.p("root: $(__self__/"foo")")
+    @get index() = h.p("root: $(__self__/"foo")")
     @include sub = MountSubRoutes()
 end
 
@@ -169,9 +169,9 @@ end
 @testset "@htmx struct - property access" begin
     app = TestApp()
     @test app.title == "Test"
-    html = repr("text/html", app.index)
+    html = repr("text/html", app.index(Verb{:GET}()))
     @test contains(html, "Test")
-    html = repr("text/html", app.item("foo"))
+    html = repr("text/html", app.item(Verb{:GET}(), "foo"))
     @test contains(html, "foo")
     @test Symbol("@get") in DynamicObjects.metafirst(TestApp, :index).macros
     @test !(Symbol("@get") in DynamicObjects.metafirst(TestApp, :title).macros)
@@ -186,9 +186,9 @@ end
 
 @testset "indexed property with all-default indices" begin
     app = AllDefaultsApp()
-    html = repr("text/html", app.viz(; pn="test"))
+    html = repr("text/html", app.viz(Verb{:GET}(); pn="test"))
     @test contains(html, "Viz: test")
-    html = repr("text/html", app.viz(; pn=""))
+    html = repr("text/html", app.viz(Verb{:GET}(); pn=""))
     @test contains(html, "Viz: all")
 end
 
@@ -317,7 +317,7 @@ end
 
 @testset "type conversion in indexed routes" begin
     app = TypedApp()
-    html = repr("text/html", app.typed(42))
+    html = repr("text/html", app.typed(Verb{:GET}(), 42))
     @test contains(html, "N=42")
     info = DynamicObjects.metafirst(TypedApp, :typed)
     @test info !== nothing
@@ -730,8 +730,8 @@ end
     @test rooted / "/leading" == "/proxy/8000/leading"
     @test rooted.sub / "bar" == "/proxy/8000/sub/bar"
     # Route bodies see the qualified path via __self__
-    @test contains(repr("text/html", rooted.index), "/proxy/8000/foo")
-    @test contains(repr("text/html", rooted.sub.show), "/proxy/8000/sub/x")
+    @test contains(repr("text/html", rooted.index(Verb{:GET}())), "/proxy/8000/foo")
+    @test contains(repr("text/html", rooted.sub.show(Verb{:GET}())), "/proxy/8000/sub/x")
 end
 
 @testset "__appdata__ injection via __parent__ chain" begin
@@ -739,7 +739,7 @@ end
     app0 = AppDataApp()
     @test app0.__appdata__ === nothing
     @test app0.sub.__appdata__ === nothing
-    @test contains(repr("text/html", app0.index), "nothing")
+    @test contains(repr("text/html", app0.index(Verb{:GET}())), "nothing")
 
     # Construct with appdata: child sees it via __parent__ chain
     appdata = (; counter=Ref(42), label="hello")
@@ -776,7 +776,7 @@ end
     app = AppDataSingletonApp()
     @test app.__appdata__ === _SINGLETON_APPDATA
     @test app.sub.__appdata__ === _SINGLETON_APPDATA
-    @test contains(repr("text/html", app.index), "singleton")
+    @test contains(repr("text/html", app.index(Verb{:GET}())), "singleton")
 end
 
 @testset "@query_url" begin
