@@ -28,11 +28,11 @@ end
         h.div(
             h.button("Edit";
                 hx_get=editor_routes / "form",
-                hx_target="#" * container_id, hx_swap="outerHTML"),
+                hx_target="#$container_id", hx_swap="outerHTML"),
             " ",
             h.button("History";
                 hx_get=editor_routes / "history",
-                hx_target="#" * container_id, hx_swap="outerHTML"),
+                hx_target="#$container_id", hx_swap="outerHTML"),
         ),
         h.hr(),
         h.p("Parameterised sub-editor (pass ", h.code("?name=…"),
@@ -63,10 +63,10 @@ end
             h.h3("Section: ", h.code(name)),
             h.pre(editor.current_content()),
             h.button("Edit"; hx_get=query_url(editor_routes/"form", __self__),
-                             hx_target="#" * container_id, hx_swap="outerHTML"),
+                             hx_target="#$container_id", hx_swap="outerHTML"),
             " ",
             h.button("History"; hx_get=query_url(editor_routes/"history", __self__),
-                                hx_target="#" * container_id, hx_swap="outerHTML"),
+                                hx_target="#$container_id", hx_swap="outerHTML"),
         )
     end
 end
