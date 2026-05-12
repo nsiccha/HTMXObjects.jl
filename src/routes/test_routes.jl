@@ -16,8 +16,9 @@ Provides:
 - `@post run_batch`    — run a comma-separated batch of named tests
 - `@post clear_cache`  — discard all cached results
 
-The underlying `test_*` functions are only available when `Test` is loaded
-(they're provided by the package's `TestExt` extension).
+The underlying `test_*` functions are only available when both `Test` and
+`TestModules` are loaded (they're provided by the package's `TestModulesExt`
+extension).
 """
 @htmx struct TestRoutes
     # Mount with `@include tests = TestRoutes(; __req__, test_module=@__MODULE__)`.
