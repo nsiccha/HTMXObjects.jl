@@ -47,8 +47,8 @@ using HTMXObjects
         pico_version="2",
     )
 
-    @get index = results_list
-    @get results = results_list
+    @get index() = results_list
+    @get results() = results_list
 end
 
 gallery_paths() = ["/", "/results"]
