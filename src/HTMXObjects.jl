@@ -2084,7 +2084,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     is_htmx(req) && return to_response(err_val)   # always 200 for HTMX
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (err_val = wrapper[err_val])
+        isnothing(wrapper) || (err_val = wrapper(err_val))
     end
     _with_error_status(req, to_response(err_val))
 end
@@ -2160,7 +2160,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
-            save_response(record_dir, save_path, to_response(static_transform(wrapper[val]; record_base)))
+            save_response(record_dir, save_path, to_response(static_transform(wrapper(val); record_base)))
         else
             save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
         end
@@ -2175,7 +2175,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     # Markdown mode
     if wants_markdown(req)
         if hasproperty(obj, :to_markdown)
-            return to_response(getproperty(obj, :to_markdown)[val])
+            return to_response(getproperty(obj, :to_markdown)(val))
         else
             return markdown_response(to_markdown_string(val))
         end
@@ -2189,7 +2189,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     end
 
     # Full page wrap for direct browser navigation
-    to_response(wrapper[val])
+    to_response(wrapper(val))
 end
 
 # For URL paths whose only `{x}` placeholders are at the very end (the
@@ -2663,7 +2663,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
             wrapped = val
             for obj in reverse(page_chain)
                 wrapper = _page_wrapper(obj)
-                isnothing(wrapper) || (wrapped = wrapper[wrapped])
+                isnothing(wrapper) || (wrapped = wrapper(wrapped))
             end
             save_response(record_dir, save_path, to_response(static_transform(wrapped; record_base)))
         end
@@ -2672,7 +2672,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
         # Use the innermost (last) struct for markdown, if any
         obj = isempty(page_chain) ? nothing : last(page_chain)
         if !isnothing(obj) && hasproperty(obj, :to_markdown)
-            return to_response(getproperty(obj, :to_markdown)[val])
+            return to_response(getproperty(obj, :to_markdown)(val))
         else
             return markdown_response(to_markdown_string(val))
         end
@@ -2681,7 +2681,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
     # Apply page wrappers: innermost (last) wraps first, then each outer one
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (val = wrapper[val])
+        isnothing(wrapper) || (val = wrapper(val))
     end
     to_response(val)
 end
