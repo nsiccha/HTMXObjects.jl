@@ -2,7 +2,7 @@
     EditorRoutes
 
 Git-backed inline editor `@htmx` struct. Mount as an `@include` under a
-parent that exposes `editor` (a [`GitRepo`](@ref) per-file handle from
+parent that exposes `editor` (a `GitRepo` per-file handle from
 `editor(relpath)`) and `container_id::String` (HTML id of the wrapper) as
 locals. All URLs forward the parent's `@param` values via
 `query_url(path, __parent__)`, so a parameterised parent
