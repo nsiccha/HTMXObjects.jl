@@ -3141,21 +3141,27 @@ function sortTable(col, th) {
     // companion's id mirrors it). We sort only the primary rows and keep
     // each detail row pinned to its parent. Rows without an id are treated
     // as primary too. Skip primaries whose first cell is empty (sub-headers).
-    const all = Array.from(tbody.querySelectorAll('tr'));
+    // `:scope > tr` keeps inner tables (e.g. a markdown table inside a
+    // detail row) from being treated as primaries.
+    const all = Array.from(tbody.querySelectorAll(':scope > tr'));
     const isCompanion = r => r.id && r.id.startsWith('detail-');
     const primaries = all.filter(r => !isCompanion(r) && r.cells.length > col);
     const companionFor = r => {
         if (!r.id) return null;
         const idx = r.id.indexOf('-');
         if (idx < 0) return null;
-        return tbody.querySelector('#detail-' + r.id.slice(idx + 1));
+        return tbody.querySelector(':scope > #detail-' + r.id.slice(idx + 1));
     };
     const asc = th.dataset.sortDir !== 'asc';
     th.dataset.sortDir = asc ? 'asc' : 'desc';
     th.closest('tr').querySelectorAll('th').forEach(h => { if (h !== th) delete h.dataset.sortDir; });
+    // Sort key: prefer `data-sort-value` if the cell sets one, else the
+    // visible text. This lets callers force a semantic order (e.g. status:
+    // proposed → approved → rejected) without re-encoding the displayed text.
+    const sortKey = cell => (cell.dataset.sortValue ?? cell.textContent).trim();
     primaries.sort((a, b) => {
-        const av = a.cells[col].textContent.trim();
-        const bv = b.cells[col].textContent.trim();
+        const av = sortKey(a.cells[col]);
+        const bv = sortKey(b.cells[col]);
         const an = parseFloat(av), bn = parseFloat(bv);
         if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
         return asc ? av.localeCompare(bv) : bv.localeCompare(av);
