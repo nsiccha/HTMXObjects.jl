@@ -79,7 +79,7 @@ const APPDATA = AppData()
 
     __page__(content) = htmx(h.main(; class="container")(content); pico_version="2")
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h1("Items"),
         h.ul([h.li(x) for x in items]...),
     )
@@ -159,7 +159,7 @@ code. A `@htmx` struct is a `@dynamicstruct` plus:
     title = "My items"
     header = h.header(h.strong(title))
 
-    @get index    = h.main(header, h.ul([h.li(x) for x in items]...))
+    @get index()  = h.main(header, h.ul([h.li(x) for x in items]...))
     @get show(id) = h.article(h.header("Item "), h.code(id))
 end
 ```
@@ -190,7 +190,7 @@ const APPDATA = AppData()
 @htmx struct AppRoutes
     __appdata__ = APPDATA
     (; items, counter, dataset) = __appdata__   # destructure once
-    @get index = h.p("count: $(counter[])")
+    @get index() = h.p("count: $(counter[])")
     # use `items` / `dataset` directly — never `__appdata__.items`
 end
 ```
@@ -208,8 +208,8 @@ segment.
 ```julia
 @htmx struct PipelineRoutes
     (; dataset) = __appdata__           # falls through via __parent__
-    @get index   = h.p("rows: $(nrow(dataset))")
-    @post submit = ...
+    @get index()  = h.p("rows: $(nrow(dataset))")
+    @post submit() = ...
 end
 
 @htmx struct AppRoutes
@@ -231,7 +231,7 @@ end
             find(label) = findfirstelement(e -> e.label == label, entries())
         end
 
-        @get index = h.ul([h.li(e.label) for e in example_store.entries()]...)
+        @get index() = h.ul([h.li(e.label) for e in example_store.entries()]...)
     end
 end
 ```
@@ -253,7 +253,7 @@ through `__appdata__.feature.items` in every route body.
 @htmx struct AnalysisRoutes
     (; dataset, fit_resolver) = __appdata__
     (; chain_analysis, posteriors_data) = dataset
-    @include chains     = ChainsRoutes()        # sees __parent__ = this
+    @include chains     = ChainsRoutes()       # sees __parent__ = this
     @include posteriors = PosteriorsRoutes()
 end
 
@@ -271,21 +271,29 @@ point).
 
 ```julia
 @htmx struct AppRoutes
-    @get  index         = list_view()                 # GET /
-    @get  item(id)      = render_item(id)             # GET /item/{id}  (id::String)
-    @get  page(id::Int) = render_page(id)             # GET /page/{id}  (auto-parsed to Int)
-    @get  search(; q="", n::Int=1) = ...              # GET /search?q=&n=
-    @post submit(; name="") = persist!(name)          # POST /submit (form-encoded)
-    @get  range(a, b=1) = ...                         # GET /range/{a}/{b} AND /range/{a}
-    @delete remove(id) = drop!(id)                    # DELETE /remove/{id}
-    @ws     feed = (__ws__) -> ...                    # WebSocket at /feed
+    @get  index()         = list_view()                # GET /
+    @get  item(id)        = render_item(id)            # GET /item/{id}  (id::String)
+    @get  page(id::Int)   = render_page(id)            # GET /page/{id}  (auto-parsed to Int)
+    @get  search(; q="", n::Int=1) = ...               # GET /search?q=&n=
+    @post submit(; name="") = persist!(name)           # POST /submit (form-encoded)
+    @get  range(a, b=1)   = ...                        # GET /range/{a}/{b} AND /range/{a}
+    @delete remove(id)    = drop!(id)                  # DELETE /remove/{id}
+    @ws     feed()        = (__ws__) -> ...            # WebSocket at /feed
 end
 ```
 
 ### Rules
 
-- **Use `()` syntax for parameters.** `@get foo[bar](; q="")` hits a DO
-  assertion — Julia parses `;` inside `[]` as matrix concatenation.
+- **Call form is mandatory.** Every route LHS must be a call form
+  (`name()` / `name(arg)` / `name(; kw=…)`). Bare form (`@get index = body`)
+  is rejected at macro-expansion — the macro injects `::Verb{V}` as the
+  first positional arg and needs a call AST to do so. Bracket form
+  (`@get foo[bar]`) is the DO IP-index syntax and also not valid for
+  routes — `@get foo[bar](; q="")` hits a DO assertion because Julia parses
+  `;` inside `[]` as matrix concatenation.
+- **`:index` collapses the URL segment.** `@get index() = …` mounts at
+  the enclosing prefix itself (no `/index` segment); `@get index(slug)`
+  mounts at `<prefix>/{slug}`.
 - **Untyped params are `String`.** Annotate with `::Int`, `::Float64`,
   `::Bool`, `::Symbol`, or `::Vector{T}` for auto-parsing. Extend
   `_convert_param(val::AbstractString, ::Type{T})` to support new types.
@@ -299,9 +307,10 @@ end
   typed kwargs receive the first value.
 - **Multi-verb routes on one name are allowed** — `@get user(id)` +
   `@put user(id)` + `@delete user(id)` all register at `/user/{id}`.
-  Internally they are renamed to `user_GET`, `user_PUT`, … and the bare
-  name is no longer a DO property. If only a single verb targets `name`,
-  the bare name stays accessible as `app.name`.
+  The verb is encoded as a `Verb{V}` singleton injected as the first
+  positional arg of every route LHS, so multiple `compute_property`
+  methods on the same property name coexist. There is no name mangling;
+  only exact `(name, verb)` duplicates are rejected.
 
 ### Register with `route!`
 
@@ -335,8 +344,8 @@ same params.
         top_chains::Int          = 4
     end
 
-    @get index = render(vessels, subjects, top_chains)
-    @get plot  = build_plot(vessels, fit_key)
+    @get index() = render(vessels, subjects, top_chains)
+    @get plot()  = build_plot(vessels, fit_key)
 end
 ```
 
@@ -361,7 +370,7 @@ end
 ### `query_url(path, obj)` — round-tripping params
 
 ```julia
-@get plot = begin
+@get plot() = begin
     poll_url = query_url(__self__ / "data", __self__)
     h.div(hx_get=poll_url, hx_trigger="every 1s")(...)
 end
@@ -393,14 +402,14 @@ the framework handles the rest:
 
 ```julia
 # BAD — double-wraps browser responses.
-@get index = __page__(h.div(...))
+@get index() = __page__(h.div(...))
 
 # BAD — the pipeline already does this.
 @get item(id) = is_htmx(__req__) ? fragment : __page__(fragment)
 @get item(id) = if wants_markdown(__req__) markdown else html end
 
 # GOOD
-@get index = h.div(...)
+@get index() = h.div(...)
 ```
 
 ### `__page__` — the full-page wrapper
@@ -447,6 +456,7 @@ handler injects them — but route bodies may reference them.
 | `__ws__`        | `@ws` body wrapper                   | The WebSocket handle inside `@ws` bodies.             |
 | `__parent__`    | `@include` desugar                   | Parent struct instance in a sub-struct.               |
 | `__prefix__`    | `route!` + `@include`                | Current mount path.                                   |
+| `__route__`     | `route!` handler (per request)       | The per-request URL (query string stripped). Use for `hx_get=__route__` / `href=__route__` instead of recomputing. |
 | `__appdata__`   | User (`= APPDATA`) + `@include`      | App data; falls through the `__parent__` chain.       |
 | `__page__`      | User                                 | `content -> full_page(content)`. Called by pipeline.  |
 | `__error__`     | User (optional)                      | `err -> renderable`. Called on caught exceptions.     |
@@ -480,7 +490,7 @@ the same persisted value.
 @htmx struct AppRoutes
     @cached running = false
 
-    @post toggle = begin
+    @post toggle() = begin
         running = !running               # rewritten to __self__.running = !running
         @persist running                 # flush to disk
         render_ui()
@@ -783,7 +793,7 @@ For composite routes (dashboards with several independent panels), wrap each
 panel in `safely` so one failure doesn't kill the others:
 
 ```julia
-@get dashboard = h.div(
+@get dashboard() = h.div(
     safely(; obj=__self__) do
         render_ppc_plot(data)
     end,

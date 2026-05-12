@@ -7,19 +7,19 @@ HTMXObjects ships a small test-running UI you can mount inside any `@htmx` app, 
 `TestRoutes` is an `@htmx struct` exposing `@get index`, `@post run(name)`, `@post run_all`, `@post run_failed`, `@post run_missing`, `@post run_batch(; names)`, and `@post clear_cache`. Mount it via `@include` inside your app:
 
 ```julia
-using HTMXObjects, Test                  # `Test` triggers the test extension
+using HTMXObjects, Test, TestModules     # both trigger the test extension
 
 @htmx struct App
-    @include tests = TestRoutes(; __req__, test_module=@__MODULE__, prefix="/tests")
+    @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
 
-    @get index = h.main(class="container")(
+    @get index() = h.main(class="container")(
         h.h1("My App"),
         h.p(h.a(href="/tests/")("Tests")),
     )
 end
 ```
 
-`Test` must be loaded for the routes to do anything — the UI implementation lives in `HTMXObjects.TestExt` and is activated by the package extension mechanism.
+Both `Test` and `TestModules` must be loaded for the routes to do anything — the UI implementation lives in `HTMXObjects.TestModulesExt` and is activated by the package extension mechanism. The `prefix` for the mount comes from the `@include` segment name (`/tests`); don't pass `prefix=` as a kwarg.
 
 Once the app is running, navigate to `/tests/` to see the list of registered tests, run them individually, and inspect output/timings/cached results.
 
