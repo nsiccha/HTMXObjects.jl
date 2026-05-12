@@ -61,8 +61,8 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 
 | Export | Purpose |
 |--------|---------|
-| `wants_markdown(req)`  | `true` iff `?md=1` (or the `Accept: text/markdown` header) is set    |
-| `wants_errors(req)`    | `true` iff `?errors=1` is set                                        |
+| `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
+| `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 
@@ -70,9 +70,9 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 
 | Export | Purpose |
 |--------|---------|
-| `e.error_id`, `e.warn_id`, … | A namespace of error-tagged HTML helpers; each call returns a `<span>` with a stable id so partial errors can be filtered/queried |
-| `filter_errors(html)`  | Strip the error nodes from a rendered fragment                       |
-| `ERROR_DIR`            | Where recorded errors are written for the static-export pipeline      |
+| `e`                   | Error-tagged HTML builder — mirrors `h` (`e.div(...)`, `e.p(...)`, …) but injects `data-error="true"`. Pair with `filter_errors` and `?error` to expose machine-readable error summaries from a composite page |
+| `filter_errors(html)` | Walk a Node tree and keep only nodes with `data-error="true"` (and their ancestors); used by the response pipeline when `?error` is on the query |
+| `ERROR_DIR`           | `Ref{String}` — directory where caught route exceptions are logged (default `joinpath(tempdir(), "htmxo_errors")`, override via `HTMXO_ERROR_DIR` env var) |
 
 ## Forms and inputs
 
@@ -146,7 +146,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 | `record!(app; record_dir, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
 | `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
-| `MIMEResponse`                 | Coerce arbitrary content to a typed response via `to_response` |
+| `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline |
 
 See the [`htmxo-gallery`](https://github.com/nsiccha/Claude/blob/main/skills/htmxo-gallery/SKILL.md) skill for the canonical wiring.
 

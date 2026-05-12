@@ -76,7 +76,7 @@ A marker type that turns a `Symbol` field name into a human-readable label (`(:p
 
 ### `show_when=` kwarg
 
-All widgets accept `show_when="otherfield=othervalue"` — emits a tiny client-side script (`show_when_script()`) that hides the input until another widget's value matches. Drop `show_when_script()` once per page (typically in your `__page__`).
+All form widgets accept `show_when=(field, op, value)` — emits `data-show-when-*` attributes that the client-side script (`show_when_script()`) reads to hide the input until another widget's value matches. Supported ops: `==`, `!=`, `startswith`, `endswith`. Drop `show_when_script()` once per page (typically in your `__page__`).
 
 ## Forms
 
@@ -160,19 +160,20 @@ Drop `tabset_styles()` once per page to style the active-tab indicator.
 
 A vertical navigation panel — pass a vector of `("Label", "/url")` pairs (or `Pair`-of-`String`-with-children for nested groups).
 
-### `status_badge` — colour-coded status pill
+### `status_badge` — semantic status pill
 
-Defaults to a small palette suited to in-flight task state:
+Renders a `<span>` whose class is picked from a small `state => "u-text-*"` map,
+so colours come from the `--htmxo-*` CSS variables (no inline styles):
 
 ```julia
-status_badge(:running)        # orange "Running"
-status_badge(:finishing)      # orange "Finishing"
-status_badge(:done)           # green  "Done"
-status_badge(:failed)         # red    "Failed"
-status_badge(:pending)        # gray   "Pending"
+status_badge(:running)        # u-text-warning  "Running"
+status_badge(:finishing)      # u-text-warning  "Finishing"
+status_badge(:done)           # u-text-success  "Done"
+status_badge(:failed)         # u-text-error    "Failed"
+status_badge(:pending)        # u-text-muted    "Pending"
 
-status_badge(:failed; label="Error!")                            # custom label
-status_badge(:custom; colors=Dict(:custom => "blue"))            # custom palette
+status_badge(:failed; label="Error!")                              # custom label
+status_badge(:custom; classes=Dict(:custom => "u-text-accent"))    # custom palette
 ```
 
 ### `lazy(url, content…; tag=h.div, swap="outerHTML", …)` — lazy-load on view
@@ -202,10 +203,15 @@ hx_link("/settings"; hx_target="#main", hx_push_url="true")("Settings")
 Inside a route body, return `fragment` for HTMX requests and call `full_page_fn()` for direct browser navigation. Typically used with do-block syntax:
 
 ```julia
-@get index(__req__) = htmx_or(__req__, content_fragment) do
+@get index() = htmx_or(__req__, content_fragment) do
     htmx(h.main(class="container")(h.h1("Hello"), content_fragment))
 end
 ```
+
+(`__req__` is a magic property on every `@htmx` instance — don't declare it
+as a path param. Prefer defining `__page__(content)` and returning the bare
+`content_fragment` — the response pipeline applies `__page__` for direct
+browser visits and skips it on HTMX swaps automatically.)
 
 ## Formatting
 
