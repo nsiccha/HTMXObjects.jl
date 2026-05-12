@@ -22,7 +22,7 @@ using HTMXObjects
         )("+"),
     )
 
-    @get index = h.div(h.h1("HTMX Counter"), counter_ui(0))
+    @get index() = h.div(h.h1("HTMX Counter"), counter_ui(0))
     @get increment(n::Int) = counter_ui(n + 1)
 end
 

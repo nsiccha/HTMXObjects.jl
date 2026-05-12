@@ -34,7 +34,7 @@ using HTMXObjects
         extra_head=(h.style("nav a[aria-current] { font-weight: bold; }"),),
     )(h.main(class="container")(content))
 
-    @get index = h.div(tab_nav("home"), tab_panel(tabs[1]))
+    @get index() = h.div(tab_nav("home"), tab_panel(tabs[1]))
 
     @get tab(id) = let t = tabs[findfirst(t -> t.id == id, tabs)]
         hx_response(

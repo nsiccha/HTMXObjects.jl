@@ -47,7 +47,7 @@ using HTMXObjects
         pico_version="2",
     )
 
-    @get index = h.p("Select a post from the list.")
+    @get index() = h.p("Select a post from the list.")
 
     @get post(id) = let p = posts[findfirst(p -> p.id == id, posts)]
         h.article(h.header(h.h2(p.title)), h.p(p.body))

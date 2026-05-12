@@ -7,7 +7,7 @@ using HTMXObjects
 @htmx struct App
     __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h1("Hello, World!"),
         h.p("Built with ", h.a(href="https://github.com/nsiccha/HTMXObjects.jl")("HTMXObjects.jl")),
     )
