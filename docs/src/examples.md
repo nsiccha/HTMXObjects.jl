@@ -20,12 +20,11 @@ The minimal HTMXObjects app — a single `@get index` route.
 
 ```julia
 @htmx struct HelloApp
-    @get index = htmx(
-        h.main(class="container")(
-            h.h1("Hello, World!"),
-            h.p("Built with ", h.a(href="...")("HTMXObjects.jl")),
-        );
-        pico_version="2",
+    __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
+
+    @get index() = h.div(
+        h.h1("Hello, World!"),
+        h.p("Built with ", h.a(href="https://github.com/nsiccha/HTMXObjects.jl")("HTMXObjects.jl")),
     )
 end
 ```
@@ -40,13 +39,15 @@ page reload.
 
 ```julia
 @htmx struct CounterApp
-    counter_ui[n::Int] = h.div(id="counter")(
+    __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
+
+    counter_ui(n::Int) = h.div(id="counter")(
         h.p("Count: $n"),
         h.button(hx_get="/increment/$n", hx_target="#counter", hx_swap="outerHTML")("+"),
     )
 
-    @get index = htmx(h.main(class="container")(h.h1("HTMX Counter"), counter_ui[0]); pico_version="2")
-    @get increment[n::Int] = counter_ui[n + 1]
+    @get index() = h.div(h.h1("HTMX Counter"), counter_ui(0))
+    @get increment(n::Int) = counter_ui(n + 1)
 end
 ```
 
