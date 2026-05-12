@@ -6,16 +6,34 @@
     <title>Testing | HTMXObjects.jl</title>
     <meta name="description" content="Documentation for HTMXObjects.jl">
     <meta name="generator" content="VitePress v1.6.4">
-    <link rel="preload stylesheet" href="/HTMXObjects.jl/dev/assets/style.DSnweb8H.css" as="style">
+    <link rel="preload stylesheet" href="/HTMXObjects.jl/dev/assets/style.ujSXQLNG.css" as="style">
     <link rel="preload stylesheet" href="/HTMXObjects.jl/dev/vp-icons.css" as="style">
     
-    <script type="module" src="/HTMXObjects.jl/dev/assets/app.BJV7xUNd.js"></script>
+    <script type="module" src="/HTMXObjects.jl/dev/assets/app.BdC30cNH.js"></script>
     <link rel="preload" href="/HTMXObjects.jl/dev/assets/inter-roman-latin.Di8DUHzh.woff2" as="font" type="font/woff2" crossorigin="">
-    <link rel="modulepreload" href="/HTMXObjects.jl/dev/assets/chunks/theme.C1iC9ybV.js">
-    <link rel="modulepreload" href="/HTMXObjects.jl/dev/assets/chunks/framework.BI3-zSs5.js">
-    <link rel="modulepreload" href="/HTMXObjects.jl/dev/assets/testing.md.CYSrUFkK.lean.js">
+    <link rel="modulepreload" href="/HTMXObjects.jl/dev/assets/chunks/theme.DyRPK_HB.js">
+    <link rel="modulepreload" href="/HTMXObjects.jl/dev/assets/chunks/framework.CzY0d9Tg.js">
+    <link rel="modulepreload" href="/HTMXObjects.jl/dev/assets/testing.md.BGiVpFzq.lean.js">
     <script src="/HTMXObjects.jl/versions.js"></script>
     <script src="/HTMXObjects.jl/dev/siteinfo.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"></script>
+    <style>
+:root {
+    --htmxo-accent:  var(--vp-c-brand-1, #4a90d9);
+    --htmxo-success: var(--vp-c-success-1, #2a9d8f);
+    --htmxo-warning: var(--vp-c-warning-1, #e9a23b);
+    --htmxo-error:   var(--vp-c-danger-1, #e76f51);
+    --htmxo-border:  var(--vp-c-divider, currentColor);
+    --htmxo-muted:   var(--vp-c-text-3, color-mix(in srgb, currentColor 60%, transparent));
+}
+.htmxo-embed {
+    border: 1px solid var(--vp-c-divider);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    background: var(--vp-c-bg-soft);
+}
+    </style>
     <script id="check-dark-mode">(()=>{const e=localStorage.getItem("vitepress-theme-appearance")||"auto",a=window.matchMedia("(prefers-color-scheme: dark)").matches;(!e||e==="auto"?a:e==="dark")&&document.documentElement.classList.add("dark")})();</script>
     <script id="check-mac-os">document.documentElement.classList.toggle("mac",/Mac|iPhone|iPod|iPad/i.test(navigator.platform));</script>
   </head>
@@ -34,7 +52,7 @@
 <span class="line"><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;">@testset</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> &quot;MyApp&quot;</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583;"> begin</span></span>
 <span class="line"><span style="--shiki-light:#6A737D;--shiki-dark:#6A737D;">    # ... your test sets</span></span>
 <span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583;">end</span></span></code></pre></div><p>…and let <code>julia --project=test test/runtests.jl</code> exercise the actual <code>@testset</code>s without the UI layer.</p><h2 id="Web-integrated-test-workflow" tabindex="-1">Web-integrated test workflow <a class="header-anchor" href="#Web-integrated-test-workflow" aria-label="Permalink to &quot;Web-integrated test workflow {#Web-integrated-test-workflow}&quot;">​</a></h2><p>The recommended development loop:</p><ol><li><p>Open the app — <code>julia --project=web -e &#39;using Revise; using MyAppWeb; MyAppWeb.run!()&#39;</code></p></li><li><p>Visit <code>/tests/</code> for the runner UI</p></li><li><p>Edit code in <code>web/src/MyAppWeb.jl</code> — Revise hot-reloads it</p></li><li><p>Click &quot;Run failed&quot; or a single test to verify your change without restarting Julia</p></li></ol><p>This is the pattern used by every web app in the ecosystem (StanBlocks, BRM, Treebars, …). See <a href="https://github.com/nsiccha/Claude/blob/main/testing-pattern.md" target="_blank" rel="noreferrer"><code>testing-pattern.md</code></a> in the project knowledge base for the full convention (<code>@testmodule</code> syntax, disk persistence, etc.).</p></div></div></main><footer class="VPDocFooter" data-v-83890dd9 data-v-4f9813fa><!--[--><!--]--><div class="edit-info" data-v-4f9813fa><div class="edit-link" data-v-4f9813fa><a class="VPLink link vp-external-link-icon no-icon edit-link-button" href="https://github.com/nsiccha/HTMXObjects.jl/edit/dev/docs/src/testing.md" target="_blank" rel="noreferrer" data-v-4f9813fa><!--[--><span class="vpi-square-pen edit-link-icon" data-v-4f9813fa></span> Edit this page<!--]--></a></div><!----></div><nav class="prev-next" aria-labelledby="doc-footer-aria-label" data-v-4f9813fa><span class="visually-hidden" id="doc-footer-aria-label" data-v-4f9813fa>Pager</span><div class="pager" data-v-4f9813fa><a class="VPLink link pager-link prev" href="/HTMXObjects.jl/dev/components" data-v-4f9813fa><!--[--><span class="desc" data-v-4f9813fa>Previous page</span><span class="title" data-v-4f9813fa>Components</span><!--]--></a></div><div class="pager" data-v-4f9813fa><a class="VPLink link pager-link next" href="/HTMXObjects.jl/dev/api" data-v-4f9813fa><!--[--><span class="desc" data-v-4f9813fa>Next page</span><span class="title" data-v-4f9813fa>API</span><!--]--></a></div></nav></footer><!--[--><!--]--></div></div></div><!--[--><!--]--></div></div><footer class="VPFooter has-sidebar" data-v-a9a9e638 data-v-c970a860><div class="container" data-v-c970a860><p class="message" data-v-c970a860>Made with <a href="https://luxdl.github.io/DocumenterVitepress.jl/dev/" target="_blank"><strong>DocumenterVitepress.jl</strong></a><br></p><p class="copyright" data-v-c970a860>© Copyright 2026.</p></div></footer><!--[--><div class="warning-banner" data-v-64d3ad24>You are viewing the dev branch. This branch may include code written with Claude Code with less human supervision. Only human-approved code is merged into main.</div><!--]--></div></div>
-    <script>window.__VP_HASH_MAP__=JSON.parse("{\"api.md\":\"kcKekcKz\",\"components.md\":\"DxH-g2Cy\",\"examples.md\":\"Cc_AXxyX\",\"index.md\":\"Dek4C0iZ\",\"testing.md\":\"CYSrUFkK\"}");window.__VP_SITE_DATA__=JSON.parse("{\"lang\":\"en-US\",\"dir\":\"ltr\",\"title\":\"HTMXObjects.jl\",\"description\":\"Documentation for HTMXObjects.jl\",\"base\":\"/HTMXObjects.jl/dev/\",\"head\":[],\"router\":{\"prefetchLinks\":true},\"appearance\":true,\"themeConfig\":{\"outline\":\"deep\",\"search\":{\"provider\":\"local\",\"options\":{\"detailedView\":true}},\"nav\":[{\"text\":\"Home\",\"link\":\"/index\"},{\"text\":\"Examples\",\"link\":\"/examples\"},{\"text\":\"Components\",\"link\":\"/components\"},{\"text\":\"Testing\",\"link\":\"/testing\"},{\"text\":\"API\",\"link\":\"/api\"},{\"component\":\"VersionPicker\"}],\"sidebar\":[{\"text\":\"Home\",\"link\":\"/index\"},{\"text\":\"Examples\",\"link\":\"/examples\"},{\"text\":\"Components\",\"link\":\"/components\"},{\"text\":\"Testing\",\"link\":\"/testing\"},{\"text\":\"API\",\"link\":\"/api\"}],\"editLink\":{\"pattern\":\"https://github.com/nsiccha/HTMXObjects.jl/edit/dev/docs/src/:path\"},\"socialLinks\":[{\"icon\":\"github\",\"link\":\"https://github.com/nsiccha/HTMXObjects.jl\"}],\"footer\":{\"message\":\"Made with <a href=\\\"https://luxdl.github.io/DocumenterVitepress.jl/dev/\\\" target=\\\"_blank\\\"><strong>DocumenterVitepress.jl</strong></a><br>\",\"copyright\":\"© Copyright 2026.\"}},\"locales\":{},\"scrollOffset\":134,\"cleanUrls\":true}");</script>
+    <script>window.__VP_HASH_MAP__=JSON.parse("{\"api.md\":\"Da7cb31F\",\"components.md\":\"Cn8pgW_O\",\"examples.md\":\"D5d3orkc\",\"index.md\":\"BbMqXQVy\",\"testing.md\":\"BGiVpFzq\"}");window.__VP_SITE_DATA__=JSON.parse("{\"lang\":\"en-US\",\"dir\":\"ltr\",\"title\":\"HTMXObjects.jl\",\"description\":\"Documentation for HTMXObjects.jl\",\"base\":\"/HTMXObjects.jl/dev/\",\"head\":[],\"router\":{\"prefetchLinks\":true},\"appearance\":true,\"themeConfig\":{\"outline\":\"deep\",\"search\":{\"provider\":\"local\",\"options\":{\"detailedView\":true}},\"nav\":[{\"text\":\"Home\",\"link\":\"/index\"},{\"text\":\"Examples\",\"link\":\"/examples\"},{\"text\":\"Components\",\"link\":\"/components\"},{\"text\":\"Testing\",\"link\":\"/testing\"},{\"text\":\"API\",\"link\":\"/api\"},{\"component\":\"VersionPicker\"}],\"sidebar\":[{\"text\":\"Home\",\"link\":\"/index\"},{\"text\":\"Examples\",\"link\":\"/examples\"},{\"text\":\"Components\",\"link\":\"/components\"},{\"text\":\"Testing\",\"link\":\"/testing\"},{\"text\":\"API\",\"link\":\"/api\"}],\"editLink\":{\"pattern\":\"https://github.com/nsiccha/HTMXObjects.jl/edit/dev/docs/src/:path\"},\"socialLinks\":[{\"icon\":\"github\",\"link\":\"https://github.com/nsiccha/HTMXObjects.jl\"}],\"footer\":{\"message\":\"Made with <a href=\\\"https://luxdl.github.io/DocumenterVitepress.jl/dev/\\\" target=\\\"_blank\\\"><strong>DocumenterVitepress.jl</strong></a><br>\",\"copyright\":\"© Copyright 2026.\"}},\"locales\":{},\"scrollOffset\":134,\"cleanUrls\":true}");</script>
     
   </body>
 </html>

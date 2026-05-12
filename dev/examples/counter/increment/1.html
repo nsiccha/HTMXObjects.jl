@@ -1,0 +1,312 @@
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"></script><script src="https://unpkg.com/hyperscript.org@0.9.14"></script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"><style>@layer htmxo {
+    :where(:root) {
+        --htmxo-accent:  #4a90d9;
+        --htmxo-success: #2a9d8f;
+        --htmxo-warning: #e9a23b;
+        --htmxo-error:   #e76f51;
+        --htmxo-border:  currentColor;
+        --htmxo-muted:   color-mix(in srgb, currentColor 60%, transparent);
+    }
+}
+</style><style>:root {
+    --htmxo-accent:  var(--pico-primary, #4a90d9);
+    --htmxo-success: var(--pico-color-green-550, #2a9d8f);
+    --htmxo-warning: var(--pico-color-amber-550, #e9a23b);
+    --htmxo-error:   var(--pico-color-red-550, #e76f51);
+    --htmxo-border:  var(--pico-border-color, currentColor);
+    --htmxo-muted:   var(--pico-muted-color, color-mix(in srgb, currentColor 60%, transparent));
+}
+</style><style>@layer htmxo {
+@keyframes htmx-pulse {
+    0%, 100% { outline-color: color-mix(in srgb, var(--htmxo-accent) 30%, transparent); }
+    50% { outline-color: var(--htmxo-accent); }
+}
+.htmx-request-active {
+    outline: 2px solid var(--htmxo-accent);
+    outline-offset: -2px;
+    animation: htmx-pulse 1s ease-in-out infinite;
+}
+.htmx-request-success {
+    outline: 2px solid var(--htmxo-success);
+    outline-offset: -2px;
+    animation: htmx-fade-success 1s ease-out forwards;
+}
+.htmx-request-error {
+    outline: 2px solid var(--htmxo-error);
+    outline-offset: -2px;
+    animation: htmx-fade-error 2s ease-out forwards;
+}
+@keyframes htmx-fade-success {
+    0% { outline-color: var(--htmxo-success); }
+    100% { outline-color: transparent; }
+}
+@keyframes htmx-fade-error {
+    0% { outline-color: var(--htmxo-error); }
+    100% { outline-color: transparent; }
+}
+}
+</style><script>document.addEventListener('DOMContentLoaded', function() {
+    function getTarget(evt) {
+        var elt = evt.detail.elt;
+        var targetSel = elt.getAttribute('hx-target');
+        if (targetSel) {
+            if (targetSel === 'this') return elt;
+            var found = document.querySelector(targetSel);
+            if (found) return found;
+        }
+        return elt;
+    }
+    function isPolling(elt) {
+        var trigger = elt.getAttribute('hx-trigger') || '';
+        return trigger.indexOf('every') !== -1;
+    }
+    function isPollingRelated(elt) {
+        return isPolling(elt) || (elt.querySelector && !!elt.querySelector('[hx-trigger*="every"]'));
+    }
+    function clearFeedback(el) {
+        el.classList.remove('htmx-request-active', 'htmx-request-success', 'htmx-request-error');
+    }
+    document.body.addEventListener('htmx:beforeRequest', function(e) {
+        var elt = e.detail.elt;
+        if (isPolling(elt)) return;
+        var t = getTarget(e);
+        clearFeedback(t);
+        t.classList.add('htmx-request-active');
+        if (t !== elt) {
+            clearFeedback(elt);
+            elt.classList.add('htmx-request-active');
+        }
+    });
+    document.body.addEventListener('htmx:oobAfterSwap', function(e) {
+        var t = e.detail.target || e.detail.elt;
+        if (!t) return;
+        clearFeedback(t);
+        t.classList.add('htmx-request-success');
+        setTimeout(function() { clearFeedback(t); }, 1000);
+    });
+    document.body.addEventListener('htmx:afterRequest', function(e) {
+        var elt = e.detail.elt;
+        if (isPollingRelated(elt)) return;
+        var t = getTarget(e);
+        t.classList.remove('htmx-request-active');
+        if (e.detail.successful) {
+            t.classList.add('htmx-request-success');
+            setTimeout(function() { clearFeedback(t); }, 1000);
+            if (t !== elt) {
+                elt.classList.remove('htmx-request-active');
+                elt.classList.add('htmx-request-success');
+                setTimeout(function() { clearFeedback(elt); }, 1000);
+            }
+        } else {
+            t.classList.add('htmx-request-error');
+            setTimeout(function() { clearFeedback(t); }, 2000);
+            if (t !== elt) {
+                elt.classList.add('htmx-request-error');
+                setTimeout(function() { clearFeedback(elt); }, 2000);
+            }
+        }
+    });
+});
+</script><style>@layer htmxo {
+/* === Generic behavior conventions === */
+/* Any element triggering an htmx action is clickable. */
+[hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }
+
+/* `data-status` on a leaf text element (cells, badges, pills) colors the
+   text by status; on a container with `.htmxo-status-banner` it colors the
+   left border instead (see banner rules below). */
+td[data-status], th[data-status], span[data-status], small[data-status] { font-weight: bold; }
+[data-status="success"]:not(.htmxo-status-banner) { color: var(--htmxo-success); }
+[data-status="error"]:not(.htmxo-status-banner)   { color: var(--htmxo-error); }
+[data-status="warning"]:not(.htmxo-status-banner) { color: var(--htmxo-warning); }
+[data-status="muted"]:not(.htmxo-status-banner)   { color: var(--htmxo-muted); }
+
+.u-hidden { display: none; }
+.u-inline { display: inline; }
+.u-inline-block { display: inline-block; }
+.u-block { display: block; }
+.u-flex { display: flex; align-items: center; gap: 0.5rem; }
+.u-flex-tight { display: flex; align-items: center; gap: 0.25rem; }
+.u-flex-wide { display: flex; align-items: center; gap: 1rem; }
+.u-flex-wrap { flex-wrap: wrap; }
+.u-flex-between { display: flex; justify-content: space-between; align-items: center; }
+.u-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.u-stack-tight { display: flex; flex-direction: column; gap: 0.25rem; }
+.u-stack-wide { display: flex; flex-direction: column; gap: 1rem; }
+.u-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.u-grid-auto { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
+/* Sidebar + main page layout. Stacks on phone-sized viewports (<768px);
+   becomes a 2-col grid above. Pair with `app_layout(sidebar, content)`. */
+.htmxo-app-layout { display: block; min-height: 100vh; }
+.htmxo-app-layout > aside { padding: 1rem 0; }
+.htmxo-app-layout > main { min-width: 0; padding: 1rem 0; }
+@media (min-width: 768px) {
+    .htmxo-app-layout {
+        display: grid;
+        grid-template-columns: var(--htmxo-sidebar-width, 12rem) 1fr;
+        grid-template-areas: "sidebar content";
+        column-gap: 2rem;
+    }
+    .htmxo-app-layout > aside { grid-area: sidebar; padding: 1rem 1rem 1rem 0; border-right: 1px solid var(--pico-muted-border-color); }
+    .htmxo-app-layout > main { grid-area: content; }
+    .htmxo-app-layout > aside > nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; }
+}
+.u-bg-soft { background: var(--pico-card-background-color, #f8f8f8); }
+.u-btn-sm { padding: 0.3rem 0.8rem; }
+.u-btn-xs { padding: 0.2rem 0.6rem; }
+.u-input-grow { flex: 1; min-width: 20rem; max-width: 500px; }
+.u-link-plain { text-decoration: none; color: inherit; }
+.u-my-2 { margin: 0.5rem 0; }
+.u-my-1 { margin: 0.25rem 0; }
+.u-my-4 { margin: 1rem 0; }
+.u-pointer { cursor: pointer; }
+.u-w-full { width: 100%; }
+.u-grow { flex: 1; min-width: 0; }
+.u-min-w-0 { min-width: 0; }
+.u-narrow { max-width: 900px; }
+.u-truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.u-pre-wrap { white-space: pre-wrap; }
+.u-mono { font-family: monospace; }
+.u-no-border { border: none; }
+.u-text-bold { font-weight: bold; }
+.u-text-normal { font-weight: normal; }
+.u-text-xs { font-size: 0.75em; }
+.u-text-sm { font-size: 0.85em; }
+.u-text-lg { font-size: 1.1em; }
+.u-text-muted { color: var(--htmxo-muted); }
+.u-text-success { color: var(--htmxo-success); }
+.u-text-error { color: var(--htmxo-error); }
+.u-text-warning { color: var(--htmxo-warning); }
+.u-text-accent { color: var(--htmxo-accent); }
+.u-text-center { text-align: center; }
+.u-text-left { text-align: left; }
+.u-text-right { text-align: right; }
+.u-mt-0 { margin-top: 0; }
+.u-mt-1 { margin-top: 0.25rem; }
+.u-mt-2 { margin-top: 0.5rem; }
+.u-mt-3 { margin-top: 0.75rem; }
+.u-mt-4 { margin-top: 1rem; }
+.u-mt-5 { margin-top: 1.5rem; }
+.u-mt-6 { margin-top: 2rem; }
+.u-mb-0 { margin-bottom: 0; }
+.u-mb-1 { margin-bottom: 0.25rem; }
+.u-mb-2 { margin-bottom: 0.5rem; }
+.u-mb-3 { margin-bottom: 0.75rem; }
+.u-mb-4 { margin-bottom: 1rem; }
+.u-mb-5 { margin-bottom: 1.5rem; }
+.u-mb-6 { margin-bottom: 2rem; }
+.u-ml-1 { margin-left: 0.25rem; }
+.u-ml-2 { margin-left: 0.5rem; }
+.u-ml-4 { margin-left: 1rem; }
+.u-mr-1 { margin-right: 0.25rem; }
+.u-mr-2 { margin-right: 0.5rem; }
+.u-mr-3 { margin-right: 0.75rem; }
+.u-m-0 { margin: 0; }
+.u-p-0 { padding: 0; }
+.u-p-2 { padding: 0.5rem; }
+.u-p-4 { padding: 1rem; }
+.u-sticky-top { position: sticky; top: 0; max-height: 100vh; overflow-y: auto; }
+.u-scroll-y { max-height: 300px; overflow: auto; }
+.u-scroll-y-lg { max-height: 400px; overflow: auto; }
+.u-card { background: var(--pico-card-background-color, transparent); padding: 1rem; border-radius: 0.5rem; }
+.u-code-block { background: var(--pico-code-background-color, #f6f8fa); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; }
+/* Status banner — colored left-border callout. State via data-status. */
+.htmxo-status-banner { padding: 0.5rem 1rem; margin-bottom: 0.5rem; min-width: 0; overflow: hidden; background: var(--pico-card-background-color, transparent); border-left: 4px solid var(--htmxo-border); }
+.htmxo-status-banner[data-status="success"] { border-left-color: var(--htmxo-success); }
+.htmxo-status-banner[data-status="error"]   { border-left-color: var(--htmxo-error); }
+.htmxo-status-banner[data-status="warning"] { border-left-color: var(--htmxo-warning); }
+.htmxo-status-banner[data-status="accent"]  { border-left-color: var(--htmxo-accent); }
+
+/* Breadcrumb nav. Build with `htmxo_breadcrumb([("Home", "/", "/"), ...])`.
+   Children are <span> (current page, marked aria-current) or <a> (link).
+   Separators are generated via ::before — no separator element in markup. */
+.htmxo-breadcrumb { font-size: 0.85em; margin-bottom: 1rem; padding: 6px 0; border-bottom: 1px solid var(--pico-muted-border-color); }
+.htmxo-breadcrumb > * + *::before { content: ' / '; color: var(--pico-muted-color); margin: 0 6px; }
+.htmxo-breadcrumb [aria-current="page"] { color: var(--pico-color); font-weight: 500; }
+.htmxo-breadcrumb a { text-decoration: none; color: var(--pico-primary); }
+.htmxo-breadcrumb a:hover { text-decoration: underline; }
+.u-badge { display: inline-block; padding: 0.15em 0.5em; border-radius: 3px; font-size: 0.8em; font-weight: 600; line-height: 1.2; color: var(--htmxo-bg, #fff); background: var(--htmxo-muted); }
+.u-badge.u-badge-success { background: var(--htmxo-success); }
+.u-badge.u-badge-error   { background: var(--htmxo-error); }
+.u-badge.u-badge-warning { background: var(--htmxo-warning); }
+.u-badge.u-badge-accent  { background: var(--htmxo-accent); }
+.u-badge.u-badge-muted   { background: var(--htmxo-muted); }
+.u-badge-soft { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 1rem; font-size: 0.8em; line-height: 1.2; cursor: pointer; user-select: none; border: 1px solid transparent; background: color-mix(in srgb, var(--htmxo-muted) 25%, transparent); }
+.u-badge-soft.u-badge-success { background: color-mix(in srgb, var(--htmxo-success) 35%, transparent); }
+.u-badge-soft.u-badge-error   { background: color-mix(in srgb, var(--htmxo-error)   35%, transparent); }
+.u-badge-soft.u-badge-warning { background: color-mix(in srgb, var(--htmxo-warning) 35%, transparent); }
+.u-badge-soft.u-badge-accent  { background: color-mix(in srgb, var(--htmxo-accent)  35%, transparent); }
+
+/* Generic equal-column grid. Column count and gap are tunable per
+   instance via CSS variables on the element itself or an ancestor:
+       <div class="htmxo-grid" style="--htmxo-grid-cols:16">…</div>   /* DON'T — inline */
+   Apps should set the variables in their own scoped stylesheet:
+       .my-app-dense-grid { --htmxo-grid-cols: 16; --htmxo-grid-gap: 0.25rem; }
+       <div class="htmxo-grid my-app-dense-grid">…</div> */
+.htmxo-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--htmxo-grid-cols, 4), 1fr);
+    gap: var(--htmxo-grid-gap, 0.5rem);
+}
+
+/* "← Back" link. Subtler than a primary link; sits above content as a
+   navigation hint. Pair with `<a class="htmxo-back-link" href="…">← Back</a>`. */
+.htmxo-back-link {
+    display: inline-block;
+    margin-bottom: 0.5rem;
+    font-size: 0.9em;
+    text-decoration: none;
+    color: var(--htmxo-muted, currentColor);
+}
+.htmxo-back-link:hover { text-decoration: underline; }
+}
+</style><style>@layer htmxo {
+.tabset > nav {
+    margin: 0;
+    padding: 0 0 0 1rem;
+    border-bottom: 2px solid var(--htmxo-border);
+}
+.tabset > nav ul {
+    align-self: flex-end;
+    gap: 0.25rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.tabset > nav ul li {
+    padding: 0;
+    margin: 0;
+}
+.tabset > nav ul li a {
+    display: block;
+    padding: 0.5rem 1rem;
+    border: 2px solid transparent;
+    border-bottom: none;
+    border-radius: 0.35rem 0.35rem 0 0;
+    background: transparent;
+    text-decoration: none;
+}
+.tabset > nav ul li a.contrast {
+    border-color: var(--htmxo-border);
+    background: transparent;
+}
+.tabset > .tab-panel {
+    padding: 1rem;
+    border: 2px solid var(--htmxo-border);
+    border-top: none;
+    border-radius: 0 0 0.35rem 0.35rem;
+}
+}
+</style><style>@layer htmxo {
+.htmxo-editor-input {
+    font-family: monospace;
+    font-size: 0.85em;
+    width: 100%;
+}
+.htmxo-editor-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+}
+</style><style>[data-static-disabled]{opacity:.45;pointer-events:none;cursor:not-allowed}</style></head><body><main class="container"><div id="counter"><p>Count: 2</p><button hx-get="/HTMXObjects.jl/dev/examples/counter/hx/increment/2" hx-target="#counter" hx-swap="outerHTML">+</button></div></main></body></html>
