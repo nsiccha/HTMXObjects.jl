@@ -11,7 +11,7 @@ export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table_js, sortable_table_styles, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape
@@ -3279,27 +3279,80 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     cols = Tables.columnnames(Tables.columns(table))
     isnothing(id) && (id = "tbl-" * string(hash(cols), base=16))
 
-    headers = if sortable
-        [h.th(string(c); onclick="sortTable($(i-1), this)", class="u-pointer")
-         for (i, c) in enumerate(cols)]
-    else
-        [h.th(string(c)) for c in cols]
-    end
-
     body_rows = [
         h.tr([h.td(isnothing(cell) ? string(Tables.getcolumn(row, c)) : cell(Tables.getcolumn(row, c), c, ri))
               for c in cols]...)
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
-    table_node = h.table(; class, role="grid", kwargs...)(
-        h.thead(h.tr(headers...)),
-        h.tbody(body_rows...; id)
+    sortable_table([string(c) for c in cols], body_rows;
+        id, sortable, download, download_filename, caption, class, kwargs...)
+end
+
+"""
+    sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
+                   download=false, download_filename=nothing, caption=nothing,
+                   kwargs...)
+
+Lower-level table renderer for pre-built rows. Use when cells need rich
+attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
+`render_table`'s value-to-content callback can't carry. `render_table`
+itself delegates to this after materialising rows from a Tables.jl source.
+
+# Arguments
+- `headers`: `Vector` of header entries. Each entry is either:
+    - a `String` — auto-wired into `h.th(label; onclick="sortTable(i, this)", class="u-pointer")`
+      when `sortable=true`, or a plain `h.th(label)` otherwise.
+    - any HTML node (e.g. `h.th("")`, `h.th("Actions")`) — used as-is.
+      That's the per-column opt-out: pass a node and the auto-wiring is skipped.
+- `rows`: `Vector{<:Node}` of pre-built `h.tr(...)` rows. The caller controls
+  every `<td>`, including `data-sort-value` for semantic sort keys (see
+  `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
+  `id="detail-X"` for the paired-row pattern.
+- `sortable`: master toggle for the auto-wiring of String headers (default `true`).
+  Pre-built `h.th` headers are unaffected.
+
+Other keyword arguments behave the same as in [`render_table`](@ref).
+
+# Example
+```julia
+rows = [h.tr(h.td(h.code(name)),
+             h.td(data_sort_value=string(w))(h.strong(status)))
+        for (name, status, w) in entries]
+sortable_table(["Name", "Status"], rows; id="entries", download=false)
+```
+Pair with [`sortable_table_js`](@ref) and [`sortable_table_styles`](@ref).
+"""
+function sortable_table(headers, rows;
+                        sortable=true, class="striped", id=nothing,
+                        download=false, download_filename=nothing,
+                        caption=nothing, kwargs...)
+    isnothing(id) && (id = "tbl-" * string(hash(headers), base=16))
+
+    th_nodes = [
+        hdr isa AbstractString ?
+            (sortable ?
+                h.th(string(hdr); onclick="sortTable($(i-1), this)", class="u-pointer") :
+                h.th(string(hdr))) :
+            hdr
+        for (i, hdr) in enumerate(headers)
+    ]
+
+    # Always include `htmxo-sortable-table` when sorting is on — that's
+    # the hook `sortable_table_styles()` reads, and it makes call sites
+    # forget-proof.
+    table_class = sortable ? string(class, " htmxo-sortable-table") : class
+
+    table_node = h.table(; class=table_class, role="grid", kwargs...)(
+        h.thead(h.tr(th_nodes...)),
+        h.tbody(rows...; id),
     )
 
     fname = something(download_filename, id * ".csv")
-    download_btn = download ? h.button("⬇ CSV"; type="button", class="outline caption-action",
-                                        onclick="downloadTableCsv(this, '$(fname)')") : nothing
+    download_btn = download ?
+        h.button("⬇ CSV"; type="button", class="outline caption-action",
+            onclick="downloadTableCsv(this, '$(fname)')") :
+        nothing
 
     if !isnothing(caption)
         actions = download ? (download_btn,) : ()
@@ -3307,7 +3360,9 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     elseif download
         h.figure(; class="captioned")(
             h.figcaption(; class="caption")(
-                h.div(; class="caption-header")(h.span(""), h.span(; class="caption-actions")(download_btn))
+                h.div(; class="caption-header")(
+                    h.span(""),
+                    h.span(; class="caption-actions")(download_btn))
             ),
             table_node,
         )
