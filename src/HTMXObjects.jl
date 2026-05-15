@@ -626,17 +626,20 @@ end
     _inject_verb_in_route_lhs!(struct_expr)
 
 For every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` macrocall in the
-struct body, rewrite the call-form LHS to inject `::HTMXObjects.Verb{V}` as
-the **first positional argument**, where `V` is the verb short symbol
-(`:GET`, `:POST`, `:WEBSOCKET`, …). After this rewrite, DynamicObjects'
-`@dynamicstruct` sees:
+struct body, rewrite the call-form LHS to inject
+`__verb__::HTMXObjects.Verb{V}` as the **first positional argument**, where
+`V` is the verb short symbol (`:GET`, `:POST`, `:WEBSOCKET`, …). After this
+rewrite, DynamicObjects' `@dynamicstruct` sees:
 
     @get foo(x::Int) = body          # source
-    foo(::HTMXObjects.Verb{:GET}, x::Int) = body   # after rewrite (LHS)
+    foo(__verb__::HTMXObjects.Verb{:GET}, x::Int) = body   # after rewrite (LHS)
 
-and emits `compute_property(::T, ::Val{:foo}, ::Verb{:GET}, x::Int) = body`.
+and emits `compute_property(::T, ::Val{:foo}, __verb__::Verb{:GET}, x::Int) = body`.
 The route registrar threads `Verb{V}()` into `prop(Verb{V}(), idx_vals…; kw…)`
 at request-handling time, so verb dispatch is purely a method-table lookup.
+The arg is named (`__verb__`) so route bodies can forward the verb to
+sub-router routes — e.g. `__self__.pipeline.index(__verb__)` to delegate
+from `@get index()` to an `@include`d sub-router's `@get index()`.
 
 Bare-form LHS is impossible here — `_extract_route_info` already rejected it.
 The injection is idempotent guarded: if the first positional arg already has
@@ -659,7 +662,7 @@ function _inject_verb_in_route_lhs!(struct_expr)
         lhs = expr.args[1]
         Meta.isexpr(lhs, (:call, :ref)) || continue
         verb_short = _verb_short(verb)
-        verb_type = Expr(:(::), Expr(:curly, GlobalRef(@__MODULE__, :Verb), QuoteNode(verb_short)))
+        verb_type = Expr(:(::), :__verb__, Expr(:curly, GlobalRef(@__MODULE__, :Verb), QuoteNode(verb_short)))
         # Skip past `:parameters` if present (must come immediately after
         # the called name); insertion goes after both the name and any
         # leading `:parameters` block so positional args stay positional.
@@ -670,8 +673,8 @@ function _inject_verb_in_route_lhs!(struct_expr)
         # Idempotency: if a `::Verb{…}` is already at insert_pos, skip.
         if length(lhs.args) >= insert_pos
             existing = lhs.args[insert_pos]
-            if Meta.isexpr(existing, :(::)) && length(existing.args) == 1
-                ann = existing.args[1]
+            if Meta.isexpr(existing, :(::))
+                ann = existing.args[end]
                 if Meta.isexpr(ann, :curly) && length(ann.args) >= 1 &&
                    (ann.args[1] === :Verb || (ann.args[1] isa GlobalRef && ann.args[1].name === :Verb))
                     continue
@@ -2456,8 +2459,9 @@ end
 # idempotency.
 function _is_verb_annotation(idx)
     Meta.isexpr(idx, :(::)) || return false
-    length(idx.args) == 1 || return false   # nameless ::Verb{V}
-    ann = idx.args[1]
+    # Accept both `::Verb{V}` (length 1) and `__verb__::Verb{V}` (length 2);
+    # in both cases the annotation type is at args[end].
+    ann = idx.args[end]
     Meta.isexpr(ann, :curly) || return false
     head = ann.args[1]
     head === :Verb && return true
