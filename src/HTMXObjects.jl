@@ -83,6 +83,13 @@ When `async=false` (the default), blocks until interrupted and calls [`terminate
 - `:interactive` — multi-threaded on the `:interactive` threadpool, leaving `:default`
   free for heavy computation. Launch julia with e.g. `julia -t 8,4` for 8 computation
   threads and 4 request-handling threads.
+
+**Footgun:** `julia -tauto,auto` and `JULIA_NUM_THREADS=auto,auto` both resolve the
+second slot to `1`, not "match default" — `:interactive` stays at 1 thread even
+with `auto`. To size both pools equally, compute shell-side:
+`julia -t\$(nproc),\$(nproc)`. Without a sized `:interactive` pool,
+`parallel=:interactive` is strictly worse than `parallel=false` (same effective
+concurrency, plus extra spawn overhead per request, plus a startup `@warn`).
 """
 function serve(; parallel=false, kwargs...)
     async = Base.get(kwargs, :async, false)
@@ -1142,7 +1149,10 @@ function _extract_args end
 
 Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
 re-evaluation automatically re-registers routes without a server restart.
-`@ws` property bodies are automatically wrapped in `(__ws__) -> body`.
+`@ws` property bodies are automatically wrapped in `(__ws__) -> body`. WS routes
+accept the same path-param + kwargs surface as GET — `@ws feed(id::Int; q="") = body`
+mounts at `/feed/{id}` and the handler receives the typed `id` (same `_convert_param`
+path as GET) plus `q` from the upgrade request's query string.
 Inline `prop = struct ... end` definitions are processed as nested route structs.
 """
 macro htmx(args...)
