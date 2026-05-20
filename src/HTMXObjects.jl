@@ -2035,6 +2035,13 @@ Default rendering for a caught error — a small article pointing at the recorde
 error id. Override by defining `__error__` on the route's enclosing struct
 (or, to disable catching entirely, set `__error__ = rethrow`).
 
+To run an extra side effect *after* an error is recorded — notifying an
+external service, incrementing a metric — define `__on_error__(err, uid, path)`
+on the route's enclosing struct. It is invoked for its side effect only (return
+value ignored) and does not replace the error article; a failure inside it is
+logged, not swallowed. It has the same per-struct reachability as `__error__`,
+and fires for both route errors and `safely`-wrapped widget errors.
+
 In dev (Revise loaded), include the full log path so the article matches
 the `@error` line on stderr (`HTMXObjects caught an error: <path>`) — the
 same string is already in the server log, including it here lets the
@@ -2057,9 +2064,21 @@ function _default_error_render(uid, path)
     end
 end
 
-# Invoke the user's `__error__` hook if present, else fall back to the default.
-# The hook is called with just the exception, so `__error__ = rethrow` works.
+# If `obj` defines `__on_error__`, invoke it as a side effect (return value
+# ignored) after the error is recorded but before rendering — the hook point
+# for running an extra command once HTMXObjects' built-in logging has run.
+# A failure inside the hook is logged, never swallowed silently. Then invoke
+# the user's `__error__` render hook if present, else fall back to the
+# default. `__error__` is called with just the exception, so
+# `__error__ = rethrow` works.
 function _invoke_error_handler(obj, err, uid, path)
+    if obj !== nothing && hasproperty(obj, :__on_error__)
+        try
+            getproperty(obj, :__on_error__)(err, uid, path)
+        catch hook_err
+            @error "HTMXObjects __on_error__ hook failed" exception=(hook_err, catch_backtrace())
+        end
+    end
     if obj !== nothing && hasproperty(obj, :__error__)
         return getproperty(obj, :__error__)(err)
     end
