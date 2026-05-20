@@ -415,21 +415,25 @@ end
     _inject_dunder_props!(struct_expr)
 
 Ensure that `@htmx` struct bodies always declare `__parent__`, `__prefix__`,
-`__req__`, `__appdata__`, and `__route__` as properties so route bodies can
-reference them and so the `__parent__` chain threads request context, appdata,
-the mount prefix, and the per-request route URL down through `@include`d
-sub-structs.
+`__req__`, `__appdata__`, `__route__`, and `__on_error__` as properties so route
+bodies can reference them and so the `__parent__` chain threads request context,
+appdata, the mount prefix, the per-request route URL, and the error hook down
+through `@include`d sub-structs.
 
 Defaults:
 - `__parent__ = nothing` — set by `@include` desugar to point at the enclosing struct.
 - `__prefix__ = ""` — root-level mount path (no leading `/`); `@include` builds
   `parent.__prefix__ * "/childname"` for each nested sub-struct.
-- `__req__` / `__appdata__` — fall through `__parent__` if present, else `nothing`.
-  `__req__` is supplied by HTMXO at request-handler construction. `__appdata__`
-  is supplied by the user — the conventional pattern is to override the default
-  inside the root `@htmx struct` body (`__appdata__ = APP_DATA` with
-  `const APP_DATA = AppData()` at module scope) so the singleton is part of the
-  struct's definition, not of `route!`'s API.
+- `__req__` / `__appdata__` / `__on_error__` — fall through `__parent__` if
+  present, else `nothing`. `__req__` is supplied by HTMXO at request-handler
+  construction. `__appdata__` is supplied by the user — the conventional pattern
+  is to override the default inside the root `@htmx struct` body
+  (`__appdata__ = APP_DATA` with `const APP_DATA = AppData()` at module scope) so
+  the singleton is part of the struct's definition, not of `route!`'s API.
+  `__on_error__` is the optional post-error side-effect hook (see
+  `_default_error_render`); defining it once on the root `@htmx struct` body
+  propagates it to every route — including `@include`d upstream structs the app
+  cannot edit.
 - `__route__ = ""` — defaults to empty; `_register_route_handler` sets it to
   `req.target` (with query string stripped) when constructing the struct for
   a real request, so route bodies can write `hx_get=__route__` /
@@ -446,6 +450,7 @@ function _inject_dunder_props!(struct_expr)
     has_parent = false
     has_prefix = false
     has_route = false
+    has_on_error = false
     for arg in body.args
         arg isa Expr || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
@@ -457,18 +462,20 @@ function _inject_dunder_props!(struct_expr)
         end
         Meta.isexpr(inner, :(=)) || continue
         name = _property_lhs_name(inner.args[1])
-        name === :__req__     && (has_req = true)
-        name === :__appdata__ && (has_appdata = true)
-        name === :__parent__  && (has_parent = true)
-        name === :__prefix__  && (has_prefix = true)
-        name === :__route__   && (has_route = true)
+        name === :__req__      && (has_req = true)
+        name === :__appdata__  && (has_appdata = true)
+        name === :__parent__   && (has_parent = true)
+        name === :__prefix__   && (has_prefix = true)
+        name === :__route__    && (has_route = true)
+        name === :__on_error__ && (has_on_error = true)
     end
     prepend = Any[]
-    has_parent  || push!(prepend, :(__parent__ = nothing))
-    has_prefix  || push!(prepend, :(__prefix__ = ""))
-    has_req     || push!(prepend, :(__req__     = isnothing(__parent__) ? nothing : __parent__.__req__))
-    has_appdata || push!(prepend, :(__appdata__ = isnothing(__parent__) ? nothing : __parent__.__appdata__))
-    has_route   || push!(prepend, :(__route__   = isnothing(__parent__) ? "" : __parent__.__route__))
+    has_parent   || push!(prepend, :(__parent__ = nothing))
+    has_prefix   || push!(prepend, :(__prefix__ = ""))
+    has_req      || push!(prepend, :(__req__      = isnothing(__parent__) ? nothing : __parent__.__req__))
+    has_appdata  || push!(prepend, :(__appdata__  = isnothing(__parent__) ? nothing : __parent__.__appdata__))
+    has_route    || push!(prepend, :(__route__    = isnothing(__parent__) ? "" : __parent__.__route__))
+    has_on_error || push!(prepend, :(__on_error__ = isnothing(__parent__) ? nothing : __parent__.__on_error__))
     if !isempty(prepend)
         body.args = vcat(prepend, body.args)
     end
@@ -2037,10 +2044,13 @@ error id. Override by defining `__error__` on the route's enclosing struct
 
 To run an extra side effect *after* an error is recorded — notifying an
 external service, incrementing a metric — define `__on_error__(err, uid, path)`
-on the route's enclosing struct. It is invoked for its side effect only (return
-value ignored) and does not replace the error article; a failure inside it is
-logged, not swallowed. It has the same per-struct reachability as `__error__`,
-and fires for both route errors and `safely`-wrapped widget errors.
+on the root `@htmx` struct. `@htmx` auto-injects `__on_error__` into every
+struct (defaulting through `__parent__`, like `__appdata__`), so a single
+root-level definition propagates to every route — including `@include`d
+upstream structs the app cannot edit. It is invoked for its side effect only
+(return value ignored) and does not replace the error article; a failure inside
+it is logged, not swallowed. Fires for both route errors and `safely`-wrapped
+widget errors.
 
 In dev (Revise loaded), include the full log path so the article matches
 the `@error` line on stderr (`HTMXObjects caught an error: <path>`) — the
@@ -2064,19 +2074,23 @@ function _default_error_render(uid, path)
     end
 end
 
-# If `obj` defines `__on_error__`, invoke it as a side effect (return value
-# ignored) after the error is recorded but before rendering — the hook point
-# for running an extra command once HTMXObjects' built-in logging has run.
-# A failure inside the hook is logged, never swallowed silently. Then invoke
-# the user's `__error__` render hook if present, else fall back to the
-# default. `__error__` is called with just the exception, so
-# `__error__ = rethrow` works.
+# `__on_error__` is auto-injected into every `@htmx` struct (default `nothing`,
+# falling through `__parent__`), so the property is always present but may be
+# `nothing`. When non-nothing, invoke it as a side effect (return value ignored)
+# after the error is recorded but before rendering — the hook point for running
+# an extra command once HTMXObjects' built-in logging has run. A failure inside
+# the hook is logged, never swallowed silently. Then invoke the user's
+# `__error__` render hook if present, else fall back to the default. `__error__`
+# is called with just the exception, so `__error__ = rethrow` works.
 function _invoke_error_handler(obj, err, uid, path)
     if obj !== nothing && hasproperty(obj, :__on_error__)
-        try
-            getproperty(obj, :__on_error__)(err, uid, path)
-        catch hook_err
-            @error "HTMXObjects __on_error__ hook failed" exception=(hook_err, catch_backtrace())
+        hook = getproperty(obj, :__on_error__)
+        if hook !== nothing
+            try
+                hook(err, uid, path)
+            catch hook_err
+                @error "HTMXObjects __on_error__ hook failed" exception=(hook_err, catch_backtrace())
+            end
         end
     end
     if obj !== nothing && hasproperty(obj, :__error__)
