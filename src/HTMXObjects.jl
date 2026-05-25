@@ -2,7 +2,7 @@ module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
 export create_app
-export HTTP, queryparams, formdata
+export HTTP, queryparams, formparams, formdata
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
 export route!, record!, to_response, save_response, static_transform, MIMEResponse,
@@ -160,29 +160,22 @@ dynamicfiles(
 _form_append(existing::String, v) = [existing, v]
 _form_append(existing::AbstractVector, v) = (push!(existing, v); existing)
 
-# --- Query parameter parsing (multi-value aware) ---
+# --- Form-encoded parsing (multi-value aware) ---
 
-"""
-    queryparams(req::HTTP.Request) -> Dict{String, Union{String, Vector{String}}}
-
-Parse query parameters from the request URL. Unlike `HTTP.queryparams` (which
-returns `Dict{String,String}` and drops duplicate keys), this preserves all
-values: single-value keys map to a `String`, duplicate keys map to a
-`Vector{String}`.
-
-    queryparams("http://x/?a=1&b=2&b=3")  #=> Dict("a" => "1", "b" => ["2", "3"])
-"""
-function queryparams(req::HTTP.Request)
-    query = HTTP.URI(req.target).query
-    isempty(query) && return Dict{String, Union{String, Vector{String}}}()
+# Parse a form-encoded string ("a=1&b=2&b=3") into a multi-value-preserving
+# Dict. Shared by `queryparams` (URL query string) and `formparams` (request
+# body). Query and `application/x-www-form-urlencoded` bodies use the same
+# wire format, so one parser suffices.
+function _parse_form_encoded(s::AbstractString)
+    isempty(s) && return Dict{String, Union{String, Vector{String}}}()
     d = Dict{String, Union{String, Vector{String}}}()
-    # Query strings are form-encoded: '+' represents a space. `unescapeuri` only
-    # does percent-decoding, so translate '+' → ' ' before unescaping. Without
-    # this, URLs written via JS `URLSearchParams.toString()` (which form-encodes
+    # '+' represents a space in form-encoded data. `unescapeuri` only does
+    # percent-decoding, so translate '+' → ' ' before unescaping. Without this,
+    # values produced by JS `URLSearchParams.toString()` (which form-encodes
     # spaces as '+') round-trip spaces as literal '+' characters and break
     # downstream lookups.
-    _form_unescape(s) = String(HTTP.URIs.unescapeuri(replace(s, '+' => ' ')))
-    for part in split(query, "&", keepempty=false)
+    _form_unescape(t) = String(HTTP.URIs.unescapeuri(replace(t, '+' => ' ')))
+    for part in split(s, "&", keepempty=false)
         kv = split(part, "=", limit=2)
         k = _form_unescape(kv[1])
         v = length(kv) >= 2 ? _form_unescape(kv[2]) : ""
@@ -194,6 +187,32 @@ function queryparams(req::HTTP.Request)
     end
     d
 end
+
+"""
+    queryparams(req::HTTP.Request) -> Dict{String, Union{String, Vector{String}}}
+
+Parse query parameters from the request URL. Unlike `HTTP.queryparams` (which
+returns `Dict{String,String}` and drops duplicate keys), this preserves all
+values: single-value keys map to a `String`, duplicate keys map to a
+`Vector{String}`.
+
+    queryparams("http://x/?a=1&b=2&b=3")  #=> Dict("a" => "1", "b" => ["2", "3"])
+"""
+queryparams(req::HTTP.Request) = _parse_form_encoded(HTTP.URI(req.target).query)
+
+"""
+    formparams(req::HTTP.Request) -> Dict{String, Union{String, Vector{String}}}
+
+Parse a urlencoded request body into a multi-value-preserving Dict. The
+`formparams` analogue of `queryparams` — repeated body fields (`image=a&image=b`)
+become a `Vector{String}` instead of collapsing to the last value, which is
+what `Oxygen.formdata` (a thin wrapper over `URIs.queryparams`) does. Used by
+the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
+receives every posted value.
+
+Reads the body via `HTTP.payload`; an empty body yields an empty dict.
+"""
+formparams(req::HTTP.Request) = _parse_form_encoded(String(HTTP.payload(req)))
 
 """
     _wrap_ws_bodies!(struct_expr)
@@ -1112,7 +1131,9 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
     end
 
     # Source selection is fixed at codegen time: GET/DELETE/WEBSOCKET pull
-    # from queryparams, the rest from formdata (with queryparams fallback).
+    # from queryparams, the rest from formparams (with queryparams fallback).
+    # Both parsers preserve multi-value keys (repeated `?tag=a&tag=b` or
+    # repeated body fields `image=a&image=b` arrive as a `Vector{String}`).
     _is_query_verb = verb_short in (:GET, :DELETE, :WEBSOCKET)
 
     _M = @__MODULE__
@@ -1135,7 +1156,7 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
     else
         quote
             __parts__ = split(split(__req__.target, "?")[1], "/", keepempty=false)
-            __src__ = isempty($(HTTP).payload(__req__)) ? Dict{String,Any}() : $(formdata)(__req__)
+            __src__ = $(formparams)(__req__)
             __fallback__ = $(queryparams)(__req__)
             __idx__ = Any[]
             $(pos_stmts...)
@@ -1624,7 +1645,9 @@ updates the struct.
   both `GET /filter/{a}/{b}` and `GET /filter/{a}` (with `b=1` filled in)
 - Kwargs (via call syntax) auto-extract from query params or form data:
   `@get search(; q="", page::Int=1)` extracts `q` and `page` from the query string
-  (`GET` / `DELETE` → `queryparams`, `POST` / `PUT` / `PATCH` → `formdata`)
+  (`GET` / `DELETE` → `queryparams`, `POST` / `PUT` / `PATCH` → `formparams`).
+  Both parsers preserve multi-value keys, so a `Vector`-typed kwarg receives
+  every repeated value (`?tag=a&tag=b` or repeated `image=a&image=b` body fields).
 - The `:index` property (with empty prefix) maps to `GET /`
 
 If `record_dir` is given, each response is also written to disk under that
@@ -1672,11 +1695,11 @@ _convert_param(val::AbstractVector, T::Type) =
     error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
 _convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # single/empty → vector
 
-# Determine whether kwargs come from queryparams (GET/DELETE) or formdata (POST/PUT/PATCH).
+# Determine whether kwargs come from queryparams (GET/DELETE) or formparams (POST/PUT/PATCH).
 const _queryparams_verbs = Set(["GET", "DELETE"])
 function _kwargs_source(req, method)
     method in _queryparams_verbs && return queryparams(req)
-    isempty(HTTP.payload(req)) ? Dict{String, Any}() : formdata(req)
+    formparams(req)
 end
 
 # Sentinel for "no default provided" / "key was absent". Distinguishes required
@@ -1709,7 +1732,7 @@ end
 
 Extract a single typed parameter from an HTTP request, mirroring the behavior of
 `@get`/`@post` kwarg extraction. Looks up `name` in the method-appropriate source
-(`queryparams` for GET/DELETE, `formdata` for POST/PUT/PATCH with a `queryparams`
+(`queryparams` for GET/DELETE, `formparams` for POST/PUT/PATCH with a `queryparams`
 fallback), converts via `_convert_param(value, T)`, and returns `default` when the
 key is absent or empty. Throws `KeyError(name)` if no default was supplied.
 
