@@ -3299,8 +3299,10 @@ function downloadTableCsv(btn, filename) {
     };
     const headers = Array.from(table.querySelectorAll('thead th'))
         .map(th => esc(th.textContent.replace(/ [▲▼]$/, '').trim()));
-    const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr =>
-        Array.from(tr.cells).map(td => esc(td.textContent.trim())).join(','));
+    const rows = Array.from(table.querySelectorAll('tbody tr'))
+        .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
+        .map(tr =>
+            Array.from(tr.cells).map(td => esc(td.textContent.trim())).join(','));
     const csv = [headers.join(','), ...rows].join('\n');
     const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
     const url = URL.createObjectURL(blob);
