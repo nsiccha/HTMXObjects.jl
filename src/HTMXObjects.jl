@@ -3500,15 +3500,18 @@ end
     master_detail_pair(key, master_cells, detail_body, ncols::Int;
                        master_class=nothing,
                        detail_class=nothing,
-                       master_attrs=())
+                       master_attrs=(),
+                       initially_open::Bool=false)
 
 Build the `(master_tr, detail_tr)` pair for one master/detail item.
 
 The master `<tr>` carries id `"row-<safe>"` and an onclick that toggles
 the paired detail `<tr id="detail-<safe>">`, where `safe` is `key` run
-through [`master_detail_safe_key`](@ref). The detail row is hidden
-initially (`hidden=true`) and wraps `detail_body` in a single
-`<td colspan="\$ncols">` cell.
+through [`master_detail_safe_key`](@ref). The detail row wraps
+`detail_body` in a single `<td colspan="\$ncols">` cell. By default the
+detail is collapsed initially (`hidden=true`, no `aria-expanded` on the
+master) — pass `initially_open=true` for rows whose body IS the content
+the user came to see (a question + answer brief, for example).
 
 # Arguments
 - `master_cells`: iterable of `<td>` nodes for the master row.
@@ -3526,18 +3529,17 @@ initially (`hidden=true`) and wraps `detail_body` in a single
   for extra attributes on the master `<tr>` (`data_status`, `data_aid`,
   `data_activity`, `data_sort_value`, …). Note: HTML attribute names
   use underscores in the `h` builder (`data_status`, not `data-status`).
+- `initially_open`: render the row open instead of collapsed. When
+  `true`, omits `hidden` on the detail row and sets `aria-expanded="true"`
+  on the master so collapsed-look CSS keyed off
+  `:not([aria-expanded="true"])` shows the expanded look from the first
+  render. First click then collapses the row as usual.
 
 The pair MUST be interleaved into the row list passed to
 [`sortable_table`](@ref) (master, detail, master, detail, …) so the
 `sortable_table_js` companion-pair logic keeps them paired through a
 column sort. Use [`master_detail_table`](@ref) to do the interleaving
 for you.
-
-Initial `aria-expanded` is intentionally not set — the `h` builder
-drops string-valued `aria_expanded="false"` anyway, and the toggle
-sets it on first click. Collapsed-look CSS should key off
-`:not([aria-expanded="true"])` so both the initial (no attribute) and
-post-collapse (`="false"`) states match.
 
 For an inline form inside `detail_body`, prefer `hx-swap="none"` and
 suppress any `HX-Redirect` on the response — otherwise a successful
@@ -3546,18 +3548,25 @@ POST yanks the user off the table.
 function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             master_class=nothing,
                             detail_class=nothing,
-                            master_attrs=())
+                            master_attrs=(),
+                            initially_open::Bool=false)
     safe = _md_safe_key(key)
     tr_kwargs = Dict{Symbol,Any}(
         :id      => "row-$safe",
         :onclick => master_detail_toggle_js(safe),
     )
+    # Only the `"true"` form of aria-expanded survives the `h` builder —
+    # the `"false"` form gets dropped (gotcha 2), but rendering "no attr"
+    # is what we want for the collapsed initial state anyway, so the CSS
+    # `:not([aria-expanded="true"])` selector correctly matches both.
+    initially_open && (tr_kwargs[:aria_expanded] = "true")
     isnothing(master_class) || (tr_kwargs[:class] = master_class)
     for (k, v) in pairs(master_attrs)
         tr_kwargs[Symbol(k)] = v
     end
     master = h.tr(; tr_kwargs...)(master_cells...)
-    detail_kwargs = Dict{Symbol,Any}(:id => "detail-$safe", :hidden => true)
+    detail_kwargs = Dict{Symbol,Any}(:id => "detail-$safe")
+    initially_open || (detail_kwargs[:hidden] = true)
     isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
     detail = h.tr(; detail_kwargs...)(
         h.td(colspan=string(ncols))(detail_body),
@@ -3592,6 +3601,10 @@ interactive-descendant click guard, no-initial-`aria-expanded`, paired
 - `master_attrs(item)`: optional function returning an iterable of
   `name => value` pairs for extra `<tr>` attributes on the master row.
 - `master_class`, `detail_class`: optional extra CSS classes on the rows.
+- `initially_open`: `true`, `false`, or a predicate `item -> Bool`.
+  When the predicate is `true` for an item, that row renders open from
+  the first paint (see [`master_detail_pair`](@ref) for the mechanics).
+  Defaults to `false` (all rows collapsed initially).
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
@@ -3609,13 +3622,16 @@ function master_detail_table(headers, items;
                              master_attrs=nothing,
                              master_class=nothing,
                              detail_class=nothing,
+                             initially_open::Union{Bool,Function}=false,
                              kwargs...)
     ncols = length(headers)
     rows = Any[]
+    _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     for item in items
         attrs = isnothing(master_attrs) ? () : master_attrs(item)
         (m, d) = master_detail_pair(key(item), master(item), detail(item), ncols;
-                                    master_class, detail_class, master_attrs=attrs)
+                                    master_class, detail_class, master_attrs=attrs,
+                                    initially_open=_open(item))
         push!(rows, m, d)
     end
     sortable_table(headers, rows; kwargs...)
