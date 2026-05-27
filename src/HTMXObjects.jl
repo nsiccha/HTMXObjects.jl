@@ -11,7 +11,7 @@ export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_styles, CaptionSpec, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape
@@ -3255,7 +3255,16 @@ end
 Return an `h.style(...)` node with the canonical CSS for tables marked
 `class="htmxo-sortable-table"`: every `<th>` gets `cursor: pointer` (sortable
 by default), and any `<th>` with a `colspan` (i.e. a group span over multiple
-columns) opts out and centres its text. Pair with [`sortable_table_js`](@ref).
+columns) opts out and centres its text.
+
+Also covers the master/detail paired-row pattern (`tr#row-<key>` +
+`tr#detail-<key>`): primary-row hover highlight, master-row cursor when the
+row carries an `onclick`, and a padding/border reset on the detail cell.
+These rules are intentionally **outside any `@layer`** — Pico styles `<tr>`
+and `<td>` unlayered and an unlayered rule beats any `@layer`-ed rule
+regardless of specificity (htmxo-semantic-styling cracked pattern 9), so
+wrapping them in `@layer htmxo` would leave them ineffective against
+Pico's defaults. Pair with [`sortable_table_js`](@ref).
 """
 function sortable_table_styles()
     h.style("""
@@ -3265,15 +3274,15 @@ function sortable_table_styles()
 /* Body cells with a hyperscript handler are clickable too (htmx-attr cells
    already get cursor:pointer from the global rule in htmxo_utility_styles). */
 .htmxo-sortable-table tbody td[_] { cursor: pointer; }
-/* Hover-highlight primary rows. The sortable_table_js convention pairs a
-   primary row `tr#row-<id>` with a hidden detail row `tr#detail-<id>`. */
+}
+/* Master/detail paired-row rules — INTENTIONALLY UNLAYERED so they beat
+   Pico's unlayered tr/td defaults. The sortable_table_js convention pairs
+   a primary row `tr#row-<key>` with a hidden detail row `tr#detail-<key>`. */
 .htmxo-sortable-table tbody tr[id^="row-"]:hover {
     background: var(--pico-table-row-stripped-background-color);
 }
-/* Detail rows borrow the primary row's full width. The detail cell is just
-   a container; padding/border belong to the inner content. */
+.htmxo-sortable-table tbody tr[id^="row-"][onclick] > td { cursor: pointer; }
 .htmxo-sortable-table tbody tr[id^="detail-"] > td { padding: 0; border: none; }
-}
 """)
 end
 
@@ -3489,8 +3498,8 @@ end
 
 """
     master_detail_pair(key, master_cells, detail_body, ncols::Int;
-                       master_class="htmxo-master-row",
-                       detail_class="htmxo-detail-row",
+                       master_class=nothing,
+                       detail_class=nothing,
                        master_attrs=())
 
 Build the `(master_tr, detail_tr)` pair for one master/detail item.
@@ -3508,8 +3517,11 @@ initially (`hidden=true`) and wraps `detail_body` in a single
   `colspan` so the detail aligns with the table width).
 
 # Keyword arguments
-- `master_class`, `detail_class`: CSS classes; defaults hook
-  [`master_detail_styles`](@ref).
+- `master_class`, `detail_class`: extra CSS classes on the two rows
+  (default `nothing` — no extra class). The `row-…` / `detail-…` id
+  pattern is what [`sortable_table_styles`](@ref) and the
+  `sortable_table_js` companion-pair lookup key off; classes are for
+  app-side styling on top.
 - `master_attrs`: iterable of `name => value` pairs (or a NamedTuple)
   for extra attributes on the master `<tr>` (`data_status`, `data_aid`,
   `data_activity`, `data_sort_value`, …). Note: HTML attribute names
@@ -3522,29 +3534,32 @@ column sort. Use [`master_detail_table`](@ref) to do the interleaving
 for you.
 
 Initial `aria-expanded` is intentionally not set — the `h` builder
-drops string-valued `aria_expanded="false"` anyway, and the styles
-key the collapsed look off `:not([aria-expanded="true"])` so both the
-initial (no attribute) and post-collapse (`="false"`) states match.
+drops string-valued `aria_expanded="false"` anyway, and the toggle
+sets it on first click. Collapsed-look CSS should key off
+`:not([aria-expanded="true"])` so both the initial (no attribute) and
+post-collapse (`="false"`) states match.
 
 For an inline form inside `detail_body`, prefer `hx-swap="none"` and
 suppress any `HX-Redirect` on the response — otherwise a successful
 POST yanks the user off the table.
 """
 function master_detail_pair(key, master_cells, detail_body, ncols::Int;
-                            master_class="htmxo-master-row",
-                            detail_class="htmxo-detail-row",
+                            master_class=nothing,
+                            detail_class=nothing,
                             master_attrs=())
     safe = _md_safe_key(key)
     tr_kwargs = Dict{Symbol,Any}(
         :id      => "row-$safe",
-        :class   => master_class,
         :onclick => master_detail_toggle_js(safe),
     )
+    isnothing(master_class) || (tr_kwargs[:class] = master_class)
     for (k, v) in pairs(master_attrs)
         tr_kwargs[Symbol(k)] = v
     end
     master = h.tr(; tr_kwargs...)(master_cells...)
-    detail = h.tr(id="detail-$safe", class=detail_class, hidden=true)(
+    detail_kwargs = Dict{Symbol,Any}(:id => "detail-$safe", :hidden => true)
+    isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
+    detail = h.tr(; detail_kwargs...)(
         h.td(colspan=string(ncols))(detail_body),
     )
     (master, detail)
@@ -3554,8 +3569,8 @@ end
     master_detail_table(headers, items;
                         key, master, detail,
                         master_attrs=nothing,
-                        master_class="htmxo-master-row",
-                        detail_class="htmxo-detail-row",
+                        master_class=nothing,
+                        detail_class=nothing,
                         kwargs...)
 
 Render a `sortable_table` whose primary rows expand into paired,
@@ -3576,8 +3591,7 @@ interactive-descendant click guard, no-initial-`aria-expanded`, paired
   inside one `<td colspan=ncols>`).
 - `master_attrs(item)`: optional function returning an iterable of
   `name => value` pairs for extra `<tr>` attributes on the master row.
-- `master_class`, `detail_class`: CSS classes on the rows; defaults
-  hook [`master_detail_styles`](@ref).
+- `master_class`, `detail_class`: optional extra CSS classes on the rows.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
@@ -3586,16 +3600,15 @@ Detail bodies are always eager — for lazy-load patterns (a slot with
 [`master_detail_pair`](@ref) and a custom onclick built on
 [`master_detail_toggle_js`](@ref).
 
-Include [`sortable_table_js`](@ref) on the page (for sort + companion
-pinning) and [`master_detail_styles`](@ref) **outside any `@layer`**
-(Pico styles `tr`/`td` unlayered and an unlayered rule wins regardless
-of specificity — see `htmxo-semantic-styling` cracked pattern 9).
+Include [`sortable_table_js`](@ref) on the page (which also brings in
+the master/detail hover + detail-cell reset rules via
+[`sortable_table_styles`](@ref)).
 """
 function master_detail_table(headers, items;
                              key, master, detail,
                              master_attrs=nothing,
-                             master_class="htmxo-master-row",
-                             detail_class="htmxo-detail-row",
+                             master_class=nothing,
+                             detail_class=nothing,
                              kwargs...)
     ncols = length(headers)
     rows = Any[]
@@ -3606,32 +3619,6 @@ function master_detail_table(headers, items;
         push!(rows, m, d)
     end
     sortable_table(headers, rows; kwargs...)
-end
-
-"""
-    master_detail_styles()
-
-Return an `h.style(...)` node with the default CSS for master/detail
-rows produced by [`master_detail_pair`](@ref) / [`master_detail_table`](@ref).
-
-Rules are **intentionally OUTSIDE any `@layer` block** — Pico styles
-`<tr>` and `<td>` unlayered, and an unlayered rule beats any `@layer`-ed
-rule regardless of specificity. Wrapping these in `@layer htmxo` would
-leave the detail-cell padding/border reset and the master-row hover
-ineffective against Pico. See `htmxo-semantic-styling` cracked pattern
-9 for the full reasoning.
-
-Include this once per page (e.g. in `extra_head` alongside
-`sortable_table_js`).
-"""
-function master_detail_styles()
-    h.style(raw"""
-/* master/detail row styles — INTENTIONALLY UNLAYERED (see master_detail_styles
-   docstring). Do not wrap in `@layer`. */
-.htmxo-master-row { cursor: pointer; }
-.htmxo-master-row:hover { background: var(--pico-table-row-stripped-background-color); }
-.htmxo-detail-row > td { padding: 0; border: none; }
-""")
 end
 
 # --- Formatting helpers ---
