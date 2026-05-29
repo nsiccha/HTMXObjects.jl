@@ -3220,7 +3220,12 @@ function sortTable(col, th) {
         if (!r.id) return null;
         const idx = r.id.indexOf('-');
         if (idx < 0) return null;
-        return tbody.querySelector(':scope > #detail-' + r.id.slice(idx + 1));
+        // Pair via an attribute selector, NOT `#detail-<key>`: row keys can
+        // contain `:` (e.g. agent ids like `Claude:agents2`) or start with a
+        // digit (timestamp slugs), both of which are illegal in a `#id`
+        // selector and would throw. `[id="..."]` sidesteps CSS-identifier
+        // rules; our keys never contain `"`.
+        return tbody.querySelector(':scope > [id="detail-' + r.id.slice(idx + 1) + '"]');
     };
     const asc = th.dataset.sortDir !== 'asc';
     th.dataset.sortDir = asc ? 'asc' : 'desc';
