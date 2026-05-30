@@ -212,14 +212,28 @@ receives every posted value.
 
 Reads the body via `HTTP.payload`; an empty body yields an empty dict.
 """
-# `copy` the payload before `String` consumes it: `String(::Vector{UInt8})`
-# takes ownership and EMPTIES the source vector. `HTTP.payload(req)` is
-# `req.body`, so without the copy this destructively zeroes the request body —
-# the codegen'd POST/PUT/PATCH arg extractor calls `formparams` before the
-# handler body runs, leaving any handler that needs the raw body (e.g.
-# multipart upload via `HTTP.parse_multipart_form`) with 0 bytes. The copy is
-# read-only w.r.t. `req`; existing urlencoded callers only read the parsed Dict.
-formparams(req::HTTP.Request) = _parse_form_encoded(String(copy(HTTP.payload(req))))
+function formparams(req::HTTP.Request)
+    # Only an `application/x-www-form-urlencoded` body is parseable here — it's
+    # the wire format `_parse_form_encoded` understands. A `multipart/form-data`
+    # (file upload), JSON, or other binary body must NOT be fed to the
+    # urlencoded parser: `unescapeuri` hits a raw `%` (0x25) byte followed by
+    # non-hex bytes and throws `ArgumentError: invalid base 16 digit`. The
+    # codegen'd POST/PUT/PATCH arg extractor calls `formparams` unconditionally,
+    # so without this gate every multipart upload route 500s on a realistic
+    # (non-trivially-byte-patterned) file. Such handlers read the raw body
+    # themselves (e.g. `HTTP.parse_multipart_form`); any kwargs they declare
+    # fall back to `queryparams`. Parse only when the content-type says
+    # urlencoded, or is absent (a headerless client posting a urlencoded body).
+    ct = lowercase(HTTP.header(req, "Content-Type", ""))
+    isempty(ct) || occursin("application/x-www-form-urlencoded", ct) ||
+        return Dict{String, Union{String, Vector{String}}}()
+    # `copy` the payload before `String` consumes it: `String(::Vector{UInt8})`
+    # takes ownership and EMPTIES the source vector (`HTTP.payload(req)` IS
+    # `req.body`), which would zero the body for any handler that reads it after
+    # the arg extractor runs. The copy is read-only w.r.t. `req`; existing
+    # urlencoded callers only read the parsed Dict, so behaviour is unchanged.
+    _parse_form_encoded(String(copy(HTTP.payload(req))))
+end
 
 """
     _wrap_ws_bodies!(struct_expr)
