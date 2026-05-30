@@ -14,7 +14,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -1203,6 +1203,7 @@ function htmx(args...;
     hyperscript_version = "0.9.14",
     pico_version        = nothing,
     feedback             = true,
+    compose              = true,
     extra_head          = (),
 )
     cdn = []
@@ -1221,6 +1222,7 @@ function htmx(args...;
             htmxo_theme(),
             (isnothing(pico_version) ? () : (pico_bridge(),))...,
             (feedback ? request_feedback() : ())...,
+            (compose ? compose_box_assets() : ())...,
             htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
@@ -4735,6 +4737,172 @@ Combined style + script nodes for automatic HTMX request feedback.
 Included by default in `htmx()`.
 """
 request_feedback() = (request_feedback_style(), request_feedback_script())
+
+"""
+    compose_box_styles()
+
+CSS for the [`compose_box`](@ref) auto-growing compose textarea + the toast it
+raises on a failed submit. Deliberately **unlayered** (not inside
+`@layer htmxo`) so the `.htmxo-compose-textarea` class beats Pico's unlayered
+`textarea { resize: … }` rule — a layered rule would lose regardless of
+specificity and the drag-handle/scrollbar would reappear.
+"""
+compose_box_styles() = h.style(raw"""
+.htmxo-compose-textarea {
+    resize: none; overflow: hidden; field-sizing: content; line-height: 1.4;
+}
+.htmxo-toast {
+    position: fixed; bottom: 1rem; right: 1rem; z-index: 9999;
+    padding: 0.5rem 0.85rem; border-radius: 0.3rem; font-size: 0.85em;
+    background: var(--pico-card-background-color, #fff);
+    border: 1px solid var(--pico-muted-border-color, #ccc);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15); max-width: 28rem;
+    opacity: 0; transform: translateY(0.5rem);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.htmxo-toast-show { opacity: 1; transform: translateY(0); }
+.htmxo-toast-error { border-color: var(--pico-color-red-500, #d32f2f); color: var(--pico-color-red-500, #d32f2f); }
+.htmxo-toast-info { color: var(--pico-color, inherit); }
+""")
+
+"""
+    compose_box_script()
+
+JS driving [`compose_box`](@ref): auto-grow (no-op when the browser supports
+`field-sizing: content`, JS fallback otherwise), Enter-to-send /
+Shift+Enter-newline, localStorage draft persistence for `.htmxo-compose-draft`
+elements (keyed by `data-draft-key`), and a submit guard on
+`.htmxo-compose-form` forms (clear drafts + reset on 2xx, toast on
+failure / network error). Re-binds on `htmx:afterSettle`; idempotent per
+element. Exposes `window.htmxoToast(text, status)` and
+`window.htmxoComposeRebind(root)` for reuse. Body-listener attachment is
+deferred to `DOMContentLoaded` so the script is safe to inject in `<head>`.
+"""
+compose_box_script() = h.script(raw"""
+(function() {
+    var FIELD_SIZING = !!(window.CSS && CSS.supports && CSS.supports('field-sizing', 'content'));
+    function autoGrow(el) {
+        if (!el || FIELD_SIZING) return;
+        el.style.height = 'auto';
+        el.style.height = el.scrollHeight + 'px';
+    }
+    function draftKey(el) { return el.getAttribute('data-draft-key') || ''; }
+    function restoreDrafts(root) {
+        var scope = root && root.querySelectorAll ? root : document;
+        scope.querySelectorAll('.htmxo-compose-draft').forEach(function(el) {
+            if (el.dataset.htmxoDraftBound === '1') return;
+            el.dataset.htmxoDraftBound = '1';
+            var k = draftKey(el);
+            if (!k) return;
+            try { var saved = localStorage.getItem(k); if (saved && !el.value) el.value = saved; } catch (e) {}
+            if (el.classList.contains('htmxo-compose-textarea')) autoGrow(el);
+            el.addEventListener('input', function() {
+                try { if (el.value) localStorage.setItem(k, el.value); else localStorage.removeItem(k); } catch (e) {}
+            });
+        });
+    }
+    function bindTextareas(root) {
+        var scope = root && root.querySelectorAll ? root : document;
+        scope.querySelectorAll('.htmxo-compose-textarea').forEach(function(el) {
+            if (el.dataset.htmxoTaBound === '1') { autoGrow(el); return; }
+            el.dataset.htmxoTaBound = '1';
+            autoGrow(el);
+            el.addEventListener('input', function() { autoGrow(el); });
+            el.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    var f = el.closest('form');
+                    if (!f) return;
+                    if (f.requestSubmit) f.requestSubmit();
+                    else f.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                }
+            });
+        });
+    }
+    function clearFormDrafts(form) {
+        form.querySelectorAll('.htmxo-compose-draft').forEach(function(el) {
+            var k = draftKey(el); if (!k) return;
+            try { localStorage.removeItem(k); } catch (e) {}
+        });
+    }
+    function toast(text, status) {
+        var t = document.createElement('div');
+        t.className = 'htmxo-toast htmxo-toast-' + (status || 'info');
+        t.textContent = text;
+        document.body.appendChild(t);
+        void t.offsetWidth;
+        t.classList.add('htmxo-toast-show');
+        setTimeout(function() {
+            t.classList.remove('htmxo-toast-show');
+            setTimeout(function() { t.remove(); }, 350);
+        }, 4000);
+    }
+    window.htmxoToast = toast;
+    window.htmxoComposeRebind = function(root) { restoreDrafts(root); bindTextareas(root); };
+    function init() {
+        restoreDrafts(document);
+        bindTextareas(document);
+        document.body.addEventListener('htmx:afterSettle', function(evt) {
+            restoreDrafts(evt.detail && evt.detail.elt);
+            bindTextareas(evt.detail && evt.detail.elt);
+        });
+        // 2xx → clear drafts + reset the form. Non-2xx → keep value, toast.
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            var form = evt.target && evt.target.closest && evt.target.closest('.htmxo-compose-form');
+            if (!form) return;
+            if (evt.detail && evt.detail.successful) {
+                clearFormDrafts(form);
+                form.reset();
+                form.querySelectorAll('.htmxo-compose-textarea').forEach(autoGrow);
+            } else {
+                toast('send failed — your text is preserved, retry when ready', 'error');
+            }
+        });
+        // No response at all (server down, network drop). Same UX as a non-2xx.
+        document.body.addEventListener('htmx:sendError', function(evt) {
+            var form = evt.target && evt.target.closest && evt.target.closest('.htmxo-compose-form');
+            if (!form) return;
+            toast('send failed — unreachable; your text is preserved', 'error');
+        });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
+})();
+""")
+
+"""
+    compose_box_assets()
+
+Combined style + script nodes for [`compose_box`](@ref). Injected into the
+page head by `htmx(...)` when `compose=true` (the default), mirroring
+[`request_feedback`](@ref).
+"""
+compose_box_assets() = (compose_box_styles(), compose_box_script())
+
+"""
+    compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="")
+
+Emit an auto-growing `<textarea>` compose box: it sizes to its content (one row
+when empty via `rows=1`, growing with each wrapped/entered line, no scrollbar
+or drag handle), and submits its enclosing `<form>` on Enter (Shift+Enter
+inserts a newline).
+
+For the draft-persistence and submit-feedback behaviour, the surrounding form
+should carry the `htmxo-compose-form` class — then a 2xx submit clears drafts +
+resets the box and a failed/again-unreachable submit raises a toast while
+preserving the typed text. Pass `draft_key` to persist the in-progress text to
+`localStorage` under that key (the box also gets the `htmxo-compose-draft`
+class). All behaviour is driven by [`compose_box_assets`](@ref), injected by
+`htmx(...; compose=true)` by default.
+"""
+function compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="")
+    cls = "htmxo-compose-textarea"
+    isnothing(draft_key) || (cls *= " htmxo-compose-draft")
+    isempty(class)       || (cls *= " " * class)
+    isnothing(draft_key) ?
+        h.textarea(value; name, rows, placeholder, class=cls) :
+        h.textarea(value; name, rows, placeholder, class=cls, data_draft_key=draft_key)
+end
 
 """
     loading_indicator_script()
