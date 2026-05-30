@@ -14,7 +14,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script
+export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -1288,6 +1288,7 @@ function htmx(args...;
     pico_version        = nothing,
     feedback             = true,
     compose              = true,
+    overlay              = true,
     extra_head          = (),
 )
     cdn = []
@@ -1307,6 +1308,7 @@ function htmx(args...;
             (isnothing(pico_version) ? () : (pico_bridge(),))...,
             (feedback ? request_feedback() : ())...,
             (compose ? compose_box_assets() : ())...,
+            (overlay ? overlay_bar() : ())...,
             htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
@@ -2232,20 +2234,30 @@ _with_error_status(req, resp::HTTP.Response) =
 _passthrough_response(r::HTTP.Response) = r
 _passthrough_response(_) = nothing
 
+# Expose the recorded error-log uid to the client as a response header so the
+# overlay bar's traffic-observer (D3) can attach it to a bug report without
+# scraping the rendered error body. Framework-namespaced (not `HX-*`) to stay
+# clear of htmx's reserved response-header namespace; same-origin so JS reads it
+# via `xhr.getResponseHeader('X-HTMXO-Error-Id')` with no CORS expose-list.
+function _stamp_error_id(resp::HTTP.Response, uid)
+    HTTP.setheader(resp, "X-HTMXO-Error-Id" => uid)
+    resp
+end
+
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
     uid, path = _record_error(err, bt, req)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _passthrough_response(err_val)
-    isnothing(direct) || return direct
+    isnothing(direct) || return _stamp_error_id(direct, uid)
     if wants_markdown(req)
-        return _with_error_status(req, markdown_response(to_markdown_string(err_val)))
+        return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val))), uid)
     end
-    is_htmx(req) && return to_response(err_val)   # always 200 for HTMX
+    is_htmx(req) && return _stamp_error_id(to_response(err_val), uid)   # always 200 for HTMX
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (err_val = wrapper(err_val))
     end
-    _with_error_status(req, to_response(err_val))
+    _stamp_error_id(_with_error_status(req, to_response(err_val)), uid)
 end
 
 """
@@ -2363,11 +2375,28 @@ _base_segments(path, n_params::Int) =
 # When `route!` is called without an explicit `prefix=` kwarg, mount_prefix is "".
 # In that case we must NOT pass `__prefix__=""` to the constructor — that would
 # clobber any default the struct itself sets in its body (e.g. an env-driven
-# `__prefix__ = get(ENV, "BASEPATH", "/proxy/8000")`). Only override when the
-# caller actually supplied a prefix. Children get their `__prefix__` via the
-# `@include` desugar reading `__self__.__prefix__`, so the resolved root value
-# propagates either way.
+# `__prefix__ = get(ENV, "BASEPATH", "/proxy/8000")`). Only override when there is
+# an actual prefix to set. Children get their `__prefix__` via the `@include`
+# desugar reading `__self__.__prefix__`, so the resolved root value propagates
+# either way.
 _prefix_kw(mp) = isempty(mp) ? NamedTuple() : (; __prefix__=mp)
+
+# Per-request mount prefix (Fork B — overlay/same-origin support). Resolution
+# order, computed at root construction where `req` is in scope:
+#   1. an explicit registration prefix (`route!(...; prefix=)`) always wins;
+#   2. else the `X-Forwarded-Prefix` header a reverse-proxy sets (the KB's
+#      `/p/<slug>` proxy, or Strato) — so every app is prefix-aware behind a
+#      proxy with zero app code;
+#   3. else "" — `_prefix_kw` then passes nothing, preserving any struct-body
+#      `__prefix__` default (e.g. an env-driven BASEPATH).
+# The header value is normalized to a single leading slash, no trailing slash
+# (`/p/raumplan`), matching how `__prefix__` is printed verbatim as a URL prefix.
+function _request_prefix(req::HTTP.Request, registration_prefix::AbstractString)
+    isempty(registration_prefix) || return registration_prefix
+    fwd = HTTP.header(req, "X-Forwarded-Prefix", "")
+    fwd = strip(fwd, '/')
+    isempty(fwd) ? "" : "/" * fwd
+end
 
 # Per-request URL of the route being handled, with query string stripped —
 # used to populate `__route__` on the struct so route bodies can write
@@ -2414,7 +2443,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     _register_handler(method, path, function(req)
         local root, leaf
         try
-            root = RootT(; __req__=req, __route__=_request_route_path(req), _prefix_kw(root_prefix)...)
+            root = RootT(; __req__=req, __route__=_request_route_path(req), _prefix_kw(_request_prefix(req, root_prefix))...)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -2582,7 +2611,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             ws_verb = Verb{:WEBSOCKET}()
             register(CONTEXT[], "WEBSOCKET", path, function(ws)
                 idx_vals, kw_pairs = _extract_args(RouteT, Val(name), ws_verb, ws.request, ws_base, n_params)
-                prop = getproperty(RouteT(; __req__=ws.request, _prefix_kw(mount_prefix)...), name)
+                prop = getproperty(RouteT(; __req__=ws.request, _prefix_kw(_request_prefix(ws.request, mount_prefix))...), name)
                 lambda = prop(ws_verb, idx_vals...; NamedTuple(kw_pairs)...)
                 lambda(ws)
             end)
@@ -4825,6 +4854,227 @@ Combined style + script nodes for automatic HTMX request feedback.
 Included by default in `htmx()`.
 """
 request_feedback() = (request_feedback_style(), request_feedback_script())
+
+"""
+    overlay_bar_style()
+
+CSS for the framework debug/dev overlay bar — a thin fixed bottom strip
+(collapsed: app · route · owner · Report; opened: the bug/feedback report
+form). Plain `#id`-scoped rules (no `@layer`) so it sits above app content
+and Pico regardless of stacking. Injected by [`htmx`](@ref) when `overlay=true`.
+"""
+overlay_bar_style() = h.style("""
+#htmxo-overlay-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000;
+  font: 13px/1.4 system-ui, -apple-system, sans-serif;
+  background: var(--htmxo-overlay-bg, #1e1e2e); color: var(--htmxo-overlay-fg, #e8e8f0);
+  border-top: 1px solid rgba(255,255,255,.12); box-shadow: 0 -2px 12px rgba(0,0,0,.25);
+}
+#htmxo-overlay-bar .hob-collapsed { display: flex; align-items: center; gap: 1rem; padding: 4px 12px; }
+#htmxo-overlay-bar .hob-id { flex: 1 1 auto; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#htmxo-overlay-bar .hob-route { opacity: .85; font-weight: 400; }
+#htmxo-overlay-bar .hob-owner { opacity: .75; }
+#htmxo-overlay-bar .hob-toggle { background: rgba(255,255,255,.12); color: inherit; border: 0; border-radius: 4px; padding: 2px 10px; cursor: pointer; font: inherit; }
+#htmxo-overlay-bar[data-state="collapsed"] .hob-form { display: none; }
+#htmxo-overlay-bar[data-state="open"] .hob-collapsed { display: none; }
+#htmxo-overlay-bar .hob-form { display: block; padding: 8px 12px; max-width: 680px; }
+#htmxo-overlay-bar .hob-formhead { display: flex; gap: 1rem; align-items: center; margin-bottom: 6px; font-weight: 600; }
+#htmxo-overlay-bar .hob-fh-id { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#htmxo-overlay-bar .hob-fh-owner { opacity: .75; font-weight: 400; }
+#htmxo-overlay-bar .hob-kind { display: flex; gap: 1rem; margin-bottom: 6px; }
+#htmxo-overlay-bar .hob-text { width: 100%; box-sizing: border-box; background: rgba(0,0,0,.25); color: inherit; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; padding: 6px; font: inherit; resize: vertical; }
+#htmxo-overlay-bar .hob-opts { display: flex; gap: 1rem; margin: 6px 0; opacity: .9; }
+#htmxo-overlay-bar .hob-actions { display: flex; align-items: center; gap: 1rem; }
+#htmxo-overlay-bar .hob-status { opacity: .85; }
+#htmxo-overlay-bar .hob-send { margin-left: auto; background: var(--htmxo-overlay-accent, #7c6ff0); color: #fff; border: 0; border-radius: 4px; padding: 4px 16px; cursor: pointer; font: inherit; font-weight: 600; }
+#htmxo-overlay-bar .hob-send:disabled { opacity: .5; cursor: default; }
+#htmxo-overlay-bar code { background: rgba(0,0,0,.3); padding: 0 4px; border-radius: 3px; }
+@media print { #htmxo-overlay-bar { display: none; } }
+""")
+
+"""
+    overlay_bar_script()
+
+JS for the overlay bar (D1 + D3). On `DOMContentLoaded` it builds the strip
+DOM, resolves where-you-are from `window.location` (proxied `/p/<slug>/…` →
+slug from the path; direct → app via `/agents/app-for-port?port=`), and
+attaches `document.body` htmx-event listeners: route tracking through partial
+swaps (`htmx:pushedIntoHistory` / `htmx:historyRestore` / `popstate` /
+`htmx:afterSettle`) and a traffic observer (`htmx:afterRequest` /
+`htmx:sendError`) that captures a FAILED app request — reading the
+`X-HTMXO-Error-Id` response header — as pre-filled bug context. The report
+posts raw context to the root-absolute `POST /agents/report`; the KB resolves
+the owner and files the todo. All KB calls are root-absolute (same-origin via
+the prefix-proxy) and degrade visibly if an endpoint isn't reachable.
+"""
+overlay_bar_script() = h.script("""
+document.addEventListener('DOMContentLoaded', function() {
+  if (window.__htmxoOverlayInit) { return; }
+  window.__htmxoOverlayInit = true;
+
+  var ctx = { app: '', route: '/', url: '', owner: '', proxied: false };
+  var lastError = null;
+  var bar, collapsedOwner, fhId, fhOwner, errRow, errUid, statusEl, textEl, sendBtn, inclErr, appEl, routeEl;
+
+  function parseLocation() {
+    var path = window.location.pathname || '/';
+    var parts = path.split('/').filter(function(s) { return s.length > 0; });
+    if (parts.length >= 2 && parts[0] === 'p') {
+      ctx.proxied = true; ctx.app = parts[1]; ctx.route = '/' + parts.slice(2).join('/');
+    } else {
+      ctx.proxied = false; ctx.route = path;
+    }
+    if (ctx.route === '') { ctx.route = '/'; }
+    ctx.url = window.location.href;
+  }
+
+  function buildBar() {
+    bar = document.createElement('div');
+    bar.id = 'htmxo-overlay-bar';
+    bar.setAttribute('data-state', 'collapsed');
+    bar.innerHTML =
+      '<div class="hob-collapsed">' +
+        '<span class="hob-id"><span class="hob-app"></span> · <span class="hob-route"></span></span>' +
+        '<span class="hob-owner"></span>' +
+        '<button type="button" class="hob-toggle">Report &#9650;</button>' +
+      '</div>' +
+      '<form class="hob-form">' +
+        '<div class="hob-formhead"><span class="hob-fh-id"></span><span class="hob-fh-owner"></span>' +
+          '<button type="button" class="hob-toggle">&#9660;</button></div>' +
+        '<div class="hob-kind">' +
+          '<label><input type="radio" name="hob-kind" value="bug" checked> bug</label>' +
+          '<label><input type="radio" name="hob-kind" value="feedback"> feedback</label>' +
+        '</div>' +
+        '<textarea class="hob-text" rows="3" placeholder="what happened…"></textarea>' +
+        '<div class="hob-opts">' +
+          '<label><input type="checkbox" class="hob-incl-ctx" checked> route+state</label>' +
+          '<label class="hob-errrow" hidden><input type="checkbox" class="hob-incl-err" checked> error-log <code class="hob-erruid"></code></label>' +
+        '</div>' +
+        '<div class="hob-actions"><span class="hob-status"></span>' +
+          '<button type="button" class="hob-send">Send</button></div>' +
+      '</form>';
+    document.body.appendChild(bar);
+    appEl = bar.querySelector('.hob-app');
+    routeEl = bar.querySelector('.hob-route');
+    collapsedOwner = bar.querySelector('.hob-owner');
+    fhId = bar.querySelector('.hob-fh-id');
+    fhOwner = bar.querySelector('.hob-fh-owner');
+    errRow = bar.querySelector('.hob-errrow');
+    errUid = bar.querySelector('.hob-erruid');
+    statusEl = bar.querySelector('.hob-status');
+    textEl = bar.querySelector('.hob-text');
+    sendBtn = bar.querySelector('.hob-send');
+    inclErr = bar.querySelector('.hob-incl-err');
+    var toggles = bar.querySelectorAll('.hob-toggle');
+    for (var i = 0; i < toggles.length; i++) { toggles[i].addEventListener('click', toggleOpen); }
+    sendBtn.addEventListener('click', send);
+  }
+
+  function render() {
+    var appLabel = ctx.app || '(app)';
+    appEl.textContent = '🐞 ' + appLabel;
+    routeEl.textContent = ctx.route;
+    collapsedOwner.textContent = ctx.owner ? ('👤 ' + ctx.owner) : '';
+    fhId.textContent = appLabel + ' · ' + ctx.route;
+    fhOwner.textContent = ctx.owner ? ('owner: ' + ctx.owner) : '';
+  }
+
+  function refresh() { parseLocation(); render(); }
+
+  function toggleOpen() {
+    var open = bar.getAttribute('data-state') === 'open';
+    bar.setAttribute('data-state', open ? 'collapsed' : 'open');
+    if (!open) { statusEl.textContent = ''; refresh(); }
+  }
+
+  function resolveOwner() {
+    var q = ctx.proxied ? ('slug=' + encodeURIComponent(ctx.app))
+                        : ('port=' + encodeURIComponent(window.location.port));
+    fetch('/agents/app_for_port?' + q, { headers: { 'Accept': 'application/json' } })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(d) {
+        if (!d) { return; }
+        if (d.slug && !ctx.app) { ctx.app = d.slug; }
+        if (d.owner) { ctx.owner = d.owner; }
+        render();
+      })
+      .catch(function() {});
+  }
+
+  function captureError(uid, status) {
+    lastError = { uid: uid, status: status };
+    errRow.hidden = false;
+    errUid.textContent = uid ? ('#' + uid) : ('HTTP ' + status);
+    var bug = bar.querySelector('input[name="hob-kind"][value="bug"]');
+    if (bug) { bug.checked = true; }
+  }
+
+  function attachObservers() {
+    document.body.addEventListener('htmx:pushedIntoHistory', refresh);
+    document.body.addEventListener('htmx:historyRestore', refresh);
+    window.addEventListener('popstate', refresh);
+    document.body.addEventListener('htmx:afterSettle', refresh);
+    document.body.addEventListener('htmx:afterRequest', function(e) {
+      var xhr = e.detail && e.detail.xhr;
+      if (!xhr) { return; }
+      var failed = (e.detail.successful === false) || (xhr.status >= 400);
+      if (!failed) { return; }
+      var uid = '';
+      try { uid = xhr.getResponseHeader('X-HTMXO-Error-Id') || ''; } catch (err) {}
+      captureError(uid, xhr.status);
+    });
+    document.body.addEventListener('htmx:sendError', function(e) { captureError('', 0); });
+  }
+
+  function send() {
+    refresh();
+    var kindEl = bar.querySelector('input[name="hob-kind"]:checked');
+    var inclErrOn = inclErr && !errRow.hidden && inclErr.checked;
+    var body = new URLSearchParams();
+    body.set('kind', kindEl ? kindEl.value : 'bug');
+    body.set('text', textEl.value || '');
+    body.set('app', ctx.app || '');
+    body.set('route', ctx.route || '');
+    body.set('url', ctx.url || '');
+    var euid = (inclErrOn && lastError) ? (lastError.uid || '') : '';
+    if (euid) { body.set('error_uid', euid); }
+    // screenshot: reserved field, not captured in v1 (omitted when none).
+    statusEl.textContent = 'sending…';
+    sendBtn.disabled = true;
+    fetch('/agents/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    }).then(function(r) {
+      if (!r.ok) { return Promise.reject('HTTP ' + r.status); }
+      return r.json().catch(function() { return {}; });
+    }).then(function(d) {
+      statusEl.textContent = 'filed' + ((d && d.owner) ? (' → ' + d.owner) : '');
+      textEl.value = '';
+      setTimeout(function() { bar.setAttribute('data-state', 'collapsed'); statusEl.textContent = ''; }, 1800);
+    }).catch(function(err) {
+      statusEl.textContent = 'could not file (' + err + ')';
+    }).then(function() { sendBtn.disabled = false; });
+  }
+
+  buildBar();
+  parseLocation();
+  render();
+  resolveOwner();
+  attachObservers();
+});
+""")
+
+"""
+    overlay_bar()
+
+Combined style + script for the framework debug/dev overlay bar (the v1
+feedback spine). Injected by [`htmx`](@ref) on full-page responses when
+`overlay=true` (the default; pass `overlay=false` to opt out). The bar resolves
+its own context client-side and talks to the KB root-absolute, mirroring
+[`request_feedback`](@ref)'s zero-server-context model.
+"""
+overlay_bar() = (overlay_bar_style(), overlay_bar_script())
 
 """
     compose_box_styles()
