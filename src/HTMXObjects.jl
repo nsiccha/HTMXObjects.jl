@@ -212,7 +212,14 @@ receives every posted value.
 
 Reads the body via `HTTP.payload`; an empty body yields an empty dict.
 """
-formparams(req::HTTP.Request) = _parse_form_encoded(String(HTTP.payload(req)))
+# `copy` the payload before `String` consumes it: `String(::Vector{UInt8})`
+# takes ownership and EMPTIES the source vector. `HTTP.payload(req)` is
+# `req.body`, so without the copy this destructively zeroes the request body —
+# the codegen'd POST/PUT/PATCH arg extractor calls `formparams` before the
+# handler body runs, leaving any handler that needs the raw body (e.g.
+# multipart upload via `HTTP.parse_multipart_form`) with 0 bytes. The copy is
+# read-only w.r.t. `req`; existing urlencoded callers only read the parsed Dict.
+formparams(req::HTTP.Request) = _parse_form_encoded(String(copy(HTTP.payload(req))))
 
 """
     _wrap_ws_bodies!(struct_expr)
