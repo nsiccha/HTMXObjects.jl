@@ -2,7 +2,7 @@ module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
 export create_app
-export HTTP, queryparams, formparams, formdata
+export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString
 export route!, record!, to_response, save_response, static_transform, MIMEResponse,
@@ -233,6 +233,68 @@ function formparams(req::HTTP.Request)
     # the arg extractor runs. The copy is read-only w.r.t. `req`; existing
     # urlencoded callers only read the parsed Dict, so behaviour is unchanged.
     _parse_form_encoded(String(copy(HTTP.payload(req))))
+end
+
+"""
+    Upload
+
+One uploaded part of a `multipart/form-data` request body, as bound to a route
+kwarg by the POST/PUT/PATCH argument extractor. `filename` is the client-supplied
+name, `contenttype` the part's declared MIME type, `data` the raw bytes, `name`
+the form field name. Declare `@post upload(; file)` and the handler receives an
+`Upload` for `file` — no need to call `HTTP.parse_multipart_form` yourself.
+"""
+struct Upload
+    name::String
+    filename::String
+    contenttype::String
+    data::Vector{UInt8}
+end
+Base.show(io::IO, u::Upload) =
+    print(io, "Upload(", repr(u.filename), ", ", repr(u.contenttype), ", ", length(u.data), " bytes)")
+
+# Multi-value append for repeated multipart field names. Value-type-agnostic
+# (works for `Upload` and `String` parts alike), mirroring `_form_append`.
+_mp_append(existing::AbstractVector, v) = (push!(existing, v); existing)
+_mp_append(existing, v) = Any[existing, v]
+
+"""
+    multipartparams(req::HTTP.Request) -> Dict{String, Any}
+
+Parse a `multipart/form-data` body into a field-name → value map: a file part
+(one carrying a filename) becomes an [`Upload`](@ref); a plain text part becomes
+a `String`. Repeated field names collect into a `Vector`. Returns an empty dict
+when the body isn't valid multipart. Non-destructive — `HTTP.parse_multipart_form`
+reads `req.body` through its own buffer, leaving the request body intact.
+"""
+function multipartparams(req::HTTP.Request)
+    d = Dict{String, Any}()
+    parts = HTTP.parse_multipart_form(req)
+    parts === nothing && return d
+    for p in parts
+        fname = p.filename === nothing ? "" : p.filename
+        val = isempty(fname) ? String(read(p)) : Upload(p.name, fname, p.contenttype, read(p))
+        d[p.name] = haskey(d, p.name) ? _mp_append(d[p.name], val) : val
+    end
+    d
+end
+
+"""
+    bodyparams(req::HTTP.Request) -> AbstractDict
+
+The request-body parameter source for the POST/PUT/PATCH argument extractor:
+a `multipart/form-data` body routes to [`multipartparams`](@ref) (text fields as
+`String`, file fields as [`Upload`](@ref)); everything else routes to
+[`formparams`](@ref) (which itself only parses an
+`application/x-www-form-urlencoded` body and returns an empty dict otherwise).
+This is what lets a declared kwarg bind from either body shape through the one
+shared `_lookup_param` path — `@post f(; x)` for a urlencoded field and
+`@post upload(; file)` for a file both Just Work.
+"""
+function bodyparams(req::HTTP.Request)
+    ct = lowercase(HTTP.header(req, "Content-Type", ""))
+    occursin("multipart/form-data", ct) && return multipartparams(req)
+    formparams(req)
 end
 
 """
@@ -1152,9 +1214,10 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
     end
 
     # Source selection is fixed at codegen time: GET/DELETE/WEBSOCKET pull
-    # from queryparams, the rest from formparams (with queryparams fallback).
-    # Both parsers preserve multi-value keys (repeated `?tag=a&tag=b` or
-    # repeated body fields `image=a&image=b` arrive as a `Vector{String}`).
+    # from queryparams, the rest from bodyparams (with queryparams fallback).
+    # bodyparams routes by Content-Type: urlencoded → formparams (multi-value
+    # preserved, repeated `image=a&image=b` → `Vector{String}`), multipart →
+    # multipartparams (file fields → `Upload`, text fields → `String`).
     _is_query_verb = verb_short in (:GET, :DELETE, :WEBSOCKET)
 
     _M = @__MODULE__
@@ -1177,7 +1240,7 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
     else
         quote
             __parts__ = split(split(__req__.target, "?")[1], "/", keepempty=false)
-            __src__ = $(formparams)(__req__)
+            __src__ = $(bodyparams)(__req__)
             __fallback__ = $(queryparams)(__req__)
             __idx__ = Any[]
             $(pos_stmts...)
@@ -1717,12 +1780,16 @@ _convert_param(val::AbstractVector, T::Type{<:AbstractVector}) = val  # multi-va
 _convert_param(val::AbstractVector, T::Type) =
     error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
 _convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # single/empty → vector
+# Multipart Upload values flow through the same lookup path. Untyped (`::Nothing`)
+# is already covered by the `_convert_param(val, ::Nothing) = val` catch-all above.
+_convert_param(val::Upload, ::Type{Upload}) = val
+_convert_param(val::Upload, T::Type{<:AbstractVector}) = [val]  # single file declared as a Vector
 
 # Determine whether kwargs come from queryparams (GET/DELETE) or formparams (POST/PUT/PATCH).
 const _queryparams_verbs = Set(["GET", "DELETE"])
 function _kwargs_source(req, method)
     method in _queryparams_verbs && return queryparams(req)
-    formparams(req)
+    bodyparams(req)
 end
 
 # Sentinel for "no default provided" / "key was absent". Distinguishes required
