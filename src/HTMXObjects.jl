@@ -4875,8 +4875,12 @@ overlay_bar_style() = h.style("""
 #htmxo-overlay-bar .hob-route { opacity: .85; font-weight: 400; }
 #htmxo-overlay-bar .hob-owner { opacity: .75; }
 #htmxo-overlay-bar .hob-toggle { background: rgba(255,255,255,.12); color: inherit; border: 0; border-radius: 4px; padding: 2px 10px; cursor: pointer; font: inherit; }
-#htmxo-overlay-bar[data-state="collapsed"] .hob-form { display: none; }
-#htmxo-overlay-bar[data-state="open"] .hob-collapsed { display: none; }
+#htmxo-overlay-bar[data-state="collapsed"] .hob-form,
+#htmxo-overlay-bar[data-state="collapsed"] .hob-chat { display: none; }
+#htmxo-overlay-bar[data-state="open"] .hob-collapsed,
+#htmxo-overlay-bar[data-state="open"] .hob-chat { display: none; }
+#htmxo-overlay-bar[data-state="chat"] .hob-collapsed,
+#htmxo-overlay-bar[data-state="chat"] .hob-form { display: none; }
 #htmxo-overlay-bar .hob-form { display: block; padding: 8px 12px; max-width: 680px; }
 #htmxo-overlay-bar .hob-formhead { display: flex; gap: 1rem; align-items: center; margin-bottom: 6px; font-weight: 600; }
 #htmxo-overlay-bar .hob-fh-id { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4889,6 +4893,21 @@ overlay_bar_style() = h.style("""
 #htmxo-overlay-bar .hob-send { margin-left: auto; background: var(--htmxo-overlay-accent, #7c6ff0); color: #fff; border: 0; border-radius: 4px; padding: 4px 16px; cursor: pointer; font: inherit; font-weight: 600; }
 #htmxo-overlay-bar .hob-send:disabled { opacity: .5; cursor: default; }
 #htmxo-overlay-bar code { background: rgba(0,0,0,.3); padding: 0 4px; border-radius: 3px; }
+#htmxo-overlay-bar[data-state="chat"] .hob-chat { display: flex; flex-direction: column; padding: 8px 12px; max-width: 680px; max-height: 60vh; }
+#htmxo-overlay-bar .hob-chathead { display: flex; gap: 1rem; align-items: center; margin-bottom: 6px; font-weight: 600; }
+#htmxo-overlay-bar .hob-ch-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#htmxo-overlay-bar .hob-ch-todo { color: var(--htmxo-overlay-accent, #7c6ff0); text-decoration: none; font-weight: 400; }
+#htmxo-overlay-bar .hob-ch-pick,
+#htmxo-overlay-bar .hob-ch-close { background: rgba(255,255,255,.12); color: inherit; border: 0; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: inherit; font-size: 12px; }
+#htmxo-overlay-bar .hob-ch-thread { overflow-y: auto; max-height: 40vh; background: rgba(0,0,0,.18); border-radius: 4px; padding: 6px; margin-bottom: 6px; }
+#htmxo-overlay-bar .hob-ch-thread .kb-msg-window { margin: 0; }
+#htmxo-overlay-bar .hob-ch-compose { display: flex; gap: .5rem; align-items: flex-end; }
+#htmxo-overlay-bar .hob-ch-text { flex: 1 1 auto; box-sizing: border-box; background: rgba(0,0,0,.25); color: inherit; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; padding: 6px; font: inherit; resize: vertical; }
+#htmxo-overlay-bar .hob-ch-send { background: var(--htmxo-overlay-accent, #7c6ff0); color: #fff; border: 0; border-radius: 4px; padding: 6px 16px; cursor: pointer; font: inherit; font-weight: 600; }
+#htmxo-overlay-bar .hob-ch-send:disabled { opacity: .5; cursor: default; }
+#htmxo-overlay-bar .hob-ch-status { opacity: .85; margin-top: 4px; min-height: 1em; }
+#htmxo-overlay-bar .kb-bubble.hob-anchor { outline: 2px solid var(--htmxo-overlay-accent, #7c6ff0); outline-offset: 1px; border-radius: 4px; animation: hob-flash 1.4s ease-out; }
+@keyframes hob-flash { from { background: rgba(124,111,240,.4); } to { background: transparent; } }
 @media print { #htmxo-overlay-bar { display: none; } }
 """)
 
@@ -4904,8 +4923,21 @@ swaps (`htmx:pushedIntoHistory` / `htmx:historyRestore` / `popstate` /
 `htmx:sendError`) that captures a FAILED app request — reading the
 `X-HTMXO-Error-Id` response header — as pre-filled bug context. The report
 posts raw context to the root-absolute `POST /agents/report`; the KB resolves
-the owner and files the todo. All KB calls are root-absolute (same-origin via
-the prefix-proxy) and degrade visibly if an endpoint isn't reachable.
+the owner and files the todo.
+
+On a successful report the bar **morphs into a live chat** (`data-state="chat"`)
+with the resolved owner: it renders the owner's thread via
+`GET /agents/<owner>/messages?embedded=1&around=<seed-ts>` (chrome-stripped to
+the `kb-msg-window`), anchors+highlights the just-filed report bubble
+(`[data-ts]`, falling back to the latest-window + last bubble when `/report`
+returns no seed `ts`), and opens an inline reply box that `POST`s to
+`/agents/<owner>/dispatch` (`from=user`). Live updates ride the `@ws events()`
+hub at `/agents/events` (filtering the `messages:<owner>` marker), with a ~10s
+poll fallback until that marker is wired. A "change agent" control re-targets
+the chat and the owner's durable todo is cross-linked in the header.
+
+All KB calls are root-absolute (same-origin via the prefix-proxy) and degrade
+visibly if an endpoint isn't reachable.
 """
 overlay_bar_script() = h.script("""
 document.addEventListener('DOMContentLoaded', function() {
@@ -4915,6 +4947,9 @@ document.addEventListener('DOMContentLoaded', function() {
   var ctx = { app: '', route: '/', url: '', owner: '', proxied: false };
   var lastError = null;
   var bar, collapsedOwner, fhId, fhOwner, errRow, errUid, statusEl, textEl, sendBtn, inclErr, appEl, routeEl;
+  var chatThread, chatText, chatSendBtn, chatTitle, chatTodo, chatPick, chatClose, chatStatus;
+  var chatOwner = '', chatTodoUrl = '', chatWs = null, chatPoll = null;
+  var FUTURE_TS = '2099-01-01T00:00:00';
 
   function parseLocation() {
     var path = window.location.pathname || '/';
@@ -4952,7 +4987,21 @@ document.addEventListener('DOMContentLoaded', function() {
         '</div>' +
         '<div class="hob-actions"><span class="hob-status"></span>' +
           '<button type="button" class="hob-send">Send</button></div>' +
-      '</form>';
+      '</form>' +
+      '<div class="hob-chat">' +
+        '<div class="hob-chathead">' +
+          '<span class="hob-ch-title"></span>' +
+          '<a class="hob-ch-todo" target="_blank" rel="noopener" hidden>todo &#8599;</a>' +
+          '<button type="button" class="hob-ch-pick">change agent</button>' +
+          '<button type="button" class="hob-ch-close">&#9660;</button>' +
+        '</div>' +
+        '<div class="hob-ch-thread"></div>' +
+        '<div class="hob-ch-compose">' +
+          '<textarea class="hob-ch-text" rows="2" placeholder="reply to this agent…"></textarea>' +
+          '<button type="button" class="hob-ch-send">Send</button>' +
+        '</div>' +
+        '<div class="hob-ch-status"></div>' +
+      '</div>';
     document.body.appendChild(bar);
     appEl = bar.querySelector('.hob-app');
     routeEl = bar.querySelector('.hob-route');
@@ -4965,9 +5014,23 @@ document.addEventListener('DOMContentLoaded', function() {
     textEl = bar.querySelector('.hob-text');
     sendBtn = bar.querySelector('.hob-send');
     inclErr = bar.querySelector('.hob-incl-err');
+    chatTitle = bar.querySelector('.hob-ch-title');
+    chatTodo = bar.querySelector('.hob-ch-todo');
+    chatPick = bar.querySelector('.hob-ch-pick');
+    chatClose = bar.querySelector('.hob-ch-close');
+    chatThread = bar.querySelector('.hob-ch-thread');
+    chatText = bar.querySelector('.hob-ch-text');
+    chatSendBtn = bar.querySelector('.hob-ch-send');
+    chatStatus = bar.querySelector('.hob-ch-status');
     var toggles = bar.querySelectorAll('.hob-toggle');
     for (var i = 0; i < toggles.length; i++) { toggles[i].addEventListener('click', toggleOpen); }
     sendBtn.addEventListener('click', send);
+    chatSendBtn.addEventListener('click', sendChat);
+    chatPick.addEventListener('click', pickAgent);
+    chatClose.addEventListener('click', closeChat);
+    chatText.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    });
   }
 
   function render() {
@@ -5026,6 +5089,143 @@ document.addEventListener('DOMContentLoaded', function() {
     document.body.addEventListener('htmx:sendError', function(e) { captureError('', 0); });
   }
 
+  function fetchThread(aroundTs) {
+    var u = '/agents/' + encodeURIComponent(chatOwner) + '/messages?embedded=1&around=' + encodeURIComponent(aroundTs);
+    // HX-Request: true => the KB returns the bare kb-msg-window fragment (no full-page
+    // chrome); the kb-msg-window strip below is then just belt-and-suspenders.
+    return fetch(u, { headers: { 'Accept': 'text/html', 'HX-Request': 'true' } })
+      .then(function(r) { return r.ok ? r.text() : Promise.reject('HTTP ' + r.status); });
+  }
+
+  // Wake-safe anchor: seed_ts is a reliable LOWER BOUND, not the bubble's exact
+  // ts (the woken-agent case stamps the turn ts async, a few seconds later). So
+  // we highlight the newest from=user bubble with ts >= floorTs — the just-filed
+  // report is always the newest user turn right after the POST — not an exact
+  // data-ts == seed_ts match (which misses the wake case).
+  function pickAnchor(floorTs) {
+    var users = chatThread.querySelectorAll('.kb-bubble[data-role="user"]');
+    var best = null;
+    for (var i = 0; i < users.length; i++) {
+      var ts = users[i].getAttribute('data-ts') || '';
+      if (!floorTs || ts >= floorTs) { best = users[i]; }
+    }
+    if (best) { return best; }
+    if (users.length) { return users[users.length - 1]; }
+    var all = chatThread.querySelectorAll('.kb-bubble');
+    return all.length ? all[all.length - 1] : null;
+  }
+
+  function injectThread(html, floorTs, keepScroll) {
+    var atBottom = keepScroll && chatThread.scrollHeight > 0 &&
+      (chatThread.scrollHeight - chatThread.scrollTop - chatThread.clientHeight) < 48;
+    var tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    // Defensive chrome-strip: keep only the message window until leg 3 slims embedded=1.
+    var win = tmp.querySelector('.kb-msg-window');
+    chatThread.innerHTML = '';
+    chatThread.appendChild(win ? win : tmp);
+    if (window.htmx) { try { window.htmx.process(chatThread); } catch (e) {} }
+    if (keepScroll) {
+      if (atBottom) { chatThread.scrollTop = chatThread.scrollHeight; }
+      return;
+    }
+    var target = pickAnchor(floorTs);
+    if (target) {
+      target.classList.add('hob-anchor');
+      target.scrollIntoView({ block: 'center' });
+    } else {
+      chatThread.scrollTop = chatThread.scrollHeight;
+    }
+  }
+
+  function reloadLatest() {
+    if (!chatOwner) { return; }
+    fetchThread(FUTURE_TS).then(function(html) {
+      injectThread(html, '', true);
+    }).catch(function() {});
+  }
+
+  function subscribeWs() {
+    if (chatWs) { try { chatWs.close(); } catch (e) {} chatWs = null; }
+    try {
+      var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var sock = new WebSocket(proto + '//' + window.location.host + '/agents/events');
+      chatWs = sock;
+      sock.onmessage = function(ev) {
+        if ((ev.data || '') === ('messages:' + chatOwner)) { reloadLatest(); }
+      };
+      sock.onclose = function() { if (chatWs === sock) { chatWs = null; } };
+      sock.onerror = function() {};
+    } catch (e) { chatWs = null; }
+  }
+
+  function startPoll() {
+    stopPoll();
+    // Fallback until leg 3 wires the messages:<aid> live-push marker.
+    chatPoll = setInterval(reloadLatest, 10000);
+  }
+  function stopPoll() { if (chatPoll) { clearInterval(chatPoll); chatPoll = null; } }
+
+  function enterChat(owner, todoUrl, seedTs) {
+    if (!owner) { return; }
+    chatOwner = owner;
+    chatTodoUrl = todoUrl || '';
+    bar.setAttribute('data-state', 'chat');
+    chatTitle.textContent = '💬 ' + owner;
+    if (chatTodoUrl) { chatTodo.setAttribute('href', chatTodoUrl); chatTodo.hidden = false; }
+    else { chatTodo.hidden = true; }
+    chatStatus.textContent = 'loading…';
+    var anchor = seedTs || FUTURE_TS;
+    var highlight = seedTs || '';
+    fetchThread(anchor).then(function(html) {
+      injectThread(html, highlight, false);
+      chatStatus.textContent = '';
+    }).catch(function(err) {
+      chatStatus.textContent = 'could not load thread (' + err + ')';
+    });
+    subscribeWs();
+    startPoll();
+  }
+
+  function sendChat() {
+    var msg = (chatText.value || '').trim();
+    if (!msg || !chatOwner) { return; }
+    chatSendBtn.disabled = true;
+    chatStatus.textContent = 'sending…';
+    var b = new URLSearchParams();
+    b.set('from', 'user');
+    b.set('message', msg);
+    fetch('/agents/' + encodeURIComponent(chatOwner) + '/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: b.toString()
+    }).then(function(r) {
+      if (!r.ok) { return Promise.reject('HTTP ' + r.status); }
+    }).then(function() {
+      chatText.value = '';
+      chatStatus.textContent = '';
+      reloadLatest();
+    }).catch(function(err) {
+      chatStatus.textContent = 'send failed (' + err + ')';
+    }).then(function() { chatSendBtn.disabled = false; });
+  }
+
+  function pickAgent() {
+    var who = window.prompt('Chat with which agent?', chatOwner);
+    if (!who) { return; }
+    who = who.trim();
+    if (!who || who === chatOwner) { return; }
+    enterChat(who, chatTodoUrl, '');
+  }
+
+  function closeChat() {
+    if (chatWs) { try { chatWs.close(); } catch (e) {} chatWs = null; }
+    stopPoll();
+    bar.setAttribute('data-state', 'collapsed');
+    statusEl.textContent = '';
+    refresh();
+  }
+
   function send() {
     refresh();
     var kindEl = bar.querySelector('input[name="hob-kind"]:checked');
@@ -5049,9 +5249,19 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!r.ok) { return Promise.reject('HTTP ' + r.status); }
       return r.json().catch(function() { return {}; });
     }).then(function(d) {
-      statusEl.textContent = 'filed' + ((d && d.owner) ? (' → ' + d.owner) : '');
       textEl.value = '';
-      setTimeout(function() { bar.setAttribute('data-state', 'collapsed'); statusEl.textContent = ''; }, 1800);
+      var owner = (d && d.owner) ? d.owner : ctx.owner;
+      var todoUrl = (d && d.todo_url) ? d.todo_url : '';
+      // Seed ts from /report (ask #1, leg 1) — `seed_ts` is the contract key; it
+      // is a LOWER BOUND used to scope the window (see pickAnchor). Empty => latest-window.
+      var seedTs = (d && (d.seed_ts || d.ts || d.thread_ts)) || '';
+      if (owner) {
+        statusEl.textContent = 'filed → ' + owner;
+        enterChat(owner, todoUrl, seedTs);
+      } else {
+        statusEl.textContent = 'filed';
+        setTimeout(function() { bar.setAttribute('data-state', 'collapsed'); statusEl.textContent = ''; }, 1800);
+      }
     }).catch(function(err) {
       statusEl.textContent = 'could not file (' + err + ')';
     }).then(function() { sendBtn.disabled = false; });
