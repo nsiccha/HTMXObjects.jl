@@ -1386,7 +1386,13 @@ _finalized_response(m::MIMEResponse) = to_response(m)
 
 # Convert a value to markdown text via show(io, MIME"text/markdown"(), val).
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
-to_markdown_string(val) = sprint(show, MIME"text/markdown"(), val)
+# Interactive chrome (form/input/textarea/button) is dropped first by
+# `_strip_md_chrome` so a `?plain`/`?markdown` read never serializes a form's
+# fields into prose (e.g. an edit-form textarea pre-filled with the raw body).
+# An all-chrome val strips to `nothing` → empty markdown.
+to_markdown_string(val) = let stripped = _strip_md_chrome(val)
+    isnothing(stripped) ? "" : sprint(show, MIME"text/markdown"(), stripped)
+end
 
 # --- Dual-view wrappers: html_only / markdown_only ---
 
@@ -3219,6 +3225,58 @@ function filter_errors(node::Node)
     isempty(new_children) && return nothing
 
     # Keep this node as a structural wrapper with only error children
+    Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
+end
+
+# Interactive elements counted as "chrome" and dropped from markdown output.
+# Dropping the node drops its whole subtree, so children of a `<form>` go with
+# it; standalone `<button>`/`<input>`/`<textarea>` are dropped wherever they
+# appear (form-wrapped or not). Extend this set (e.g. select/option/label) only
+# via the open design decisions — see the markdown-read contract in `htmxo-use`.
+const _MD_CHROME_TAGS = Set{Symbol}((:form, :input, :textarea, :button))
+
+_is_md_chrome(tag) = Symbol(lowercase(string(tag))) in _MD_CHROME_TAGS
+
+"""
+    _strip_md_chrome(val)
+
+Walk a Node tree and DROP interactive-chrome nodes (`_MD_CHROME_TAGS`:
+`<form>` / `<input>` / `<textarea>` / `<button>`) entirely — node and subtree —
+so they emit nothing into markdown. Everything else (prose, headings, links,
+tables, non-chrome structure, and ALL text) is preserved. Non-Node values pass
+through unchanged; a value that is itself all-chrome strips to `nothing`.
+
+Applied automatically by [`to_markdown_string`](@ref) so every
+`?plain` / `?markdown` / `Accept: text/markdown` read drops form chrome with no
+consumer annotation — the automatic counterpart to [`html_only`](@ref), which
+is the explicit per-node opt-out for other HTML-only content.
+"""
+_strip_md_chrome(val) = val
+_strip_md_chrome(val::AbstractArray) = filter(!isnothing, _strip_md_chrome.(val))
+_strip_md_chrome(val::Tuple) = filter(!isnothing, _strip_md_chrome.(val))
+_strip_md_chrome((content, id)::Pair) = let f = _strip_md_chrome(content)
+    isnothing(f) ? nothing : f => id
+end
+
+# Re-insertable child: a surviving Node → its underlying Cobweb node; a chrome
+# Node → nothing (dropped). Unlike filter_errors (which prunes non-error text),
+# text / primitive children are KEPT as-is so non-chrome prose survives.
+_strip_md_chrome_child(child) = child
+_strip_md_chrome_child(child::Node) = let f = _strip_md_chrome(child)
+    isnothing(f) ? nothing : parent(f)
+end
+_strip_md_chrome_child(child::Cobweb.Node) = let f = _strip_md_chrome(Node(child))
+    isnothing(f) ? nothing : parent(f)
+end
+
+function _strip_md_chrome(node::Node)
+    cn = parent(node)
+    _is_md_chrome(Cobweb.tag(cn)) && return nothing
+    new_children = []
+    for child in Cobweb.children(cn)
+        kept = _strip_md_chrome_child(child)
+        isnothing(kept) || push!(new_children, kept)
+    end
     Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
 end
 
