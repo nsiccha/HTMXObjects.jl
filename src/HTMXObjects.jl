@@ -4955,7 +4955,7 @@ overlay_bar_style() = h.style("""
 #htmxo-overlay-bar .hob-send { margin-left: auto; background: var(--htmxo-overlay-accent, #7c6ff0); color: #fff; border: 0; border-radius: 4px; padding: 4px 16px; cursor: pointer; font: inherit; font-weight: 600; }
 #htmxo-overlay-bar .hob-send:disabled { opacity: .5; cursor: default; }
 #htmxo-overlay-bar code { background: rgba(0,0,0,.3); padding: 0 4px; border-radius: 3px; }
-#htmxo-overlay-bar[data-state="chat"] .hob-chat { display: flex; flex-direction: column; padding: 8px 12px; max-width: 680px; max-height: 60vh; }
+#htmxo-overlay-bar[data-state="chat"] .hob-chat { display: flex; flex-direction: column; padding: 8px 12px; max-height: 60vh; }
 #htmxo-overlay-bar .hob-chathead { display: flex; gap: 1rem; align-items: center; margin-bottom: 6px; font-weight: 600; }
 #htmxo-overlay-bar .hob-ch-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #htmxo-overlay-bar .hob-ch-todo { color: var(--htmxo-overlay-accent, #7c6ff0); text-decoration: none; font-weight: 400; }
