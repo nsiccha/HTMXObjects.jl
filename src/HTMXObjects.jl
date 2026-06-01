@@ -3633,8 +3633,8 @@ The master `<tr>` carries id `"row-<safe>"` and an onclick that toggles
 the paired detail `<tr id="detail-<safe>">`, where `safe` is `key` run
 through [`master_detail_safe_key`](@ref). The detail row wraps
 `detail_body` in a single `<td colspan="\$ncols">` cell. By default the
-detail is collapsed initially (`hidden=true`, no `aria-expanded` on the
-master) — pass `initially_open=true` for rows whose body IS the content
+detail is collapsed initially (`hidden=true`, `aria-expanded="false"` on
+the master) — pass `initially_open=true` for rows whose body IS the content
 the user came to see (a question + answer brief, for example).
 
 # Arguments
@@ -3655,9 +3655,9 @@ the user came to see (a question + answer brief, for example).
   use underscores in the `h` builder (`data_status`, not `data-status`).
 - `initially_open`: render the row open instead of collapsed. When
   `true`, omits `hidden` on the detail row and sets `aria-expanded="true"`
-  on the master so collapsed-look CSS keyed off
-  `:not([aria-expanded="true"])` shows the expanded look from the first
-  render. First click then collapses the row as usual.
+  on the master (vs `"false"` when collapsed) so collapsed-look CSS keyed
+  off `[aria-expanded="false"]` (or `:not([aria-expanded="true"])`) shows
+  the expanded look from the first render. First click toggles as usual.
 
 The pair MUST be interleaved into the row list passed to
 [`sortable_table`](@ref) (master, detail, master, detail, …) so the
@@ -3679,11 +3679,15 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
         :id      => "row-$safe",
         :onclick => master_detail_toggle_js(safe),
     )
-    # Only the `"true"` form of aria-expanded survives the `h` builder —
-    # the `"false"` form gets dropped (gotcha 2), but rendering "no attr"
-    # is what we want for the collapsed initial state anyway, so the CSS
-    # `:not([aria-expanded="true"])` selector correctly matches both.
-    initially_open && (tr_kwargs[:aria_expanded] = "true")
+    # Every master row is expandable, so it always carries aria-expanded
+    # reflecting state: "true" open, "false" collapsed. This matches what
+    # master_detail_toggle_js sets on click (so the initial render and the
+    # post-click DOM agree) and is the a11y-correct shape. Collapsed-look
+    # CSS can key off `[aria-expanded="false"]` or the equivalent
+    # `:not([aria-expanded="true"])`. (Pre-HTMX-116ab2c the `h` builder
+    # dropped every string `"false"`, forcing a no-attr + `:not(...)`
+    # workaround; that drop is now scoped to true boolean attrs.)
+    tr_kwargs[:aria_expanded] = initially_open ? "true" : "false"
     isnothing(master_class) || (tr_kwargs[:class] = master_class)
     for (k, v) in pairs(master_attrs)
         tr_kwargs[Symbol(k)] = v
@@ -3709,7 +3713,7 @@ end
 Render a `sortable_table` whose primary rows expand into paired,
 hidden-by-default detail rows on click. The helper takes care of the
 five gotchas in `htmxo-master-detail`: CSS-safe key sanitisation,
-interactive-descendant click guard, no-initial-`aria-expanded`, paired
+interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 `row-…` / `detail-…` ids, and a `colspan`-spanning detail cell.
 
 # Arguments
