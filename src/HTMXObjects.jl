@@ -1308,7 +1308,11 @@ function htmx(args...;
             (isnothing(pico_version) ? () : (pico_bridge(),))...,
             (feedback ? request_feedback() : ())...,
             (compose ? compose_box_assets() : ())...,
-            (overlay ? overlay_bar() : ())...,
+            # Thin-hook bootstrap: load the relocated overlay bundle from
+            # `KB_ORIGIN/overlay/bar.js` instead of inlining `<style>`+`<script>`.
+            # The bar is `position:fixed`, so a deferred async load has no
+            # layout-shift to guard (no skeleton/placeholder needed).
+            (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
             htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
@@ -5396,10 +5400,31 @@ document.addEventListener('DOMContentLoaded', function() {
 """)
 
 """
+    KB_ORIGIN
+
+Origin prefix for the relocated overlay bundle served at
+`<KB_ORIGIN>/overlay/bar.js` — the thin-hook bootstrap `htmx(...; overlay=true)`
+emits in place of the old inline `<style>`+`<script>`. Default `""` →
+root-absolute `/overlay/bar.js`, same-origin under the supported `/p/<slug>/`
+proxy. Set to an absolute origin (e.g. `"http://localhost:4200"`) for
+direct-port / dev access; the pre-existing cross-origin runtime-fetch limit
+then applies (the bar's own `/repos` + `/agents/...` calls are same-origin to
+the *page*, not to `KB_ORIGIN`) — documented here, not solved.
+"""
+const KB_ORIGIN = ""
+
+"""
     overlay_bar()
 
+!!! note "Dead code as of the th8p6p thin-hook cutover"
+    `htmx(...; overlay=true)` no longer injects this inline bundle — it emits a
+    single `<script src=\$KB_ORIGIN/overlay/bar.js defer>` bootstrap instead, and
+    the real `overlay_bar_script`/`overlay_bar_style` are served from the KB at
+    `/overlay/bar.js`. These three definitions are retained (not called) only to
+    keep the flip minimal + cleanly revertible; removal is a later follow-up.
+
 Combined style + script for the framework debug/dev overlay bar (the v1
-feedback spine). Injected by [`htmx`](@ref) on full-page responses when
+feedback spine). Was injected by [`htmx`](@ref) on full-page responses when
 `overlay=true` (the default; pass `overlay=false` to opt out). The bar resolves
 its own context client-side and talks to the KB root-absolute, mirroring
 [`request_feedback`](@ref)'s zero-server-context model.
