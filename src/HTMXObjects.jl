@@ -4881,7 +4881,7 @@ overlay_bar_style() = h.style("""
 #htmxo-overlay-bar[data-state="open"] .hob-chat { display: none; }
 #htmxo-overlay-bar[data-state="chat"] .hob-collapsed,
 #htmxo-overlay-bar[data-state="chat"] .hob-form { display: none; }
-#htmxo-overlay-bar .hob-form { display: block; padding: 8px 12px; max-width: 680px; }
+#htmxo-overlay-bar .hob-form { display: block; padding: 8px 12px; }
 #htmxo-overlay-bar .hob-formhead { display: flex; gap: 1rem; align-items: center; margin-bottom: 6px; font-weight: 600; }
 #htmxo-overlay-bar .hob-fh-id { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #htmxo-overlay-bar .hob-fh-owner { opacity: .75; font-weight: 400; }
