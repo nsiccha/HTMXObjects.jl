@@ -4933,6 +4933,7 @@ overlay_bar_style() = h.style("""
   border-top: 1px solid rgba(255,255,255,.12); box-shadow: 0 -2px 12px rgba(0,0,0,.25);
 }
 #htmxo-overlay-bar .hob-collapsed { display: flex; align-items: center; gap: 1rem; padding: 4px 12px; }
+#htmxo-overlay-bar .hob-secure { flex: 0 0 auto; cursor: default; }
 #htmxo-overlay-bar .hob-id { flex: 1 1 auto; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #htmxo-overlay-bar .hob-route { opacity: .85; font-weight: 400; }
 #htmxo-overlay-bar .hob-owner { opacity: .75; }
@@ -4955,13 +4956,13 @@ overlay_bar_style() = h.style("""
 #htmxo-overlay-bar .hob-send { margin-left: auto; background: var(--htmxo-overlay-accent, #7c6ff0); color: #fff; border: 0; border-radius: 4px; padding: 4px 16px; cursor: pointer; font: inherit; font-weight: 600; }
 #htmxo-overlay-bar .hob-send:disabled { opacity: .5; cursor: default; }
 #htmxo-overlay-bar code { background: rgba(0,0,0,.3); padding: 0 4px; border-radius: 3px; }
-#htmxo-overlay-bar[data-state="chat"] .hob-chat { display: flex; flex-direction: column; padding: 8px 12px; max-height: 60vh; }
+#htmxo-overlay-bar[data-state="chat"] .hob-chat { display: flex; flex-direction: column; padding: 8px 12px; max-height: 80vh; }
 #htmxo-overlay-bar .hob-chathead { display: flex; gap: 1rem; align-items: center; margin-bottom: 6px; font-weight: 600; }
 #htmxo-overlay-bar .hob-ch-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #htmxo-overlay-bar .hob-ch-todo { color: var(--htmxo-overlay-accent, #7c6ff0); text-decoration: none; font-weight: 400; }
 #htmxo-overlay-bar .hob-ch-pick,
 #htmxo-overlay-bar .hob-ch-close { background: rgba(255,255,255,.12); color: inherit; border: 0; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: inherit; font-size: 12px; }
-#htmxo-overlay-bar .hob-ch-thread { overflow-y: auto; max-height: 40vh; background: rgba(0,0,0,.18); border-radius: 4px; padding: 6px; margin-bottom: 6px; }
+#htmxo-overlay-bar .hob-ch-thread { overflow-y: auto; resize: vertical; height: 40vh; min-height: 12vh; max-height: 80vh; background: rgba(0,0,0,.18); border-radius: 4px; padding: 6px; margin-bottom: 6px; }
 #htmxo-overlay-bar .hob-ch-thread .kb-msg-window { margin: 0; }
 #htmxo-overlay-bar .hob-ch-compose { display: flex; gap: .5rem; align-items: flex-end; }
 #htmxo-overlay-bar .hob-ch-text { flex: 1 1 auto; box-sizing: border-box; background: rgba(0,0,0,.25); color: inherit; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; padding: 6px; font: inherit; resize: vertical; }
@@ -5049,12 +5050,13 @@ document.addEventListener('DOMContentLoaded', function() {
     bar.setAttribute('data-state', 'collapsed');
     bar.innerHTML =
       '<div class="hob-collapsed">' +
+        '<span class="hob-secure" title="Secure deployment" hidden>&#128274;</span>' +
         '<span class="hob-id"><span class="hob-app"></span> · <span class="hob-route"></span></span>' +
         '<span class="hob-owner"></span>' +
         '<button type="button" class="hob-toggle">Report &#9650;</button>' +
       '</div>' +
       '<form class="hob-form">' +
-        '<div class="hob-formhead"><span class="hob-fh-id"></span><span class="hob-fh-owner"></span>' +
+        '<div class="hob-formhead"><span class="hob-secure" title="Secure deployment" hidden>&#128274;</span><span class="hob-fh-id"></span><span class="hob-fh-owner"></span>' +
           '<button type="button" class="hob-toggle">&#9660;</button></div>' +
         '<div class="hob-kind">' +
           '<label><input type="radio" name="hob-kind" value="bug" checked> bug</label>' +
@@ -5070,6 +5072,7 @@ document.addEventListener('DOMContentLoaded', function() {
       '</form>' +
       '<div class="hob-chat">' +
         '<div class="hob-chathead">' +
+          '<span class="hob-secure" title="Secure deployment" hidden>&#128274;</span>' +
           '<span class="hob-ch-title"></span>' +
           '<a class="hob-ch-todo" target="_blank" rel="noopener" hidden>todo &#8599;</a>' +
           '<button type="button" class="hob-ch-pick">change agent</button>' +
@@ -5140,6 +5143,30 @@ document.addEventListener('DOMContentLoaded', function() {
         if (d.slug && !ctx.app) { ctx.app = d.slug; }
         if (d.owner) { ctx.owner = d.owner; }
         render();
+        // Direct access: the slug is only known once app_for_port resolves it.
+        // (Proxied access already knows it from the path — see the init call.)
+        if (!ctx.proxied) { applySecure(ctx.app); }
+      })
+      .catch(function() {});
+  }
+
+  // Surface the secure-deployment soft-guard (backend decision d22m82) in the
+  // UI: /repos carries `secure` per slug, so when the resolved slug is secure
+  // we reveal the 🔒 badges (collapsed strip + form/chat heads). Defensive and
+  // async — any failure leaves the badges hidden (fail-safe: default not-secure).
+  function applySecure(slug) {
+    if (!slug) { return; }
+    fetch('/repos', { headers: { 'Accept': 'application/json' } })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(list) {
+        if (!list || !list.length) { return; }
+        var secure = false;
+        for (var i = 0; i < list.length; i++) {
+          if (list[i] && list[i].name === slug) { secure = !!list[i].secure; break; }
+        }
+        if (!secure) { return; }
+        var els = bar.querySelectorAll('.hob-secure');
+        for (var j = 0; j < els.length; j++) { els[j].hidden = false; }
       })
       .catch(function() {});
   }
@@ -5351,6 +5378,10 @@ document.addEventListener('DOMContentLoaded', function() {
   parseLocation();
   render();
   resolveOwner();
+  // Proxied access knows its slug from the /p/<slug>/ path right away — resolve
+  // secure-ness immediately. (Direct access fires this from resolveOwner once
+  // app_for_port supplies the slug.)
+  if (ctx.proxied) { applySecure(ctx.app); }
   attachObservers();
   syncOverlayPad();
   // ResizeObserver catches every bar height change — state transitions
