@@ -4954,6 +4954,24 @@ document.addEventListener('DOMContentLoaded', function() {
   var chatThread, chatText, chatSendBtn, chatTitle, chatTodo, chatPick, chatClose, chatStatus;
   var chatOwner = '', chatTodoUrl = '', chatWs = null, chatPoll = null;
   var FUTURE_TS = '2099-01-01T00:00:00';
+  var origPadBottom = null;
+
+  // The bar is position:fixed;bottom:0, so it floats OVER the last bar-height
+  // of page content. Reserve that space at the page bottom = the bar's CURRENT
+  // height (collapsed ~30px / open / chat up to 60vh) so bottom content scrolls
+  // clear above it. We add to the app's OWN body padding-bottom (captured once)
+  // rather than clobbering it, and also expose the height as `--htmxo-overlay-h`
+  // for apps that want it. A ResizeObserver on the bar keeps this in sync across
+  // every state transition, async chat-content growth, and viewport resize.
+  function syncOverlayPad() {
+    if (!bar) { return; }
+    if (origPadBottom === null) {
+      origPadBottom = parseFloat(window.getComputedStyle(document.body).paddingBottom) || 0;
+    }
+    var h = bar.offsetHeight || 0;
+    document.body.style.paddingBottom = (origPadBottom + h) + 'px';
+    document.documentElement.style.setProperty('--htmxo-overlay-h', h + 'px');
+  }
 
   function parseLocation() {
     var path = window.location.pathname || '/';
@@ -5276,6 +5294,15 @@ document.addEventListener('DOMContentLoaded', function() {
   render();
   resolveOwner();
   attachObservers();
+  syncOverlayPad();
+  // ResizeObserver catches every bar height change — state transitions
+  // (collapsed↔open↔chat), async chat-thread growth, and 60vh shifts on
+  // viewport resize — in one registration. The resize listener is a cheap
+  // fallback for browsers without ResizeObserver.
+  if (window.ResizeObserver) {
+    try { new ResizeObserver(syncOverlayPad).observe(bar); } catch (e) {}
+  }
+  window.addEventListener('resize', syncOverlayPad);
 });
 """)
 
