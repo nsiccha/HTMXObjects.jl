@@ -4294,6 +4294,13 @@ sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
             h.span(
                 h.input(; id=inp_id, type="text", placeholder,
                     class="u-grow",
+                    # Swallow this staging input's native `change` (fired on
+                    # blur/Enter-commit) so it never bubbles to an enclosing
+                    # `hx_trigger="change"` form with stale pre-append state. The
+                    # ONLY change the form should see is the select's explicit
+                    # post-append `dispatchEvent` below — which carries the new
+                    # value deterministically on both the Add-button and Enter paths.
+                    onchange="event.stopPropagation()",
                     onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click()}"),
                 h.button("Add"; type="button", onclick="""
                     (function(){
