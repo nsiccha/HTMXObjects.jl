@@ -537,10 +537,14 @@ Defaults:
   propagates it to every route — including `@include`d upstream structs the app
   cannot edit.
 - `__route__ = ""` — defaults to empty; `_register_route_handler` sets it to
-  `req.target` (with query string stripped) when constructing the struct for
-  a real request, so route bodies can write `hx_get=__route__` /
-  `href=__route__` instead of recomputing `__self__/"name/\$id"`. For
-  non-request constructions (e.g., `route!` at module init) it stays `""`.
+  the current request's path (query string stripped, **mount-prefix-aware**:
+  the request `__prefix__` is prepended when a path-stripping proxy removed it,
+  so `__route__` is the full externally-visible path and stays consistent with
+  `__prefix__`) when constructing the struct for a real request, so route
+  bodies can write `hx_get=__route__` / `href=__route__` — and
+  `query_url(__self__;…)`, which builds on `__route__` — instead of recomputing
+  `__self__/"name/\$id"`. For non-request constructions (e.g., `route!` at
+  module init) it stays `""`.
 
 The legacy short names `req` / `appdata` are no longer recognised.
 """
@@ -2419,6 +2423,23 @@ function _request_route_path(req::HTTP.Request)
     isnothing(qi) ? target : target[1:qi-1]
 end
 
+# Prefix-aware form: prepend the request `prefix` when a path-stripping reverse
+# proxy (e.g. the Strato tunnel, which strips `X-Forwarded-Prefix` from the
+# path before forwarding) removed it, so `__route__` is the full
+# externally-visible path — matching `__prefix__`. This restores the invariant
+# that `query_url(__self__;…)` (which builds on `__route__`) and `href=__self__`
+# / `__self__/"…"` (which build on `__prefix__`) agree on the mount prefix,
+# while still preserving the current handler's path params (carried in the
+# stripped path, which `__prefix__`/`string(self)` lack). No-op when there is no
+# prefix, or when the path already carries it (non-stripping proxy, or a
+# registration-prefix mount whose routes register at `prefix * path`).
+function _request_route_path(req::HTTP.Request, prefix::AbstractString)
+    rp = _request_route_path(req)
+    isempty(prefix) && return rp
+    (rp == prefix || startswith(rp, prefix * "/")) && return rp
+    prefix * rp
+end
+
 """
     _register_route_handler(RootT, LeafT, chain, method, name, path, n_params, record_dir; root_prefix="")
 
@@ -2453,7 +2474,11 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     _register_handler(method, path, function(req)
         local root, leaf
         try
-            root = RootT(; __req__=req, __route__=_request_route_path(req), _prefix_kw(_request_prefix(req, root_prefix))...)
+            # Resolve the request prefix once and feed it to BOTH `__route__`
+            # (so it stays prefix-aware under a path-stripping proxy) and
+            # `__prefix__` — keeping the two URL-building paths in agreement.
+            pfx = _request_prefix(req, root_prefix)
+            root = RootT(; __req__=req, __route__=_request_route_path(req, pfx), _prefix_kw(pfx)...)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
