@@ -797,3 +797,25 @@ end
     end
 end
 
+# ── @header binding ──────────────────────────────────────────────────────────
+@htmx struct HeaderApp
+    @header x_test_agent::String = ""
+    @header x_count::Int = 0
+
+    @get probe() = "agent=$(x_test_agent) count=$(x_count)"
+end
+
+@testset "@header kwarg binding" begin
+    req_with = HTTP.Request("GET", "/probe",
+        ["X-Test-Agent" => "bot42", "X-Count" => "7"])
+    req_without = HTTP.Request("GET", "/probe")
+
+    app_with = HeaderApp(; __req__=req_with)
+    @test app_with.x_test_agent == "bot42"
+    @test app_with.x_count == 7
+
+    app_without = HeaderApp(; __req__=req_without)
+    @test app_without.x_test_agent == ""
+    @test app_without.x_count == 0
+end
+
