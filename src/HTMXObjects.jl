@@ -959,7 +959,73 @@ function _rewrite_param_line(expr)
     (name_sym, Expr(:(=), name_sym, rhs))
 end
 
-function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_child=false, kwargs...)
+# Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
+# and return `(name_sym, rewritten_assignment)` for @header, or `nothing` if unrecognized.
+# Produces `name = _extract_header(_req_of(__self__), :name, T, default)`.
+function _rewrite_header_line(expr)
+    default_expr = nothing
+    lhs = expr
+    if Meta.isexpr(expr, :(=))
+        lhs = expr.args[1]
+        default_expr = expr.args[2]
+    end
+    name_sym, type_expr = _split_param_lhs(lhs)
+    name_sym === nothing && return nothing
+    t = type_expr === nothing ? :nothing : type_expr
+    req_expr = :($(_req_of)(__self__))
+    rhs = default_expr === nothing ?
+        :($(_extract_header)($req_expr, $(QuoteNode(name_sym)), $t)) :
+        :($(_extract_header)($req_expr, $(QuoteNode(name_sym)), $t, $default_expr))
+    (name_sym, Expr(:(=), name_sym, rhs))
+end
+
+"""
+    _convert_headers!(struct_expr) -> Vector{Symbol}
+
+Find `@header name::T = default` lines in a `@htmx` struct body and rewrite them
+to plain derived-property assignments that call
+`_extract_header(_req_of(__self__), ...)` at property-access time. The header key
+is derived from the kwarg name by replacing `_` with `-` (so `x_kb_agent_id`
+binds HTTP header `X-KB-Agent-ID`; HTTP.jl header lookup is case-insensitive).
+Supports single-line and block forms identical to `@param`.
+
+Returns the ordered list of declared header names for threading to child structs.
+"""
+function _convert_headers!(struct_expr)
+    body = struct_expr.args[3]
+    names = Symbol[]
+    new_args = Any[]
+    process_line! = inner -> begin
+        rewritten = _rewrite_header_line(inner)
+        rewritten === nothing && return
+        push!(names, rewritten[1])
+        push!(new_args, rewritten[2])
+    end
+    for arg in body.args
+        if !(arg isa Expr)
+            push!(new_args, arg); continue
+        end
+        if Meta.isexpr(arg, :macrocall) && arg.args[1] === Symbol("@header")
+            payload = [a for a in arg.args[2:end] if !(a isa LineNumberNode)]
+            if length(payload) == 1 && Meta.isexpr(payload[1], :block)
+                for inner in payload[1].args
+                    inner isa LineNumberNode && (push!(new_args, inner); continue)
+                    process_line!(inner)
+                end
+            else
+                for inner in payload
+                    process_line!(inner)
+                end
+            end
+        else
+            push!(new_args, arg)
+        end
+    end
+    body.args = new_args
+    names
+end
+
+function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], parent_headers=Symbol[], is_child=false, kwargs...)
     # Capture externals BEFORE _convert_include_to_struct! strips the @include
     # wrapper from `@include prop = ExternalStruct(...)` lines (the begin-block
     # form turns into an inline struct, but the call form is left as a bare
@@ -1005,7 +1071,8 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
     own_params = _convert_params!(struct_expr)
-    # Merge: parent params first (preserve order), then own, deduplicated.
+    own_headers = _convert_headers!(struct_expr)
+    # Merge: parent params/headers first (preserve order), then own, deduplicated.
     param_names = Symbol[]
     for n in parent_params
         n in param_names || push!(param_names, n)
@@ -1013,10 +1080,17 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], is_c
     for n in own_params
         n in param_names || push!(param_names, n)
     end
+    header_names = Symbol[]
+    for n in parent_headers
+        n in header_names || push!(header_names, n)
+    end
+    for n in own_headers
+        n in header_names || push!(header_names, n)
+    end
     inline_props = _find_inline_structs(struct_expr)
 
     block = DynamicObjects.dynamicstruct(struct_expr;
-        child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names, is_child=true),
+        child_handler=s -> _htmx_transform(s; reroute=false, parent_params=param_names, parent_headers=header_names, is_child=true),
         is_child, kwargs...)
     type_name = _struct_type_name(struct_expr)
     @assert Meta.isexpr(block, :escape)
@@ -1854,6 +1928,28 @@ end
 _resolve_extracted(::_NoDefault, ::_NoDefault, name) = throw(KeyError(name))
 _resolve_extracted(::_NoDefault, default, _) = default
 _resolve_extracted(v, _default, _name) = v
+
+# Convert a kwarg-style symbol name to an HTTP header key by replacing `_` with
+# `-`. HTTP.jl header lookup is case-insensitive, so `x-kb-agent-id` finds the
+# `X-KB-Agent-ID` header that the KB curl wrapper injects.
+_kwarg_to_header_name(name::Symbol) = replace(String(name), '_' => '-')
+
+"""
+    _extract_header(req, name, T, default=_NO_DEFAULT) -> value
+
+Extract a single typed HTTP request header. The header key is derived from `name`
+by replacing `_` with `-` (`x_kb_agent_id` → `x-kb-agent-id`; HTTP.jl lookup is
+case-insensitive, so this matches `X-KB-Agent-ID`). Converts the raw string via
+`_convert_param(value, T)` and returns `default` when the header is absent or
+empty. Throws `KeyError(name)` if no default was supplied and the header is absent.
+
+`T` may be `nothing` for untyped headers (raw `String`).
+"""
+function _extract_header(req, name, T, default=_NO_DEFAULT)
+    v = HTTP.header(req, _kwarg_to_header_name(name), "")
+    v_or_sentinel = isempty(v) ? _NO_DEFAULT : _convert_param(v, T)
+    _resolve_extracted(v_or_sentinel, default, name)
+end
 
 # Register a route handler directly on the HTTP router, bypassing Oxygen's
 # argument-name validation. We extract path params ourselves via positional URL segment indexing.
