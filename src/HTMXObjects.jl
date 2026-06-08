@@ -4084,16 +4084,73 @@ Vector values produce repeated inputs (one `<input>` per element).
 hidden_inputs(; kwargs...) = mapreduce(((k, v),) -> _hidden_input(k, v), vcat, kwargs; init=[])
 
 """
-    _form(method, url, children...; label="Submit", btn_class="btn", confirm="", hx_target="", hx_swap="", hx_include="", form_class="", kwargs...)
+    hidden_inputs(obj; skip=(), overrides...) -> Vector{Node}
+
+Object-form of [`hidden_inputs`](@ref) — the GET-form hop symmetric to
+[`query_url(path, obj)`](@ref). Emit a hidden `<input>` for every `@param`
+declared on `obj`'s type that is actually present in the inbound request
+(`_req_of(obj)`) — exactly the set `query_url(path, obj)` forwards into a URL.
+**Zero consumer burden:** pass the route object and the framework collects the
+params the user set; there is no hand-listed set of hidden inputs to drift out
+of sync with the `@param` block.
+
+`skip` (any iterable of `Symbol`) drops params the form supplies another way —
+the field a visible control already submits, paging params, etc. `overrides`
+set explicit values that win over the auto-collected one and are emitted even
+if absent from the request (same semantics as
+`query_url(path, obj; overrides...)`). A skipped key is never emitted, even if
+also passed as an override.
+
+    h.form(; hx_get="/fit/compute", hx_target="#out")(
+        hidden_inputs(__self__; skip=[:source])...,   # forward every set @param but `source`
+        source_select,
+    )
+
+For the common case, [`get_form`](@ref)/[`post_form`](@ref) take this directly
+via their `obj=` / `skip=` keywords.
+"""
+function hidden_inputs(obj; skip=(), overrides...)
+    names = _param_names(typeof(obj))
+    skipset = Set{Symbol}(Symbol(s) for s in skip)
+    override_keys = Set(keys(overrides))
+    present = queryparams(_req_of(obj))
+    kws = Pair{Symbol,Any}[]
+    for n in names
+        (n in skipset || n in override_keys) && continue
+        haskey(present, String(n)) || continue
+        push!(kws, n => getproperty(obj, n))
+    end
+    for (k, v) in pairs(overrides)
+        k in skipset && continue
+        push!(kws, k => v)
+    end
+    hidden_inputs(; kws...)
+end
+
+"""
+    _form(method, url, children...; obj=nothing, skip=(), label="Submit", btn_class="btn", confirm="", form_class="", kwargs...)
 
 Shared implementation for `get_form` and `post_form`. `method` is `:hx_get` or
-`:hx_post`. Extra keyword arguments become hidden `<input>` fields. Positional
-`children` are inserted before the submit button.
+`:hx_post`. Positional `children` are inserted before the submit button.
+
+Hidden inputs come from one of two paths, depending on `obj`:
+
+- `obj === nothing` (default): the non-form-attr keyword arguments each become a
+  hidden `<input>` field (`hidden_inputs(; …)`).
+- `obj` given: the route object's set `@param`s are auto-collected
+  (`hidden_inputs(obj; skip, …)`), and the non-form-attr keyword arguments
+  become `query_url`-style **overrides** rather than standalone inputs. `skip`
+  drops params a visible control already supplies. This is the zero-burden
+  object-forwarding form symmetric to `query_url(path, obj)`.
+
+`obj` is a keyword (not positional) because route objects are plain structs
+(`<: Any`), so a positional `obj` would be indistinguishable from a `children`
+node in the existing `get_form(url, children...)` varargs.
 """
 const _FORM_KEYS = Set([:label, :btn_class, :confirm, :form_class])
 _is_form_attr(k) = startswith(String(k), "hx_") || k in (:id, :class, :style, :enctype)
 
-function _form(method, url, children...; label="Submit", btn_class="btn", confirm="", form_class="", kwargs...)
+function _form(method, url, children...; obj=nothing, skip=(), label="Submit", btn_class="btn", confirm="", form_class="", kwargs...)
     form_kw = filter(((k, _),) -> _is_form_attr(k), pairs(kwargs))
     hidden_kw = filter(((k, _),) -> !_is_form_attr(k), pairs(kwargs))
     merged_class = isempty(form_class) ? "u-inline" : "u-inline $form_class"
@@ -4102,15 +4159,18 @@ function _form(method, url, children...; label="Submit", btn_class="btn", confir
         hx_confirm=confirm, class=merged_class,
     )))
     btn = isnothing(label) ? [] : [h.button(; class=btn_class, type="submit")(label)]
+    # With `obj`, the non-form-attr kwargs are overrides for the auto-collected
+    # @params (not standalone hidden inputs) — see `hidden_inputs(obj; …)`.
+    hidden = isnothing(obj) ? hidden_inputs(; hidden_kw...) : hidden_inputs(obj; skip, hidden_kw...)
     h.form(; base_attrs..., form_kw...)(
-        hidden_inputs(; hidden_kw...)...,
+        hidden...,
         children...,
         btn...,
     )
 end
 
 """
-    post_form(url, children...; kwargs...)
+    post_form(url, children...; obj=nothing, skip=(), kwargs...)
 
 Generate a complete inline POST form. Extra keyword arguments become hidden
 `<input>` fields. Positional `children` are inserted before the submit button.
@@ -4120,11 +4180,16 @@ Generate a complete inline POST form. Extra keyword arguments become hidden
         hx_target="#list", hx_swap="innerHTML",
         msg="APPROVED.",
     )
+
+Pass `obj=<route object>` to auto-forward its set `@param`s as hidden inputs
+with zero hand-listing (see [`hidden_inputs(obj)`](@ref) / [`get_form`](@ref));
+`skip` drops params a visible control supplies, and the extra kwargs become
+`query_url`-style overrides.
 """
 post_form(url, children...; kwargs...) = _form(:hx_post, url, children...; kwargs...)
 
 """
-    get_form(url, children...; kwargs...)
+    get_form(url, children...; obj=nothing, skip=(), kwargs...)
 
 Generate a complete inline GET form. Same API as [`post_form`](@ref) but uses
 `hx-get` instead of `hx-post`.
@@ -4134,6 +4199,18 @@ Generate a complete inline GET form. Same API as [`post_form`](@ref) but uses
         sinput((; outcomes), outcome_options; multiple=true);
         hx_target="#results", hx_swap="innerHTML",
         fit_key, top_chains=string(top_chains),
+    )
+
+**Object-forwarding form** (symmetric to `query_url(path, obj)`): pass
+`obj=<route object>` to auto-collect a hidden `<input>` for every `@param` the
+user set — no hand-list to keep in sync with the `@param` block. `skip` drops
+params a visible control already submits; remaining kwargs are `query_url`-style
+overrides. See [`hidden_inputs(obj)`](@ref).
+
+    get_form(__self__/"fit/compute",
+        source_select;                 # the visible control for `source`
+        obj=__self__, skip=[:source],  # forward every OTHER set @param, zero hand-list
+        hx_target="#fit", hx_swap="innerHTML",
     )
 """
 get_form(url, children...; label=nothing, kwargs...) = _form(:hx_get, url, children...; label, kwargs...)
