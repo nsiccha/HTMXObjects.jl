@@ -3507,6 +3507,15 @@ sorted numerically; everything else uses `localeCompare`.
 function sortable_table_js()
     h.script(raw"""
 function sortTable(col, th) {
+    // Accept sortTable(th): with a single <th> element, derive the column
+    // index from its position in the header row. Lets a hand-built RICH header
+    // (one holding a button/link — which can't be a plain auto-wired String
+    // header) opt into sorting WITHOUT hardcoding its column index. Legacy
+    // sortTable(col, th) (col a number) is unchanged.
+    if (th === undefined && col && col.nodeType === 1) {
+        th = col;
+        col = Array.prototype.indexOf.call(th.parentNode.children, th);
+    }
     const tbody = th.closest('table').querySelector('tbody');
     // Paired-row pattern: a sortable row may carry a sibling row whose id
     // starts with "detail-" instead of "row-" (or any custom prefix → the
@@ -3548,10 +3557,20 @@ function sortTable(col, th) {
         const c = companionFor(r);
         if (c) tbody.appendChild(c);
     });
+    // Sort caret in a dedicated trailing <span> per <th>: the old approach
+    // assigned th.textContent, which flattens EVERY child node to a text node,
+    // so sorting any column destroyed interactive content living in a header
+    // (a batch-action button, a link — e.g. the KB agents table's Model ⟳
+    // refresh and its bulk ↻/⏸/▶/🗑 buttons both went inert after a sort).
+    // Managing a caret span leaves rich header content untouched.
     th.closest('tr').querySelectorAll('th').forEach(h => {
-        h.textContent = h.textContent.replace(/ [▲▼]$/, '');
+        const oldCaret = h.querySelector(':scope > .htmxo-sort-caret');
+        if (oldCaret) oldCaret.remove();
     });
-    th.textContent += asc ? ' ▲' : ' ▼';
+    const caret = document.createElement('span');
+    caret.className = 'htmxo-sort-caret';
+    caret.textContent = asc ? ' ▲' : ' ▼';
+    th.appendChild(caret);
 }
 """)
 end
@@ -3693,6 +3712,11 @@ itself delegates to this after materialising rows from a Tables.jl source.
       when `sortable=true`, or a plain `h.th(label)` otherwise.
     - any HTML node (e.g. `h.th("")`, `h.th("Actions")`) — used as-is.
       That's the per-column opt-out: pass a node and the auto-wiring is skipped.
+      To make a RICH header sortable anyway (e.g. one holding a button), wire
+      it yourself with `onclick="sortTable(this)"` — passing the `<th>` element
+      lets `sortTable` derive the column index from its DOM position, so no
+      index is hardcoded. The sort caret is kept in a trailing child `<span>`,
+      so any buttons/links in a header survive a sort.
 - `rows`: `Vector{<:Node}` of pre-built `h.tr(...)` rows. The caller controls
   every `<td>`, including `data-sort-value` for semantic sort keys (see
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
