@@ -403,7 +403,7 @@ _warn_legacy_page_name!(struct_expr) = _warn_legacy_name!(struct_expr, :page, :_
 
 # Attribute names that should be `__prefix__`-aware (and therefore should
 # not be hardcoded root-absolute strings). `hx-*` attributes get
-# underscore-to-hyphen translation by Cobweb; we match the underscore form
+# underscore-to-hyphen translation by HTMX's node builder; we match the underscore form
 # as written in source.
 const _URL_BEARING_ATTRS = (
     :href, :src, :action, :formaction,
@@ -1140,7 +1140,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     ))
     # Emit `Base.print(io, ::T)` so route bodies can write
     # `href=__self__` (the struct's index URL — `__prefix__` for non-root
-    # mounts, `"/"` for the root). Cobweb stringifies attribute values via
+    # mounts, `"/"` for the root). HTMX stringifies attribute values via
     # `print(io, val)`, so this is what makes `href=__self__` resolve to a
     # bare URL rather than the struct's default Julia repr.
     push!(block.args[1].args, :(
@@ -1578,23 +1578,20 @@ const _static_kwargs_paths = Set{String}()
 const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45;pointer-events:none;cursor:not-allowed}")
 
 # Non-GET hx attribute names that are non-functional on a static server.
-# Cobweb converts underscores to hyphens in attribute names, so these use hyphens.
+# HTMX converts underscores to hyphens in attribute names, so these use hyphens.
 const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-patch"), Symbol("hx-delete")])
-
-import HTMX: Cobweb
 
 """
     escape_html(s) -> String
 
 Escape `&`, `"`, `'`, `<`, `>` for safe interpolation into element text or
-attribute values. Thin re-export of `Cobweb.escape` so callers don't need to
-reach through HTMX.jl's transitive dependency.
+attribute values. Thin re-export of `HTMX.escape`.
 
 Note: `h.code(s)` and friends do **not** auto-escape text content — call
 `escape_html` explicitly when interpolating untrusted or markup-bearing
 strings.
 """
-escape_html(s::AbstractString) = Cobweb.escape(s)
+escape_html(s::AbstractString) = HTMX.escape(s)
 
 """
     html_escape(s) -> String
@@ -1604,7 +1601,7 @@ strings. Use only when bypassing HTMX.jl's automatic escaping (e.g. when
 building HTML via `replace(_, => "<a href=...>...")` for a `<pre>` block).
 
 For attribute values or text that may contain quotes / apostrophes, use
-[`escape_html`](@ref) (which delegates to `Cobweb.escape`) for the full
+[`escape_html`](@ref) (which delegates to `HTMX.escape`) for the full
 5-character escape set.
 """
 html_escape(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;")
@@ -1645,9 +1642,8 @@ _rewrite_hx_url(url::AbstractString, record_base::AbstractString) =
     _rewrite_static_url(url, isempty(record_base) ? "" : (rstrip(record_base, '/') * "/hx"))
 
 function _disable_for_static(node::Node; record_base::String="")
-    cn = parent(node)
-    attrs = Cobweb.attrs(cn)
-    children = Cobweb.children(cn)
+    attrs = HTMX.attrs(node)
+    children = HTMX.children(node)
 
     # Check if this element needs disabling
     disabled = false
@@ -1694,12 +1690,11 @@ function _disable_for_static(node::Node; record_base::String="")
     # Recurse into children
     new_children = map(child -> _disable_child(child, record_base), children)
 
-    Node(Cobweb.Node(Cobweb.tag(cn), new_attrs, new_children))
+    Node(HTMX.tag(node), new_attrs, new_children)
 end
 
 _disable_child(child, record_base) = child
 _disable_child(child::Node, record_base) = _disable_for_static(child; record_base)
-_disable_child(child::Cobweb.Node, record_base) = parent(_disable_for_static(Node(child); record_base))
 
 """
     _inject_static_style(val)
@@ -1708,19 +1703,17 @@ If val is a full HTML page (contains a `<head>`), inject the disabled-element st
 """
 _inject_static_style(val) = val
 function _inject_static_style(node::Node)
-    cn = parent(node)
-    if Cobweb.tag(cn) == :head
-        new_children = vcat(Cobweb.children(cn), [parent(_STATIC_DISABLED_STYLE)])
-        return Node(Cobweb.Node(:head, copy(Cobweb.attrs(cn)), new_children))
+    if HTMX.tag(node) == :head
+        new_children = vcat(HTMX.children(node), [_STATIC_DISABLED_STYLE])
+        return Node(:head, copy(HTMX.attrs(node)), new_children)
     end
     # Recurse into children looking for <head>
-    new_children = map(_inject_child, Cobweb.children(cn))
-    Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
+    new_children = map(_inject_child, HTMX.children(node))
+    Node(HTMX.tag(node), copy(HTMX.attrs(node)), new_children)
 end
 
 _inject_child(child) = child
-_inject_child(child::Node) = parent(_inject_static_style(child))
-_inject_child(child::Cobweb.Node) = parent(_inject_static_style(Node(child)))
+_inject_child(child::Node) = _inject_static_style(child)
 
 """
     static_transform(val; record_base="")
@@ -3319,17 +3312,13 @@ filter_errors(val::Tuple) = filter(!isnothing, filter_errors.(val))
 # drop everything else (text, primitives) so non-error subtrees prune away.
 _filter_errors_child(_) = nothing
 _filter_errors_child(child::Node) = filter_errors(child)
-_filter_errors_child(child::Cobweb.Node) = filter_errors(Node(child))
 filter_errors((content, id)::Pair) = let filtered = filter_errors(content)
     isnothing(filtered) ? nothing : filtered => id
 end
 
 function _has_error_attr(node::Node)
-    cn = parent(node)
-    attrs = Cobweb.attrs(cn)
-    get(attrs, Symbol("data-error"), nothing) == "true"
+    get(HTMX.attrs(node), Symbol("data-error"), nothing) == "true"
 end
-_has_error_attr(node::Cobweb.Node) = _has_error_attr(Node(node))
 _has_error_attr(::Any) = false
 
 function filter_errors(node::Node)
@@ -3337,12 +3326,10 @@ function filter_errors(node::Node)
     _has_error_attr(node) && return node
 
     # Otherwise, recurse into children and keep only error-containing branches
-    cn = parent(node)
-    children = Cobweb.children(cn)
     new_children = []
-    for child in children
+    for child in HTMX.children(node)
         filtered = _filter_errors_child(child)
-        !isnothing(filtered) && push!(new_children, parent(filtered))
+        !isnothing(filtered) && push!(new_children, filtered)
         # Drop non-Node children (text) in non-error nodes
     end
 
@@ -3350,7 +3337,7 @@ function filter_errors(node::Node)
     isempty(new_children) && return nothing
 
     # Keep this node as a structural wrapper with only error children
-    Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
+    Node(HTMX.tag(node), copy(HTMX.attrs(node)), new_children)
 end
 
 # Interactive elements counted as "chrome" and dropped from markdown output.
@@ -3383,26 +3370,20 @@ _strip_md_chrome((content, id)::Pair) = let f = _strip_md_chrome(content)
     isnothing(f) ? nothing : f => id
 end
 
-# Re-insertable child: a surviving Node → its underlying Cobweb node; a chrome
-# Node → nothing (dropped). Unlike filter_errors (which prunes non-error text),
-# text / primitive children are KEPT as-is so non-chrome prose survives.
+# Re-insertable child: a surviving Node passes through; a chrome Node → nothing
+# (dropped). Unlike filter_errors (which prunes non-error text), text / primitive
+# children are KEPT as-is so non-chrome prose survives.
 _strip_md_chrome_child(child) = child
-_strip_md_chrome_child(child::Node) = let f = _strip_md_chrome(child)
-    isnothing(f) ? nothing : parent(f)
-end
-_strip_md_chrome_child(child::Cobweb.Node) = let f = _strip_md_chrome(Node(child))
-    isnothing(f) ? nothing : parent(f)
-end
+_strip_md_chrome_child(child::Node) = _strip_md_chrome(child)
 
 function _strip_md_chrome(node::Node)
-    cn = parent(node)
-    _is_md_chrome(Cobweb.tag(cn)) && return nothing
+    _is_md_chrome(HTMX.tag(node)) && return nothing
     new_children = []
-    for child in Cobweb.children(cn)
+    for child in HTMX.children(node)
         kept = _strip_md_chrome_child(child)
         isnothing(kept) || push!(new_children, kept)
     end
-    Node(Cobweb.Node(Cobweb.tag(cn), copy(Cobweb.attrs(cn)), new_children))
+    Node(HTMX.tag(node), copy(HTMX.attrs(node)), new_children)
 end
 
 """
@@ -4802,7 +4783,7 @@ Build the placeholder `<div>` that `setupHtmxoEmbed` resolves at runtime.
 — in dev it resolves to `"/<base>"` (Vite proxy), in prod to
 `"<deploy-abspath>/<base>"` (committed recordings).
 
-Use as a Cobweb `Node` from a Julia-driven page, or stringify and embed
+Use as an HTMX `Node` from a Julia-driven page, or stringify and embed
 in markdown:
 
     println(io, htmxo_embed_html(; base="live-aov/"))
