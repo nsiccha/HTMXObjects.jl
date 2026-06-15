@@ -891,11 +891,29 @@ function _convert_params!(struct_expr)
         if !(arg isa Expr)
             push!(new_args, arg); continue
         end
-        if Meta.isexpr(arg, :macrocall) && arg.args[1] === Symbol("@param")
+        # Peel a `Core.@doc "str" @param …` wrapper — Julia's parser wraps
+        # `"doc"\n@param x = …` inside a struct body, making arg.args[1] a
+        # GlobalRef(Core,:@doc) rather than Symbol("@param"), which the bare
+        # check below would miss. Capture the wrapper so it can be re-attached
+        # on the lowered property, letting DynamicObjects capture info.doc.
+        doc_wrapper = nothing
+        param_arg = arg
+        if Meta.isexpr(arg, :macrocall)
+            mname = arg.args[1]
+            if (mname isa GlobalRef ? mname.name : mname) === Symbol("@doc") &&
+               length(arg.args) >= 4
+                doc_wrapper = arg
+                param_arg = arg.args[end]
+            end
+        end
+        if Meta.isexpr(param_arg, :macrocall) && param_arg.args[1] === Symbol("@param")
             # Strip the LineNumberNode that follows the macro name
-            payload = [a for a in arg.args[2:end] if !(a isa LineNumberNode)]
+            payload = [a for a in param_arg.args[2:end] if !(a isa LineNumberNode)]
             # Block form: @param begin ... end → expand each line
-            if length(payload) == 1 && Meta.isexpr(payload[1], :block)
+            is_block = length(payload) == 1 && Meta.isexpr(payload[1], :block)
+            if is_block
+                # Block form: outer @doc wrapper is ambiguous across multiple params —
+                # don't re-attach (each block-line param gets info.doc=nothing). Deferred.
                 for inner in payload[1].args
                     inner isa LineNumberNode && (push!(new_args, inner); continue)
                     process_line!(inner)
@@ -903,8 +921,14 @@ function _convert_params!(struct_expr)
             else
                 # Single-line form: @param vessels::T = default
                 # Multiple payload elements are a tuple literal (comma-separated)
+                n_before = length(new_args)
                 for inner in payload
                     process_line!(inner)
+                end
+                # Single-param with outer @doc: re-attach the wrapper on the one
+                # newly-pushed rewrite so DO captures the doc string onto info.doc.
+                if !isnothing(doc_wrapper) && length(new_args) - n_before == 1
+                    new_args[end] = Expr(:macrocall, doc_wrapper.args[1:end-1]..., new_args[end])
                 end
             end
         else
@@ -3054,6 +3078,40 @@ end
 #   `@param (;x)=__parent__` delegation) — its type/required/default are
 #   resolved from the nearest ancestor that declares it locally.
 
+# Normalize a raw doc value from info.doc (AbstractString, Expr, or nothing)
+# to Union{String,Nothing}. Interpolated Expr docs degrade gracefully to nothing.
+_normalize_doc(::Nothing) = nothing
+_normalize_doc(d::AbstractString) = isempty(strip(d)) ? nothing : string(d)
+_normalize_doc(d) = nothing  # Expr (:string with interpolation) — skip initial cut
+
+# Read the per-declaration docstring from an `info` NamedTuple defensively —
+# `get` with default so reflect never crashes against a DO version that hasn't
+# added the `doc` field yet (degrades to doc=nothing until DO's change lands).
+_decl_doc(info) = _normalize_doc(get(info, :doc, nothing))
+
+# Parse a Julia `# Arguments` section from a docstring into a name→description
+# map. Lines matching `- \`name\`: description` under a `# Arguments` header
+# are collected; the section ends at the next `#`-header. Names not in the
+# route sig are ignored; sig args absent from the section get doc=nothing.
+function _parse_arguments_section(doc::AbstractString)
+    result = Dict{Symbol,String}()
+    in_args = false
+    for line in split(doc, '\n')
+        stripped = strip(line)
+        if stripped == "# Arguments"
+            in_args = true
+            continue
+        end
+        if in_args
+            !isempty(stripped) && startswith(stripped, "#") && break
+            m = match(r"^-\s+`(\w+)`:\s+(.+)$", stripped)
+            m === nothing && continue
+            result[Symbol(m.captures[1])] = String(strip(m.captures[2]))
+        end
+    end
+    result
+end
+
 _reflect_resolve_type(_mod, ::Nothing) = nothing
 function _reflect_resolve_type(mod, ty)
     ty === :nothing && return nothing
@@ -3078,14 +3136,15 @@ _reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET") ? :query :
 # `__verb__::Verb{V}`, filtered by name per DO's verb-agnostic contract);
 # kwargs read from query/body by method. `type` is a resolved `Type` (or
 # `nothing`); `default` is meaningful only when `!required`.
-function _reflect_call_params(OwnerT, info, method)
+function _reflect_call_params(OwnerT, info, method, arg_docs=Dict{Symbol,String}())
     sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(OwnerT))
     kwsrc = _reflect_kw_source(method)
     path_params = NamedTuple[]
     kwargs = NamedTuple[]
     sig === nothing && return (path_params, kwargs)
     mk = (p, source) -> (name=p.name, source=source, type=p.type, required=p.required,
-                         default=(p.required ? nothing : p.default), doc=nothing, inherited=false)
+                         default=(p.required ? nothing : p.default),
+                         doc=get(arg_docs, p.name, nothing), inherited=false)
     for p in sig.positional
         p.name === :__verb__ && continue
         push!(path_params, mk(p, :path))
@@ -3107,7 +3166,8 @@ function _reflect_local_param(T, nm)
     if Meta.isexpr(rhs, :call) && length(rhs.args) >= 4 && rhs.args[1] === _extract_param
         has_default = length(rhs.args) >= 5
         return (type=_reflect_resolve_type(parentmodule(T), rhs.args[4]),
-                required=!has_default, default=has_default ? rhs.args[5] : nothing)
+                required=!has_default, default=has_default ? rhs.args[5] : nothing,
+                doc=_decl_doc(info))
     end
     nothing
 end
@@ -3134,7 +3194,7 @@ function _reflect_param_props(OwnerT, method, parent_stack)
                         default=nothing, doc=nothing, inherited=inherited))
         else
             push!(out, (name=nm, source=src, type=loc.type, required=loc.required,
-                        default=loc.default, doc=nothing, inherited=inherited))
+                        default=loc.default, doc=loc.doc, inherited=inherited))
         end
     end
     out
@@ -3147,11 +3207,14 @@ function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[])
             _reflect_walk!(acc, nested_type, nested_prefix, push!(copy(parent_stack), IterT))
         end,
         (name, info, method) -> begin
-            path_params, kwargs = _reflect_call_params(IterT, info, method)
+            route_doc = _decl_doc(info)
+            arg_docs = isnothing(route_doc) ? Dict{Symbol,String}() :
+                       _parse_arguments_section(route_doc)
+            path_params, kwargs = _reflect_call_params(IterT, info, method, arg_docs)
             param_strs = [string(p.name) for p in path_params]
             path = _route_path(prefix, name, param_strs)
             params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
-            push!(acc, (verb=Symbol(method), path=path, name=name, doc=nothing, params=params))
+            push!(acc, (verb=Symbol(method), path=path, name=name, doc=route_doc, params=params))
         end)
 end
 
