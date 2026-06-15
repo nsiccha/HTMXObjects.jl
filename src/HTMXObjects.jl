@@ -3041,7 +3041,8 @@ _reflect_resolve_type(_mod, ::Nothing) = nothing
 function _reflect_resolve_type(mod, ty)
     ty === :nothing && return nothing
     # Unresolvable annotation ⇒ `nothing` (consumers map it to String),
-    # matching DO `property_signature`'s contract for the call-sig path.
+    # matching DO `property_signature`'s type contract. Serves the @param path;
+    # the call-sig path resolves via DO directly (see `_reflect_call_params`).
     try Core.eval(mod, ty) catch; nothing end
 end
 
@@ -3049,42 +3050,31 @@ end
 # query-vs-body split in `_generate_extract_args` / `_kwargs_source`.
 _reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET") ? :query : :body
 
-# Split a route's `info.indices` into (path_params, kwargs), mirroring
-# `_register_one_route`'s index walk (skip the injected `__verb__::Verb{V}`,
-# split the `:parameters` kwargs node) but capturing type/required/default.
-#
-# INTERIM local parse. Decision 1t1vfwh puts the AST→structured parse in DO,
-# but DO's `property_signature(T, prop)` keys on `metafirst(T, prop)`, which
-# returns the FIRST declaration for a name — collapsing multi-verb same-name
-# routes (`@get user(id)` + `@post user(; …)`) to one signature. We need the
-# per-route `info` that `_walk_route_meta` hands us (it carries the verb-
-# specific indices). Swap to DO once it exposes a parse-from-`info` entry point
-# (dispatched); until then this mirrors DO's parse (verified identical output
-# for non-colliding routes).
+# Split a route's call signature into (path_params, kwargs) via DO's
+# `property_signature(info, mod)` — the canonical AST→structured parser
+# (decision 1t1vfwh). We pass the per-route, verb-specific `info` that
+# `_walk_route_meta` hands us, so multi-verb same-name routes
+# (`@get user(id)` + `@post user(; …)`) each keep their own signature — the
+# `(T, prop)` form would collapse them via `metafirst` (first-decl-wins). The
+# `(info, mod)` form never returns `nothing` (empty indices → empty lists), but
+# we guard anyway. Positionals become path params (skipping the injected
+# `__verb__::Verb{V}`, filtered by name per DO's verb-agnostic contract);
+# kwargs read from query/body by method. `type` is a resolved `Type` (or
+# `nothing`); `default` is meaningful only when `!required`.
 function _reflect_call_params(OwnerT, info, method)
-    mod = parentmodule(OwnerT)
+    sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(OwnerT))
     kwsrc = _reflect_kw_source(method)
     path_params = NamedTuple[]
     kwargs = NamedTuple[]
-    saw_verb = false
-    mk = (lhs, default, source, required) -> begin
-        nm, ty = _split_param_lhs(lhs)
-        (name=nm, source=source, type=_reflect_resolve_type(mod, ty),
-         required=required, default=default, doc=nothing, inherited=false)
+    sig === nothing && return (path_params, kwargs)
+    mk = (p, source) -> (name=p.name, source=source, type=p.type, required=p.required,
+                         default=(p.required ? nothing : p.default), doc=nothing, inherited=false)
+    for p in sig.positional
+        p.name === :__verb__ && continue
+        push!(path_params, mk(p, :path))
     end
-    for idx in info.indices
-        if Meta.isexpr(idx, :parameters)
-            for kw in idx.args
-                Meta.isexpr(kw, :kw) ? push!(kwargs, mk(kw.args[1], kw.args[2], kwsrc, false)) :
-                                       push!(kwargs, mk(kw, nothing, kwsrc, true))
-            end
-        elseif !saw_verb && _is_verb_annotation(idx)
-            saw_verb = true
-        elseif Meta.isexpr(idx, :kw)
-            push!(path_params, mk(idx.args[1], idx.args[2], :path, false))
-        else
-            push!(path_params, mk(idx, nothing, :path, true))
-        end
+    for p in sig.kwargs
+        push!(kwargs, mk(p, kwsrc))
     end
     (path_params, kwargs)
 end
