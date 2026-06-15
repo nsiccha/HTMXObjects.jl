@@ -45,7 +45,7 @@ const APPDATA = AppData()
             h.li(h.a(href=__self__/"editor_demo")("Editor form demo")),
             h.li(h.a(href=__self__/"git_editor_demo")("Git-backed editor demo")),
             h.li(h.a(href=__self__/"gallery_demo")("Gallery primitive demo")),
-            h.li(h.a(href=__self__/"structure")("Type structure browser")),
+            h.li(h.a(href=__self__/"schema")("App schema (JSON)")),
         ),
     )
 
@@ -58,7 +58,7 @@ const APPDATA = AppData()
     @include git_editor_demo = GitEditorDemoRoutes()
     @include gallery_demo = GalleryDemoRoutes()
     @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
-    @include structure = StructureRoutes(; root=AppRoutes)
+    @include schema = SchemaRoutes(; root=AppRoutes)
 end
 
 function __init__()

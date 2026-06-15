@@ -158,6 +158,6 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 |--------|---------|
 | `TestRoutes`     | Test-runner UI (see Testing section) |
 | `EditorRoutes`   | Git-backed inline file editor (see Editor section) |
-| `StructureRoutes`| Introspection browser for an `@htmx`/`@dynamicstruct` tree |
+| `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`) |
 | `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
 | `RecordingRoutes`| Static-recording driver (see Gallery section) |
