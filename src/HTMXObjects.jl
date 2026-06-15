@@ -1284,7 +1284,7 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
         else
             push!(kw_stmts, quote
                 let __v__ = $lookup_call
-                    __v__ === $(_NO_DEFAULT) && throw(KeyError($(QuoteNode(kname))))
+                    __v__ === $(_NO_DEFAULT) && throw($(MissingRequiredParam)($(QuoteNode(kname))))
                     push!(__kw__, $(QuoteNode(kname)) => __v__)
                 end
             end)
@@ -1907,7 +1907,7 @@ Extract a single typed parameter from an HTTP request, mirroring the behavior of
 `@get`/`@post` kwarg extraction. Looks up `name` in the method-appropriate source
 (`queryparams` for GET/DELETE, `formparams` for POST/PUT/PATCH with a `queryparams`
 fallback), converts via `_convert_param(value, T)`, and returns `default` when the
-key is absent or empty. Throws `KeyError(name)` if no default was supplied.
+key is absent or empty. Throws `MissingRequiredParam(name)` if no default was supplied.
 
 `T` may be `nothing` for untyped params (raw `String`/`Vector{String}`).
 """
@@ -1918,7 +1918,7 @@ function _extract_param(req, name, T, default=_NO_DEFAULT)
     v = _lookup_param(src, fallback, name, T)
     _resolve_extracted(v, default, name)
 end
-_resolve_extracted(::_NoDefault, ::_NoDefault, name) = throw(KeyError(name))
+_resolve_extracted(::_NoDefault, ::_NoDefault, name) = throw(MissingRequiredParam(name))
 _resolve_extracted(::_NoDefault, default, _) = default
 _resolve_extracted(v, _default, _name) = v
 
@@ -1934,7 +1934,7 @@ Extract a single typed HTTP request header. The header key is derived from `name
 by replacing `_` with `-` (`x_kb_agent_id` → `x-kb-agent-id`; HTTP.jl lookup is
 case-insensitive, so this matches `X-KB-Agent-ID`). Converts the raw string via
 `_convert_param(value, T)` and returns `default` when the header is absent or
-empty. Throws `KeyError(name)` if no default was supplied and the header is absent.
+empty. Throws `MissingRequiredParam(name)` if no default was supplied and the header is absent.
 
 `T` may be `nothing` for untyped headers (raw `String`).
 """
@@ -2179,6 +2179,13 @@ function Base.showerror(io::IO, e::ReviseMissedEdits)
     print(io, "See 'Revise freshness' below for the same data.")
 end
 
+struct MissingRequiredParam <: Exception
+    name::Symbol
+end
+function Base.showerror(io::IO, e::MissingRequiredParam)
+    print(io, "Missing required parameter: ", e.name)
+end
+
 function _check_revise_errors!()
     # Both checks: queue errors (Revise tried but failed) and missed edits
     # (FS watcher silently dropped a save). Either condition means the
@@ -2328,11 +2335,13 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 #   HTMX requests keep 200 so vanilla HTMX still swaps in the error article
 #     without needing `htmx.config.responseHandling` or response-targets.
 #   Non-HTMX (curl, direct browser nav, uptime checks, monitoring) get 500
-#     so logs / health checks / load balancers see errors as errors.
+#     so logs / health checks / load balancers see errors as errors,
+#     except MissingRequiredParam which maps to 400 (client error).
 # If the user's `__error__` hook returns an `HTTP.Response` directly, their
 # status choice is respected — not rewritten.
-_with_error_status(req, resp::HTTP.Response) =
-    is_htmx(req) ? resp : HTTP.Response(500, resp.headers; body=resp.body)
+_error_status_code(err) = unwrap_error(err) isa MissingRequiredParam ? 400 : 500
+_with_error_status(req, resp::HTTP.Response, err) =
+    is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
 _passthrough_response(r::HTTP.Response) = r
 _passthrough_response(_) = nothing
@@ -2353,14 +2362,14 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     direct = _passthrough_response(err_val)
     isnothing(direct) || return _stamp_error_id(direct, uid)
     if wants_markdown(req)
-        return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val))), uid)
+        return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val)), err), uid)
     end
     is_htmx(req) && return _stamp_error_id(to_response(err_val), uid)   # always 200 for HTMX
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (err_val = wrapper(err_val))
     end
-    _stamp_error_id(_with_error_status(req, to_response(err_val)), uid)
+    _stamp_error_id(_with_error_status(req, to_response(err_val), err), uid)
 end
 
 """
