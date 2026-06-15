@@ -3016,6 +3016,156 @@ function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::Stri
     )
 end
 
+# --- Reflection -----------------------------------------------------------
+#
+# `reflect(T)` returns the route tree of an `@htmx` app as plain data — one
+# NamedTuple descriptor per route — for schema-autogen consumers (the
+# KB-MCP), docs, and tooling. It MIRRORS the registration walk
+# (`_register_routes` → `_walk_route_meta` → `_register_one_route` /
+# `_register_included_routes`) so the reported `path`/`verb` match what
+# `route!` actually registers — but collects descriptors instead of
+# registering handlers. Plain NamedTuples (not new structs) keep it
+# Revise-friendly and trivially JSON-serializable.
+#
+# Route descriptor:  (verb::Symbol, path::String, name::Symbol,
+#                     doc::Union{String,Nothing}, params::Vector{NamedTuple})
+# Param descriptor:  (name::Symbol, source::Symbol, type, required::Bool,
+#                     default, doc::Union{String,Nothing}, inherited::Bool)
+#   source ∈ :path | :query | :body   (where the value is read);
+#   inherited=true marks a `@param` reaching this route from an ancestor
+#   struct (auto-threaded into nested @include children, or an explicit
+#   `@param (;x)=__parent__` delegation) — its type/required/default are
+#   resolved from the nearest ancestor that declares it locally.
+
+_reflect_resolve_type(_mod, ::Nothing) = nothing
+function _reflect_resolve_type(mod, ty)
+    ty === :nothing && return nothing
+    # Unresolvable annotation ⇒ `nothing` (consumers map it to String),
+    # matching DO `property_signature`'s contract for the call-sig path.
+    try Core.eval(mod, ty) catch; nothing end
+end
+
+# Source bucket for request-parsed params by HTTP method — mirrors the
+# query-vs-body split in `_generate_extract_args` / `_kwargs_source`.
+_reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET") ? :query : :body
+
+# Split a route's `info.indices` into (path_params, kwargs), mirroring
+# `_register_one_route`'s index walk (skip the injected `__verb__::Verb{V}`,
+# split the `:parameters` kwargs node) but capturing type/required/default.
+#
+# INTERIM local parse. Decision 1t1vfwh puts the AST→structured parse in DO,
+# but DO's `property_signature(T, prop)` keys on `metafirst(T, prop)`, which
+# returns the FIRST declaration for a name — collapsing multi-verb same-name
+# routes (`@get user(id)` + `@post user(; …)`) to one signature. We need the
+# per-route `info` that `_walk_route_meta` hands us (it carries the verb-
+# specific indices). Swap to DO once it exposes a parse-from-`info` entry point
+# (dispatched); until then this mirrors DO's parse (verified identical output
+# for non-colliding routes).
+function _reflect_call_params(OwnerT, info, method)
+    mod = parentmodule(OwnerT)
+    kwsrc = _reflect_kw_source(method)
+    path_params = NamedTuple[]
+    kwargs = NamedTuple[]
+    saw_verb = false
+    mk = (lhs, default, source, required) -> begin
+        nm, ty = _split_param_lhs(lhs)
+        (name=nm, source=source, type=_reflect_resolve_type(mod, ty),
+         required=required, default=default, doc=nothing, inherited=false)
+    end
+    for idx in info.indices
+        if Meta.isexpr(idx, :parameters)
+            for kw in idx.args
+                Meta.isexpr(kw, :kw) ? push!(kwargs, mk(kw.args[1], kw.args[2], kwsrc, false)) :
+                                       push!(kwargs, mk(kw, nothing, kwsrc, true))
+            end
+        elseif !saw_verb && _is_verb_annotation(idx)
+            saw_verb = true
+        elseif Meta.isexpr(idx, :kw)
+            push!(path_params, mk(idx.args[1], idx.args[2], :path, false))
+        else
+            push!(path_params, mk(idx, nothing, :path, true))
+        end
+    end
+    (path_params, kwargs)
+end
+
+# Parse a LOCAL `@param` on `T` into (type, required, default), or `nothing`
+# if `nm` is absent or only reaches `T` by inheritance/delegation. A local
+# `@param`'s emitted RHS is `_extract_param(req, :name, T[, default])` —
+# arity-4 (no default) ⇒ required, arity-5 ⇒ has default.
+function _reflect_local_param(T, nm)
+    info = Base.invokelatest(DynamicObjects.metafirst, T, nm)
+    info === nothing && return nothing
+    rhs = info.rhs
+    if Meta.isexpr(rhs, :call) && length(rhs.args) >= 4 && rhs.args[1] === _extract_param
+        has_default = length(rhs.args) >= 5
+        return (type=_reflect_resolve_type(parentmodule(T), rhs.args[4]),
+                required=!has_default, default=has_default ? rhs.args[5] : nothing)
+    end
+    nothing
+end
+
+# Build param descriptors for every `@param` of `OwnerT` (`_param_names`
+# includes names inherited from ancestors). A locally-declared param is read
+# straight off `OwnerT`; an inherited/delegated one is resolved from the
+# nearest ancestor in `parent_stack` that declares it locally. `source` is the
+# read-location (query/body by method); `inherited` carries the provenance.
+function _reflect_param_props(OwnerT, method, parent_stack)
+    src = _reflect_kw_source(method)
+    out = NamedTuple[]
+    for nm in Base.invokelatest(_param_names, OwnerT)
+        loc = _reflect_local_param(OwnerT, nm)
+        inherited = loc === nothing
+        if inherited
+            for anc in Iterators.reverse(parent_stack)
+                loc = _reflect_local_param(anc, nm)
+                loc === nothing || break
+            end
+        end
+        if loc === nothing
+            push!(out, (name=nm, source=src, type=nothing, required=false,
+                        default=nothing, doc=nothing, inherited=inherited))
+        else
+            push!(out, (name=nm, source=src, type=loc.type, required=loc.required,
+                        default=loc.default, doc=nothing, inherited=inherited))
+        end
+    end
+    out
+end
+
+function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[])
+    _walk_route_meta(IterT,
+        (name, info, nested_type) -> begin
+            nested_prefix, _step = _nested_prefix_and_step(IterT, name, info, prefix)
+            _reflect_walk!(acc, nested_type, nested_prefix, push!(copy(parent_stack), IterT))
+        end,
+        (name, info, method) -> begin
+            path_params, kwargs = _reflect_call_params(IterT, info, method)
+            param_strs = [string(p.name) for p in path_params]
+            path = _route_path(prefix, name, param_strs)
+            params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
+            push!(acc, (verb=Symbol(method), path=path, name=name, doc=nothing, params=params))
+        end)
+end
+
+"""
+    reflect(::Type{T}) -> Vector{NamedTuple}
+
+Reflect the route tree of an `@htmx` app type `T` into plain data — one
+descriptor per route, with `verb`, mount-resolved `path`, `name`, `doc`, and
+`params`. Each param carries `name`, `source` (`:path`/`:query`/`:body`),
+resolved `type`, `required`, `default`, `doc`, and `inherited`. The single
+ergonomic entry point for schema-autogen
+(the KB-MCP), docs, and tooling; mirrors the registration walk so paths/verbs
+match what `route!` registers.
+"""
+function reflect(::Type{T}) where {T}
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return NamedTuple[]
+    acc = NamedTuple[]
+    _reflect_walk!(acc, T, "")
+    acc
+end
+
 """
     route!(app; prefix="", record_dir=nothing, record_base="")
 
