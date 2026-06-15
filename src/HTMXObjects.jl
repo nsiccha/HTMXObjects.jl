@@ -2321,6 +2321,14 @@ function _invoke_error_handler(obj, err, uid, path)
     if obj !== nothing && hasproperty(obj, :__error__)
         return getproperty(obj, :__error__)(err)
     end
+    inner = unwrap_error(err)
+    if inner isa MissingRequiredParam
+        return h.article(
+            h.header("Bad Request"),
+            h.p(sprint(showerror, inner));
+            aria_invalid="true",
+        )
+    end
     _default_error_render(uid, path)
 end
 
