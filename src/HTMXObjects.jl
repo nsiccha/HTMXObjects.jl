@@ -6349,6 +6349,7 @@ Exactly one must be given.
 - `rows`                 — textarea rows.
 - `placeholder`          — input placeholder.
 - `label`                — optional label rendered above the editor.
+- `save_label`           — submit-button label (default `"Save"`).
 - `cancel_url`           — URL for Cancel (`hx-get`).
 - `cancel_onclick`       — inline JS for Cancel.
 """
@@ -6366,6 +6367,7 @@ function editor_form(;
     rows            = 15,
     placeholder     = "",
     label           = nothing,
+    save_label      = "Save",
     cancel_url      = nothing,
     cancel_onclick  = nothing,
 )
@@ -6396,7 +6398,7 @@ function editor_form(;
             input_node,
             h.input(; type="hidden", name="version", value=version),
             h.div(; class="htmxo-editor-actions")(
-                h.button("Save"; type="submit"),
+                h.button(save_label; type="submit"),
                 cancel_btn,
             ),
         ),
