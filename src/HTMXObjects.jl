@@ -3689,8 +3689,9 @@ Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
 caption rendered above it. Pass `actions` (e.g. download buttons) to populate
 the right side of the caption header.
 """
-function with_caption(spec::CaptionSpec, content; actions=())
-    h.figure(; class="captioned")(render_caption(spec; actions), _as_children(content)...)
+function with_caption(spec::CaptionSpec, content; actions=(), id=nothing)
+    fig_attrs = isnothing(id) ? (; class="captioned") : (; class="captioned", id)
+    h.figure(; fig_attrs...)(render_caption(spec; actions), _as_children(content)...)
 end
 
 # --- Table rendering ---
@@ -3969,7 +3970,8 @@ function sortable_table(headers, rows;
 
     if !isnothing(caption)
         actions = download ? (download_btn,) : ()
-        with_caption(caption, table_node; actions)
+        fig_id = startswith(id, "tbl-") ? id : "tbl-$id"
+        with_caption(caption, table_node; actions, id=fig_id)
     elseif download
         h.figure(; class="captioned")(
             h.figcaption(; class="caption")(
