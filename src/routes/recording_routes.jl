@@ -9,7 +9,7 @@
     # is loaded. The IP runs once per (app_type, paths, record_dir,
     # record_base) tuple thanks to `:parallel` cache; `?force=true` on
     # the route invalidates and re-runs.
-    record(app_type::DataType, paths::Tuple, record_dir::String, record_base::String) = begin
+    record(app_type::Type, paths::Tuple, record_dir::String, record_base::String) = begin
         phases = [_recording_progress_phase(__status__, p) for p in paths]
         # Clean slate so stale files from a previous run don't pollute
         # the output. The recording closures rebuild everything we
@@ -69,7 +69,7 @@ mount prefix:
 """
 @htmx struct RecordingRoutes
     # Mountable docs-build route bundle for `record!`-driven recordings.
-    app_type::DataType
+    app_type::Type
     paths::Vector{String} = String["/"]
     record_dir::String
     record_base::String = ""

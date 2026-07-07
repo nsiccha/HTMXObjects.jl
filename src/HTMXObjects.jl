@@ -1867,10 +1867,10 @@ const _http_verbs = Dict(
 # stored type changes, so widening this without a restart is impossible.
 # Companion dict `_record_bases` carries the `record_base` URL prefix so
 # new fields can be added without touching this const.
-const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tuple{String, Any}}}()
-const _record_bases = Dict{DataType, String}()
+const _registered_types = Dict{Type, NamedTuple{(:prefix, :record_dir), Tuple{String, Any}}}()
+const _record_bases = Dict{Type, String}()
 # Reverse lookup: included sub-struct type → set of registered parent types
-const _included_type_parents = Dict{DataType, Set{DataType}}()
+const _included_type_parents = Dict{Type, Set{Type}}()
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
@@ -3046,7 +3046,7 @@ end
 # and the parent's `@include` desugar then threads `/<name>` per nesting level.
 function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String, record_dir; root_prefix::String="", record_base::String="")
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
-    push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
+    push!(get!(Set{Type}, _included_type_parents, NestedT), ParentT)
     _walk_route_meta(NestedT,
         (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
@@ -3346,7 +3346,7 @@ _recording_run_phase(f, phase) = _recording_run_phase_impl[](f, phase)
 _recording_polling(args...; kwargs...) = _recording_polling_impl[](args...; kwargs...)
 
 # Called by @htmx macro expansion — re-registers routes when Revise updates the struct
-function _reroute!(T::DataType)
+function _reroute!(T::Type)
     if haskey(_registered_types, T)
         args = _registered_types[T]
         _register_routes(T; args.prefix, args.record_dir, record_base=get(_record_bases, T, ""))
