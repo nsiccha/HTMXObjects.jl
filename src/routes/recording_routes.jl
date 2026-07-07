@@ -47,7 +47,7 @@
     end
 end
 
-const RECORDING_STATE = RecordingState(; cache_type=:parallel)
+const RECORDING_STATE = RecordingState()
 
 """
     @include record_gallery = RecordingRoutes(;
