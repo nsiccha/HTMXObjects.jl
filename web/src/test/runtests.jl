@@ -718,6 +718,44 @@ end
     @test !contains(url, "n_bootstrap=10")
 end
 
+@testset "hidden_inputs(obj)" begin
+    # Object-form param forwarding. Shares _param_names(obj) enumeration with
+    # query_url(path, obj); this locks the OTHER call site the DO-perf slots
+    # strip fixed. Pre-fix (typeof(app)==ParamApp{__DO_S__}) _param_names fell
+    # to the () default → hidden_inputs emitted nothing → sibling @params reset.
+    render(nodes) = join(repr("text/html", n) for n in nodes)
+
+    # Only params actually present in the request are emitted; vectors repeat.
+    req = HTTP.Request("GET", "/?vessels=A&vessels=B&n_bootstrap=42")
+    app = ParamApp(; __req__=req)
+    html = render(hidden_inputs(app))
+    @test contains(html, "name=\"vessels\"")
+    @test contains(html, "value=\"A\"")
+    @test contains(html, "value=\"B\"")
+    @test contains(html, "name=\"n_bootstrap\"")
+    @test contains(html, "value=\"42\"")
+    @test !contains(html, "name=\"note\"")   # absent from request → not forwarded
+
+    # Nothing present → no hidden inputs at all
+    req = HTTP.Request("GET", "/")
+    app = ParamApp(; __req__=req)
+    @test isempty(hidden_inputs(app))
+
+    # skip drops a present param
+    req = HTTP.Request("GET", "/?vessels=A&n_bootstrap=7")
+    app = ParamApp(; __req__=req)
+    html = render(hidden_inputs(app; skip=(:vessels,)))
+    @test !contains(html, "name=\"vessels\"")
+    @test contains(html, "name=\"n_bootstrap\"")
+
+    # overrides win even when absent from the request
+    req = HTTP.Request("GET", "/")
+    app = ParamApp(; __req__=req)
+    html = render(hidden_inputs(app; note="forced"))
+    @test contains(html, "name=\"note\"")
+    @test contains(html, "value=\"forced\"")
+end
+
 @testset "__self__/\"path\" mount-prefix operator" begin
     # Default construction: no parent, no prefix
     app = MountRootApp()
