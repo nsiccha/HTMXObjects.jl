@@ -4347,7 +4347,9 @@ For the common case, [`get_form`](@ref)/[`post_form`](@ref) take this directly
 via their `obj=` / `skip=` keywords.
 """
 function hidden_inputs(obj; skip=(), overrides...)
-    names = _param_names(typeof(obj))
+    # DO Phase B slots: strip typeof(obj)==T{__DO_S__} back to bare T so the
+    # emitted _param_names(::Type{T}) matches (mirrors route!'s .wrapper strip, 2efa17f).
+    names = _param_names(Base.typename(typeof(obj)).wrapper)
     skipset = Set{Symbol}(Symbol(s) for s in skip)
     override_keys = Set(keys(overrides))
     present = queryparams(_req_of(obj))
@@ -4516,7 +4518,9 @@ Presence is checked against `queryparams(_req_of(obj))` regardless of the
 inbound request method — `query_url` always builds GET-style URLs.
 """
 function query_url(path, obj; overrides...)
-    names = _param_names(typeof(obj))
+    # DO Phase B slots: strip typeof(obj)==T{__DO_S__} back to bare T so the
+    # emitted _param_names(::Type{T}) matches (mirrors route!'s .wrapper strip, 2efa17f).
+    names = _param_names(Base.typename(typeof(obj)).wrapper)
     override_keys = Set(keys(overrides))
     present = queryparams(_req_of(obj))
     kws = Pair{Symbol,Any}[]
