@@ -3255,7 +3255,17 @@ Oxygen router. Returns `app`.
 **you do not need to call `route!` again after editing a route body**.
 """
 function route!(obj; prefix="", record_dir=nothing, record_base="")
-    T = typeof(obj)
+    # DO Phase B appends a `__DO_S__` slots type parameter to every struct, so
+    # `typeof(obj)` is now the CONCRETE `AppName{slots}`, not the bare `AppName`.
+    # Strip back to the bare UnionAll — this is exactly the pre-Phase-B value of
+    # `T`, so the registry (keyed to match `_reroute!`'s bare arg and the bare
+    # `_nested_struct_type` keys), route registration, and request-time
+    # reconstruction `RootT(; __req__, …)` (DO's keyword ctor lives on the bare
+    # name only) all stay byte-identical to before Phase B.
+    # `.wrapper` strips ALL type params; `@htmx` route roots are non-parametric,
+    # so this equals stripping only `__DO_S__` (a parametric root would need a
+    # DO `stripslots` helper).
+    T = Base.typename(typeof(obj)).wrapper
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
