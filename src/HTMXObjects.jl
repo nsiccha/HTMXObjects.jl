@@ -93,6 +93,7 @@ concurrency, plus extra spawn overhead per request, plus a startup `@warn`).
 """
 function serve(; parallel=false, kwargs...)
     async = Base.get(kwargs, :async, false)
+    kwargs = _with_access_timing(kwargs)
     serve_kwargs = if parallel === :interactive
         if Threads.nthreads(:interactive) <= 1
             @warn "Only 1 interactive thread available. Launch julia with e.g. \"julia -t 8,4\" to add more interactive threads for request handling."
@@ -108,6 +109,55 @@ function serve(; parallel=false, kwargs...)
             terminate()
         end
     end
+end
+
+# --- Access-log request timing ---------------------------------------------
+# `serve` installs, by default, a middleware that stamps each request's start
+# time plus a custom access-log line that appends the elapsed handling time.
+# HTTP.jl's `logfmt` has no duration token and records no request-start, so the
+# two pieces are required together. A caller can override either by passing their
+# own `middleware` / `access_log` to `serve` — both are respected.
+
+# Mirrors Oxygen's default access-log line (Oxygen `core.jl`: the `logfmt`
+# assigned in `serve`) so the output is purely additive: the standard line, then
+# a trailing elapsed time.
+const _ACCESS_LOG_BASE = logfmt"$time_iso8601 - $remote_addr:$remote_port - \"$request\" $status"
+
+"""
+    _timing_middleware(handler)
+
+Oxygen middleware that stamps `req.context[:t0]` with the request-start time so
+[`_timed_access_log`](@ref) can report the elapsed handling time.
+"""
+function _timing_middleware(handler)
+    function (req::HTTP.Request)
+        req.context[:t0] = time()
+        return handler(req)
+    end
+end
+
+"""
+    _timed_access_log(io, http)
+
+Custom `access_log` writer: Oxygen's standard access-log line followed by the
+request's elapsed handling time, formatted with SI units (e.g. ` 78.9ms`,
+` 1.23s`, ` 5.0min`). The duration is omitted for requests that never passed
+through [`_timing_middleware`](@ref) (e.g. connections rejected before routing).
+"""
+function _timed_access_log(io::IO, http)
+    _ACCESS_LOG_BASE(io, http)
+    t0 = Base.get(http.message.context, :t0, nothing)
+    t0 === nothing || print(io, " ", fmt_time(time() - t0))
+end
+
+# Prepend the timing middleware to any caller-supplied `middleware`, and install
+# the timed access-log writer unless the caller passed their own `access_log`
+# (matching Oxygen's own default-only-if-absent behaviour).
+function _with_access_timing(kwargs)
+    kw = Dict{Symbol,Any}(kwargs)
+    kw[:middleware] = Any[_timing_middleware, Base.get(kw, :middleware, [])...]
+    haskey(kw, :access_log) || (kw[:access_log] = _timed_access_log)
+    return kw
 end
 
 """
