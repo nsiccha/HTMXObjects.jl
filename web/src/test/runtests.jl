@@ -433,6 +433,47 @@ end
     @test contains(html, "<script>")
     @test contains(html, "sortTable")
     @test contains(html, "closest")
+    # Sort-state read surface: `sortTable` mirrors `data-sort-dir` into the
+    # standard `aria-sort` (and clears both from siblings); `htmxoSortState`
+    # is the documented accessor consumers spread into `hx-vals`.
+    @test contains(html, "function htmxoSortState")
+    @test contains(html, "setAttribute('aria-sort'")
+    @test contains(html, "removeAttribute('aria-sort')")
+    @test contains(html, "thead th[data-sort-dir]")
+end
+
+@testset "sortable_table default_sort" begin
+    rows = [h.tr(h.td("a"), h.td("1"))]
+    plain = repr("text/html", sortable_table(["Name", "Score"], rows))
+    @test !contains(plain, "data-sort-dir")
+    @test !contains(plain, "aria-sort")
+    @test !contains(plain, "htmxo-sort-caret")
+
+    # `col => dir`, stamped on exactly one <th>, matching what sortTable sets.
+    desc = repr("text/html", sortable_table(["Name", "Score"], rows; default_sort=2 => :desc))
+    @test contains(desc, "data-sort-dir=\"desc\"")
+    @test contains(desc, "aria-sort=\"descending\"")
+    @test contains(desc, "htmxo-sort-caret")
+    @test length(collect(eachmatch(r"data-sort-dir", desc))) == 1
+    @test length(collect(eachmatch(r"aria-sort", desc))) == 1
+
+    # Bare column (defaults to :asc), and a String header label.
+    @test contains(repr("text/html", sortable_table(["Name", "Score"], rows; default_sort=1)),
+                   "data-sort-dir=\"asc\"")
+    @test contains(repr("text/html", sortable_table(["Name", "Score"], rows; default_sort="Score")),
+                   "aria-sort=\"ascending\"")
+
+    # Forwarded through render_table's kwargs..., not leaked as a <table> attr.
+    rt = repr("text/html", render_table((name=["a"], score=[1]); default_sort=2 => :desc, download=false))
+    @test contains(rt, "data-sort-dir=\"desc\"")
+    @test !contains(rt, "default_sort")
+
+    @test_throws ErrorException sortable_table(["A"], rows; default_sort=1 => :sideways)
+    @test_throws ErrorException sortable_table(["A"], rows; default_sort=5)
+    @test_throws ErrorException sortable_table(["A"], rows; default_sort="Nope")
+    @test_throws ErrorException sortable_table(["A"], rows; default_sort=1, sortable=false)
+    # Only auto-wired String headers can be stamped.
+    @test_throws ErrorException sortable_table([h.th("A")], rows; default_sort=1)
 end
 
 @testset "_convert_param with vectors" begin

@@ -3696,15 +3696,94 @@ end
 
 # --- Table rendering ---
 
+# Normalise a `default_sort` direction to the `data-sort-dir` token.
+function _sort_dir_token(dir)
+    d = Symbol(lowercase(string(dir)))
+    d in (:asc, :ascending) && return "asc"
+    d in (:desc, :descending) && return "desc"
+    error("sortable_table: default_sort direction must be :asc or :desc, got $(repr(dir))")
+end
+
+# Resolve `default_sort` to a `(1-based column index, "asc"|"desc")` pair.
+# Accepts `col`, `col => dir`, where `col` is a 1-based `Integer` or a header
+# label matching one of the `String` headers.
+function _resolve_default_sort(default_sort, headers)
+    isnothing(default_sort) && return nothing
+    col, dir = default_sort isa Pair ?
+        (first(default_sort), last(default_sort)) : (default_sort, :asc)
+    idx = if col isa Integer
+        Int(col)
+    else
+        label = string(col)
+        found = findfirst(hdr -> hdr isa AbstractString && string(hdr) == label, headers)
+        isnothing(found) && error(
+            "sortable_table: default_sort column $(repr(label)) does not match any String header")
+        found
+    end
+    1 <= idx <= length(headers) || error(
+        "sortable_table: default_sort column index $idx out of range 1:$(length(headers))")
+    headers[idx] isa AbstractString || error(
+        "sortable_table: default_sort column $idx is a pre-built header node. Only " *
+        "auto-wired String headers can be stamped; wire the marker yourself with " *
+        "`data_sort_dir=` + `aria_sort=` if the header is a custom node.")
+    (idx, _sort_dir_token(dir))
+end
+
+# Build one auto-wired sortable `<th>` (1-based column `i`). When `ds = (idx,
+# dir)` names this column, stamp exactly what `sortTable` sets client-side:
+# `data-sort-dir`, `aria-sort`, and the trailing caret `<span>`. That makes a
+# `morph:` swap re-impose the sorted state rather than wipe it, keeps the caret
+# consistent with the rows the server actually emitted, and lets the next click
+# toggle from the right direction (`sortTable` reads `data-sort-dir`).
+function _sortable_th(label, i, ds)
+    onclick = "sortTable($(i-1), this)"
+    if !isnothing(ds) && first(ds) == i
+        dir = last(ds)
+        h.th(label, h.span(dir == "asc" ? " ▲" : " ▼"; class="htmxo-sort-caret");
+            onclick, class="u-pointer", data_sort_dir=dir,
+            aria_sort=(dir == "asc" ? "ascending" : "descending"))
+    else
+        h.th(label; onclick, class="u-pointer")
+    end
+end
+
 """
     sortable_table_js()
 
-Return an `h.script(...)` node containing the `sortTable` JavaScript function
-for click-to-sort table headers. Include this once per page (e.g. in `extra_head`).
+Return an `h.script(...)` node containing the `sortTable` and `htmxoSortState`
+JavaScript functions for click-to-sort table headers. Include this once per
+page (e.g. in `extra_head`).
 
 The JS finds the `<tbody>` relative to the clicked header (no hardcoded ID),
 so multiple sortable tables can coexist on the same page. Numeric values are
 sorted numerically; everything else uses `localeCompare`.
+
+# Sort state — the public read surface
+`sortTable` marks the active `<th>` with **both** `data-sort-dir="asc"|"desc"`
+and `aria-sort="ascending"|"descending"`, and clears both from every sibling
+`<th>`. Read that state with:
+
+    htmxoSortState(target) -> {sort_col, sort_dir} | {}
+
+`target` is a CSS selector or element; `sort_col` is **1-based** (matching
+`default_sort`), `sort_dir` is `"asc"`/`"desc"`. An unsorted table yields `{}`.
+
+# Sort state vs. `morph:` swaps
+An idiomorph `hx-swap="morph:*"` syncs attributes against the server's HTML and
+removes any the server did not render — so a client-set sort marker **and the
+row order** are wiped by the next morph that covers the `<thead>`/`<tbody>`.
+To make a user's sort survive a morph, send the state out with the request and
+have the server render rows in that order:
+
+```julia
+h.button("↻"; hx_get=string(__self__),
+    hx_vals="js:{...htmxoSortState('#entries')}",
+    hx_target="#entries", hx_swap="morph:outerHTML")
+```
+
+then render with `sortable_table(rows...; default_sort=sort_col => sort_dir)`
+so the server-rendered header agrees with the server-rendered row order.
+See [`sortable_table`](@ref).
 """
 function sortable_table_js()
     h.script(raw"""
@@ -3742,7 +3821,14 @@ function sortTable(col, th) {
     };
     const asc = th.dataset.sortDir !== 'asc';
     th.dataset.sortDir = asc ? 'asc' : 'desc';
-    th.closest('tr').querySelectorAll('th').forEach(h => { if (h !== th) delete h.dataset.sortDir; });
+    // `aria-sort` mirrors `data-sort-dir` on the active <th>: it is the
+    // standard accessible marker, and it is what `sortable_table`'s
+    // `default_sort=` stamps server-side. Exactly one <th> per header row
+    // carries either attribute — clear both from the siblings.
+    th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
+    th.closest('tr').querySelectorAll('th').forEach(h => {
+        if (h !== th) { delete h.dataset.sortDir; h.removeAttribute('aria-sort'); }
+    });
     // Sort key: prefer `data-sort-value` if the cell sets one, else the
     // visible text. This lets callers force a semantic order (e.g. status:
     // proposed → approved → rejected) without re-encoding the displayed text.
@@ -3773,6 +3859,34 @@ function sortTable(col, th) {
     caret.className = 'htmxo-sort-caret';
     caret.textContent = asc ? ' ▲' : ' ▼';
     th.appendChild(caret);
+}
+
+// Read a table's CURRENT client-side sort state. `target` is a CSS selector
+// or an element (the <table>, or any node inside or around it). Returns
+// {sort_col, sort_dir} — 1-based column index, 'asc'|'desc' — or {} when the
+// table is unsorted, so it spreads cleanly into an htmx hx-vals:
+//
+//     hx-vals="js:{...htmxoSortState('#my-table')}"
+//
+// Read it BEFORE the swap, not after. A `morph:*` (idiomorph) swap syncs
+// attributes against the server's HTML and REMOVES any the server did not
+// render — so the client-set `data-sort-dir` / `aria-sort` and the caret
+// span are all gone once the morph lands, and the server's child order is
+// re-imposed on the rows. Ride the state out with the request, render the
+// rows in that order, and stamp it back with
+// `sortable_table(...; default_sort=col => dir)`.
+function htmxoSortState(target) {
+    const root = typeof target === 'string' ? document.querySelector(target) : target;
+    if (!root) return {};
+    const table = root.tagName === 'TABLE' ? root
+        : (root.querySelector('table') || root.closest('table'));
+    if (!table) return {};
+    const th = table.querySelector('thead th[data-sort-dir]');
+    if (!th) return {};
+    return {
+        sort_col: Array.prototype.indexOf.call(th.parentNode.children, th) + 1,
+        sort_dir: th.dataset.sortDir,
+    };
 }
 """)
 end
@@ -3901,7 +4015,7 @@ end
 """
     sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
                    download=false, download_filename=nothing, caption=nothing,
-                   kwargs...)
+                   default_sort=nothing, kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -3925,6 +4039,13 @@ itself delegates to this after materialising rows from a Tables.jl source.
   `id="detail-X"` for the paired-row pattern.
 - `sortable`: master toggle for the auto-wiring of String headers (default `true`).
   Pre-built `h.th` headers are unaffected.
+- `default_sort`: declare the order `rows` are ALREADY in, as `col` or
+  `col => dir` — `col` a 1-based column index or a `String` header label, `dir`
+  `:asc` (default) or `:desc`. Stamps `data-sort-dir` / `aria-sort` / the sort
+  caret on that header, exactly as a client-side `sortTable` click would.
+  It **declares** the order, it does not perform it: `sortable_table` receives
+  pre-built row nodes, so the caller must emit `rows` in that order. Requires
+  `sortable=true` and a `String` header at `col`.
 
 Other keyword arguments behave the same as in [`render_table`](@ref).
 
@@ -3935,18 +4056,43 @@ rows = [h.tr(h.td(h.code(name)),
         for (name, status, w) in entries]
 sortable_table(["Name", "Status"], rows; id="entries", download=false)
 ```
-Pair with [`sortable_table_js`](@ref) and [`sortable_table_styles`](@ref).
+
+# Surviving a `morph:` swap
+An idiomorph `hx-swap="morph:*"` re-imposes the server's child order on the
+`<tbody>` and strips any attribute the server did not render — so a user's
+client-side sort (rows *and* caret) is silently wiped by the next morph, and
+that swap is idiomorph's worst case, since a client-sorted DOM is maximally
+divergent from the server's order. Ride the sort state out with the request and
+render rows in that order:
+
+```julia
+h.button("↻"; hx_get=string(__self__),
+    hx_vals="js:{...htmxoSortState('#entries')}",
+    hx_target="#entries", hx_swap="morph:outerHTML")
+
+# ...and in the route, with `@param sort_col::Int = 0` / `@param sort_dir::String = "asc"`:
+sortable_table(headers, sorted_rows; id="entries",
+    default_sort=(sort_col == 0 ? nothing : sort_col => Symbol(sort_dir)))
+```
+
+Pair with [`sortable_table_js`](@ref) (which ships `htmxoSortState`) and
+[`sortable_table_styles`](@ref).
 """
 function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
-                        caption=nothing, kwargs...)
+                        caption=nothing, default_sort=nothing, kwargs...)
     isnothing(id) && (id = "tbl-" * string(hash(headers), base=16))
+
+    if !isnothing(default_sort) && !sortable
+        error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
+    end
+    ds = _resolve_default_sort(default_sort, headers)
 
     th_nodes = [
         hdr isa AbstractString ?
             (sortable ?
-                h.th(string(hdr); onclick="sortTable($(i-1), this)", class="u-pointer") :
+                _sortable_th(string(hdr), i, ds) :
                 h.th(string(hdr))) :
             hdr
         for (i, hdr) in enumerate(headers)

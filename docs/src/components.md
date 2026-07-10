@@ -136,6 +136,48 @@ Columns are auto-detected from the table (any `Tables.jl`-compatible source). Ot
 
 Drop `sortable_table_js()` and `download_table_js()` once per page (typically inside `__page__`) to enable the client-side sorting and CSV download.
 
+#### Reading and restoring the sort state
+
+`sortTable` marks the active `<th>` with both `data-sort-dir="asc"|"desc"` and
+`aria-sort="ascending"|"descending"`, clearing both from the sibling headers.
+`sortable_table_js()` also ships the accessor
+
+```js
+htmxoSortState(target) // -> {sort_col, sort_dir} | {}   (sort_col is 1-based)
+```
+
+where `target` is a CSS selector or element. An unsorted table yields `{}`, so
+it spreads cleanly into an htmx `hx-vals`.
+
+!!! warning "A `morph:` swap wipes a client-side sort"
+    An idiomorph `hx-swap="morph:*"` re-imposes the server's child order on the
+    `<tbody>` and removes any attribute the server did not render — so a user's
+    column sort (rows **and** the caret) is silently wiped by the next swap. It
+    is also idiomorph's worst case: a client-sorted DOM is maximally divergent
+    from the server's order, so nearly every row must be relocated.
+
+    Fix both by sending the sort state with the request and rendering rows in
+    that order server-side:
+
+    ```julia
+    h.button("↻"; hx_get=string(__self__),
+        hx_vals="js:{...htmxoSortState('#entries')}",
+        hx_target="#entries", hx_swap="morph:outerHTML")
+    ```
+
+    Then, in the route (with `@param sort_col::Int = 0` and
+    `@param sort_dir::String = "asc"`), sort the rows yourself and declare the
+    order so the header agrees with it:
+
+    ```julia
+    sortable_table(headers, sorted_rows; id="entries",
+        default_sort = sort_col == 0 ? nothing : sort_col => Symbol(sort_dir))
+    ```
+
+    `default_sort` **declares** the order (stamping `data-sort-dir` /
+    `aria-sort` / the caret on that header); it does not sort `rows` for you.
+    It forwards through `render_table` and `master_detail_table` too.
+
 ## Layout / widgets
 
 ### `tabset` and `htmx_tabset` — tab navigation
