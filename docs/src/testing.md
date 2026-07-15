@@ -101,6 +101,8 @@ Navigate to the included route (normally `/tests/`). The page supports:
 - re-running failed or not-yet-run items;
 - expandable Markdown descriptions and source locations;
 - live pass/fail/error state, duration, exit code, and escaped child output;
+- bounded inline previews for large logs, with the complete output always
+  reachable from the job row;
 - polling while the child is active and clearing completed history.
 
 Only one child job runs per project at a time. Client-supplied IDs are checked
@@ -116,7 +118,8 @@ The routes are thin wrappers around ordinary functions:
 | Function | Behaviour |
 |---|---|
 | `discover_test_items(project)` | Parse metadata without importing test code |
-| `test_list(project; prefix)` | Render the catalog, selections, state, and output |
+| `test_list(project; prefix)` | Render the catalog, selections, state, and output previews |
+| `test_output(project, id; prefix)` | Render one validated job's complete captured output |
 | `test_run!(project, id; prefix)` | Start one catalog item |
 | `test_run_batch!(project, ids; prefix)` | Start an arbitrary checked subset |
 | `test_run_all!(project; prefix)` | Start the complete catalog |

@@ -1068,6 +1068,25 @@ and child-process side effects remain explicit rather than mutating host state.
         @test contains(rendered, "fixture output &lt;unsafe&gt;")
         @test !contains(rendered, "fixture output <unsafe>")
 
+        complete_marker = "complete-output-begins-here"
+        bounded_log = joinpath(project, "bounded-output.log")
+        write(bounded_log, complete_marker * "\n" * repeat("x", HTMXObjects._TEST_LOG_LIMIT + 1))
+        bounded_job = HTMXObjects.TestRunJob("bounded-fixture", String[], ["bounded"], :passed,
+            time(), time(), time(), 0, bounded_log, nothing, "")
+        store = HTMXObjects._test_store(project)
+        lock(store.lock)
+        try
+            pushfirst!(store.jobs, bounded_job)
+        finally
+            unlock(store.lock)
+        end
+        preview = repr("text/html", HTMXObjects._test_job_view(bounded_job; prefix="/tests"))
+        @test !contains(preview, complete_marker)
+        @test contains(preview, "Open complete output")
+        @test contains(preview, "/tests/output/bounded-fixture")
+        complete = repr("text/html", test_output(project, bounded_job.id; prefix="/tests"))
+        @test contains(complete, complete_marker)
+
         test_run!(project, by_name["fail"].id)
         failing = await_job(2)
         @test failing.status == :failed

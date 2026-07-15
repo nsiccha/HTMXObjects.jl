@@ -349,8 +349,14 @@ function _read_test_log(job)
     catch err
         return "Unable to read test output: $(sprint(showerror, err))"
     end
-    text = replace(text, r"\e\[[0-9;?]*[ -/]*[@-~]" => "")
-    length(text) <= _TEST_LOG_LIMIT ? text : "… output truncated …\n" * last(text, _TEST_LOG_LIMIT)
+    replace(text, r"\e\[[0-9;?]*[ -/]*[@-~]" => "")
+end
+
+function _test_log_preview(job)
+    text = _read_test_log(job)
+    length(text) <= _TEST_LOG_LIMIT && return text, false
+    "Preview shows the final $(_TEST_LOG_LIMIT) characters.\n" *
+        last(text, _TEST_LOG_LIMIT), true
 end
 
 _test_status_label(status) = status in (:queued, :running, :passed, :failed, :error) ?
@@ -379,8 +385,8 @@ function _test_description(item)
     )
 end
 
-function _test_job_view(job)
-    output = _read_test_log(job)
+function _test_job_view(job; prefix="/tests")
+    output, bounded = _test_log_preview(job)
     status = _test_status_label(job.status)
     h.details(; open=job.status in (:running, :failed, :error))(
         h.summary(; class="u-pointer")(
@@ -397,7 +403,44 @@ function _test_job_view(job)
                 h.pre(; class="u-text-xs u-scroll-y u-pre-wrap")(
                     escape_html(output),
                 ),
+            bounded ? h.p(
+                h.a("Open complete output"; href="$(prefix)/output/$(job.id)",
+                    target="_blank"),
+            ) : "",
         ),
+    )
+end
+
+"""
+    test_output(project, id; prefix="/tests")
+
+Render the complete captured output for one validated test job. The main test
+page keeps large polling fragments bounded and links here without discarding
+the beginning of the log.
+"""
+function test_output(project, id; prefix="/tests")
+    jobs = _test_job_snapshot(project)
+    index = findfirst(job -> job.id == id, jobs)
+    if isnothing(index)
+        return h.main(; class="container")(
+            h.h1("Unknown test job"),
+            h.p("No captured output exists for job ", h.code(string(id)), "."),
+            h.a("Back to tests"; href=prefix),
+        )
+    end
+
+    job = jobs[index]
+    output = _read_test_log(job)
+    h.main(; class="container")(
+        h.p(h.a("Back to tests"; href=prefix)),
+        h.h1("Test output"),
+        h.p(
+            h.span(; class=_test_status_class(job.status))(_test_status_label(job.status)),
+            " — ", join(job.labels, ", "),
+            " · job ", h.code(job.id),
+        ),
+        isempty(output) ? h.p(; class="u-text-muted")("Waiting for output…") :
+            h.pre(; class="u-text-xs u-scroll-y u-pre-wrap")(escape_html(output)),
     )
 end
 
@@ -460,7 +503,7 @@ function test_list(project; prefix="/tests", notice="")
             hx_target="#tests-container", hx_swap="outerHTML", class="u-mr-2") for tag in tags)...,
     )
     jobs_node = isempty(jobs) ? nothing : h.section(; class="u-mt-6")(
-        h.h2("Run output"), (_test_job_view(job) for job in jobs)...,
+        h.h2("Run output"), (_test_job_view(job; prefix) for job in jobs)...,
     )
 
     children = Any[
