@@ -1,7 +1,22 @@
-using TestModules
-using Random, HTMXObjects, HTTP, Tables
+using TestItemRunner
 
-# --- Struct definitions at module scope ---
+# Shared imports are evaluated independently inside every test item.
+@testsnippet HTMXOTestImports begin
+    using Random, HTMXObjects, HTTP, Tables
+    import HTMXObjects: _convert_param
+end
+
+# Route fixtures are evaluated once per TestItemRunner process and imported by
+# each item. Test bodies remain independent while avoiding repeated macro work.
+@testmodule HTMXOTestFixtures begin
+using HTMXObjects
+
+export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
+    NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
+    ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
+    AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
+    TestUIHost,
+    _SINGLETON_APPDATA
 
 @htmx struct TestApp
     title = "Test"
@@ -95,9 +110,27 @@ end
     @include sub = MountSubRoutes()
 end
 
+@htmx struct HeaderApp
+    @header x_test_agent::String = ""
+    @header x_count::Int = 0
+
+    @get probe() = "agent=$(x_test_agent) count=$(x_count)"
+end
+
+@htmx struct TestUIHost
+    @include tests = TestRoutes(; project=pkgdir(HTMXObjects))
+end
+
+end # @testmodule HTMXOTestFixtures
+
 # --- Tests ---
 
-@testset "auto - HTML rendering" begin
+"""
+Checks the core HTML conversion contract for nodes, arrays, literal HTML, and
+out-of-band swap pairs. These are the values route handlers most commonly
+return to the response pipeline.
+"""
+@testitem "auto - HTML rendering" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     result = auto(h.div("hello"); wrap=identity)
     @test contains(result, "<div>")
     @test contains(result, "hello")
@@ -111,7 +144,7 @@ end
     @test contains(result, "new")
 end
 
-@testset "to_response" begin
+@testitem "to_response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     resp = to_response(h.div("hello"))
     @test resp.status == 200
     @test contains(String(resp.body), "<div>")
@@ -126,7 +159,7 @@ end
     @test to_response(orig) === orig
 end
 
-@testset "HTMX request header inspection" begin
+@testitem "HTMX request header inspection" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     htmx_req = HTTP.Request("GET", "/",
         ["HX-Request" => "true", "HX-Target" => "#result",
          "HX-Trigger" => "btn", "HX-Current-URL" => "http://localhost/",
@@ -143,7 +176,7 @@ end
     @test !hx_boosted(plain_req)
 end
 
-@testset "hx_response headers" begin
+@testitem "hx_response headers" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     base = h.div("content")
     resp = hx_response(base; trigger="myEvent")
     @test any(p.first == "HX-Trigger" && p.second == "myEvent"
@@ -166,7 +199,7 @@ end
     @test !any(startswith(p.first, "HX-") for p in resp0.headers)
 end
 
-@testset "@htmx struct - property access" begin
+@testitem "@htmx struct - property access" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     app = TestApp()
     @test app.title == "Test"
     html = repr("text/html", app.index(Verb{:GET}()))
@@ -177,14 +210,14 @@ end
     @test !(Symbol("@get") in DynamicObjects.metafirst(TestApp, :title).macros)
 end
 
-@testset ":index -> / routing" begin
+@testitem ":index -> / routing" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     app = IndexApp()
     info = DynamicObjects.metafirst(IndexApp, :index)
     @test info !== nothing
     @test Symbol("@get") in info.macros
 end
 
-@testset "indexed property with all-default indices" begin
+@testitem "indexed property with all-default indices" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     app = AllDefaultsApp()
     html = repr("text/html", app.viz(Verb{:GET}(); pn="test"))
     @test contains(html, "Viz: test")
@@ -192,23 +225,23 @@ end
     @test contains(html, "Viz: all")
 end
 
-@testset "htmx() full-page template" begin
+@testitem "htmx() full-page template" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     page = htmx(h.main("content"))
     html = repr("text/html", page)
     @test contains(html, "htmx.org")
     @test contains(html, "hyperscript.org")
     @test contains(html, "<html")
     @test contains(html, "content")
-    @test !contains(html, "pico")
+    @test !contains(html, "@picocss/pico@")
     html_pico = repr("text/html", htmx(h.main(); pico_version="2"))
-    @test contains(html_pico, "pico")
+    @test contains(html_pico, "@picocss/pico@2")
     html_bare = repr("text/html", htmx(h.main(); htmx_version=nothing))
     @test !contains(html_bare, "htmx.org")
     html_extra = repr("text/html", htmx(h.main(); extra_head=(h.style("body{margin:0}"),)))
     @test contains(html_extra, "body{margin:0}")
 end
 
-@testset "save_response" begin
+@testitem "save_response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     mktempdir() do dir
         resp = HTTP.Response(200, ["Content-Type" => "text/html"]; body="<p>hi</p>")
         dest = save_response(dir, "/", resp)
@@ -222,7 +255,12 @@ end
     end
 end
 
-@testset "recording - end-to-end" begin
+"""
+Starts a real HTTP server and verifies that live responses are recorded at the
+same route-shaped paths used by static output. Tagged `integration`/`server`
+because it binds a port and mutates Oxygen's process-global route context.
+"""
+@testitem "recording - end-to-end" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
     mktempdir() do dir
         app = RecordApp()
         route!(app; record_dir=dir)
@@ -252,7 +290,7 @@ end
     end
 end
 
-@testset "hx_link helper" begin
+@testitem "hx_link helper" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     link = hx_link("/about")
     html = repr("text/html", link)
     @test contains(html, "href=\"/about\"")
@@ -266,7 +304,7 @@ end
     @test contains(html2, "class=\"nav-link\"")
 end
 
-@testset "htmx_or helper" begin
+@testitem "htmx_or helper" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     fragment = h.p("partial content")
     htmx_req = HTTP.Request("GET", "/", ["HX-Request" => "true"])
     resp = htmx_or(htmx_req, fragment) do
@@ -285,7 +323,7 @@ end
     @test contains(body2, "htmx.org")
 end
 
-@testset "static_transform" begin
+@testitem "static_transform" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     btn = h.button("Toggle"; hx_post="/toggle")
     transformed = static_transform(btn)
     html = repr("text/html", transformed)
@@ -308,14 +346,14 @@ end
     @test contains(html_head, "pointer-events:none")
 end
 
-@testset "@post route verb metadata" begin
+@testitem "@post route verb metadata" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     info = DynamicObjects.metafirst(PostApp, :submit)
     @test info !== nothing
     @test Symbol("@post") in info.macros
     @test !(Symbol("@get") in info.macros)
 end
 
-@testset "type conversion in indexed routes" begin
+@testitem "type conversion in indexed routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     app = TypedApp()
     html = repr("text/html", app.typed(Verb{:GET}(), 42))
     @test contains(html, "N=42")
@@ -324,14 +362,14 @@ end
     @test Symbol("@get") in info.macros
 end
 
-@testset "hx_response with location" begin
+@testitem "hx_response with location" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     resp = hx_response(h.div("content"); location="/new")
     @test any(p.first == "HX-Location" && p.second == "/new"
               for p in resp.headers)
     @test contains(String(resp.body), "<div>")
 end
 
-@testset "queryparams - multi-value support" begin
+@testitem "queryparams - multi-value support" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     req = HTTP.Request("GET", "/search?q=hello&page=1")
     qp = queryparams(req)
     @test qp["q"] == "hello"
@@ -358,7 +396,7 @@ end
     @test qp_noval["flag"] == ""
 end
 
-@testset "nothing default in kwargs route" begin
+@testitem "nothing default in kwargs route" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
     route!(NothingDefaultApp())
     serve(; port=8098, async=true)
     try
@@ -374,7 +412,7 @@ end
     end
 end
 
-@testset "wants_markdown" begin
+@testitem "wants_markdown" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     req_md = HTTP.Request("GET", "/", ["Accept" => "text/markdown"])
     @test wants_markdown(req_md)
     req_plain = HTTP.Request("GET", "/", ["Accept" => "text/plain"])
@@ -389,7 +427,7 @@ end
     @test !wants_markdown(req_none)
 end
 
-@testset "markdown_response" begin
+@testitem "markdown_response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     resp = markdown_response("# Hello\n\nworld")
     @test resp.status == 200
     @test String(resp.body) == "# Hello\n\nworld"
@@ -397,7 +435,7 @@ end
               for p in resp.headers)
 end
 
-@testset "render_table" begin
+@testitem "render_table" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     tbl = (; name=["Alice", "Bob", "Charlie"], score=[95, 87, 92])
     node = render_table(tbl)
     html = repr("text/html", node)
@@ -409,12 +447,12 @@ end
     @test contains(html, "name")
     @test contains(html, "score")
     @test contains(html, "sortTable")
-    @test contains(html, "cursor:pointer")
+    @test contains(html, "class=\"u-pointer\"")
     node_ns = render_table(tbl; sortable=false)
     html_ns = repr("text/html", node_ns)
     @test contains(html_ns, "Alice")
     @test !contains(html_ns, "sortTable")
-    @test !contains(html_ns, "cursor:pointer")
+    @test !contains(html_ns, "class=\"u-pointer\"")
     node_cell = render_table(tbl; cell=(v, col, ri) -> col == :score ? "**$(v)**" : string(v))
     html_cell = repr("text/html", node_cell)
     @test contains(html_cell, "**95**")
@@ -424,10 +462,10 @@ end
     @test contains(html_id, "my-table")
     node_kw = render_table(tbl; class="custom", id="t1")
     html_kw = repr("text/html", node_kw)
-    @test contains(html_kw, "class=\"custom\"")
+    @test contains(html_kw, "class=\"custom htmxo-sortable-table\"")
 end
 
-@testset "sortable_table_js" begin
+@testitem "sortable_table_js" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = sortable_table_js()
     html = repr("text/html", node)
     @test contains(html, "<script>")
@@ -442,7 +480,7 @@ end
     @test contains(html, "thead th[data-sort-dir]")
 end
 
-@testset "sortable_table default_sort" begin
+@testitem "sortable_table default_sort" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     rows = [h.tr(h.td("a"), h.td("1"))]
     plain = repr("text/html", sortable_table(["Name", "Score"], rows))
     @test !contains(plain, "data-sort-dir")
@@ -476,24 +514,29 @@ end
     @test_throws ErrorException sortable_table([h.th("A")], rows; default_sort=1)
 end
 
-@testset "_convert_param with vectors" begin
+"""
+Documents repeated query/form value conversion: untyped or vector-typed
+parameters retain repeated values, while a vector cannot silently collapse
+into a scalar parameter.
+"""
+@testitem "_convert_param with vectors" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     cp = HTMXObjects._convert_param
     v = ["a", "b", "c"]
     @test cp(v, nothing) === v
-    @test cp(["first", "second"], String) == "first"
-    @test cp(["42", "99"], Int) == 42
-    @test cp(["3.14", "2.72"], Float64) == 3.14
-    @test cp(["only"], String) == "only"
-    @test cp(["7"], Int) == 7
+    @test cp(v, Vector{String}) === v
+    @test cp("only", Vector{String}) == ["only"]
+    @test isempty(cp("", Vector{String}))
+    @test_throws ErrorException cp(["first", "second"], String)
+    @test_throws ErrorException cp(["42"], Int)
 end
 
-@testset "_convert_param for Symbol" begin
+@testitem "_convert_param for Symbol" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     cp = HTMXObjects._convert_param
     @test cp("done", Symbol) === :done
     @test cp("", Symbol) === Symbol("")
 end
 
-@testset "fmt_time" begin
+@testitem "fmt_time" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     @test fmt_time(1.5e-9) == "1.5ns"
     @test fmt_time(4.56e-6) == "4.6μs"
     @test fmt_time(0.0789) == "79.0ms"
@@ -503,7 +546,7 @@ end
     @test fmt_time(-0.001) == "-1.0ms"
 end
 
-@testset "fmt_bytes" begin
+@testitem "fmt_bytes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     @test fmt_bytes(512) == "512 B"
     @test fmt_bytes(1536) == "1.5 KB"
     @test fmt_bytes(2 * 1024^2) == "2.0 MB"
@@ -511,7 +554,7 @@ end
     @test fmt_bytes(1.0 * 1024^4) == "1.0 TB"
 end
 
-@testset "fmt_number" begin
+@testitem "fmt_number" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     @test fmt_number(0) == "0"
     @test fmt_number(42.0) == "42.0"
     @test fmt_number(1500.0) == "1.5K"
@@ -524,24 +567,23 @@ end
     @test fmt_number(-2500.0) == "-2.5K"
 end
 
-@testset "Long" begin
+@testitem "Long" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     @test Long("study_cohort") == "study cohort"
     @test Long(:hello_world) == "hello world"
     @test Long("single") == "single"
 end
 
-@testset "sinput" begin
+@testitem "sinput" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = sinput("color", ["red", "green", "blue"]; value="green")
     html = repr("text/html", node)
     @test contains(html, "<label>")
     @test contains(html, "<select")
     @test contains(html, "name=\"color\"")
-    # selected option: HTMX.jl renders boolean `selected` as bare attr (not selected="true")
-    @test contains(html, "<option value=\"green\" selected>")
+    @test contains(html, "<option value=\"green\" selected=\"true\">")
     @test !contains(html, "<option value=\"red\" selected")
 end
 
-@testset "soption" begin
+@testitem "soption" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # plain value
     node = soption("apple")
     html = repr("text/html", node)
@@ -555,10 +597,10 @@ end
     # selected
     node3 = soption("x"; selected_value="x")
     html3 = repr("text/html", node3)
-    @test contains(html3, "selected>")
+    @test contains(html3, "selected=\"true\">")
 end
 
-@testset "linput" begin
+@testitem "linput" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = linput("email")
     html = repr("text/html", node)
     @test contains(html, "<label>")
@@ -567,7 +609,7 @@ end
     @test contains(html, "placeholder=\"email\"")
 end
 
-@testset "loading_indicator_script" begin
+@testitem "loading_indicator_script" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = loading_indicator_script()
     @test node isa Node
     html = repr("text/html", node)
@@ -576,7 +618,7 @@ end
     @test contains(html, "aria-busy")
 end
 
-@testset "tabset" begin
+@testitem "tabset" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = tabset("Tab A" => h.p("Content A"), "Tab B" => h.p("Content B"))
     html = repr("text/html", node)
     @test contains(html, "Tab A")
@@ -588,7 +630,7 @@ end
     @test contains(html, "class=\"secondary\"")
     # tab panels
     @test contains(html, "tab-panel")
-    @test contains(html, "display:none")
+    @test contains(html, "tab-panel u-w-full u-hidden")
     # lazy tabs: string content → hx-get with revealed trigger
     lazy = tabset("Eager" => h.p("here"), "Lazy" => "/api/lazy")
     lhtml = repr("text/html", lazy)
@@ -603,7 +645,7 @@ end
     @test contains(lhtml2, "hx-get=\"/b\"")
 end
 
-@testset "status_badge" begin
+@testitem "status_badge" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = status_badge(:running)
     html = repr("text/html", node)
     @test contains(html, "Running")
@@ -630,7 +672,7 @@ end
     @test contains(html5, "u-text-accent")
 end
 
-@testset "nav_sidebar" begin
+@testitem "nav_sidebar" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = nav_sidebar(["Home" => "/", "About" => "/about"]; prefix="/app")
     html = repr("text/html", node)
     @test contains(html, "<aside>")
@@ -647,7 +689,11 @@ end
     @test contains(html2, "href=\"/x\"")
 end
 
-@testset "@param — basic" begin
+"""
+Exercises the complete `@param` precedence chain: struct defaults, query
+values, explicit constructor overrides, and generated route metadata.
+"""
+@testitem "@param — basic" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # Defaults when request has nothing
     req = HTTP.Request("GET", "/")
     app = ParamApp(; __req__=req)
@@ -668,14 +714,14 @@ end
     @test app.vessels == ["solo"]
 end
 
-@testset "@param — inline child inherits params" begin
+@testitem "@param — inline child inherits params" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     req = HTTP.Request("GET", "/?vessels=X&vessels=Y&n_bootstrap=5")
     app = ParamApp(; __req__=req)
     @test app.child.vessels == ["X", "Y"]
     @test app.child.n_bootstrap == "5"
 end
 
-@testset "@param — block form" begin
+@testitem "@param — block form" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     req = HTTP.Request("GET", "/?a=42&b=hello")
     app = ParamBlockApp(; __req__=req)
     @test app.a == 42
@@ -687,17 +733,24 @@ end
     @test app.b == "x"
 end
 
-@testset "@param — required throws on miss" begin
+@testitem "@param — required throws on miss" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     req = HTTP.Request("GET", "/")
     app = ParamRequiredApp(; __req__=req)
-    @test_throws KeyError app.fit_key
+    err = try
+        app.fit_key
+        nothing
+    catch caught
+        caught
+    end
+    @test err isa PropertyComputationError
+    @test unwrap_error(err) isa HTMXObjects.MissingRequiredParam
 
     req = HTTP.Request("GET", "/?fit_key=abc")
     app = ParamRequiredApp(; __req__=req)
     @test app.fit_key == "abc"
 end
 
-@testset "@param — POST reads formdata" begin
+@testitem "@param — POST reads formdata" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     req = HTTP.Request("POST", "/submit",
         ["Content-Type" => "application/x-www-form-urlencoded"],
         "name=bob")
@@ -710,7 +763,7 @@ end
     @test app.name == "anon"
 end
 
-@testset "@include ExternalStruct emits _nested_struct_type" begin
+@testitem "@include ExternalStruct emits _nested_struct_type" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # Regression: `@include sub = MountSubRoutes()` (call form, not begin-block)
     # must still emit `_nested_struct_type(MountRootApp, Val(:sub)) = MountSubRoutes`
     # so `_register_routes` recognizes the nested struct and mounts its routes.
@@ -721,7 +774,7 @@ end
     @test HTMXObjects._nested_struct_type(PrefixDefaultApp, Val(:sub)) === MountSubRoutes
 end
 
-@testset "_param_names emission" begin
+@testitem "_param_names emission" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     @test HTMXObjects._param_names(ParamApp) == (:vessels, :n_bootstrap, :note)
     # Inline child inherits parent's param names
     child_type = HTMXObjects._nested_struct_type(ParamApp, Val(:child))
@@ -730,7 +783,7 @@ end
     @test HTMXObjects._param_names(TestApp) == ()
 end
 
-@testset "query_url(path, obj)" begin
+@testitem "query_url(path, obj)" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # Only params actually present in the request are emitted
     req = HTTP.Request("GET", "/?vessels=A&vessels=B")
     app = ParamApp(; __req__=req)
@@ -759,7 +812,7 @@ end
     @test !contains(url, "n_bootstrap=10")
 end
 
-@testset "__self__/\"path\" mount-prefix operator" begin
+@testitem "__self__/\"path\" mount-prefix operator" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # Default construction: no parent, no prefix
     app = MountRootApp()
     @test app / "foo" == "/foo"
@@ -775,7 +828,7 @@ end
     @test contains(repr("text/html", rooted.sub.show(Verb{:GET}())), "/proxy/8000/sub/x")
 end
 
-@testset "__appdata__ injection via __parent__ chain" begin
+@testitem "__appdata__ injection via __parent__ chain" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # Default: no appdata → __appdata__ is nothing
     app0 = AppDataApp()
     @test app0.__appdata__ === nothing
@@ -790,7 +843,7 @@ end
     @test app.sub.__parent__ === app
 end
 
-@testset "__prefix__ struct-body default survives route!() with no prefix kwarg" begin
+@testitem "__prefix__ struct-body default survives route!() with no prefix kwarg" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # Direct construction: default obviously applies.
     app = PrefixDefaultApp()
     @test app.__prefix__ == "/baked-in"
@@ -810,7 +863,7 @@ end
     @test overridden.sub / "bar" == "/override/sub/bar"
 end
 
-@testset "__appdata__ singleton via struct-body default" begin
+@testitem "__appdata__ singleton via struct-body default" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # The conventional pattern: struct sets `__appdata__ = SOME_CONST` so
     # every constructed instance (including those built per-request by route
     # handlers) sees the singleton, with no `appdata` kwarg on `route!`.
@@ -820,7 +873,7 @@ end
     @test contains(repr("text/html", app.index(Verb{:GET}())), "singleton")
 end
 
-@testset "@query_url" begin
+@testitem "@query_url" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # bare symbol
     @test (@query_url index) == "/"
     @test (@query_url fit) == "/fit"
@@ -838,15 +891,11 @@ end
     end
 end
 
-# ── @header binding ──────────────────────────────────────────────────────────
-@htmx struct HeaderApp
-    @header x_test_agent::String = ""
-    @header x_count::Int = 0
-
-    @get probe() = "agent=$(x_test_agent) count=$(x_count)"
-end
-
-@testset "@header kwarg binding" begin
+"""
+Verifies that typed `@header` fields bind case-insensitive HTTP headers and
+fall back to declared defaults when a request omits them.
+"""
+@testitem "@header kwarg binding" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     req_with = HTTP.Request("GET", "/probe",
         ["X-Test-Agent" => "bot42", "X-Count" => "7"])
     req_without = HTTP.Request("GET", "/probe")
@@ -860,3 +909,186 @@ end
     @test app_without.x_count == 0
 end
 
+"""
+Proves that the web catalog discovers TestItems metadata without importing the
+test package, including adjacent Markdown documentation and stable source keys.
+"""
+@testitem "documented test item discovery" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :test_ui] begin
+    mktempdir() do project
+        mkpath(joinpath(project, "test"))
+        write(joinpath(project, "Project.toml"), "name = \"CatalogFixture\"\n")
+        write(joinpath(project, "test", "items.jl"), """
+        \"\"\"
+        Explains the **documented contract**.
+
+        Longer details remain Markdown.
+        \"\"\"
+        @testitem \"documented contract\" tags=[:unit, :documented] begin
+            @test true
+        end
+
+        @testitem \"plain contract\" begin
+            @test true
+        end
+        """)
+
+        catalog = discover_test_items(project)
+        @test isempty(catalog.errors)
+        @test length(catalog.items) == 2
+        documented = only(filter(item -> item.name == "documented contract", catalog.items))
+        @test documented.key == "test/items.jl::documented contract"
+        @test documented.file == "test/items.jl"
+        @test documented.tags == [:unit, :documented]
+        @test contains(documented.description, "**documented contract**")
+        @test length(documented.id) == 16
+
+        html = repr("text/html", test_list(project))
+        @test contains(html, "documented contract")
+        @test contains(html, "Longer details remain Markdown")
+        @test contains(html, "#documented")
+        @test contains(html, "/run_tag/documented")
+    end
+end
+
+@testitem "test catalog parse errors stay in the UI" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :test_ui] begin
+    mktempdir() do project
+        write(joinpath(project, "broken.jl"), "function definitely_broken(\n")
+        catalog = discover_test_items(project)
+        @test isempty(catalog.items)
+        @test length(catalog.errors) == 1
+        html = repr("text/html", test_list(project))
+        @test contains(html, "Catalog errors")
+        @test contains(html, "broken.jl")
+    end
+end
+
+"""
+Mounts `TestRoutes` through the normal `@include` registrar and drives both a
+catalog GET and a rejected selective POST through the in-process HTTP router.
+"""
+@testitem "web-included test routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :test_ui] begin
+    route!(TestUIHost())
+    router = HTMXObjects.CONTEXT[].service.router
+
+    get_request = HTTP.Request("GET", "/tests", ["HX-Request" => "true"], UInt8[])
+    get_handler = first(HTTP.Handlers.gethandler(router, get_request))
+    @test get_handler !== HTTP.Handlers.default404
+    get_response = get_handler(get_request)
+    @test get_response.status == 200
+    get_body = String(get_response.body)
+    @test contains(get_body, "documented test item discovery")
+    @test contains(get_body, "Run selected")
+    @test contains(get_body, "/tests/run_tag/unit")
+
+    post_request = HTTP.Request("POST", "/tests/run/not-a-catalog-id",
+        ["HX-Request" => "true"], UInt8[])
+    post_handler = first(HTTP.Handlers.gethandler(router, post_request))
+    @test post_handler !== HTTP.Handlers.default404
+    post_response = post_handler(post_request)
+    @test post_response.status == 200
+    @test contains(String(post_response.body), "Unknown test selection")
+end
+
+"""
+Exercises the isolated runner as the web UI uses it: a checked subset can
+produce and safely render output, a failing child cannot take down the host,
+and child-process side effects remain explicit rather than mutating host state.
+"""
+@testitem "isolated web test jobs" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :test_ui] begin
+    mktempdir() do project
+        mkpath(joinpath(project, "src"))
+        mkpath(joinpath(project, "test"))
+        write(joinpath(project, "Project.toml"), """
+        name = "HTMXOTestJobFixture"
+        uuid = "9726e4dc-e091-4eb3-85fa-a7f7d0ae98c4"
+        version = "0.1.0"
+
+        [extras]
+        Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+        [targets]
+        test = ["Test"]
+        """)
+        write(joinpath(project, "src", "HTMXOTestJobFixture.jl"),
+            "module HTMXOTestJobFixture\nend\n")
+        write(joinpath(project, "test", "items.jl"), """
+        \"\"\"A passing fixture with output.\"\"\"
+        @testitem "pass" tags=[:fixture] begin end
+        @testitem "mutate" tags=[:fixture] begin end
+        @testitem "fail" tags=[:fixture] begin end
+        """)
+        write(joinpath(project, "test", "runtests.jl"), """
+        using Test
+        prefix = "--htmxo-test="
+        selectors = [arg[length(prefix) + 1:end] for arg in ARGS if startswith(arg, prefix)]
+        isempty(selectors) && error("fixture requires an exact selection")
+        for selector in selectors
+            name = split(selector, "::"; limit=2)[2]
+            println("fixture output <unsafe> for ", name)
+            @testset "fixture selection" begin
+                if name == "pass"
+                    @test true
+                elseif name == "mutate"
+                    write(joinpath(@__DIR__, "..", "child-marker.txt"), "child process")
+                    @test true
+                elseif name == "fail"
+                    @test false
+                else
+                    error("unknown fixture selection: " * name)
+                end
+            end
+        end
+        """)
+
+        catalog = discover_test_items(project)
+        @test isempty(catalog.errors)
+        @test length(catalog.items) == 3
+        by_name = Dict(item.name => item for item in catalog.items)
+
+        function await_job(count; timeout=60.0)
+            deadline = time() + timeout
+            while time() < deadline
+                jobs = HTMXObjects._test_job_snapshot(project)
+                if length(jobs) >= count && !(jobs[1].status in (:queued, :running))
+                    return jobs[1]
+                end
+                sleep(0.05)
+            end
+            error("timed out waiting for isolated test job")
+        end
+
+        test_run_batch!(project, [by_name["pass"].id, by_name["mutate"].id])
+        passing = await_job(1)
+        @test passing.status == :passed
+        @test passing.exitcode == 0
+        @test isfile(joinpath(project, "child-marker.txt"))
+        @test contains(HTMXObjects._read_test_log(passing), "fixture output <unsafe>")
+
+        rendered = repr("text/html", test_list(project))
+        @test contains(rendered, "fixture output &lt;unsafe&gt;")
+        @test !contains(rendered, "fixture output <unsafe>")
+
+        test_run!(project, by_name["fail"].id)
+        failing = await_job(2)
+        @test failing.status == :failed
+        @test failing.exitcode != 0
+        @test contains(HTMXObjects._read_test_log(failing), "Test Failed")
+        @test contains(repr("text/html", test_list(project)), "failed")
+
+        before_unknown = length(HTMXObjects._test_job_snapshot(project))
+        unknown = repr("text/html", test_run!(project, "not-a-catalog-id"))
+        @test contains(unknown, "Unknown test selection")
+        @test length(HTMXObjects._test_job_snapshot(project)) == before_unknown
+
+        bad_log = joinpath(project, "missing", "log.txt")
+        error_job = HTMXObjects.TestRunJob("error-fixture", String[], String[], :queued,
+            time(), nothing, nothing, nothing, bad_log, nothing, "")
+        error_store = HTMXObjects.TestRunStore(ReentrantLock(), [error_job])
+        HTMXObjects._execute_test_job!(error_store, project, error_job)
+        @test error_job.status == :error
+        @test !isempty(error_job.error)
+
+        test_clear_cache!(project)
+        @test isempty(HTMXObjects._test_job_snapshot(project))
+    end
+end

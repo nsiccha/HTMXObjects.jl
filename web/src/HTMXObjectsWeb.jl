@@ -2,10 +2,8 @@ module HTMXObjectsWeb
 
 using HTMXObjects
 using HTMXObjects.DynamicObjects
-using TestModules, Random
 using DataFrames
 
-include("test/runtests.jl")
 include("demo.jl")
 include("lazy_grid.jl")
 include("sortable_table.jl")
@@ -27,6 +25,7 @@ include("gallery_demo.jl")
 end
 
 const APPDATA = AppData()
+const TEST_PROJECT = normpath(joinpath(@__DIR__, "..", ".."))
 
 @htmx struct AppRoutes
     __appdata__ = APPDATA
@@ -57,7 +56,7 @@ const APPDATA = AppData()
     @include editor_demo = EditorDemoRoutes()
     @include git_editor_demo = GitEditorDemoRoutes()
     @include gallery_demo = GalleryDemoRoutes()
-    @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
+    @include tests = TestRoutes(; project=TEST_PROJECT)
     @include schema = SchemaRoutes(; root=AppRoutes)
 end
 

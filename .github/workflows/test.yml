@@ -1,9 +1,9 @@
 name: Run tests
 on:
   push:
-    branches: [master, main, dev]
+    branches: [master, main, dev, devibe]
   pull_request:
-    types: [opened, edited]
+    types: [opened, synchronize, reopened]
 permissions:
   actions: write
   contents: read
@@ -31,15 +31,24 @@ jobs:
         run: |
           git clone -b dev https://github.com/nsiccha/DynamicObjects.jl.git
           git clone -b dev https://github.com/nsiccha/HTMX.jl.git
-          git clone https://github.com/nsiccha/TestModules.jl.git
+          git clone https://github.com/nsiccha/Treebars.jl.git
+          cp Project.toml Project.toml.test-backup
           julia --project -e '
             using Pkg
             Pkg.develop([
               PackageSpec(path="DynamicObjects.jl"),
               PackageSpec(path="HTMX.jl"),
-              PackageSpec(path="TestModules.jl"),
+              PackageSpec(path="Treebars.jl"),
             ])
           '
+          mv Project.toml.test-backup Project.toml
+          julia --project -e 'using Pkg; Pkg.resolve()'
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run tests
-        run: julia --project=. -e 'include("test/runtests.jl")'
+        run: julia --project=. -e 'using Pkg; Pkg.test(; coverage=true)'
+      - uses: julia-actions/julia-processcoverage@v1
+        if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
+      - uses: codecov/codecov-action@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
+        with:
+          fail_ci_if_error: false

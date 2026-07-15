@@ -32,8 +32,7 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Install dependencies
         run: |
-          git clone https://github.com/nsiccha/TestModules.jl.git
-          julia --project=docs -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="TestModules.jl")]); Pkg.instantiate()'
+          julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       - name: Record example apps
         # Produces docs/public/examples/<name>/{,hx/}*.html — HTMXO recordings
         # with hx-get URLs rewritten under the GitHub Pages base. `make.jl`

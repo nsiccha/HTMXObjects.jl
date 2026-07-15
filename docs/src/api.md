@@ -130,8 +130,9 @@ See the dedicated [Testing](testing.md) page.
 
 | Export | Purpose |
 |--------|---------|
-| `TestRoutes`             | An `@htmx struct` you `@include` to mount a test runner UI under `/tests/` |
-| `test_list`, `test_run!`, `test_run_all!`, `test_run_failed!`, `test_run_missing!`, `test_run_batch!`, `test_clear_cache!` | Underlying test runner functions (call directly or via the UI) |
+| `TestRoutes`             | Mount a selective, subprocess-isolated TestItems runner under an app route |
+| `TestItemInfo`, `discover_test_items` | Parse names, tags, source locations, and adjacent Markdown descriptions without loading tests |
+| `test_list`, `test_run!`, `test_run_all!`, `test_run_tag!`, `test_run_failed!`, `test_run_missing!`, `test_run_batch!`, `test_clear_cache!` | Render or drive the same runner used by the web UI |
 
 ## Gallery & static recording
 

@@ -1,35 +1,35 @@
 """
-    TestRoutes(; test_module, prefix="/tests")
+    TestRoutes(; project)
 
-Mountable `@htmx` route bundle that wires up a test-runner UI for the
-`@testset`s defined in `test_module`. Mount it under any `@htmx struct` via:
+Mountable `@htmx` route bundle for documented, selectively runnable
+`@testitem`s in a Julia package. Mount it under any `@htmx struct` via:
 
-    @include tests = TestRoutes(; test_module=@__MODULE__)
+    @include tests = TestRoutes(; project=pkgdir(MyPackage))
 
 Provides:
 
-- `@get  index`        — render the cached test list (see [`test_list`](@ref))
-- `@post run(name)`    — re-run a single named `@testset` (see [`test_run!`](@ref))
-- `@post run_all`      — run every test (see [`test_run_all!`](@ref))
-- `@post run_failed`   — re-run only previously-failed tests
-- `@post run_missing`  — run tests with no cached result
-- `@post run_batch`    — run a comma-separated batch of named tests
-- `@post clear_cache`  — discard all cached results
+- `@get index/status` — discover and render tests plus live run state
+- `@post run(id)` — run one exact test item
+- `@post run_selected(names)` — run an arbitrary checked subset
+- `@post run_all/run_failed/run_missing` — common selections
+- `@post run_tag(tag)` — run every item carrying one tag
+- `@post clear` — discard completed run output
 
-The underlying `test_*` functions are only available when both `Test` and
-`TestModules` are loaded (they're provided by the package's `TestModulesExt`
-extension).
+Test bodies are never imported into the web application. Every selection is
+validated against the discovered catalog and launched through an isolated
+`Pkg.test(test_args=...)` child process. The package's `test/runtests.jl`
+maps `--htmxo-test=<relative-file>::<name>` arguments onto a TestItemRunner
+filter.
 """
 @htmx struct TestRoutes
-    # Mount with `@include tests = TestRoutes(; __req__, test_module=@__MODULE__)`.
-    test_module = nothing
-    prefix = "/tests"
-    md = wants_markdown(__req__)
-    @get index() = test_list(test_module, md; prefix)
-    @post run(name) = test_run!(test_module, name, md; prefix)
-    @post run_all() = test_run_all!(test_module, md; prefix)
-    @post run_failed() = test_run_failed!(test_module, md; prefix)
-    @post run_missing() = test_run_missing!(test_module, md; prefix)
-    @post run_batch(; names="") = test_run_batch!(test_module, names, md; prefix)
-    @post clear_cache() = test_clear_cache!(test_module, md; prefix)
+    project = ""
+    @get index() = test_list(project; prefix=string(__self__))
+    @get status() = test_list(project; prefix=string(__self__))
+    @post run(id) = test_run!(project, id; prefix=string(__self__))
+    @post run_selected(; names=String[]) = test_run_batch!(project, names; prefix=string(__self__))
+    @post run_all() = test_run_all!(project; prefix=string(__self__))
+    @post run_tag(tag) = test_run_tag!(project, tag; prefix=string(__self__))
+    @post run_failed() = test_run_failed!(project; prefix=string(__self__))
+    @post run_missing() = test_run_missing!(project; prefix=string(__self__))
+    @post clear() = test_clear_cache!(project; prefix=string(__self__))
 end

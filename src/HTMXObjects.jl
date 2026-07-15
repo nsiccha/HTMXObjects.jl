@@ -20,7 +20,8 @@ export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
 export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_script,
     default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
-export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_clear_cache!
+export TestItemInfo, discover_test_items
+export test_list, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export Verb
 
@@ -4421,66 +4422,7 @@ function fmt_number(x; sigdigits=2)
     return string(round(x / 1e12; sigdigits)) * "T"
 end
 
-# --- Test UI stubs (implemented by TestExt when Test is loaded) ---
-
-"""
-    test_list(test_module, md; prefix="") -> Node
-
-Render the test UI's main page: one row per `@testset` defined in
-`test_module`, with cached pass/fail/duration columns and per-row run
-buttons. Implemented by the `TestExt` extension (active when `Test` is
-loaded); mounted under `TestRoutes` at `/tests/`.
-"""
-function test_list end
-
-"""
-    test_run!(test_module, name, md; prefix="") -> Node
-
-Run a single `@testset` (identified by its display name) in `test_module`,
-update the cached result, and return the refreshed `test_list` UI fragment.
-Implemented by the `TestExt` extension.
-"""
-function test_run! end
-
-"""
-    test_run_all!(test_module, md; prefix="") -> Node
-
-Run every `@testset` in `test_module` and return the refreshed `test_list`
-UI fragment. Implemented by the `TestExt` extension.
-"""
-function test_run_all! end
-
-"""
-    test_run_batch!(test_module, names::AbstractString, md; prefix="") -> Node
-
-Run a comma-separated batch of `@testset`s in `test_module`. Used by the test
-UI's batch-run controls. Implemented by the `TestExt` extension.
-"""
-function test_run_batch! end
-
-"""
-    test_run_failed!(test_module, md; prefix="") -> Node
-
-Run every `@testset` in `test_module` whose cached result was a failure, and
-return the refreshed UI. Implemented by the `TestExt` extension.
-"""
-function test_run_failed! end
-
-"""
-    test_run_missing!(test_module, md; prefix="") -> Node
-
-Run every `@testset` in `test_module` that has no cached result yet, and
-return the refreshed UI. Implemented by the `TestExt` extension.
-"""
-function test_run_missing! end
-
-"""
-    test_clear_cache!(test_module, md; prefix="") -> Node
-
-Discard all cached test results for `test_module`, returning the refreshed
-empty-cache UI. Implemented by the `TestExt` extension.
-"""
-function test_clear_cache! end
+include("test_items.jl")
 
 include("routes/test_routes.jl")
 

@@ -838,8 +838,7 @@ python -m http.server --directory site
 | Plain function in the package / web module         | Yes                                  |
 | `@dynamicstruct` / `@htmx` struct body              | Yes                                  |
 | New `@get`/`@post` added to a struct               | Yes (via `_reroute!`)                |
-| `@testset` body in `web/src/test/runtests.jl`      | Yes                                  |
-| `@testset` via `../` path outside the pkg tree     | **No** — source-text cache mismatch  |
+| Documented `@testitem` selected from `/tests/`     | Fresh child process; no reload needed |
 | `@generated` function helper                       | **No** — world-age frozen            |
 | `Revise.includet(SubModule, file)`                 | **Breaks all tracking** — never use  |
 | `const` value change                               | **No** — `APPDATA` must never be reassigned |
@@ -1022,8 +1021,8 @@ The web module should contain only `APPDATA`, struct definitions, and
 
 - [Web app pattern (KB)](https://github.com/nsiccha/Claude/blob/main/web-app-pattern.md)
   — directory layout, `web/Project.toml` sync, `start-web.sh`.
-- [Testing pattern (KB)](https://github.com/nsiccha/Claude/blob/main/testing-pattern.md)
-  — `web/src/test/` + symlink, `TestModules.@testset`, test UI.
+- [Testing](testing.md)
+  — canonical `test/` layout, documented TestItems, selective CLI and web runs.
 - [Revise notes (KB)](https://github.com/nsiccha/Claude/blob/main/revise.md)
   — what Revise does and does not hot-reload.
 

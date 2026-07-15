@@ -1,74 +1,129 @@
 # Testing
 
-HTMXObjects ships a small test-running UI you can mount inside any `@htmx` app, so you (and Revise) get a click-driven test runner that lives in the same web app you're developing.
+HTMXObjects uses [TestItems.jl](https://github.com/julia-vscode/TestItems.jl)
+and [TestItemRunner.jl](https://github.com/julia-vscode/TestItemRunner.jl) for one
+set of tests with two entry points: ordinary `Pkg.test()` for terminals and CI,
+and `TestRoutes` for selecting and inspecting tests inside an HTMXO app.
 
-## Mounting the UI
+Test code is never loaded into the web process. Every web-triggered selection
+runs through `Pkg.test(test_args=...)` in a fresh Julia child process, so a test
+failure or module mutation cannot take down or contaminate the host app.
 
-`TestRoutes` is an `@htmx struct` exposing `@get index`, `@post run(name)`, `@post run_all`, `@post run_failed`, `@post run_missing`, `@post run_batch(; names)`, and `@post clear_cache`. Mount it via `@include` inside your app:
+## Writing documented test items
+
+Put `TestItemRunner` in the package's test target and use `@testitem` rather
+than a custom test-module registry:
+
+```toml
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
+
+[targets]
+test = ["Test", "TestItemRunner"]
+```
 
 ```julia
-using HTMXObjects, Test, TestModules     # both trigger the test extension
+using TestItemRunner
+
+@testsnippet CommonImports begin
+    using MyPackage
+end
+
+"""
+Checks the public parse contract.
+
+The full Markdown description is shown in the web UI.
+"""
+@testitem "parse a valid record" setup=[CommonImports] tags=[:unit, :parser] begin
+    @test parse_record("ok").valid
+end
+```
+
+The docstring must be immediately before `@testitem`; putting a docstring
+inside its body is invalid Julia documentation syntax. TestItemRunner still
+runs the item normally, while HTMXObjects discovers the adjacent description,
+name, tags, and source location without evaluating the file.
+
+The package's `test/runtests.jl` supplies a filter to
+`@run_package_tests`. HTMXObjects' version accepts exact internal selectors as
+well as friendly `--name`, `--tag`, and `--file` filters. Copy that small runner
+when adopting this workflow in another package.
+
+## Command-line workflow
+
+Run the complete suite using the standard Julia package command:
+
+```julia
+pkg> test
+```
+
+For a subset, `test/select.jl` forwards its arguments through `Pkg.test`:
+
+```sh
+julia --project=. test/select.jl --name="parse a valid record"
+julia --project=. test/select.jl --tag=unit
+julia --project=. test/select.jl --file=test/parser.jl --tag=parser
+julia --project=. test/select.jl --list
+```
+
+Repeated values select any value within that category; different categories
+combine, so `--file=… --tag=…` means tests matching both. Unknown names, tags,
+files, and exact selectors fail loudly instead of silently reporting success.
+
+Programmatic callers can use the same contract directly:
+
+```julia
+using Pkg
+Pkg.test(; test_args=["--tag=unit"])
+```
+
+## Mounting the web UI
+
+Mount `TestRoutes` with the package project directory:
+
+```julia
+using HTMXObjects, MyPackage
 
 @htmx struct App
-    @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
+    @include tests = TestRoutes(; project=pkgdir(MyPackage))
 
-    @get index() = h.main(class="container")(
-        h.h1("My App"),
-        h.p(h.a(href="/tests/")("Tests")),
+    @get index() = h.main(; class="container")(
+        h.h1("My app"),
+        h.a(; href=__self__/"tests/")("Tests"),
     )
 end
 ```
 
-Both `Test` and `TestModules` must be loaded for the routes to do anything — the UI implementation lives in `HTMXObjects.TestModulesExt` and is activated by the package extension mechanism. The `prefix` for the mount comes from the `@include` segment name (`/tests`); don't pass `prefix=` as a kwarg.
+Navigate to the included route (normally `/tests/`). The page supports:
 
-Once the app is running, navigate to `/tests/` to see the list of registered tests, run them individually, and inspect output/timings/cached results.
+- one test, any checked subset, all tests, or all tests carrying a tag;
+- re-running failed or not-yet-run items;
+- expandable Markdown descriptions and source locations;
+- live pass/fail/error state, duration, exit code, and escaped child output;
+- polling while the child is active and clearing completed history.
 
-## Where tests come from
+Only one child job runs per project at a time. Client-supplied IDs are checked
+against the freshly discovered catalog before a process is started. Completed
+state lives in the web process and is intentionally bounded; the tests
+themselves always run in a clean process, so Revise is not part of the test
+correctness model.
 
-The runner looks at `test_module` and finds:
+## Direct API
 
-- `@testset`s registered via [TestModules.jl](https://github.com/nsiccha/TestModules.jl) (`@testmodule`-style)
-- Plain `@testset` calls in the module's source
-
-For app code that lives in `web/src/MyAppWeb.jl`, write tests in the same module (or a sub-module that's `using`-ed). With Revise running, edits are picked up live — the test list refreshes on the next `index` GET.
-
-## Calling the runner directly
-
-You can also drive the runner from Julia (e.g. from a CI script) — the same functions back the UI buttons:
+The routes are thin wrappers around ordinary functions:
 
 | Function | Behaviour |
-|----------|-----------|
-| `test_list(test_module, md; prefix)`   | Render the test list (HTML or Markdown depending on `md`) |
-| `test_run!(test_module, name, md; prefix)` | Run one test by name                                  |
-| `test_run_all!(test_module, md; prefix)`   | Run every registered test                             |
-| `test_run_failed!(test_module, md; prefix)` | Re-run only the previously-failed tests              |
-| `test_run_missing!(test_module, md; prefix)` | Run tests that haven't been run yet                 |
-| `test_run_batch!(test_module, names, md; prefix)` | Run a comma-separated batch of tests           |
-| `test_clear_cache!(test_module, md; prefix)` | Discard cached pass/fail state                     |
+|---|---|
+| `discover_test_items(project)` | Parse metadata without importing test code |
+| `test_list(project; prefix)` | Render the catalog, selections, state, and output |
+| `test_run!(project, id; prefix)` | Start one catalog item |
+| `test_run_batch!(project, ids; prefix)` | Start an arbitrary checked subset |
+| `test_run_all!(project; prefix)` | Start the complete catalog |
+| `test_run_tag!(project, tag; prefix)` | Start every item carrying a tag |
+| `test_run_failed!` / `test_run_missing!` | Select from the latest in-memory state |
+| `test_clear_cache!(project; prefix)` | Delete completed job output and state |
 
-`md::Bool` toggles between HTML (full UI) and Markdown (agent-friendly) output. `prefix` is the URL prefix the routes were mounted under (defaults to `/tests`).
-
-## CI vs. interactive
-
-The HTMX-driven UI is intentionally **stateful** — it remembers per-test pass/fail/timing across runs so you can iterate quickly. For CI, prefer:
-
-```julia
-# ci_runtests.jl
-using Test, MyAppWeb
-@testset "MyApp" begin
-    # ... your test sets
-end
-```
-
-…and let `julia --project=test test/runtests.jl` exercise the actual `@testset`s without the UI layer.
-
-## Web-integrated test workflow
-
-The recommended development loop:
-
-1. Open the app — `julia --project=web -e 'using Revise; using MyAppWeb; MyAppWeb.run!()'`
-2. Visit `/tests/` for the runner UI
-3. Edit code in `web/src/MyAppWeb.jl` — Revise hot-reloads it
-4. Click "Run failed" or a single test to verify your change without restarting Julia
-
-This is the pattern used by every web app in the ecosystem (StanBlocks, BRM, Treebars, …). See [`testing-pattern.md`](https://github.com/nsiccha/Claude/blob/main/testing-pattern.md) in the project knowledge base for the full convention (`@testmodule` syntax, disk persistence, etc.).
+These calls return the refreshed UI immediately; execution continues
+asynchronously in the child process. `TestRoutes.status` supplies the polling
+fragment while a job is active.
