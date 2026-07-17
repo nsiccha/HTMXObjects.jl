@@ -4203,8 +4203,13 @@ when constructing row ids by hand outside the helpers.
 """
 master_detail_safe_key(key) = _md_safe_key(key)
 
+# The custom DOM event name a lazy master/detail slot listens for, and that
+# its master row's toggle fires on expand. One source of truth for both sites
+# (the slot's `hx-trigger` and the toggle's `htmx.trigger(...)` call).
+_md_lazy_event() = "htmxo-md-load"
+
 """
-    master_detail_toggle_js(safe_key) -> String
+    master_detail_toggle_js(safe_key; lazy_slot_id=nothing) -> String
 
 Return the click-handler JS snippet for the master row of a master/detail
 pair. The snippet ignores clicks on interactive descendants (`a`,
@@ -4217,14 +4222,60 @@ Exposed for callers that need to extend the toggle (e.g. lazy-load a
 fragment into a slot on open, empty it on close) — concatenate the
 extension onto the returned string. The extension can read the standard
 toggle's `show` local (true on open, false on close).
+
+Pass `lazy_slot_id` to have the toggle drive a lazy detail slot itself: on
+expand (`show`), it fires the `htmxo-md-load` event at `#<lazy_slot_id>` —
+but only when that slot is neither already loaded (`data-loaded='1'`) nor in
+flight (`data-loading='1'`) — latching `data-loading='1'` before firing so
+repeat clicks while the request is outstanding coalesce (single-flight,
+idempotent). This is the seam [`master_detail_pair`](@ref) drives for its
+`detail_url` mode; you rarely need it directly. Deliberately **not**
+`hx-trigger="load"` (fires for every collapsed slot at page load) nor
+`revealed`/`intersect` (a late intersection response can clobber a
+freshly-focused open slot) — the trigger is the explicit expand event.
 """
-function master_detail_toggle_js(safe_key)
-    string(
+function master_detail_toggle_js(safe_key; lazy_slot_id=nothing)
+    base = string(
         "if(event.target.closest('a,button,input,textarea,select,form'))return;",
         "var d=document.getElementById('detail-", safe_key, "');if(!d)return;",
         "var show=d.hidden;d.hidden=!show;",
         "this.setAttribute('aria-expanded',show);",
     )
+    isnothing(lazy_slot_id) && return base
+    string(base,
+        "if(show){var s=document.getElementById('", lazy_slot_id, "');",
+        "if(s&&s.dataset.loaded!=='1'&&s.dataset.loading!=='1')",
+        "{s.dataset.loading='1';htmx.trigger(s,'", _md_lazy_event(), "');}}",
+    )
+end
+
+# The lazy detail slot — the proven single-flight + click-to-retry shape,
+# generalised from the KB For-You `_foryou_lazy_detail_slot`. Lives permanently
+# in the (collapsed) detail cell; loads once on the first expand event, reuses
+# the loaded DOM thereafter. `placeholder` is shown until the fetch lands (and
+# must carry a `[data-status]` element for the loading/retry text swaps to have
+# a target — the default does). `also_load=true` (an initially-open row) adds
+# `load` so that one slot fetches on render; collapsed slots never do.
+function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
+    ph = isnothing(placeholder) ? h.small(data_status="muted")("Loading…") : placeholder
+    ev = _md_lazy_event()
+    h.div(id="detail-slot-$safe",
+          class="htmxo-md-detail-slot",
+          data_loaded="0",
+          hx_get=string(url),
+          hx_trigger=also_load ? "$ev, load" : ev,
+          hx_target="this", hx_swap="innerHTML",
+          hx_on__before_request="this.dataset.loading='1';delete this.dataset.failed;" *
+                                "var p=this.querySelector('[data-status]');" *
+                                "if(p)p.textContent='Loading…'",
+          hx_on__after_request="delete this.dataset.loading;" *
+                               "if(event.detail.successful){this.dataset.loaded='1';delete this.dataset.failed;}" *
+                               "else{this.dataset.loaded='0';this.dataset.failed='1';" *
+                               "var p=this.querySelector('[data-status]');" *
+                               "if(p)p.textContent='Failed to load — click to retry';}",
+          hx_on__click="if(this.dataset.failed==='1'&&!this.dataset.loading){" *
+                       "this.dataset.loading='1';htmx.trigger(this,'$ev');}")(
+        ph)
 end
 
 """
@@ -4232,7 +4283,8 @@ end
                        master_class=nothing,
                        detail_class=nothing,
                        master_attrs=(),
-                       initially_open::Bool=false)
+                       initially_open::Bool=false,
+                       detail_url=nothing)
 
 Build the `(master_tr, detail_tr)` pair for one master/detail item.
 
@@ -4247,6 +4299,8 @@ the user came to see (a question + answer brief, for example).
 # Arguments
 - `master_cells`: iterable of `<td>` nodes for the master row.
 - `detail_body`: any content placed inside the detail row's spanning `<td>`.
+  In lazy mode (`detail_url` set) this instead becomes the slot's pre-load
+  **placeholder** (`nothing` → a default muted "Loading…").
 - `ncols`: the master row's column count (drives the detail cell's
   `colspan` so the detail aligns with the table width).
 
@@ -4265,6 +4319,21 @@ the user came to see (a question + answer brief, for example).
   on the master (vs `"false"` when collapsed) so collapsed-look CSS keyed
   off `[aria-expanded="false"]` (or `:not([aria-expanded="true"])`) shows
   the expanded look from the first render. First click toggles as usual.
+- `detail_url`: opt in to **lazy** detail loading. When set (a URL string),
+  the detail cell hosts a slot that `hx-get`s `detail_url` into itself on the
+  **first expand** and reuses the loaded DOM thereafter — `detail_body` is
+  not rendered eagerly; it serves as the pre-load placeholder instead
+  (default: a muted "Loading…"). The load is single-flight (repeat clicks
+  while in flight coalesce) with click-to-retry on failure, driven by the
+  toggle's `lazy_slot_id` seam — never by `load`/`revealed`/`intersect`
+  (see [`master_detail_toggle_js`](@ref)). A collapsed row issues no
+  request; an `initially_open=true` lazy row loads once on render. **Explicit
+  invalidation:** set the slot's `data-loaded='0'` (id `detail-slot-<safe>`)
+  to force a reload on the next expand — an open row reloads on next expand,
+  a collapsed row stays lazy; there is no refetch-on-re-open by default.
+  HTMXObjects owns only the load/latch/retry mechanics — response caching,
+  content hashing, TTL/LRU, and refresh-gating stay the caller's concern.
+  Default `nothing` → today's eager `detail_body`, unchanged.
 
 The pair MUST be interleaved into the row list passed to
 [`sortable_table`](@ref) (master, detail, master, detail, …) so the
@@ -4280,11 +4349,15 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             master_class=nothing,
                             detail_class=nothing,
                             master_attrs=(),
-                            initially_open::Bool=false)
+                            initially_open::Bool=false,
+                            detail_url=nothing)
     safe = _md_safe_key(key)
+    lazy = !isnothing(detail_url)
     tr_kwargs = Dict{Symbol,Any}(
         :id      => "row-$safe",
-        :onclick => master_detail_toggle_js(safe),
+        :onclick => lazy ?
+            master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
+            master_detail_toggle_js(safe),
     )
     # Every master row is expandable, so it always carries aria-expanded
     # reflecting state: "true" open, "false" collapsed. This matches what
@@ -4303,15 +4376,21 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     detail_kwargs = Dict{Symbol,Any}(:id => "detail-$safe")
     initially_open || (detail_kwargs[:hidden] = true)
     isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
+    # Lazy mode: the detail cell hosts a slot that fetches `detail_url` on the
+    # first expand (see `_md_lazy_slot`); `detail_body` becomes its pre-load
+    # placeholder. Eager mode: `detail_body` is the final content, unchanged.
+    cell_body = lazy ?
+        _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open) :
+        detail_body
     detail = h.tr(; detail_kwargs...)(
-        h.td(colspan=string(ncols))(detail_body),
+        h.td(colspan=string(ncols))(cell_body),
     )
     (master, detail)
 end
 
 """
     master_detail_table(headers, items;
-                        key, master, detail,
+                        key, master, detail=nothing, detail_url=nothing,
                         master_attrs=nothing,
                         master_class=nothing,
                         detail_class=nothing,
@@ -4332,7 +4411,13 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `master(item)`: function returning the master row's `<td>` cells
   (vector or tuple of nodes).
 - `detail(item)`: function returning the detail row's body (placed
-  inside one `<td colspan=ncols>`).
+  inside one `<td colspan=ncols>`). Optional when `detail_url` is given —
+  it then builds the per-row pre-load placeholder instead.
+- `detail_url(item)` (or a bare URL `String`): opt in to **lazy** detail
+  loading — each row's detail is fetched into its slot on first expand
+  instead of rendered eagerly. Supply exactly one of `detail` / `detail_url`
+  (or both: `detail` as the lazy placeholder). See [`master_detail_pair`](@ref)
+  for the slot's single-flight / retry / invalidation contract.
 - `master_attrs(item)`: optional function returning an iterable of
   `name => value` pairs for extra `<tr>` attributes on the master row.
 - `master_class`, `detail_class`: optional extra CSS classes on the rows.
@@ -4343,30 +4428,39 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
-Detail bodies are always eager — for lazy-load patterns (a slot with
-`htmx.ajax` populated on open) build the rows by hand with
-[`master_detail_pair`](@ref) and a custom onclick built on
-[`master_detail_toggle_js`](@ref).
+For **lazy** detail loading (fetch each row's detail on first expand rather
+than rendering every collapsed detail up front), pass `detail_url` — the
+proven single-flight + click-to-retry slot, no hand-rolled `htmx.ajax` glue
+or custom onclick needed. Without it, detail bodies are eager.
 
 Include [`sortable_table_js`](@ref) on the page (which also brings in
 the master/detail hover + detail-cell reset rules via
 [`sortable_table_styles`](@ref)).
 """
 function master_detail_table(headers, items;
-                             key, master, detail,
+                             key, master, detail=nothing,
+                             detail_url=nothing,
                              master_attrs=nothing,
                              master_class=nothing,
                              detail_class=nothing,
                              initially_open::Union{Bool,Function}=false,
                              kwargs...)
     ncols = length(headers)
+    (!isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
+        "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
+    # `detail_url` may be a per-item `item -> url` callback or a bare String
+    # (same URL for every row — unusual, but supported).
+    _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
     rows = Any[]
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     for item in items
         attrs = isnothing(master_attrs) ? () : master_attrs(item)
-        (m, d) = master_detail_pair(key(item), master(item), detail(item), ncols;
+        # In lazy mode `detail(item)` (if given) is the per-row placeholder.
+        body = isnothing(detail) ? nothing : detail(item)
+        url  = isnothing(_url) ? nothing : _url(item)
+        (m, d) = master_detail_pair(key(item), master(item), body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
-                                    initially_open=_open(item))
+                                    initially_open=_open(item), detail_url=url)
         push!(rows, m, d)
     end
     sortable_table(headers, rows; kwargs...)
