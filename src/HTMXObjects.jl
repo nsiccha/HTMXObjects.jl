@@ -4,7 +4,7 @@ export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @i
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
-export auto, htmx, h, Node, @__str, HyperscriptString
+export auto, htmx, h, Node, @__str, HyperscriptString, Raw
 export route!, record!, to_response, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
 export safely, ERROR_DIR
@@ -28,7 +28,7 @@ export Verb
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
-import HTMX: h, auto, Node, @__str, HyperscriptString
+import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
 
 import Oxygen
 import Oxygen: formdata
@@ -1659,23 +1659,27 @@ const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-pa
 """
     escape_html(s) -> String
 
-Escape `&`, `"`, `'`, `<`, `>` for safe interpolation into element text or
-attribute values. Thin re-export of `HTMX.escape`.
+Escape `&`, `"`, `'`, `<`, `>`. Thin re-export of `HTMX.escape`.
 
-Note: `h.code(s)` and friends do **not** auto-escape text content — call
-`escape_html` explicitly when interpolating untrusted or markup-bearing
-strings.
+For building a **raw HTML string by hand** — not for values passed
+through `h.*`. As of the escape-by-default flip, `h.*` escapes text
+children and all attribute values exactly once, so **never** pre-escape
+a value you hand to a node builder (that double-escapes). Reach for
+`escape_html` only when you assemble HTML text yourself; for deliberate
+trusted markup inside a node use [`Raw`](@ref) instead.
 """
 escape_html(s::AbstractString) = HTMX.escape(s)
 
 """
     html_escape(s) -> String
 
-Escape `&`, `<`, `>` in `s` for safe direct interpolation into raw HTML
-strings. Use only when bypassing HTMX.jl's automatic escaping (e.g. when
-building HTML via `replace(_, => "<a href=...>...")` for a `<pre>` block).
+Escape `&`, `<`, `>` in `s` for safe interpolation into a **hand-built
+raw HTML string** (e.g. `replace(_, => "<a href=...>...")` for a `<pre>`
+block). Never pre-escape a value passed through `h.*` — node builders
+escape text and attributes themselves; use [`Raw`](@ref) for trusted
+markup inside a node.
 
-For attribute values or text that may contain quotes / apostrophes, use
+For values that may contain quotes / apostrophes, use
 [`escape_html`](@ref) (which delegates to `HTMX.escape`) for the full
 5-character escape set.
 """
@@ -3690,7 +3694,7 @@ Return a `<style>` node with default CSS for `render_caption` / `with_caption`:
 flex layout for the caption header (title left, actions right) and small
 spacing for the `<details>` body. Include once per page.
 """
-caption_style() = h.style("""
+caption_style() = h.style(Raw("""
 @layer htmxo {
 figure.captioned { margin: 0 0 1rem 0; }
 figcaption.caption { margin-bottom: 0.5rem; }
@@ -3700,7 +3704,7 @@ figcaption.caption { margin-bottom: 0.5rem; }
 .caption-long { margin-top: 0.25rem; }
 .caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
 }
-""")
+"""))
 
 _wrap_long(s::AbstractString) = h.div(s)
 _wrap_long(s) = s
@@ -3837,7 +3841,7 @@ so the server-rendered header agrees with the server-rendered row order.
 See [`sortable_table`](@ref).
 """
 function sortable_table_js()
-    h.script(raw"""
+    h.script(Raw(raw"""
 function sortTable(col, th) {
     // Accept sortTable(th): with a single <th> element, derive the column
     // index from its position in the header row. Lets a hand-built RICH header
@@ -3939,7 +3943,7 @@ function htmxoSortState(target) {
         sort_dir: th.dataset.sortDir,
     };
 }
-""")
+"""))
 end
 
 """
@@ -3960,7 +3964,7 @@ wrapping them in `@layer htmxo` would leave them ineffective against
 Pico's defaults. Pair with [`sortable_table_js`](@ref).
 """
 function sortable_table_styles()
-    h.style("""
+    h.style(Raw("""
 @layer htmxo {
 .htmxo-sortable-table thead th { cursor: pointer; }
 .htmxo-sortable-table thead th[colspan] { cursor: default; text-align: center; border-bottom: none; }
@@ -3976,7 +3980,7 @@ function sortable_table_styles()
 }
 .htmxo-sortable-table tbody tr[id^="row-"][onclick] > td { cursor: pointer; }
 .htmxo-sortable-table tbody tr[id^="detail-"] > td { padding: 0; border: none; }
-""")
+"""))
 end
 
 """
@@ -3991,7 +3995,7 @@ triggers a Blob download. Sort indicator arrows (` ▲`/` ▼`) added by
 `sortable_table_js()` are stripped from header text.
 """
 function download_table_js()
-    h.script(raw"""
+    h.script(Raw(raw"""
 function downloadTableCsv(btn, filename) {
     const wrap = btn.closest('figure, .table-wrap') || btn.parentElement;
     const table = wrap.querySelector('table');
@@ -4016,7 +4020,7 @@ function downloadTableCsv(btn, filename) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 }
-""")
+"""))
 end
 
 """
@@ -4203,8 +4207,13 @@ when constructing row ids by hand outside the helpers.
 """
 master_detail_safe_key(key) = _md_safe_key(key)
 
+# The custom DOM event name a lazy master/detail slot listens for, and that
+# its master row's toggle fires on expand. One source of truth for both sites
+# (the slot's `hx-trigger` and the toggle's `htmx.trigger(...)` call).
+_md_lazy_event() = "htmxo-md-load"
+
 """
-    master_detail_toggle_js(safe_key) -> String
+    master_detail_toggle_js(safe_key; lazy_slot_id=nothing) -> String
 
 Return the click-handler JS snippet for the master row of a master/detail
 pair. The snippet ignores clicks on interactive descendants (`a`,
@@ -4217,14 +4226,60 @@ Exposed for callers that need to extend the toggle (e.g. lazy-load a
 fragment into a slot on open, empty it on close) — concatenate the
 extension onto the returned string. The extension can read the standard
 toggle's `show` local (true on open, false on close).
+
+Pass `lazy_slot_id` to have the toggle drive a lazy detail slot itself: on
+expand (`show`), it fires the `htmxo-md-load` event at `#<lazy_slot_id>` —
+but only when that slot is neither already loaded (`data-loaded='1'`) nor in
+flight (`data-loading='1'`) — latching `data-loading='1'` before firing so
+repeat clicks while the request is outstanding coalesce (single-flight,
+idempotent). This is the seam [`master_detail_pair`](@ref) drives for its
+`detail_url` mode; you rarely need it directly. Deliberately **not**
+`hx-trigger="load"` (fires for every collapsed slot at page load) nor
+`revealed`/`intersect` (a late intersection response can clobber a
+freshly-focused open slot) — the trigger is the explicit expand event.
 """
-function master_detail_toggle_js(safe_key)
-    string(
+function master_detail_toggle_js(safe_key; lazy_slot_id=nothing)
+    base = string(
         "if(event.target.closest('a,button,input,textarea,select,form'))return;",
         "var d=document.getElementById('detail-", safe_key, "');if(!d)return;",
         "var show=d.hidden;d.hidden=!show;",
         "this.setAttribute('aria-expanded',show);",
     )
+    isnothing(lazy_slot_id) && return base
+    string(base,
+        "if(show){var s=document.getElementById('", lazy_slot_id, "');",
+        "if(s&&s.dataset.loaded!=='1'&&s.dataset.loading!=='1')",
+        "{s.dataset.loading='1';htmx.trigger(s,'", _md_lazy_event(), "');}}",
+    )
+end
+
+# The lazy detail slot — the proven single-flight + click-to-retry shape,
+# generalised from the KB For-You `_foryou_lazy_detail_slot`. Lives permanently
+# in the (collapsed) detail cell; loads once on the first expand event, reuses
+# the loaded DOM thereafter. `placeholder` is shown until the fetch lands (and
+# must carry a `[data-status]` element for the loading/retry text swaps to have
+# a target — the default does). `also_load=true` (an initially-open row) adds
+# `load` so that one slot fetches on render; collapsed slots never do.
+function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
+    ph = isnothing(placeholder) ? h.small(data_status="muted")("Loading…") : placeholder
+    ev = _md_lazy_event()
+    h.div(id="detail-slot-$safe",
+          class="htmxo-md-detail-slot",
+          data_loaded="0",
+          hx_get=string(url),
+          hx_trigger=also_load ? "$ev, load" : ev,
+          hx_target="this", hx_swap="innerHTML",
+          hx_on__before_request="this.dataset.loading='1';delete this.dataset.failed;" *
+                                "var p=this.querySelector('[data-status]');" *
+                                "if(p)p.textContent='Loading…'",
+          hx_on__after_request="delete this.dataset.loading;" *
+                               "if(event.detail.successful){this.dataset.loaded='1';delete this.dataset.failed;}" *
+                               "else{this.dataset.loaded='0';this.dataset.failed='1';" *
+                               "var p=this.querySelector('[data-status]');" *
+                               "if(p)p.textContent='Failed to load — click to retry';}",
+          hx_on__click="if(this.dataset.failed==='1'&&!this.dataset.loading){" *
+                       "this.dataset.loading='1';htmx.trigger(this,'$ev');}")(
+        ph)
 end
 
 """
@@ -4232,7 +4287,8 @@ end
                        master_class=nothing,
                        detail_class=nothing,
                        master_attrs=(),
-                       initially_open::Bool=false)
+                       initially_open::Bool=false,
+                       detail_url=nothing)
 
 Build the `(master_tr, detail_tr)` pair for one master/detail item.
 
@@ -4247,6 +4303,8 @@ the user came to see (a question + answer brief, for example).
 # Arguments
 - `master_cells`: iterable of `<td>` nodes for the master row.
 - `detail_body`: any content placed inside the detail row's spanning `<td>`.
+  In lazy mode (`detail_url` set) this instead becomes the slot's pre-load
+  **placeholder** (`nothing` → a default muted "Loading…").
 - `ncols`: the master row's column count (drives the detail cell's
   `colspan` so the detail aligns with the table width).
 
@@ -4265,6 +4323,21 @@ the user came to see (a question + answer brief, for example).
   on the master (vs `"false"` when collapsed) so collapsed-look CSS keyed
   off `[aria-expanded="false"]` (or `:not([aria-expanded="true"])`) shows
   the expanded look from the first render. First click toggles as usual.
+- `detail_url`: opt in to **lazy** detail loading. When set (a URL string),
+  the detail cell hosts a slot that `hx-get`s `detail_url` into itself on the
+  **first expand** and reuses the loaded DOM thereafter — `detail_body` is
+  not rendered eagerly; it serves as the pre-load placeholder instead
+  (default: a muted "Loading…"). The load is single-flight (repeat clicks
+  while in flight coalesce) with click-to-retry on failure, driven by the
+  toggle's `lazy_slot_id` seam — never by `load`/`revealed`/`intersect`
+  (see [`master_detail_toggle_js`](@ref)). A collapsed row issues no
+  request; an `initially_open=true` lazy row loads once on render. **Explicit
+  invalidation:** set the slot's `data-loaded='0'` (id `detail-slot-<safe>`)
+  to force a reload on the next expand — an open row reloads on next expand,
+  a collapsed row stays lazy; there is no refetch-on-re-open by default.
+  HTMXObjects owns only the load/latch/retry mechanics — response caching,
+  content hashing, TTL/LRU, and refresh-gating stay the caller's concern.
+  Default `nothing` → today's eager `detail_body`, unchanged.
 
 The pair MUST be interleaved into the row list passed to
 [`sortable_table`](@ref) (master, detail, master, detail, …) so the
@@ -4280,11 +4353,15 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             master_class=nothing,
                             detail_class=nothing,
                             master_attrs=(),
-                            initially_open::Bool=false)
+                            initially_open::Bool=false,
+                            detail_url=nothing)
     safe = _md_safe_key(key)
+    lazy = !isnothing(detail_url)
     tr_kwargs = Dict{Symbol,Any}(
         :id      => "row-$safe",
-        :onclick => master_detail_toggle_js(safe),
+        :onclick => lazy ?
+            master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
+            master_detail_toggle_js(safe),
     )
     # Every master row is expandable, so it always carries aria-expanded
     # reflecting state: "true" open, "false" collapsed. This matches what
@@ -4303,15 +4380,21 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     detail_kwargs = Dict{Symbol,Any}(:id => "detail-$safe")
     initially_open || (detail_kwargs[:hidden] = true)
     isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
+    # Lazy mode: the detail cell hosts a slot that fetches `detail_url` on the
+    # first expand (see `_md_lazy_slot`); `detail_body` becomes its pre-load
+    # placeholder. Eager mode: `detail_body` is the final content, unchanged.
+    cell_body = lazy ?
+        _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open) :
+        detail_body
     detail = h.tr(; detail_kwargs...)(
-        h.td(colspan=string(ncols))(detail_body),
+        h.td(colspan=string(ncols))(cell_body),
     )
     (master, detail)
 end
 
 """
     master_detail_table(headers, items;
-                        key, master, detail,
+                        key, master, detail=nothing, detail_url=nothing,
                         master_attrs=nothing,
                         master_class=nothing,
                         detail_class=nothing,
@@ -4332,7 +4415,13 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `master(item)`: function returning the master row's `<td>` cells
   (vector or tuple of nodes).
 - `detail(item)`: function returning the detail row's body (placed
-  inside one `<td colspan=ncols>`).
+  inside one `<td colspan=ncols>`). Optional when `detail_url` is given —
+  it then builds the per-row pre-load placeholder instead.
+- `detail_url(item)` (or a bare URL `String`): opt in to **lazy** detail
+  loading — each row's detail is fetched into its slot on first expand
+  instead of rendered eagerly. Supply exactly one of `detail` / `detail_url`
+  (or both: `detail` as the lazy placeholder). See [`master_detail_pair`](@ref)
+  for the slot's single-flight / retry / invalidation contract.
 - `master_attrs(item)`: optional function returning an iterable of
   `name => value` pairs for extra `<tr>` attributes on the master row.
 - `master_class`, `detail_class`: optional extra CSS classes on the rows.
@@ -4343,30 +4432,39 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
-Detail bodies are always eager — for lazy-load patterns (a slot with
-`htmx.ajax` populated on open) build the rows by hand with
-[`master_detail_pair`](@ref) and a custom onclick built on
-[`master_detail_toggle_js`](@ref).
+For **lazy** detail loading (fetch each row's detail on first expand rather
+than rendering every collapsed detail up front), pass `detail_url` — the
+proven single-flight + click-to-retry slot, no hand-rolled `htmx.ajax` glue
+or custom onclick needed. Without it, detail bodies are eager.
 
 Include [`sortable_table_js`](@ref) on the page (which also brings in
 the master/detail hover + detail-cell reset rules via
 [`sortable_table_styles`](@ref)).
 """
 function master_detail_table(headers, items;
-                             key, master, detail,
+                             key, master, detail=nothing,
+                             detail_url=nothing,
                              master_attrs=nothing,
                              master_class=nothing,
                              detail_class=nothing,
                              initially_open::Union{Bool,Function}=false,
                              kwargs...)
     ncols = length(headers)
+    (!isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
+        "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
+    # `detail_url` may be a per-item `item -> url` callback or a bare String
+    # (same URL for every row — unusual, but supported).
+    _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
     rows = Any[]
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     for item in items
         attrs = isnothing(master_attrs) ? () : master_attrs(item)
-        (m, d) = master_detail_pair(key(item), master(item), detail(item), ncols;
+        # In lazy mode `detail(item)` (if given) is the per-row placeholder.
+        body = isnothing(detail) ? nothing : detail(item)
+        url  = isnothing(_url) ? nothing : _url(item)
+        (m, d) = master_detail_pair(key(item), master(item), body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
-                                    initially_open=_open(item))
+                                    initially_open=_open(item), detail_url=url)
         push!(rows, m, d)
     end
     sortable_table(headers, rows; kwargs...)
@@ -4992,7 +5090,7 @@ elements. Include once per page (like [`loading_indicator_script`](@ref)).
 Evaluates visibility on load and re-initializes on `htmx:afterSettle` for
 dynamically swapped content.
 """
-show_when_script() = h.script(raw"""
+show_when_script() = h.script(Raw(raw"""
 (function() {
   function evalShowWhen(el) {
     var field = el.dataset.showWhenField;
@@ -5023,7 +5121,7 @@ show_when_script() = h.script(raw"""
   initShowWhen();
   document.body.addEventListener('htmx:afterSettle', function(e) { initShowWhen(e.detail.elt); });
 })();
-""")
+"""))
 
 # --- Theme ---
 
@@ -5040,7 +5138,7 @@ so any host's `:root { --htmxo-...: ... }` override wins automatically — no
 specificity wars, no host detection in component code. See [`pico_bridge`](@ref)
 and [`vitepress_bridge`](@ref) for one-line adapters.
 """
-htmxo_theme() = h.style("""
+htmxo_theme() = h.style(Raw("""
 @layer htmxo {
     :where(:root) {
         --htmxo-accent:  #4a90d9;
@@ -5051,7 +5149,7 @@ htmxo_theme() = h.style("""
         --htmxo-muted:   color-mix(in srgb, currentColor 60%, transparent);
     }
 }
-""")
+"""))
 
 """
     pico_bridge()
@@ -5061,7 +5159,7 @@ once at the page level when an HTMXO app uses Pico CSS, so HTMXO components
 pick up the host's accent / borders / status colors. Loaded automatically by
 [`htmx`](@ref) when `pico_version` is non-`nothing`.
 """
-pico_bridge() = h.style("""
+pico_bridge() = h.style(Raw("""
 :root {
     --htmxo-accent:  var(--pico-primary, #4a90d9);
     --htmxo-success: var(--pico-color-green-550, #2a9d8f);
@@ -5070,7 +5168,7 @@ pico_bridge() = h.style("""
     --htmxo-border:  var(--pico-border-color, currentColor);
     --htmxo-muted:   var(--pico-muted-color, color-mix(in srgb, currentColor 60%, transparent));
 }
-""")
+"""))
 
 """
     vitepress_bridge()
@@ -5080,7 +5178,7 @@ Include in VitePress's `head` (via `config.mts`) when embedding HTMXO
 recordings/fragments inside docs pages, so HTMXO components match the docs
 theme automatically. Falls back to HTMXO defaults when a token is missing.
 """
-vitepress_bridge() = h.style("""
+vitepress_bridge() = h.style(Raw("""
 :root {
     --htmxo-accent:  var(--vp-c-brand-1, #4a90d9);
     --htmxo-success: var(--vp-c-success-1, #2a9d8f);
@@ -5089,7 +5187,7 @@ vitepress_bridge() = h.style("""
     --htmxo-border:  var(--vp-c-divider, currentColor);
     --htmxo-muted:   var(--vp-c-text-3, color-mix(in srgb, currentColor 60%, transparent));
 }
-""")
+"""))
 
 # --- VitePress integration helpers ---
 
@@ -5215,7 +5313,7 @@ Class prefixes:
 - `u-mt-*` etc.   margin / padding scale: `0`, `1` (0.25rem), `2` (0.5rem),
                   `3` (0.75rem), `4` (1rem), `5` (1.5rem), `6` (2rem)
 """
-htmxo_utility_styles() = h.style("""
+htmxo_utility_styles() = h.style(Raw("""
 @layer htmxo {
 /* === Generic behavior conventions === */
 /* Any element triggering an htmx action is clickable. */
@@ -5369,7 +5467,7 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 }
 .htmxo-back-link:hover { text-decoration: underline; }
 }
-""")
+"""))
 
 # --- Request feedback ---
 
@@ -5380,7 +5478,7 @@ CSS for automatic HTMX request feedback: pulsating border while in-flight,
 brief color flash on success/failure. Themed via `--htmxo-accent`,
 `--htmxo-success`, `--htmxo-error` (see [`htmxo_theme`](@ref)).
 """
-request_feedback_style() = h.style("""
+request_feedback_style() = h.style(Raw("""
 @layer htmxo {
 @keyframes htmx-pulse {
     0%, 100% { outline-color: color-mix(in srgb, var(--htmxo-accent) 30%, transparent); }
@@ -5410,7 +5508,7 @@ request_feedback_style() = h.style("""
     100% { outline-color: transparent; }
 }
 }
-""")
+"""))
 
 """
     request_feedback_script()
@@ -5418,7 +5516,7 @@ request_feedback_style() = h.style("""
 JS that hooks into HTMX events to add visual feedback classes on the target element
 of each request.
 """
-request_feedback_script() = h.script("""
+request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
     function getTarget(evt) {
         var elt = evt.detail.elt;
@@ -5481,7 +5579,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 });
-""")
+"""))
 
 """
     request_feedback()
@@ -5499,7 +5597,7 @@ CSS for the framework debug/dev overlay bar — a thin fixed bottom strip
 form). Plain `#id`-scoped rules (no `@layer`) so it sits above app content
 and Pico regardless of stacking. Injected by [`htmx`](@ref) when `overlay=true`.
 """
-overlay_bar_style() = h.style("""
+overlay_bar_style() = h.style(Raw("""
 #htmxo-overlay-bar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000;
   font: 13px/1.4 system-ui, -apple-system, sans-serif;
@@ -5546,7 +5644,7 @@ overlay_bar_style() = h.style("""
 #htmxo-overlay-bar .kb-bubble.hob-anchor { outline: 2px solid var(--htmxo-overlay-accent, #7c6ff0); outline-offset: 1px; border-radius: 4px; animation: hob-flash 1.4s ease-out; }
 @keyframes hob-flash { from { background: rgba(124,111,240,.4); } to { background: transparent; } }
 @media print { #htmxo-overlay-bar { display: none; } }
-""")
+"""))
 
 """
     overlay_bar_script()
@@ -5576,7 +5674,7 @@ the chat and the owner's durable todo is cross-linked in the header.
 All KB calls are root-absolute (same-origin via the prefix-proxy) and degrade
 visibly if an endpoint isn't reachable.
 """
-overlay_bar_script() = h.script("""
+overlay_bar_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
   if (window.__htmxoOverlayInit) { return; }
   window.__htmxoOverlayInit = true;
@@ -5967,7 +6065,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   window.addEventListener('resize', syncOverlayPad);
 });
-""")
+"""))
 
 """
     KB_ORIGIN
@@ -6010,7 +6108,7 @@ raises on a failed submit. Deliberately **unlayered** (not inside
 `textarea { resize: … }` rule — a layered rule would lose regardless of
 specificity and the drag-handle/scrollbar would reappear.
 """
-compose_box_styles() = h.style(raw"""
+compose_box_styles() = h.style(Raw(raw"""
 .htmxo-compose-textarea {
     resize: none; overflow: hidden; field-sizing: content; line-height: 1.4;
 }
@@ -6026,7 +6124,7 @@ compose_box_styles() = h.style(raw"""
 .htmxo-toast-show { opacity: 1; transform: translateY(0); }
 .htmxo-toast-error { border-color: var(--pico-color-red-500, #d32f2f); color: var(--pico-color-red-500, #d32f2f); }
 .htmxo-toast-info { color: var(--pico-color, inherit); }
-""")
+"""))
 
 """
     compose_box_script()
@@ -6041,7 +6139,7 @@ element. Exposes `window.htmxoToast(text, status)` and
 `window.htmxoComposeRebind(root)` for reuse. Body-listener attachment is
 deferred to `DOMContentLoaded` so the script is safe to inject in `<head>`.
 """
-compose_box_script() = h.script(raw"""
+compose_box_script() = h.script(Raw(raw"""
 (function() {
     var FIELD_SIZING = !!(window.CSS && CSS.supports && CSS.supports('field-sizing', 'content'));
     function autoGrow(el) {
@@ -6131,7 +6229,7 @@ compose_box_script() = h.script(raw"""
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
     else init();
 })();
-""")
+"""))
 
 """
     compose_box_assets()
@@ -6176,14 +6274,14 @@ requests. Pico CSS renders a spinner automatically for `aria-busy` elements.
 !!! note
     Deprecated in favor of `request_feedback()` which provides richer visual feedback.
 """
-loading_indicator_script() = h.script("""
+loading_indicator_script() = h.script(Raw("""
 document.body.addEventListener('htmx:beforeRequest', function(e) {
     e.detail.elt.setAttribute('aria-busy', 'true');
 });
 document.body.addEventListener('htmx:afterRequest', function(e) {
     e.detail.elt.removeAttribute('aria-busy');
 });
-""")
+"""))
 
 # --- Tabset ---
 
@@ -6198,7 +6296,7 @@ Scoped to `.tabset` on the outer `<div>`, so plain `<nav><ul>` menus elsewhere
 are untouched. Auto-included by `htmx()`; inject manually via `extra_head`
 if you're building your own `<head>`.
 """
-tabset_styles() = h.style("""
+tabset_styles() = h.style(Raw("""
 @layer htmxo {
 .tabset > nav {
     margin: 0;
@@ -6236,7 +6334,7 @@ tabset_styles() = h.style("""
     border-radius: 0 0 0.35rem 0.35rem;
 }
 }
-""")
+"""))
 
 function _tabset_panel(content::AbstractString, i, active)
     # String content = URL → lazy load via hx-get on first reveal
@@ -6444,7 +6542,7 @@ CSS for [`editor_form`](@ref): monospace `<textarea>`/`<input>` editor body
 Scoped class names, no global selectors. Auto-included by [`htmx`](@ref); inject
 manually via `extra_head` if you build your own `<head>`.
 """
-editor_styles() = h.style("""
+editor_styles() = h.style(Raw("""
 @layer htmxo {
 .htmxo-editor-input {
     font-family: monospace;
@@ -6457,7 +6555,7 @@ editor_styles() = h.style("""
     margin-top: 0.5rem;
 }
 }
-""")
+"""))
 
 """
     editor_form(; id, post_url, content="", version="", ...) -> Node
@@ -6816,7 +6914,7 @@ function gallery_grid(items::AbstractVector{GalleryItem};
                           search_placeholder),
         inner,
         h.div("No items match the current filter."; class="htmxo-gallery-empty"),
-        h.script(gallery_controls_script()),
+        h.script(Raw(gallery_controls_script())),
     )
 end
 
@@ -7056,8 +7154,8 @@ Source of truth is
 `HTMXObjects/assets/vitepress/htmxo-gallery.css` — same file is
 imported by `htmxo-embed.ts` so the docs-embedded fragment matches.
 """
-htmxo_gallery_styles() = h.style(
-    read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-gallery.css"), String))
+htmxo_gallery_styles() = h.style(Raw(
+    read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-gallery.css"), String)))
 
 """
     htmxo_syntax_head(; languages=("julia", "stan"))
@@ -7084,7 +7182,7 @@ function htmxo_syntax_head(; languages=("julia", "stan"))
     syntax_css = read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-syntax.css"), String)
     (h.script(; src="$base/prism.min.js"),
      (h.script(; src="$base/components/prism-$lang.min.js") for lang in languages)...,
-     h.style(syntax_css))
+     h.style(Raw(syntax_css)))
 end
 
 @dynamicstruct struct GitRepo
