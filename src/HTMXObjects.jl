@@ -4318,6 +4318,28 @@ the user came to see (a question + answer brief, for example).
   for extra attributes on the master `<tr>` (`data_status`, `data_aid`,
   `data_activity`, `data_sort_value`, …). Note: HTML attribute names
   use underscores in the `h` builder (`data_status`, not `data-status`).
+  **These are applied LAST and OVERWRITE** what this function built — so
+  `master_attrs=(onclick=…,)` **replaces** the toggle outright; it does
+  **not** compose with it. To extend the toggle, rebuild it yourself and
+  concatenate your extension onto it (it can read the toggle's `show`
+  local; it runs only for clicks the toggle did not early-`return` on):
+
+  ```julia
+  safe = master_detail_safe_key(key)
+  onclick = master_detail_toggle_js(safe) * my_extra_js
+  ```
+
+  **In lazy mode (`detail_url` set) you MUST also carry the lazy seam**,
+  or the detail silently never loads — a collapsed row issues no request
+  by design, so "never loads" is indistinguishable from "correctly lazy"
+  until someone expands a row and sits on a permanent placeholder:
+
+  ```julia
+  onclick = master_detail_toggle_js(safe; lazy_slot_id="detail-slot-\$safe") * my_extra_js
+  ```
+
+  `master_detail_toggle_js` / `master_detail_safe_key` are **not
+  exported** — qualify them (`HTMXObjects.master_detail_toggle_js`).
 - `initially_open`: render the row open instead of collapsed. When
   `true`, omits `hidden` on the detail row and sets `aria-expanded="true"`
   on the master (vs `"false"` when collapsed) so collapsed-look CSS keyed
@@ -4335,6 +4357,9 @@ the user came to see (a question + answer brief, for example).
   invalidation:** set the slot's `data-loaded='0'` (id `detail-slot-<safe>`)
   to force a reload on the next expand — an open row reloads on next expand,
   a collapsed row stays lazy; there is no refetch-on-re-open by default.
+  **Custom onclick:** the lazy trigger lives on the master row's `onclick`,
+  which a caller-supplied `master_attrs=(onclick=…,)` overwrites — see the
+  `master_attrs` note above for the `lazy_slot_id` seam you must carry.
   HTMXObjects owns only the load/latch/retry mechanics — response caching,
   content hashing, TTL/LRU, and refresh-gating stay the caller's concern.
   Default `nothing` → today's eager `detail_body`, unchanged.
