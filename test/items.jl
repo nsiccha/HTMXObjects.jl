@@ -1784,7 +1784,11 @@ already rendered any value, so the HTML side was the asymmetry.
     # Scalars, `nothing`, and multi-line values all have a representation.
     @test contains(repr("text/html", generic_html(42)), "42")
     @test generic_html(nothing) == ""
-    @test contains(repr("text/html", generic_html([1 2; 3 4])), "<pre>")
+    # A matrix is a first-class grid shape, not the multi-line text fallback.
+    @test contains(repr("text/html", generic_html([1 2; 3 4])), "<table>")
+    # Values with no dedicated shape still take the multi-line `<pre>` fallback
+    # — including arrays of three or more dimensions, which are out of scope.
+    @test contains(repr("text/html", generic_html(zeros(2, 2, 2))), "<pre>")
 
     # Values are escaped — data must never reach the client as trusted HTML.
     escaped = String(to_response((danger="<script>x</script>",)).body)
@@ -1831,6 +1835,77 @@ HX request with the result itself — status 200 *and* the data — rather than
         # `?plain` markdown mode is untouched.
         md = String(HTTP.get("http://127.0.0.1:$port/summary?plain=1").body)
         @test contains(md, "accepted = 3")
+    finally
+        terminate()
+    end
+end
+
+"""
+A route returning a `Matrix` must render as a grid. The generic normalizer
+treats arrays element-wise, which for a 2-D array flattened the cells into
+column-major order with the shape gone — a `Matrix{Float64}` result reached
+the client as an unlabelled, mis-ordered run of numbers. Regression for the
+semantic-app matrix snag.
+"""
+@testitem "generic_html - matrices render as grids, not flattened" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: generic_html, to_response, _html_value
+
+    # The reported shape: a materialized numeric grid.
+    body = String(to_response([1.0 2.0 3.0; 4.0 5.0 6.0]).body)
+    @test contains(body, "<table>")
+    # Row-major reading order, one `tr` per matrix row — the flattening bug
+    # emitted 1.0, 4.0, 2.0, … instead.
+    @test contains(body, "<tr><td>1.0</td><td>2.0</td><td>3.0</td></tr>")
+    @test contains(body, "<tr><td>4.0</td><td>5.0</td><td>6.0</td></tr>")
+
+    # Cell values are escaped, exactly like every other generic shape.
+    escaped = String(to_response(["<script>x" "b"; "c" "d"]).body)
+    @test !contains(escaped, "<script>")
+    @test contains(escaped, "&lt;script&gt;")
+
+    # A matrix holding renderable values keeps the element-wise fragment
+    # behavior — this only adds rendering where there was none.
+    @test String(to_response([h.p("a") h.p("b")]).body) == "<p>a</p>\n<p>b</p>"
+
+    # Vectors are unchanged: still an element-wise fragment.
+    @test String(to_response([1.0, 2.0]).body) == "<span>1.0</span>\n<span>2.0</span>"
+
+    # Degenerate shapes have a representation rather than raising.
+    @test contains(repr("text/html", generic_html(zeros(0, 0))), "<table>")
+    @test contains(repr("text/html", generic_html(reshape([7.0], 1, 1))), "<td>7.0</td>")
+end
+
+"""
+End-to-end counterpart: a live `@get` returning a `Matrix{Float64}` must
+answer an HX request with the grid itself — status 200 *and* the data — not
+200 with an error article and an `X-HTMXO-Error-Id` header, which is how the
+`MethodError` from `repr("text/html", ::Float64)` surfaced to the reporter.
+"""
+@testitem "generic_html - live @get returning a Matrix" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    @htmx struct MatrixResultApp
+        __page__(content) = h.html(h.body(content))
+        @get prediction_grid() = [1.0 2.0; 3.0 4.0]
+    end
+    route!(MatrixResultApp())
+    port = 8102
+    serve(; port, async=true)
+    try
+        r = HTTP.get("http://127.0.0.1:$port/prediction_grid";
+                     headers=["HX-Request" => "true"], status_exception=false)
+        @test r.status == 200
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") == ""
+        body = String(r.body)
+        @test contains(body, "<tr><td>1.0</td><td>2.0</td></tr>")
+        @test contains(body, "<tr><td>3.0</td><td>4.0</td></tr>")
+        @test !contains(body, "Something went wrong")
+
+        # Full-page navigation renders the same grid inside `__page__`.
+        page = String(HTTP.get("http://127.0.0.1:$port/prediction_grid").body)
+        @test contains(page, "<html><body><table>")
+
+        # `?plain` markdown mode is untouched.
+        md = String(HTTP.get("http://127.0.0.1:$port/prediction_grid?plain=1").body)
+        @test !isempty(md)
     finally
         terminate()
     end
