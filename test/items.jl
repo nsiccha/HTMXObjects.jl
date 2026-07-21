@@ -15,7 +15,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
-    TestUIHost,
+    TestUIHost, ProviderApp,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -121,6 +121,16 @@ end
     @include tests = TestRoutes(; project=pkgdir(HTMXObjects))
 end
 
+@htmx struct ProviderApp
+    label::String
+
+    @get index() = h.p("root $(label)")
+    @include nested = begin
+        @get show(; count::Int) = h.p("$(label):$(count):$(__route__)")
+        @ws stream(id::Int; suffix::String) = "$(label):$(id):$(suffix):$(__route__)"
+    end
+end
+
 end # @testmodule HTMXOTestFixtures
 
 # --- Tests ---
@@ -208,6 +218,50 @@ end
     @test contains(html, "foo")
     @test Symbol("@get") in DynamicObjects.metafirst(TestApp, :index).macros
     @test !(Symbol("@get") in DynamicObjects.metafirst(TestApp, :title).macros)
+end
+
+@testitem "root provider and shared operation runner" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _base_segments, _operation_target, _run_operation
+
+    seen = OperationContext[]
+    provider = RootProvider(
+        (RootT, context) -> begin
+            push!(seen, context)
+            RootT(String(context.key); __req__=context.request,
+                  __route__=context.route, __prefix__=context.prefix)
+        end;
+        scope=:session,
+        key=req -> HTTP.header(req, "X-Session", "missing"),
+    )
+
+    route!(ProviderApp("registered"); root_provider=provider)
+    req = HTTP.Request("GET", "/nested/show?count=7", ["X-Session" => "session-a"])
+    handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))
+    resp = handler(req)
+    @test resp.status == 200
+    @test contains(String(resp.body), "session-a:7:/nested/show")
+    @test only(seen).scope === :session
+    @test only(seen).key == "session-a"
+    @test only(seen).transport === :http
+
+    bad_req = HTTP.Request("GET", "/nested/show?count=not-an-int",
+                           ["X-Session" => "session-a"])
+    bad_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, bad_req))
+    @test bad_handler(bad_req).status == 500
+
+    ws_req = HTTP.Request("GET", "/nested/stream/4?suffix=ok", ["X-Session" => "session-b"])
+    chain_info = DynamicObjects.metafirst(ProviderApp, :nested)
+    NestedT = DynamicObjects._nested_struct_type(ProviderApp, Val(:nested))
+    nested_prefix, step = HTMXObjects._nested_prefix_and_step(ProviderApp, :nested, chain_info, "")
+    target = _operation_target(provider, ProviderApp, [step], ws_req, "", 0, :websocket)
+    operation = _run_operation(target, NestedT, :stream, Verb{:WEBSOCKET}(),
+                               ws_req, _base_segments("/nested/stream/{id}", 1), 1)
+    @test operation.value(nothing) == "session-b:4:ok:/nested/stream/4"
+    @test last(seen).transport === :websocket
+    @test nested_prefix == "nested"
+
+    @test_throws ArgumentError RootProvider(identity; scope=:pod)
+    @test_throws ArgumentError RootProvider(identity; scope=:job)
 end
 
 @testitem ":index -> / routing" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
