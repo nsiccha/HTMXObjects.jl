@@ -2057,11 +2057,39 @@ end
     RootProvider(factory; scope=:request, key=nothing)
 
 Construct roots for registered operations. `factory` is called as
-`factory(RootT, context)` and must return a `RootT`. For `scope=:session` or
-`:job`, pass a `key(req)` function and let the application-owned factory decide
-how roots are retained or reconstructed. The default request provider preserves
-the historic behavior: a fresh root is constructed for every request with
-`__req__`, `__route__`, and `__prefix__` populated by HTMXObjects.
+`factory(RootT, context)` and must return a `RootT` **carrying
+`context.request`** — see below. For `scope=:session` or `:job`, pass a
+`key(req)` function and let the application-owned factory decide what is
+retained behind that key. The default request provider preserves the historic
+behavior: a fresh root is constructed for every request with `__req__`,
+`__route__`, and `__prefix__` populated by HTMXObjects.
+
+!!! warning "Retain the payload, not the root"
+    A root is a *per-request* object even under `:session`/`:job`. `@param` and
+    `@header` lower to ordinary **cached** DynamicObjects properties that read
+    `_req_of(__self__)`, so a root only ever observes the request it was built
+    with, and its `@include` children inherit `__req__` from it. Retaining the
+    root across requests therefore serves request #1's parameters forever;
+    dropping the request entirely leaves every request-reading path with
+    `nothing`. Nor can the root be refreshed in place — `@dynamicstruct` emits
+    an immutable type, and mutating it would not invalidate the cached values
+    anyway. Retain the *application payload* behind `context.key` and build a
+    fresh root around it each request:
+
+    ```julia
+    RootProvider(; scope=:job, key=req -> HTTP.header(req, "X-Job", "")) do RootT, context
+        payload = lock(store_lock) do
+            get!(() -> ExpensiveState(), store, context.key)
+        end
+        RootT(payload; __req__=context.request, __route__=context.route,
+              # omit `__prefix__` when empty so a struct-body default survives
+              (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)
+    end
+    ```
+
+    The retained `payload` (and any cache it owns) survives; the cheap root
+    wrapper does not. A factory that returns a root not carrying
+    `context.request` is rejected at the provider seam with an `ArgumentError`.
 """
 struct RootProvider{F,K}
     factory::F
@@ -2869,7 +2897,36 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
             end
         end
     end
+    _check_root_request(root, RootT, context)
     root
+end
+
+# The refresh above cannot help an `@htmx` root: `@dynamicstruct` emits an
+# IMMUTABLE type, so `ismutabletype` is false for every app struct and the block
+# no-ops. And a root only ever observes the request it was constructed with:
+# `@param`/`@header` lower to ordinary *cached* DynamicObjects properties reading
+# `_req_of(__self__)`, and `@include` children inherit `__req__` from their
+# parent. So a factory that retains the root across requests serves request #1's
+# parameters forever (silent), and one that drops the request leaves `_req_of`
+# `nothing` for every request-reading path (a `Nothing has no field method` deep
+# inside form/param rendering, far from the provider that caused it). Reject
+# both here, at the seam that created them, with the corrected shape spelled out.
+function _check_root_request(root, RootT, context::OperationContext)
+    _req_of(root) === context.request && return nothing
+    detail = _req_of(root) === nothing ?
+        "it carries no request (`__req__` is `nothing`)" :
+        "it carries a different request — a root retained from an earlier request"
+    throw(ArgumentError(string(
+        "root provider for $(RootT) (scope $(repr(context.scope)), key $(repr(context.key))) ",
+        "returned a root that does not carry the current request: ", detail, ".\n",
+        "`@param`/`@header` are cached per root, so a retained root never sees a later ",
+        "request. Retain the application payload behind `context.key` and build a fresh ",
+        "root around it each request:\n",
+        "    RootProvider(; scope=$(repr(context.scope)), key=…) do RootT, context\n",
+        "        payload = get!(() -> ExpensiveState(), store, context.key)\n",
+        "        RootT(payload; __req__=context.request, __route__=context.route,\n",
+        "              (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)\n",
+        "    end")))
 end
 
 # Shared request/session/job target resolution for HTTP and WebSocket routes.
@@ -5676,6 +5733,10 @@ _semantic_values(::Nothing) = Dict{Symbol,Any}()
 
 function _semantic_request_value(obj, param)
     req = _req_of(obj)
+    # `operation_form` is also called outside a request (docs, gallery, a
+    # hand-built object in a test). With no request there is simply nothing to
+    # prefill, so fall through to the declared default rather than throwing.
+    req === nothing && return _NO_DEFAULT
     src = _kwargs_source(req, req.method)
     fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
     _lookup_param(src, fallback, param.name, param.type)

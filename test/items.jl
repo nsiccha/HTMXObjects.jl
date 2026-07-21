@@ -16,7 +16,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
-    StackedSemanticRoute, ContextSemanticApp, ExternalContextApp,
+    StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, JobScopedApp,
     BareExternalApp, InlineContextApp,
     _SINGLETON_APPDATA
 
@@ -200,6 +200,16 @@ end
 @htmx struct ExternalContextApp
     @param fit_key::String
     @include models = ExternalContextChild()
+end
+
+# Job-scoped root provider fixture: an @param the root reads, plus a mounted
+# external child whose generated form must carry the *current* request's value.
+@htmx struct JobScopedApp
+    payload = "none"
+    @param fit_key::String
+    @include models = ExternalContextChild()
+    @get index() = h.div(h.span(fit_key), h.span(payload),
+                         operation_form(models, :analyze; target_id="#job"))
 end
 
 # The same mount without the delegation — the form still carries the context,
@@ -556,6 +566,88 @@ end
     @test child.fit_key == "external-fit"
     @test repr("text/html", child.analyze(Verb{:GET}(); value=:alt)) ==
           "<p>external-fit:alt</p>"
+end
+
+@testitem "job-scoped root provider retains payload, not the root" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_context, _provide_root
+
+    job_key(req) = HTTP.header(req, "X-Job", "default")
+    hit(target) = begin
+        req = HTTP.Request("GET", target, ["X-Job" => "job-a"])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # An `@htmx` root is immutable, so the in-place context refresh in
+    # `_provide_root` can never apply to one — the provider must hand back a
+    # root that already carries the request.
+    @test !ismutabletype(JobScopedApp)
+
+    # Supported shape: the expensive payload lives behind `context.key`; the
+    # root is rebuilt per request so `@param` and the mounted child's generated
+    # form both observe the *current* request.
+    builds = Ref(0)
+    payloads = Dict{Any,String}()
+    good = RootProvider(; scope=:job, key=job_key) do RootT, context
+        retained = get!(() -> (builds[] += 1; "payload-$(builds[])"), payloads, context.key)
+        RootT(; payload=retained, __req__=context.request, __route__=context.route,
+              (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)
+    end
+    route!(JobScopedApp(); root_provider=good)
+
+    first_resp = hit("/?fit_key=first-key")
+    second_resp = hit("/?fit_key=second-key")
+    @test first_resp.status == 200
+    @test second_resp.status == 200
+    # the retained payload is shared across both requests…
+    @test contains(String(first_resp.body), "payload-1")
+    @test contains(String(second_resp.body), "payload-1")
+    @test builds[] == 1
+    # …while every request-derived value tracks its own request.
+    @test contains(String(first_resp.body), "type=\"hidden\" name=\"fit_key\" value=\"first-key\"")
+    @test contains(String(second_resp.body), "type=\"hidden\" name=\"fit_key\" value=\"second-key\"")
+
+    # Unsupported shape: retaining the root itself. Rejected at the provider
+    # seam rather than surfacing as a `Nothing has no field method` inside form
+    # rendering (request 1) or silently serving request 1's params (request 2).
+    roots = Dict{Any,JobScopedApp}()
+    bad = RootProvider(; scope=:job, key=job_key) do RootT, context
+        get!(() -> RootT(), roots, context.key)
+    end
+    route!(JobScopedApp(); root_provider=bad)
+    @test hit("/?fit_key=first-key").status == 500
+
+    bad_req = HTTP.Request("GET", "/?fit_key=first-key", ["X-Job" => "job-a"])
+    context = _operation_context(bad, bad_req, "", :http)
+    err = try
+        _provide_root(bad, JobScopedApp, context)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test contains(err.msg, "does not carry the current request")
+    @test contains(err.msg, "carries no request")
+    @test contains(err.msg, "Retain the application payload")
+
+    # …and the retained-from-an-earlier-request variant reports the other cause.
+    stale_req = HTTP.Request("GET", "/?fit_key=second-key", ["X-Job" => "job-a"])
+    stale = RootProvider(; scope=:job, key=job_key) do RootT, _context
+        RootT(; __req__=bad_req)
+    end
+    stale_context = _operation_context(stale, stale_req, "", :http)
+    stale_err = try
+        _provide_root(stale, JobScopedApp, stale_context)
+        nothing
+    catch e
+        e
+    end
+    @test stale_err isa ArgumentError
+    @test contains(stale_err.msg, "a root retained from an earlier request")
+
+    # `operation_form` outside any request falls back to declared defaults
+    # instead of throwing on a `nothing` request.
+    detached = repr("text/html", operation_form(ExternalContextApp().models, :analyze; target_id="#d"))
+    @test contains(detached, "name=\"value\"")
 end
 
 @testitem "operation_form context: inline vs bare external mounted child" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
