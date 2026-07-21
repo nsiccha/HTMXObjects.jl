@@ -3024,18 +3024,27 @@ end
 _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
     policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
 
+# A DO compute-at-most-once handle is CONTROL FLOW, never response content: the
+# progress/poll transport already carries "still running", so a handle that
+# reaches the renderer has nothing left to say and prints its diagnostic repr —
+# cache, key and `Verb` internals — as visible body text. Resolve it here, the
+# one funnel both polling seams (the Treebars extension and the no-Treebars
+# fallback below) render through, so neither can leak it.
+#
+# Both seams hand their result to Treebars' `_polling_resolve`, whose done path
+# is a CATCH-ALL by construction: whatever no in-flight-handle method matched is
+# treated as the finished value and passed straight to `render_result`. That is a
+# skew-tolerant design on Treebars' side, but it means the guard has to exist on
+# ours too — a `render_result` of bare `identity` renders whatever arrives.
+_resolve_operation_value(value) =
+    value isa DynamicObjects.Pending ? fetch(value) : value
+
 # Extension seam: core degrades polling requests to the historical blocking
 # call when Treebars is absent. The extension replaces this Ref without method
 # overwrites, matching the recording bridge's precompile-safe pattern.
 const _operation_polling_impl = Ref{Any}(
-    (render_result, ip, keys, call_kwargs, _transport) -> begin
-        value = ip(keys...; call_kwargs...)
-        # Without Treebars, preserve the historical blocking fallback while
-        # honoring DO's compute-at-most-once Pending handle. Rendering the
-        # unresolved handle directly leaks its diagnostic repr into HTML.
-        value isa DynamicObjects.Pending && (value = fetch(value))
-        render_result(value)
-    end
+    (render_result, ip, keys, call_kwargs, _transport) ->
+        render_result(_resolve_operation_value(ip(keys...; call_kwargs...)))
 )
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
@@ -3050,7 +3059,8 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                      keep_progress=policy.keep_progress,
                      error_obj=target.leaf, req=req,
                      grace_period=_operation_grace_period(policy, req))
-        return _operation_polling(identity, prop, (verb_inst, idx_vals...),
+        return _operation_polling(_resolve_operation_value, prop,
+                                  (verb_inst, idx_vals...),
                                   NamedTuple(kw_pairs), transport)
     end
     prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
