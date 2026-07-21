@@ -1658,3 +1658,85 @@ and child-process side effects remain explicit rather than mutating host state.
         @test isempty(HTMXObjects._test_job_snapshot(project))
     end
 end
+
+"""
+A route returning ordinary structured data (a `NamedTuple` of results) must
+render in HTML/HX mode, not raise `MethodError: no method matching
+show(::IO, ::MIME"text/html", ::NamedTuple)` and degrade into a recorded
+error article. Regression for the semantic-app snag: `?plain` markdown mode
+already rendered any value, so the HTML side was the asymmetry.
+"""
+@testitem "generic_html - structured results render in HTML/HX mode" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: generic_html, to_response, _html_value
+
+    # The reported shape: a plain NamedTuple result.
+    body = String(to_response((accepted=3, rejected=1, note="ok")).body)
+    @test contains(body, "<dl>")
+    @test contains(body, "accepted")
+    @test contains(body, "3")
+    @test contains(body, "note")
+    @test contains(body, "ok")
+
+    # Dicts take the same mapping shape.
+    @test contains(repr("text/html", generic_html(Dict(:a => 1))), "<dl>")
+
+    # Equal-length vector columns render as a table instead.
+    tbl = repr("text/html", generic_html((name=["a", "b"], score=[1, 2])))
+    @test contains(tbl, "<table>")
+    @test contains(tbl, "<th>name</th>")
+    @test contains(tbl, "<td>b</td>")
+
+    # Scalars, `nothing`, and multi-line values all have a representation.
+    @test contains(repr("text/html", generic_html(42)), "42")
+    @test generic_html(nothing) == ""
+    @test contains(repr("text/html", generic_html([1 2; 3 4])), "<pre>")
+
+    # Values are escaped — data must never reach the client as trusted HTML.
+    escaped = String(to_response((danger="<script>x</script>",)).body)
+    @test !contains(escaped, "<script>")
+    @test contains(escaped, "&lt;script&gt;")
+
+    # Existing behavior is untouched: Nodes, top-level strings, array
+    # fragments, and OOB-swap Pairs all still pass straight through.
+    @test _html_value(h.p("hi")) isa HTMXObjects.Node
+    @test _html_value("<b>raw</b>") == "<b>raw</b>"
+    @test String(to_response([h.p("a"), h.p("b")]).body) == "<p>a</p>\n<p>b</p>"
+    @test contains(String(to_response(h.p("x") => "slot").body), "hx-swap-oob")
+end
+
+"""
+End-to-end counterpart: a live `@get` returning a `NamedTuple` must answer an
+HX request with the result itself — status 200 *and* the data — rather than
+200 with an error article and an `X-HTMXO-Error-Id` header.
+"""
+@testitem "generic_html - live @get returning a NamedTuple" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    @htmx struct StructuredResultApp
+        __page__(content) = h.html(h.body(content))
+        @get summary() = (accepted=3, rejected=1)
+    end
+    route!(StructuredResultApp())
+    port = 8101
+    serve(; port, async=true)
+    try
+        r = HTTP.get("http://127.0.0.1:$port/summary";
+                     headers=["HX-Request" => "true"], status_exception=false)
+        @test r.status == 200
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") == ""
+        body = String(r.body)
+        @test contains(body, "<dl>")
+        @test contains(body, "accepted")
+        @test !contains(body, "Something went wrong")
+
+        # Full-page navigation renders the same structure inside `__page__`,
+        # not `show(::MIME"text/plain")` text.
+        page = String(HTTP.get("http://127.0.0.1:$port/summary").body)
+        @test contains(page, "<html><body><dl>")
+        @test contains(page, "accepted")
+
+        # `?plain` markdown mode is untouched.
+        md = String(HTTP.get("http://127.0.0.1:$port/summary?plain=1").body)
+        @test contains(md, "accepted = 3")
+    finally
+        terminate()
+    end
+end
