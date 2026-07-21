@@ -1,6 +1,8 @@
 module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
+export @semantic, property_descriptor, property_descriptors, option_descriptor,
+    static_domain, dynamic_domain, materialization_observation, materialization_plan
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
@@ -24,6 +26,8 @@ export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export Verb
+export OperationContext, RootProvider, OperationPolicy
+export semantic_descriptor, operation_form
 
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
@@ -396,8 +400,19 @@ _property_lhs_name(_) = nothing
 _property_lhs_name(lhs::Symbol) = lhs
 function _property_lhs_name(lhs::Expr)
     (lhs.head === :call || lhs.head === :ref) && return _as_symbol(first(lhs.args))
-    lhs.head === :(::) && length(lhs.args) >= 1 && return _as_symbol(lhs.args[1])
+    lhs.head === :(::) && length(lhs.args) >= 1 && return _property_lhs_name(lhs.args[1])
     nothing
+end
+
+# Return-annotated route definitions have an outer `::ReturnType` around the
+# call-form LHS. Keep that annotation intact for DynamicObjects descriptor
+# inference while route-specific transforms work on the inner call.
+_route_call_lhs(_) = nothing
+function _route_call_lhs(lhs::Expr)
+    Meta.isexpr(lhs, (:call, :ref)) && return lhs
+    Meta.isexpr(lhs, :(::)) && length(lhs.args) == 2 || return nothing
+    inner = lhs.args[1]
+    Meta.isexpr(inner, (:call, :ref)) ? inner : nothing
 end
 
 # Name of a kwarg slot in a `:parameters` expr — bare `Symbol` or `:kw` Expr.
@@ -831,7 +846,8 @@ function _inject_verb_in_route_lhs!(struct_expr)
         verb === Symbol("") && continue
         Meta.isexpr(expr, :(=)) || continue
         lhs = expr.args[1]
-        Meta.isexpr(lhs, (:call, :ref)) || continue
+        lhs = _route_call_lhs(lhs)
+        lhs === nothing && continue
         verb_short = _verb_short(verb)
         verb_type = Expr(:(::), :__verb__, Expr(:curly, GlobalRef(@__MODULE__, :Verb), QuoteNode(verb_short)))
         # Skip past `:parameters` if present (must come immediately after
@@ -1265,10 +1281,11 @@ function _extract_route_info(struct_expr)
         lhs = expr.args[1]
         pos_params = Tuple{Symbol, Any}[]
         kw_params = Tuple{Symbol, Any, Bool}[]
-        if Meta.isexpr(lhs, (:call, :ref))
-            prop_name = lhs.args[1]
+        call_lhs = _route_call_lhs(lhs)
+        if call_lhs !== nothing
+            prop_name = call_lhs.args[1]
             Meta.isexpr(prop_name, :(::)) && (prop_name = prop_name.args[1])
-            for idx in lhs.args[2:end]
+            for idx in call_lhs.args[2:end]
                 if Meta.isexpr(idx, :parameters)
                     for kw_arg in idx.args
                         if Meta.isexpr(kw_arg, :kw)
@@ -1926,6 +1943,87 @@ const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tupl
 const _record_bases = Dict{DataType, String}()
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
+
+"""
+    OperationContext
+
+Request-local context passed to a [`RootProvider`](@ref). `scope` and `key`
+describe the provider-selected application lifetime (`:request`, `:session`, or
+`:job`); `transport` is `:http` or `:websocket`. The provider owns any storage
+behind session/job keys — HTMXObjects only supplies the request, externally
+visible route/prefix, and a uniform construction seam.
+"""
+struct OperationContext{R,K}
+    request::R
+    prefix::String
+    route::String
+    transport::Symbol
+    scope::Symbol
+    key::K
+end
+
+"""
+    RootProvider(factory; scope=:request, key=nothing)
+
+Construct roots for registered operations. `factory` is called as
+`factory(RootT, context)` and must return a `RootT`. For `scope=:session` or
+`:job`, pass a `key(req)` function and let the application-owned factory decide
+how roots are retained or reconstructed. The default request provider preserves
+the historic behavior: a fresh root is constructed for every request with
+`__req__`, `__route__`, and `__prefix__` populated by HTMXObjects.
+"""
+struct RootProvider{F,K}
+    factory::F
+    scope::Symbol
+    key::K
+end
+
+"""
+    OperationPolicy(mode=:blocking; poll_interval="200ms", keep_progress=true)
+
+Select route execution transport. `:blocking` preserves historical synchronous
+responses. `:polling` uses the Treebars extension for pending-capable HTML
+operations. `:auto` polls only HTMX requests whose DynamicObjects descriptor
+advertises pending capability. Declared `HTTP.Response` and `MIMEResponse`
+outputs always remain direct, as do WebSocket route lambdas.
+"""
+struct OperationPolicy
+    mode::Symbol
+    poll_interval::String
+    keep_progress::Bool
+end
+
+function OperationPolicy(mode::Symbol=:blocking; poll_interval="200ms",
+        keep_progress::Bool=true)
+    mode in (:blocking, :polling, :auto) || throw(ArgumentError(
+        "operation-policy mode must be :blocking, :polling, or :auto (got $(repr(mode)))"))
+    OperationPolicy(mode, string(poll_interval), keep_progress)
+end
+
+function RootProvider(factory; scope::Symbol=:request, key=nothing)
+    scope in (:request, :session, :job) ||
+        throw(ArgumentError("root-provider scope must be :request, :session, or :job (got $(repr(scope)))"))
+    isnothing(key) && scope !== :request &&
+        throw(ArgumentError("root-provider scope $(repr(scope)) requires a key(req) function"))
+    keyfn = isnothing(key) ? (_req -> nothing) : key
+    RootProvider{typeof(factory),typeof(keyfn)}(factory, scope, keyfn)
+end
+
+_default_root_factory(RootT, context::OperationContext) =
+    RootT(; __req__=context.request, __route__=context.route,
+          _prefix_kw(context.prefix)...)
+
+RootProvider(; scope::Symbol=:request, key=nothing) =
+    RootProvider(_default_root_factory; scope, key)
+
+_normalize_root_provider(::Nothing) = RootProvider()
+_normalize_root_provider(provider::RootProvider) = provider
+_normalize_root_provider(factory) = RootProvider(factory)
+
+# Companion registry rather than another field on `_registered_types`: that
+# const's NamedTuple value type is frozen under Julia 1.10/Revise.
+const _root_providers = Dict{DataType,Any}()
+const _operation_policies = Dict{DataType,OperationPolicy}()
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
@@ -2028,8 +2126,7 @@ end
 # Wraps the handler so that pending Revise errors are surfaced as the
 # framework's standard error article (see `_check_revise_errors!`) — this is
 # the single chokepoint for all HTTP route registrations, so the check
-# applies uniformly to plain, indexed, and `@include`'d routes. WebSocket
-# handlers go through `Oxygen.register` directly and are not covered.
+# applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
 function _register_handler(method, path, handler)
     wrapped = function(req)
         try
@@ -2040,6 +2137,18 @@ function _register_handler(method, path, handler)
         handler(req)
     end
     HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, wrapped)
+end
+
+# Oxygen validates handler argument names against `{path}` placeholders. Our
+# emitted runner intentionally extracts every argument from the request so it
+# can apply one typed validation path to HTTP and WebSocket operations. Register
+# the GET upgrade directly, as Oxygen ultimately does, and keep it behind the
+# same Revise-error chokepoint as every other emitted route.
+function _register_websocket_handler(path, handler)
+    _register_handler("WEBSOCKET", path, function(req)
+        HTTP.WebSockets.isupgrade(req) &&
+            HTTP.WebSockets.upgrade(ws -> handler(ws, req), req.context[:stream])
+    end)
 end
 
 # --- Error handling ---
@@ -2265,6 +2374,16 @@ function Base.showerror(io::IO, e::MissingRequiredParam)
     print(io, "Missing required parameter: ", e.name)
 end
 
+struct InvalidDomainValue <: Exception
+    name::Symbol
+    value
+    allowed
+end
+function Base.showerror(io::IO, e::InvalidDomainValue)
+    print(io, "Invalid value for parameter ", e.name, ": ", repr(e.value))
+    isempty(e.allowed) || print(io, "; allowed values: ", join(repr.(e.allowed), ", "))
+end
+
 function _check_revise_errors!()
     # Both checks: queue errors (Revise tried but failed) and missed edits
     # (FS watcher silently dropped a save). Either condition means the
@@ -2401,7 +2520,7 @@ function _invoke_error_handler(obj, err, uid, path)
         return getproperty(obj, :__error__)(err)
     end
     inner = unwrap_error(err)
-    if inner isa MissingRequiredParam
+    if inner isa Union{MissingRequiredParam,InvalidDomainValue}
         return h.article(
             h.header("Bad Request"),
             h.p(sprint(showerror, inner));
@@ -2423,10 +2542,11 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 #     without needing `htmx.config.responseHandling` or response-targets.
 #   Non-HTMX (curl, direct browser nav, uptime checks, monitoring) get 500
 #     so logs / health checks / load balancers see errors as errors,
-#     except MissingRequiredParam which maps to 400 (client error).
+#     except missing/invalid submitted parameters, which map to 400.
 # If the user's `__error__` hook returns an `HTTP.Response` directly, their
 # status choice is respected — not rewritten.
-_error_status_code(err) = unwrap_error(err) isa MissingRequiredParam ? 400 : 500
+_error_status_code(err) =
+    unwrap_error(err) isa Union{MissingRequiredParam,InvalidDomainValue} ? 400 : 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
@@ -2625,6 +2745,184 @@ function _request_route_path(req::HTTP.Request, prefix::AbstractString)
     prefix * rp
 end
 
+function _operation_context(provider::RootProvider, req::HTTP.Request,
+        root_prefix::AbstractString, transport::Symbol)
+    prefix = _request_prefix(req, root_prefix)
+    OperationContext(req, prefix, _request_route_path(req, prefix), transport,
+                     provider.scope, provider.key(req))
+end
+
+function _provide_root(provider::RootProvider, RootT, context::OperationContext)
+    root = provider.factory(RootT, context)
+    root isa RootT || throw(ArgumentError(
+        "root provider for $(RootT) returned $(typeof(root)); expected an instance of $(RootT)"))
+    root
+end
+
+# Shared request/session/job target resolution for HTTP and WebSocket routes.
+# Keeping this below the registration funnel means both transports construct
+# the same root type through the same provider and walk the same include chain.
+function _operation_target(provider::RootProvider, RootT, chain::Vector,
+        req::HTTP.Request, root_prefix::AbstractString, root_segs::Int,
+        transport::Symbol)
+    context = _operation_context(provider, req, root_prefix, transport)
+    root = _provide_root(provider, RootT, context)
+    leaf = isempty(chain) ? root : _walk_chain(root, chain, req, root_segs)
+    (; context, root, leaf)
+end
+
+function _property_descriptor(T, name::Symbol)
+    isdefined(DynamicObjects, :property_descriptor) || return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :property_descriptor), T, name)
+end
+
+function _property_descriptors(T)
+    isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
+    Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)
+end
+
+function _property_descriptor(T, name::Symbol, verb::Symbol)
+    expected = Verb{verb}
+    for descriptor in _property_descriptors(T)
+        descriptor.name === name || continue
+        inputs = get(descriptor, :inputs, NamedTuple[])
+        any(input -> input.name === :__verb__ &&
+                     get(input, :type, nothing) === expected, inputs) &&
+            return descriptor
+    end
+    _property_descriptor(T, name)
+end
+
+function _operation_input_values(descriptor, idx_vals, kw_pairs)
+    values = Dict{Symbol,Any}(kw_pairs)
+    descriptor === nothing && return values
+    positional = [input for input in get(descriptor, :inputs, NamedTuple[])
+                  if get(input, :kind, nothing) === :positional &&
+                     input.name !== :__verb__]
+    for (input, value) in zip(positional, idx_vals)
+        values[input.name] = value
+    end
+    values
+end
+
+function _domain_dependency_value(obj, values, name::Symbol)
+    haskey(values, name) && return values[name]
+    hasproperty(obj, name) || throw(ArgumentError(
+        "dynamic domain dependency $(repr(name)) is unavailable on $(typeof(obj))"))
+    getproperty(obj, name)
+end
+
+function _resolved_input_domain(obj, T, input, values)
+    domain = get(input, :domain, nothing)
+    (domain === nothing || get(domain, :kind, :unrestricted) !== :dynamic) && return domain
+
+    provider = get(domain, :provider, nothing)
+    provider isa Symbol || throw(ArgumentError(
+        "dynamic domain for $(input.name) has no provider property"))
+    provider_descriptor = _property_descriptor(T, provider)
+    provider_descriptor === nothing && throw(ArgumentError(
+        "dynamic domain provider $(repr(provider)) is not described on $(T)"))
+    dependencies = get(domain, :dependencies, Symbol[])
+    args = [_domain_dependency_value(obj, values, dep) for dep in dependencies]
+    prop = getproperty(obj, provider)
+    raw_options = get(provider_descriptor, :indexed, false) ? prop(args...) : prop
+    Base.invokelatest(getproperty(DynamicObjects, :static_domain), raw_options;
+        multiple=get(domain, :multiple, false),
+        allow_custom=get(domain, :allow_custom, false))
+end
+
+_submitted_domain_values(value, multiple::Bool) =
+    multiple && value isa AbstractVector ? value : (value,)
+
+function _validate_input_domain!(obj, T, input, value, values)
+    domain = _resolved_input_domain(obj, T, input, values)
+    domain === nothing && return
+    get(domain, :kind, :unrestricted) === :unrestricted && return
+    get(domain, :allow_custom, false) && return
+    value === nothing && !get(input, :required, true) && return
+
+    options = get(domain, :options, NamedTuple[])
+    allowed = [option.value for option in options if !get(option, :disabled, false)]
+    for submitted in _submitted_domain_values(value, get(domain, :multiple, false))
+        any(candidate -> isequal(candidate, submitted), allowed) ||
+            throw(InvalidDomainValue(input.name, submitted, allowed))
+    end
+end
+
+function _validate_operation_domains!(obj, T, name::Symbol, verb::Symbol,
+        idx_vals, kw_pairs)
+    descriptor = _property_descriptor(T, name, verb)
+    descriptor === nothing && return
+    values = _operation_input_values(descriptor, idx_vals, kw_pairs)
+    for input in get(descriptor, :inputs, NamedTuple[])
+        input.name === :__verb__ && continue
+        haskey(values, input.name) || continue
+        _validate_input_domain!(obj, T, input, values[input.name], values)
+    end
+end
+
+_verb_symbol(::Verb{V}) where {V} = V
+
+function _declared_final_response(descriptor)
+    descriptor === nothing && return false
+    output = get(descriptor, :output, nothing)
+    output === nothing && return false
+    T = get(output, :type, nothing)
+    T isa Type && T <: Union{HTTP.Response,MIMEResponse}
+end
+
+function _operation_execution_mode(policy::OperationPolicy, descriptor,
+        req::HTTP.Request, verb_inst::Verb)
+    _verb_symbol(verb_inst) === :WEBSOCKET && return :blocking
+    _declared_final_response(descriptor) && return :blocking
+    policy.mode === :auto || return policy.mode
+    descriptor === nothing && return :blocking
+    semantics = get(descriptor, :semantics, nothing)
+    semantics === nothing && return :blocking
+    get(semantics, :pending, false) && is_htmx(req) ? :polling : :blocking
+end
+
+# Extension seam: core degrades polling requests to the historical blocking
+# call when Treebars is absent. The extension replaces this Ref without method
+# overwrites, matching the recording bridge's precompile-safe pattern.
+const _operation_polling_impl = Ref{Any}(
+    (render_result, ip, keys, call_kwargs, _transport) ->
+        render_result(ip(keys...; call_kwargs...))
+)
+
+_operation_polling(args...) = _operation_polling_impl[](args...)
+
+function _execute_operation(policy::OperationPolicy, descriptor, target, name,
+        verb_inst, idx_vals, kw_pairs, req)
+    prop = getproperty(target.leaf, name)
+    mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
+    if mode === :polling
+        transport = (poll_url=String(req.target), label=Long(name),
+                     poll_interval=policy.poll_interval,
+                     keep_progress=policy.keep_progress,
+                     error_obj=target.leaf, req=req)
+        return _operation_polling(identity, prop, (verb_inst, idx_vals...),
+                                  NamedTuple(kw_pairs), transport)
+    end
+    prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+end
+
+# The common typed pass-through runner. Route code never manually reads query,
+# form, multipart, or WebSocket upgrade parameters: the emitted `_extract_args`
+# method validates/coerces them, then the verb-keyed DO property is invoked.
+function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
+        req::HTTP.Request, base::Int, n_params::Int;
+        operation_policy::OperationPolicy=OperationPolicy())
+    idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
+    verb = _verb_symbol(verb_inst)
+    _validate_operation_domains!(target.leaf, LeafT, name, verb, idx_vals, kw_pairs)
+    descriptor = _property_descriptor(LeafT, name, verb)
+    value = _execute_operation(operation_policy, descriptor, target, name,
+                               verb_inst, idx_vals, kw_pairs, req)
+    (; context=target.context, root=target.root, leaf=target.leaf,
+       idx_vals, kw_pairs, value)
+end
+
 """
     _register_route_handler(RootT, LeafT, chain, method, name, path, n_params, record_dir; root_prefix="")
 
@@ -2643,11 +2941,12 @@ The handler:
 `Verb{V}` is the singleton encoded from `Symbol(method)` at registration
 time (`"GET"` → `Verb{:GET}`).
 
-WebSocket handlers do not go through this path — they have a different
-signature (`ws` instead of `req`) and skip the HTTP error pipeline.
+WebSocket handlers share the root-provider and typed operation runner below,
+but retain a transport-specific `ws` signature and response lifecycle.
 """
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
-        path, n_params, record_dir; root_prefix="", record_base::String="")
+        path, n_params, record_dir; root_prefix="", record_base::String="",
+        root_provider=RootProvider(), operation_policy=OperationPolicy())
     base = _base_segments(path, n_params)
     is_included = !isempty(chain)
     # Number of URL segments consumed by the root prefix (e.g. "/foo/bar" → 2)
@@ -2657,13 +2956,12 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     # `Symbol(method)` is the verb short symbol used in `Verb{V}`.
     verb_inst = Verb{Symbol(method)}()
     _register_handler(method, path, function(req)
-        local root, leaf
+        local context, root, leaf
         try
-            # Resolve the request prefix once and feed it to BOTH `__route__`
-            # (so it stays prefix-aware under a path-stripping proxy) and
-            # `__prefix__` — keeping the two URL-building paths in agreement.
-            pfx = _request_prefix(req, root_prefix)
-            root = RootT(; __req__=req, __route__=_request_route_path(req, pfx), _prefix_kw(pfx)...)
+            target = _operation_target(root_provider, RootT, Symbol[], req,
+                                       root_prefix, root_segs, :http)
+            context = target.context
+            root = target.root
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -2681,10 +2979,11 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         end
 
         try
-            local idx_vals, kw_pairs
-            idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
-            prop = getproperty(leaf, name)
-            val = prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+            target = (; context, root, leaf)
+            operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
+                                       operation_policy)
+            idx_vals = operation.idx_vals
+            val = operation.value
 
             save_path = if isnothing(record_dir)
                 nothing
@@ -2797,7 +3096,9 @@ end
 # `_register_included_routes` (nested @include) funnel here.
 function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractString,
                               mount_prefix::AbstractString, name::Symbol, info,
-                              method::AbstractString, record_dir, record_base::AbstractString)
+                              method::AbstractString, record_dir, record_base::AbstractString,
+                              root_provider::RootProvider,
+                              operation_policy::OperationPolicy)
     positional_indices = Any[]
     has_kwargs = false
     # The first positional index of every route is the injected
@@ -2828,23 +3129,32 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             # is `(::Verb{:WEBSOCKET}, url_args…)` so the registered handler
             # threads `Verb{:WEBSOCKET}()` like any other route.
             ws_base = _base_segments(path, n_params)
+            ws_root_segs = isempty(mount_prefix) ? 0 :
+                           count(==('/'), strip(mount_prefix, '/')) + 1
             ws_verb = Verb{:WEBSOCKET}()
-            register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                idx_vals, kw_pairs = _extract_args(RouteT, Val(name), ws_verb, ws.request, ws_base, n_params)
-                prop = getproperty(RouteT(; __req__=ws.request, _prefix_kw(_request_prefix(ws.request, mount_prefix))...), name)
-                lambda = prop(ws_verb, idx_vals...; NamedTuple(kw_pairs)...)
-                lambda(ws)
+            _register_websocket_handler(path, function(ws, req)
+                target = _operation_target(root_provider, OwnerT, chain, req,
+                                           mount_prefix, ws_root_segs, :websocket)
+                operation = _run_operation(target, RouteT, name, ws_verb,
+                                           req, ws_base, n_params; operation_policy)
+                operation.value(ws)
             end)
         elseif isempty(param_strs) && has_kwargs
             # kwargs-only route (no path params): mark static for the recorder
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
-            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir; root_prefix=mount_prefix, record_base)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
+                                    root_prefix=mount_prefix, record_base, root_provider,
+                                    operation_policy)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
-            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir; root_prefix=mount_prefix, record_base)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
+                                    root_prefix=mount_prefix, record_base, root_provider,
+                                    operation_policy)
         else
             # Register the full route (all params explicit)
-            _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir; root_prefix=mount_prefix, record_base)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
+                                    root_prefix=mount_prefix, record_base, root_provider,
+                                    operation_policy)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -2852,7 +3162,10 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 cut = default_positions[k]  # position of first omitted param
                 short_params = param_strs[1:cut-1]
                 short_path = _route_path(prefix, name, short_params)
-                _register_route_handler(OwnerT, RouteT, chain, method, name, short_path, length(short_params), record_dir; root_prefix=mount_prefix, record_base)
+                _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
+                                        length(short_params), record_dir;
+                                        root_prefix=mount_prefix, record_base, root_provider,
+                                        operation_policy)
             end
         end
     end
@@ -2915,15 +3228,21 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
     end
 end
 
-function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=Any[])
+function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
+        parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
+        operation_policy=get(_operation_policies, T, OperationPolicy()))
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _walk_route_meta(T,
         (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
             chain = vcat(parent_chain, [step])
-            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
+            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir;
+                                      root_prefix=mount_prefix, record_base, root_provider,
+                                      operation_policy)
         end,
-        (name, info, method) -> _register_one_route(T, T, Symbol[], prefix, mount_prefix, name, info, method, record_dir, record_base),
+        (name, info, method) -> _register_one_route(T, T, Symbol[], prefix,
+            mount_prefix, name, info, method, record_dir, record_base,
+            root_provider, operation_policy),
     )
 end
 
@@ -3099,16 +3418,22 @@ end
 # `root_prefix` is the parent's mount prefix (with leading "/") — passed verbatim
 # to the handler so `ParentT(; __prefix__=root_prefix)` constructs correctly,
 # and the parent's `@include` desugar then threads `/<name>` per nesting level.
-function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String, record_dir; root_prefix::String="", record_base::String="")
+function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String,
+        record_dir; root_prefix::String="", record_base::String="",
+        root_provider=get(_root_providers, ParentT, RootProvider()),
+        operation_policy=get(_operation_policies, ParentT, OperationPolicy()))
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     _walk_route_meta(NestedT,
         (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
             _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
-                nested_prefix, record_dir; root_prefix, record_base)
+                nested_prefix, record_dir; root_prefix, record_base, root_provider,
+                operation_policy)
         end,
-        (name, info, method) -> _register_one_route(ParentT, NestedT, chain, prefix, root_prefix, name, info, method, record_dir, record_base),
+        (name, info, method) -> _register_one_route(ParentT, NestedT, chain,
+            prefix, root_prefix, name, info, method, record_dir, record_base,
+            root_provider, operation_policy),
     )
 end
 
@@ -3255,11 +3580,13 @@ function _reflect_param_props(OwnerT, method, parent_stack)
     out
 end
 
-function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[])
+function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
+        enrich=(owner, route) -> route)
     _walk_route_meta(IterT,
         (name, info, nested_type) -> begin
             nested_prefix, _step = _nested_prefix_and_step(IterT, name, info, prefix)
-            _reflect_walk!(acc, nested_type, nested_prefix, push!(copy(parent_stack), IterT))
+            _reflect_walk!(acc, nested_type, nested_prefix,
+                           push!(copy(parent_stack), IterT); enrich)
         end,
         (name, info, method) -> begin
             route_doc = _decl_doc(info)
@@ -3269,7 +3596,9 @@ function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[])
             param_strs = [string(p.name) for p in path_params]
             path = _route_path(prefix, name, param_strs)
             params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
-            push!(acc, (verb=Symbol(method), path=path, name=name, doc=route_doc, params=params))
+            route = (verb=Symbol(method), path=path, name=name,
+                     doc=route_doc, params=params)
+            push!(acc, enrich(IterT, route))
         end)
 end
 
@@ -3291,8 +3620,56 @@ function reflect(::Type{T}) where {T}
     acc
 end
 
+function _semantic_param(param, property)
+    property === nothing && return merge(param, (kind=nothing, domain=nothing))
+    input = findfirst(candidate -> candidate.name === param.name,
+                      get(property, :inputs, NamedTuple[]))
+    input === nothing && return merge(param, (kind=nothing, domain=nothing))
+    semantic_input = get(property, :inputs, NamedTuple[])[input]
+    merge(param, (kind=get(semantic_input, :kind, nothing),
+                  domain=get(semantic_input, :domain, nothing)))
+end
+
+function _semantic_route(owner, route)
+    property = _property_descriptor(owner, route.name, route.verb)
+    params = [_semantic_param(param, property) for param in route.params]
+    merge(route, (owner=owner, params=params, property=property))
+end
+
+function _semantic_graph(T)
+    children = NamedTuple[]
+    _walk_route_meta(T,
+        (name, _info, nested_type) ->
+            push!(children, (name=name, graph=_semantic_graph(nested_type))),
+        (_name, _info, _method) -> nothing,
+    )
+    (type=T, properties=_property_descriptors(T), children=children)
+end
+
 """
-    route!(app; prefix="", record_dir=nothing, record_base="")
+    semantic_descriptor(::Type{T}) -> NamedTuple
+
+Return the merged, HTML-free semantic application descriptor for an `@htmx`
+graph. `graph` is hierarchical across `@include` boundaries and carries the
+exact DynamicObjects `property_descriptors` records at every node. `routes` is
+the flat, mount-resolved transport view from [`reflect`](@ref), enriched with
+the owning type, its matching property descriptor, and each parameter's
+semantic `kind` and `domain`. Existing `reflect(T)` output is unchanged.
+"""
+function semantic_descriptor(::Type{T}) where {T}
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ||
+        return (type=T, graph=(type=T, properties=NamedTuple[], children=NamedTuple[]),
+                routes=NamedTuple[])
+    routes = NamedTuple[]
+    _reflect_walk!(routes, T, ""; enrich=_semantic_route)
+    (type=T, graph=_semantic_graph(T), routes=routes)
+end
+
+semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
+
+"""
+    route!(app; prefix="", record_dir=nothing, record_base="",
+           root_provider=nothing, operation_policy=OperationPolicy())
 
 Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` route declared on
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) with the
@@ -3304,17 +3681,29 @@ Oxygen router. Returns `app`.
   [`save_response`](@ref) under that directory; intended for static export.
 - `record_base` — URL prefix to strip from saved file paths when `record_dir`
   is set (for deploying to a non-root subpath).
+- `root_provider` — a [`RootProvider`](@ref), or a callable
+  `factory(RootT, context)`, used by both HTTP and WebSocket operations.
+  `nothing` preserves the historic fresh-root-per-request behavior.
+- `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
+  polling, or HTMX-aware automatic execution. Defaults to blocking.
 
-`route!` stores `(prefix, record_dir)` per type in an internal registry so the
+`route!` stores its registration settings per type in internal registries so the
 `_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
 **you do not need to call `route!` again after editing a route body**.
 """
-function route!(obj; prefix="", record_dir=nothing, record_base="")
+function route!(obj; prefix="", record_dir=nothing, record_base="",
+        root_provider=nothing, operation_policy=OperationPolicy())
     T = typeof(obj)
+    provider = _normalize_root_provider(root_provider)
+    policy = operation_policy isa OperationPolicy ? operation_policy :
+             OperationPolicy(operation_policy)
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
+    _root_providers[T] = provider
+    _operation_policies[T] = policy
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
-    _register_routes(T; prefix, record_dir, record_base)
+    _register_routes(T; prefix, record_dir, record_base, root_provider=provider,
+                     operation_policy=policy)
     obj
 end
 
@@ -3404,14 +3793,20 @@ _recording_polling(args...; kwargs...) = _recording_polling_impl[](args...; kwar
 function _reroute!(T::DataType)
     if haskey(_registered_types, T)
         args = _registered_types[T]
-        _register_routes(T; args.prefix, args.record_dir, record_base=get(_record_bases, T, ""))
+        _register_routes(T; args.prefix, args.record_dir,
+            record_base=get(_record_bases, T, ""),
+            root_provider=get(_root_providers, T, RootProvider()),
+            operation_policy=get(_operation_policies, T, OperationPolicy()))
     end
     # If T is an @include'd sub-struct, re-register its parent(s)
     if haskey(_included_type_parents, T)
         for ParentT in _included_type_parents[T]
             haskey(_registered_types, ParentT) || continue
             args = _registered_types[ParentT]
-            _register_routes(ParentT; args.prefix, args.record_dir, record_base=get(_record_bases, ParentT, ""))
+            _register_routes(ParentT; args.prefix, args.record_dir,
+                record_base=get(_record_bases, ParentT, ""),
+                root_provider=get(_root_providers, ParentT, RootProvider()),
+                operation_policy=get(_operation_policies, ParentT, OperationPolicy()))
         end
     end
 end
@@ -4212,6 +4607,13 @@ master_detail_safe_key(key) = _md_safe_key(key)
 # (the slot's `hx-trigger` and the toggle's `htmx.trigger(...)` call).
 _md_lazy_event() = "htmxo-md-load"
 
+# `htmx.trigger` dispatches a bubbling custom event. A nested lazy table lives
+# inside its ancestor's loaded slot, so without `consume` the inner event also
+# reaches the ancestor's hx-trigger listener and refetches the outer detail.
+# Keep the scoping modifier beside the event name so every lazy slot gets it.
+_md_lazy_trigger(; also_load::Bool=false) =
+    also_load ? "$(_md_lazy_event()) consume, load" : "$(_md_lazy_event()) consume"
+
 """
     master_detail_toggle_js(safe_key; lazy_slot_id=nothing) -> String
 
@@ -4267,7 +4669,7 @@ function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
           class="htmxo-md-detail-slot",
           data_loaded="0",
           hx_get=string(url),
-          hx_trigger=also_load ? "$ev, load" : ev,
+          hx_trigger=_md_lazy_trigger(; also_load),
           hx_target="this", hx_swap="innerHTML",
           hx_on__before_request="this.dataset.loading='1';delete this.dataset.failed;" *
                                 "var p=this.querySelector('[data-status]');" *
@@ -4318,6 +4720,28 @@ the user came to see (a question + answer brief, for example).
   for extra attributes on the master `<tr>` (`data_status`, `data_aid`,
   `data_activity`, `data_sort_value`, …). Note: HTML attribute names
   use underscores in the `h` builder (`data_status`, not `data-status`).
+  **These are applied LAST and OVERWRITE** what this function built — so
+  `master_attrs=(onclick=…,)` **replaces** the toggle outright; it does
+  **not** compose with it. To extend the toggle, rebuild it yourself and
+  concatenate your extension onto it (it can read the toggle's `show`
+  local; it runs only for clicks the toggle did not early-`return` on):
+
+  ```julia
+  safe = master_detail_safe_key(key)
+  onclick = master_detail_toggle_js(safe) * my_extra_js
+  ```
+
+  **In lazy mode (`detail_url` set) you MUST also carry the lazy seam**,
+  or the detail silently never loads — a collapsed row issues no request
+  by design, so "never loads" is indistinguishable from "correctly lazy"
+  until someone expands a row and sits on a permanent placeholder:
+
+  ```julia
+  onclick = master_detail_toggle_js(safe; lazy_slot_id="detail-slot-\$safe") * my_extra_js
+  ```
+
+  `master_detail_toggle_js` / `master_detail_safe_key` are **not
+  exported** — qualify them (`HTMXObjects.master_detail_toggle_js`).
 - `initially_open`: render the row open instead of collapsed. When
   `true`, omits `hidden` on the detail row and sets `aria-expanded="true"`
   on the master (vs `"false"` when collapsed) so collapsed-look CSS keyed
@@ -4335,6 +4759,9 @@ the user came to see (a question + answer brief, for example).
   invalidation:** set the slot's `data-loaded='0'` (id `detail-slot-<safe>`)
   to force a reload on the next expand — an open row reloads on next expand,
   a collapsed row stays lazy; there is no refetch-on-re-open by default.
+  **Custom onclick:** the lazy trigger lives on the master row's `onclick`,
+  which a caller-supplied `master_attrs=(onclick=…,)` overwrites — see the
+  `master_attrs` note above for the `lazy_slot_id` seam you must carry.
   HTMXObjects owns only the load/latch/retry mechanics — response caching,
   content hashing, TTL/LRU, and refresh-gating stay the caller's concern.
   Default `nothing` → today's eager `detail_body`, unchanged.
@@ -5063,6 +5490,158 @@ radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, k
         end for option in options]...;
         show_attrs...
     )
+end
+
+_semantic_values(values::NamedTuple) = Dict{Symbol,Any}(pairs(values))
+_semantic_values(values::AbstractDict) =
+    Dict{Symbol,Any}(Symbol(name) => value for (name, value) in pairs(values))
+_semantic_values(::Nothing) = Dict{Symbol,Any}()
+
+function _semantic_form_values(route, provided)
+    values = _semantic_values(provided)
+    for param in route.params
+        if !haskey(values, param.name) && !param.required
+            values[param.name] = param.default
+        end
+    end
+    values
+end
+
+function _semantic_option_node(option, selected)
+    selected_attrs = _is_selected(option.value, selected) ? (; selected="true") : (;)
+    disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
+    help = get(option, :help, nothing)
+    help_attrs = isnothing(help) ? (;) : (; title=help)
+    h.option(option.label; value=option.value, selected_attrs..., disabled_attrs...,
+             help_attrs...)
+end
+
+function _semantic_select(name, label, domain, selected; required=false)
+    options = get(domain, :options, NamedTuple[])
+    ungrouped = Any[]
+    grouped = Dict{Any,Vector{Any}}()
+    group_order = Any[]
+    for option in options
+        node = _semantic_option_node(option, selected)
+        group = get(option, :group, nothing)
+        if isnothing(group)
+            push!(ungrouped, node)
+        else
+            haskey(grouped, group) || (grouped[group] = Any[]; push!(group_order, group))
+            push!(grouped[group], node)
+        end
+    end
+    nodes = copy(ungrouped)
+    append!(nodes, [h.optgroup(grouped[group]...; label=group) for group in group_order])
+    required_attrs = required ? (; required="true") : (;)
+    multiple_attrs = get(domain, :multiple, false) ? (; multiple="true") : (;)
+    h.label(label,
+        h.select(nodes...; name=string(name), aria_label=label,
+                 required_attrs..., multiple_attrs...))
+end
+
+function _semantic_radio(name, label, domain, selected; required=false)
+    required_attrs = required ? (; required="true") : (;)
+    h.fieldset(
+        h.legend(label),
+        [begin
+            checked_attrs = _is_selected(option.value, selected) ? (; checked="true") : (;)
+            disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
+            help = get(option, :help, nothing)
+            option_label = isnothing(help) ? option.label : "$(option.label) — $(help)"
+            h.label(
+                h.input(; type="radio", name=string(name), value=option.value,
+                        checked_attrs..., disabled_attrs..., required_attrs...),
+                option_label,
+            )
+        end for option in get(domain, :options, NamedTuple[])]...,
+    )
+end
+
+function _semantic_control(obj, owner, param, values; radio_max::Int=4)
+    value = get(values, param.name, nothing)
+    label = isnothing(param.doc) ? Long(param.name) : param.doc
+    input = (name=param.name, domain=get(param, :domain, nothing))
+    domain = _resolved_input_domain(obj, owner, input, values)
+
+    if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
+        options = get(domain, :options, NamedTuple[])
+        if get(domain, :allow_custom, false)
+            enabled = [option.value => option.label for option in options
+                       if !get(option, :disabled, false)]
+            return sinput_custom(string(param.name), enabled; label, value)
+        elseif !get(domain, :multiple, false) && length(options) <= radio_max
+            return _semantic_radio(param.name, label, domain, value;
+                                   required=param.required)
+        else
+            return _semantic_select(param.name, label, domain, value;
+                                    required=param.required)
+        end
+    end
+
+    required_attrs = param.required ? (; required="true") : (;)
+    T = param.type
+    if T isa Type && T === Bool
+        return cinput(string(param.name); label, checked=something(value, false),
+                      required_attrs...)
+    elseif T isa Type && T <: Number
+        return ninput(string(param.name); label, value=something(value, 0),
+                      required_attrs...)
+    end
+    linput(string(param.name); label, value=something(value, ""), required_attrs...)
+end
+
+function _operation_form_action(route, values, target)
+    action = string(target)
+    for param in route.params
+        param.source === :path || continue
+        haskey(values, param.name) || throw(MissingRequiredParam(param.name))
+        token = "{" * string(param.name) * "}"
+        action = replace(action, token => HTTP.URIs.escapeuri(string(values[param.name])))
+    end
+    action
+end
+
+function _operation_route(T, name::Symbol, verb::Symbol)
+    candidates = [route for route in semantic_descriptor(T).routes
+                  if route.owner === T && route.name === name && route.verb === verb]
+    isempty(candidates) && throw(ArgumentError(
+        "no semantic $(verb) route $(repr(name)) on $(T)"))
+    length(candidates) == 1 || throw(ArgumentError(
+        "semantic route $(repr(name)) on $(T) is ambiguous for verb $(verb)"))
+    only(candidates)
+end
+
+"""
+    operation_form(obj, name::Symbol; verb=:GET, values=(;), kwargs...)
+    operation_form(obj, route::NamedTuple; values=(;), target=route.path, kwargs...)
+
+Generate an HTMX form from a merged semantic route descriptor. Static domains
+become radio/select/custom controls; dynamic domains execute their declared DO
+provider from the supplied current `values`; unrestricted values use typed
+boolean, numeric, or text controls. Positional path inputs must be supplied in
+`values` and are encoded into the route URL. Submitted values still pass through
+the shared typed extractor and current-domain validation on the server.
+"""
+function operation_form(obj, route::NamedTuple; values=(;), target=route.path,
+        submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
+        form_class="", kwargs...)
+    route.verb === :WEBSOCKET && throw(ArgumentError(
+        "operation_form does not submit WebSocket routes"))
+    current = _semantic_form_values(route, values)
+    action = _operation_form_action(route, current, target)
+    controls = [_semantic_control(obj, route.owner, param, current; radio_max)
+                for param in route.params if param.source !== :path]
+    method_key = Symbol("hx_" * lowercase(string(route.verb)))
+    method_attrs = NamedTuple{(method_key,)}((action,))
+    target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
+    swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
+    h.form(controls..., h.button(submit; type="submit");
+           method_attrs..., target_attrs..., swap_attrs..., class=form_class, kwargs...)
+end
+
+function operation_form(obj, name::Symbol; verb::Symbol=:GET, kwargs...)
+    operation_form(obj, _operation_route(typeof(obj), name, verb); kwargs...)
 end
 
 # --- Conditional visibility (show_when) ---
