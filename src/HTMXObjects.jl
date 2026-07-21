@@ -1,6 +1,8 @@
 module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
+export @semantic, property_descriptor, property_descriptors, option_descriptor,
+    static_domain, dynamic_domain, materialization_observation, materialization_plan
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
@@ -25,6 +27,7 @@ export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export Verb
 export OperationContext, RootProvider
+export semantic_descriptor, operation_form
 
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
@@ -2335,6 +2338,16 @@ function Base.showerror(io::IO, e::MissingRequiredParam)
     print(io, "Missing required parameter: ", e.name)
 end
 
+struct InvalidDomainValue <: Exception
+    name::Symbol
+    value
+    allowed
+end
+function Base.showerror(io::IO, e::InvalidDomainValue)
+    print(io, "Invalid value for parameter ", e.name, ": ", repr(e.value))
+    isempty(e.allowed) || print(io, "; allowed values: ", join(repr.(e.allowed), ", "))
+end
+
 function _check_revise_errors!()
     # Both checks: queue errors (Revise tried but failed) and missed edits
     # (FS watcher silently dropped a save). Either condition means the
@@ -2471,7 +2484,7 @@ function _invoke_error_handler(obj, err, uid, path)
         return getproperty(obj, :__error__)(err)
     end
     inner = unwrap_error(err)
-    if inner isa MissingRequiredParam
+    if inner isa Union{MissingRequiredParam,InvalidDomainValue}
         return h.article(
             h.header("Bad Request"),
             h.p(sprint(showerror, inner));
@@ -2493,10 +2506,11 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 #     without needing `htmx.config.responseHandling` or response-targets.
 #   Non-HTMX (curl, direct browser nav, uptime checks, monitoring) get 500
 #     so logs / health checks / load balancers see errors as errors,
-#     except MissingRequiredParam which maps to 400 (client error).
+#     except missing/invalid submitted parameters, which map to 400.
 # If the user's `__error__` hook returns an `HTTP.Response` directly, their
 # status choice is respected — not rewritten.
-_error_status_code(err) = unwrap_error(err) isa MissingRequiredParam ? 400 : 500
+_error_status_code(err) =
+    unwrap_error(err) isa Union{MissingRequiredParam,InvalidDomainValue} ? 400 : 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
@@ -2721,12 +2735,90 @@ function _operation_target(provider::RootProvider, RootT, chain::Vector,
     (; context, root, leaf)
 end
 
+function _property_descriptor(T, name::Symbol)
+    isdefined(DynamicObjects, :property_descriptor) || return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :property_descriptor), T, name)
+end
+
+function _property_descriptors(T)
+    isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
+    Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)
+end
+
+function _operation_input_values(descriptor, idx_vals, kw_pairs)
+    values = Dict{Symbol,Any}(kw_pairs)
+    descriptor === nothing && return values
+    positional = [input for input in get(descriptor, :inputs, NamedTuple[])
+                  if get(input, :kind, nothing) === :positional &&
+                     input.name !== :__verb__]
+    for (input, value) in zip(positional, idx_vals)
+        values[input.name] = value
+    end
+    values
+end
+
+function _domain_dependency_value(obj, values, name::Symbol)
+    haskey(values, name) && return values[name]
+    hasproperty(obj, name) || throw(ArgumentError(
+        "dynamic domain dependency $(repr(name)) is unavailable on $(typeof(obj))"))
+    getproperty(obj, name)
+end
+
+function _resolved_input_domain(obj, T, input, values)
+    domain = get(input, :domain, nothing)
+    (domain === nothing || get(domain, :kind, :unrestricted) !== :dynamic) && return domain
+
+    provider = get(domain, :provider, nothing)
+    provider isa Symbol || throw(ArgumentError(
+        "dynamic domain for $(input.name) has no provider property"))
+    provider_descriptor = _property_descriptor(T, provider)
+    provider_descriptor === nothing && throw(ArgumentError(
+        "dynamic domain provider $(repr(provider)) is not described on $(T)"))
+    dependencies = get(domain, :dependencies, Symbol[])
+    args = [_domain_dependency_value(obj, values, dep) for dep in dependencies]
+    prop = getproperty(obj, provider)
+    raw_options = get(provider_descriptor, :indexed, false) ? prop(args...) : prop
+    Base.invokelatest(getproperty(DynamicObjects, :static_domain), raw_options;
+        multiple=get(domain, :multiple, false),
+        allow_custom=get(domain, :allow_custom, false))
+end
+
+_submitted_domain_values(value, multiple::Bool) =
+    multiple && value isa AbstractVector ? value : (value,)
+
+function _validate_input_domain!(obj, T, input, value, values)
+    domain = _resolved_input_domain(obj, T, input, values)
+    domain === nothing && return
+    get(domain, :kind, :unrestricted) === :unrestricted && return
+    get(domain, :allow_custom, false) && return
+    value === nothing && !get(input, :required, true) && return
+
+    options = get(domain, :options, NamedTuple[])
+    allowed = [option.value for option in options if !get(option, :disabled, false)]
+    for submitted in _submitted_domain_values(value, get(domain, :multiple, false))
+        any(candidate -> isequal(candidate, submitted), allowed) ||
+            throw(InvalidDomainValue(input.name, submitted, allowed))
+    end
+end
+
+function _validate_operation_domains!(obj, T, name::Symbol, idx_vals, kw_pairs)
+    descriptor = _property_descriptor(T, name)
+    descriptor === nothing && return
+    values = _operation_input_values(descriptor, idx_vals, kw_pairs)
+    for input in get(descriptor, :inputs, NamedTuple[])
+        input.name === :__verb__ && continue
+        haskey(values, input.name) || continue
+        _validate_input_domain!(obj, T, input, values[input.name], values)
+    end
+end
+
 # The common typed pass-through runner. Route code never manually reads query,
 # form, multipart, or WebSocket upgrade parameters: the emitted `_extract_args`
 # method validates/coerces them, then the verb-keyed DO property is invoked.
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int)
     idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
+    _validate_operation_domains!(target.leaf, LeafT, name, idx_vals, kw_pairs)
     prop = getproperty(target.leaf, name)
     value = prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
     (; context=target.context, root=target.root, leaf=target.leaf,
@@ -3379,11 +3471,13 @@ function _reflect_param_props(OwnerT, method, parent_stack)
     out
 end
 
-function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[])
+function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
+        enrich=(owner, route) -> route)
     _walk_route_meta(IterT,
         (name, info, nested_type) -> begin
             nested_prefix, _step = _nested_prefix_and_step(IterT, name, info, prefix)
-            _reflect_walk!(acc, nested_type, nested_prefix, push!(copy(parent_stack), IterT))
+            _reflect_walk!(acc, nested_type, nested_prefix,
+                           push!(copy(parent_stack), IterT); enrich)
         end,
         (name, info, method) -> begin
             route_doc = _decl_doc(info)
@@ -3393,7 +3487,9 @@ function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[])
             param_strs = [string(p.name) for p in path_params]
             path = _route_path(prefix, name, param_strs)
             params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
-            push!(acc, (verb=Symbol(method), path=path, name=name, doc=route_doc, params=params))
+            route = (verb=Symbol(method), path=path, name=name,
+                     doc=route_doc, params=params)
+            push!(acc, enrich(IterT, route))
         end)
 end
 
@@ -3414,6 +3510,53 @@ function reflect(::Type{T}) where {T}
     _reflect_walk!(acc, T, "")
     acc
 end
+
+function _semantic_param(param, property)
+    property === nothing && return merge(param, (kind=nothing, domain=nothing))
+    input = findfirst(candidate -> candidate.name === param.name,
+                      get(property, :inputs, NamedTuple[]))
+    input === nothing && return merge(param, (kind=nothing, domain=nothing))
+    semantic_input = get(property, :inputs, NamedTuple[])[input]
+    merge(param, (kind=get(semantic_input, :kind, nothing),
+                  domain=get(semantic_input, :domain, nothing)))
+end
+
+function _semantic_route(owner, route)
+    property = _property_descriptor(owner, route.name)
+    params = [_semantic_param(param, property) for param in route.params]
+    merge(route, (owner=owner, params=params, property=property))
+end
+
+function _semantic_graph(T)
+    children = NamedTuple[]
+    _walk_route_meta(T,
+        (name, _info, nested_type) ->
+            push!(children, (name=name, graph=_semantic_graph(nested_type))),
+        (_name, _info, _method) -> nothing,
+    )
+    (type=T, properties=_property_descriptors(T), children=children)
+end
+
+"""
+    semantic_descriptor(::Type{T}) -> NamedTuple
+
+Return the merged, HTML-free semantic application descriptor for an `@htmx`
+graph. `graph` is hierarchical across `@include` boundaries and carries the
+exact DynamicObjects `property_descriptors` records at every node. `routes` is
+the flat, mount-resolved transport view from [`reflect`](@ref), enriched with
+the owning type, its matching property descriptor, and each parameter's
+semantic `kind` and `domain`. Existing `reflect(T)` output is unchanged.
+"""
+function semantic_descriptor(::Type{T}) where {T}
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ||
+        return (type=T, graph=(type=T, properties=NamedTuple[], children=NamedTuple[]),
+                routes=NamedTuple[])
+    routes = NamedTuple[]
+    _reflect_walk!(routes, T, ""; enrich=_semantic_route)
+    (type=T, graph=_semantic_graph(T), routes=routes)
+end
+
+semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
 
 """
     route!(app; prefix="", record_dir=nothing, record_base="", root_provider=nothing)
@@ -5221,6 +5364,158 @@ radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, k
         end for option in options]...;
         show_attrs...
     )
+end
+
+_semantic_values(values::NamedTuple) = Dict{Symbol,Any}(pairs(values))
+_semantic_values(values::AbstractDict) =
+    Dict{Symbol,Any}(Symbol(name) => value for (name, value) in pairs(values))
+_semantic_values(::Nothing) = Dict{Symbol,Any}()
+
+function _semantic_form_values(route, provided)
+    values = _semantic_values(provided)
+    for param in route.params
+        if !haskey(values, param.name) && !param.required
+            values[param.name] = param.default
+        end
+    end
+    values
+end
+
+function _semantic_option_node(option, selected)
+    selected_attrs = _is_selected(option.value, selected) ? (; selected="true") : (;)
+    disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
+    help = get(option, :help, nothing)
+    help_attrs = isnothing(help) ? (;) : (; title=help)
+    h.option(option.label; value=option.value, selected_attrs..., disabled_attrs...,
+             help_attrs...)
+end
+
+function _semantic_select(name, label, domain, selected; required=false)
+    options = get(domain, :options, NamedTuple[])
+    ungrouped = Any[]
+    grouped = Dict{Any,Vector{Any}}()
+    group_order = Any[]
+    for option in options
+        node = _semantic_option_node(option, selected)
+        group = get(option, :group, nothing)
+        if isnothing(group)
+            push!(ungrouped, node)
+        else
+            haskey(grouped, group) || (grouped[group] = Any[]; push!(group_order, group))
+            push!(grouped[group], node)
+        end
+    end
+    nodes = copy(ungrouped)
+    append!(nodes, [h.optgroup(grouped[group]...; label=group) for group in group_order])
+    required_attrs = required ? (; required="true") : (;)
+    multiple_attrs = get(domain, :multiple, false) ? (; multiple="true") : (;)
+    h.label(label,
+        h.select(nodes...; name=string(name), aria_label=label,
+                 required_attrs..., multiple_attrs...))
+end
+
+function _semantic_radio(name, label, domain, selected; required=false)
+    required_attrs = required ? (; required="true") : (;)
+    h.fieldset(
+        h.legend(label),
+        [begin
+            checked_attrs = _is_selected(option.value, selected) ? (; checked="true") : (;)
+            disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
+            help = get(option, :help, nothing)
+            option_label = isnothing(help) ? option.label : "$(option.label) — $(help)"
+            h.label(
+                h.input(; type="radio", name=string(name), value=option.value,
+                        checked_attrs..., disabled_attrs..., required_attrs...),
+                option_label,
+            )
+        end for option in get(domain, :options, NamedTuple[])]...,
+    )
+end
+
+function _semantic_control(obj, owner, param, values; radio_max::Int=4)
+    value = get(values, param.name, nothing)
+    label = isnothing(param.doc) ? Long(param.name) : param.doc
+    input = (name=param.name, domain=get(param, :domain, nothing))
+    domain = _resolved_input_domain(obj, owner, input, values)
+
+    if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
+        options = get(domain, :options, NamedTuple[])
+        if get(domain, :allow_custom, false)
+            enabled = [option.value => option.label for option in options
+                       if !get(option, :disabled, false)]
+            return sinput_custom(string(param.name), enabled; label, value)
+        elseif !get(domain, :multiple, false) && length(options) <= radio_max
+            return _semantic_radio(param.name, label, domain, value;
+                                   required=param.required)
+        else
+            return _semantic_select(param.name, label, domain, value;
+                                    required=param.required)
+        end
+    end
+
+    required_attrs = param.required ? (; required="true") : (;)
+    T = param.type
+    if T isa Type && T === Bool
+        return cinput(string(param.name); label, checked=something(value, false),
+                      required_attrs...)
+    elseif T isa Type && T <: Number
+        return ninput(string(param.name); label, value=something(value, 0),
+                      required_attrs...)
+    end
+    linput(string(param.name); label, value=something(value, ""), required_attrs...)
+end
+
+function _operation_form_action(route, values, target)
+    action = string(target)
+    for param in route.params
+        param.source === :path || continue
+        haskey(values, param.name) || throw(MissingRequiredParam(param.name))
+        token = "{" * string(param.name) * "}"
+        action = replace(action, token => HTTP.URIs.escapeuri(string(values[param.name])))
+    end
+    action
+end
+
+function _operation_route(T, name::Symbol, verb::Symbol)
+    candidates = [route for route in semantic_descriptor(T).routes
+                  if route.owner === T && route.name === name && route.verb === verb]
+    isempty(candidates) && throw(ArgumentError(
+        "no semantic $(verb) route $(repr(name)) on $(T)"))
+    length(candidates) == 1 || throw(ArgumentError(
+        "semantic route $(repr(name)) on $(T) is ambiguous for verb $(verb)"))
+    only(candidates)
+end
+
+"""
+    operation_form(obj, name::Symbol; verb=:GET, values=(;), kwargs...)
+    operation_form(obj, route::NamedTuple; values=(;), target=route.path, kwargs...)
+
+Generate an HTMX form from a merged semantic route descriptor. Static domains
+become radio/select/custom controls; dynamic domains execute their declared DO
+provider from the supplied current `values`; unrestricted values use typed
+boolean, numeric, or text controls. Positional path inputs must be supplied in
+`values` and are encoded into the route URL. Submitted values still pass through
+the shared typed extractor and current-domain validation on the server.
+"""
+function operation_form(obj, route::NamedTuple; values=(;), target=route.path,
+        submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
+        form_class="", kwargs...)
+    route.verb === :WEBSOCKET && throw(ArgumentError(
+        "operation_form does not submit WebSocket routes"))
+    current = _semantic_form_values(route, values)
+    action = _operation_form_action(route, current, target)
+    controls = [_semantic_control(obj, route.owner, param, current; radio_max)
+                for param in route.params if param.source !== :path]
+    method_key = Symbol("hx_" * lowercase(string(route.verb)))
+    method_attrs = NamedTuple{(method_key,)}((action,))
+    target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
+    swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
+    h.form(controls..., h.button(submit; type="submit");
+           method_attrs..., target_attrs..., swap_attrs..., class=form_class, kwargs...)
+end
+
+function operation_form(obj, name::Symbol; verb::Symbol=:GET, kwargs...)
+    operation_form(obj, _operation_route(typeof(obj), name, verb); kwargs...)
 end
 
 # --- Conditional visibility (show_when) ---

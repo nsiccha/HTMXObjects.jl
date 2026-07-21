@@ -15,7 +15,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
-    TestUIHost, ProviderApp,
+    TestUIHost, ProviderApp, SemanticApp,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -128,6 +128,29 @@ end
     @include nested = begin
         @get show(; count::Int) = h.p("$(label):$(count):$(__route__)")
         @ws stream(id::Int; suffix::String) = "$(label):$(id):$(suffix):$(__route__)"
+    end
+end
+
+@htmx struct SemanticApp
+    choices(cohort::Symbol) = cohort === :north ? (
+        (value=:n1, label="North 1", group="North"),
+        (value=:n2, label="North 2", disabled=true),
+    ) : (:s1,)
+
+    @semantic (inputs=(
+        dataset=(domain=dynamic_domain(:choices; dependencies=(:cohort,)),),
+        mode=(domain=static_domain((
+            (value=:fast, label="Fast"),
+            (value=:safe, label="Safe", help="Full checks"),
+            (value=:unsafe, label="Unsafe", disabled=true),
+        )),),
+    ),) @get run(; dataset::Symbol, cohort::Symbol=:north,
+                    mode::Symbol=:fast, count::Int=1) =
+        h.p("$(dataset):$(cohort):$(mode):$(count)")
+
+    @include nested = begin
+        @semantic (inputs=(quality=(domain=static_domain((:quick, :full)),),),) @post execute(; quality::Symbol=:quick) =
+            h.p("nested:$(quality)")
     end
 end
 
@@ -262,6 +285,58 @@ end
 
     @test_throws ArgumentError RootProvider(identity; scope=:pod)
     @test_throws ArgumentError RootProvider(identity; scope=:job)
+end
+
+@testitem "semantic descriptor, generated controls, and domain validation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    descriptor = semantic_descriptor(SemanticApp)
+    @test descriptor.type === SemanticApp
+    @test only(descriptor.graph.children).name === :nested
+    @test any(property -> property.name === :choices, descriptor.graph.properties)
+
+    route = only(filter(route -> route.owner === SemanticApp &&
+                                 route.name === :run && route.verb === :GET,
+                        descriptor.routes))
+    @test route.property.semantics.pending
+    dataset = only(filter(param -> param.name === :dataset, route.params))
+    mode = only(filter(param -> param.name === :mode, route.params))
+    @test dataset.domain.kind === :dynamic
+    @test dataset.domain.provider === :choices
+    @test dataset.domain.dependencies == [:cohort]
+    @test mode.domain.kind === :static
+    @test mode.domain.cardinality == 3
+
+    # The pre-existing reflection API remains byte-shape compatible.
+    reflected = only(filter(route -> route.name === :run, HTMXObjects.reflect(SemanticApp)))
+    @test keys(reflected) == (:verb, :path, :name, :doc, :params)
+
+    app = SemanticApp()
+    html = repr("text/html", operation_form(app, :run; values=(cohort=:north,),
+                                             target_id="#semantic-result"))
+    @test contains(html, "hx-get=\"/run\"")
+    @test contains(html, "hx-target=\"#semantic-result\"")
+    @test contains(html, "North 1")
+    @test contains(html, "North 2")
+    @test contains(html, "disabled=\"true\"")
+    @test contains(html, "type=\"number\"")
+    @test contains(html, "name=\"count\"")
+
+    route!(app)
+    good = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=fast&count=2")
+    good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, good))
+    good_response = good_handler(good)
+    @test good_response.status == 200
+    @test contains(String(good_response.body), "n1:north:fast:2")
+
+    disabled = HTTP.Request("GET", "/run?dataset=n2&cohort=north&mode=fast&count=2")
+    disabled_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, disabled))
+    disabled_response = disabled_handler(disabled)
+    @test disabled_response.status == 400
+    @test contains(String(disabled_response.body), "Bad Request")
+
+    tampered = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=turbo&count=2")
+    tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, tampered))
+    tampered_response = tampered_handler(tampered)
+    @test tampered_response.status == 400
 end
 
 @testitem ":index -> / routing" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
