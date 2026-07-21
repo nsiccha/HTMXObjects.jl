@@ -17,6 +17,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp,
+    BareExternalApp, InlineContextApp,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -182,7 +183,14 @@ end
     end
 end
 
+# A separately declared child that also *reads* the enclosing `@param` in its
+# own route body needs the delegation line: `operation_form` carries the
+# enclosing value as hidden context for either include shape, but only an
+# inline child inherits the parent's `@param` as a property. Without the
+# delegation, `fit_key` here is an unbound name and the route throws
+# `UndefVarError` the first time it is actually executed.
 @htmx struct ExternalContextChild
+    @param (; fit_key) = __parent__
     @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
         h.p("$(fit_key):$(value)")
     @get structured(; value::Symbol=:ok) =
@@ -192,6 +200,24 @@ end
 @htmx struct ExternalContextApp
     @param fit_key::String
     @include models = ExternalContextChild()
+end
+
+# The same mount without the delegation — the form still carries the context,
+# but the child owns no `fit_key` property.
+@htmx struct BareExternalChild
+    @get probe(; note::String="hi") = h.p("bare:$(note)")
+end
+
+@htmx struct BareExternalApp
+    @param fit_key::String
+    @include models = BareExternalChild()
+end
+
+@htmx struct InlineContextApp
+    @param fit_key::String
+    @include models = begin
+        @get probe(; note::String="hi") = h.p("inline:$(note)")
+    end
 end
 
 @htmx struct PolicyApp
@@ -504,6 +530,8 @@ end
 end
 
 @testitem "external mounted child preserves enclosing form context" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _param_names
+
     app = ExternalContextApp(; __req__=HTTP.Request("GET", "/?fit_key=external-fit"))
     child = app.models
     html = repr("text/html", operation_form(child, :analyze; target_id="#external"))
@@ -520,6 +548,42 @@ end
     @test structured_response.status == 200
     @test contains(String(structured_response.body), "structured:alt")
     @test contains(String(structured_response.body), "ready")
+
+    # Executing the route is what distinguishes a child that merely *renders*
+    # the enclosing context from one that can actually read it. The delegation
+    # line on ExternalContextChild is what makes this work.
+    @test _param_names(typeof(child)) == (:fit_key,)
+    @test child.fit_key == "external-fit"
+    @test repr("text/html", child.analyze(Verb{:GET}(); value=:alt)) ==
+          "<p>external-fit:alt</p>"
+end
+
+@testitem "operation_form context: inline vs bare external mounted child" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _param_names
+
+    req = HTTP.Request("GET", "/?fit_key=proof")
+    form(RootT) = repr("text/html",
+                       operation_form(RootT(; __req__=req).models, :probe))
+
+    # `operation_form` resolves enclosing @param context from the runtime
+    # __parent__ chain, so both include shapes emit the same hidden context.
+    @test contains(form(InlineContextApp),
+                   "type=\"hidden\" name=\"fit_key\" value=\"proof\"")
+    @test contains(form(BareExternalApp),
+                   "type=\"hidden\" name=\"fit_key\" value=\"proof\"")
+    @test form(BareExternalApp) == form(InlineContextApp)
+
+    # __parent__/__req__/__prefix__ thread to an external child either way …
+    bare = BareExternalApp(; __req__=req).models
+    @test bare.__req__ === req
+    @test bare.__prefix__ == "/models"
+
+    # … but @param *inheritance* is resolved at macro expansion, so only the
+    # inline child owns the property. A bare external child must delegate
+    # explicitly (see ExternalContextChild) before its body can read fit_key.
+    @test _param_names(typeof(InlineContextApp(; __req__=req).models)) == (:fit_key,)
+    @test _param_names(typeof(bare)) == ()
+    @test_throws Exception bare.fit_key
 end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

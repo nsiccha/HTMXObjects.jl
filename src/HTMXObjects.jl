@@ -5914,6 +5914,23 @@ the shared typed extractor and current-domain validation on the server.
 
 Enclosing `@param` values are inferred from the current request and carried as
 hidden inputs; only the operation's semantic inputs become visible controls.
+The enclosing set is resolved from `obj`'s runtime `__parent__` chain, so an
+inline `@include child = begin … end` and a separately declared bundle mounted
+as `@include child = ExternalChild()` emit the same hidden context.
+
+Carrying the context is not the same as the child *owning* it. `@param`
+inheritance is resolved at macro expansion, so only an inline child gets the
+parent's `@param`s as its own properties; an external bundle was expanded
+before any mount site existed and inherits none. Its generated form still
+carries `fit_key`, but its route body cannot reference `fit_key` and
+`child.fit_key` does not resolve. A child that needs to read the value must
+delegate explicitly:
+
+    @htmx struct ExternalChild
+        @param (; fit_key) = __parent__
+        @get probe(; note::String="hi") = …
+    end
+
 When a dynamic domain declares dependencies, changing one of those controls
 rerenders the generated form through the same verb and route without executing
 the operation. The refreshed form retains `target_id`, `swap`, submit label,
