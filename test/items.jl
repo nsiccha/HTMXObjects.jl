@@ -185,6 +185,8 @@ end
 @htmx struct ExternalContextChild
     @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
         h.p("$(fit_key):$(value)")
+    @get structured(; value::Symbol=:ok) =
+        (summary=h.p("structured:$(value)"), status="ready")
 end
 
 @htmx struct ExternalContextApp
@@ -508,6 +510,16 @@ end
     @test contains(html, "type=\"hidden\" name=\"fit_key\" value=\"external-fit\"")
     @test contains(html, "hx-get=\"/models/analyze\"")
     @test contains(html, "name=\"value\"")
+
+    route!(app)
+    structured_req = HTTP.Request("GET", "/models/structured?fit_key=external-fit&value=alt",
+                                  ["HX-Request" => "true"])
+    structured_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, structured_req))
+    structured_response = structured_handler(structured_req)
+    @test structured_response.status == 200
+    @test contains(String(structured_response.body), "structured:alt")
+    @test contains(String(structured_response.body), "ready")
 end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

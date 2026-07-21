@@ -1600,6 +1600,12 @@ to_response(::MarkdownOnly) = to_response("")
 auto(val::HtmlOnly; wrap) = auto(val.content; wrap)
 auto(::MarkdownOnly; wrap) = ""
 
+# Semantic operations may return a small NamedTuple carrying an HTML fragment
+# alongside structured metadata. Treat its values as an HTML fragment sequence
+# instead of falling through to `repr("text/html", ::NamedTuple)`, which has no
+# MIME renderer and turns an otherwise valid HX response into a caught error.
+auto(val::NamedTuple; wrap) = auto(collect(values(val)); wrap)
+
 # HTML rendering via show dispatch — HtmlOnly renders content, MarkdownOnly is invisible
 Base.show(io::IO, m::MIME"text/html", val::HtmlOnly) = show(io, m, val.content)
 Base.show(io::IO, ::MIME"text/html", ::MarkdownOnly) = nothing
@@ -2917,8 +2923,14 @@ _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
 # call when Treebars is absent. The extension replaces this Ref without method
 # overwrites, matching the recording bridge's precompile-safe pattern.
 const _operation_polling_impl = Ref{Any}(
-    (render_result, ip, keys, call_kwargs, _transport) ->
-        render_result(ip(keys...; call_kwargs...))
+    (render_result, ip, keys, call_kwargs, _transport) -> begin
+        value = ip(keys...; call_kwargs...)
+        # Without Treebars, preserve the historical blocking fallback while
+        # honoring DO's compute-at-most-once Pending handle. Rendering the
+        # unresolved handle directly leaks its diagnostic repr into HTML.
+        value isa DynamicObjects.Pending && (value = fetch(value))
+        render_result(value)
+    end
 )
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
