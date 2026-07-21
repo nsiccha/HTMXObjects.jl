@@ -15,7 +15,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
-    TestUIHost,
+    TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
+    StackedSemanticRoute, ContextSemanticApp,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -121,6 +122,92 @@ end
     @include tests = TestRoutes(; project=pkgdir(HTMXObjects))
 end
 
+@htmx struct ProviderApp
+    label::String
+
+    @get index() = h.p("root $(label)")
+    @include nested = begin
+        @get show(; count::Int) = h.p("$(label):$(count):$(__route__)")
+        @ws stream(id::Int; suffix::String) = "$(label):$(id):$(suffix):$(__route__)"
+    end
+end
+
+@htmx struct SemanticApp
+    choices(cohort::Symbol) = cohort === :north ? (
+        (value=:n1, label="North 1", group="North"),
+        (value=:n2, label="North 2", disabled=true),
+    ) : (:s1,)
+
+    @semantic (inputs=(
+        dataset=(domain=dynamic_domain(:choices; dependencies=(:cohort,)),),
+        mode=(domain=static_domain((
+            (value=:fast, label="Fast"),
+            (value=:safe, label="Safe", help="Full checks"),
+            (value=:unsafe, label="Unsafe", disabled=true),
+        )),),
+    ),) @get run(; dataset::Symbol, cohort::Symbol=:north,
+                    mode::Symbol=:fast, count::Int=1) =
+        h.p("$(dataset):$(cohort):$(mode):$(count)")
+
+    @include nested = begin
+        @semantic (inputs=(quality=(domain=static_domain((:quick, :full)),),),) @post execute(; quality::Symbol=:quick) =
+            h.p("nested:$(quality)")
+    end
+end
+
+@htmx struct ContextSemanticApp
+    @param fit_key::String
+
+    @include analysis = begin
+        model_options(study::Symbol) = study === :alpha ? (
+            (value=:a1, label="Alpha 1"),
+            (value=:a2, label="Alpha 2"),
+        ) : (
+            (value=:b1, label="Beta 1"),
+            (value=:b2, label="Beta 2"),
+        )
+
+        @semantic (inputs=(
+            study=(domain=static_domain((
+                (value=:alpha, label="Alpha"),
+                (value=:beta, label="Beta"),
+            )),),
+            model=(domain=dynamic_domain(:model_options;
+                                         dependencies=(:study,)),),
+        ),) @get analyze(; study::Symbol=:alpha, model::Symbol) =
+            h.p("$(fit_key):$(study):$(model)")
+
+        @get raw_context(; count::Int=1)::MIMEResponse =
+            MIMEResponse("text/plain", "$(fit_key):$(count)")
+    end
+end
+
+@htmx struct PolicyApp
+    @get html(; count::Int=1) = h.p("html:$(count)")
+    @get raw(; count::Int=1)::MIMEResponse =
+        MIMEResponse("text/plain", "raw:$(count)")
+    @get response(; count::Int=1)::HTTP.Response =
+        HTTP.Response(202, ["Content-Type" => "application/json"];
+                      body="{\"count\":$(count)}")
+    @ws stream(; count::Int=1) = "ws:$(count)"
+end
+
+@htmx struct MultiVerbPolicyApp
+    @semantic (inputs=(mode=(domain=static_domain((:raw, :json)),),),) @get exchange(; mode::Symbol=:raw)::MIMEResponse =
+        MIMEResponse("text/plain", "get:$(mode)")
+    @semantic (inputs=(count=(domain=static_domain((1, 2)),),),) @post exchange(; count::Int=1) =
+        h.p("post:$(count)")
+end
+
+# One declaration owns its semantic input, route, disk materialization, and
+# progress policy. The typed call LHS exercises the route-return annotation
+# parser while leaving the annotation visible to DynamicObjects.
+@htmx struct StackedSemanticRoute
+    __cache_base__ = tempdir()
+    @semantic (inputs=(count=(domain=static_domain((1, 2, 3)),),),) @get @mmap @progress model(; count::Int=2)::Vector{Float64} =
+        collect(1.0:count)
+end
+
 end # @testmodule HTMXOTestFixtures
 
 # --- Tests ---
@@ -208,6 +295,326 @@ end
     @test contains(html, "foo")
     @test Symbol("@get") in DynamicObjects.metafirst(TestApp, :index).macros
     @test !(Symbol("@get") in DynamicObjects.metafirst(TestApp, :title).macros)
+end
+
+@testitem "root provider and shared operation runner" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _base_segments, _operation_target, _run_operation
+
+    seen = OperationContext[]
+    provider = RootProvider(
+        (RootT, context) -> begin
+            push!(seen, context)
+            RootT(String(context.key); __req__=context.request,
+                  __route__=context.route, __prefix__=context.prefix)
+        end;
+        scope=:session,
+        key=req -> HTTP.header(req, "X-Session", "missing"),
+    )
+
+    route!(ProviderApp("registered"); root_provider=provider)
+    req = HTTP.Request("GET", "/nested/show?count=7", ["X-Session" => "session-a"])
+    handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))
+    resp = handler(req)
+    @test resp.status == 200
+    @test contains(String(resp.body), "session-a:7:/nested/show")
+    @test only(seen).scope === :session
+    @test only(seen).key == "session-a"
+    @test only(seen).transport === :http
+
+    bad_req = HTTP.Request("GET", "/nested/show?count=not-an-int",
+                           ["X-Session" => "session-a"])
+    bad_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, bad_req))
+    @test bad_handler(bad_req).status == 500
+
+    ws_req = HTTP.Request("GET", "/nested/stream/4?suffix=ok", ["X-Session" => "session-b"])
+    chain_info = DynamicObjects.metafirst(ProviderApp, :nested)
+    NestedT = DynamicObjects._nested_struct_type(ProviderApp, Val(:nested))
+    nested_prefix, step = HTMXObjects._nested_prefix_and_step(ProviderApp, :nested, chain_info, "")
+    target = _operation_target(provider, ProviderApp, [step], ws_req, "", 0, :websocket)
+    operation = _run_operation(target, NestedT, :stream, Verb{:WEBSOCKET}(),
+                               ws_req, _base_segments("/nested/stream/{id}", 1), 1)
+    @test operation.value(nothing) == "session-b:4:ok:/nested/stream/4"
+    @test last(seen).transport === :websocket
+    @test nested_prefix == "nested"
+
+    @test_throws ArgumentError RootProvider(identity; scope=:pod)
+    @test_throws ArgumentError RootProvider(identity; scope=:job)
+end
+
+@testitem "semantic descriptor, generated controls, and domain validation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    descriptor = semantic_descriptor(SemanticApp)
+    @test descriptor.type === SemanticApp
+    @test only(descriptor.graph.children).name === :nested
+    @test any(property -> property.name === :choices, descriptor.graph.properties)
+
+    route = only(filter(route -> route.owner === SemanticApp &&
+                                 route.name === :run && route.verb === :GET,
+                        descriptor.routes))
+    @test route.property.semantics.pending
+    dataset = only(filter(param -> param.name === :dataset, route.params))
+    mode = only(filter(param -> param.name === :mode, route.params))
+    @test dataset.domain.kind === :dynamic
+    @test dataset.domain.provider === :choices
+    @test dataset.domain.dependencies == [:cohort]
+    @test mode.domain.kind === :static
+    @test mode.domain.cardinality == 3
+
+    # The pre-existing reflection API remains byte-shape compatible.
+    reflected = only(filter(route -> route.name === :run, HTMXObjects.reflect(SemanticApp)))
+    @test keys(reflected) == (:verb, :path, :name, :doc, :params)
+
+    app = SemanticApp()
+    html = repr("text/html", operation_form(app, :run; values=(cohort=:north,),
+                                             target_id="#semantic-result"))
+    @test contains(html, "hx-get=\"/run\"")
+    @test contains(html, "hx-target=\"#semantic-result\"")
+    @test contains(html, "North 1")
+    @test contains(html, "North 2")
+    @test contains(html, "disabled=\"true\"")
+    @test contains(html, "type=\"number\"")
+    @test contains(html, "name=\"count\"")
+
+    route!(app)
+    good = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=fast&count=2")
+    good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, good))
+    good_response = good_handler(good)
+    @test good_response.status == 200
+    @test contains(String(good_response.body), "n1:north:fast:2")
+
+    disabled = HTTP.Request("GET", "/run?dataset=n2&cohort=north&mode=fast&count=2")
+    disabled_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, disabled))
+    disabled_response = disabled_handler(disabled)
+    @test disabled_response.status == 400
+    @test contains(String(disabled_response.body), "Bad Request")
+
+    tampered = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=turbo&count=2")
+    tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, tampered))
+    tampered_response = tampered_handler(tampered)
+    @test tampered_response.status == 400
+end
+
+@testitem "generated semantic form context and dependent refresh" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_polling_impl, _run_operation
+
+    app_req = HTTP.Request("GET", "/?fit_key=fit-17")
+    app = ContextSemanticApp(; __req__=app_req)
+    leaf = app.analysis
+    html = repr("text/html", operation_form(
+        leaf, :analyze; values=(study=:alpha,), target_id="#analysis",
+        submit="Analyze", form_class="semantic-form"))
+
+    # Root context is inferred from the request and carried, never exposed as
+    # another generated operation control.
+    @test contains(html, "type=\"hidden\" name=\"fit_key\" value=\"fit-17\"")
+    @test !contains(html, ">fit key<")
+    @test contains(html, "hx-get=\"/analysis/analyze?__htmxo_form=1\"")
+    @test contains(html, "hx-include=\"closest form\"")
+    @test contains(html, "hx-target=\"closest form\"")
+    @test contains(html, "Alpha 1")
+    @test contains(html, "name=\"__htmxo_target_id\" value=\"#analysis\"")
+
+    # The same query context survives the automatic poll URL. The poll marker
+    # is additive; typed operation inputs remain separate from root @params.
+    poll_req = HTTP.Request(
+        "GET", "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1",
+        ["HX-Request" => "true"],
+    )
+    poll_app = ContextSemanticApp(; __req__=poll_req)
+    poll_leaf = poll_app.analysis
+    transport = Ref{Any}()
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _ip, _keys, call_kwargs, seen_transport) -> begin
+            transport[] = (; call_kwargs, seen_transport)
+            h.aside("polling")
+        end
+    try
+        operation = _run_operation(
+            (context=nothing, root=poll_app, leaf=poll_leaf),
+            typeof(poll_leaf), :analyze, Verb{:GET}(), poll_req, 0, 0;
+            operation_policy=OperationPolicy(:auto),
+        )
+        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        @test transport[].call_kwargs == (study=:alpha, model=:a1)
+        @test transport[].seen_transport.poll_url ==
+              "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1&__htmxo_poll=1"
+        @test poll_leaf.fit_key == "fit-17"
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+
+    route!(app; operation_policy=:auto)
+    refresh = HTTP.Request(
+        "GET",
+        "/analysis/analyze?__htmxo_form=1&fit_key=fit-17&study=beta&" *
+        "__htmxo_target_id=%23analysis&__htmxo_submit=Analyze&" *
+        "__htmxo_form_class=semantic-form&__htmxo_swap=innerHTML&" *
+        "__htmxo_radio_max=4",
+        ["HX-Request" => "true"],
+    )
+    refresh_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, refresh))
+    refreshed = refresh_handler(refresh)
+    refreshed_html = String(refreshed.body)
+    @test refreshed.status == 200
+    @test contains(refreshed_html, "Beta 1")
+    @test !contains(refreshed_html, "Alpha 1")
+    @test contains(refreshed_html, "hx-target=\"#analysis\"")
+    @test contains(refreshed_html, "class=\"semantic-form\"")
+    @test contains(refreshed_html,
+                   "type=\"hidden\" name=\"fit_key\" value=\"fit-17\"")
+
+    good = HTTP.Request(
+        "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=b1")
+    good_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, good))
+    good_response = good_handler(good)
+    @test good_response.status == 200
+    @test contains(String(good_response.body), "fit-17:beta:b1")
+
+    forged = HTTP.Request(
+        "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=a1")
+    forged_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, forged))
+    forged_response = forged_handler(forged)
+    @test forged_response.status == 400
+
+    raw = HTTP.Request(
+        "GET", "/analysis/raw_context?fit_key=fit-17&count=3",
+        ["HX-Request" => "true"],
+    )
+    raw_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, raw))
+    raw_response = raw_handler(raw)
+    @test raw_response.status == 200
+    @test HTTP.header(raw_response, "Content-Type") == "text/plain"
+    @test String(raw_response.body) == "fit-17:3"
+end
+
+@testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_execution_mode, _operation_polling_impl,
+        _property_descriptor, _run_operation
+
+    @test OperationPolicy().mode === :blocking
+    @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
+          OperationPolicy(:polling, "350ms", false)
+    @test_throws ArgumentError OperationPolicy(:background)
+
+    html_descriptor = _property_descriptor(PolicyApp, :html)
+    raw_descriptor = _property_descriptor(PolicyApp, :raw)
+    response_descriptor = _property_descriptor(PolicyApp, :response)
+    plain = HTTP.Request("GET", "/html?count=2")
+    hx = HTTP.Request("GET", "/html?count=2", ["HX-Request" => "true"])
+    @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
+                                    plain, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
+                                    hx, Verb{:GET}()) === :polling
+    @test _operation_execution_mode(OperationPolicy(:polling), raw_descriptor,
+                                    hx, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:polling), response_descriptor,
+                                    hx, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
+                                    hx, Verb{:WEBSOCKET}()) === :blocking
+
+    exchange = filter(route -> route.name === :exchange,
+                      semantic_descriptor(MultiVerbPolicyApp).routes)
+    get_exchange = only(filter(route -> route.verb === :GET, exchange))
+    post_exchange = only(filter(route -> route.verb === :POST, exchange))
+    @test get_exchange.property.output.type === MIMEResponse
+    @test post_exchange.property.output.type === nothing
+    @test only(filter(input -> input.name === :mode,
+                      get_exchange.property.inputs)).domain.cardinality == 2
+    @test only(filter(input -> input.name === :count,
+                      post_exchange.property.inputs)).domain.cardinality == 2
+    @test _operation_execution_mode(OperationPolicy(:polling),
+                                    get_exchange.property, hx,
+                                    Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:polling),
+                                    post_exchange.property, hx,
+                                    Verb{:POST}()) === :blocking
+
+    app = PolicyApp()
+    target = (context=nothing, root=app, leaf=app)
+    polls = NamedTuple[]
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (render_result, ip, keys, call_kwargs, transport) -> begin
+            push!(polls, (; keys, call_kwargs, transport))
+            h.aside("polling")
+        end
+    try
+        operation = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
+                                   hx, 0, 0;
+                                   operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        @test length(polls) == 1
+        @test only(polls).call_kwargs == (count=2,)
+        @test only(polls).transport.poll_url ==
+              "/html?count=2&__htmxo_poll=1"
+        @test only(polls).transport.grace_period == 0.1
+
+        poll_request = HTTP.Request(
+            "GET", "/html?count=2&__htmxo_poll=1", ["HX-Request" => "true"])
+        polled = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
+                                poll_request, 0, 0;
+                                operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", polled.value) == "<aside>polling</aside>"
+        @test length(polls) == 2
+        @test last(polls).call_kwargs == (count=2,)
+        @test last(polls).transport.poll_url ==
+              "/html?count=2&__htmxo_poll=1"
+        @test last(polls).transport.grace_period == 0.0
+
+        raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
+                             HTTP.Request("GET", "/raw?count=3"), 0, 0;
+                             operation_policy=OperationPolicy(:polling))
+        @test raw.value isa MIMEResponse
+        @test raw.value.content_type == "text/plain"
+        @test raw.value.body == "raw:3"
+
+        response = _run_operation(target, PolicyApp, :response, Verb{:GET}(),
+                                  HTTP.Request("GET", "/response?count=4"), 0, 0;
+                                  operation_policy=OperationPolicy(:polling))
+        @test response.value.status == 202
+        @test String(response.value.body) == "{\"count\":4}"
+
+        ws = _run_operation(target, PolicyApp, :stream, Verb{:WEBSOCKET}(),
+                            HTTP.Request("GET", "/stream?count=5"), 0, 0;
+                            operation_policy=OperationPolicy(:polling))
+        @test ws.value(nothing) == "ws:5"
+        @test length(polls) == 2
+
+        route!(app; operation_policy=:polling)
+        raw_req = HTTP.Request("GET", "/raw?count=6", ["HX-Request" => "true"])
+        raw_handler = first(HTTP.Handlers.gethandler(
+            HTMXObjects.CONTEXT[].service.router, raw_req))
+        raw_response = raw_handler(raw_req)
+        @test raw_response.status == 200
+        @test HTTP.header(raw_response, "Content-Type") == "text/plain"
+        @test String(raw_response.body) == "raw:6"
+
+        response_req = HTTP.Request("GET", "/response?count=7",
+                                    ["HX-Request" => "true"])
+        response_handler = first(HTTP.Handlers.gethandler(
+            HTMXObjects.CONTEXT[].service.router, response_req))
+        final_response = response_handler(response_req)
+        @test final_response.status == 202
+        @test HTTP.header(final_response, "Content-Type") == "application/json"
+        @test String(final_response.body) == "{\"count\":7}"
+        @test length(polls) == 2
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+
+    stacked = only(filter(route -> route.name === :model,
+                          semantic_descriptor(StackedSemanticRoute).routes))
+    @test stacked.path == "/model"
+    @test stacked.property.output.type === Vector{Float64}
+    @test stacked.property.semantics.mmap
+    @test stacked.property.semantics.progress
+    @test stacked.property.semantics.pending
+    @test only(filter(input -> input.name === :count,
+                      stacked.property.inputs)).domain.cardinality == 3
 end
 
 @testitem ":index -> / routing" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
@@ -512,6 +919,115 @@ end
     @test_throws ErrorException sortable_table(["A"], rows; default_sort=1, sortable=false)
     # Only auto-wired String headers can be stamped.
     @test_throws ErrorException sortable_table([h.th("A")], rows; default_sort=1)
+end
+
+@testitem "nested lazy master/detail events stay scoped" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    inner = master_detail_table(["Inner"], [1];
+        key=identity,
+        master=_ -> (h.td("inner"),),
+        detail_url=_ -> "/inner",
+        id="inner-table")
+    nested = master_detail_table(["Outer"], [1];
+        key=_ -> "outer",
+        master=_ -> (h.td("outer"),),
+        detail=_ -> inner,
+        detail_url=_ -> "/outer",
+        id="outer-table")
+    html = repr("text/html", nested)
+
+    # This is the post-load nesting shape that exposed the regression: the
+    # inner lazy slot is a descendant of the still-live outer lazy slot.
+    # htmx's `consume` trigger modifier prevents the inner custom event from
+    # triggering another request on that ancestor.
+    @test length(collect(eachmatch(r"hx-trigger=\"htmxo-md-load consume\"", html))) == 2
+    @test !contains(html, "hx-trigger=\"htmxo-md-load\"")
+    @test contains(html, "id=\"detail-slot-outer\"")
+    @test contains(html, "id=\"detail-slot-1\"")
+
+    open_pair = master_detail_pair("open", (h.td("open"),), nothing, 1;
+        initially_open=true, detail_url="/open")
+    open_html = repr("text/html", h.div(open_pair...))
+    @test contains(open_html, "hx-trigger=\"htmxo-md-load consume, load\"")
+end
+
+@testitem "nested lazy master/detail browser requests stay isolated" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        outer_requests = Ref(0)
+        inner_requests = Ref(0)
+        inner = master_detail_table(["Inner"], [1];
+            key=_ -> "inner",
+            master=_ -> (h.td("inner"),),
+            detail_url=_ -> "/inner",
+            id="inner-table")
+        outer = master_detail_table(["Outer"], [1];
+            key=_ -> "outer",
+            master=_ -> (h.td("outer"),),
+            detail_url=_ -> "/outer",
+            id="outer-table")
+        driver = h.script(Raw("""
+            document.body.addEventListener('htmx:afterSettle', function(event) {
+                if (event.detail.target.id === 'detail-slot-outer' && !window.innerClickStarted) {
+                    window.innerClickStarted = true;
+                    setTimeout(function() {
+                        document.getElementById('row-inner').click();
+                    }, 10);
+                } else if (event.detail.target.id === 'detail-slot-inner') {
+                    document.body.dataset.nestedDone = '1';
+                }
+            });
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    document.getElementById('row-outer').click();
+                }, 50);
+            });
+            """))
+        page = repr("text/html", htmx(outer, driver;
+            hyperscript_version=nothing,
+            feedback=false,
+            compose=false,
+            overlay=false))
+        inner_html = repr("text/html", inner)
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif path == "/outer"
+                outer_requests[] += 1
+                HTTP.Response(200, ["Content-Type" => "text/html"], inner_html)
+            elseif path == "/inner"
+                inner_requests[] += 1
+                HTTP.Response(200, ["Content-Type" => "text/html"], "<p id=\"inner-loaded\">loaded</p>")
+            else
+                HTTP.Response(404)
+            end
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            @test contains(dom, "data-nested-done=\"1\"")
+            @test contains(dom, "id=\"inner-loaded\"")
+            @test outer_requests[] == 1
+            @test inner_requests[] == 1
+        finally
+            close(server)
+        end
+    end
 end
 
 """
