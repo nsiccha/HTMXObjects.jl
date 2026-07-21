@@ -940,6 +940,115 @@ end
     @test_throws ErrorException sortable_table([h.th("A")], rows; default_sort=1)
 end
 
+@testitem "nested lazy master/detail events stay scoped" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    inner = master_detail_table(["Inner"], [1];
+        key=identity,
+        master=_ -> (h.td("inner"),),
+        detail_url=_ -> "/inner",
+        id="inner-table")
+    nested = master_detail_table(["Outer"], [1];
+        key=_ -> "outer",
+        master=_ -> (h.td("outer"),),
+        detail=_ -> inner,
+        detail_url=_ -> "/outer",
+        id="outer-table")
+    html = repr("text/html", nested)
+
+    # This is the post-load nesting shape that exposed the regression: the
+    # inner lazy slot is a descendant of the still-live outer lazy slot.
+    # htmx's `consume` trigger modifier prevents the inner custom event from
+    # triggering another request on that ancestor.
+    @test length(collect(eachmatch(r"hx-trigger=\"htmxo-md-load consume\"", html))) == 2
+    @test !contains(html, "hx-trigger=\"htmxo-md-load\"")
+    @test contains(html, "id=\"detail-slot-outer\"")
+    @test contains(html, "id=\"detail-slot-1\"")
+
+    open_pair = master_detail_pair("open", (h.td("open"),), nothing, 1;
+        initially_open=true, detail_url="/open")
+    open_html = repr("text/html", h.div(open_pair...))
+    @test contains(open_html, "hx-trigger=\"htmxo-md-load consume, load\"")
+end
+
+@testitem "nested lazy master/detail browser requests stay isolated" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        outer_requests = Ref(0)
+        inner_requests = Ref(0)
+        inner = master_detail_table(["Inner"], [1];
+            key=_ -> "inner",
+            master=_ -> (h.td("inner"),),
+            detail_url=_ -> "/inner",
+            id="inner-table")
+        outer = master_detail_table(["Outer"], [1];
+            key=_ -> "outer",
+            master=_ -> (h.td("outer"),),
+            detail_url=_ -> "/outer",
+            id="outer-table")
+        driver = h.script(Raw("""
+            document.body.addEventListener('htmx:afterSettle', function(event) {
+                if (event.detail.target.id === 'detail-slot-outer' && !window.innerClickStarted) {
+                    window.innerClickStarted = true;
+                    setTimeout(function() {
+                        document.getElementById('row-inner').click();
+                    }, 10);
+                } else if (event.detail.target.id === 'detail-slot-inner') {
+                    document.body.dataset.nestedDone = '1';
+                }
+            });
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    document.getElementById('row-outer').click();
+                }, 50);
+            });
+            """))
+        page = repr("text/html", htmx(outer, driver;
+            hyperscript_version=nothing,
+            feedback=false,
+            compose=false,
+            overlay=false))
+        inner_html = repr("text/html", inner)
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif path == "/outer"
+                outer_requests[] += 1
+                HTTP.Response(200, ["Content-Type" => "text/html"], inner_html)
+            elseif path == "/inner"
+                inner_requests[] += 1
+                HTTP.Response(200, ["Content-Type" => "text/html"], "<p id=\"inner-loaded\">loaded</p>")
+            else
+                HTTP.Response(404)
+            end
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            @test contains(dom, "data-nested-done=\"1\"")
+            @test contains(dom, "id=\"inner-loaded\"")
+            @test outer_requests[] == 1
+            @test inner_requests[] == 1
+        finally
+            close(server)
+        end
+    end
+end
+
 """
 Documents repeated query/form value conversion: untyped or vector-typed
 parameters retain repeated values, while a vector cannot silently collapse
