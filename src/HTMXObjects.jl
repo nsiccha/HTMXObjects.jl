@@ -5,7 +5,7 @@ export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString, Raw
-export route!, record!, to_response, save_response, static_transform, MIMEResponse,
+export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
@@ -1498,14 +1498,76 @@ pico_page(content; pico_version="2", class="container", extra_head=()) =
 const _html_response = s -> HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body=s)
 
 """
+    generic_html(val) -> Node or ""
+
+Structured, escape-safe HTML for an ordinary Julia value whose type defines no
+`show(::IO, ::MIME"text/html", …)` method. This is the framework's *generic
+presentation contract*: a route may return plain data (a `NamedTuple` of
+results, a `Dict`, a count) and still render in HTML/HX mode, the same way
+`?plain` markdown mode already renders any value via `show(::MIME"text/markdown")`.
+
+Shapes, in dispatch order:
+- `nothing` → `""` (empty body, not an error)
+- `NamedTuple` / `AbstractDict` whose values are all equal-length vectors
+  (a column table) → a plain `h.table`
+- other `NamedTuple` / `AbstractDict` → an `h.dl` of `dt`/`dd` pairs, values
+  rendered recursively
+- anything else → `show(::MIME"text/plain")` text, in `h.pre(h.code(…))` when
+  it spans lines and `h.span(…)` when it does not
+
+A `Node` is always returned (never a bare `String`), because `auto` passes a
+top-level `AbstractString` through as trusted HTML — data must reach the
+client as a `Node` child so HTMX's escape-by-default applies. Rich rendering
+stays opt-in: define `show(::IO, ::MIME"text/html", ::MyType)` — or reach for
+[`render_table`](@ref) — and that wins over this fallback.
+"""
+generic_html(::Nothing) = ""
+generic_html(val) = let text = sprint(show, MIME"text/plain"(), val)
+    occursin('\n', text) ? h.pre(h.code(text)) : h.span(text)
+end
+generic_html(val::NamedTuple) = _generic_mapping_html(keys(val), values(val))
+generic_html(val::AbstractDict) = _generic_mapping_html(keys(val), values(val))
+
+# A column table is a mapping whose values are all vectors of one length —
+# checked structurally rather than via `Tables.istable` so the branch a caller
+# gets is predictable from the value alone.
+_is_column_table(vals) = !isempty(vals) && all(v -> v isa AbstractVector, vals) &&
+    allequal(map(length, collect(vals)))
+
+function _generic_mapping_html(ks, vs)
+    kv = collect(vs)
+    _is_column_table(kv) && return h.table(
+        h.thead(h.tr([h.th(string(k)) for k in ks]...)),
+        h.tbody([h.tr([h.td(string(col[i])) for col in kv]...)
+                 for i in eachindex(first(kv))]...),
+    )
+    items = Any[]
+    for (k, v) in zip(ks, kv)
+        push!(items, h.dt(string(k)))
+        push!(items, h.dd(_html_value(v)))
+    end
+    h.dl(items...)
+end
+
+# Normalize a route return value into something `auto` can render, leaving
+# every value that already has an HTML representation untouched. Arrays stay
+# element-wise (an array of Nodes is still a fragment) and OOB-swap Pairs keep
+# their target id, so this only ever adds rendering where there was none.
+_html_value(val) = showable(MIME"text/html"(), val) ? val : generic_html(val)
+_html_value(val::AbstractString) = val
+_html_value(val::AbstractArray) = map(_html_value, val)
+_html_value((content, id)::Pair) = _html_value(content) => id
+
+"""
     to_response(val)
 
 Convert any Julia value to an `HTTP.Response`. Handles Nodes, plain strings,
 arrays of either, and HTMX OOB-swap Pairs (via `auto`). Values that are
-already an `HTTP.Response` pass through unchanged.
+already an `HTTP.Response` pass through unchanged. Values with no `text/html`
+`show` method render via [`generic_html`](@ref) instead of raising.
 """
 to_response(val::HTTP.Response) = val
-to_response(val) = auto(val; wrap=_html_response)
+to_response(val) = auto(_html_value(val); wrap=_html_response)
 
 """
     MIMEResponse(content_type, body)
@@ -2530,7 +2592,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
-            save_response(record_dir, save_path, to_response(static_transform(wrapper(val); record_base)))
+            save_response(record_dir, save_path, to_response(static_transform(wrapper(_html_value(val)); record_base)))
         else
             save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
         end
@@ -2558,8 +2620,12 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         return fragment_resp
     end
 
-    # Full page wrap for direct browser navigation
-    to_response(wrapper(val))
+    # Full page wrap for direct browser navigation. Normalize first so
+    # `__page__` receives the same renderable the HX branch above sent —
+    # otherwise a plain value reaches the wrapper as a bare Node child and
+    # renders as `show(::MIME"text/plain")` text in full-page mode while
+    # rendering structurally over HX.
+    to_response(wrapper(_html_value(val)))
 end
 
 # For URL paths whose only `{x}` placeholders are at the very end (the
@@ -3069,7 +3135,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         else
-            wrapped = val
+            wrapped = _html_value(val)
             for obj in reverse(page_chain)
                 wrapper = _page_wrapper(obj)
                 isnothing(wrapper) || (wrapped = wrapper(wrapped))
@@ -3087,7 +3153,10 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
         end
     end
     is_htmx(req) && return to_response(val)
-    # Apply page wrappers: innermost (last) wraps first, then each outer one
+    # Apply page wrappers: innermost (last) wraps first, then each outer one.
+    # Normalized first, so a plain value renders the same structurally in
+    # full-page mode as the HX branch above already returns.
+    val = _html_value(val)
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (val = wrapper(val))
