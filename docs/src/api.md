@@ -29,6 +29,10 @@ HTMXObjects builds on [DynamicObjects.jl](https://github.com/nsiccha/DynamicObje
 
 `auto`, `htmx`, `h`, `Node`, `@__str`, `HyperscriptString`. See the [HTMX.jl docs](https://nsiccha.github.io/HTMX.jl/dev/) for full details.
 
+### Which HTMX.jl
+
+HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies on `h.*` escaping text and attribute values by default, neither of which exists before HTMX 1.0. HTMX.jl is unregistered, so a consumer assembling its own environment must supply a 1.x checkout itself: that is the `dev` branch of [nsiccha/HTMX.jl](https://github.com/nsiccha/HTMX.jl). Anything off the pre-1.0 history still reports `version = "0.1.0"` and is rejected at resolve time — deliberately, so the mismatch surfaces as an unsatisfiable requirement rather than as an `UndefVarError` on `HTMX.Raw` at render time.
+
 ## HTTP / request helpers
 
 | Export | Purpose |
