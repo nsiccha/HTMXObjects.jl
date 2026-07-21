@@ -15,7 +15,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
-    TestUIHost, ProviderApp, SemanticApp,
+    TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
+    StackedSemanticRoute,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -152,6 +153,32 @@ end
         @semantic (inputs=(quality=(domain=static_domain((:quick, :full)),),),) @post execute(; quality::Symbol=:quick) =
             h.p("nested:$(quality)")
     end
+end
+
+@htmx struct PolicyApp
+    @get html(; count::Int=1) = h.p("html:$(count)")
+    @get raw(; count::Int=1)::MIMEResponse =
+        MIMEResponse("text/plain", "raw:$(count)")
+    @get response(; count::Int=1)::HTTP.Response =
+        HTTP.Response(202, ["Content-Type" => "application/json"];
+                      body="{\"count\":$(count)}")
+    @ws stream(; count::Int=1) = "ws:$(count)"
+end
+
+@htmx struct MultiVerbPolicyApp
+    @semantic (inputs=(mode=(domain=static_domain((:raw, :json)),),),) @get exchange(; mode::Symbol=:raw)::MIMEResponse =
+        MIMEResponse("text/plain", "get:$(mode)")
+    @semantic (inputs=(count=(domain=static_domain((1, 2)),),),) @post exchange(; count::Int=1) =
+        h.p("post:$(count)")
+end
+
+# One declaration owns its semantic input, route, disk materialization, and
+# progress policy. The typed call LHS exercises the route-return annotation
+# parser while leaving the annotation visible to DynamicObjects.
+@htmx struct StackedSemanticRoute
+    __cache_base__ = tempdir()
+    @semantic (inputs=(count=(domain=static_domain((1, 2, 3)),),),) @get @mmap @progress model(; count::Int=2)::Vector{Float64} =
+        collect(1.0:count)
 end
 
 end # @testmodule HTMXOTestFixtures
@@ -337,6 +364,118 @@ end
     tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, tampered))
     tampered_response = tampered_handler(tampered)
     @test tampered_response.status == 400
+end
+
+@testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_execution_mode, _operation_polling_impl,
+        _property_descriptor, _run_operation
+
+    @test OperationPolicy().mode === :blocking
+    @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
+          OperationPolicy(:polling, "350ms", false)
+    @test_throws ArgumentError OperationPolicy(:background)
+
+    html_descriptor = _property_descriptor(PolicyApp, :html)
+    raw_descriptor = _property_descriptor(PolicyApp, :raw)
+    response_descriptor = _property_descriptor(PolicyApp, :response)
+    plain = HTTP.Request("GET", "/html?count=2")
+    hx = HTTP.Request("GET", "/html?count=2", ["HX-Request" => "true"])
+    @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
+                                    plain, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
+                                    hx, Verb{:GET}()) === :polling
+    @test _operation_execution_mode(OperationPolicy(:polling), raw_descriptor,
+                                    hx, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:polling), response_descriptor,
+                                    hx, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
+                                    hx, Verb{:WEBSOCKET}()) === :blocking
+
+    exchange = filter(route -> route.name === :exchange,
+                      semantic_descriptor(MultiVerbPolicyApp).routes)
+    get_exchange = only(filter(route -> route.verb === :GET, exchange))
+    post_exchange = only(filter(route -> route.verb === :POST, exchange))
+    @test get_exchange.property.output.type === MIMEResponse
+    @test post_exchange.property.output.type === nothing
+    @test only(filter(input -> input.name === :mode,
+                      get_exchange.property.inputs)).domain.cardinality == 2
+    @test only(filter(input -> input.name === :count,
+                      post_exchange.property.inputs)).domain.cardinality == 2
+    @test _operation_execution_mode(OperationPolicy(:polling),
+                                    get_exchange.property, hx,
+                                    Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:polling),
+                                    post_exchange.property, hx,
+                                    Verb{:POST}()) === :polling
+
+    app = PolicyApp()
+    target = (context=nothing, root=app, leaf=app)
+    polls = NamedTuple[]
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (render_result, ip, keys, call_kwargs, transport) -> begin
+            push!(polls, (; keys, call_kwargs, transport))
+            h.aside("polling")
+        end
+    try
+        operation = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
+                                   hx, 0, 0;
+                                   operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        @test length(polls) == 1
+        @test only(polls).call_kwargs == (count=2,)
+        @test only(polls).transport.poll_url == "/html?count=2"
+
+        raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
+                             HTTP.Request("GET", "/raw?count=3"), 0, 0;
+                             operation_policy=OperationPolicy(:polling))
+        @test raw.value isa MIMEResponse
+        @test raw.value.content_type == "text/plain"
+        @test raw.value.body == "raw:3"
+
+        response = _run_operation(target, PolicyApp, :response, Verb{:GET}(),
+                                  HTTP.Request("GET", "/response?count=4"), 0, 0;
+                                  operation_policy=OperationPolicy(:polling))
+        @test response.value.status == 202
+        @test String(response.value.body) == "{\"count\":4}"
+
+        ws = _run_operation(target, PolicyApp, :stream, Verb{:WEBSOCKET}(),
+                            HTTP.Request("GET", "/stream?count=5"), 0, 0;
+                            operation_policy=OperationPolicy(:polling))
+        @test ws.value(nothing) == "ws:5"
+        @test length(polls) == 1
+
+        route!(app; operation_policy=:polling)
+        raw_req = HTTP.Request("GET", "/raw?count=6", ["HX-Request" => "true"])
+        raw_handler = first(HTTP.Handlers.gethandler(
+            HTMXObjects.CONTEXT[].service.router, raw_req))
+        raw_response = raw_handler(raw_req)
+        @test raw_response.status == 200
+        @test HTTP.header(raw_response, "Content-Type") == "text/plain"
+        @test String(raw_response.body) == "raw:6"
+
+        response_req = HTTP.Request("GET", "/response?count=7",
+                                    ["HX-Request" => "true"])
+        response_handler = first(HTTP.Handlers.gethandler(
+            HTMXObjects.CONTEXT[].service.router, response_req))
+        final_response = response_handler(response_req)
+        @test final_response.status == 202
+        @test HTTP.header(final_response, "Content-Type") == "application/json"
+        @test String(final_response.body) == "{\"count\":7}"
+        @test length(polls) == 1
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+
+    stacked = only(filter(route -> route.name === :model,
+                          semantic_descriptor(StackedSemanticRoute).routes))
+    @test stacked.path == "/model"
+    @test stacked.property.output.type === Vector{Float64}
+    @test stacked.property.semantics.mmap
+    @test stacked.property.semantics.progress
+    @test stacked.property.semantics.pending
+    @test only(filter(input -> input.name === :count,
+                      stacked.property.inputs)).domain.cardinality == 3
 end
 
 @testitem ":index -> / routing" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin

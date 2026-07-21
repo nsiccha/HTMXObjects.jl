@@ -26,7 +26,7 @@ export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export Verb
-export OperationContext, RootProvider
+export OperationContext, RootProvider, OperationPolicy
 export semantic_descriptor, operation_form
 
 using DynamicObjects, HTTP, Tables
@@ -400,8 +400,19 @@ _property_lhs_name(_) = nothing
 _property_lhs_name(lhs::Symbol) = lhs
 function _property_lhs_name(lhs::Expr)
     (lhs.head === :call || lhs.head === :ref) && return _as_symbol(first(lhs.args))
-    lhs.head === :(::) && length(lhs.args) >= 1 && return _as_symbol(lhs.args[1])
+    lhs.head === :(::) && length(lhs.args) >= 1 && return _property_lhs_name(lhs.args[1])
     nothing
+end
+
+# Return-annotated route definitions have an outer `::ReturnType` around the
+# call-form LHS. Keep that annotation intact for DynamicObjects descriptor
+# inference while route-specific transforms work on the inner call.
+_route_call_lhs(_) = nothing
+function _route_call_lhs(lhs::Expr)
+    Meta.isexpr(lhs, (:call, :ref)) && return lhs
+    Meta.isexpr(lhs, :(::)) && length(lhs.args) == 2 || return nothing
+    inner = lhs.args[1]
+    Meta.isexpr(inner, (:call, :ref)) ? inner : nothing
 end
 
 # Name of a kwarg slot in a `:parameters` expr — bare `Symbol` or `:kw` Expr.
@@ -835,7 +846,8 @@ function _inject_verb_in_route_lhs!(struct_expr)
         verb === Symbol("") && continue
         Meta.isexpr(expr, :(=)) || continue
         lhs = expr.args[1]
-        Meta.isexpr(lhs, (:call, :ref)) || continue
+        lhs = _route_call_lhs(lhs)
+        lhs === nothing && continue
         verb_short = _verb_short(verb)
         verb_type = Expr(:(::), :__verb__, Expr(:curly, GlobalRef(@__MODULE__, :Verb), QuoteNode(verb_short)))
         # Skip past `:parameters` if present (must come immediately after
@@ -1269,10 +1281,11 @@ function _extract_route_info(struct_expr)
         lhs = expr.args[1]
         pos_params = Tuple{Symbol, Any}[]
         kw_params = Tuple{Symbol, Any, Bool}[]
-        if Meta.isexpr(lhs, (:call, :ref))
-            prop_name = lhs.args[1]
+        call_lhs = _route_call_lhs(lhs)
+        if call_lhs !== nothing
+            prop_name = call_lhs.args[1]
             Meta.isexpr(prop_name, :(::)) && (prop_name = prop_name.args[1])
-            for idx in lhs.args[2:end]
+            for idx in call_lhs.args[2:end]
                 if Meta.isexpr(idx, :parameters)
                     for kw_arg in idx.args
                         if Meta.isexpr(kw_arg, :kw)
@@ -1965,6 +1978,28 @@ struct RootProvider{F,K}
     key::K
 end
 
+"""
+    OperationPolicy(mode=:blocking; poll_interval="200ms", keep_progress=true)
+
+Select route execution transport. `:blocking` preserves historical synchronous
+responses. `:polling` uses the Treebars extension for pending-capable HTML
+operations. `:auto` polls only HTMX requests whose DynamicObjects descriptor
+advertises pending capability. Declared `HTTP.Response` and `MIMEResponse`
+outputs always remain direct, as do WebSocket route lambdas.
+"""
+struct OperationPolicy
+    mode::Symbol
+    poll_interval::String
+    keep_progress::Bool
+end
+
+function OperationPolicy(mode::Symbol=:blocking; poll_interval="200ms",
+        keep_progress::Bool=true)
+    mode in (:blocking, :polling, :auto) || throw(ArgumentError(
+        "operation-policy mode must be :blocking, :polling, or :auto (got $(repr(mode)))"))
+    OperationPolicy(mode, string(poll_interval), keep_progress)
+end
+
 function RootProvider(factory; scope::Symbol=:request, key=nothing)
     scope in (:request, :session, :job) ||
         throw(ArgumentError("root-provider scope must be :request, :session, or :job (got $(repr(scope)))"))
@@ -1988,6 +2023,7 @@ _normalize_root_provider(factory) = RootProvider(factory)
 # Companion registry rather than another field on `_registered_types`: that
 # const's NamedTuple value type is frozen under Julia 1.10/Revise.
 const _root_providers = Dict{DataType,Any}()
+const _operation_policies = Dict{DataType,OperationPolicy}()
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
@@ -2745,6 +2781,18 @@ function _property_descriptors(T)
     Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)
 end
 
+function _property_descriptor(T, name::Symbol, verb::Symbol)
+    expected = Verb{verb}
+    for descriptor in _property_descriptors(T)
+        descriptor.name === name || continue
+        inputs = get(descriptor, :inputs, NamedTuple[])
+        any(input -> input.name === :__verb__ &&
+                     get(input, :type, nothing) === expected, inputs) &&
+            return descriptor
+    end
+    _property_descriptor(T, name)
+end
+
 function _operation_input_values(descriptor, idx_vals, kw_pairs)
     values = Dict{Symbol,Any}(kw_pairs)
     descriptor === nothing && return values
@@ -2801,8 +2849,9 @@ function _validate_input_domain!(obj, T, input, value, values)
     end
 end
 
-function _validate_operation_domains!(obj, T, name::Symbol, idx_vals, kw_pairs)
-    descriptor = _property_descriptor(T, name)
+function _validate_operation_domains!(obj, T, name::Symbol, verb::Symbol,
+        idx_vals, kw_pairs)
+    descriptor = _property_descriptor(T, name, verb)
     descriptor === nothing && return
     values = _operation_input_values(descriptor, idx_vals, kw_pairs)
     for input in get(descriptor, :inputs, NamedTuple[])
@@ -2812,15 +2861,64 @@ function _validate_operation_domains!(obj, T, name::Symbol, idx_vals, kw_pairs)
     end
 end
 
+_verb_symbol(::Verb{V}) where {V} = V
+
+function _declared_final_response(descriptor)
+    descriptor === nothing && return false
+    output = get(descriptor, :output, nothing)
+    output === nothing && return false
+    T = get(output, :type, nothing)
+    T isa Type && T <: Union{HTTP.Response,MIMEResponse}
+end
+
+function _operation_execution_mode(policy::OperationPolicy, descriptor,
+        req::HTTP.Request, verb_inst::Verb)
+    _verb_symbol(verb_inst) === :WEBSOCKET && return :blocking
+    _declared_final_response(descriptor) && return :blocking
+    policy.mode === :auto || return policy.mode
+    descriptor === nothing && return :blocking
+    semantics = get(descriptor, :semantics, nothing)
+    semantics === nothing && return :blocking
+    get(semantics, :pending, false) && is_htmx(req) ? :polling : :blocking
+end
+
+# Extension seam: core degrades polling requests to the historical blocking
+# call when Treebars is absent. The extension replaces this Ref without method
+# overwrites, matching the recording bridge's precompile-safe pattern.
+const _operation_polling_impl = Ref{Any}(
+    (render_result, ip, keys, call_kwargs, _transport) ->
+        render_result(ip(keys...; call_kwargs...))
+)
+
+_operation_polling(args...) = _operation_polling_impl[](args...)
+
+function _execute_operation(policy::OperationPolicy, descriptor, target, name,
+        verb_inst, idx_vals, kw_pairs, req)
+    prop = getproperty(target.leaf, name)
+    mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
+    if mode === :polling
+        transport = (poll_url=String(req.target), label=Long(name),
+                     poll_interval=policy.poll_interval,
+                     keep_progress=policy.keep_progress,
+                     error_obj=target.leaf, req=req)
+        return _operation_polling(identity, prop, (verb_inst, idx_vals...),
+                                  NamedTuple(kw_pairs), transport)
+    end
+    prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+end
+
 # The common typed pass-through runner. Route code never manually reads query,
 # form, multipart, or WebSocket upgrade parameters: the emitted `_extract_args`
 # method validates/coerces them, then the verb-keyed DO property is invoked.
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
-        req::HTTP.Request, base::Int, n_params::Int)
+        req::HTTP.Request, base::Int, n_params::Int;
+        operation_policy::OperationPolicy=OperationPolicy())
     idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
-    _validate_operation_domains!(target.leaf, LeafT, name, idx_vals, kw_pairs)
-    prop = getproperty(target.leaf, name)
-    value = prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+    verb = _verb_symbol(verb_inst)
+    _validate_operation_domains!(target.leaf, LeafT, name, verb, idx_vals, kw_pairs)
+    descriptor = _property_descriptor(LeafT, name, verb)
+    value = _execute_operation(operation_policy, descriptor, target, name,
+                               verb_inst, idx_vals, kw_pairs, req)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -2848,7 +2946,7 @@ but retain a transport-specific `ws` signature and response lifecycle.
 """
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         path, n_params, record_dir; root_prefix="", record_base::String="",
-        root_provider=RootProvider())
+        root_provider=RootProvider(), operation_policy=OperationPolicy())
     base = _base_segments(path, n_params)
     is_included = !isempty(chain)
     # Number of URL segments consumed by the root prefix (e.g. "/foo/bar" → 2)
@@ -2882,7 +2980,8 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
 
         try
             target = (; context, root, leaf)
-            operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params)
+            operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
+                                       operation_policy)
             idx_vals = operation.idx_vals
             val = operation.value
 
@@ -2998,7 +3097,8 @@ end
 function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractString,
                               mount_prefix::AbstractString, name::Symbol, info,
                               method::AbstractString, record_dir, record_base::AbstractString,
-                              root_provider::RootProvider)
+                              root_provider::RootProvider,
+                              operation_policy::OperationPolicy)
     positional_indices = Any[]
     has_kwargs = false
     # The first positional index of every route is the injected
@@ -3036,22 +3136,25 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 target = _operation_target(root_provider, OwnerT, chain, req,
                                            mount_prefix, ws_root_segs, :websocket)
                 operation = _run_operation(target, RouteT, name, ws_verb,
-                                           req, ws_base, n_params)
+                                           req, ws_base, n_params; operation_policy)
                 operation.value(ws)
             end)
         elseif isempty(param_strs) && has_kwargs
             # kwargs-only route (no path params): mark static for the recorder
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
-                                    root_prefix=mount_prefix, record_base, root_provider)
+                                    root_prefix=mount_prefix, record_base, root_provider,
+                                    operation_policy)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
-                                    root_prefix=mount_prefix, record_base, root_provider)
+                                    root_prefix=mount_prefix, record_base, root_provider,
+                                    operation_policy)
         else
             # Register the full route (all params explicit)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
-                                    root_prefix=mount_prefix, record_base, root_provider)
+                                    root_prefix=mount_prefix, record_base, root_provider,
+                                    operation_policy)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -3061,7 +3164,8 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 short_path = _route_path(prefix, name, short_params)
                 _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
                                         length(short_params), record_dir;
-                                        root_prefix=mount_prefix, record_base, root_provider)
+                                        root_prefix=mount_prefix, record_base, root_provider,
+                                        operation_policy)
             end
         end
     end
@@ -3125,17 +3229,20 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
 end
 
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
-        parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()))
+        parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
+        operation_policy=get(_operation_policies, T, OperationPolicy()))
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _walk_route_meta(T,
         (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
             chain = vcat(parent_chain, [step])
             _register_included_routes(T, nested_type, chain, nested_prefix, record_dir;
-                                      root_prefix=mount_prefix, record_base, root_provider)
+                                      root_prefix=mount_prefix, record_base, root_provider,
+                                      operation_policy)
         end,
         (name, info, method) -> _register_one_route(T, T, Symbol[], prefix,
-            mount_prefix, name, info, method, record_dir, record_base, root_provider),
+            mount_prefix, name, info, method, record_dir, record_base,
+            root_provider, operation_policy),
     )
 end
 
@@ -3313,18 +3420,20 @@ end
 # and the parent's `@include` desugar then threads `/<name>` per nesting level.
 function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String,
         record_dir; root_prefix::String="", record_base::String="",
-        root_provider=get(_root_providers, ParentT, RootProvider()))
+        root_provider=get(_root_providers, ParentT, RootProvider()),
+        operation_policy=get(_operation_policies, ParentT, OperationPolicy()))
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     _walk_route_meta(NestedT,
         (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
             _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
-                nested_prefix, record_dir; root_prefix, record_base, root_provider)
+                nested_prefix, record_dir; root_prefix, record_base, root_provider,
+                operation_policy)
         end,
         (name, info, method) -> _register_one_route(ParentT, NestedT, chain,
             prefix, root_prefix, name, info, method, record_dir, record_base,
-            root_provider),
+            root_provider, operation_policy),
     )
 end
 
@@ -3522,7 +3631,7 @@ function _semantic_param(param, property)
 end
 
 function _semantic_route(owner, route)
-    property = _property_descriptor(owner, route.name)
+    property = _property_descriptor(owner, route.name, route.verb)
     params = [_semantic_param(param, property) for param in route.params]
     merge(route, (owner=owner, params=params, property=property))
 end
@@ -3559,7 +3668,8 @@ end
 semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
 
 """
-    route!(app; prefix="", record_dir=nothing, record_base="", root_provider=nothing)
+    route!(app; prefix="", record_dir=nothing, record_base="",
+           root_provider=nothing, operation_policy=OperationPolicy())
 
 Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` route declared on
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) with the
@@ -3574,19 +3684,26 @@ Oxygen router. Returns `app`.
 - `root_provider` — a [`RootProvider`](@ref), or a callable
   `factory(RootT, context)`, used by both HTTP and WebSocket operations.
   `nothing` preserves the historic fresh-root-per-request behavior.
+- `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
+  polling, or HTMX-aware automatic execution. Defaults to blocking.
 
 `route!` stores its registration settings per type in internal registries so the
 `_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
 **you do not need to call `route!` again after editing a route body**.
 """
-function route!(obj; prefix="", record_dir=nothing, record_base="", root_provider=nothing)
+function route!(obj; prefix="", record_dir=nothing, record_base="",
+        root_provider=nothing, operation_policy=OperationPolicy())
     T = typeof(obj)
     provider = _normalize_root_provider(root_provider)
+    policy = operation_policy isa OperationPolicy ? operation_policy :
+             OperationPolicy(operation_policy)
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
     _root_providers[T] = provider
+    _operation_policies[T] = policy
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
-    _register_routes(T; prefix, record_dir, record_base, root_provider=provider)
+    _register_routes(T; prefix, record_dir, record_base, root_provider=provider,
+                     operation_policy=policy)
     obj
 end
 
@@ -3678,7 +3795,8 @@ function _reroute!(T::DataType)
         args = _registered_types[T]
         _register_routes(T; args.prefix, args.record_dir,
             record_base=get(_record_bases, T, ""),
-            root_provider=get(_root_providers, T, RootProvider()))
+            root_provider=get(_root_providers, T, RootProvider()),
+            operation_policy=get(_operation_policies, T, OperationPolicy()))
     end
     # If T is an @include'd sub-struct, re-register its parent(s)
     if haskey(_included_type_parents, T)
@@ -3687,7 +3805,8 @@ function _reroute!(T::DataType)
             args = _registered_types[ParentT]
             _register_routes(ParentT; args.prefix, args.record_dir,
                 record_base=get(_record_bases, ParentT, ""),
-                root_provider=get(_root_providers, ParentT, RootProvider()))
+                root_provider=get(_root_providers, ParentT, RootProvider()),
+                operation_policy=get(_operation_policies, ParentT, OperationPolicy()))
         end
     end
 end
