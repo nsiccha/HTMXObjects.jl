@@ -24,6 +24,7 @@ export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export Verb
+export OperationContext, RootProvider
 
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
@@ -1926,6 +1927,64 @@ const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tupl
 const _record_bases = Dict{DataType, String}()
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
+
+"""
+    OperationContext
+
+Request-local context passed to a [`RootProvider`](@ref). `scope` and `key`
+describe the provider-selected application lifetime (`:request`, `:session`, or
+`:job`); `transport` is `:http` or `:websocket`. The provider owns any storage
+behind session/job keys — HTMXObjects only supplies the request, externally
+visible route/prefix, and a uniform construction seam.
+"""
+struct OperationContext{R,K}
+    request::R
+    prefix::String
+    route::String
+    transport::Symbol
+    scope::Symbol
+    key::K
+end
+
+"""
+    RootProvider(factory; scope=:request, key=nothing)
+
+Construct roots for registered operations. `factory` is called as
+`factory(RootT, context)` and must return a `RootT`. For `scope=:session` or
+`:job`, pass a `key(req)` function and let the application-owned factory decide
+how roots are retained or reconstructed. The default request provider preserves
+the historic behavior: a fresh root is constructed for every request with
+`__req__`, `__route__`, and `__prefix__` populated by HTMXObjects.
+"""
+struct RootProvider{F,K}
+    factory::F
+    scope::Symbol
+    key::K
+end
+
+function RootProvider(factory; scope::Symbol=:request, key=nothing)
+    scope in (:request, :session, :job) ||
+        throw(ArgumentError("root-provider scope must be :request, :session, or :job (got $(repr(scope)))"))
+    isnothing(key) && scope !== :request &&
+        throw(ArgumentError("root-provider scope $(repr(scope)) requires a key(req) function"))
+    keyfn = isnothing(key) ? (_req -> nothing) : key
+    RootProvider{typeof(factory),typeof(keyfn)}(factory, scope, keyfn)
+end
+
+_default_root_factory(RootT, context::OperationContext) =
+    RootT(; __req__=context.request, __route__=context.route,
+          _prefix_kw(context.prefix)...)
+
+RootProvider(; scope::Symbol=:request, key=nothing) =
+    RootProvider(_default_root_factory; scope, key)
+
+_normalize_root_provider(::Nothing) = RootProvider()
+_normalize_root_provider(provider::RootProvider) = provider
+_normalize_root_provider(factory) = RootProvider(factory)
+
+# Companion registry rather than another field on `_registered_types`: that
+# const's NamedTuple value type is frozen under Julia 1.10/Revise.
+const _root_providers = Dict{DataType,Any}()
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
@@ -2028,8 +2087,7 @@ end
 # Wraps the handler so that pending Revise errors are surfaced as the
 # framework's standard error article (see `_check_revise_errors!`) — this is
 # the single chokepoint for all HTTP route registrations, so the check
-# applies uniformly to plain, indexed, and `@include`'d routes. WebSocket
-# handlers go through `Oxygen.register` directly and are not covered.
+# applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
 function _register_handler(method, path, handler)
     wrapped = function(req)
         try
@@ -2040,6 +2098,18 @@ function _register_handler(method, path, handler)
         handler(req)
     end
     HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, wrapped)
+end
+
+# Oxygen validates handler argument names against `{path}` placeholders. Our
+# emitted runner intentionally extracts every argument from the request so it
+# can apply one typed validation path to HTTP and WebSocket operations. Register
+# the GET upgrade directly, as Oxygen ultimately does, and keep it behind the
+# same Revise-error chokepoint as every other emitted route.
+function _register_websocket_handler(path, handler)
+    _register_handler("WEBSOCKET", path, function(req)
+        HTTP.WebSockets.isupgrade(req) &&
+            HTTP.WebSockets.upgrade(ws -> handler(ws, req), req.context[:stream])
+    end)
 end
 
 # --- Error handling ---
@@ -2625,6 +2695,44 @@ function _request_route_path(req::HTTP.Request, prefix::AbstractString)
     prefix * rp
 end
 
+function _operation_context(provider::RootProvider, req::HTTP.Request,
+        root_prefix::AbstractString, transport::Symbol)
+    prefix = _request_prefix(req, root_prefix)
+    OperationContext(req, prefix, _request_route_path(req, prefix), transport,
+                     provider.scope, provider.key(req))
+end
+
+function _provide_root(provider::RootProvider, RootT, context::OperationContext)
+    root = provider.factory(RootT, context)
+    root isa RootT || throw(ArgumentError(
+        "root provider for $(RootT) returned $(typeof(root)); expected an instance of $(RootT)"))
+    root
+end
+
+# Shared request/session/job target resolution for HTTP and WebSocket routes.
+# Keeping this below the registration funnel means both transports construct
+# the same root type through the same provider and walk the same include chain.
+function _operation_target(provider::RootProvider, RootT, chain::Vector,
+        req::HTTP.Request, root_prefix::AbstractString, root_segs::Int,
+        transport::Symbol)
+    context = _operation_context(provider, req, root_prefix, transport)
+    root = _provide_root(provider, RootT, context)
+    leaf = isempty(chain) ? root : _walk_chain(root, chain, req, root_segs)
+    (; context, root, leaf)
+end
+
+# The common typed pass-through runner. Route code never manually reads query,
+# form, multipart, or WebSocket upgrade parameters: the emitted `_extract_args`
+# method validates/coerces them, then the verb-keyed DO property is invoked.
+function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
+        req::HTTP.Request, base::Int, n_params::Int)
+    idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
+    prop = getproperty(target.leaf, name)
+    value = prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+    (; context=target.context, root=target.root, leaf=target.leaf,
+       idx_vals, kw_pairs, value)
+end
+
 """
     _register_route_handler(RootT, LeafT, chain, method, name, path, n_params, record_dir; root_prefix="")
 
@@ -2643,11 +2751,12 @@ The handler:
 `Verb{V}` is the singleton encoded from `Symbol(method)` at registration
 time (`"GET"` → `Verb{:GET}`).
 
-WebSocket handlers do not go through this path — they have a different
-signature (`ws` instead of `req`) and skip the HTTP error pipeline.
+WebSocket handlers share the root-provider and typed operation runner below,
+but retain a transport-specific `ws` signature and response lifecycle.
 """
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
-        path, n_params, record_dir; root_prefix="", record_base::String="")
+        path, n_params, record_dir; root_prefix="", record_base::String="",
+        root_provider=RootProvider())
     base = _base_segments(path, n_params)
     is_included = !isempty(chain)
     # Number of URL segments consumed by the root prefix (e.g. "/foo/bar" → 2)
@@ -2657,13 +2766,12 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     # `Symbol(method)` is the verb short symbol used in `Verb{V}`.
     verb_inst = Verb{Symbol(method)}()
     _register_handler(method, path, function(req)
-        local root, leaf
+        local context, root, leaf
         try
-            # Resolve the request prefix once and feed it to BOTH `__route__`
-            # (so it stays prefix-aware under a path-stripping proxy) and
-            # `__prefix__` — keeping the two URL-building paths in agreement.
-            pfx = _request_prefix(req, root_prefix)
-            root = RootT(; __req__=req, __route__=_request_route_path(req, pfx), _prefix_kw(pfx)...)
+            target = _operation_target(root_provider, RootT, Symbol[], req,
+                                       root_prefix, root_segs, :http)
+            context = target.context
+            root = target.root
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -2681,10 +2789,10 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         end
 
         try
-            local idx_vals, kw_pairs
-            idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
-            prop = getproperty(leaf, name)
-            val = prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+            target = (; context, root, leaf)
+            operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params)
+            idx_vals = operation.idx_vals
+            val = operation.value
 
             save_path = if isnothing(record_dir)
                 nothing
@@ -2797,7 +2905,8 @@ end
 # `_register_included_routes` (nested @include) funnel here.
 function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractString,
                               mount_prefix::AbstractString, name::Symbol, info,
-                              method::AbstractString, record_dir, record_base::AbstractString)
+                              method::AbstractString, record_dir, record_base::AbstractString,
+                              root_provider::RootProvider)
     positional_indices = Any[]
     has_kwargs = false
     # The first positional index of every route is the injected
@@ -2828,23 +2937,29 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             # is `(::Verb{:WEBSOCKET}, url_args…)` so the registered handler
             # threads `Verb{:WEBSOCKET}()` like any other route.
             ws_base = _base_segments(path, n_params)
+            ws_root_segs = isempty(mount_prefix) ? 0 :
+                           count(==('/'), strip(mount_prefix, '/')) + 1
             ws_verb = Verb{:WEBSOCKET}()
-            register(CONTEXT[], "WEBSOCKET", path, function(ws)
-                idx_vals, kw_pairs = _extract_args(RouteT, Val(name), ws_verb, ws.request, ws_base, n_params)
-                prop = getproperty(RouteT(; __req__=ws.request, _prefix_kw(_request_prefix(ws.request, mount_prefix))...), name)
-                lambda = prop(ws_verb, idx_vals...; NamedTuple(kw_pairs)...)
-                lambda(ws)
+            _register_websocket_handler(path, function(ws, req)
+                target = _operation_target(root_provider, OwnerT, chain, req,
+                                           mount_prefix, ws_root_segs, :websocket)
+                operation = _run_operation(target, RouteT, name, ws_verb,
+                                           req, ws_base, n_params)
+                operation.value(ws)
             end)
         elseif isempty(param_strs) && has_kwargs
             # kwargs-only route (no path params): mark static for the recorder
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
-            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir; root_prefix=mount_prefix, record_base)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
+                                    root_prefix=mount_prefix, record_base, root_provider)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
-            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir; root_prefix=mount_prefix, record_base)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
+                                    root_prefix=mount_prefix, record_base, root_provider)
         else
             # Register the full route (all params explicit)
-            _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir; root_prefix=mount_prefix, record_base)
+            _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
+                                    root_prefix=mount_prefix, record_base, root_provider)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -2852,7 +2967,9 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 cut = default_positions[k]  # position of first omitted param
                 short_params = param_strs[1:cut-1]
                 short_path = _route_path(prefix, name, short_params)
-                _register_route_handler(OwnerT, RouteT, chain, method, name, short_path, length(short_params), record_dir; root_prefix=mount_prefix, record_base)
+                _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
+                                        length(short_params), record_dir;
+                                        root_prefix=mount_prefix, record_base, root_provider)
             end
         end
     end
@@ -2915,15 +3032,18 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
     end
 end
 
-function _register_routes(T; prefix="", record_dir=nothing, record_base::String="", parent_chain=Any[])
+function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
+        parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()))
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _walk_route_meta(T,
         (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
             chain = vcat(parent_chain, [step])
-            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir; root_prefix=mount_prefix, record_base)
+            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir;
+                                      root_prefix=mount_prefix, record_base, root_provider)
         end,
-        (name, info, method) -> _register_one_route(T, T, Symbol[], prefix, mount_prefix, name, info, method, record_dir, record_base),
+        (name, info, method) -> _register_one_route(T, T, Symbol[], prefix,
+            mount_prefix, name, info, method, record_dir, record_base, root_provider),
     )
 end
 
@@ -3099,16 +3219,20 @@ end
 # `root_prefix` is the parent's mount prefix (with leading "/") — passed verbatim
 # to the handler so `ParentT(; __prefix__=root_prefix)` constructs correctly,
 # and the parent's `@include` desugar then threads `/<name>` per nesting level.
-function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String, record_dir; root_prefix::String="", record_base::String="")
+function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String,
+        record_dir; root_prefix::String="", record_base::String="",
+        root_provider=get(_root_providers, ParentT, RootProvider()))
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     _walk_route_meta(NestedT,
         (name, info, nested_type) -> begin
             nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
             _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
-                nested_prefix, record_dir; root_prefix, record_base)
+                nested_prefix, record_dir; root_prefix, record_base, root_provider)
         end,
-        (name, info, method) -> _register_one_route(ParentT, NestedT, chain, prefix, root_prefix, name, info, method, record_dir, record_base),
+        (name, info, method) -> _register_one_route(ParentT, NestedT, chain,
+            prefix, root_prefix, name, info, method, record_dir, record_base,
+            root_provider),
     )
 end
 
@@ -3292,7 +3416,7 @@ function reflect(::Type{T}) where {T}
 end
 
 """
-    route!(app; prefix="", record_dir=nothing, record_base="")
+    route!(app; prefix="", record_dir=nothing, record_base="", root_provider=nothing)
 
 Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` route declared on
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) with the
@@ -3304,17 +3428,22 @@ Oxygen router. Returns `app`.
   [`save_response`](@ref) under that directory; intended for static export.
 - `record_base` — URL prefix to strip from saved file paths when `record_dir`
   is set (for deploying to a non-root subpath).
+- `root_provider` — a [`RootProvider`](@ref), or a callable
+  `factory(RootT, context)`, used by both HTTP and WebSocket operations.
+  `nothing` preserves the historic fresh-root-per-request behavior.
 
-`route!` stores `(prefix, record_dir)` per type in an internal registry so the
+`route!` stores its registration settings per type in internal registries so the
 `_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
 **you do not need to call `route!` again after editing a route body**.
 """
-function route!(obj; prefix="", record_dir=nothing, record_base="")
+function route!(obj; prefix="", record_dir=nothing, record_base="", root_provider=nothing)
     T = typeof(obj)
+    provider = _normalize_root_provider(root_provider)
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
+    _root_providers[T] = provider
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
-    _register_routes(T; prefix, record_dir, record_base)
+    _register_routes(T; prefix, record_dir, record_base, root_provider=provider)
     obj
 end
 
@@ -3404,14 +3533,18 @@ _recording_polling(args...; kwargs...) = _recording_polling_impl[](args...; kwar
 function _reroute!(T::DataType)
     if haskey(_registered_types, T)
         args = _registered_types[T]
-        _register_routes(T; args.prefix, args.record_dir, record_base=get(_record_bases, T, ""))
+        _register_routes(T; args.prefix, args.record_dir,
+            record_base=get(_record_bases, T, ""),
+            root_provider=get(_root_providers, T, RootProvider()))
     end
     # If T is an @include'd sub-struct, re-register its parent(s)
     if haskey(_included_type_parents, T)
         for ParentT in _included_type_parents[T]
             haskey(_registered_types, ParentT) || continue
             args = _registered_types[ParentT]
-            _register_routes(ParentT; args.prefix, args.record_dir, record_base=get(_record_bases, ParentT, ""))
+            _register_routes(ParentT; args.prefix, args.record_dir,
+                record_base=get(_record_bases, ParentT, ""),
+                root_provider=get(_root_providers, ParentT, RootProvider()))
         end
     end
 end
