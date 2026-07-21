@@ -1529,6 +1529,8 @@ Shapes, in dispatch order:
   (a column table) → a plain `h.table`
 - other `NamedTuple` / `AbstractDict` → an `h.dl` of `dt`/`dd` pairs, values
   rendered recursively
+- `AbstractMatrix` → an `h.table` of one `tr` per matrix row, preserving shape
+  and row-major reading order
 - anything else → `show(::MIME"text/plain")` text, in `h.pre(h.code(…))` when
   it spans lines and `h.span(…)` when it does not
 
@@ -1544,6 +1546,14 @@ generic_html(val) = let text = sprint(show, MIME"text/plain"(), val)
 end
 generic_html(val::NamedTuple) = _generic_mapping_html(keys(val), values(val))
 generic_html(val::AbstractDict) = _generic_mapping_html(keys(val), values(val))
+
+# A 2-D array of plain data is a grid, not a fragment sequence. Cells are
+# stringified like the column-table branch above rather than recursed through
+# `_html_value`, so a numeric grid stays a plain table of numbers; either way
+# the text reaches the client as a Node child and is escaped.
+generic_html(val::AbstractMatrix) = h.table(h.tbody(
+    [h.tr([h.td(string(val[i, j])) for j in axes(val, 2)]...) for i in axes(val, 1)]...,
+))
 
 # A column table is a mapping whose values are all vectors of one length —
 # checked structurally rather than via `Tables.istable` so the branch a caller
@@ -1574,6 +1584,15 @@ _html_value(val) = showable(MIME"text/html"(), val) ? val : generic_html(val)
 _html_value(val::AbstractString) = val
 _html_value(val::AbstractArray) = map(_html_value, val)
 _html_value((content, id)::Pair) = _html_value(content) => id
+
+# A matrix of plain data renders as a grid. Flattening it element-wise like any
+# other array would emit its cells in column-major order with the shape gone —
+# a `Matrix{Float64}` result reaching the client as an unlabelled, mis-ordered
+# run of numbers. A matrix holding anything already renderable (a matrix of
+# Nodes) keeps the element-wise fragment behavior, so this only changes the
+# shapes that previously had no rendering at all.
+_html_value(val::AbstractMatrix) =
+    any(x -> showable(MIME"text/html"(), x), val) ? map(_html_value, val) : generic_html(val)
 
 """
     to_response(val)
