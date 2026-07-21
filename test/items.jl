@@ -16,7 +16,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
-    StackedSemanticRoute,
+    StackedSemanticRoute, ContextSemanticApp,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -152,6 +152,33 @@ end
     @include nested = begin
         @semantic (inputs=(quality=(domain=static_domain((:quick, :full)),),),) @post execute(; quality::Symbol=:quick) =
             h.p("nested:$(quality)")
+    end
+end
+
+@htmx struct ContextSemanticApp
+    @param fit_key::String
+
+    @include analysis = begin
+        model_options(study::Symbol) = study === :alpha ? (
+            (value=:a1, label="Alpha 1"),
+            (value=:a2, label="Alpha 2"),
+        ) : (
+            (value=:b1, label="Beta 1"),
+            (value=:b2, label="Beta 2"),
+        )
+
+        @semantic (inputs=(
+            study=(domain=static_domain((
+                (value=:alpha, label="Alpha"),
+                (value=:beta, label="Beta"),
+            )),),
+            model=(domain=dynamic_domain(:model_options;
+                                         dependencies=(:study,)),),
+        ),) @get analyze(; study::Symbol=:alpha, model::Symbol) =
+            h.p("$(fit_key):$(study):$(model)")
+
+        @get raw_context(; count::Int=1)::MIMEResponse =
+            MIMEResponse("text/plain", "$(fit_key):$(count)")
     end
 end
 
@@ -366,6 +393,104 @@ end
     @test tampered_response.status == 400
 end
 
+@testitem "generated semantic form context and dependent refresh" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_polling_impl, _run_operation
+
+    app_req = HTTP.Request("GET", "/?fit_key=fit-17")
+    app = ContextSemanticApp(; __req__=app_req)
+    leaf = app.analysis
+    html = repr("text/html", operation_form(
+        leaf, :analyze; values=(study=:alpha,), target_id="#analysis",
+        submit="Analyze", form_class="semantic-form"))
+
+    # Root context is inferred from the request and carried, never exposed as
+    # another generated operation control.
+    @test contains(html, "type=\"hidden\" name=\"fit_key\" value=\"fit-17\"")
+    @test !contains(html, ">fit key<")
+    @test contains(html, "hx-get=\"/analysis/analyze?__htmxo_form=1\"")
+    @test contains(html, "hx-include=\"closest form\"")
+    @test contains(html, "hx-target=\"closest form\"")
+    @test contains(html, "Alpha 1")
+    @test contains(html, "name=\"__htmxo_target_id\" value=\"#analysis\"")
+
+    # The same query context survives the automatic poll URL. The poll marker
+    # is additive; typed operation inputs remain separate from root @params.
+    poll_req = HTTP.Request(
+        "GET", "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1",
+        ["HX-Request" => "true"],
+    )
+    poll_app = ContextSemanticApp(; __req__=poll_req)
+    poll_leaf = poll_app.analysis
+    transport = Ref{Any}()
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _ip, _keys, call_kwargs, seen_transport) -> begin
+            transport[] = (; call_kwargs, seen_transport)
+            h.aside("polling")
+        end
+    try
+        operation = _run_operation(
+            (context=nothing, root=poll_app, leaf=poll_leaf),
+            typeof(poll_leaf), :analyze, Verb{:GET}(), poll_req, 0, 0;
+            operation_policy=OperationPolicy(:auto),
+        )
+        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        @test transport[].call_kwargs == (study=:alpha, model=:a1)
+        @test transport[].seen_transport.poll_url ==
+              "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1&__htmxo_poll=1"
+        @test poll_leaf.fit_key == "fit-17"
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+
+    route!(app; operation_policy=:auto)
+    refresh = HTTP.Request(
+        "GET",
+        "/analysis/analyze?__htmxo_form=1&fit_key=fit-17&study=beta&" *
+        "__htmxo_target_id=%23analysis&__htmxo_submit=Analyze&" *
+        "__htmxo_form_class=semantic-form&__htmxo_swap=innerHTML&" *
+        "__htmxo_radio_max=4",
+        ["HX-Request" => "true"],
+    )
+    refresh_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, refresh))
+    refreshed = refresh_handler(refresh)
+    refreshed_html = String(refreshed.body)
+    @test refreshed.status == 200
+    @test contains(refreshed_html, "Beta 1")
+    @test !contains(refreshed_html, "Alpha 1")
+    @test contains(refreshed_html, "hx-target=\"#analysis\"")
+    @test contains(refreshed_html, "class=\"semantic-form\"")
+    @test contains(refreshed_html,
+                   "type=\"hidden\" name=\"fit_key\" value=\"fit-17\"")
+
+    good = HTTP.Request(
+        "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=b1")
+    good_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, good))
+    good_response = good_handler(good)
+    @test good_response.status == 200
+    @test contains(String(good_response.body), "fit-17:beta:b1")
+
+    forged = HTTP.Request(
+        "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=a1")
+    forged_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, forged))
+    forged_response = forged_handler(forged)
+    @test forged_response.status == 400
+
+    raw = HTTP.Request(
+        "GET", "/analysis/raw_context?fit_key=fit-17&count=3",
+        ["HX-Request" => "true"],
+    )
+    raw_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, raw))
+    raw_response = raw_handler(raw)
+    @test raw_response.status == 200
+    @test HTTP.header(raw_response, "Content-Type") == "text/plain"
+    @test String(raw_response.body) == "fit-17:3"
+end
+
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_execution_mode, _operation_polling_impl,
         _property_descriptor, _run_operation
@@ -406,7 +531,7 @@ end
                                     Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:polling),
                                     post_exchange.property, hx,
-                                    Verb{:POST}()) === :polling
+                                    Verb{:POST}()) === :blocking
 
     app = PolicyApp()
     target = (context=nothing, root=app, leaf=app)
@@ -424,7 +549,21 @@ end
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
         @test length(polls) == 1
         @test only(polls).call_kwargs == (count=2,)
-        @test only(polls).transport.poll_url == "/html?count=2"
+        @test only(polls).transport.poll_url ==
+              "/html?count=2&__htmxo_poll=1"
+        @test only(polls).transport.grace_period == 0.1
+
+        poll_request = HTTP.Request(
+            "GET", "/html?count=2&__htmxo_poll=1", ["HX-Request" => "true"])
+        polled = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
+                                poll_request, 0, 0;
+                                operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", polled.value) == "<aside>polling</aside>"
+        @test length(polls) == 2
+        @test last(polls).call_kwargs == (count=2,)
+        @test last(polls).transport.poll_url ==
+              "/html?count=2&__htmxo_poll=1"
+        @test last(polls).transport.grace_period == 0.0
 
         raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
                              HTTP.Request("GET", "/raw?count=3"), 0, 0;
@@ -443,7 +582,7 @@ end
                             HTTP.Request("GET", "/stream?count=5"), 0, 0;
                             operation_policy=OperationPolicy(:polling))
         @test ws.value(nothing) == "ws:5"
-        @test length(polls) == 1
+        @test length(polls) == 2
 
         route!(app; operation_policy=:polling)
         raw_req = HTTP.Request("GET", "/raw?count=6", ["HX-Request" => "true"])
@@ -462,7 +601,7 @@ end
         @test final_response.status == 202
         @test HTTP.header(final_response, "Content-Type") == "application/json"
         @test String(final_response.body) == "{\"count\":7}"
-        @test length(polls) == 1
+        @test length(polls) == 2
     finally
         _operation_polling_impl[] = old_polling
     end

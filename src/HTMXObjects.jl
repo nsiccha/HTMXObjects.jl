@@ -1984,8 +1984,10 @@ end
 Select route execution transport. `:blocking` preserves historical synchronous
 responses. `:polling` uses the Treebars extension for pending-capable HTML
 operations. `:auto` polls only HTMX requests whose DynamicObjects descriptor
-advertises pending capability. Declared `HTTP.Response` and `MIMEResponse`
-outputs always remain direct, as do WebSocket route lambdas.
+advertises pending capability. Polling is limited to GET operations because the
+Treebars poller issues GET refreshes; mutation verbs therefore remain direct.
+Declared `HTTP.Response` and `MIMEResponse` outputs always remain direct, as do
+WebSocket route lambdas.
 """
 struct OperationPolicy
     mode::Symbol
@@ -2873,7 +2875,7 @@ end
 
 function _operation_execution_mode(policy::OperationPolicy, descriptor,
         req::HTTP.Request, verb_inst::Verb)
-    _verb_symbol(verb_inst) === :WEBSOCKET && return :blocking
+    _verb_symbol(verb_inst) === :GET || return :blocking
     _declared_final_response(descriptor) && return :blocking
     policy.mode === :auto || return policy.mode
     descriptor === nothing && return :blocking
@@ -2881,6 +2883,35 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     semantics === nothing && return :blocking
     get(semantics, :pending, false) && is_htmx(req) ? :polling : :blocking
 end
+
+_operation_poll_marker(value::AbstractString) = value == "1"
+_operation_poll_marker(values::AbstractVector) = "1" in values
+_operation_poll_marker(_) = false
+
+_operation_poll_request(req::HTTP.Request) =
+    _operation_poll_marker(get(queryparams(req), "__htmxo_poll", nothing))
+
+_operation_form_request(req::HTTP.Request) =
+    _operation_poll_marker(get(queryparams(req), "__htmxo_form", nothing))
+
+function _operation_marker_url(target::AbstractString, marker::AbstractString)
+    separator = occursin('?', target) ? '&' : '?'
+    target * separator * marker * "=1"
+end
+
+function _operation_poll_url(policy::OperationPolicy, req::HTTP.Request)
+    target = String(req.target)
+    policy.mode === :auto || return target
+    _operation_poll_request(req) && return target
+    _operation_marker_url(target, "__htmxo_poll")
+end
+
+# `:auto` spends a small part of Oxygen's existing request task waiting on the
+# DO Pending handle. The extension returns a fast value directly; only a
+# timeout becomes a Treebars poller. Keep this outside OperationPolicy's struct
+# shape so the public type remains Revise-safe on Julia 1.10.
+_operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
+    policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
 
 # Extension seam: core degrades polling requests to the historical blocking
 # call when Treebars is absent. The extension replaces this Ref without method
@@ -2897,10 +2928,11 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     prop = getproperty(target.leaf, name)
     mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
     if mode === :polling
-        transport = (poll_url=String(req.target), label=Long(name),
+        transport = (poll_url=_operation_poll_url(policy, req), label=Long(name),
                      poll_interval=policy.poll_interval,
                      keep_progress=policy.keep_progress,
-                     error_obj=target.leaf, req=req)
+                     error_obj=target.leaf, req=req,
+                     grace_period=_operation_grace_period(policy, req))
         return _operation_polling(identity, prop, (verb_inst, idx_vals...),
                                   NamedTuple(kw_pairs), transport)
     end
@@ -2913,6 +2945,10 @@ end
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
         operation_policy::OperationPolicy=OperationPolicy())
+    if _operation_form_request(req)
+        return _operation_form_refresh(target, LeafT, name, verb_inst, req,
+                                       base, n_params)
+    end
     idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
     verb = _verb_symbol(verb_inst)
     _validate_operation_domains!(target.leaf, LeafT, name, verb, idx_vals, kw_pairs)
@@ -5497,10 +5533,25 @@ _semantic_values(values::AbstractDict) =
     Dict{Symbol,Any}(Symbol(name) => value for (name, value) in pairs(values))
 _semantic_values(::Nothing) = Dict{Symbol,Any}()
 
-function _semantic_form_values(route, provided)
+function _semantic_request_value(obj, param)
+    req = _req_of(obj)
+    src = _kwargs_source(req, req.method)
+    fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
+    _lookup_param(src, fallback, param.name, param.type)
+end
+
+function _semantic_form_values(obj, route, provided)
     values = _semantic_values(provided)
     for param in route.params
-        if !haskey(values, param.name) && !param.required
+        haskey(values, param.name) && continue
+        if get(param, :kind, nothing) === nothing && param.source !== :path
+            request_value = _semantic_request_value(obj, param)
+            if request_value !== _NO_DEFAULT
+                values[param.name] = request_value
+                continue
+            end
+        end
+        if !param.required
             values[param.name] = param.default
         end
     end
@@ -5591,6 +5642,94 @@ function _semantic_control(obj, owner, param, values; radio_max::Int=4)
     linput(string(param.name); label, value=something(value, ""), required_attrs...)
 end
 
+function _semantic_context_inputs(route, values)
+    nodes = Any[]
+    for param in route.params
+        param.source === :path && continue
+        get(param, :kind, nothing) === nothing || continue
+        haskey(values, param.name) || continue
+        value = values[param.name]
+        value === nothing && continue
+        append!(nodes, _hidden_input(param.name, value))
+    end
+    nodes
+end
+
+function _semantic_refresh_dependencies(route)
+    dependencies = Set{Symbol}()
+    for param in route.params
+        domain = get(param, :domain, nothing)
+        domain === nothing && continue
+        get(domain, :kind, :unrestricted) === :dynamic || continue
+        union!(dependencies, Symbol.(get(domain, :dependencies, Symbol[])))
+    end
+    dependencies
+end
+
+function _semantic_refresh_attrs(route, action)
+    method_key = Symbol("hx_" * lowercase(string(route.verb)))
+    refresh_url = _operation_marker_url(string(action), "__htmxo_form")
+    method_attrs = NamedTuple{(method_key,)}((refresh_url,))
+    merge(method_attrs, (hx_trigger="change", hx_include="closest form",
+                         hx_target="closest form", hx_swap="outerHTML"))
+end
+
+function _operation_form_setting(req, name, default=nothing)
+    method = req.method
+    src = _kwargs_source(req, method)
+    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
+    value = _lookup_param(src, fallback, name, String)
+    value === _NO_DEFAULT ? default : value
+end
+
+function _operation_refresh_values(req, route, base::Int, n_params::Int)
+    values = Dict{Symbol,Any}()
+    idx_vals = Any[]
+    parts = split(split(req.target, "?")[1], "/", keepempty=false)
+    path_index = 0
+    method = req.method
+    src = _kwargs_source(req, method)
+    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
+    for param in route.params
+        if param.source === :path
+            path_index += 1
+            path_index <= n_params || continue
+            value = _convert_param(parts[base + path_index], param.type)
+            values[param.name] = value
+            push!(idx_vals, value)
+        else
+            value = _lookup_param(src, fallback, param.name, param.type)
+            if value !== _NO_DEFAULT
+                values[param.name] = value
+            elseif !param.required
+                values[param.name] = param.default
+            end
+        end
+    end
+    (; values, idx_vals)
+end
+
+function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
+        req::HTTP.Request, base::Int, n_params::Int)
+    route = _operation_route(LeafT, name, _verb_symbol(verb_inst))
+    extracted = _operation_refresh_values(req, route, base, n_params)
+    request_path = String(HTTP.URI(req.target).path)
+    target_id = _operation_form_setting(req, :__htmxo_target_id)
+    swap = _operation_form_setting(req, :__htmxo_swap, "innerHTML")
+    submit = _operation_form_setting(req, :__htmxo_submit, "Run")
+    form_class = _operation_form_setting(req, :__htmxo_form_class, "")
+    radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, "4"))
+    value = operation_form(target.leaf, route; values=extracted.values,
+                           target=request_path, target_id, swap, submit,
+                           form_class, radio_max)
+    kw_pairs = Pair{Symbol,Any}[
+        param.name => extracted.values[param.name] for param in route.params
+        if param.source !== :path && haskey(extracted.values, param.name)
+    ]
+    (; context=target.context, root=target.root, leaf=target.leaf,
+       idx_vals=extracted.idx_vals, kw_pairs, value)
+end
+
 function _operation_form_action(route, values, target)
     action = string(target)
     for param in route.params
@@ -5601,6 +5740,8 @@ function _operation_form_action(route, values, target)
     end
     action
 end
+
+_operation_form_target(obj, route) = obj / route.path
 
 function _operation_route(T, name::Symbol, verb::Symbol)
     candidates = [route for route in semantic_descriptor(T).routes
@@ -5614,7 +5755,7 @@ end
 
 """
     operation_form(obj, name::Symbol; verb=:GET, values=(;), kwargs...)
-    operation_form(obj, route::NamedTuple; values=(;), target=route.path, kwargs...)
+    operation_form(obj, route::NamedTuple; values=(;), target=obj/route.path, kwargs...)
 
 Generate an HTMX form from a merged semantic route descriptor. Static domains
 become radio/select/custom controls; dynamic domains execute their declared DO
@@ -5622,21 +5763,48 @@ provider from the supplied current `values`; unrestricted values use typed
 boolean, numeric, or text controls. Positional path inputs must be supplied in
 `values` and are encoded into the route URL. Submitted values still pass through
 the shared typed extractor and current-domain validation on the server.
+
+Enclosing `@param` values are inferred from the current request and carried as
+hidden inputs; only the operation's semantic inputs become visible controls.
+When a dynamic domain declares dependencies, changing one of those controls
+rerenders the generated form through the same verb and route without executing
+the operation. The refreshed form retains `target_id`, `swap`, submit label,
+form class, and radio threshold.
 """
-function operation_form(obj, route::NamedTuple; values=(;), target=route.path,
+function operation_form(obj, route::NamedTuple; values=(;),
+        target=_operation_form_target(obj, route),
         submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
         form_class="", kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
-    current = _semantic_form_values(route, values)
+    current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
-    controls = [_semantic_control(obj, route.owner, param, current; radio_max)
-                for param in route.params if param.source !== :path]
+    refresh_dependencies = _semantic_refresh_dependencies(route)
+    controls = Any[]
+    for param in route.params
+        param.source === :path && continue
+        get(param, :kind, nothing) === nothing && continue
+        control = _semantic_control(obj, route.owner, param, current; radio_max)
+        if param.name in refresh_dependencies
+            control = h.div(control; _semantic_refresh_attrs(route, action)...)
+        end
+        push!(controls, control)
+    end
+    context_inputs = _semantic_context_inputs(route, current)
+    config_inputs = hidden_inputs(
+        __htmxo_swap=swap,
+        __htmxo_submit=submit,
+        __htmxo_form_class=form_class,
+        __htmxo_radio_max=radio_max,
+    )
+    isnothing(target_id) || append!(config_inputs,
+        hidden_inputs(__htmxo_target_id=target_id))
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     method_attrs = NamedTuple{(method_key,)}((action,))
     target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
     swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
-    h.form(controls..., h.button(submit; type="submit");
+    h.form(context_inputs..., config_inputs..., controls...,
+           h.button(submit; type="submit");
            method_attrs..., target_attrs..., swap_attrs..., class=form_class, kwargs...)
 end
 
