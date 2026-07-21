@@ -7,7 +7,7 @@ export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, @__str, HyperscriptString, Raw
-export route!, record!, to_response, save_response, static_transform, MIMEResponse,
+export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
@@ -1515,14 +1515,95 @@ pico_page(content; pico_version="2", class="container", extra_head=()) =
 const _html_response = s -> HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body=s)
 
 """
+    generic_html(val) -> Node or ""
+
+Structured, escape-safe HTML for an ordinary Julia value whose type defines no
+`show(::IO, ::MIME"text/html", …)` method. This is the framework's *generic
+presentation contract*: a route may return plain data (a `NamedTuple` of
+results, a `Dict`, a count) and still render in HTML/HX mode, the same way
+`?plain` markdown mode already renders any value via `show(::MIME"text/markdown")`.
+
+Shapes, in dispatch order:
+- `nothing` → `""` (empty body, not an error)
+- `NamedTuple` / `AbstractDict` whose values are all equal-length vectors
+  (a column table) → a plain `h.table`
+- other `NamedTuple` / `AbstractDict` → an `h.dl` of `dt`/`dd` pairs, values
+  rendered recursively
+- `AbstractMatrix` → an `h.table` of one `tr` per matrix row, preserving shape
+  and row-major reading order
+- anything else → `show(::MIME"text/plain")` text, in `h.pre(h.code(…))` when
+  it spans lines and `h.span(…)` when it does not
+
+A `Node` is always returned (never a bare `String`), because `auto` passes a
+top-level `AbstractString` through as trusted HTML — data must reach the
+client as a `Node` child so HTMX's escape-by-default applies. Rich rendering
+stays opt-in: define `show(::IO, ::MIME"text/html", ::MyType)` — or reach for
+[`render_table`](@ref) — and that wins over this fallback.
+"""
+generic_html(::Nothing) = ""
+generic_html(val) = let text = sprint(show, MIME"text/plain"(), val)
+    occursin('\n', text) ? h.pre(h.code(text)) : h.span(text)
+end
+generic_html(val::NamedTuple) = _generic_mapping_html(keys(val), values(val))
+generic_html(val::AbstractDict) = _generic_mapping_html(keys(val), values(val))
+
+# A 2-D array of plain data is a grid, not a fragment sequence. Cells are
+# stringified like the column-table branch above rather than recursed through
+# `_html_value`, so a numeric grid stays a plain table of numbers; either way
+# the text reaches the client as a Node child and is escaped.
+generic_html(val::AbstractMatrix) = h.table(h.tbody(
+    [h.tr([h.td(string(val[i, j])) for j in axes(val, 2)]...) for i in axes(val, 1)]...,
+))
+
+# A column table is a mapping whose values are all vectors of one length —
+# checked structurally rather than via `Tables.istable` so the branch a caller
+# gets is predictable from the value alone.
+_is_column_table(vals) = !isempty(vals) && all(v -> v isa AbstractVector, vals) &&
+    allequal(map(length, collect(vals)))
+
+function _generic_mapping_html(ks, vs)
+    kv = collect(vs)
+    _is_column_table(kv) && return h.table(
+        h.thead(h.tr([h.th(string(k)) for k in ks]...)),
+        h.tbody([h.tr([h.td(string(col[i])) for col in kv]...)
+                 for i in eachindex(first(kv))]...),
+    )
+    items = Any[]
+    for (k, v) in zip(ks, kv)
+        push!(items, h.dt(string(k)))
+        push!(items, h.dd(_html_value(v)))
+    end
+    h.dl(items...)
+end
+
+# Normalize a route return value into something `auto` can render, leaving
+# every value that already has an HTML representation untouched. Arrays stay
+# element-wise (an array of Nodes is still a fragment) and OOB-swap Pairs keep
+# their target id, so this only ever adds rendering where there was none.
+_html_value(val) = showable(MIME"text/html"(), val) ? val : generic_html(val)
+_html_value(val::AbstractString) = val
+_html_value(val::AbstractArray) = map(_html_value, val)
+_html_value((content, id)::Pair) = _html_value(content) => id
+
+# A matrix of plain data renders as a grid. Flattening it element-wise like any
+# other array would emit its cells in column-major order with the shape gone —
+# a `Matrix{Float64}` result reaching the client as an unlabelled, mis-ordered
+# run of numbers. A matrix holding anything already renderable (a matrix of
+# Nodes) keeps the element-wise fragment behavior, so this only changes the
+# shapes that previously had no rendering at all.
+_html_value(val::AbstractMatrix) =
+    any(x -> showable(MIME"text/html"(), x), val) ? map(_html_value, val) : generic_html(val)
+
+"""
     to_response(val)
 
 Convert any Julia value to an `HTTP.Response`. Handles Nodes, plain strings,
 arrays of either, and HTMX OOB-swap Pairs (via `auto`). Values that are
-already an `HTTP.Response` pass through unchanged.
+already an `HTTP.Response` pass through unchanged. Values with no `text/html`
+`show` method render via [`generic_html`](@ref) instead of raising.
 """
 to_response(val::HTTP.Response) = val
-to_response(val) = auto(val; wrap=_html_response)
+to_response(val) = auto(_html_value(val); wrap=_html_response)
 
 """
     MIMEResponse(content_type, body)
@@ -1976,11 +2057,48 @@ end
     RootProvider(factory; scope=:request, key=nothing)
 
 Construct roots for registered operations. `factory` is called as
-`factory(RootT, context)` and must return a `RootT`. For `scope=:session` or
-`:job`, pass a `key(req)` function and let the application-owned factory decide
-how roots are retained or reconstructed. The default request provider preserves
-the historic behavior: a fresh root is constructed for every request with
-`__req__`, `__route__`, and `__prefix__` populated by HTMXObjects.
+`factory(RootT, context)` and must return a `RootT` **carrying
+`context.request`** — see below. For `scope=:session` or `:job`, pass a
+`key(req)` function and let the application-owned factory decide what is
+retained behind that key. The default request provider preserves the historic
+behavior: a fresh root is constructed for every request with `__req__`,
+`__route__`, and `__prefix__` populated by HTMXObjects.
+
+!!! warning "Retain the payload, not the root"
+    A root is a *per-request* object even under `:session`/`:job`. `@param` and
+    `@header` lower to ordinary **cached** DynamicObjects properties that read
+    `_req_of(__self__)`, so a root only ever observes the request it was built
+    with, and its `@include` children inherit `__req__` from it. Retaining the
+    root across requests therefore serves request #1's parameters forever;
+    dropping the request entirely leaves every request-reading path with
+    `nothing`. Nor can the root be refreshed in place — `@dynamicstruct` emits
+    an immutable type, and mutating it would not invalidate the cached values
+    anyway. Retain the *application payload* behind `context.key` and build a
+    fresh root around it each request:
+
+    ```julia
+    RootProvider(; scope=:job, key=req -> HTTP.header(req, "X-Job", "")) do RootT, context
+        payload = lock(store_lock) do
+            get!(() -> ExpensiveState(), store, context.key)
+        end
+        RootT(payload; __req__=context.request, __route__=context.route,
+              # omit `__prefix__` when empty so a struct-body default survives
+              (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)
+    end
+    ```
+
+    The retained `payload` (and any cache it owns) survives; the cheap root
+    wrapper does not. A factory that returns a root not carrying
+    `context.request` is rejected at the provider seam with an `ArgumentError`.
+
+    "Payload" means your own **inert data** — a fitted model, a loaded dataset,
+    a cache. It does **not** mean a mounted `@include` child: a child is part of
+    the request-scoped object graph and inherits `__req__` from its parent, so
+    retaining one and passing it back in (`RootT(; child=retained, …)`) leaves it
+    with no `__parent__` and silently drops every parent-supplied param from its
+    generated forms. `operation_form` rejects that instance rather than render an
+    incomplete form. If the child is expensive, retain the data *inside* it and
+    let the `@include` rebuild the cheap wrapper.
 """
 struct RootProvider{F,K}
     factory::F
@@ -2662,7 +2780,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
-            save_response(record_dir, save_path, to_response(static_transform(wrapper(val); record_base)))
+            save_response(record_dir, save_path, to_response(static_transform(wrapper(_html_value(val)); record_base)))
         else
             save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
         end
@@ -2690,8 +2808,12 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         return fragment_resp
     end
 
-    # Full page wrap for direct browser navigation
-    to_response(wrapper(val))
+    # Full page wrap for direct browser navigation. Normalize first so
+    # `__page__` receives the same renderable the HX branch above sent —
+    # otherwise a plain value reaches the wrapper as a bare Node child and
+    # renders as `show(::MIME"text/plain")` text in full-page mode while
+    # rendering structurally over HX.
+    to_response(wrapper(_html_value(val)))
 end
 
 # For URL paths whose only `{x}` placeholders are at the very end (the
@@ -2797,7 +2919,36 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
             end
         end
     end
+    _check_root_request(root, RootT, context)
     root
+end
+
+# The refresh above cannot help an `@htmx` root: `@dynamicstruct` emits an
+# IMMUTABLE type, so `ismutabletype` is false for every app struct and the block
+# no-ops. And a root only ever observes the request it was constructed with:
+# `@param`/`@header` lower to ordinary *cached* DynamicObjects properties reading
+# `_req_of(__self__)`, and `@include` children inherit `__req__` from their
+# parent. So a factory that retains the root across requests serves request #1's
+# parameters forever (silent), and one that drops the request leaves `_req_of`
+# `nothing` for every request-reading path (a `Nothing has no field method` deep
+# inside form/param rendering, far from the provider that caused it). Reject
+# both here, at the seam that created them, with the corrected shape spelled out.
+function _check_root_request(root, RootT, context::OperationContext)
+    _req_of(root) === context.request && return nothing
+    detail = _req_of(root) === nothing ?
+        "it carries no request (`__req__` is `nothing`)" :
+        "it carries a different request — a root retained from an earlier request"
+    throw(ArgumentError(string(
+        "root provider for $(RootT) (scope $(repr(context.scope)), key $(repr(context.key))) ",
+        "returned a root that does not carry the current request: ", detail, ".\n",
+        "`@param`/`@header` are cached per root, so a retained root never sees a later ",
+        "request. Retain the application payload behind `context.key` and build a fresh ",
+        "root around it each request:\n",
+        "    RootProvider(; scope=$(repr(context.scope)), key=…) do RootT, context\n",
+        "        payload = get!(() -> ExpensiveState(), store, context.key)\n",
+        "        RootT(payload; __req__=context.request, __route__=context.route,\n",
+        "              (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)\n",
+        "    end")))
 end
 
 # Shared request/session/job target resolution for HTTP and WebSocket routes.
@@ -2952,18 +3103,27 @@ end
 _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
     policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
 
+# A DO compute-at-most-once handle is CONTROL FLOW, never response content: the
+# progress/poll transport already carries "still running", so a handle that
+# reaches the renderer has nothing left to say and prints its diagnostic repr —
+# cache, key and `Verb` internals — as visible body text. Resolve it here, the
+# one funnel both polling seams (the Treebars extension and the no-Treebars
+# fallback below) render through, so neither can leak it.
+#
+# Both seams hand their result to Treebars' `_polling_resolve`, whose done path
+# is a CATCH-ALL by construction: whatever no in-flight-handle method matched is
+# treated as the finished value and passed straight to `render_result`. That is a
+# skew-tolerant design on Treebars' side, but it means the guard has to exist on
+# ours too — a `render_result` of bare `identity` renders whatever arrives.
+_resolve_operation_value(value) =
+    value isa DynamicObjects.Pending ? fetch(value) : value
+
 # Extension seam: core degrades polling requests to the historical blocking
 # call when Treebars is absent. The extension replaces this Ref without method
 # overwrites, matching the recording bridge's precompile-safe pattern.
 const _operation_polling_impl = Ref{Any}(
-    (render_result, ip, keys, call_kwargs, _transport) -> begin
-        value = ip(keys...; call_kwargs...)
-        # Without Treebars, preserve the historical blocking fallback while
-        # honoring DO's compute-at-most-once Pending handle. Rendering the
-        # unresolved handle directly leaks its diagnostic repr into HTML.
-        value isa DynamicObjects.Pending && (value = fetch(value))
-        render_result(value)
-    end
+    (render_result, ip, keys, call_kwargs, _transport) ->
+        render_result(_resolve_operation_value(ip(keys...; call_kwargs...)))
 )
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
@@ -2978,7 +3138,8 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                      keep_progress=policy.keep_progress,
                      error_obj=target.leaf, req=req,
                      grace_period=_operation_grace_period(policy, req))
-        return _operation_polling(identity, prop, (verb_inst, idx_vals...),
+        return _operation_polling(_resolve_operation_value, prop,
+                                  (verb_inst, idx_vals...),
                                   NamedTuple(kw_pairs), transport)
     end
     prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
@@ -3469,7 +3630,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         else
-            wrapped = val
+            wrapped = _html_value(val)
             for obj in reverse(page_chain)
                 wrapper = _page_wrapper(obj)
                 isnothing(wrapper) || (wrapped = wrapper(wrapped))
@@ -3487,7 +3648,10 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
         end
     end
     is_htmx(req) && return to_response(val)
-    # Apply page wrappers: innermost (last) wraps first, then each outer one
+    # Apply page wrappers: innermost (last) wraps first, then each outer one.
+    # Normalized first, so a plain value renders the same structurally in
+    # full-page mode as the HX branch above already returns.
+    val = _html_value(val)
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (val = wrapper(val))
@@ -4699,6 +4863,13 @@ master_detail_safe_key(key) = _md_safe_key(key)
 # (the slot's `hx-trigger` and the toggle's `htmx.trigger(...)` call).
 _md_lazy_event() = "htmxo-md-load"
 
+# `htmx.trigger` dispatches a bubbling custom event. A nested lazy table lives
+# inside its ancestor's loaded slot, so without `consume` the inner event also
+# reaches the ancestor's hx-trigger listener and refetches the outer detail.
+# Keep the scoping modifier beside the event name so every lazy slot gets it.
+_md_lazy_trigger(; also_load::Bool=false) =
+    also_load ? "$(_md_lazy_event()) consume, load" : "$(_md_lazy_event()) consume"
+
 """
     master_detail_toggle_js(safe_key; lazy_slot_id=nothing) -> String
 
@@ -4754,7 +4925,7 @@ function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
           class="htmxo-md-detail-slot",
           data_loaded="0",
           hx_get=string(url),
-          hx_trigger=also_load ? "$ev, load" : ev,
+          hx_trigger=_md_lazy_trigger(; also_load),
           hx_target="this", hx_swap="innerHTML",
           hx_on__before_request="this.dataset.loading='1';delete this.dataset.failed;" *
                                 "var p=this.querySelector('[data-status]');" *
@@ -5584,6 +5755,10 @@ _semantic_values(::Nothing) = Dict{Symbol,Any}()
 
 function _semantic_request_value(obj, param)
     req = _req_of(obj)
+    # `operation_form` is also called outside a request (docs, gallery, a
+    # hand-built object in a test). With no request there is simply nothing to
+    # prefill, so fall through to the declared default rather than throwing.
+    req === nothing && return _NO_DEFAULT
     src = _kwargs_source(req, req.method)
     fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
     _lookup_param(src, fallback, param.name, param.type)
@@ -5730,6 +5905,49 @@ function _semantic_runtime_route(obj, route)
     merge(route, (params=params,))
 end
 
+# A mounted `@include` child resolves parent-supplied params through `__parent__`
+# — the walk above, and `_req_of`, which also falls through the same link. A
+# child that is a REGISTERED include of some parent but whose `__parent__` is
+# `nothing` was built outside the request-scoped object graph (typically by a
+# session/job provider factory retaining the child and injecting it into a fresh
+# root). Every parent-supplied param is then unresolvable, and because
+# `_semantic_request_value` legitimately falls through to the declared default
+# when there is no request, the generated form silently omits them: HTTP 200,
+# no error log, missing hidden inputs. That is strictly worse than throwing, so
+# say so here — but only when a registered parent actually declares params this
+# form would have inherited, so genuinely standalone rendering still works.
+function _detached_include_child_params(obj)
+    hasproperty(obj, :__parent__) || return Symbol[]
+    getproperty(obj, :__parent__) === nothing || return Symbol[]
+    parents = get(_included_type_parents, typeof(obj), nothing)
+    parents === nothing && return Symbol[]
+    lost = Symbol[]
+    for ParentT in parents, name in Base.invokelatest(_param_names, ParentT)
+        name in lost || push!(lost, name)
+    end
+    lost
+end
+
+function _check_mounted_include_child(obj, route)
+    lost = _detached_include_child_params(obj)
+    isempty(lost) && return nothing
+    needed = [param.name for param in route.params if param.name in lost]
+    isempty(needed) && return nothing
+    parents = join(sort!([string(P) for P in _included_type_parents[typeof(obj)]]), ", ")
+    throw(ArgumentError(string(
+        "operation_form on $(typeof(obj)) cannot resolve $(join(map(repr, needed), ", ")): ",
+        "it is mounted as an `@include` child of $(parents), but this instance has no ",
+        "`__parent__`, so parent-supplied params resolve to nothing and would be silently ",
+        "omitted from the form.\n",
+        "This usually means a session/job `RootProvider` factory retained the CHILD and ",
+        "injected it into a freshly built root. A mounted child is part of the ",
+        "request-scoped object graph, not a payload — it inherits `__req__` from its ",
+        "parent. Retain your own inert data behind `context.key` and let the `@include` ",
+        "build the child:\n",
+        "    RootT(retained_state; __req__=context.request, __route__=context.route, …)\n",
+        "    # and do NOT pass the child in")))
+end
+
 function _semantic_refresh_dependencies(route)
     dependencies = Set{Symbol}()
     for param in route.params
@@ -5841,6 +6059,23 @@ the shared typed extractor and current-domain validation on the server.
 
 Enclosing `@param` values are inferred from the current request and carried as
 hidden inputs; only the operation's semantic inputs become visible controls.
+The enclosing set is resolved from `obj`'s runtime `__parent__` chain, so an
+inline `@include child = begin … end` and a separately declared bundle mounted
+as `@include child = ExternalChild()` emit the same hidden context.
+
+Carrying the context is not the same as the child *owning* it. `@param`
+inheritance is resolved at macro expansion, so only an inline child gets the
+parent's `@param`s as its own properties; an external bundle was expanded
+before any mount site existed and inherits none. Its generated form still
+carries `fit_key`, but its route body cannot reference `fit_key` and
+`child.fit_key` does not resolve. A child that needs to read the value must
+delegate explicitly:
+
+    @htmx struct ExternalChild
+        @param (; fit_key) = __parent__
+        @get probe(; note::String="hi") = …
+    end
+
 When a dynamic domain declares dependencies, changing one of those controls
 rerenders the generated form through the same verb and route without executing
 the operation. The refreshed form retains `target_id`, `swap`, submit label,
@@ -5853,6 +6088,7 @@ function operation_form(obj, route::NamedTuple; values=(;),
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
     route = _semantic_runtime_route(obj, route)
+    _check_mounted_include_child(obj, route)
     current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
     refresh_dependencies = _semantic_refresh_dependencies(route)

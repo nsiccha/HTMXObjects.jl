@@ -16,7 +16,9 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
-    StackedSemanticRoute, ContextSemanticApp, ExternalContextApp,
+    StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
+    ParamlessHostApp, ParamlessHostChild,
+    BareExternalApp, InlineContextApp,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -182,7 +184,14 @@ end
     end
 end
 
+# A separately declared child that also *reads* the enclosing `@param` in its
+# own route body needs the delegation line: `operation_form` carries the
+# enclosing value as hidden context for either include shape, but only an
+# inline child inherits the parent's `@param` as a property. Without the
+# delegation, `fit_key` here is an unbound name and the route throws
+# `UndefVarError` the first time it is actually executed.
 @htmx struct ExternalContextChild
+    @param (; fit_key) = __parent__
     @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
         h.p("$(fit_key):$(value)")
     @get structured(; value::Symbol=:ok) =
@@ -192,6 +201,46 @@ end
 @htmx struct ExternalContextApp
     @param fit_key::String
     @include models = ExternalContextChild()
+end
+
+# A parent that declares NO params: its @include child stays renderable
+# standalone, since there is no inherited context to lose.
+@htmx struct ParamlessHostChild
+    @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
+        h.p("paramless:$(value)")
+end
+
+@htmx struct ParamlessHostApp
+    @include kid = ParamlessHostChild()
+    @get index() = h.div("host")
+end
+
+# Job-scoped root provider fixture: an @param the root reads, plus a mounted
+# external child whose generated form must carry the *current* request's value.
+@htmx struct JobScopedApp
+    payload = "none"
+    @param fit_key::String
+    @include models = ExternalContextChild()
+    @get index() = h.div(h.span(fit_key), h.span(payload),
+                         operation_form(models, :analyze; target_id="#job"))
+end
+
+# The same mount without the delegation — the form still carries the context,
+# but the child owns no `fit_key` property.
+@htmx struct BareExternalChild
+    @get probe(; note::String="hi") = h.p("bare:$(note)")
+end
+
+@htmx struct BareExternalApp
+    @param fit_key::String
+    @include models = BareExternalChild()
+end
+
+@htmx struct InlineContextApp
+    @param fit_key::String
+    @include models = begin
+        @get probe(; note::String="hi") = h.p("inline:$(note)")
+    end
 end
 
 @htmx struct PolicyApp
@@ -504,6 +553,8 @@ end
 end
 
 @testitem "external mounted child preserves enclosing form context" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _param_names
+
     app = ExternalContextApp(; __req__=HTTP.Request("GET", "/?fit_key=external-fit"))
     child = app.models
     html = repr("text/html", operation_form(child, :analyze; target_id="#external"))
@@ -520,11 +571,167 @@ end
     @test structured_response.status == 200
     @test contains(String(structured_response.body), "structured:alt")
     @test contains(String(structured_response.body), "ready")
+
+    # Executing the route is what distinguishes a child that merely *renders*
+    # the enclosing context from one that can actually read it. The delegation
+    # line on ExternalContextChild is what makes this work.
+    @test _param_names(typeof(child)) == (:fit_key,)
+    @test child.fit_key == "external-fit"
+    @test repr("text/html", child.analyze(Verb{:GET}(); value=:alt)) ==
+          "<p>external-fit:alt</p>"
+end
+
+@testitem "job-scoped root provider retains payload, not the root" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_context, _provide_root
+
+    job_key(req) = HTTP.header(req, "X-Job", "default")
+    hit(target) = begin
+        req = HTTP.Request("GET", target, ["X-Job" => "job-a"])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # An `@htmx` root is immutable, so the in-place context refresh in
+    # `_provide_root` can never apply to one — the provider must hand back a
+    # root that already carries the request.
+    @test !ismutabletype(JobScopedApp)
+
+    # Supported shape: the expensive payload lives behind `context.key`; the
+    # root is rebuilt per request so `@param` and the mounted child's generated
+    # form both observe the *current* request.
+    builds = Ref(0)
+    payloads = Dict{Any,String}()
+    good = RootProvider(; scope=:job, key=job_key) do RootT, context
+        retained = get!(() -> (builds[] += 1; "payload-$(builds[])"), payloads, context.key)
+        RootT(; payload=retained, __req__=context.request, __route__=context.route,
+              (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)
+    end
+    route!(JobScopedApp(); root_provider=good)
+
+    first_resp = hit("/?fit_key=first-key")
+    second_resp = hit("/?fit_key=second-key")
+    @test first_resp.status == 200
+    @test second_resp.status == 200
+    # the retained payload is shared across both requests…
+    @test contains(String(first_resp.body), "payload-1")
+    @test contains(String(second_resp.body), "payload-1")
+    @test builds[] == 1
+    # …while every request-derived value tracks its own request.
+    @test contains(String(first_resp.body), "type=\"hidden\" name=\"fit_key\" value=\"first-key\"")
+    @test contains(String(second_resp.body), "type=\"hidden\" name=\"fit_key\" value=\"second-key\"")
+
+    # Unsupported shape: retaining the root itself. Rejected at the provider
+    # seam rather than surfacing as a `Nothing has no field method` inside form
+    # rendering (request 1) or silently serving request 1's params (request 2).
+    roots = Dict{Any,JobScopedApp}()
+    bad = RootProvider(; scope=:job, key=job_key) do RootT, context
+        get!(() -> RootT(), roots, context.key)
+    end
+    route!(JobScopedApp(); root_provider=bad)
+    @test hit("/?fit_key=first-key").status == 500
+
+    bad_req = HTTP.Request("GET", "/?fit_key=first-key", ["X-Job" => "job-a"])
+    context = _operation_context(bad, bad_req, "", :http)
+    err = try
+        _provide_root(bad, JobScopedApp, context)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test contains(err.msg, "does not carry the current request")
+    @test contains(err.msg, "carries no request")
+    @test contains(err.msg, "Retain the application payload")
+
+    # …and the retained-from-an-earlier-request variant reports the other cause.
+    stale_req = HTTP.Request("GET", "/?fit_key=second-key", ["X-Job" => "job-a"])
+    stale = RootProvider(; scope=:job, key=job_key) do RootT, _context
+        RootT(; __req__=bad_req)
+    end
+    stale_context = _operation_context(stale, stale_req, "", :http)
+    stale_err = try
+        _provide_root(stale, JobScopedApp, stale_context)
+        nothing
+    catch e
+        e
+    end
+    @test stale_err isa ArgumentError
+    @test contains(stale_err.msg, "a root retained from an earlier request")
+
+    # `operation_form` outside any request falls back to declared defaults
+    # instead of throwing on a `nothing` request.
+    detached = repr("text/html", operation_form(ExternalContextApp().models, :analyze; target_id="#d"))
+    @test contains(detached, "name=\"value\"")
+end
+
+@testitem "a detached @include child refuses to render a form it cannot fill" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _detached_include_child_params
+
+    # Registration is what records the child→parent link, so route! first.
+    route!(ExternalContextApp(; __req__=HTTP.Request("GET", "/?fit_key=live")))
+    route!(ParamlessHostApp())
+
+    # Mounted: resolves through __parent__, renders the inherited hidden input.
+    mounted = ExternalContextApp(; __req__=HTTP.Request("GET", "/?fit_key=live")).models
+    @test isempty(_detached_include_child_params(mounted))
+    @test contains(repr("text/html", operation_form(mounted, :analyze; target_id="#m")),
+                   "type=\"hidden\" name=\"fit_key\" value=\"live\"")
+
+    # Detached: the exact shape a job/session factory produces when it retains
+    # the CHILD and injects it into a fresh root. Previously rendered a 200 with
+    # the inherited input silently missing; now it says so.
+    orphan = ExternalContextChild()
+    @test _detached_include_child_params(orphan) == [:fit_key]
+    err = try
+        operation_form(orphan, :analyze; target_id="#o")
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test contains(err.msg, "cannot resolve :fit_key")
+    @test contains(err.msg, "ExternalContextApp")
+    @test contains(err.msg, "no `__parent__`")
+    @test contains(err.msg, "not a payload")
+
+    # A child of a param-less parent has no inherited context to lose, so
+    # standalone rendering keeps working.
+    @test isempty(_detached_include_child_params(ParamlessHostChild()))
+    standalone = repr("text/html", operation_form(ParamlessHostChild(), :analyze; target_id="#s"))
+    @test contains(standalone, "name=\"value\"")
+end
+
+@testitem "operation_form context: inline vs bare external mounted child" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _param_names
+
+    req = HTTP.Request("GET", "/?fit_key=proof")
+    form(RootT) = repr("text/html",
+                       operation_form(RootT(; __req__=req).models, :probe))
+
+    # `operation_form` resolves enclosing @param context from the runtime
+    # __parent__ chain, so both include shapes emit the same hidden context.
+    @test contains(form(InlineContextApp),
+                   "type=\"hidden\" name=\"fit_key\" value=\"proof\"")
+    @test contains(form(BareExternalApp),
+                   "type=\"hidden\" name=\"fit_key\" value=\"proof\"")
+    @test form(BareExternalApp) == form(InlineContextApp)
+
+    # __parent__/__req__/__prefix__ thread to an external child either way …
+    bare = BareExternalApp(; __req__=req).models
+    @test bare.__req__ === req
+    @test bare.__prefix__ == "/models"
+
+    # … but @param *inheritance* is resolved at macro expansion, so only the
+    # inline child owns the property. A bare external child must delegate
+    # explicitly (see ExternalContextChild) before its body can read fit_key.
+    @test _param_names(typeof(InlineContextApp(; __req__=req).models)) == (:fit_key,)
+    @test _param_names(typeof(bare)) == ()
+    @test_throws Exception bare.fit_key
 end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_execution_mode, _operation_polling_impl,
-        _property_descriptor, _run_operation
+        _property_descriptor, _run_operation, _resolve_operation_value
+    import HTMXObjects.DynamicObjects
 
     @test OperationPolicy().mode === :blocking
     @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
@@ -636,6 +843,36 @@ end
     finally
         _operation_polling_impl[] = old_polling
     end
+
+    # A DO handle is control flow, never body content. Treebars' `_polling_resolve`
+    # done path is a CATCH-ALL — it hands whatever DO returned straight to
+    # `render_result` — so the guard has to live on the `render_result` we pass in.
+    # Emulate that seam exactly and assert no DO internals reach the response.
+    _operation_polling_impl[] =
+        (render_result, ip, keys, call_kwargs, _transport) ->
+            h.div(string(render_result(ip(keys...; call_kwargs...))))
+    try
+        resolved = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
+                                  hx, 0, 0;
+                                  operation_policy=OperationPolicy(:auto))
+        html = repr("text/html", resolved.value)
+        @test !contains(html, "Pending")
+        @test !contains(html, "ThreadsafeDict")
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+
+    # The funnel itself: an unresolved handle resolves to its value, ordinary
+    # values pass through untouched.
+    let cache = DynamicObjects.ThreadsafeDict()
+        pending = Base.get!(cache, :probe; fetch=identity) do _status
+            7
+        end
+        @test pending isa DynamicObjects.Pending
+        @test _resolve_operation_value(pending) == 7
+    end
+    @test _resolve_operation_value(42) === 42
+    @test _resolve_operation_value("plain") == "plain"
 
     stacked = only(filter(route -> route.name === :model,
                           semantic_descriptor(StackedSemanticRoute).routes))
@@ -950,6 +1187,115 @@ end
     @test_throws ErrorException sortable_table(["A"], rows; default_sort=1, sortable=false)
     # Only auto-wired String headers can be stamped.
     @test_throws ErrorException sortable_table([h.th("A")], rows; default_sort=1)
+end
+
+@testitem "nested lazy master/detail events stay scoped" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    inner = master_detail_table(["Inner"], [1];
+        key=identity,
+        master=_ -> (h.td("inner"),),
+        detail_url=_ -> "/inner",
+        id="inner-table")
+    nested = master_detail_table(["Outer"], [1];
+        key=_ -> "outer",
+        master=_ -> (h.td("outer"),),
+        detail=_ -> inner,
+        detail_url=_ -> "/outer",
+        id="outer-table")
+    html = repr("text/html", nested)
+
+    # This is the post-load nesting shape that exposed the regression: the
+    # inner lazy slot is a descendant of the still-live outer lazy slot.
+    # htmx's `consume` trigger modifier prevents the inner custom event from
+    # triggering another request on that ancestor.
+    @test length(collect(eachmatch(r"hx-trigger=\"htmxo-md-load consume\"", html))) == 2
+    @test !contains(html, "hx-trigger=\"htmxo-md-load\"")
+    @test contains(html, "id=\"detail-slot-outer\"")
+    @test contains(html, "id=\"detail-slot-1\"")
+
+    open_pair = master_detail_pair("open", (h.td("open"),), nothing, 1;
+        initially_open=true, detail_url="/open")
+    open_html = repr("text/html", h.div(open_pair...))
+    @test contains(open_html, "hx-trigger=\"htmxo-md-load consume, load\"")
+end
+
+@testitem "nested lazy master/detail browser requests stay isolated" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        outer_requests = Ref(0)
+        inner_requests = Ref(0)
+        inner = master_detail_table(["Inner"], [1];
+            key=_ -> "inner",
+            master=_ -> (h.td("inner"),),
+            detail_url=_ -> "/inner",
+            id="inner-table")
+        outer = master_detail_table(["Outer"], [1];
+            key=_ -> "outer",
+            master=_ -> (h.td("outer"),),
+            detail_url=_ -> "/outer",
+            id="outer-table")
+        driver = h.script(Raw("""
+            document.body.addEventListener('htmx:afterSettle', function(event) {
+                if (event.detail.target.id === 'detail-slot-outer' && !window.innerClickStarted) {
+                    window.innerClickStarted = true;
+                    setTimeout(function() {
+                        document.getElementById('row-inner').click();
+                    }, 10);
+                } else if (event.detail.target.id === 'detail-slot-inner') {
+                    document.body.dataset.nestedDone = '1';
+                }
+            });
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    document.getElementById('row-outer').click();
+                }, 50);
+            });
+            """))
+        page = repr("text/html", htmx(outer, driver;
+            hyperscript_version=nothing,
+            feedback=false,
+            compose=false,
+            overlay=false))
+        inner_html = repr("text/html", inner)
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif path == "/outer"
+                outer_requests[] += 1
+                HTTP.Response(200, ["Content-Type" => "text/html"], inner_html)
+            elseif path == "/inner"
+                inner_requests[] += 1
+                HTTP.Response(200, ["Content-Type" => "text/html"], "<p id=\"inner-loaded\">loaded</p>")
+            else
+                HTTP.Response(404)
+            end
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            @test contains(dom, "data-nested-done=\"1\"")
+            @test contains(dom, "id=\"inner-loaded\"")
+            @test outer_requests[] == 1
+            @test inner_requests[] == 1
+        finally
+            close(server)
+        end
+    end
 end
 
 """
@@ -1547,5 +1893,162 @@ and child-process side effects remain explicit rather than mutating host state.
 
         test_clear_cache!(project)
         @test isempty(HTMXObjects._test_job_snapshot(project))
+    end
+end
+
+"""
+A route returning ordinary structured data (a `NamedTuple` of results) must
+render in HTML/HX mode, not raise `MethodError: no method matching
+show(::IO, ::MIME"text/html", ::NamedTuple)` and degrade into a recorded
+error article. Regression for the semantic-app snag: `?plain` markdown mode
+already rendered any value, so the HTML side was the asymmetry.
+"""
+@testitem "generic_html - structured results render in HTML/HX mode" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: generic_html, to_response, _html_value
+
+    # The reported shape: a plain NamedTuple result.
+    body = String(to_response((accepted=3, rejected=1, note="ok")).body)
+    @test contains(body, "<dl>")
+    @test contains(body, "accepted")
+    @test contains(body, "3")
+    @test contains(body, "note")
+    @test contains(body, "ok")
+
+    # Dicts take the same mapping shape.
+    @test contains(repr("text/html", generic_html(Dict(:a => 1))), "<dl>")
+
+    # Equal-length vector columns render as a table instead.
+    tbl = repr("text/html", generic_html((name=["a", "b"], score=[1, 2])))
+    @test contains(tbl, "<table>")
+    @test contains(tbl, "<th>name</th>")
+    @test contains(tbl, "<td>b</td>")
+
+    # Scalars, `nothing`, and multi-line values all have a representation.
+    @test contains(repr("text/html", generic_html(42)), "42")
+    @test generic_html(nothing) == ""
+    # A matrix is a first-class grid shape, not the multi-line text fallback.
+    @test contains(repr("text/html", generic_html([1 2; 3 4])), "<table>")
+    # Values with no dedicated shape still take the multi-line `<pre>` fallback
+    # — including arrays of three or more dimensions, which are out of scope.
+    @test contains(repr("text/html", generic_html(zeros(2, 2, 2))), "<pre>")
+
+    # Values are escaped — data must never reach the client as trusted HTML.
+    escaped = String(to_response((danger="<script>x</script>",)).body)
+    @test !contains(escaped, "<script>")
+    @test contains(escaped, "&lt;script&gt;")
+
+    # Existing behavior is untouched: Nodes, top-level strings, array
+    # fragments, and OOB-swap Pairs all still pass straight through.
+    @test _html_value(h.p("hi")) isa HTMXObjects.Node
+    @test _html_value("<b>raw</b>") == "<b>raw</b>"
+    @test String(to_response([h.p("a"), h.p("b")]).body) == "<p>a</p>\n<p>b</p>"
+    @test contains(String(to_response(h.p("x") => "slot").body), "hx-swap-oob")
+end
+
+"""
+End-to-end counterpart: a live `@get` returning a `NamedTuple` must answer an
+HX request with the result itself — status 200 *and* the data — rather than
+200 with an error article and an `X-HTMXO-Error-Id` header.
+"""
+@testitem "generic_html - live @get returning a NamedTuple" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    @htmx struct StructuredResultApp
+        __page__(content) = h.html(h.body(content))
+        @get summary() = (accepted=3, rejected=1)
+    end
+    route!(StructuredResultApp())
+    port = 8101
+    serve(; port, async=true)
+    try
+        r = HTTP.get("http://127.0.0.1:$port/summary";
+                     headers=["HX-Request" => "true"], status_exception=false)
+        @test r.status == 200
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") == ""
+        body = String(r.body)
+        @test contains(body, "<dl>")
+        @test contains(body, "accepted")
+        @test !contains(body, "Something went wrong")
+
+        # Full-page navigation renders the same structure inside `__page__`,
+        # not `show(::MIME"text/plain")` text.
+        page = String(HTTP.get("http://127.0.0.1:$port/summary").body)
+        @test contains(page, "<html><body><dl>")
+        @test contains(page, "accepted")
+
+        # `?plain` markdown mode is untouched.
+        md = String(HTTP.get("http://127.0.0.1:$port/summary?plain=1").body)
+        @test contains(md, "accepted = 3")
+    finally
+        terminate()
+    end
+end
+
+"""
+A route returning a `Matrix` must render as a grid. The generic normalizer
+treats arrays element-wise, which for a 2-D array flattened the cells into
+column-major order with the shape gone — a `Matrix{Float64}` result reached
+the client as an unlabelled, mis-ordered run of numbers. Regression for the
+semantic-app matrix snag.
+"""
+@testitem "generic_html - matrices render as grids, not flattened" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: generic_html, to_response, _html_value
+
+    # The reported shape: a materialized numeric grid.
+    body = String(to_response([1.0 2.0 3.0; 4.0 5.0 6.0]).body)
+    @test contains(body, "<table>")
+    # Row-major reading order, one `tr` per matrix row — the flattening bug
+    # emitted 1.0, 4.0, 2.0, … instead.
+    @test contains(body, "<tr><td>1.0</td><td>2.0</td><td>3.0</td></tr>")
+    @test contains(body, "<tr><td>4.0</td><td>5.0</td><td>6.0</td></tr>")
+
+    # Cell values are escaped, exactly like every other generic shape.
+    escaped = String(to_response(["<script>x" "b"; "c" "d"]).body)
+    @test !contains(escaped, "<script>")
+    @test contains(escaped, "&lt;script&gt;")
+
+    # A matrix holding renderable values keeps the element-wise fragment
+    # behavior — this only adds rendering where there was none.
+    @test String(to_response([h.p("a") h.p("b")]).body) == "<p>a</p>\n<p>b</p>"
+
+    # Vectors are unchanged: still an element-wise fragment.
+    @test String(to_response([1.0, 2.0]).body) == "<span>1.0</span>\n<span>2.0</span>"
+
+    # Degenerate shapes have a representation rather than raising.
+    @test contains(repr("text/html", generic_html(zeros(0, 0))), "<table>")
+    @test contains(repr("text/html", generic_html(reshape([7.0], 1, 1))), "<td>7.0</td>")
+end
+
+"""
+End-to-end counterpart: a live `@get` returning a `Matrix{Float64}` must
+answer an HX request with the grid itself — status 200 *and* the data — not
+200 with an error article and an `X-HTMXO-Error-Id` header, which is how the
+`MethodError` from `repr("text/html", ::Float64)` surfaced to the reporter.
+"""
+@testitem "generic_html - live @get returning a Matrix" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    @htmx struct MatrixResultApp
+        __page__(content) = h.html(h.body(content))
+        @get prediction_grid() = [1.0 2.0; 3.0 4.0]
+    end
+    route!(MatrixResultApp())
+    port = 8102
+    serve(; port, async=true)
+    try
+        r = HTTP.get("http://127.0.0.1:$port/prediction_grid";
+                     headers=["HX-Request" => "true"], status_exception=false)
+        @test r.status == 200
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") == ""
+        body = String(r.body)
+        @test contains(body, "<tr><td>1.0</td><td>2.0</td></tr>")
+        @test contains(body, "<tr><td>3.0</td><td>4.0</td></tr>")
+        @test !contains(body, "Something went wrong")
+
+        # Full-page navigation renders the same grid inside `__page__`.
+        page = String(HTTP.get("http://127.0.0.1:$port/prediction_grid").body)
+        @test contains(page, "<html><body><table>")
+
+        # `?plain` markdown mode is untouched.
+        md = String(HTTP.get("http://127.0.0.1:$port/prediction_grid?plain=1").body)
+        @test !isempty(md)
+    finally
+        terminate()
     end
 end
