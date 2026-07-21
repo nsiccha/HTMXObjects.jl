@@ -1599,6 +1599,10 @@ to_response(val::HtmlOnly) = to_response(val.content)
 to_response(::MarkdownOnly) = to_response("")
 auto(val::HtmlOnly; wrap) = auto(val.content; wrap)
 auto(::MarkdownOnly; wrap) = ""
+# Primitive semantic results (for example a materialized Float64 from an
+# @mmap property) have no MIME"text/html" show method. Render them as escaped
+# text through the existing String path instead of leaking a caught 200.
+auto(val::Union{Number,Symbol,Bool,Char}; wrap) = auto(string(val); wrap)
 
 # Semantic operations may return a small NamedTuple carrying an HTML fragment
 # alongside structured metadata. Treat its values as an HTML fragment sequence
