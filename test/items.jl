@@ -588,7 +588,8 @@ end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_execution_mode, _operation_polling_impl,
-        _property_descriptor, _run_operation
+        _property_descriptor, _run_operation, _resolve_operation_value
+    import HTMXObjects.DynamicObjects
 
     @test OperationPolicy().mode === :blocking
     @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
@@ -700,6 +701,36 @@ end
     finally
         _operation_polling_impl[] = old_polling
     end
+
+    # A DO handle is control flow, never body content. Treebars' `_polling_resolve`
+    # done path is a CATCH-ALL — it hands whatever DO returned straight to
+    # `render_result` — so the guard has to live on the `render_result` we pass in.
+    # Emulate that seam exactly and assert no DO internals reach the response.
+    _operation_polling_impl[] =
+        (render_result, ip, keys, call_kwargs, _transport) ->
+            h.div(string(render_result(ip(keys...; call_kwargs...))))
+    try
+        resolved = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
+                                  hx, 0, 0;
+                                  operation_policy=OperationPolicy(:auto))
+        html = repr("text/html", resolved.value)
+        @test !contains(html, "Pending")
+        @test !contains(html, "ThreadsafeDict")
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+
+    # The funnel itself: an unresolved handle resolves to its value, ordinary
+    # values pass through untouched.
+    let cache = DynamicObjects.ThreadsafeDict()
+        pending = Base.get!(cache, :probe; fetch=identity) do _status
+            7
+        end
+        @test pending isa DynamicObjects.Pending
+        @test _resolve_operation_value(pending) == 7
+    end
+    @test _resolve_operation_value(42) === 42
+    @test _resolve_operation_value("plain") == "plain"
 
     stacked = only(filter(route -> route.name === :model,
                           semantic_descriptor(StackedSemanticRoute).routes))
