@@ -2894,6 +2894,19 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
     # request fields on mutable roots so mounted children inherit the current
     # OperationContext while the DynamicObjects cache remains owned by the app.
     # Immutable roots must be rebuilt by their provider to carry request state.
+    if provider.scope === :job && isdefined(DynamicObjects, :remount)
+        # Immutable cached roots use DynamicObjects' same-type mounted view so
+        # request context and transitive dependents are refreshed without
+        # copying settled/in-flight/mmap/indexed cache identity.
+        try
+            root = Base.invokelatest(getproperty(DynamicObjects, :remount), root;
+                __req__=context.request, __prefix__=context.prefix,
+                __parent__=nothing)
+        catch
+            # Providers may already return a freshly bound root or use an older
+            # DynamicObjects without remount; retain the compatibility path.
+        end
+    end
     if ismutabletype(typeof(root))
         for (name, value) in ((:__req__, context.request),
                               (:__route__, context.route),
