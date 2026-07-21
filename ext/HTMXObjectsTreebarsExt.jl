@@ -21,6 +21,12 @@ function __init__()
 
     HTMXObjects._recording_polling_impl[] =
         (args...; kwargs...) -> Treebars.polling_fetchindex(args...; kwargs...)
+
+    HTMXObjects._operation_polling_impl[] =
+        (render_result, ip, keys, call_kwargs, transport) -> begin
+            kwargs = merge(call_kwargs, transport)
+            Treebars.polling_fetchindex(render_result, ip, keys...; kwargs...)
+        end
 end
 
 end # module
