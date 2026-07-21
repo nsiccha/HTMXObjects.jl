@@ -16,7 +16,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
-    StackedSemanticRoute, ContextSemanticApp,
+    StackedSemanticRoute, ContextSemanticApp, ExternalContextApp,
     _SINGLETON_APPDATA
 
 @htmx struct TestApp
@@ -180,6 +180,16 @@ end
         @get raw_context(; count::Int=1)::MIMEResponse =
             MIMEResponse("text/plain", "$(fit_key):$(count)")
     end
+end
+
+@htmx struct ExternalContextChild
+    @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
+        h.p("$(fit_key):$(value)")
+end
+
+@htmx struct ExternalContextApp
+    @param fit_key::String
+    @include models = ExternalContextChild()
 end
 
 @htmx struct PolicyApp
@@ -489,6 +499,15 @@ end
     @test raw_response.status == 200
     @test HTTP.header(raw_response, "Content-Type") == "text/plain"
     @test String(raw_response.body) == "fit-17:3"
+end
+
+@testitem "external mounted child preserves enclosing form context" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    app = ExternalContextApp(; __req__=HTTP.Request("GET", "/?fit_key=external-fit"))
+    child = app.models
+    html = repr("text/html", operation_form(child, :analyze; target_id="#external"))
+    @test contains(html, "type=\"hidden\" name=\"fit_key\" value=\"external-fit\"")
+    @test contains(html, "hx-get=\"/models/analyze\"")
+    @test contains(html, "name=\"value\"")
 end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

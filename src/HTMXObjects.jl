@@ -3596,7 +3596,18 @@ end
 function _reflect_param_props(OwnerT, method, parent_stack)
     src = _reflect_kw_source(method)
     out = NamedTuple[]
-    for nm in Base.invokelatest(_param_names, OwnerT)
+    # Inline children receive an emitted `_param_names` tuple containing their
+    # parent's context. Separately declared external children do not, even
+    # though construction still threads the same `__parent__`/`__req__` chain.
+    # Merge the enclosing declarations here so reflection, generated forms,
+    # and typed route extraction agree for both include shapes.
+    names = Symbol[Base.invokelatest(_param_names, OwnerT)...]
+    for ancestor in Iterators.reverse(parent_stack)
+        for nm in Base.invokelatest(_param_names, ancestor)
+            nm in names || push!(names, nm)
+        end
+    end
+    for nm in names
         loc = _reflect_local_param(OwnerT, nm)
         inherited = loc === nothing
         if inherited
@@ -5655,6 +5666,32 @@ function _semantic_context_inputs(route, values)
     nodes
 end
 
+function _semantic_runtime_route(obj, route)
+    params = NamedTuple[route.params...]
+    names = Set{Symbol}(param.name for param in params)
+    parent = hasproperty(obj, :__parent__) ? getproperty(obj, :__parent__) : nothing
+    while parent !== nothing
+        ParentT = typeof(parent)
+        for name in Base.invokelatest(_param_names, ParentT)
+            name in names && continue
+            local_info = _reflect_local_param(ParentT, name)
+            if local_info === nothing
+                push!(params, (name=name, source=_reflect_kw_source(string(route.verb)),
+                               type=nothing, required=false, default=nothing,
+                               doc=nothing, inherited=true, kind=nothing, domain=nothing))
+            else
+                push!(params, (name=name, source=_reflect_kw_source(string(route.verb)),
+                               type=local_info.type, required=local_info.required,
+                               default=local_info.default, doc=local_info.doc,
+                               inherited=true, kind=nothing, domain=nothing))
+            end
+            push!(names, name)
+        end
+        parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
+    end
+    merge(route, (params=params,))
+end
+
 function _semantic_refresh_dependencies(route)
     dependencies = Set{Symbol}()
     for param in route.params
@@ -5777,6 +5814,7 @@ function operation_form(obj, route::NamedTuple; values=(;),
         form_class="", kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
+    route = _semantic_runtime_route(obj, route)
     current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
     refresh_dependencies = _semantic_refresh_dependencies(route)
