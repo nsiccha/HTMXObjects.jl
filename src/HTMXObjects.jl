@@ -2764,6 +2764,22 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
     root = provider.factory(RootT, context)
     root isa RootT || throw(ArgumentError(
         "root provider for $(RootT) returned $(typeof(root)); expected an instance of $(RootT)"))
+    # Session/job providers may return a cached root. Refresh the framework
+    # request fields on mutable roots so mounted children inherit the current
+    # OperationContext while the DynamicObjects cache remains owned by the app.
+    # Immutable roots must be rebuilt by their provider to carry request state.
+    if ismutabletype(typeof(root))
+        for (name, value) in ((:__req__, context.request),
+                              (:__route__, context.route),
+                              (:__prefix__, context.prefix))
+            hasproperty(root, name) || continue
+            try
+                setproperty!(root, name, value)
+            catch
+                # A provider may expose read-only computed context properties.
+            end
+        end
+    end
     root
 end
 
