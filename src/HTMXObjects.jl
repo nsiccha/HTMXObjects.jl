@@ -2090,6 +2090,15 @@ behavior: a fresh root is constructed for every request with `__req__`,
     The retained `payload` (and any cache it owns) survives; the cheap root
     wrapper does not. A factory that returns a root not carrying
     `context.request` is rejected at the provider seam with an `ArgumentError`.
+
+    "Payload" means your own **inert data** — a fitted model, a loaded dataset,
+    a cache. It does **not** mean a mounted `@include` child: a child is part of
+    the request-scoped object graph and inherits `__req__` from its parent, so
+    retaining one and passing it back in (`RootT(; child=retained, …)`) leaves it
+    with no `__parent__` and silently drops every parent-supplied param from its
+    generated forms. `operation_form` rejects that instance rather than render an
+    incomplete form. If the child is expensive, retain the data *inside* it and
+    let the `@include` rebuild the cheap wrapper.
 """
 struct RootProvider{F,K}
     factory::F
@@ -5883,6 +5892,49 @@ function _semantic_runtime_route(obj, route)
     merge(route, (params=params,))
 end
 
+# A mounted `@include` child resolves parent-supplied params through `__parent__`
+# — the walk above, and `_req_of`, which also falls through the same link. A
+# child that is a REGISTERED include of some parent but whose `__parent__` is
+# `nothing` was built outside the request-scoped object graph (typically by a
+# session/job provider factory retaining the child and injecting it into a fresh
+# root). Every parent-supplied param is then unresolvable, and because
+# `_semantic_request_value` legitimately falls through to the declared default
+# when there is no request, the generated form silently omits them: HTTP 200,
+# no error log, missing hidden inputs. That is strictly worse than throwing, so
+# say so here — but only when a registered parent actually declares params this
+# form would have inherited, so genuinely standalone rendering still works.
+function _detached_include_child_params(obj)
+    hasproperty(obj, :__parent__) || return Symbol[]
+    getproperty(obj, :__parent__) === nothing || return Symbol[]
+    parents = get(_included_type_parents, typeof(obj), nothing)
+    parents === nothing && return Symbol[]
+    lost = Symbol[]
+    for ParentT in parents, name in Base.invokelatest(_param_names, ParentT)
+        name in lost || push!(lost, name)
+    end
+    lost
+end
+
+function _check_mounted_include_child(obj, route)
+    lost = _detached_include_child_params(obj)
+    isempty(lost) && return nothing
+    needed = [param.name for param in route.params if param.name in lost]
+    isempty(needed) && return nothing
+    parents = join(sort!([string(P) for P in _included_type_parents[typeof(obj)]]), ", ")
+    throw(ArgumentError(string(
+        "operation_form on $(typeof(obj)) cannot resolve $(join(map(repr, needed), ", ")): ",
+        "it is mounted as an `@include` child of $(parents), but this instance has no ",
+        "`__parent__`, so parent-supplied params resolve to nothing and would be silently ",
+        "omitted from the form.\n",
+        "This usually means a session/job `RootProvider` factory retained the CHILD and ",
+        "injected it into a freshly built root. A mounted child is part of the ",
+        "request-scoped object graph, not a payload — it inherits `__req__` from its ",
+        "parent. Retain your own inert data behind `context.key` and let the `@include` ",
+        "build the child:\n",
+        "    RootT(retained_state; __req__=context.request, __route__=context.route, …)\n",
+        "    # and do NOT pass the child in")))
+end
+
 function _semantic_refresh_dependencies(route)
     dependencies = Set{Symbol}()
     for param in route.params
@@ -6023,6 +6075,7 @@ function operation_form(obj, route::NamedTuple; values=(;),
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
     route = _semantic_runtime_route(obj, route)
+    _check_mounted_include_child(obj, route)
     current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
     refresh_dependencies = _semantic_refresh_dependencies(route)

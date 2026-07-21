@@ -16,7 +16,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
-    StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, JobScopedApp,
+    StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
+    ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, InlineContextApp,
     _SINGLETON_APPDATA
 
@@ -200,6 +201,18 @@ end
 @htmx struct ExternalContextApp
     @param fit_key::String
     @include models = ExternalContextChild()
+end
+
+# A parent that declares NO params: its @include child stays renderable
+# standalone, since there is no inherited context to lose.
+@htmx struct ParamlessHostChild
+    @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
+        h.p("paramless:$(value)")
+end
+
+@htmx struct ParamlessHostApp
+    @include kid = ParamlessHostChild()
+    @get index() = h.div("host")
 end
 
 # Job-scoped root provider fixture: an @param the root reads, plus a mounted
@@ -648,6 +661,43 @@ end
     # instead of throwing on a `nothing` request.
     detached = repr("text/html", operation_form(ExternalContextApp().models, :analyze; target_id="#d"))
     @test contains(detached, "name=\"value\"")
+end
+
+@testitem "a detached @include child refuses to render a form it cannot fill" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _detached_include_child_params
+
+    # Registration is what records the child→parent link, so route! first.
+    route!(ExternalContextApp(; __req__=HTTP.Request("GET", "/?fit_key=live")))
+    route!(ParamlessHostApp())
+
+    # Mounted: resolves through __parent__, renders the inherited hidden input.
+    mounted = ExternalContextApp(; __req__=HTTP.Request("GET", "/?fit_key=live")).models
+    @test isempty(_detached_include_child_params(mounted))
+    @test contains(repr("text/html", operation_form(mounted, :analyze; target_id="#m")),
+                   "type=\"hidden\" name=\"fit_key\" value=\"live\"")
+
+    # Detached: the exact shape a job/session factory produces when it retains
+    # the CHILD and injects it into a fresh root. Previously rendered a 200 with
+    # the inherited input silently missing; now it says so.
+    orphan = ExternalContextChild()
+    @test _detached_include_child_params(orphan) == [:fit_key]
+    err = try
+        operation_form(orphan, :analyze; target_id="#o")
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test contains(err.msg, "cannot resolve :fit_key")
+    @test contains(err.msg, "ExternalContextApp")
+    @test contains(err.msg, "no `__parent__`")
+    @test contains(err.msg, "not a payload")
+
+    # A child of a param-less parent has no inherited context to lose, so
+    # standalone rendering keeps working.
+    @test isempty(_detached_include_child_params(ParamlessHostChild()))
+    standalone = repr("text/html", operation_form(ParamlessHostChild(), :analyze; target_id="#s"))
+    @test contains(standalone, "name=\"value\"")
 end
 
 @testitem "operation_form context: inline vs bare external mounted child" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
