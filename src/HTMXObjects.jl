@@ -4212,6 +4212,13 @@ master_detail_safe_key(key) = _md_safe_key(key)
 # (the slot's `hx-trigger` and the toggle's `htmx.trigger(...)` call).
 _md_lazy_event() = "htmxo-md-load"
 
+# `htmx.trigger` dispatches a bubbling custom event. A nested lazy table lives
+# inside its ancestor's loaded slot, so without `consume` the inner event also
+# reaches the ancestor's hx-trigger listener and refetches the outer detail.
+# Keep the scoping modifier beside the event name so every lazy slot gets it.
+_md_lazy_trigger(; also_load::Bool=false) =
+    also_load ? "$(_md_lazy_event()) consume, load" : "$(_md_lazy_event()) consume"
+
 """
     master_detail_toggle_js(safe_key; lazy_slot_id=nothing) -> String
 
@@ -4267,7 +4274,7 @@ function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
           class="htmxo-md-detail-slot",
           data_loaded="0",
           hx_get=string(url),
-          hx_trigger=also_load ? "$ev, load" : ev,
+          hx_trigger=_md_lazy_trigger(; also_load),
           hx_target="this", hx_swap="innerHTML",
           hx_on__before_request="this.dataset.loading='1';delete this.dataset.failed;" *
                                 "var p=this.querySelector('[data-status]');" *
