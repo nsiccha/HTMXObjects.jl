@@ -78,6 +78,40 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `filter_errors(html)` | Walk a Node tree and keep only nodes with `data-error="true"` (and their ancestors); used by the response pipeline when `?error` is on the query |
 | `ERROR_DIR`           | `Ref{String}` — directory where caught route exceptions are logged (default `joinpath(tempdir(), "htmxo_errors")`, override via `HTMXO_ERROR_DIR` env var) |
 
+## Semantic applications
+
+`semantic_app` turns one mounted semantic graph into the ordinary operation
+surface. Each route remains the executable declaration; the compiler discovers
+it, renders its typed/domain-aware form, assigns a result target, and submits to
+the already-registered route. `operation_form` remains available when one
+operation needs custom placement.
+
+```julia
+@htmx struct ModelApp
+    @param study::Symbol = :alpha
+
+    @include models = begin
+        @semantic (inputs=(model=(domain=static_domain((:base, :full)),),),) @get fit(; model::Symbol=:base) =
+            h.p("$(study):$(model)")
+    end
+
+    @get index() = semantic_app(models; title="Model operations")
+end
+```
+
+Adding another route inside `models` automatically adds its descriptor, form,
+result target, and registered operation; there is no second operation list.
+Mounted `@param` context and declared defaults become hidden inputs. An indexed
+`@include` is intentionally fail-closed until an index is selected—call
+`semantic_app(app.models(:chosen))` to compile that concrete subtree.
+
+| Export | Purpose |
+|--------|---------|
+| `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
+| `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
+| `operation_form(obj, name; …)` | Low-level generated form for one operation |
+| `OperationPolicy`, `RootProvider`, `OperationContext` | Execution transport and request/session/job root-provider contracts |
+
 ## Forms and inputs
 
 See the [Components catalog](components.md) for the full list with examples.

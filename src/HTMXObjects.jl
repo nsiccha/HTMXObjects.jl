@@ -27,7 +27,7 @@ export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export Verb
 export OperationContext, RootProvider, OperationPolicy
-export semantic_descriptor, operation_form
+export semantic_descriptor, operation_form, semantic_app
 
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
@@ -3768,7 +3768,7 @@ function _reflect_call_params(OwnerT, info, method, arg_docs=Dict{Symbol,String}
     kwargs = NamedTuple[]
     sig === nothing && return (path_params, kwargs)
     mk = (p, source) -> (name=p.name, source=source, type=p.type, required=p.required,
-                         default=(p.required ? nothing : p.default),
+                         default=(p.required ? nothing : _unquote(p.default)),
                          doc=get(arg_docs, p.name, nothing), inherited=false)
     for p in sig.positional
         p.name === :__verb__ && continue
@@ -3791,7 +3791,8 @@ function _reflect_local_param(T, nm)
     if Meta.isexpr(rhs, :call) && length(rhs.args) >= 4 && rhs.args[1] === _extract_param
         has_default = length(rhs.args) >= 5
         return (type=_reflect_resolve_type(parentmodule(T), rhs.args[4]),
-                required=!has_default, default=has_default ? rhs.args[5] : nothing,
+                required=!has_default,
+                default=has_default ? _unquote(rhs.args[5]) : nothing,
                 doc=_decl_doc(info))
     end
     nothing
@@ -5757,11 +5758,22 @@ function _semantic_request_value(obj, param)
     req = _req_of(obj)
     # `operation_form` is also called outside a request (docs, gallery, a
     # hand-built object in a test). With no request there is simply nothing to
-    # prefill, so fall through to the declared default rather than throwing.
+    # prefill here; `_semantic_form_values` next resolves mounted object context
+    # and then falls through to the descriptor default.
     req === nothing && return _NO_DEFAULT
     src = _kwargs_source(req, req.method)
     fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
     _lookup_param(src, fallback, param.name, param.type)
+end
+
+function _semantic_object_value(obj, param)
+    current = obj
+    while current !== nothing
+        hasproperty(current, param.name) && return getproperty(current, param.name)
+        current = hasproperty(current, :__parent__) ?
+                  getproperty(current, :__parent__) : nothing
+    end
+    _NO_DEFAULT
 end
 
 function _semantic_form_values(obj, route, provided)
@@ -5772,6 +5784,15 @@ function _semantic_form_values(obj, route, provided)
             request_value = _semantic_request_value(obj, param)
             if request_value !== _NO_DEFAULT
                 values[param.name] = request_value
+                continue
+            end
+            if !param.required
+                values[param.name] = param.default
+                continue
+            end
+            object_value = _semantic_object_value(obj, param)
+            if object_value !== _NO_DEFAULT
+                values[param.name] = object_value
                 continue
             end
         end
@@ -5881,13 +5902,28 @@ end
 
 function _semantic_runtime_route(obj, route)
     params = NamedTuple[route.params...]
-    names = Set{Symbol}(param.name for param in params)
     parent = hasproperty(obj, :__parent__) ? getproperty(obj, :__parent__) : nothing
     while parent !== nothing
         ParentT = typeof(parent)
         for name in Base.invokelatest(_param_names, ParentT)
-            name in names && continue
             local_info = _reflect_local_param(ParentT, name)
+            existing = findfirst(param -> param.name === name, params)
+            if existing !== nothing
+                # An inline child knows the inherited parameter name at macro
+                # expansion, but its standalone descriptor cannot know the
+                # enclosing declaration's type/default/doc. Enrich that
+                # placeholder from the concrete mounted parent before form
+                # defaults are resolved.
+                if local_info !== nothing && get(params[existing], :inherited, false)
+                    params[existing] = merge(params[existing], (
+                        type=local_info.type,
+                        required=local_info.required,
+                        default=local_info.default,
+                        doc=local_info.doc,
+                    ))
+                end
+                continue
+            end
             if local_info === nothing
                 push!(params, (name=name, source=_reflect_kw_source(string(route.verb)),
                                type=nothing, required=false, default=nothing,
@@ -5898,7 +5934,6 @@ function _semantic_runtime_route(obj, route)
                                default=local_info.default, doc=local_info.doc,
                                inherited=true, kind=nothing, domain=nothing))
             end
-            push!(names, name)
         end
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
@@ -6122,6 +6157,176 @@ end
 
 function operation_form(obj, name::Symbol; verb::Symbol=:GET, kwargs...)
     operation_form(obj, _operation_route(typeof(obj), name, verb); kwargs...)
+end
+
+_normalize_semantic_prefix(prefix) = begin
+    value = strip(string(prefix), '/')
+    isempty(value) ? "" : "/" * value
+end
+
+function _semantic_relative_prefix(prefix, root_prefix)
+    full = _normalize_semantic_prefix(prefix)
+    root = _normalize_semantic_prefix(root_prefix)
+    isempty(root) && return full
+    full == root && return ""
+    startswith(full, root * "/") || throw(ArgumentError(
+        "semantic_app found mounted prefix $(repr(full)) outside root prefix $(repr(root))"))
+    replace(full, root => ""; count=1)
+end
+
+function _semantic_mounts!(mounts, obj, graph, root_prefix)
+    expected = graph.type
+    obj isa expected || throw(ArgumentError(
+        "semantic_app expected a mounted $(expected), got $(typeof(obj))"))
+    hasproperty(obj, :__prefix__) || throw(ArgumentError(
+        "semantic_app requires an @htmx object with a mounted `__prefix__`"))
+    prefix = _semantic_relative_prefix(getproperty(obj, :__prefix__), root_prefix)
+    key = (expected, prefix)
+    haskey(mounts, key) && throw(ArgumentError(
+        "semantic_app found two $(expected) mounts at $(repr(prefix)); operation identity is ambiguous"))
+    mounts[key] = obj
+
+    for child in graph.children
+        hasproperty(obj, child.name) || throw(ArgumentError(
+            "semantic_app descriptor names child $(repr(child.name)) on $(typeof(obj)), but the mounted object has no such property"))
+        mounted = getproperty(obj, child.name)
+        ChildT = child.graph.type
+        mounted isa ChildT || throw(ArgumentError(string(
+            "semantic_app cannot materialize child $(repr(child.name)) on $(typeof(obj)): ",
+            "the descriptor expects $(ChildT), but `getproperty` produced $(typeof(mounted)). ",
+            "Indexed `@include` children need a selected index; render `semantic_app` on ",
+            "that selected child, or mount a plain semantic child.")))
+        _semantic_mounts!(mounts, mounted, child.graph, root_prefix)
+    end
+    mounts
+end
+
+_semantic_path_under(path, prefix) =
+    isempty(prefix) || path == prefix || startswith(path, prefix * "/")
+
+function _semantic_route_mount(mounts, route)
+    candidates = Pair{Tuple{Any,String},Any}[
+        key => obj for (key, obj) in mounts
+        if key[1] === route.owner && _semantic_path_under(route.path, key[2])
+    ]
+    isempty(candidates) && throw(ArgumentError(
+        "semantic_app could not resolve $(route.verb) $(route.path) to a mounted $(route.owner)"))
+    longest = maximum(length(first(candidate)[2]) for candidate in candidates)
+    winners = [last(candidate) for candidate in candidates
+               if length(first(candidate)[2]) == longest]
+    length(winners) == 1 || throw(ArgumentError(
+        "semantic_app found ambiguous mounts for $(route.verb) $(route.path) on $(route.owner)"))
+    only(winners)
+end
+
+function _semantic_operation_title(route)
+    description = get(route, :doc, nothing)
+    if description isa AbstractString
+        for line in split(description, '\n')
+            value = strip(line)
+            isempty(value) || return value
+        end
+    end
+    Long(route.name)
+end
+
+function _semantic_operation_slug(route)
+    path = replace(strip(route.path, '/'), r"[^A-Za-z0-9]+" => "-")
+    isempty(path) && (path = "index")
+    lowercase(string(route.verb)) * "-" * lowercase(path)
+end
+
+_semantic_app_setting(setting::Function, entry) = setting(entry)
+_semantic_app_setting(setting, _entry) = setting
+
+function _default_semantic_operation(entry)
+    entry.form === nothing && throw(ArgumentError(string(
+        "semantic_app has no default control for WebSocket operation ",
+        "$(entry.verb) $(entry.path); pass `render_operation` and render this ",
+        "entry explicitly")))
+    h.article(
+        h.header(h.h2(entry.title), h.code("$(entry.verb) $(entry.path)")),
+        entry.form,
+        entry.result;
+        class="htmxo-semantic-operation",
+        data_operation=entry.name,
+        data_verb=entry.verb,
+        data_path=entry.path,
+    )
+end
+
+"""
+    semantic_app(obj; values=(;), title=nothing, submit="Run",
+                 render_operation=_default_semantic_operation)
+
+Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
+operation surface. Routes are discovered in declaration order from
+[`semantic_descriptor`](@ref); each ordinary HTTP operation gets an
+[`operation_form`](@ref) and a stable result target, so adding another route to
+the graph requires no parallel form or route registry.
+
+`values` may be one `NamedTuple`/dictionary shared by every form, or a function
+of an operation entry. `submit` may likewise be a value or function. Override
+`render_operation(entry)` for local layout; the entry carries `object`, `route`,
+`name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`. The default
+renderer fails closed for WebSocket routes, whose client transport must be
+rendered explicitly.
+
+The compiler also fails closed when a descriptor cannot be resolved to exactly
+one mounted child, when `(verb, path)` identities collide, or when an indexed
+`@include` has no selected runtime child. Call `semantic_app` on a selected
+indexed child to compile that subtree.
+"""
+function semantic_app(obj; values=(;), title=nothing, submit="Run",
+        render_operation=_default_semantic_operation)
+    descriptor = semantic_descriptor(obj)
+    root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
+    mounts = Dict{Tuple{Any,String},Any}()
+    _semantic_mounts!(mounts, obj, descriptor.graph, root_prefix)
+
+    seen = Set{Tuple{Symbol,String}}()
+    operations = Any[]
+    for (index, route) in enumerate(descriptor.routes)
+        identity = (route.verb, route.path)
+        identity in seen && throw(ArgumentError(
+            "semantic_app found duplicate operation identity $(route.verb) $(route.path)"))
+        push!(seen, identity)
+
+        property = get(route, :property, nothing)
+        property === nothing && throw(ArgumentError(
+            "semantic_app route $(route.verb) $(route.path) has no property descriptor"))
+        get(property, :role, nothing) === :operation || throw(ArgumentError(
+            "semantic_app route $(route.verb) $(route.path) is not described as an operation"))
+
+        mounted = _semantic_route_mount(mounts, route)
+        local_route = _operation_route(typeof(mounted), route.name, route.verb)
+        target_id = "htmxo-operation-$(index)-$(_semantic_operation_slug(route))-result"
+        base_entry = (;
+            object=mounted,
+            route=local_route,
+            name=route.name,
+            verb=route.verb,
+            path=route.path,
+            title=_semantic_operation_title(route),
+            target_id,
+        )
+        operation_values = _semantic_app_setting(values, base_entry)
+        operation_submit = _semantic_app_setting(submit, base_entry)
+        form = route.verb === :WEBSOCKET ? nothing : operation_form(
+            mounted, local_route;
+            values=operation_values,
+            target_id="#$(target_id)",
+            submit=operation_submit,
+            form_class="htmxo-semantic-operation-form",
+        )
+        result = h.div(; id=target_id, class="htmxo-semantic-operation-result",
+                       aria_live="polite")
+        entry = merge(base_entry, (; form, result))
+        push!(operations, render_operation(entry))
+    end
+
+    heading = isnothing(title) ? Any[] : Any[h.header(h.h1(title))]
+    h.section(heading..., operations...; class="htmxo-semantic-app")
 end
 
 # --- Conditional visibility (show_when) ---

@@ -15,7 +15,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
-    TestUIHost, ProviderApp, SemanticApp, PolicyApp, MultiVerbPolicyApp,
+    TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, IndexedSemanticAutoApp,
+    PolicyApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, InlineContextApp,
@@ -154,6 +155,28 @@ end
     @include nested = begin
         @semantic (inputs=(quality=(domain=static_domain((:quick, :full)),),),) @post execute(; quality::Symbol=:quick) =
             h.p("nested:$(quality)")
+    end
+end
+
+# The graph is the only operation registry: adding another route inside this
+# mounted child is enough for `semantic_app` to discover, render, and execute
+# it. The enclosing selection is declared once and inherited as hidden context.
+@htmx struct SemanticAutoApp
+    @param study::Symbol = :alpha
+
+    @include models = begin
+        @semantic (inputs=(model=(domain=static_domain((:base, :full)),),),) @get fit(; model::Symbol=:base) =
+            h.p("fit:$(study):$(model)")
+
+        @semantic (inputs=(draws=(domain=static_domain((10, 20)),),),) @post predict(; draws::Int=10) =
+            h.p("predict:$(study):$(draws)")
+    end
+end
+
+@htmx struct IndexedSemanticAutoApp
+    @include models(model::Symbol) = begin
+        @semantic (inputs=(mode=(domain=static_domain((:quick, :full)),),),) @get run(; mode::Symbol=:quick) =
+            h.p("$(model):$(mode)")
     end
 end
 
@@ -419,6 +442,7 @@ end
     @test dataset.domain.dependencies == [:cohort]
     @test mode.domain.kind === :static
     @test mode.domain.cardinality == 3
+    @test mode.default === :fast
 
     # The pre-existing reflection API remains byte-shape compatible.
     reflected = only(filter(route -> route.name === :run, HTMXObjects.reflect(SemanticApp)))
@@ -452,6 +476,59 @@ end
     tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, tampered))
     tampered_response = tampered_handler(tampered)
     @test tampered_response.status == 400
+end
+
+@testitem "semantic app compiles one mounted graph without an operation registry" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    app = SemanticAutoApp()
+    descriptor = semantic_descriptor(app)
+    @test [(route.verb, route.path) for route in descriptor.routes] ==
+          [(:GET, "/models/fit"), (:POST, "/models/predict")]
+
+    rendered = semantic_app(
+        app;
+        title="Model operations",
+        submit=entry -> entry.name === :fit ? "Fit" : "Predict",
+    )
+    html = repr("text/html", rendered)
+    @test contains(html, "Model operations")
+    @test contains(html, "GET /models/fit")
+    @test contains(html, "POST /models/predict")
+    @test contains(html, "hx-get=\"/models/fit\"")
+    @test contains(html, "hx-post=\"/models/predict\"")
+    @test contains(html, ">Fit</button>")
+    @test contains(html, ">Predict</button>")
+    @test contains(html, "type=\"hidden\" name=\"study\" value=\"alpha\"")
+    @test count("class=\"htmxo-semantic-operation\"", html) == 2
+    @test count("class=\"htmxo-semantic-operation-result\"", html) == 2
+    @test findfirst("GET /models/fit", html) < findfirst("POST /models/predict", html)
+
+    route!(app)
+    fit = HTTP.Request("GET", "/models/fit?study=alpha&model=full")
+    fit_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, fit))
+    fit_response = fit_handler(fit)
+    @test fit_response.status == 200
+    @test contains(String(fit_response.body), "fit:alpha:full")
+
+    predict = HTTP.Request("POST", "/models/predict",
+        ["Content-Type" => "application/x-www-form-urlencoded"],
+        "study=alpha&draws=20")
+    predict_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, predict))
+    predict_response = predict_handler(predict)
+    @test predict_response.status == 200
+    @test contains(String(predict_response.body), "predict:alpha:20")
+
+    indexed_error = try
+        semantic_app(IndexedSemanticAutoApp())
+        nothing
+    catch err
+        err
+    end
+    @test indexed_error isa ArgumentError
+    @test contains(indexed_error.msg, "Indexed `@include` children need a selected index")
+
+    selected_html = repr("text/html", semantic_app(IndexedSemanticAutoApp().models(:one)))
+    @test contains(selected_html, "hx-get=\"/models/one/run\"")
 end
 
 @testitem "generated semantic form context and dependent refresh" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
