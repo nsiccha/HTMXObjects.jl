@@ -16,6 +16,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, IndexedSemanticAutoApp,
+    ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
     PolicyApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
@@ -178,6 +179,31 @@ end
         @semantic (inputs=(mode=(domain=static_domain((:quick, :full)),),),) @get run(; mode::Symbol=:quick) =
             h.p("$(model):$(mode)")
     end
+end
+
+@htmx struct ZeroConfigSemanticApp
+    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
+    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+
+    unrelated = Ref("survives")
+
+    @get fit() = h.p("fit:$(study):$(dose):$(objectid(unrelated))")
+    @post predict() = h.p("predict:$(study):$(dose):$(objectid(unrelated))")
+end
+
+
+@htmx struct ZeroConfigSemanticChild
+    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
+    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+
+    unrelated = Ref("mounted-survives")
+
+    @post predict() = h.p("mounted:$(study):$(dose):$(objectid(unrelated))")
+end
+
+
+@htmx struct ZeroConfigSemanticHost
+    @include models = ZeroConfigSemanticChild(:north, 50)
 end
 
 @htmx struct ContextSemanticApp
@@ -479,7 +505,10 @@ end
 end
 
 @testitem "semantic app compiles one mounted graph without an operation registry" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    app = SemanticAutoApp()
+    import HTMXObjects: _is_semantic_root_provider, _operation_context,
+                        _root_providers
+
+    app = SemanticAutoApp(; __cache_base__=mktempdir())
     descriptor = semantic_descriptor(app)
     @test [(route.verb, route.path) for route in descriptor.routes] ==
           [(:GET, "/models/fit"), (:POST, "/models/predict")]
@@ -502,7 +531,27 @@ end
     @test count("class=\"htmxo-semantic-operation-result\"", html) == 2
     @test findfirst("GET /models/fit", html) < findfirst("POST /models/predict", html)
 
+    # Rendering the semantic graph is the existing declaration that selects a
+    # managed provider. No key callback, Dict, lock, factory, or explicit
+    # RootProvider is application code, and a later route! preserves the
+    # compiler-selected provider.
+    provider = _root_providers[SemanticAutoApp]
+    @test _is_semantic_root_provider(provider)
+    @test provider.factory.entries[(SemanticAutoApp, "")].value === app
     route!(app)
+    @test _root_providers[SemanticAutoApp] === provider
+    registered = _operation_context(
+        provider, HTTP.Request("GET", "/semantic/models/fit"),
+        "/semantic", :http)
+    @test registered.prefix == "/semantic"
+    @test registered.key == "/semantic"
+    forwarded = _operation_context(
+        provider,
+        HTTP.Request("GET", "/models/fit", ["X-Forwarded-Prefix" => "/p/sbpmx/"]),
+        "", :http)
+    @test forwarded.prefix == "/p/sbpmx"
+    @test forwarded.key == "/p/sbpmx"
+
     fit = HTTP.Request("GET", "/models/fit?study=alpha&model=full")
     fit_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, fit))
     fit_response = fit_handler(fit)
@@ -517,6 +566,27 @@ end
     predict_response = predict_handler(predict)
     @test predict_response.status == 200
     @test contains(String(predict_response.body), "predict:alpha:20")
+    @test length(provider.factory.entries) == 1
+    @test haskey(provider.factory.entries, (SemanticAutoApp, ""))
+
+    # A request-bound graph rendered on the first page is seeded directly;
+    # later operation requests remount this rooted source rather than building
+    # a parallel application-owned store.
+    _root_providers[SemanticAutoApp] = RootProvider()
+    seed_req = HTTP.Request("GET", "/", ["X-Forwarded-Prefix" => "/p/seed"])
+    seeded_root = SemanticAutoApp(; __req__=seed_req, __prefix__="/p/seed",
+                                  __cache_base__=mktempdir())
+    semantic_app(seeded_root)
+    seeded_provider = _root_providers[SemanticAutoApp]
+    @test seeded_provider.factory.entries[(SemanticAutoApp, "/p/seed")].value ===
+          seeded_root
+
+    custom = RootProvider((RootT, context) -> RootT(
+        ; __req__=context.request, __route__=context.route,
+          __prefix__=context.prefix))
+    _root_providers[SemanticAutoApp] = custom
+    semantic_app(seeded_root)
+    @test _root_providers[SemanticAutoApp] === custom
 
     indexed_error = try
         semantic_app(IndexedSemanticAutoApp())
@@ -529,6 +599,88 @@ end
 
     selected_html = repr("text/html", semantic_app(IndexedSemanticAutoApp().models(:one)))
     @test contains(selected_html, "hx-get=\"/models/one/run\"")
+end
+
+@testitem "zero-config fixed semantic context remakes mounted targets" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _root_providers
+
+    app = ZeroConfigSemanticApp(:north, 50; __cache_base__=mktempdir())
+    unrelated = app.unrelated
+    descriptor = semantic_descriptor(app)
+    predict = only(filter(route -> route.name === :predict, descriptor.routes))
+
+    # The executable route has no declared arguments. Effective fixed-field
+    # dependencies are nevertheless first-class semantic context params; the
+    # transport-only reflection surface remains unchanged.
+    @test getproperty.(predict.params, :name) == [:study, :dose]
+    @test all(param -> param.kind === :context, predict.params)
+    @test isempty(only(filter(route -> route.name === :predict,
+                              HTMXObjects.reflect(ZeroConfigSemanticApp))).params)
+
+    html = repr("text/html", semantic_app(app; title="Zero configuration"))
+    @test count("<legend>study</legend>", html) == 1
+    @test count("<legend>dose</legend>", html) == 1
+    @test count("class=\"htmxo-semantic-context\"", html) == 1
+    @test count("hx-include=\"#htmxo-semantic-context-zeroconfigsemanticapp\"",
+                html) == 2
+
+    route!(app)
+    request = HTTP.Request(
+        "POST", "/predict",
+        ["Content-Type" => "application/x-www-form-urlencoded"],
+        "study=south&dose=100",
+    )
+    handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, request))
+    response = handler(request)
+    @test response.status == 200
+    @test contains(String(response.body),
+                   "predict:south:100:$(objectid(unrelated))")
+
+    provider = _root_providers[ZeroConfigSemanticApp]
+    source = provider.factory.entries[(ZeroConfigSemanticApp, "")].value
+    @test source === app
+    @test source.study === :north
+    @test source.dose == 50
+    @test source.unrelated === unrelated
+    ownership = HTMXObjects.DynamicObjects.materialization_ownership(
+        (; scope=:job, key="", retention=(; max_entries=128, ttl=nothing)),
+        source,
+    )
+    @test ownership.state === :active
+    @test ownership.scope === :job
+    @test ownership.retention == (; max_entries=128, ttl=nothing)
+
+    # The same contract holds for a fixed semantic bundle mounted externally:
+    # remake the child selected by the registered chain, keep the retained root
+    # as the governed owner, and preserve unrelated child cache identity.
+    host = ZeroConfigSemanticHost(; __cache_base__=mktempdir())
+    mounted_unrelated = host.models.unrelated
+    mounted_html = repr("text/html", semantic_app(host))
+    @test count("<legend>study</legend>", mounted_html) == 1
+    @test count("<legend>dose</legend>", mounted_html) == 1
+    @test count("class=\"htmxo-semantic-context\"", mounted_html) == 1
+    @test count("hx-include=\"#htmxo-semantic-context-zeroconfigsemantichost\"",
+                mounted_html) == 1
+
+    route!(host)
+    mounted_request = HTTP.Request(
+        "POST", "/models/predict",
+        ["Content-Type" => "application/x-www-form-urlencoded"],
+        "study=south&dose=100",
+    )
+    mounted_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, mounted_request))
+    mounted_response = mounted_handler(mounted_request)
+    @test mounted_response.status == 200
+    @test contains(String(mounted_response.body),
+                   "mounted:south:100:$(objectid(mounted_unrelated))")
+    retained_host = _root_providers[ZeroConfigSemanticHost].factory.entries[
+        (ZeroConfigSemanticHost, "")].value
+    @test retained_host === host
+    @test retained_host.models.study === :north
+    @test retained_host.models.dose == 50
+    @test retained_host.models.unrelated === mounted_unrelated
 end
 
 @testitem "generated semantic form context and dependent refresh" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -562,7 +714,7 @@ end
     transport = Ref{Any}()
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
-        (_render, _ip, _keys, call_kwargs, seen_transport) -> begin
+        (_render, _started, _ip, _keys, call_kwargs, seen_transport) -> begin
             transport[] = (; call_kwargs, seen_transport)
             h.aside("polling")
         end
@@ -659,7 +811,8 @@ end
 end
 
 @testitem "scoped root providers retain and remount roots" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _ManagedRootFactory, _operation_context, _provide_root
+    import HTMXObjects: _ManagedRootFactory, _managed_root_release_handler,
+                        _operation_context, _provide_root
 
     job_key(req) = HTTP.header(req, "X-Job", "default")
     hit(target; job="job-a") = begin
@@ -780,6 +933,46 @@ end
     ttl_a = retained("ttl")
     tick[] += 10
     @test retained("ttl") !== ttl_a
+
+    # Managed eviction releases only the provider's reference. The internal
+    # framework notification runs after the store lock is released and carries
+    # enough identity for DynamicObjects to retire a lease without any
+    # application-owned store or GC callback.
+    release_tick = Ref(0.0)
+    release_factory = _ManagedRootFactory(
+        RootRetention(max_entries=1, ttl=5); clock=() -> release_tick[])
+    release_provider = RootProvider(release_factory; scope=:job, key=job_key)
+    release_events = Any[]
+    lock_states = Bool[]
+    old_release_handler = _managed_root_release_handler[]
+    try
+        _managed_root_release_handler[] = event -> begin
+            push!(release_events, event)
+            push!(lock_states, islocked(release_factory.lock))
+        end
+        release_root(job) = begin
+            req = HTTP.Request("GET", "/", ["X-Job" => job])
+            release_factory(JobScopedApp,
+                _operation_context(release_provider, req, "", :http))
+        end
+        released_a = release_root("a")
+        release_tick[] = 1
+        released_b = release_root("b")
+        release_tick[] = 7
+        release_root("b")
+
+        @test lock_states == [false, false]
+        @test getproperty.(release_events, :reason) == [:lru, :ttl]
+        @test getproperty.(release_events, :key) == ["a", "b"]
+        @test all(event -> event.root_type === JobScopedApp, release_events)
+        @test all(event -> event.scope === :job, release_events)
+        @test release_events[1].root === released_a
+        @test release_events[2].root === released_b
+        @test all(event -> event.retention === release_factory.retention,
+                  release_events)
+    finally
+        _managed_root_release_handler[] = old_release_handler
+    end
 
     # Request-scoped custom providers still fail closed if they omit the
     # current request, since remounting is intentionally scoped-only.
@@ -912,7 +1105,7 @@ end
     polls = NamedTuple[]
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
-        (render_result, ip, keys, call_kwargs, transport) -> begin
+        (render_result, _started, ip, keys, call_kwargs, transport) -> begin
             push!(polls, (; keys, call_kwargs, transport))
             h.aside("polling")
         end
@@ -985,8 +1178,8 @@ end
     # `render_result` — so the guard has to live on the `render_result` we pass in.
     # Emulate that seam exactly and assert no DO internals reach the response.
     _operation_polling_impl[] =
-        (render_result, ip, keys, call_kwargs, _transport) ->
-            h.div(string(render_result(ip(keys...; call_kwargs...))))
+        (render_result, started, _ip, _keys, _call_kwargs, _transport) ->
+            h.div(string(render_result(started)))
     try
         resolved = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
                                   hx, 0, 0;

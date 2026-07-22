@@ -9,17 +9,16 @@ module HTMXObjectsTreebarsExt
 import HTMXObjects
 import Treebars
 
-function _grace_fetch(render_result, ip, keys, call_kwargs, grace_period)
-    grace_period > 0 || return (ready=false, value=nothing)
-    HTMXObjects.DynamicObjects.fetchindex(ip, keys...; call_kwargs...) do rv, _status
-        if rv isa HTMXObjects.DynamicObjects.Pending
-            outcome = timedwait(() -> isready(rv), grace_period;
-                                pollint=min(0.005, grace_period))
-            outcome === :ok || return (ready=false, value=nothing)
-            rv = fetch(rv)
-        end
-        (ready=true, value=render_result(rv))
+function _grace_fetch(render_result, started, grace_period)
+    rv = started
+    if rv isa HTMXObjects.DynamicObjects.Pending
+        grace_period > 0 || return (ready=false, value=nothing)
+        outcome = timedwait(() -> isready(rv), grace_period;
+                            pollint=min(0.005, grace_period))
+        outcome === :ok || return (ready=false, value=nothing)
+        rv = fetch(rv)
     end
+    (ready=true, value=render_result(rv))
 end
 
 function __init__()
@@ -36,9 +35,8 @@ function __init__()
         (args...; kwargs...) -> Treebars.polling_fetchindex(args...; kwargs...)
 
     HTMXObjects._operation_polling_impl[] =
-        (render_result, ip, keys, call_kwargs, transport) -> begin
-            fast = _grace_fetch(render_result, ip, keys, call_kwargs,
-                                transport.grace_period)
+        (render_result, started, ip, keys, call_kwargs, transport) -> begin
+            fast = _grace_fetch(render_result, started, transport.grace_period)
             fast.ready && return fast.value
             treebars_transport = (
                 poll_url=transport.poll_url,

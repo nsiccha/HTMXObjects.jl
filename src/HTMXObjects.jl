@@ -2174,17 +2174,59 @@ _root_retention_time() = time_ns() * 1.0e-9
 _ManagedRootFactory(retention::RootRetention; clock=_root_retention_time) =
     _ManagedRootFactory(retention, clock, ReentrantLock(), Dict{Any,_RetainedRoot}())
 
-function _prune_managed_roots!(factory::_ManagedRootFactory, now::Float64)
-    ttl = factory.retention.ttl
-    if !isnothing(ttl)
-        for (key, entry) in collect(factory.entries)
-            now - entry.touched >= ttl && delete!(factory.entries, key)
-        end
+function _release_managed_root_materialization!(event)
+    isdefined(DynamicObjects, :release_materialization!) || return nothing
+    context = (;
+        scope=event.scope,
+        key=event.key,
+        retention=(;
+            max_entries=event.retention.max_entries,
+            ttl=event.retention.ttl,
+        ),
+    )
+    Base.invokelatest(
+        getproperty(DynamicObjects, :release_materialization!),
+        context, event.root; reason=event.reason)
+    isdefined(DynamicObjects, :materialization_gc!) &&
+        Base.invokelatest(getproperty(DynamicObjects, :materialization_gc!))
+    nothing
+end
+
+_managed_root_release_handler = Ref{Any}(_release_managed_root_materialization!)
+
+function _managed_root_release_event(factory::_ManagedRootFactory, store_key,
+        entry::_RetainedRoot, scope::Symbol, reason::Symbol)
+    root_type, key = store_key
+    (; root=entry.value, root_type, scope, key, reason,
+       retention=factory.retention)
+end
+
+function _notify_managed_root_releases(events)
+    isassigned(_managed_root_release_handler) || return nothing
+    handler = _managed_root_release_handler[]
+    isnothing(handler) && return nothing
+    for event in events
+        Base.invokelatest(handler, event)
     end
     nothing
 end
 
-function _evict_managed_root!(factory::_ManagedRootFactory)
+function _prune_managed_roots!(factory::_ManagedRootFactory, now::Float64,
+        scope::Symbol)
+    released = Any[]
+    ttl = factory.retention.ttl
+    if !isnothing(ttl)
+        for (key, entry) in collect(factory.entries)
+            now - entry.touched >= ttl || continue
+            delete!(factory.entries, key)
+            push!(released, _managed_root_release_event(
+                factory, key, entry, scope, :ttl))
+        end
+    end
+    released
+end
+
+function _evict_managed_root!(factory::_ManagedRootFactory, scope::Symbol)
     isempty(factory.entries) && return nothing
     oldest_key = first(keys(factory.entries))
     oldest_time = factory.entries[oldest_key].touched
@@ -2193,8 +2235,9 @@ function _evict_managed_root!(factory::_ManagedRootFactory)
         oldest_key = key
         oldest_time = entry.touched
     end
+    entry = factory.entries[oldest_key]
     delete!(factory.entries, oldest_key)
-    nothing
+    _managed_root_release_event(factory, oldest_key, entry, scope, :lru)
 end
 
 function _prime_managed_root!(root, seen=Base.IdSet())
@@ -2219,8 +2262,9 @@ end
 
 function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
     now = Float64(factory.clock())
-    lock(factory.lock) do
-        _prune_managed_roots!(factory, now)
+    released = Any[]
+    root = lock(factory.lock) do
+        append!(released, _prune_managed_roots!(factory, now, context.scope))
         store_key = (RootT, context.key)
         if haskey(factory.entries, store_key)
             entry = factory.entries[store_key]
@@ -2228,7 +2272,8 @@ function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
             return entry.value
         end
         while length(factory.entries) >= factory.retention.max_entries
-            _evict_managed_root!(factory)
+            event = _evict_managed_root!(factory, context.scope)
+            isnothing(event) || push!(released, event)
         end
         # Prime only declaration-level, non-indexed mounted children. This
         # gives remount a stable rooted graph whose unrelated child/model caches
@@ -2239,6 +2284,11 @@ function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
         factory.entries[store_key] = _RetainedRoot(root, now)
         root
     end
+    # Release notifications may hand ownership back to DynamicObjects. Never
+    # invoke framework code while holding the provider lock: an executor may
+    # synchronously inspect or reacquire the same semantic root.
+    _notify_managed_root_releases(released)
+    root
 end
 
 function RootProvider(; scope::Symbol=:request, key=nothing, retention=nothing)
@@ -2261,6 +2311,7 @@ _normalize_root_provider(factory) = RootProvider(factory)
 # const's NamedTuple value type is frozen under Julia 1.10/Revise.
 const _root_providers = Dict{DataType,Any}()
 const _operation_policies = Dict{DataType,OperationPolicy}()
+const _semantic_root_types = Set{Type}()
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
 _convert_param(val, ::Nothing) = val
@@ -2986,11 +3037,23 @@ function _request_route_path(req::HTTP.Request, prefix::AbstractString)
     prefix * rp
 end
 
+# Private sentinel key function for semantic-app managed providers. The real
+# key is the normalized prefix already computed by `_operation_context`; using
+# function identity keeps this policy internal without adding a public callback
+# or changing RootProvider's stored shape.
+_semantic_mount_key(_req) = nothing
+
+_is_semantic_root_provider(provider) =
+    provider isa RootProvider && provider.scope === :job &&
+    provider.key === _semantic_mount_key &&
+    provider.factory isa _ManagedRootFactory
+
 function _operation_context(provider::RootProvider, req::HTTP.Request,
         root_prefix::AbstractString, transport::Symbol)
     prefix = _request_prefix(req, root_prefix)
+    key = provider.key === _semantic_mount_key ? prefix : provider.key(req)
     OperationContext(req, prefix, _request_route_path(req, prefix), transport,
-                     provider.scope, provider.key(req))
+                     provider.scope, key)
 end
 
 function _provide_root(provider::RootProvider, RootT, context::OperationContext)
@@ -3057,8 +3120,14 @@ function _operation_target(provider::RootProvider, RootT, chain::Vector,
         transport::Symbol)
     context = _operation_context(provider, req, root_prefix, transport)
     root = _provide_root(provider, RootT, context)
-    leaf = isempty(chain) ? root : _walk_chain(root, chain, req, root_segs)
-    (; context, root, leaf)
+    objects = isempty(chain) ? Any[root] : _chain_steps(root, chain, req, root_segs)
+    leaf = last(objects)
+    retention = provider.factory isa _ManagedRootFactory ?
+        (; max_entries=provider.factory.retention.max_entries,
+           ttl=provider.factory.retention.ttl) : nothing
+    governed = RootT in _semantic_root_types
+    (; context, root, leaf, objects, chain, root_segs, request=req, retention,
+       governed)
 end
 
 function _property_descriptor(T, name::Symbol)
@@ -3093,6 +3162,110 @@ function _operation_input_values(descriptor, idx_vals, kw_pairs)
         values[input.name] = value
     end
     values
+end
+
+_operation_context_inputs(descriptor) = descriptor === nothing ? NamedTuple[] :
+    [input for input in get(descriptor, :inputs, NamedTuple[])
+     if get(input, :kind, nothing) === :context]
+
+function _operation_context_value(req::HTTP.Request, input, fallback_value)
+    method = req.method
+    src = _kwargs_source(req, method)
+    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
+    submitted = _lookup_param(src, fallback, input.name, get(input, :type, nothing))
+    submitted === _NO_DEFAULT ? fallback_value : submitted
+end
+
+function _operation_source_index(objects, source)
+    SourceT = get(source, :type, nothing)
+    property_name = get(source, :property, nothing)
+    for index in reverse(eachindex(objects))
+        object = objects[index]
+        SourceT isa Type && object isa SourceT || continue
+        property_name isa Symbol && hasproperty(object, property_name) || continue
+        return index
+    end
+    throw(ArgumentError(string(
+        "semantic context source $(repr(source)) is not mounted in the routed object chain")))
+end
+
+function _operation_chain_cursor(chain, root_segs::Int)
+    cursor = root_segs
+    for step in chain
+        name = step isa Symbol ? step : step.name
+        types = step isa Symbol ? Any[] : step.types
+        url_name = step isa Symbol ? name :
+                   (hasproperty(step, :url_name) ? step.url_name : name)
+        url_name === :index || (cursor += 1)
+        cursor += length(types)
+    end
+    cursor
+end
+
+function _remake_operation_source(source, overrides, parent, target)
+    isdefined(DynamicObjects, :remake) || throw(ArgumentError(
+        "semantic context submission requires DynamicObjects.remake"))
+    remade = Base.invokelatest(getproperty(DynamicObjects, :remake), source;
+                               (; overrides...)...)
+    req = get(target, :request, nothing)
+    req isa HTTP.Request || return remade
+    _req_of(remade) === req && return remade
+    isdefined(DynamicObjects, :remount) || return remade
+    prefix = hasproperty(source, :__prefix__) ? getproperty(source, :__prefix__) : ""
+    route = hasproperty(source, :__route__) ? getproperty(source, :__route__) :
+            target.context.route
+    Base.invokelatest(getproperty(DynamicObjects, :remount), remade;
+        __req__=req, __route__=route, __prefix__=prefix, __parent__=parent)
+end
+
+function _bind_operation_context(target, descriptor, req::HTTP.Request)
+    inputs = _operation_context_inputs(descriptor)
+    isempty(inputs) && return (target, Dict{Symbol,Any}())
+    objects = Any[get(target, :objects, target.root === target.leaf ?
+                      Any[target.root] : Any[target.root, target.leaf])...]
+    overrides = Dict{Int,Vector{Pair{Symbol,Any}}}()
+    values = Dict{Symbol,Any}()
+    sources = Dict{Symbol,Tuple{Int,Any,Any}}()
+    for input in inputs
+        source = get(input, :source, nothing)
+        source isa NamedTuple || throw(ArgumentError(
+            "semantic context input $(repr(input.name)) has no source descriptor"))
+        index = _operation_source_index(objects, source)
+        source_obj = objects[index]
+        current = getproperty(source_obj, source.property)
+        value = _operation_context_value(req, input, current)
+        values[input.name] = value
+        sources[input.name] = (index, source_obj, input)
+        isequal(value, current) && continue
+        push!(get!(overrides, index, Pair{Symbol,Any}[]), source.property => value)
+    end
+
+    for input in inputs
+        index, source_obj, _ = sources[input.name]
+        _validate_input_domain!(source_obj, typeof(source_obj), input,
+                                values[input.name], values)
+    end
+
+    chain = get(target, :chain, Any[])
+    root_segs = get(target, :root_segs, 0)
+    for index in sort!(collect(keys(overrides)))
+        parent = index == firstindex(objects) ? nothing : objects[index - 1]
+        source = objects[index]
+        remade = _remake_operation_source(source, overrides[index], parent, target)
+        if index == lastindex(objects)
+            objects[index] = remade
+            continue
+        end
+        isempty(chain) && throw(ArgumentError(string(
+            "semantic context source $(typeof(source)) changed, but the routed mount chain ",
+            "is unavailable for rebuilding its operation target")))
+        prefix_chain = chain[1:index-1]
+        suffix_chain = chain[index:end]
+        cursor = _operation_chain_cursor(prefix_chain, root_segs)
+        rebuilt = _chain_steps(remade, suffix_chain, req, cursor)
+        objects = vcat(objects[1:index-1], rebuilt)
+    end
+    (merge(target, (; leaf=last(objects), objects)), values)
 end
 
 function _domain_dependency_value(obj, values, name::Symbol)
@@ -3140,12 +3313,14 @@ function _validate_input_domain!(obj, T, input, value, values)
 end
 
 function _validate_operation_domains!(obj, T, name::Symbol, verb::Symbol,
-        idx_vals, kw_pairs)
+        idx_vals, kw_pairs, context_values=Dict{Symbol,Any}())
     descriptor = _property_descriptor(T, name, verb)
     descriptor === nothing && return
     values = _operation_input_values(descriptor, idx_vals, kw_pairs)
+    merge!(values, context_values)
     for input in get(descriptor, :inputs, NamedTuple[])
         input.name === :__verb__ && continue
+        get(input, :kind, nothing) === :context && continue
         haskey(values, input.name) || continue
         _validate_input_domain!(obj, T, input, values[input.name], values)
     end
@@ -3220,27 +3395,46 @@ _resolve_operation_value(value) =
 # call when Treebars is absent. The extension replaces this Ref without method
 # overwrites, matching the recording bridge's precompile-safe pattern.
 const _operation_polling_impl = Ref{Any}(
-    (render_result, ip, keys, call_kwargs, _transport) ->
-        render_result(_resolve_operation_value(ip(keys...; call_kwargs...)))
+    (render_result, started, _ip, _keys, _call_kwargs, _transport) ->
+        render_result(_resolve_operation_value(started))
 )
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
+
+function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs)
+    context = get(target, :context, nothing)
+    if get(target, :governed, false) && context isa OperationContext &&
+            isdefined(DynamicObjects, :execute_materialization)
+        framework_context = (;
+            scope=context.scope,
+            key=context.key,
+            retention=get(target, :retention, nothing),
+        )
+        return Base.invokelatest(
+            getproperty(DynamicObjects, :execute_materialization),
+            framework_context, target.root, target.leaf, name,
+            verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+    end
+    prop = getproperty(target.leaf, name)
+    prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req)
     prop = getproperty(target.leaf, name)
     mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
+    started = _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs)
     if mode === :polling
         transport = (poll_url=_operation_poll_url(policy, req), label=Long(name),
                      poll_interval=policy.poll_interval,
                      keep_progress=policy.keep_progress,
                      error_obj=target.leaf, req=req,
                      grace_period=_operation_grace_period(policy, req))
-        return _operation_polling(_resolve_operation_value, prop,
+        return _operation_polling(_resolve_operation_value, started, prop,
                                   (verb_inst, idx_vals...),
                                   NamedTuple(kw_pairs), transport)
     end
-    prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+    started
 end
 
 # The common typed pass-through runner. Route code never manually reads query,
@@ -3255,8 +3449,10 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
     end
     idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
     verb = _verb_symbol(verb_inst)
-    _validate_operation_domains!(target.leaf, LeafT, name, verb, idx_vals, kw_pairs)
     descriptor = _property_descriptor(LeafT, name, verb)
+    target, context_values = _bind_operation_context(target, descriptor, req)
+    _validate_operation_domains!(target.leaf, LeafT, name, verb, idx_vals,
+                                 kw_pairs, context_values)
     value = _execute_operation(operation_policy, descriptor, target, name,
                                verb_inst, idx_vals, kw_pairs, req)
     (; context=target.context, root=target.root, leaf=target.leaf,
@@ -3296,12 +3492,13 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     # `Symbol(method)` is the verb short symbol used in `Verb{V}`.
     verb_inst = Verb{Symbol(method)}()
     _register_handler(method, path, function(req)
-        local context, root, leaf
+        local context, root, leaf, root_target
         try
-            target = _operation_target(root_provider, RootT, Symbol[], req,
-                                       root_prefix, root_segs, :http)
-            context = target.context
-            root = target.root
+            provider = get(_root_providers, RootT, root_provider)
+            root_target = _operation_target(provider, RootT, Symbol[], req,
+                                            root_prefix, root_segs, :http)
+            context = root_target.context
+            root = root_target.root
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -3319,7 +3516,10 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         end
 
         try
-            target = (; context, root, leaf)
+            objects = isempty(chain) ? Any[root] :
+                      _chain_steps(root, chain, req, root_segs)
+            target = merge(root_target, (; leaf, objects, chain,
+                                           root_segs, request=req))
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy)
             idx_vals = operation.idx_vals
@@ -3473,7 +3673,8 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                            count(==('/'), strip(mount_prefix, '/')) + 1
             ws_verb = Verb{:WEBSOCKET}()
             _register_websocket_handler(path, function(ws, req)
-                target = _operation_target(root_provider, OwnerT, chain, req,
+                provider = get(_root_providers, OwnerT, root_provider)
+                target = _operation_target(provider, OwnerT, chain, req,
                                            mount_prefix, ws_root_segs, :websocket)
                 operation = _run_operation(target, RouteT, name, ws_verb,
                                            req, ws_base, n_params; operation_policy)
@@ -3985,9 +4186,47 @@ function _semantic_param(param, property)
                   domain=get(semantic_input, :domain, nothing)))
 end
 
+function _semantic_context_param(input, verb::Symbol)
+    source = get(input, :source, nothing)
+    source isa NamedTuple || throw(ArgumentError(
+        "semantic context input $(repr(input.name)) has no source descriptor"))
+    SourceT = get(source, :type, nothing)
+    property_name = get(source, :property, nothing)
+    SourceT isa Type && property_name isa Symbol || throw(ArgumentError(
+        "semantic context input $(repr(input.name)) has an invalid source $(repr(source))"))
+    source_descriptor = _property_descriptor(SourceT, property_name)
+    description = source_descriptor === nothing ? nothing :
+                  get(source_descriptor, :description, nothing)
+    (name=input.name,
+     source=_reflect_kw_source(string(verb)),
+     type=get(input, :type, nothing),
+     required=get(input, :required, true),
+     default=get(input, :default, nothing),
+     doc=description,
+     inherited=true,
+     kind=:context,
+     domain=get(input, :domain, nothing),
+     context_source=source,
+     context_scope=get(input, :scope, :object))
+end
+
+function _semantic_context_params(property, verb::Symbol)
+    property === nothing && return NamedTuple[]
+    [_semantic_context_param(input, verb)
+     for input in get(property, :inputs, NamedTuple[])
+     if get(input, :kind, nothing) === :context]
+end
+
 function _semantic_route(owner, route)
     property = _property_descriptor(owner, route.name, route.verb)
-    params = [_semantic_param(param, property) for param in route.params]
+    context_params = _semantic_context_params(property, route.verb)
+    route_params = [_semantic_param(param, property) for param in route.params]
+    context_names = Set(param.name for param in context_params)
+    overlap = [param.name for param in route_params if param.name in context_names]
+    isempty(overlap) || throw(ArgumentError(string(
+        "semantic route $(route.verb) $(route.path) declares operation inputs that ",
+        "collide with inherited context inputs: $(join(map(repr, overlap), ", "))")))
+    params = vcat(context_params, route_params)
     merge(route, (owner=owner, params=params, property=property))
 end
 
@@ -4008,8 +4247,9 @@ Return the merged, HTML-free semantic application descriptor for an `@htmx`
 graph. `graph` is hierarchical across `@include` boundaries and carries the
 exact DynamicObjects `property_descriptors` records at every node. `routes` is
 the flat, mount-resolved transport view from [`reflect`](@ref), enriched with
-the owning type, its matching property descriptor, and each parameter's
-semantic `kind` and `domain`. Existing `reflect(T)` output is unchanged.
+the owning type, its matching property descriptor, effective fixed-field
+`kind=:context` inputs, and each declared parameter's semantic `kind` and
+`domain`. Existing `reflect(T)` output is unchanged.
 """
 function semantic_descriptor(::Type{T}) where {T}
     hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ||
@@ -4050,7 +4290,10 @@ Oxygen router. Returns `app`.
 function route!(obj; prefix="", record_dir=nothing, record_base="",
         root_provider=nothing, operation_policy=OperationPolicy())
     T = typeof(obj)
-    provider = _normalize_root_provider(root_provider)
+    existing_provider = get(_root_providers, T, nothing)
+    provider = isnothing(root_provider) &&
+               _is_semantic_root_provider(existing_provider) ?
+        existing_provider : _normalize_root_provider(root_provider)
     policy = operation_policy isa OperationPolicy ? operation_policy :
              OperationPolicy(operation_policy)
     _registered_types[T] = (; prefix, record_dir)
@@ -5875,10 +6118,41 @@ function _semantic_object_value(obj, param)
     _NO_DEFAULT
 end
 
+function _semantic_source_object(obj, source)
+    SourceT = get(source, :type, nothing)
+    property_name = get(source, :property, nothing)
+    current = obj
+    while current !== nothing
+        if SourceT isa Type && current isa SourceT &&
+                property_name isa Symbol && hasproperty(current, property_name)
+            return current
+        end
+        current = hasproperty(current, :__parent__) ?
+                  getproperty(current, :__parent__) : nothing
+    end
+    throw(ArgumentError(string(
+        "semantic context source $(repr(source)) is not the mounted operation node ",
+        "or one of its ancestors")))
+end
+
+function _semantic_context_value(obj, param)
+    source = get(param, :context_source, nothing)
+    source isa NamedTuple || return _NO_DEFAULT
+    source_obj = _semantic_source_object(obj, source)
+    getproperty(source_obj, source.property)
+end
+
 function _semantic_form_values(obj, route, provided)
     values = _semantic_values(provided)
     for param in route.params
         haskey(values, param.name) && continue
+        if get(param, :kind, nothing) === :context
+            context_value = _semantic_context_value(obj, param)
+            if context_value !== _NO_DEFAULT
+                values[param.name] = context_value
+                continue
+            end
+        end
         if get(param, :kind, nothing) === nothing && param.source !== :path
             request_value = _semantic_request_value(obj, param)
             if request_value !== _NO_DEFAULT
@@ -5957,7 +6231,13 @@ function _semantic_control(obj, owner, param, values; radio_max::Int=4)
     value = get(values, param.name, nothing)
     label = isnothing(param.doc) ? Long(param.name) : param.doc
     input = (name=param.name, domain=get(param, :domain, nothing))
-    domain = _resolved_input_domain(obj, owner, input, values)
+    control_obj, ControlT = if get(param, :kind, nothing) === :context
+        source_obj = _semantic_source_object(obj, param.context_source)
+        (source_obj, typeof(source_obj))
+    else
+        (obj, owner)
+    end
+    domain = _resolved_input_domain(control_obj, ControlT, input, values)
 
     if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
         options = get(domain, :options, NamedTuple[])
@@ -6108,6 +6388,10 @@ function _operation_form_setting(req, name, default=nothing)
     value === _NO_DEFAULT ? default : value
 end
 
+_semantic_context_names(value::AbstractString) =
+    Set(Symbol(name) for name in split(value, ',') if !isempty(name))
+_semantic_context_names(values) = Set(Symbol.(collect(values)))
+
 function _operation_refresh_values(req, route, base::Int, n_params::Int)
     values = Dict{Symbol,Any}()
     idx_vals = Any[]
@@ -6138,6 +6422,7 @@ end
 function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int)
     route = _operation_route(LeafT, name, _verb_symbol(verb_inst))
+    route = _semantic_runtime_route(target.leaf, route)
     extracted = _operation_refresh_values(req, route, base, n_params)
     request_path = String(HTTP.URI(req.target).path)
     target_id = _operation_form_setting(req, :__htmxo_target_id)
@@ -6145,12 +6430,17 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     submit = _operation_form_setting(req, :__htmxo_submit, "Run")
     form_class = _operation_form_setting(req, :__htmxo_form_class, "")
     radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, "4"))
+    context_selector = _operation_form_setting(req, :__htmxo_context_selector)
+    shared_context = _semantic_context_names(
+        _operation_form_setting(req, :__htmxo_shared_context, ""))
     value = operation_form(target.leaf, route; values=extracted.values,
                            target=request_path, target_id, swap, submit,
-                           form_class, radio_max)
+                           form_class, radio_max, context_selector,
+                           shared_context)
     kw_pairs = Pair{Symbol,Any}[
         param.name => extracted.values[param.name] for param in route.params
-        if param.source !== :path && haskey(extracted.values, param.name)
+        if param.source !== :path && get(param, :kind, nothing) !== :context &&
+           haskey(extracted.values, param.name)
     ]
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals=extracted.idx_vals, kw_pairs, value)
@@ -6191,7 +6481,10 @@ boolean, numeric, or text controls. Positional path inputs must be supplied in
 the shared typed extractor and current-domain validation on the server.
 
 Enclosing `@param` values are inferred from the current request and carried as
-hidden inputs; only the operation's semantic inputs become visible controls.
+hidden inputs. Operation inputs and effective fixed-field `kind=:context`
+inputs become visible controls. A low-level one-operation form renders those
+context controls locally; [`semantic_app`](@ref) lifts and deduplicates them
+into one graph-level control group that every operation form includes.
 The enclosing set is resolved from `obj`'s runtime `__parent__` chain, so an
 inline `@include child = begin … end` and a separately declared bundle mounted
 as `@include child = ExternalChild()` emit the same hidden context.
@@ -6217,7 +6510,7 @@ form class, and radio threshold.
 function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
         submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
-        form_class="", kwargs...)
+        form_class="", shared_context=(), context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
     route = _semantic_runtime_route(obj, route)
@@ -6225,10 +6518,13 @@ function operation_form(obj, route::NamedTuple; values=(;),
     current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
     refresh_dependencies = _semantic_refresh_dependencies(route)
+    shared_names = _semantic_context_names(shared_context)
     controls = Any[]
     for param in route.params
         param.source === :path && continue
         get(param, :kind, nothing) === nothing && continue
+        get(param, :kind, nothing) === :context &&
+            param.name in shared_names && continue
         control = _semantic_control(obj, route.owner, param, current; radio_max)
         if param.name in refresh_dependencies
             control = h.div(control; _semantic_refresh_attrs(route, action)...)
@@ -6242,15 +6538,22 @@ function operation_form(obj, route::NamedTuple; values=(;),
         __htmxo_form_class=form_class,
         __htmxo_radio_max=radio_max,
     )
+    isempty(shared_names) || append!(config_inputs,
+        hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
+    isnothing(context_selector) || append!(config_inputs,
+        hidden_inputs(__htmxo_context_selector=context_selector))
     isnothing(target_id) || append!(config_inputs,
         hidden_inputs(__htmxo_target_id=target_id))
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     method_attrs = NamedTuple{(method_key,)}((action,))
     target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
     swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
+    include_attrs = isnothing(context_selector) ? (;) : (; hx_include=context_selector)
+    form_attrs = merge(method_attrs, target_attrs, swap_attrs, include_attrs,
+                       (; class=form_class), (; kwargs...))
     h.form(context_inputs..., config_inputs..., controls...,
            h.button(submit; type="submit");
-           method_attrs..., target_attrs..., swap_attrs..., class=form_class, kwargs...)
+           form_attrs...)
 end
 
 function operation_form(obj, name::Symbol; verb::Symbol=:GET, kwargs...)
@@ -6353,6 +6656,84 @@ function _default_semantic_operation(entry)
     )
 end
 
+function _semantic_context_identity(obj, param)
+    source_obj = _semantic_source_object(obj, param.context_source)
+    prefix = hasproperty(source_obj, :__prefix__) ?
+             _normalize_semantic_prefix(getproperty(source_obj, :__prefix__)) : ""
+    (param.context_source.type, prefix, param.context_source.property)
+end
+
+function _semantic_context_panel_id(obj)
+    prefix = hasproperty(obj, :__prefix__) ?
+             _normalize_semantic_prefix(getproperty(obj, :__prefix__)) : ""
+    token = lowercase(string(nameof(typeof(obj))) * "-" * prefix)
+    token = strip(replace(token, r"[^a-z0-9]+" => "-"), '-')
+    "htmxo-semantic-context-" * (isempty(token) ? "root" : token)
+end
+
+function _semantic_root(obj)
+    root = obj
+    while hasproperty(root, :__parent__)
+        parent = getproperty(root, :__parent__)
+        parent === nothing && break
+        root = parent
+    end
+    root
+end
+
+function _seed_semantic_root!(provider::RootProvider, root)
+    provider.factory isa _ManagedRootFactory || return nothing
+    req = _req_of(root)
+    RootT = typeof(root)
+    prefix = if req isa HTTP.Request
+        registration = get(_registered_types, RootT, nothing)
+        registration_prefix = isnothing(registration) ? "" : registration.prefix
+        _request_prefix(req, registration_prefix)
+    elseif hasproperty(root, :__prefix__)
+        _normalize_semantic_prefix(getproperty(root, :__prefix__))
+    else
+        ""
+    end
+    now = Float64(provider.factory.clock())
+    released = Any[]
+    lock(provider.factory.lock) do
+        append!(released, _prune_managed_roots!(
+            provider.factory, now, provider.scope))
+        store_key = (RootT, prefix)
+        haskey(provider.factory.entries, store_key) && return nothing
+        while length(provider.factory.entries) >=
+              provider.factory.retention.max_entries
+            event = _evict_managed_root!(provider.factory, provider.scope)
+            isnothing(event) || push!(released, event)
+        end
+        rooted = _prime_managed_root!(root)
+        provider.factory.entries[store_key] = _RetainedRoot(rooted, now)
+    end
+    _notify_managed_root_releases(released)
+    nothing
+end
+
+function _activate_semantic_root_provider!(obj)
+    root = _semantic_root(obj)
+    RootT = typeof(root)
+    push!(_semantic_root_types, RootT)
+    current = get(_root_providers, RootT, RootProvider())
+    if _is_semantic_root_provider(current)
+        _seed_semantic_root!(current, root)
+        return current
+    end
+    current.scope === :request && current.factory === _default_root_factory ||
+        return current
+    provider = RootProvider(
+        scope=:job,
+        key=_semantic_mount_key,
+        retention=RootRetention(),
+    )
+    _root_providers[RootT] = provider
+    _seed_semantic_root!(provider, root)
+    provider
+end
+
 """
     semantic_app(obj; values=(;), title=nothing, submit="Run",
                  render_operation=_default_semantic_operation)
@@ -6363,12 +6744,31 @@ operation surface. Routes are discovered in declaration order from
 [`operation_form`](@ref) and a stable result target, so adding another route to
 the graph requires no parallel form or route registry.
 
+Effective fixed-field `kind=:context` inputs are resolved from their mounted
+`source=(; type, property)`, deduplicated across operations, and rendered once
+above the operation cards. Submitting a changed selection remakes the mounted
+source and reconstructs its routed descendants; request/route/prefix context
+continues to use same-type remounting. Unrelated retained caches remain shared.
+
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` may likewise be a value or function. Override
 `render_operation(entry)` for local layout; the entry carries `object`, `route`,
 `name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`. The default
 renderer fails closed for WebSocket routes, whose client transport must be
 rendered explicitly.
+
+The first successful render also promotes the historic request-scoped default
+to a managed provider keyed by the root type and normalized mount prefix. The
+current rooted graph is retained—including fixed semantic state declared
+before a request exists—and registered operation handlers remount that provider
+at request time. A semantic application therefore supplies no job-key callback,
+store, lock, factory, or explicit `RootProvider`; an explicitly configured
+custom provider is preserved.
+
+Operations compiled by `semantic_app` execute through DynamicObjects'
+framework materialization seam with the provider-owned
+`(; scope, key, retention)` context. Applications construct no executor/store
+and call no materialization release or GC function.
 
 The compiler also fails closed when a descriptor cannot be resolved to exactly
 one mounted child, when `(verb, path)` identities collide, or when an indexed
@@ -6383,7 +6783,7 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
     _semantic_mounts!(mounts, obj, descriptor.graph, root_prefix)
 
     seen = Set{Tuple{Symbol,String}}()
-    operations = Any[]
+    specs = Any[]
     for (index, route) in enumerate(descriptor.routes)
         identity = (route.verb, route.path)
         identity in seen && throw(ArgumentError(
@@ -6410,12 +6810,63 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
         )
         operation_values = _semantic_app_setting(values, base_entry)
         operation_submit = _semantic_app_setting(submit, base_entry)
-        form = route.verb === :WEBSOCKET ? nothing : operation_form(
-            mounted, local_route;
-            values=operation_values,
+        runtime_route = _semantic_runtime_route(mounted, local_route)
+        current = _semantic_form_values(mounted, runtime_route, operation_values)
+        push!(specs, (; base_entry, mounted, local_route, runtime_route,
+                       current, operation_values, operation_submit))
+    end
+
+    context_entries = Any[]
+    context_indices = Dict{Any,Int}()
+    context_names = Dict{Symbol,Any}()
+    for spec in specs, param in spec.runtime_route.params
+        get(param, :kind, nothing) === :context || continue
+        identity = _semantic_context_identity(spec.mounted, param)
+        if haskey(context_names, param.name) && context_names[param.name] != identity
+            throw(ArgumentError(string(
+                "semantic_app found two mounted context sources named ",
+                "$(repr(param.name)); context control names must be unique within one graph")))
+        end
+        context_names[param.name] = identity
+        if haskey(context_indices, identity)
+            prior = context_entries[context_indices[identity]]
+            isequal(prior.current[param.name], spec.current[param.name]) ||
+                throw(ArgumentError(string(
+                    "semantic_app received conflicting values for shared context input ",
+                    "$(repr(param.name))")))
+            continue
+        end
+        push!(context_entries, (; object=spec.mounted,
+                                  owner=spec.runtime_route.owner,
+                                  param, current=spec.current))
+        context_indices[identity] = length(context_entries)
+    end
+
+    context_id = _semantic_context_panel_id(obj)
+    shared_context = Set(keys(context_names))
+    context_panel = if isempty(context_entries)
+        nothing
+    else
+        controls = [_semantic_control(entry.object, entry.owner, entry.param,
+                                      entry.current)
+                    for entry in context_entries]
+        h.fieldset(h.legend("Model inputs"), controls...;
+                   id=context_id, class="htmxo-semantic-context")
+    end
+
+    operations = Any[]
+    for spec in specs
+        base_entry = spec.base_entry
+        target_id = base_entry.target_id
+        selector = isempty(context_entries) ? nothing : "#$(context_id)"
+        form = base_entry.verb === :WEBSOCKET ? nothing : operation_form(
+            spec.mounted, spec.local_route;
+            values=spec.operation_values,
             target_id="#$(target_id)",
-            submit=operation_submit,
+            submit=spec.operation_submit,
             form_class="htmxo-semantic-operation-form",
+            shared_context,
+            context_selector=selector,
         )
         result = h.div(; id=target_id, class="htmxo-semantic-operation-result",
                        aria_live="polite")
@@ -6423,8 +6874,10 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
         push!(operations, render_operation(entry))
     end
 
+    _activate_semantic_root_provider!(obj)
     heading = isnothing(title) ? Any[] : Any[h.header(h.h1(title))]
-    h.section(heading..., operations...; class="htmxo-semantic-app")
+    context = isnothing(context_panel) ? Any[] : Any[context_panel]
+    h.section(heading..., context..., operations...; class="htmxo-semantic-app")
 end
 
 # --- Conditional visibility (show_when) ---
@@ -8731,6 +9184,8 @@ include("routes/editor_routes.jl")
 function __init__()
     # Per-process error log dir for caught route exceptions.
     ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
+    isassigned(_managed_root_release_handler) ||
+        (_managed_root_release_handler[] = nothing)
 end
 
 end # module HTMXObjects
