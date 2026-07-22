@@ -17,7 +17,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
-    PolicyApp, MultiVerbPolicyApp,
+    PolicyApp, SlowPolicyApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, InlineContextApp,
@@ -300,6 +300,13 @@ end
         HTTP.Response(202, ["Content-Type" => "application/json"];
                       body="{\"count\":$(count)}")
     @ws stream(; count::Int=1) = "ws:$(count)"
+end
+
+# A route whose body is slow enough that "did the request task run it to
+# completion?" is observable. `PolicyApp`'s bodies are instant, so they cannot
+# distinguish a genuine non-blocking start from a blocking one.
+@htmx struct SlowPolicyApp
+    @get slow(; count::Int=1) = (sleep(3.0); h.p("slow:$(count)"))
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -1212,6 +1219,57 @@ end
     @test stacked.property.semantics.pending
     @test only(filter(input -> input.name === :count,
                       stacked.property.inputs)).domain.cardinality == 3
+end
+
+# Polling transport is only real if the value is started NON-BLOCKINGLY. Every
+# other policy test stubs `_operation_polling_impl` and asserts the poller was
+# *reached* — which a fully-blocking start also satisfies, because the wrapper
+# still runs, just over an already-finished value. So those tests pass whether
+# or not the transport does anything, and the regression they miss is total:
+# `:auto`/`:polling` degrading to `:blocking` for every route. Pin the actual
+# contract — what reaches the seam is an in-flight handle, not a finished value.
+@testitem "polling transport starts the operation without blocking" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_polling_impl, _run_operation
+    import HTMXObjects.DynamicObjects
+
+    app = SlowPolicyApp()
+    target = (context=nothing, root=app, leaf=app)
+    starts = Any[]
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (render_result, started, _ip, _keys, _call_kwargs, _transport) -> begin
+            push!(starts, started)
+            h.aside("polling")
+        end
+    try
+        # Warm the path on its own key first — a cold `_run_operation` compiles
+        # for seconds, which would swamp the wall-clock assertion below.
+        warm = HTTP.Request("GET", "/slow?count=0", ["HX-Request" => "true"])
+        _run_operation(target, SlowPolicyApp, :slow, Verb{:GET}(), warm, 0, 0;
+                       operation_policy=OperationPolicy(:auto))
+        @test only(starts) isa DynamicObjects.Pending
+
+        empty!(starts)
+        hx = HTTP.Request("GET", "/slow?count=1", ["HX-Request" => "true"])
+        elapsed = @elapsed _run_operation(target, SlowPolicyApp, :slow,
+                                          Verb{:GET}(), hx, 0, 0;
+                                          operation_policy=OperationPolicy(:auto))
+        # The 3s body must NOT have run to completion on the request task.
+        @test elapsed < 1.0
+        @test only(starts) isa DynamicObjects.Pending
+
+        # `:blocking` is unchanged: the value is fully computed, never a handle.
+        empty!(starts)
+        plain = HTTP.Request("GET", "/slow?count=2")
+        blocking = _run_operation(target, SlowPolicyApp, :slow, Verb{:GET}(),
+                                  plain, 0, 0;
+                                  operation_policy=OperationPolicy(:blocking))
+        @test isempty(starts)
+        @test !(blocking.value isa DynamicObjects.Pending)
+        @test repr("text/html", blocking.value) == "<p>slow:2</p>"
+    finally
+        _operation_polling_impl[] = old_polling
+    end
 end
 
 @testitem ":index -> / routing" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
