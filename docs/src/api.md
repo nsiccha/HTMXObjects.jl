@@ -105,6 +105,32 @@ Mounted `@param` context and declared defaults become hidden inputs. An indexed
 `@include` is intentionally fail-closed until an index is selected—call
 `semantic_app(app.models(:chosen))` to compile that concrete subtree.
 
+Fixed semantic state is the zero-boilerplate shared-control form. Declare each
+field and domain once; zero-argument operations that depend on those fields
+inherit effective `kind=:context` inputs from DynamicObjects. `semantic_app`
+renders one shared control group per mounted source field and every operation
+form includes that group automatically:
+
+```julia
+@htmx struct ModelGraph
+    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
+    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+
+    @get fit() = h.p("fit:$(study):$(dose)")
+    @post predict() = h.p("predict:$(study):$(dose)")
+end
+
+app = ModelGraph(:north, 50)
+semantic_app(app)
+```
+
+A submitted non-default fixed selection is applied with
+`DynamicObjects.remake`; request/route/prefix rebinding remains a `remount`.
+The selected operation therefore executes against the rebuilt mounted target,
+while unrelated retained caches keep their identity. This works when the
+semantic graph is the routed root and when a fixed semantic bundle is mounted
+as a concrete external `@include` child.
+
 The first successful `semantic_app` render also activates a private managed
 root provider for the rooted graph. Its identity is the root type plus the
 normalized application mount prefix already carried by the request. The
@@ -113,6 +139,12 @@ request and already carries required fixed semantic state; later operations
 receive a same-type request remount. Applications do **not** declare a job-key
 helper, `Dict`, lock, factory, `RootProvider`, or cleanup call. An explicitly
 supplied custom provider remains authoritative.
+
+Operations from a graph compiled by `semantic_app` run through
+`DynamicObjects.execute_materialization` with the provider-owned
+`(; scope, key, retention)` context. Provider LRU/TTL release notifications call
+`release_materialization!` and opportunistic `materialization_gc!` outside the
+provider lock. Applications construct no executor/store and call no GC.
 
 | Export | Purpose |
 |--------|---------|
@@ -137,9 +169,13 @@ here has no rendering effect.
 
 A `@semantic` input override accepts exactly `name`, `type`, `required`,
 `default`, `kind` and `domain`; an unrecognised key is a loud error at macro
-expansion (`unknown @semantic fields for input ...`), not a silent no-op. Of
-those, **only `kind` and `domain` are merged into the rendered control** — the
-rest of what a control shows comes from the ordinary route declaration.
+expansion (`unknown @semantic fields for input ...`), not a silent no-op. For
+an ordinary route argument, **only `kind` and `domain` are merged into the
+rendered control** — the rest comes from the route declaration. Effective
+`kind=:context` inputs instead carry their type/default/domain and
+`source=(; type, property)` from the fixed field descriptor; HTMXObjects uses
+that source to resolve, deduplicate, render, validate and rebuild the mounted
+target.
 
 So, to answer the obvious question directly: labels, help text, units and
 ordering are **not** expressible in the `@semantic` block, and there is no
@@ -149,7 +185,7 @@ effect/side-effect policy key at all.
 |--------------------------|------------------------------|
 | Operation card title | The route's **docstring** — first non-empty line; falls back to a humanised property name |
 | Control label | The param's doc as recorded by `reflect(T)`; falls back to a humanised input name |
-| Control order | Declaration order of the route's parameters — there is no ordering key |
+| Control order | Fixed context source declaration order, then route parameter declaration order — there is no ordering key |
 | Which control is rendered | `domain` if present, else the declared Julia `type` |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |

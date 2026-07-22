@@ -16,6 +16,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, IndexedSemanticAutoApp,
+    ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
     PolicyApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
@@ -178,6 +179,31 @@ end
         @semantic (inputs=(mode=(domain=static_domain((:quick, :full)),),),) @get run(; mode::Symbol=:quick) =
             h.p("$(model):$(mode)")
     end
+end
+
+@htmx struct ZeroConfigSemanticApp
+    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
+    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+
+    unrelated = Ref("survives")
+
+    @get fit() = h.p("fit:$(study):$(dose):$(objectid(unrelated))")
+    @post predict() = h.p("predict:$(study):$(dose):$(objectid(unrelated))")
+end
+
+
+@htmx struct ZeroConfigSemanticChild
+    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
+    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+
+    unrelated = Ref("mounted-survives")
+
+    @post predict() = h.p("mounted:$(study):$(dose):$(objectid(unrelated))")
+end
+
+
+@htmx struct ZeroConfigSemanticHost
+    @include models = ZeroConfigSemanticChild(:north, 50)
 end
 
 @htmx struct ContextSemanticApp
@@ -482,7 +508,7 @@ end
     import HTMXObjects: _is_semantic_root_provider, _operation_context,
                         _root_providers
 
-    app = SemanticAutoApp()
+    app = SemanticAutoApp(; __cache_base__=mktempdir())
     descriptor = semantic_descriptor(app)
     @test [(route.verb, route.path) for route in descriptor.routes] ==
           [(:GET, "/models/fit"), (:POST, "/models/predict")]
@@ -548,7 +574,8 @@ end
     # a parallel application-owned store.
     _root_providers[SemanticAutoApp] = RootProvider()
     seed_req = HTTP.Request("GET", "/", ["X-Forwarded-Prefix" => "/p/seed"])
-    seeded_root = SemanticAutoApp(; __req__=seed_req, __prefix__="/p/seed")
+    seeded_root = SemanticAutoApp(; __req__=seed_req, __prefix__="/p/seed",
+                                  __cache_base__=mktempdir())
     semantic_app(seeded_root)
     seeded_provider = _root_providers[SemanticAutoApp]
     @test seeded_provider.factory.entries[(SemanticAutoApp, "/p/seed")].value ===
@@ -572,6 +599,88 @@ end
 
     selected_html = repr("text/html", semantic_app(IndexedSemanticAutoApp().models(:one)))
     @test contains(selected_html, "hx-get=\"/models/one/run\"")
+end
+
+@testitem "zero-config fixed semantic context remakes mounted targets" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _root_providers
+
+    app = ZeroConfigSemanticApp(:north, 50; __cache_base__=mktempdir())
+    unrelated = app.unrelated
+    descriptor = semantic_descriptor(app)
+    predict = only(filter(route -> route.name === :predict, descriptor.routes))
+
+    # The executable route has no declared arguments. Effective fixed-field
+    # dependencies are nevertheless first-class semantic context params; the
+    # transport-only reflection surface remains unchanged.
+    @test getproperty.(predict.params, :name) == [:study, :dose]
+    @test all(param -> param.kind === :context, predict.params)
+    @test isempty(only(filter(route -> route.name === :predict,
+                              HTMXObjects.reflect(ZeroConfigSemanticApp))).params)
+
+    html = repr("text/html", semantic_app(app; title="Zero configuration"))
+    @test count("<legend>study</legend>", html) == 1
+    @test count("<legend>dose</legend>", html) == 1
+    @test count("class=\"htmxo-semantic-context\"", html) == 1
+    @test count("hx-include=\"#htmxo-semantic-context-zeroconfigsemanticapp\"",
+                html) == 2
+
+    route!(app)
+    request = HTTP.Request(
+        "POST", "/predict",
+        ["Content-Type" => "application/x-www-form-urlencoded"],
+        "study=south&dose=100",
+    )
+    handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, request))
+    response = handler(request)
+    @test response.status == 200
+    @test contains(String(response.body),
+                   "predict:south:100:$(objectid(unrelated))")
+
+    provider = _root_providers[ZeroConfigSemanticApp]
+    source = provider.factory.entries[(ZeroConfigSemanticApp, "")].value
+    @test source === app
+    @test source.study === :north
+    @test source.dose == 50
+    @test source.unrelated === unrelated
+    ownership = HTMXObjects.DynamicObjects.materialization_ownership(
+        (; scope=:job, key="", retention=(; max_entries=128, ttl=nothing)),
+        source,
+    )
+    @test ownership.state === :active
+    @test ownership.scope === :job
+    @test ownership.retention == (; max_entries=128, ttl=nothing)
+
+    # The same contract holds for a fixed semantic bundle mounted externally:
+    # remake the child selected by the registered chain, keep the retained root
+    # as the governed owner, and preserve unrelated child cache identity.
+    host = ZeroConfigSemanticHost(; __cache_base__=mktempdir())
+    mounted_unrelated = host.models.unrelated
+    mounted_html = repr("text/html", semantic_app(host))
+    @test count("<legend>study</legend>", mounted_html) == 1
+    @test count("<legend>dose</legend>", mounted_html) == 1
+    @test count("class=\"htmxo-semantic-context\"", mounted_html) == 1
+    @test count("hx-include=\"#htmxo-semantic-context-zeroconfigsemantichost\"",
+                mounted_html) == 1
+
+    route!(host)
+    mounted_request = HTTP.Request(
+        "POST", "/models/predict",
+        ["Content-Type" => "application/x-www-form-urlencoded"],
+        "study=south&dose=100",
+    )
+    mounted_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, mounted_request))
+    mounted_response = mounted_handler(mounted_request)
+    @test mounted_response.status == 200
+    @test contains(String(mounted_response.body),
+                   "mounted:south:100:$(objectid(mounted_unrelated))")
+    retained_host = _root_providers[ZeroConfigSemanticHost].factory.entries[
+        (ZeroConfigSemanticHost, "")].value
+    @test retained_host === host
+    @test retained_host.models.study === :north
+    @test retained_host.models.dose == 50
+    @test retained_host.models.unrelated === mounted_unrelated
 end
 
 @testitem "generated semantic form context and dependent refresh" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -605,7 +714,7 @@ end
     transport = Ref{Any}()
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
-        (_render, _ip, _keys, call_kwargs, seen_transport) -> begin
+        (_render, _started, _ip, _keys, call_kwargs, seen_transport) -> begin
             transport[] = (; call_kwargs, seen_transport)
             h.aside("polling")
         end
@@ -996,7 +1105,7 @@ end
     polls = NamedTuple[]
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
-        (render_result, ip, keys, call_kwargs, transport) -> begin
+        (render_result, _started, ip, keys, call_kwargs, transport) -> begin
             push!(polls, (; keys, call_kwargs, transport))
             h.aside("polling")
         end
@@ -1069,8 +1178,8 @@ end
     # `render_result` — so the guard has to live on the `render_result` we pass in.
     # Emulate that seam exactly and assert no DO internals reach the response.
     _operation_polling_impl[] =
-        (render_result, ip, keys, call_kwargs, _transport) ->
-            h.div(string(render_result(ip(keys...; call_kwargs...))))
+        (render_result, started, _ip, _keys, _call_kwargs, _transport) ->
+            h.div(string(render_result(started)))
     try
         resolved = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
                                   hx, 0, 0;
