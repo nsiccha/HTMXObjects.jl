@@ -2174,7 +2174,25 @@ _root_retention_time() = time_ns() * 1.0e-9
 _ManagedRootFactory(retention::RootRetention; clock=_root_retention_time) =
     _ManagedRootFactory(retention, clock, ReentrantLock(), Dict{Any,_RetainedRoot}())
 
-_managed_root_release_handler = Ref{Any}()
+function _release_managed_root_materialization!(event)
+    isdefined(DynamicObjects, :release_materialization!) || return nothing
+    context = (;
+        scope=event.scope,
+        key=event.key,
+        retention=(;
+            max_entries=event.retention.max_entries,
+            ttl=event.retention.ttl,
+        ),
+    )
+    Base.invokelatest(
+        getproperty(DynamicObjects, :release_materialization!),
+        context, event.root; reason=event.reason)
+    isdefined(DynamicObjects, :materialization_gc!) &&
+        Base.invokelatest(getproperty(DynamicObjects, :materialization_gc!))
+    nothing
+end
+
+_managed_root_release_handler = Ref{Any}(_release_managed_root_materialization!)
 
 function _managed_root_release_event(factory::_ManagedRootFactory, store_key,
         entry::_RetainedRoot, scope::Symbol, reason::Symbol)
@@ -3018,11 +3036,23 @@ function _request_route_path(req::HTTP.Request, prefix::AbstractString)
     prefix * rp
 end
 
+# Private sentinel key function for semantic-app managed providers. The real
+# key is the normalized prefix already computed by `_operation_context`; using
+# function identity keeps this policy internal without adding a public callback
+# or changing RootProvider's stored shape.
+_semantic_mount_key(_req) = nothing
+
+_is_semantic_root_provider(provider) =
+    provider isa RootProvider && provider.scope === :job &&
+    provider.key === _semantic_mount_key &&
+    provider.factory isa _ManagedRootFactory
+
 function _operation_context(provider::RootProvider, req::HTTP.Request,
         root_prefix::AbstractString, transport::Symbol)
     prefix = _request_prefix(req, root_prefix)
+    key = provider.key === _semantic_mount_key ? prefix : provider.key(req)
     OperationContext(req, prefix, _request_route_path(req, prefix), transport,
-                     provider.scope, provider.key(req))
+                     provider.scope, key)
 end
 
 function _provide_root(provider::RootProvider, RootT, context::OperationContext)
@@ -3330,7 +3360,8 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     _register_handler(method, path, function(req)
         local context, root, leaf
         try
-            target = _operation_target(root_provider, RootT, Symbol[], req,
+            provider = get(_root_providers, RootT, root_provider)
+            target = _operation_target(provider, RootT, Symbol[], req,
                                        root_prefix, root_segs, :http)
             context = target.context
             root = target.root
@@ -3505,7 +3536,8 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                            count(==('/'), strip(mount_prefix, '/')) + 1
             ws_verb = Verb{:WEBSOCKET}()
             _register_websocket_handler(path, function(ws, req)
-                target = _operation_target(root_provider, OwnerT, chain, req,
+                provider = get(_root_providers, OwnerT, root_provider)
+                target = _operation_target(provider, OwnerT, chain, req,
                                            mount_prefix, ws_root_segs, :websocket)
                 operation = _run_operation(target, RouteT, name, ws_verb,
                                            req, ws_base, n_params; operation_policy)
@@ -4082,7 +4114,10 @@ Oxygen router. Returns `app`.
 function route!(obj; prefix="", record_dir=nothing, record_base="",
         root_provider=nothing, operation_policy=OperationPolicy())
     T = typeof(obj)
-    provider = _normalize_root_provider(root_provider)
+    existing_provider = get(_root_providers, T, nothing)
+    provider = isnothing(root_provider) &&
+               _is_semantic_root_provider(existing_provider) ?
+        existing_provider : _normalize_root_provider(root_provider)
     policy = operation_policy isa OperationPolicy ? operation_policy :
              OperationPolicy(operation_policy)
     _registered_types[T] = (; prefix, record_dir)
@@ -6385,6 +6420,63 @@ function _default_semantic_operation(entry)
     )
 end
 
+function _semantic_root(obj)
+    root = obj
+    while hasproperty(root, :__parent__)
+        parent = getproperty(root, :__parent__)
+        parent === nothing && break
+        root = parent
+    end
+    root
+end
+
+function _seed_semantic_root!(provider::RootProvider, root)
+    provider.factory isa _ManagedRootFactory || return nothing
+    req = _req_of(root)
+    req isa HTTP.Request || return nothing
+    RootT = typeof(root)
+    registration = get(_registered_types, RootT, nothing)
+    registration_prefix = isnothing(registration) ? "" : registration.prefix
+    prefix = _request_prefix(req, registration_prefix)
+    now = Float64(provider.factory.clock())
+    released = Any[]
+    lock(provider.factory.lock) do
+        append!(released, _prune_managed_roots!(
+            provider.factory, now, provider.scope))
+        store_key = (RootT, prefix)
+        haskey(provider.factory.entries, store_key) && return nothing
+        while length(provider.factory.entries) >=
+              provider.factory.retention.max_entries
+            event = _evict_managed_root!(provider.factory, provider.scope)
+            isnothing(event) || push!(released, event)
+        end
+        rooted = _prime_managed_root!(root)
+        provider.factory.entries[store_key] = _RetainedRoot(rooted, now)
+    end
+    _notify_managed_root_releases(released)
+    nothing
+end
+
+function _activate_semantic_root_provider!(obj)
+    root = _semantic_root(obj)
+    RootT = typeof(root)
+    current = get(_root_providers, RootT, RootProvider())
+    if _is_semantic_root_provider(current)
+        _seed_semantic_root!(current, root)
+        return current
+    end
+    current.scope === :request && current.factory === _default_root_factory ||
+        return current
+    provider = RootProvider(
+        scope=:job,
+        key=_semantic_mount_key,
+        retention=RootRetention(),
+    )
+    _root_providers[RootT] = provider
+    _seed_semantic_root!(provider, root)
+    provider
+end
+
 """
     semantic_app(obj; values=(;), title=nothing, submit="Run",
                  render_operation=_default_semantic_operation)
@@ -6401,6 +6493,13 @@ of an operation entry. `submit` may likewise be a value or function. Override
 `name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`. The default
 renderer fails closed for WebSocket routes, whose client transport must be
 rendered explicitly.
+
+The first successful render also promotes the historic request-scoped default
+to a managed provider keyed by the root type and normalized mount prefix. The
+current rooted graph is retained when it is request-bound, and registered
+operation handlers resolve that provider at request time. A semantic
+application therefore supplies no job-key callback, store, lock, factory, or
+explicit `RootProvider`; an explicitly configured custom provider is preserved.
 
 The compiler also fails closed when a descriptor cannot be resolved to exactly
 one mounted child, when `(verb, path)` identities collide, or when an indexed
@@ -6455,6 +6554,7 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
         push!(operations, render_operation(entry))
     end
 
+    _activate_semantic_root_provider!(obj)
     heading = isnothing(title) ? Any[] : Any[h.header(h.h1(title))]
     h.section(heading..., operations...; class="htmxo-semantic-app")
 end

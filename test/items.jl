@@ -479,6 +479,9 @@ end
 end
 
 @testitem "semantic app compiles one mounted graph without an operation registry" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _is_semantic_root_provider, _operation_context,
+                        _root_providers
+
     app = SemanticAutoApp()
     descriptor = semantic_descriptor(app)
     @test [(route.verb, route.path) for route in descriptor.routes] ==
@@ -502,7 +505,26 @@ end
     @test count("class=\"htmxo-semantic-operation-result\"", html) == 2
     @test findfirst("GET /models/fit", html) < findfirst("POST /models/predict", html)
 
+    # Rendering the semantic graph is the existing declaration that selects a
+    # managed provider. No key callback, Dict, lock, factory, or explicit
+    # RootProvider is application code, and a later route! preserves the
+    # compiler-selected provider.
+    provider = _root_providers[SemanticAutoApp]
+    @test _is_semantic_root_provider(provider)
     route!(app)
+    @test _root_providers[SemanticAutoApp] === provider
+    registered = _operation_context(
+        provider, HTTP.Request("GET", "/semantic/models/fit"),
+        "/semantic", :http)
+    @test registered.prefix == "/semantic"
+    @test registered.key == "/semantic"
+    forwarded = _operation_context(
+        provider,
+        HTTP.Request("GET", "/models/fit", ["X-Forwarded-Prefix" => "/p/sbpmx/"]),
+        "", :http)
+    @test forwarded.prefix == "/p/sbpmx"
+    @test forwarded.key == "/p/sbpmx"
+
     fit = HTTP.Request("GET", "/models/fit?study=alpha&model=full")
     fit_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, fit))
     fit_response = fit_handler(fit)
@@ -517,6 +539,26 @@ end
     predict_response = predict_handler(predict)
     @test predict_response.status == 200
     @test contains(String(predict_response.body), "predict:alpha:20")
+    @test length(provider.factory.entries) == 1
+    @test haskey(provider.factory.entries, (SemanticAutoApp, ""))
+
+    # A request-bound graph rendered on the first page is seeded directly;
+    # later operation requests remount this rooted source rather than building
+    # a parallel application-owned store.
+    _root_providers[SemanticAutoApp] = RootProvider()
+    seed_req = HTTP.Request("GET", "/", ["X-Forwarded-Prefix" => "/p/seed"])
+    seeded_root = SemanticAutoApp(; __req__=seed_req, __prefix__="/p/seed")
+    semantic_app(seeded_root)
+    seeded_provider = _root_providers[SemanticAutoApp]
+    @test seeded_provider.factory.entries[(SemanticAutoApp, "/p/seed")].value ===
+          seeded_root
+
+    custom = RootProvider((RootT, context) -> RootT(
+        ; __req__=context.request, __route__=context.route,
+          __prefix__=context.prefix))
+    _root_providers[SemanticAutoApp] = custom
+    semantic_app(seeded_root)
+    @test _root_providers[SemanticAutoApp] === custom
 
     indexed_error = try
         semantic_app(IndexedSemanticAutoApp())

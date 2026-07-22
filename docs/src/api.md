@@ -105,6 +105,14 @@ Mounted `@param` context and declared defaults become hidden inputs. An indexed
 `@include` is intentionally fail-closed until an index is selected—call
 `semantic_app(app.models(:chosen))` to compile that concrete subtree.
 
+The first successful `semantic_app` render also activates a private managed
+root provider for the rooted graph. Its identity is the root type plus the
+normalized application mount prefix already carried by the request. The
+current request-bound graph is seeded into that provider, and later operations
+receive a same-type remount. Applications do **not** declare a job-key helper,
+`Dict`, lock, factory, `RootProvider`, or cleanup call. An explicitly supplied
+custom provider remains authoritative.
+
 | Export | Purpose |
 |--------|---------|
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
@@ -212,8 +220,13 @@ operation needs nothing from its parent, renders standalone without complaint.
 
 ## Scoped root lifecycle
 
-For the ordinary in-process case, HTMXObjects owns the keyed store and its
-locking:
+For a `semantic_app`, HTMXObjects automatically owns the keyed store, locking,
+and root remounting. The default identity is `(root type, normalized mount
+prefix)`, so the declaration and ordinary `route!(ModelApp())` call need no
+lifecycle configuration.
+
+`RootProvider` remains the explicit adapter for a non-semantic application or
+a distributed/external store with an identity HTMXObjects cannot derive:
 
 ```julia
 provider = RootProvider(
@@ -232,9 +245,9 @@ subcaches retain their identity. `max_entries` applies LRU cleanup; optional
 `ttl` is an idle timeout in seconds. Cleanup is opportunistic and removes only
 the provider's reference, so work already holding a root can finish.
 
-`RootProvider()` remains fresh-per-request. The managed store is process-local;
-use `RootProvider(factory; scope, key)` as the adapter seam for a distributed or
-externally owned job/session store.
+Outside `semantic_app`, `RootProvider()` remains fresh-per-request. The managed
+store is process-local; use `RootProvider(factory; scope, key)` as the adapter
+seam for a distributed or externally owned job/session store.
 
 A retained root must still carry the current request: `_provide_root` rejects a
 factory whose returned root does not. Retain the **payload** — a fitted model, a
