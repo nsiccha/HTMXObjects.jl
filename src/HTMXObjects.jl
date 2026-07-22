@@ -6433,11 +6433,16 @@ end
 function _seed_semantic_root!(provider::RootProvider, root)
     provider.factory isa _ManagedRootFactory || return nothing
     req = _req_of(root)
-    req isa HTTP.Request || return nothing
     RootT = typeof(root)
-    registration = get(_registered_types, RootT, nothing)
-    registration_prefix = isnothing(registration) ? "" : registration.prefix
-    prefix = _request_prefix(req, registration_prefix)
+    prefix = if req isa HTTP.Request
+        registration = get(_registered_types, RootT, nothing)
+        registration_prefix = isnothing(registration) ? "" : registration.prefix
+        _request_prefix(req, registration_prefix)
+    elseif hasproperty(root, :__prefix__)
+        _normalize_semantic_prefix(getproperty(root, :__prefix__))
+    else
+        ""
+    end
     now = Float64(provider.factory.clock())
     released = Any[]
     lock(provider.factory.lock) do
@@ -6496,10 +6501,11 @@ rendered explicitly.
 
 The first successful render also promotes the historic request-scoped default
 to a managed provider keyed by the root type and normalized mount prefix. The
-current rooted graph is retained when it is request-bound, and registered
-operation handlers resolve that provider at request time. A semantic
-application therefore supplies no job-key callback, store, lock, factory, or
-explicit `RootProvider`; an explicitly configured custom provider is preserved.
+current rooted graph is retained—including fixed semantic state declared
+before a request exists—and registered operation handlers remount that provider
+at request time. A semantic application therefore supplies no job-key callback,
+store, lock, factory, or explicit `RootProvider`; an explicitly configured
+custom provider is preserved.
 
 The compiler also fails closed when a descriptor cannot be resolved to exactly
 one mounted child, when `(verb, path)` identities collide, or when an indexed

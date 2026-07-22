@@ -511,6 +511,7 @@ end
     # compiler-selected provider.
     provider = _root_providers[SemanticAutoApp]
     @test _is_semantic_root_provider(provider)
+    @test provider.factory.entries[(SemanticAutoApp, "")].value === app
     route!(app)
     @test _root_providers[SemanticAutoApp] === provider
     registered = _operation_context(

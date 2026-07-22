@@ -108,10 +108,11 @@ Mounted `@param` context and declared defaults become hidden inputs. An indexed
 The first successful `semantic_app` render also activates a private managed
 root provider for the rooted graph. Its identity is the root type plus the
 normalized application mount prefix already carried by the request. The
-current request-bound graph is seeded into that provider, and later operations
-receive a same-type remount. Applications do **not** declare a job-key helper,
-`Dict`, lock, factory, `RootProvider`, or cleanup call. An explicitly supplied
-custom provider remains authoritative.
+current graph is seeded into that provider even when it was declared before a
+request and already carries required fixed semantic state; later operations
+receive a same-type request remount. Applications do **not** declare a job-key
+helper, `Dict`, lock, factory, `RootProvider`, or cleanup call. An explicitly
+supplied custom provider remains authoritative.
 
 | Export | Purpose |
 |--------|---------|
