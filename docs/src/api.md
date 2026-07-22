@@ -189,7 +189,7 @@ effect/side-effect policy key at all.
 | Which control is rendered | `domain` if present, else the declared Julia `type` |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |
-| Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key |
+| Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key. It governs every route under the app root, not just compiled operations; see [What the policy governs](#What-the-policy-governs) |
 
 Two property-level keys do matter to the compiler: `role` must be `:operation`
 (`semantic_app` rejects any discovered route whose descriptor says otherwise),
@@ -297,6 +297,37 @@ provider at `route!` time:
 ```julia
 route!(ModelApp(); root_provider=provider, operation_policy=OperationPolicy(:auto))
 ```
+
+### What the policy governs
+
+"App-level" is literal, and it is the answer to the question this section is
+otherwise easy to misread: the policy is stored per **root type** and threaded
+into **every** route registered under that root — `@semantic` or not, inside the
+`semantic_app` graph or not. It is documented here because `semantic_app` is
+where it usually first matters, not because it is scoped to the compiler.
+
+So a hand-written route that renders bespoke HTML into an htmx-targeted
+fragment — a master/detail row detail, say — is governed by the policy exactly
+like a compiled operation card is. It needs no `@semantic` block, no descriptor
+key, and no hand-written poller.
+
+Under `:auto` a route takes the polling transport when **all** of these hold;
+otherwise it stays direct:
+
+| Condition | Where it comes from |
+|-----------|---------------------|
+| The verb is `GET` | The poller issues GET refreshes, so mutations stay direct |
+| The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
+| The request is an HTMX request | A full-page navigation gets the finished document |
+| The descriptor advertises `semantics.pending` | True for any ordinary computed route body; false for a fixed field or a `@fresh` one |
+
+`:polling` drops only the HTMX condition; `:blocking` keeps every route direct.
+
+A polling-mode route is *started* non-blockingly and answers within the grace
+period (~0.1s) with a poller; an operation that finishes inside grace skips the
+poller and returns its value directly. `polling_fetchindex` therefore remains
+useful only for what the policy does not cover — a non-GET operation, a declared
+final response, or a poller you want to shape by hand.
 
 ```@docs
 RootProvider
