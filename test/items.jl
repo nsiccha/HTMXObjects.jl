@@ -659,7 +659,8 @@ end
 end
 
 @testitem "scoped root providers retain and remount roots" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _ManagedRootFactory, _operation_context, _provide_root
+    import HTMXObjects: _ManagedRootFactory, _managed_root_release_handler,
+                        _operation_context, _provide_root
 
     job_key(req) = HTTP.header(req, "X-Job", "default")
     hit(target; job="job-a") = begin
@@ -780,6 +781,46 @@ end
     ttl_a = retained("ttl")
     tick[] += 10
     @test retained("ttl") !== ttl_a
+
+    # Managed eviction releases only the provider's reference. The internal
+    # framework notification runs after the store lock is released and carries
+    # enough identity for DynamicObjects to retire a lease without any
+    # application-owned store or GC callback.
+    release_tick = Ref(0.0)
+    release_factory = _ManagedRootFactory(
+        RootRetention(max_entries=1, ttl=5); clock=() -> release_tick[])
+    release_provider = RootProvider(release_factory; scope=:job, key=job_key)
+    release_events = Any[]
+    lock_states = Bool[]
+    old_release_handler = _managed_root_release_handler[]
+    try
+        _managed_root_release_handler[] = event -> begin
+            push!(release_events, event)
+            push!(lock_states, islocked(release_factory.lock))
+        end
+        release_root(job) = begin
+            req = HTTP.Request("GET", "/", ["X-Job" => job])
+            release_factory(JobScopedApp,
+                _operation_context(release_provider, req, "", :http))
+        end
+        released_a = release_root("a")
+        release_tick[] = 1
+        released_b = release_root("b")
+        release_tick[] = 7
+        release_root("b")
+
+        @test lock_states == [false, false]
+        @test getproperty.(release_events, :reason) == [:lru, :ttl]
+        @test getproperty.(release_events, :key) == ["a", "b"]
+        @test all(event -> event.root_type === JobScopedApp, release_events)
+        @test all(event -> event.scope === :job, release_events)
+        @test release_events[1].root === released_a
+        @test release_events[2].root === released_b
+        @test all(event -> event.retention === release_factory.retention,
+                  release_events)
+    finally
+        _managed_root_release_handler[] = old_release_handler
+    end
 
     # Request-scoped custom providers still fail closed if they omit the
     # current request, since remounting is intentionally scoped-only.

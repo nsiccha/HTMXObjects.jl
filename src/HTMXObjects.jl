@@ -2174,17 +2174,41 @@ _root_retention_time() = time_ns() * 1.0e-9
 _ManagedRootFactory(retention::RootRetention; clock=_root_retention_time) =
     _ManagedRootFactory(retention, clock, ReentrantLock(), Dict{Any,_RetainedRoot}())
 
-function _prune_managed_roots!(factory::_ManagedRootFactory, now::Float64)
-    ttl = factory.retention.ttl
-    if !isnothing(ttl)
-        for (key, entry) in collect(factory.entries)
-            now - entry.touched >= ttl && delete!(factory.entries, key)
-        end
+_managed_root_release_handler = Ref{Any}()
+
+function _managed_root_release_event(factory::_ManagedRootFactory, store_key,
+        entry::_RetainedRoot, scope::Symbol, reason::Symbol)
+    root_type, key = store_key
+    (; root=entry.value, root_type, scope, key, reason,
+       retention=factory.retention)
+end
+
+function _notify_managed_root_releases(events)
+    isassigned(_managed_root_release_handler) || return nothing
+    handler = _managed_root_release_handler[]
+    isnothing(handler) && return nothing
+    for event in events
+        Base.invokelatest(handler, event)
     end
     nothing
 end
 
-function _evict_managed_root!(factory::_ManagedRootFactory)
+function _prune_managed_roots!(factory::_ManagedRootFactory, now::Float64,
+        scope::Symbol)
+    released = Any[]
+    ttl = factory.retention.ttl
+    if !isnothing(ttl)
+        for (key, entry) in collect(factory.entries)
+            now - entry.touched >= ttl || continue
+            delete!(factory.entries, key)
+            push!(released, _managed_root_release_event(
+                factory, key, entry, scope, :ttl))
+        end
+    end
+    released
+end
+
+function _evict_managed_root!(factory::_ManagedRootFactory, scope::Symbol)
     isempty(factory.entries) && return nothing
     oldest_key = first(keys(factory.entries))
     oldest_time = factory.entries[oldest_key].touched
@@ -2193,8 +2217,9 @@ function _evict_managed_root!(factory::_ManagedRootFactory)
         oldest_key = key
         oldest_time = entry.touched
     end
+    entry = factory.entries[oldest_key]
     delete!(factory.entries, oldest_key)
-    nothing
+    _managed_root_release_event(factory, oldest_key, entry, scope, :lru)
 end
 
 function _prime_managed_root!(root, seen=Base.IdSet())
@@ -2219,8 +2244,9 @@ end
 
 function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
     now = Float64(factory.clock())
-    lock(factory.lock) do
-        _prune_managed_roots!(factory, now)
+    released = Any[]
+    root = lock(factory.lock) do
+        append!(released, _prune_managed_roots!(factory, now, context.scope))
         store_key = (RootT, context.key)
         if haskey(factory.entries, store_key)
             entry = factory.entries[store_key]
@@ -2228,7 +2254,8 @@ function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
             return entry.value
         end
         while length(factory.entries) >= factory.retention.max_entries
-            _evict_managed_root!(factory)
+            event = _evict_managed_root!(factory, context.scope)
+            isnothing(event) || push!(released, event)
         end
         # Prime only declaration-level, non-indexed mounted children. This
         # gives remount a stable rooted graph whose unrelated child/model caches
@@ -2239,6 +2266,11 @@ function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
         factory.entries[store_key] = _RetainedRoot(root, now)
         root
     end
+    # Release notifications may hand ownership back to DynamicObjects. Never
+    # invoke framework code while holding the provider lock: an executor may
+    # synchronously inspect or reacquire the same semantic root.
+    _notify_managed_root_releases(released)
+    root
 end
 
 function RootProvider(; scope::Symbol=:request, key=nothing, retention=nothing)
@@ -8731,6 +8763,8 @@ include("routes/editor_routes.jl")
 function __init__()
     # Per-process error log dir for caught route exceptions.
     ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
+    isassigned(_managed_root_release_handler) ||
+        (_managed_root_release_handler[] = nothing)
 end
 
 end # module HTMXObjects
