@@ -3401,7 +3401,14 @@ const _operation_polling_impl = Ref{Any}(
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
 
-function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs)
+# `fetch` is DO's two-phase selector, threaded through the IP call form (and
+# through `execute_materialization`, which forwards its kwargs to that same call
+# form — so the governed lease is preserved either way). `Base.fetch` takes DO's
+# `:inline` branch: compute on THIS task and return the value. `identity` takes
+# the `:spawn` branch: kick the compute off and hand back a `Pending`. Only the
+# latter makes polling transport real — see `_execute_operation`.
+function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
+        fetch=Base.fetch)
     context = get(target, :context, nothing)
     if get(target, :governed, false) && context isa OperationContext &&
             isdefined(DynamicObjects, :execute_materialization)
@@ -3413,17 +3420,26 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs)
         return Base.invokelatest(
             getproperty(DynamicObjects, :execute_materialization),
             framework_context, target.root, target.leaf, name,
-            verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+            verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
     end
     prop = getproperty(target.leaf, name)
-    prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+    prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
 end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req)
     prop = getproperty(target.leaf, name)
     mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
-    started = _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs)
+    # Decide the transport BEFORE starting the work, and start it the way that
+    # transport needs. Starting blockingly and then wrapping the finished value
+    # in a poller is a no-op: the request has already paid the full compute, so
+    # `:polling`/`:auto` would behave exactly like `:blocking` and the
+    # extension's grace-period fast path — written against `started isa
+    # Pending` — could never be reached.
+    started = _execute_materialization(target, name, verb_inst, idx_vals,
+                                       kw_pairs;
+                                       fetch=mode === :polling ? identity :
+                                             Base.fetch)
     if mode === :polling
         transport = (poll_url=_operation_poll_url(policy, req), label=Long(name),
                      poll_interval=policy.poll_interval,
