@@ -658,86 +658,144 @@ end
           "<p>external-fit:alt</p>"
 end
 
-@testitem "job-scoped root provider retains payload, not the root" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _operation_context, _provide_root
+@testitem "scoped root providers retain and remount roots" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _ManagedRootFactory, _operation_context, _provide_root
 
     job_key(req) = HTTP.header(req, "X-Job", "default")
-    hit(target) = begin
-        req = HTTP.Request("GET", target, ["X-Job" => "job-a"])
+    hit(target; job="job-a") = begin
+        req = HTTP.Request("GET", target, ["X-Job" => job])
         first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
     end
 
-    # An `@htmx` root is immutable, so the in-place context refresh in
-    # `_provide_root` can never apply to one — the provider must hand back a
-    # root that already carries the request.
     @test !ismutabletype(JobScopedApp)
+    @test RootRetention().max_entries == 128
+    @test RootRetention(ttl=60).ttl == 60.0
+    @test_throws ArgumentError RootRetention(max_entries=0)
+    @test_throws ArgumentError RootRetention(ttl=0)
+    @test_throws ArgumentError RootProvider(
+        scope=:request, retention=RootRetention())
+    @test_throws ArgumentError RootProvider(
+        scope=:job, key=job_key, retention=:managed)
 
-    # Supported shape: the expensive payload lives behind `context.key`; the
-    # root is rebuilt per request so `@param` and the mounted child's generated
-    # form both observe the *current* request.
+    # The custom factory adapter remains available for application/distributed
+    # stores that retain their own payload rather than the routed root.
     builds = Ref(0)
     payloads = Dict{Any,String}()
-    good = RootProvider(; scope=:job, key=job_key) do RootT, context
-        retained = get!(() -> (builds[] += 1; "payload-$(builds[])"), payloads, context.key)
+    custom = RootProvider(; scope=:job, key=job_key) do RootT, context
+        retained = get!(() -> (builds[] += 1; "payload-$(builds[])"),
+                        payloads, context.key)
         RootT(; payload=retained, __req__=context.request, __route__=context.route,
               (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)
     end
-    route!(JobScopedApp(); root_provider=good)
+    route!(JobScopedApp(); root_provider=custom)
 
     first_resp = hit("/?fit_key=first-key")
     second_resp = hit("/?fit_key=second-key")
     @test first_resp.status == 200
     @test second_resp.status == 200
-    # the retained payload is shared across both requests…
     @test contains(String(first_resp.body), "payload-1")
     @test contains(String(second_resp.body), "payload-1")
     @test builds[] == 1
-    # …while every request-derived value tracks its own request.
-    @test contains(String(first_resp.body), "type=\"hidden\" name=\"fit_key\" value=\"first-key\"")
-    @test contains(String(second_resp.body), "type=\"hidden\" name=\"fit_key\" value=\"second-key\"")
+    @test contains(String(first_resp.body),
+                   "type=\"hidden\" name=\"fit_key\" value=\"first-key\"")
+    @test contains(String(second_resp.body),
+                   "type=\"hidden\" name=\"fit_key\" value=\"second-key\"")
 
-    # Unsupported shape: retaining the root itself. Rejected at the provider
-    # seam rather than surfacing as a `Nothing has no field method` inside form
-    # rendering (request 1) or silently serving request 1's params (request 2).
+    # Managed retention replaces the common application-owned Dict + lock +
+    # factory. The stored source root is stable while each request receives a
+    # remounted view with current params, route, prefix, and mounted children.
+    managed = RootProvider(
+        scope=:job,
+        key=job_key,
+        retention=RootRetention(max_entries=2),
+    )
+    route!(JobScopedApp(); root_provider=managed)
+    managed_first = hit("/?fit_key=managed-first")
+    managed_second = hit("/?fit_key=managed-second")
+    @test managed_first.status == 200
+    @test managed_second.status == 200
+    @test contains(String(managed_first.body),
+                   "type=\"hidden\" name=\"fit_key\" value=\"managed-first\"")
+    @test contains(String(managed_second.body),
+                   "type=\"hidden\" name=\"fit_key\" value=\"managed-second\"")
+
+    source_req = HTTP.Request("GET", "/?fit_key=source", ["X-Job" => "job-a"])
+    source_context = _operation_context(managed, source_req, "", :http)
+    source = managed.factory(JobScopedApp, source_context)
+    @test source === managed.factory(JobScopedApp, source_context)
+    mounted = _provide_root(managed, JobScopedApp, source_context)
+    @test mounted.fit_key == "source"
+    @test mounted.__route__ == "/"
+    @test contains(repr("text/html", operation_form(mounted.models, :analyze;
+                                                    target_id="#managed")),
+                   "type=\"hidden\" name=\"fit_key\" value=\"source\"")
+    retained_result = mounted.models.structured(Verb{:GET}(); value=:ok)
+    next_req = HTTP.Request("GET", "/?fit_key=next", ["X-Job" => "job-a"])
+    next_context = _operation_context(managed, next_req, "", :http)
+    next_mounted = _provide_root(managed, JobScopedApp, next_context)
+    @test next_mounted.fit_key == "next"
+    @test next_mounted.models.structured(Verb{:GET}(); value=:ok) === retained_result
+
+    # Custom scoped providers may retain the root itself now too: the same
+    # remount seam refreshes it for both :job and :session scopes.
     roots = Dict{Any,JobScopedApp}()
-    bad = RootProvider(; scope=:job, key=job_key) do RootT, context
+    cached = RootProvider(; scope=:job, key=job_key) do RootT, context
         get!(() -> RootT(), roots, context.key)
     end
-    route!(JobScopedApp(); root_provider=bad)
-    @test hit("/?fit_key=first-key").status == 500
+    route!(JobScopedApp(); root_provider=cached)
+    @test hit("/?fit_key=cached-first").status == 200
+    cached_second = hit("/?fit_key=cached-second")
+    @test cached_second.status == 200
+    @test contains(String(cached_second.body),
+                   "type=\"hidden\" name=\"fit_key\" value=\"cached-second\"")
 
-    bad_req = HTTP.Request("GET", "/?fit_key=first-key", ["X-Job" => "job-a"])
-    context = _operation_context(bad, bad_req, "", :http)
+    session_key(req) = HTTP.header(req, "X-Session", "default")
+    retained_session = Ref{Any}(nothing)
+    session = RootProvider(; scope=:session, key=session_key) do RootT, _context
+        isnothing(retained_session[]) && (retained_session[] = RootT())
+        retained_session[]
+    end
+    session_req = HTTP.Request("GET", "/?fit_key=session-key",
+                               ["X-Session" => "session-a"])
+    session_context = _operation_context(session, session_req, "", :http)
+    @test _provide_root(session, JobScopedApp, session_context).fit_key == "session-key"
+
+    # Capacity is LRU and ttl is idle-time based. An injected monotonic clock
+    # keeps cleanup tests exact without sleeps.
+    tick = Ref(0.0)
+    retention_factory = _ManagedRootFactory(
+        RootRetention(max_entries=2, ttl=5); clock=() -> tick[])
+    bounded = RootProvider(retention_factory; scope=:job, key=job_key)
+    retained(job) = begin
+        tick[] += 1
+        req = HTTP.Request("GET", "/", ["X-Job" => job])
+        retention_factory(JobScopedApp,
+            _operation_context(bounded, req, "", :http))
+    end
+    a1 = retained("a")
+    b1 = retained("b")
+    @test retained("a") === a1
+    retained("c")
+    @test retained("b") !== b1
+    ttl_a = retained("ttl")
+    tick[] += 10
+    @test retained("ttl") !== ttl_a
+
+    # Request-scoped custom providers still fail closed if they omit the
+    # current request, since remounting is intentionally scoped-only.
+    unbound = RootProvider((RootT, _context) -> RootT())
+    unbound_req = HTTP.Request("GET", "/?fit_key=missing")
+    unbound_context = _operation_context(unbound, unbound_req, "", :http)
     err = try
-        _provide_root(bad, JobScopedApp, context)
+        _provide_root(unbound, JobScopedApp, unbound_context)
         nothing
     catch e
         e
     end
     @test err isa ArgumentError
     @test contains(err.msg, "does not carry the current request")
-    @test contains(err.msg, "carries no request")
-    @test contains(err.msg, "Retain the application payload")
+    @test contains(err.msg, "RootRetention")
 
-    # …and the retained-from-an-earlier-request variant reports the other cause.
-    stale_req = HTTP.Request("GET", "/?fit_key=second-key", ["X-Job" => "job-a"])
-    stale = RootProvider(; scope=:job, key=job_key) do RootT, _context
-        RootT(; __req__=bad_req)
-    end
-    stale_context = _operation_context(stale, stale_req, "", :http)
-    stale_err = try
-        _provide_root(stale, JobScopedApp, stale_context)
-        nothing
-    catch e
-        e
-    end
-    @test stale_err isa ArgumentError
-    @test contains(stale_err.msg, "a root retained from an earlier request")
-
-    # `operation_form` outside any request falls back to declared defaults
-    # instead of throwing on a `nothing` request.
-    detached = repr("text/html", operation_form(ExternalContextApp().models, :analyze; target_id="#d"))
-    @test contains(detached, "name=\"value\"")
 end
 
 @testitem "a detached @include child refuses to render a form it cannot fill" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -753,9 +811,10 @@ end
     @test contains(repr("text/html", operation_form(mounted, :analyze; target_id="#m")),
                    "type=\"hidden\" name=\"fit_key\" value=\"live\"")
 
-    # Detached: the exact shape a job/session factory produces when it retains
-    # the CHILD and injects it into a fresh root. Previously rendered a 200 with
-    # the inherited input silently missing; now it says so.
+    # Detached: the exact shape a custom job/session factory produces when it
+    # retains the CHILD and injects it into a fresh root. Managed retention
+    # keeps/remounts the rooted graph instead. This detached instance must still
+    # fail closed rather than silently omit the inherited input.
     orphan = ExternalContextChild()
     @test _detached_include_child_params(orphan) == [:fit_key]
     err = try

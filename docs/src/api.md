@@ -110,7 +110,33 @@ Mounted `@param` context and declared defaults become hidden inputs. An indexed
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
-| `OperationPolicy`, `RootProvider`, `OperationContext` | Execution transport and request/session/job root-provider contracts |
+| `OperationPolicy`, `RootProvider`, `RootRetention`, `OperationContext` | Execution transport and request/session/job root-provider contracts |
+
+## Scoped root lifecycle
+
+For the ordinary in-process case, HTMXObjects owns the keyed store and its
+locking:
+
+```julia
+provider = RootProvider(
+    scope=:job,
+    key=req -> HTTP.header(req, "X-Job", "default"),
+    retention=RootRetention(max_entries=64, ttl=3600),
+)
+
+route!(ModelApp(); root_provider=provider)
+```
+
+One source root is retained per `(root type, key)`. Every request receives a
+same-type remount: request, route, prefix, params, and mounted-child context are
+fresh, while unrelated model caches, in-flight work, mmap values, and indexed
+subcaches retain their identity. `max_entries` applies LRU cleanup; optional
+`ttl` is an idle timeout in seconds. Cleanup is opportunistic and removes only
+the provider's reference, so work already holding a root can finish.
+
+`RootProvider()` remains fresh-per-request. The managed store is process-local;
+use `RootProvider(factory; scope, key)` as the adapter seam for a distributed or
+externally owned job/session store.
 
 ## Forms and inputs
 
