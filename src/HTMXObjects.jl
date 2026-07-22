@@ -26,8 +26,8 @@ export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export Verb
-export OperationContext, RootProvider, OperationPolicy
-export semantic_descriptor, operation_form
+export OperationContext, RootProvider, RootRetention, OperationPolicy
+export semantic_descriptor, operation_form, semantic_app
 
 using DynamicObjects, HTTP, Tables
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
@@ -2040,9 +2040,9 @@ const _included_type_parents = Dict{DataType, Set{DataType}}()
 
 Request-local context passed to a [`RootProvider`](@ref). `scope` and `key`
 describe the provider-selected application lifetime (`:request`, `:session`, or
-`:job`); `transport` is `:http` or `:websocket`. The provider owns any storage
-behind session/job keys — HTMXObjects only supplies the request, externally
-visible route/prefix, and a uniform construction seam.
+`:job`); `transport` is `:http` or `:websocket`. A custom provider owns any
+storage behind session/job keys. The managed [`RootRetention`](@ref) form keeps
+that common in-process storage inside HTMXObjects.
 """
 struct OperationContext{R,K}
     request::R
@@ -2054,51 +2054,65 @@ struct OperationContext{R,K}
 end
 
 """
+    RootRetention(; max_entries=128, ttl=nothing)
+
+Bounded retention policy for an in-process [`RootProvider`](@ref).
+
+- `max_entries` is the maximum number of retained roots. When inserting a new
+  root at capacity, the least-recently-used entry is removed.
+- `ttl` is an optional maximum idle time in seconds. Expired entries are
+  removed opportunistically on the next provider access.
+
+Both policies remove only the provider's reference. An already-running request
+or computation may still hold its root; a later request constructs a new root.
+The store is process-local, so distributed runtimes should use a custom
+`RootProvider(factory; ...)` adapter instead.
+"""
+struct RootRetention
+    max_entries::Int
+    ttl::Union{Nothing,Float64}
+end
+
+function RootRetention(; max_entries::Integer=128, ttl=nothing)
+    max_entries > 0 || throw(ArgumentError(
+        "root-retention max_entries must be positive (got $(repr(max_entries)))"))
+    ttl_seconds = isnothing(ttl) ? nothing : Float64(ttl)
+    (isnothing(ttl_seconds) || (isfinite(ttl_seconds) && ttl_seconds > 0)) ||
+        throw(ArgumentError(
+            "root-retention ttl must be a positive finite number of seconds or nothing " *
+            "(got $(repr(ttl)))"))
+    RootRetention(Int(max_entries), ttl_seconds)
+end
+
+"""
     RootProvider(factory; scope=:request, key=nothing)
+    RootProvider(; scope=:request, key=nothing, retention=nothing)
 
-Construct roots for registered operations. `factory` is called as
-`factory(RootT, context)` and must return a `RootT` **carrying
-`context.request`** — see below. For `scope=:session` or `:job`, pass a
-`key(req)` function and let the application-owned factory decide what is
-retained behind that key. The default request provider preserves the historic
-behavior: a fresh root is constructed for every request with `__req__`,
-`__route__`, and `__prefix__` populated by HTMXObjects.
+Construct roots for registered operations. A custom `factory` is called as
+`factory(RootT, context)` and must return a `RootT`. For `scope=:session` or
+`:job`, pass a `key(req)` function and let the custom factory decide what is
+retained behind that key.
 
-!!! warning "Retain the payload, not the root"
-    A root is a *per-request* object even under `:session`/`:job`. `@param` and
-    `@header` lower to ordinary **cached** DynamicObjects properties that read
-    `_req_of(__self__)`, so a root only ever observes the request it was built
-    with, and its `@include` children inherit `__req__` from it. Retaining the
-    root across requests therefore serves request #1's parameters forever;
-    dropping the request entirely leaves every request-reading path with
-    `nothing`. Nor can the root be refreshed in place — `@dynamicstruct` emits
-    an immutable type, and mutating it would not invalidate the cached values
-    anyway. Retain the *application payload* behind `context.key` and build a
-    fresh root around it each request:
+For the common in-process case, omit the factory and pass a `RootRetention`:
 
-    ```julia
-    RootProvider(; scope=:job, key=req -> HTTP.header(req, "X-Job", "")) do RootT, context
-        payload = lock(store_lock) do
-            get!(() -> ExpensiveState(), store, context.key)
-        end
-        RootT(payload; __req__=context.request, __route__=context.route,
-              # omit `__prefix__` when empty so a struct-body default survives
-              (isempty(context.prefix) ? (;) : (; __prefix__=context.prefix))...)
-    end
-    ```
+```julia
+RootProvider(
+    scope=:job,
+    key=req -> HTTP.header(req, "X-Job", ""),
+    retention=RootRetention(max_entries=64, ttl=3600),
+)
+```
 
-    The retained `payload` (and any cache it owns) survives; the cheap root
-    wrapper does not. A factory that returns a root not carrying
-    `context.request` is rejected at the provider seam with an `ArgumentError`.
+HTMXObjects supplies the locked store, caches one root per `(RootT,
+context.key)`, and returns a same-type DynamicObjects remount for every request.
+Request-derived properties and their transitive dependents—including mounted
+children—refresh, while unrelated settled, in-flight, mmap, and indexed cache
+identity remains shared. The default `RootProvider()` keeps the historic fresh
+root-per-request behavior. `retention` is rejected for `scope=:request` because
+request scope already has exactly one request per root.
 
-    "Payload" means your own **inert data** — a fitted model, a loaded dataset,
-    a cache. It does **not** mean a mounted `@include` child: a child is part of
-    the request-scoped object graph and inherits `__req__` from its parent, so
-    retaining one and passing it back in (`RootT(; child=retained, …)`) leaves it
-    with no `__parent__` and silently drops every parent-supplied param from its
-    generated forms. `operation_form` rejects that instance rather than render an
-    incomplete form. If the child is expensive, retain the data *inside* it and
-    let the `@include` rebuild the cheap wrapper.
+The managed store is deliberately process-local. A distributed/multipod job
+store remains an application/runtime adapter expressed by the factory form.
 """
 struct RootProvider{F,K}
     factory::F
@@ -2143,8 +2157,101 @@ _default_root_factory(RootT, context::OperationContext) =
     RootT(; __req__=context.request, __route__=context.route,
           _prefix_kw(context.prefix)...)
 
-RootProvider(; scope::Symbol=:request, key=nothing) =
-    RootProvider(_default_root_factory; scope, key)
+mutable struct _RetainedRoot
+    value::Any
+    touched::Float64
+end
+
+struct _ManagedRootFactory{C}
+    retention::RootRetention
+    clock::C
+    lock::ReentrantLock
+    entries::Dict{Any,_RetainedRoot}
+end
+
+_root_retention_time() = time_ns() * 1.0e-9
+
+_ManagedRootFactory(retention::RootRetention; clock=_root_retention_time) =
+    _ManagedRootFactory(retention, clock, ReentrantLock(), Dict{Any,_RetainedRoot}())
+
+function _prune_managed_roots!(factory::_ManagedRootFactory, now::Float64)
+    ttl = factory.retention.ttl
+    if !isnothing(ttl)
+        for (key, entry) in collect(factory.entries)
+            now - entry.touched >= ttl && delete!(factory.entries, key)
+        end
+    end
+    nothing
+end
+
+function _evict_managed_root!(factory::_ManagedRootFactory)
+    isempty(factory.entries) && return nothing
+    oldest_key = first(keys(factory.entries))
+    oldest_time = factory.entries[oldest_key].touched
+    for (key, entry) in factory.entries
+        entry.touched < oldest_time || continue
+        oldest_key = key
+        oldest_time = entry.touched
+    end
+    delete!(factory.entries, oldest_key)
+    nothing
+end
+
+function _prime_managed_root!(root, seen=Base.IdSet())
+    root in seen && return root
+    push!(seen, root)
+    T = typeof(root)
+    primed = Set{Symbol}()
+    for (name, info) in Base.invokelatest(DynamicObjects.meta, T)
+        name in primed && continue
+        DynamicObjects.isfixed(info) && continue
+        info.indexed && continue
+        any(macro_sym in info.macros for macro_sym in keys(_http_verbs)) && continue
+        nested_type = _nested_struct_type(T, Val(name))
+        isnothing(nested_type) && continue
+        isempty(Base.invokelatest(DynamicObjects.meta, nested_type)) && continue
+        push!(primed, name)
+        child = getproperty(root, name)
+        _prime_managed_root!(child, seen)
+    end
+    root
+end
+
+function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
+    now = Float64(factory.clock())
+    lock(factory.lock) do
+        _prune_managed_roots!(factory, now)
+        store_key = (RootT, context.key)
+        if haskey(factory.entries, store_key)
+            entry = factory.entries[store_key]
+            entry.touched = now
+            return entry.value
+        end
+        while length(factory.entries) >= factory.retention.max_entries
+            _evict_managed_root!(factory)
+        end
+        # Prime only declaration-level, non-indexed mounted children. This
+        # gives remount a stable rooted graph whose unrelated child/model caches
+        # can be shared. Context-dependent children remain invalidated by
+        # DynamicObjects' dependency partition; indexed children are realized
+        # lazily because their keys are request/application inputs.
+        root = _prime_managed_root!(_default_root_factory(RootT, context))
+        factory.entries[store_key] = _RetainedRoot(root, now)
+        root
+    end
+end
+
+function RootProvider(; scope::Symbol=:request, key=nothing, retention=nothing)
+    if isnothing(retention)
+        return RootProvider(_default_root_factory; scope, key)
+    end
+    retention isa RootRetention || throw(ArgumentError(
+        "root-provider retention must be a RootRetention or nothing " *
+        "(got $(typeof(retention)))"))
+    scope === :request && throw(ArgumentError(
+        "root-provider retention requires scope=:session or :job; request roots are already fresh"))
+    RootProvider(_ManagedRootFactory(retention); scope, key)
+end
 
 _normalize_root_provider(::Nothing) = RootProvider()
 _normalize_root_provider(provider::RootProvider) = provider
@@ -2890,18 +2997,15 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
     root = provider.factory(RootT, context)
     root isa RootT || throw(ArgumentError(
         "root provider for $(RootT) returned $(typeof(root)); expected an instance of $(RootT)"))
-    # Session/job providers may return a cached root. Refresh the framework
-    # request fields on mutable roots so mounted children inherit the current
-    # OperationContext while the DynamicObjects cache remains owned by the app.
-    # Immutable roots must be rebuilt by their provider to carry request state.
-    if provider.scope === :job && isdefined(DynamicObjects, :remount)
-        # Immutable cached roots use DynamicObjects' same-type mounted view so
-        # request context and transitive dependents are refreshed without
-        # copying settled/in-flight/mmap/indexed cache identity.
+    # Scoped providers may return a cached root. DynamicObjects' same-type
+    # mounted view refreshes request context and transitive dependents without
+    # copying settled/in-flight/mmap/indexed cache identity. This is also what
+    # makes HTMXObjects-managed RootRetention safe for immutable @htmx roots.
+    if provider.scope in (:session, :job) && isdefined(DynamicObjects, :remount)
         try
             root = Base.invokelatest(getproperty(DynamicObjects, :remount), root;
-                __req__=context.request, __prefix__=context.prefix,
-                __parent__=nothing)
+                __req__=context.request, __route__=context.route,
+                __prefix__=context.prefix, __parent__=nothing)
         catch
             # Providers may already return a freshly bound root or use an older
             # DynamicObjects without remount; retain the compatibility path.
@@ -2923,16 +3027,9 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
     root
 end
 
-# The refresh above cannot help an `@htmx` root: `@dynamicstruct` emits an
-# IMMUTABLE type, so `ismutabletype` is false for every app struct and the block
-# no-ops. And a root only ever observes the request it was constructed with:
-# `@param`/`@header` lower to ordinary *cached* DynamicObjects properties reading
-# `_req_of(__self__)`, and `@include` children inherit `__req__` from their
-# parent. So a factory that retains the root across requests serves request #1's
-# parameters forever (silent), and one that drops the request leaves `_req_of`
-# `nothing` for every request-reading path (a `Nothing has no field method` deep
-# inside form/param rendering, far from the provider that caused it). Reject
-# both here, at the seam that created them, with the corrected shape spelled out.
+# A custom provider may still return a root that DynamicObjects cannot remount
+# (for example a non-DO root or an older producer version). Reject that shape at
+# the provider seam instead of surfacing stale params or a deep request error.
 function _check_root_request(root, RootT, context::OperationContext)
     _req_of(root) === context.request && return nothing
     detail = _req_of(root) === nothing ?
@@ -2941,9 +3038,10 @@ function _check_root_request(root, RootT, context::OperationContext)
     throw(ArgumentError(string(
         "root provider for $(RootT) (scope $(repr(context.scope)), key $(repr(context.key))) ",
         "returned a root that does not carry the current request: ", detail, ".\n",
-        "`@param`/`@header` are cached per root, so a retained root never sees a later ",
-        "request. Retain the application payload behind `context.key` and build a fresh ",
-        "root around it each request:\n",
+        "Use the managed in-process provider when the routed root is a DynamicObject:\n",
+        "    RootProvider(scope=$(repr(context.scope)), key=…, retention=RootRetention())\n",
+        "For an external/distributed store, return a fresh request-bound root from the ",
+        "custom factory:\n",
         "    RootProvider(; scope=$(repr(context.scope)), key=…) do RootT, context\n",
         "        payload = get!(() -> ExpensiveState(), store, context.key)\n",
         "        RootT(payload; __req__=context.request, __route__=context.route,\n",
@@ -3768,7 +3866,7 @@ function _reflect_call_params(OwnerT, info, method, arg_docs=Dict{Symbol,String}
     kwargs = NamedTuple[]
     sig === nothing && return (path_params, kwargs)
     mk = (p, source) -> (name=p.name, source=source, type=p.type, required=p.required,
-                         default=(p.required ? nothing : p.default),
+                         default=(p.required ? nothing : _unquote(p.default)),
                          doc=get(arg_docs, p.name, nothing), inherited=false)
     for p in sig.positional
         p.name === :__verb__ && continue
@@ -3791,7 +3889,8 @@ function _reflect_local_param(T, nm)
     if Meta.isexpr(rhs, :call) && length(rhs.args) >= 4 && rhs.args[1] === _extract_param
         has_default = length(rhs.args) >= 5
         return (type=_reflect_resolve_type(parentmodule(T), rhs.args[4]),
-                required=!has_default, default=has_default ? rhs.args[5] : nothing,
+                required=!has_default,
+                default=has_default ? _unquote(rhs.args[5]) : nothing,
                 doc=_decl_doc(info))
     end
     nothing
@@ -3937,9 +4036,10 @@ Oxygen router. Returns `app`.
   [`save_response`](@ref) under that directory; intended for static export.
 - `record_base` — URL prefix to strip from saved file paths when `record_dir`
   is set (for deploying to a non-root subpath).
-- `root_provider` — a [`RootProvider`](@ref), or a callable
-  `factory(RootT, context)`, used by both HTTP and WebSocket operations.
-  `nothing` preserves the historic fresh-root-per-request behavior.
+- `root_provider` — a [`RootProvider`](@ref), including its managed
+  [`RootRetention`](@ref) form, or a callable `factory(RootT, context)`, used by
+  both HTTP and WebSocket operations. `nothing` preserves the historic
+  fresh-root-per-request behavior.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
   polling, or HTMX-aware automatic execution. Defaults to blocking.
 
@@ -5757,11 +5857,22 @@ function _semantic_request_value(obj, param)
     req = _req_of(obj)
     # `operation_form` is also called outside a request (docs, gallery, a
     # hand-built object in a test). With no request there is simply nothing to
-    # prefill, so fall through to the declared default rather than throwing.
+    # prefill here; `_semantic_form_values` next resolves mounted object context
+    # and then falls through to the descriptor default.
     req === nothing && return _NO_DEFAULT
     src = _kwargs_source(req, req.method)
     fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
     _lookup_param(src, fallback, param.name, param.type)
+end
+
+function _semantic_object_value(obj, param)
+    current = obj
+    while current !== nothing
+        hasproperty(current, param.name) && return getproperty(current, param.name)
+        current = hasproperty(current, :__parent__) ?
+                  getproperty(current, :__parent__) : nothing
+    end
+    _NO_DEFAULT
 end
 
 function _semantic_form_values(obj, route, provided)
@@ -5772,6 +5883,15 @@ function _semantic_form_values(obj, route, provided)
             request_value = _semantic_request_value(obj, param)
             if request_value !== _NO_DEFAULT
                 values[param.name] = request_value
+                continue
+            end
+            if !param.required
+                values[param.name] = param.default
+                continue
+            end
+            object_value = _semantic_object_value(obj, param)
+            if object_value !== _NO_DEFAULT
+                values[param.name] = object_value
                 continue
             end
         end
@@ -5881,13 +6001,28 @@ end
 
 function _semantic_runtime_route(obj, route)
     params = NamedTuple[route.params...]
-    names = Set{Symbol}(param.name for param in params)
     parent = hasproperty(obj, :__parent__) ? getproperty(obj, :__parent__) : nothing
     while parent !== nothing
         ParentT = typeof(parent)
         for name in Base.invokelatest(_param_names, ParentT)
-            name in names && continue
             local_info = _reflect_local_param(ParentT, name)
+            existing = findfirst(param -> param.name === name, params)
+            if existing !== nothing
+                # An inline child knows the inherited parameter name at macro
+                # expansion, but its standalone descriptor cannot know the
+                # enclosing declaration's type/default/doc. Enrich that
+                # placeholder from the concrete mounted parent before form
+                # defaults are resolved.
+                if local_info !== nothing && get(params[existing], :inherited, false)
+                    params[existing] = merge(params[existing], (
+                        type=local_info.type,
+                        required=local_info.required,
+                        default=local_info.default,
+                        doc=local_info.doc,
+                    ))
+                end
+                continue
+            end
             if local_info === nothing
                 push!(params, (name=name, source=_reflect_kw_source(string(route.verb)),
                                type=nothing, required=false, default=nothing,
@@ -5898,7 +6033,6 @@ function _semantic_runtime_route(obj, route)
                                default=local_info.default, doc=local_info.doc,
                                inherited=true, kind=nothing, domain=nothing))
             end
-            push!(names, name)
         end
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
@@ -5939,13 +6073,12 @@ function _check_mounted_include_child(obj, route)
         "it is mounted as an `@include` child of $(parents), but this instance has no ",
         "`__parent__`, so parent-supplied params resolve to nothing and would be silently ",
         "omitted from the form.\n",
-        "This usually means a session/job `RootProvider` factory retained the CHILD and ",
-        "injected it into a freshly built root. A mounted child is part of the ",
-        "request-scoped object graph, not a payload — it inherits `__req__` from its ",
-        "parent. Retain your own inert data behind `context.key` and let the `@include` ",
-        "build the child:\n",
-        "    RootT(retained_state; __req__=context.request, __route__=context.route, …)\n",
-        "    # and do NOT pass the child in")))
+        "Render the child obtained from its mounted root. A managed ",
+        "`RootProvider(..., retention=RootRetention())` retains and remounts the whole ",
+        "rooted graph safely. A mounted child is not a payload. A custom provider that ",
+        "rebuilds the root should retain only independently owned data behind ",
+        "`context.key`, then let `@include` mount ",
+        "the child; do not inject a detached child into the new root.")))
 end
 
 function _semantic_refresh_dependencies(route)
@@ -6122,6 +6255,176 @@ end
 
 function operation_form(obj, name::Symbol; verb::Symbol=:GET, kwargs...)
     operation_form(obj, _operation_route(typeof(obj), name, verb); kwargs...)
+end
+
+_normalize_semantic_prefix(prefix) = begin
+    value = strip(string(prefix), '/')
+    isempty(value) ? "" : "/" * value
+end
+
+function _semantic_relative_prefix(prefix, root_prefix)
+    full = _normalize_semantic_prefix(prefix)
+    root = _normalize_semantic_prefix(root_prefix)
+    isempty(root) && return full
+    full == root && return ""
+    startswith(full, root * "/") || throw(ArgumentError(
+        "semantic_app found mounted prefix $(repr(full)) outside root prefix $(repr(root))"))
+    replace(full, root => ""; count=1)
+end
+
+function _semantic_mounts!(mounts, obj, graph, root_prefix)
+    expected = graph.type
+    obj isa expected || throw(ArgumentError(
+        "semantic_app expected a mounted $(expected), got $(typeof(obj))"))
+    hasproperty(obj, :__prefix__) || throw(ArgumentError(
+        "semantic_app requires an @htmx object with a mounted `__prefix__`"))
+    prefix = _semantic_relative_prefix(getproperty(obj, :__prefix__), root_prefix)
+    key = (expected, prefix)
+    haskey(mounts, key) && throw(ArgumentError(
+        "semantic_app found two $(expected) mounts at $(repr(prefix)); operation identity is ambiguous"))
+    mounts[key] = obj
+
+    for child in graph.children
+        hasproperty(obj, child.name) || throw(ArgumentError(
+            "semantic_app descriptor names child $(repr(child.name)) on $(typeof(obj)), but the mounted object has no such property"))
+        mounted = getproperty(obj, child.name)
+        ChildT = child.graph.type
+        mounted isa ChildT || throw(ArgumentError(string(
+            "semantic_app cannot materialize child $(repr(child.name)) on $(typeof(obj)): ",
+            "the descriptor expects $(ChildT), but `getproperty` produced $(typeof(mounted)). ",
+            "Indexed `@include` children need a selected index; render `semantic_app` on ",
+            "that selected child, or mount a plain semantic child.")))
+        _semantic_mounts!(mounts, mounted, child.graph, root_prefix)
+    end
+    mounts
+end
+
+_semantic_path_under(path, prefix) =
+    isempty(prefix) || path == prefix || startswith(path, prefix * "/")
+
+function _semantic_route_mount(mounts, route)
+    candidates = Pair{Tuple{Any,String},Any}[
+        key => obj for (key, obj) in mounts
+        if key[1] === route.owner && _semantic_path_under(route.path, key[2])
+    ]
+    isempty(candidates) && throw(ArgumentError(
+        "semantic_app could not resolve $(route.verb) $(route.path) to a mounted $(route.owner)"))
+    longest = maximum(length(first(candidate)[2]) for candidate in candidates)
+    winners = [last(candidate) for candidate in candidates
+               if length(first(candidate)[2]) == longest]
+    length(winners) == 1 || throw(ArgumentError(
+        "semantic_app found ambiguous mounts for $(route.verb) $(route.path) on $(route.owner)"))
+    only(winners)
+end
+
+function _semantic_operation_title(route)
+    description = get(route, :doc, nothing)
+    if description isa AbstractString
+        for line in split(description, '\n')
+            value = strip(line)
+            isempty(value) || return value
+        end
+    end
+    Long(route.name)
+end
+
+function _semantic_operation_slug(route)
+    path = replace(strip(route.path, '/'), r"[^A-Za-z0-9]+" => "-")
+    isempty(path) && (path = "index")
+    lowercase(string(route.verb)) * "-" * lowercase(path)
+end
+
+_semantic_app_setting(setting::Function, entry) = setting(entry)
+_semantic_app_setting(setting, _entry) = setting
+
+function _default_semantic_operation(entry)
+    entry.form === nothing && throw(ArgumentError(string(
+        "semantic_app has no default control for WebSocket operation ",
+        "$(entry.verb) $(entry.path); pass `render_operation` and render this ",
+        "entry explicitly")))
+    h.article(
+        h.header(h.h2(entry.title), h.code("$(entry.verb) $(entry.path)")),
+        entry.form,
+        entry.result;
+        class="htmxo-semantic-operation",
+        data_operation=entry.name,
+        data_verb=entry.verb,
+        data_path=entry.path,
+    )
+end
+
+"""
+    semantic_app(obj; values=(;), title=nothing, submit="Run",
+                 render_operation=_default_semantic_operation)
+
+Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
+operation surface. Routes are discovered in declaration order from
+[`semantic_descriptor`](@ref); each ordinary HTTP operation gets an
+[`operation_form`](@ref) and a stable result target, so adding another route to
+the graph requires no parallel form or route registry.
+
+`values` may be one `NamedTuple`/dictionary shared by every form, or a function
+of an operation entry. `submit` may likewise be a value or function. Override
+`render_operation(entry)` for local layout; the entry carries `object`, `route`,
+`name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`. The default
+renderer fails closed for WebSocket routes, whose client transport must be
+rendered explicitly.
+
+The compiler also fails closed when a descriptor cannot be resolved to exactly
+one mounted child, when `(verb, path)` identities collide, or when an indexed
+`@include` has no selected runtime child. Call `semantic_app` on a selected
+indexed child to compile that subtree.
+"""
+function semantic_app(obj; values=(;), title=nothing, submit="Run",
+        render_operation=_default_semantic_operation)
+    descriptor = semantic_descriptor(obj)
+    root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
+    mounts = Dict{Tuple{Any,String},Any}()
+    _semantic_mounts!(mounts, obj, descriptor.graph, root_prefix)
+
+    seen = Set{Tuple{Symbol,String}}()
+    operations = Any[]
+    for (index, route) in enumerate(descriptor.routes)
+        identity = (route.verb, route.path)
+        identity in seen && throw(ArgumentError(
+            "semantic_app found duplicate operation identity $(route.verb) $(route.path)"))
+        push!(seen, identity)
+
+        property = get(route, :property, nothing)
+        property === nothing && throw(ArgumentError(
+            "semantic_app route $(route.verb) $(route.path) has no property descriptor"))
+        get(property, :role, nothing) === :operation || throw(ArgumentError(
+            "semantic_app route $(route.verb) $(route.path) is not described as an operation"))
+
+        mounted = _semantic_route_mount(mounts, route)
+        local_route = _operation_route(typeof(mounted), route.name, route.verb)
+        target_id = "htmxo-operation-$(index)-$(_semantic_operation_slug(route))-result"
+        base_entry = (;
+            object=mounted,
+            route=local_route,
+            name=route.name,
+            verb=route.verb,
+            path=route.path,
+            title=_semantic_operation_title(route),
+            target_id,
+        )
+        operation_values = _semantic_app_setting(values, base_entry)
+        operation_submit = _semantic_app_setting(submit, base_entry)
+        form = route.verb === :WEBSOCKET ? nothing : operation_form(
+            mounted, local_route;
+            values=operation_values,
+            target_id="#$(target_id)",
+            submit=operation_submit,
+            form_class="htmxo-semantic-operation-form",
+        )
+        result = h.div(; id=target_id, class="htmxo-semantic-operation-result",
+                       aria_live="polite")
+        entry = merge(base_entry, (; form, result))
+        push!(operations, render_operation(entry))
+    end
+
+    heading = isnothing(title) ? Any[] : Any[h.header(h.h1(title))]
+    h.section(heading..., operations...; class="htmxo-semantic-app")
 end
 
 # --- Conditional visibility (show_when) ---
