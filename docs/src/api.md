@@ -110,7 +110,105 @@ Mounted `@param` context and declared defaults become hidden inputs. An indexed
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
-| `OperationPolicy`, `RootProvider`, `RootRetention`, `OperationContext` | Execution transport and request/session/job root-provider contracts |
+
+```@docs
+semantic_descriptor
+semantic_app
+operation_form
+```
+
+### What the compiler reads from a `@semantic` descriptor
+
+`@semantic`, `property_descriptor`, `property_descriptors`, `option_descriptor`,
+`static_domain` and `dynamic_domain` are **re-exported from DynamicObjects** —
+the descriptor schema itself is DynamicObjects'. What follows is the other half
+of the contract: which of those descriptor keys HTMXObjects' form compiler
+actually consumes, and what each one does to the generated UI. A key not listed
+here has no rendering effect.
+
+A `@semantic` input override accepts exactly `name`, `type`, `required`,
+`default`, `kind` and `domain`; an unrecognised key is a loud error at macro
+expansion (`unknown @semantic fields for input ...`), not a silent no-op. Of
+those, **only `kind` and `domain` are merged into the rendered control** — the
+rest of what a control shows comes from the ordinary route declaration.
+
+So, to answer the obvious question directly: labels, help text, units and
+ordering are **not** expressible in the `@semantic` block, and there is no
+effect/side-effect policy key at all.
+
+| What you want to control | Where it actually comes from |
+|--------------------------|------------------------------|
+| Operation card title | The route's **docstring** — first non-empty line; falls back to a humanised property name |
+| Control label | The param's doc as recorded by `reflect(T)`; falls back to a humanised input name |
+| Control order | Declaration order of the route's parameters — there is no ordering key |
+| Which control is rendered | `domain` if present, else the declared Julia `type` |
+| Required marker / default | The declaration's own `required` / default value |
+| Units | Not modelled. Put them in the param doc or the label |
+| Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key |
+
+Two property-level keys do matter to the compiler: `role` must be `:operation`
+(`semantic_app` rejects any discovered route whose descriptor says otherwise),
+and a declared `output` of `HTTP.Response` / `MIMEResponse` keeps the operation
+on the direct, non-polling transport regardless of policy.
+
+### Domains and control selection
+
+A domain is a `NamedTuple`; `static_domain` and `dynamic_domain` are the
+DynamicObjects constructors that build one. HTMXObjects reads these keys:
+
+| Domain key | Meaning |
+|------------|---------|
+| `kind` | `:unrestricted` (or absent) falls back to the typed control; `:dynamic` resolves `provider` per request; anything else is a fixed option set |
+| `options` | Vector of option `NamedTuple`s (see below) |
+| `multiple` | Emits `multiple` on the select and accepts a vector on submit |
+| `allow_custom` | Renders `sinput_custom` (datalist + free text) and **skips server-side domain validation** |
+| `provider` | `:dynamic` only — a `Symbol` naming a DynamicObjects property on the owning type that yields the options |
+| `dependencies` | `:dynamic` only — input names whose current values are passed to `provider`; changing one re-renders the form without executing the operation |
+
+Each option carries `value` and `label`, plus optional `disabled` (rendered
+disabled and excluded from validation), `help` (a `title=` tooltip on a
+`<option>`, an inline suffix on a radio label) and `group` (groups options into
+an `<optgroup>`).
+
+Given a resolved domain the control is picked by this rule, in order:
+`allow_custom` → `sinput_custom`; otherwise not `multiple` and at most
+`radio_max` options (default 4) → a radio `fieldset`; otherwise a `<select>`.
+Only with no domain, or `kind=:unrestricted`, does the input fall back to the
+type-driven control.
+
+### Fail-closed contract
+
+The four fail-closed cases are all `ArgumentError`, and all are raised **at
+runtime, when you call `semantic_app` / `operation_form`** — that is, from
+inside the route body that renders the surface. None is a macro-expansion or
+precompile-time error, so a graph that compiles can still fail on the first
+request that renders it.
+
+| Case | Raised by | Message begins |
+|------|-----------|----------------|
+| Unselected indexed `@include` mount | `semantic_app` | `semantic_app cannot materialize child …` (`Indexed @include children need a selected index`) |
+| Duplicate `(verb, path)` operation identity | `semantic_app` | `semantic_app found duplicate operation identity …` |
+| Detached `@include` child (no `__parent__`) | `operation_form` | `operation_form on <T> cannot resolve …` |
+| `@ws` route with the default renderer | `semantic_app` | `semantic_app has no default control for WebSocket operation …` |
+
+Because they are ordinary route exceptions, they surface through the standard
+response pipeline: an HTMX request gets **200** with the standard error article
+and an `X-HTMXO-Error-Id` header, a non-HTMX request gets **500**. That is the
+discriminator to recover against — not the status alone.
+
+This is distinct from *submitted-value* failures. `HTMXObjects.MissingRequiredParam`
+and `HTMXObjects.InvalidDomainValue` (raised when a form posts a value outside its
+current domain) map to **400** on a non-HTMX request and render a `Bad Request`
+article; under HTMX they too stay 200 with `X-HTMXO-Error-Id`. Neither type is
+exported, so catching one needs the qualified name.
+
+In short: **400 means the caller sent something wrong; 500 means the surface
+itself could not be compiled.**
+
+The detached-child case has one wrinkle worth knowing: the parent/child link is
+registered by `route!`, and the check only fires when the route would actually
+have inherited a parent-supplied `@param`. An unrouted app, or a child whose
+operation needs nothing from its parent, renders standalone without complaint.
 
 ## Scoped root lifecycle
 
@@ -137,6 +235,25 @@ the provider's reference, so work already holding a root can finish.
 `RootProvider()` remains fresh-per-request. The managed store is process-local;
 use `RootProvider(factory; scope, key)` as the adapter seam for a distributed or
 externally owned job/session store.
+
+A retained root must still carry the current request: `_provide_root` rejects a
+factory whose returned root does not. Retain the **payload** — a fitted model, a
+dataset, a cache — never a mounted `@include` child, which belongs to the
+request-scoped object graph.
+
+Execution transport is a separate, app-level choice, passed alongside the root
+provider at `route!` time:
+
+```julia
+route!(ModelApp(); root_provider=provider, operation_policy=OperationPolicy(:auto))
+```
+
+```@docs
+RootProvider
+RootRetention
+OperationContext
+OperationPolicy
+```
 
 ## Forms and inputs
 
