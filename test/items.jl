@@ -17,7 +17,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
-    PolicyApp, SlowPolicyApp, MultiVerbPolicyApp,
+    PolicyApp, SlowPolicyApp, SlowRecordApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, InlineContextApp,
@@ -307,6 +307,15 @@ end
 # distinguish a genuine non-blocking start from a blocking one.
 @htmx struct SlowPolicyApp
     @get slow(; count::Int=1) = (sleep(3.0); h.p("slow:$(count)"))
+end
+
+# Slower than `record!`'s grace period, fast enough to record in a test. Pins
+# that static export keeps capturing the finished HTML now that the zero-config
+# default is `:auto` — an `hx=true` recording is a synthesized HTMX request, so
+# without the forced `:blocking` it would write a Treebars poller to disk.
+@htmx struct SlowRecordApp
+    @get index() = h.main(h.p("home"))
+    @get slowrec() = (sleep(0.5); h.p("finished"))
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -1069,7 +1078,7 @@ end
         _property_descriptor, _run_operation, _resolve_operation_value
     import HTMXObjects.DynamicObjects
 
-    @test OperationPolicy().mode === :blocking
+    @test OperationPolicy().mode === :auto
     @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
           OperationPolicy(:polling, "350ms", false)
     @test_throws ArgumentError OperationPolicy(:background)
@@ -1269,6 +1278,70 @@ end
         @test repr("text/html", blocking.value) == "<p>slow:2</p>"
     finally
         _operation_polling_impl[] = old_polling
+    end
+end
+
+# The whole point of the default is that the consumer who writes the LEAST
+# config gets the good behaviour. Every other policy test passes an explicit
+# `operation_policy=`, so none of them can tell whether an app that declares
+# nothing gets `:auto` or `:blocking` — which is exactly the question a
+# consumer cannot answer from the code either. Pin it from the registry AND
+# through a real route registration, so a future change to `route!`'s kwarg
+# default cannot silently put long routes back on the request task.
+@testitem "zero-config apps default to :auto" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_policies, _operation_polling_impl,
+        _run_operation
+    import HTMXObjects.DynamicObjects
+
+    @test OperationPolicy().mode === :auto
+
+    # `route!` with no `operation_policy` at all — the SbPMX `__init__` shape.
+    route!(SlowPolicyApp())
+    policy = _operation_policies[SlowPolicyApp]
+    @test policy.mode === :auto
+
+    app = SlowPolicyApp()
+    target = (context=nothing, root=app, leaf=app)
+    starts = Any[]
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, started, _ip, _keys, _call_kwargs, _transport) -> begin
+            push!(starts, started)
+            h.aside("polling")
+        end
+    try
+        # Warm on its own key: a cold `_run_operation` compiles for seconds,
+        # which would swamp the wall-clock assertion below.
+        warm = HTTP.Request("GET", "/slow?count=100", ["HX-Request" => "true"])
+        _run_operation(target, SlowPolicyApp, :slow, Verb{:GET}(), warm, 0, 0;
+                       operation_policy=policy)
+        empty!(starts)
+
+        hx = HTTP.Request("GET", "/slow?count=101", ["HX-Request" => "true"])
+        elapsed = @elapsed _run_operation(target, SlowPolicyApp, :slow,
+                                          Verb{:GET}(), hx, 0, 0;
+                                          operation_policy=policy)
+        @test elapsed < 1.0
+        @test only(starts) isa DynamicObjects.Pending
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+end
+
+# `record!` is the one caller that must NOT inherit the `:auto` default: its
+# `hx=true` variant synthesizes an HTMX request, so an unforced policy would
+# write a Treebars poller to disk instead of the finished fragment. Measured
+# before the force was added: `hx/slowrec.html` was a `treebar-poller` div.
+@testitem "record! forces blocking transport" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+    import HTMXObjects: _operation_policies
+
+    mktempdir() do dir
+        record!(SlowRecordApp(); record_dir=dir, paths=["/", "/slowrec"],
+                full=false, hx=true, markdown=false)
+        @test _operation_policies[SlowRecordApp].mode === :blocking
+        recorded = read(joinpath(dir, "hx", "slowrec.html"), String)
+        @test contains(recorded, "<p>finished</p>")
+        @test !contains(recorded, "treebar-poller")
     end
 end
 
@@ -2136,17 +2209,42 @@ end
 """
 Mounts `TestRoutes` through the normal `@include` registrar and drives both a
 catalog GET and a rejected selective POST through the in-process HTTP router.
+
+`TestUIHost` declares no `operation_policy`, so it runs on the zero-config
+`:auto` default — and scanning the catalog takes longer than the grace period.
+An HTMX GET therefore answers with a poller and the content arrives on a
+subsequent poll. Following that round trip is the point: it proves the default
+transport actually *delivers*, not merely that it engages.
 """
 @testitem "web-included test routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :test_ui] begin
     route!(TestUIHost())
     router = HTMXObjects.CONTEXT[].service.router
 
-    get_request = HTTP.Request("GET", "/tests", ["HX-Request" => "true"], UInt8[])
-    get_handler = first(HTTP.Handlers.gethandler(router, get_request))
-    @test get_handler !== HTTP.Handlers.default404
-    get_response = get_handler(get_request)
-    @test get_response.status == 200
-    get_body = String(get_response.body)
+    function drive(target)
+        request = HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[])
+        handler = first(HTTP.Handlers.gethandler(router, request))
+        @test handler !== HTTP.Handlers.default404
+        response = handler(request)
+        @test response.status == 200
+        String(response.body)
+    end
+
+    # Either the catalog scan beat the grace period, or we get a poller whose
+    # own `hx-get` settles to the same content. Bounded so a genuinely stuck
+    # operation fails the test instead of hanging it.
+    function settle()
+        body = drive("/tests")
+        for _ in 1:100
+            contains(body, "treebar-poller") || return body
+            @test contains(body, "/tests?__htmxo_poll=1")
+            sleep(0.05)
+            body = drive("/tests?__htmxo_poll=1")
+        end
+        body
+    end
+
+    get_body = settle()
+    @test !contains(get_body, "treebar-poller")
     @test contains(get_body, "documented test item discovery")
     @test contains(get_body, "Run selected")
     @test contains(get_body, "/tests/run_tag/unit")

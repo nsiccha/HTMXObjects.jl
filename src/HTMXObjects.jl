@@ -2121,15 +2121,22 @@ struct RootProvider{F,K}
 end
 
 """
-    OperationPolicy(mode=:blocking; poll_interval="200ms", keep_progress=true)
+    OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true)
 
-Select route execution transport. `:blocking` preserves historical synchronous
-responses. `:polling` uses the Treebars extension for pending-capable HTML
-operations. `:auto` polls only HTMX requests whose DynamicObjects descriptor
-advertises pending capability. Polling is limited to GET operations because the
-Treebars poller issues GET refreshes; mutation verbs therefore remain direct.
-Declared `HTTP.Response` and `MIMEResponse` outputs always remain direct, as do
-WebSocket route lambdas.
+Select route execution transport. `:auto` — **the default, applied to every app
+whether or not it declares a policy** — polls only HTMX requests whose
+DynamicObjects descriptor advertises pending capability. `:polling` drops the
+HTMX condition. `:blocking` keeps every route direct; it is the opt-out for a
+route surface that genuinely must answer inline.
+
+Polling is limited to GET operations because the Treebars poller issues GET
+refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
+`MIMEResponse` outputs always remain direct, as do WebSocket route lambdas, and
+[`record!`](@ref) forces `:blocking` for its static-export pass.
+
+You never have to write `OperationPolicy` to get non-blocking long routes —
+`route!(app)` alone already does. Reach for it to tune (`poll_interval`,
+`keep_progress`) or to opt out (`:blocking`).
 """
 struct OperationPolicy
     mode::Symbol
@@ -2137,7 +2144,11 @@ struct OperationPolicy
     keep_progress::Bool
 end
 
-function OperationPolicy(mode::Symbol=:blocking; poll_interval="200ms",
+# One default, spelled once: `route!`'s kwarg default and every
+# `get(_operation_policies, T, OperationPolicy())` registry fallback read their
+# mode from here, so "what does an app that declares nothing get?" has a single
+# answer in the source as well as in the docs.
+function OperationPolicy(mode::Symbol=:auto; poll_interval="200ms",
         keep_progress::Bool=true)
     mode in (:blocking, :polling, :auto) || throw(ArgumentError(
         "operation-policy mode must be :blocking, :polling, or :auto (got $(repr(mode)))"))
@@ -4297,7 +4308,11 @@ Oxygen router. Returns `app`.
   both HTTP and WebSocket operations. `nothing` preserves the historic
   fresh-root-per-request behavior.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
-  polling, or HTMX-aware automatic execution. Defaults to blocking.
+  polling, or HTMX-aware automatic execution. **Defaults to
+  `OperationPolicy(:auto)`**, so an app that declares nothing already serves
+  long routes without blocking the request task. Pass one only to tune
+  (`poll_interval`, `keep_progress`) or to opt out — `:blocking` for a route
+  surface that must answer inline, `:polling` to force a tree.
 
 `route!` stores its registration settings per type in internal registries so the
 `_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
@@ -4338,8 +4353,12 @@ Each path is hit once per enabled variant:
   * `hx=true`       — `HX-Request: true`. Saves the body fragment at `<record_dir>/hx/<path>.html`.
   * `markdown=true` — `Accept: text/markdown`. Saves the markdown view at `<record_dir>/md/<path>.md` (only if the route's `to_markdown_string(val)` succeeds; otherwise skipped).
 
-Calls `route!(app; record_dir, record_base)` first to register the
-handlers with the recording config. Returns `app`.
+Calls `route!(app; record_dir, record_base, operation_policy=OperationPolicy(:blocking))`
+first to register the handlers with the recording config. Recording forces
+`:blocking` because the `hx=true` variant synthesizes an HTMX request, which the
+default `:auto` policy would answer with a Treebars poller — and a poller
+written to disk has nothing to poll. Static export wants the finished HTML.
+Returns `app`.
 
 Use this in place of the subprocess+HTTP recorder when you can drive an
 app from the same Julia process — much faster (no port, no warmup) and
@@ -4353,7 +4372,8 @@ function record!(app;
         hx::Bool=true,
         markdown::Bool=true,
     )
-    route!(app; record_dir, record_base)
+    route!(app; record_dir, record_base,
+           operation_policy=OperationPolicy(:blocking))
     isdir(record_dir) || mkpath(record_dir)
     router = CONTEXT[].service.router
     for path in paths
