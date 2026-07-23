@@ -48,10 +48,18 @@ function _view_list(xs)
     children = Any[]
     for (i, x) in enumerate(xs)
         i == 1 || push!(children, ", ")
-        push!(children, _view_code(x))
+        push!(children, _view_code(_view_option_label(x)))
     end
     h.span(children...)
 end
+
+# A domain option is a RECORD — value plus the label a control renders, and
+# possibly a group, help text or a disabled flag. Show the label: printing the
+# whole NamedTuple fills the cell with field names and buries the one thing a
+# reader is looking for. Anything without a label prints as itself.
+_view_option_label(x) = x
+_view_option_label(x::NamedTuple) =
+    hasproperty(x, :label) ? x.label : (hasproperty(x, :value) ? x.value : x)
 
 """
     _view_domain(domain) -> renderable

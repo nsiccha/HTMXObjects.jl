@@ -507,6 +507,15 @@ end
     @get index() = "domain-root"
 end
 
+# A typed computed property whose type is an ordinary Julia type, not a node.
+# `paginate::Bool = false` registers with DynamicObjects' analyzer hook, so a
+# route walk reading that hook raw would try to descend into `Bool`.
+
+@htmx struct BoolPropRoot
+    paginate::Bool = false
+    @get index() = string("paginate=", paginate)
+end
+
 end # @testmodule HTMXOTestFixtures
 
 # --- Tests ---
@@ -2946,4 +2955,35 @@ end
 
     # A scalar mount with no domain keeps the ordinary parse path.
     @test contains(String(drive("/chains/3").body), "stage=3")
+end
+
+@testitem "a typed computed property is not a mount, and its domain is proven" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: semantic_descriptor, semantic_graph_view
+
+    # The guard: `paginate::Bool = false` is a property, not a child to descend
+    # into. Registering it as a mount would put `Bool`'s (nonexistent) routes
+    # under `/paginate`.
+    paths = [route.path for route in HTMXObjects.reflect(BoolPropRoot)]
+    @test paths == ["/"]
+    @test !any(path -> contains(path, "paginate"), paths)
+
+    graph = semantic_descriptor(BoolPropRoot).graph
+    @test isempty(graph.children)
+
+    # It still appears as a PROPERTY, with a domain DynamicObjects proved
+    # rather than one anybody declared — a real two-option control, not
+    # "unrestricted".
+    descriptor = only(filter(p -> p.name === :paginate, graph.properties))
+    domain = get(descriptor, :domain, nothing)
+    @test !isnothing(domain)
+    @test domain.kind === :static
+    # Options are RECORDS, not bare values: each carries the value plus the
+    # label a control renders. Both halves matter — the value is what selects,
+    # the label is what a human reads.
+    @test Set(option.value for option in domain.options) == Set([false, true])
+    @test Set(option.label for option in domain.options) == Set(["false", "true"])
+
+    rendered = repr("text/html", semantic_graph_view(BoolPropRoot))
+    @test contains(rendered, "paginate")
+    @test contains(rendered, "static")
 end
