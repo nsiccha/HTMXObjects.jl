@@ -365,6 +365,26 @@ end
     @get index() = "plainroot"
 end
 
+# A two-level page chain. Both nodes wrap, and each must receive the navigation
+# of ITS OWN node — the outer shell sees the root, the inner sees the child —
+# rather than one record computed at the leaf and shared up the chain.
+@htmx struct NavChainChild
+    __page__(content; navigation=nothing) =
+        h.section(h.span("INNER:" *
+                         (isnothing(navigation) ? "none" : navigation.current.path)),
+                  content)
+    @get index() = "child-body"
+end
+
+@htmx struct NavChainRoot
+    @include child = NavChainChild()
+    __page__(content; navigation=nothing) =
+        h.div(h.span("OUTER:" *
+                     (isnothing(navigation) ? "none" : navigation.current.path)),
+              content)
+    @get index() = "root-body"
+end
+
 # A page wrapper that slurps. It cannot error on an extra keyword, so the
 # framework is free to pass navigation through.
 @htmx struct NavSlurpRoot
@@ -2554,6 +2574,38 @@ end
     slurp = drive("/")
     @test slurp.status == 200
     @test contains(String(slurp.body), "SLURP-GOT-NAV")
+end
+
+@testitem "recursively nested page wrappers each receive their own node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(NavChainRoot())
+
+    # Both wrappers in the chain run, innermost first, and neither sees the
+    # other's navigation: the outer shell reports the root, the inner reports
+    # the child. A single record computed at the leaf would print the same path
+    # twice, so the two distinct paths are the real assertion here.
+    nested = drive("/child")
+    @test nested.status == 200
+    body = String(nested.body)
+    @test contains(body, "OUTER:/")
+    @test contains(body, "INNER:/child")
+    @test contains(body, "child-body")
+    @test !contains(body, "INNER:/\"") && !contains(body, "OUTER:/child")
+
+    # The root's own request still nests exactly one wrapper.
+    root_body = String(drive("/").body)
+    @test contains(root_body, "OUTER:/")
+    @test contains(root_body, "root-body")
+    @test !contains(root_body, "INNER:")
+
+    # The whole chain is still stripped for HTMX and markdown requests.
+    @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "OUTER:")
+    @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "INNER:")
+    @test !contains(String(drive("/child", ["Accept" => "text/markdown"]).body), "OUTER:")
 end
 
 @testitem "the semantic graph carries containment, dependency and route edges" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
