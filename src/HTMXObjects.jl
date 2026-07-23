@@ -728,7 +728,10 @@ function _find_include_externals(struct_expr)
         # compiles, DynamicObjects' own `_nested_struct_type` (returning its
         # memoizing wrapper, whose meta declares no routes) is the only method
         # left standing, and the child's routes simply never register.
-        rhs = _unwrap_short_form_body(rhs)
+        # Only an indexed mount — a `:call` LHS — can have had its rhs wrapped
+        # by the parser. With a plain Symbol LHS a block is always a genuine
+        # inline sub-router and unwrapping it would silently reinterpret it.
+        Meta.isexpr(lhs, :call) && (rhs = _unwrap_short_form_body(rhs))
         # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type.
         Meta.isexpr(rhs, :call) || continue
         type_expr = rhs.args[1]
@@ -762,24 +765,29 @@ end
 _inline_struct_props(::Type) = ()
 
 """
-    _include_child_type(::Type{T}, ::Val{name}) -> Type or nothing
+    _child_struct_type(T, ::Val{name}) -> Type or nothing
 
-The type an INDEXED `@include name(idx…) = Child(idx…)` mounts, recorded by
-`@htmx` from the declaration itself.
+The type whose `meta` declares the routes of the child mounted at `name`.
 
-DynamicObjects answers `_nested_struct_type` for the same mount with its
-memoizing wrapper — the thing that constructs and caches one child per index.
-That wrapper declares no routes of its own and exposes the child only as an
-`Any`-typed field, so walking it finds nothing to register. Both answers are
-needed and neither replaces the other, which is why this is a separate generic
-rather than another method on DO's.
+`@htmx` records what it knows from each `@include` declaration by emitting a
+`_nested_struct_type` method — the hook DynamicObjects documents for exactly
+this. Reading goes through `nested_object_type`, which combines that with
+inline `@struct` children and DO's own `@include` externals and applies the
+DynamicObject guard: `_nested_struct_type` alone misses externals declared
+under a plain `@dynamicstruct`, and the unguarded analysis paths happily answer
+`Int` for `port::Int = 8080`, which a route walker must never follow.
+
+Falls back to the raw hook when DynamicObjects is too old to export the
+accessor.
 """
-_include_child_type(::Type, ::Val) = nothing
-
-# Route walking wants the type whose `meta` declares the child's routes: the
-# recorded child for an indexed mount, DO's answer otherwise.
-_child_struct_type(T, v::Val) =
-    something(_include_child_type(T, v), _nested_struct_type(T, v), Some(nothing))
+function _child_struct_type(T, v::Val)
+    if isdefined(DynamicObjects, :nested_object_type)
+        name = typeof(v).parameters[1]
+        return Base.invokelatest(
+            getproperty(DynamicObjects, :nested_object_type), T, name)
+    end
+    _nested_struct_type(T, v)
+end
 
 # Map a route-macro symbol to the verb short symbol used in `Verb{V}` and
 # `_http_verbs`. `Symbol("@get")` → `:GET`; `Symbol("@ws")` → `:WEBSOCKET`
@@ -844,7 +852,12 @@ function _convert_include_to_struct!(struct_expr)
         # property of the generated wrapper rather than the type to mount — the
         # `Any`-typed field with no routes behind it. DynamicObjects had the
         # identical bug on its side of the same declaration.
-        rhs = _unwrap_short_form_body(rhs)
+        #
+        # ONLY for an indexed mount: `@include name = begin … end` has a plain
+        # Symbol LHS, was never wrapped by the parser, and is a real inline
+        # sub-router — unwrapping a single-statement one would reinterpret it
+        # as an external mount.
+        isempty(index_params) || (rhs = _unwrap_short_form_body(rhs))
         if Meta.isexpr(rhs, :block)
             # Convert to: prop[(args…)] = struct _Include_prop ... end
             # __prefix__ extends the parent's prefix with the include name
@@ -1272,11 +1285,9 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     # answer, not a replacement: the wrapper for construction, the child type
     # for walking routes.
     _type_fname = Expr(:., DynamicObjects, QuoteNode(:_nested_struct_type))
-    _child_fname = Expr(:., @__MODULE__, QuoteNode(:_include_child_type))
-    for (prop, type_expr, index_params) in include_externals
-        fname = isempty(index_params) ? _type_fname : _child_fname
+    for (prop, type_expr, _index_params) in include_externals
         push!(block.args[1].args, Expr(:(=),
-            Expr(:call, fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
+            Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
             type_expr))
     end
     # Emit _param_names method if this struct declared any @param properties
