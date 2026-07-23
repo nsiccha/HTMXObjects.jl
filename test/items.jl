@@ -1303,6 +1303,35 @@ end
     @test contains(html_extra, "body{margin:0}")
 end
 
+@testitem "htmx() emits a doctype (standards mode)" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    # A page without `<!DOCTYPE html>` renders in quirks mode, which some
+    # browser libraries refuse to run in at all (KaTeX's `katex.render` throws
+    # "KaTeX doesn't work in quirks mode", and `throwOnError: false` does not
+    # suppress it). The doctype must be the very first thing in the bytes.
+    page = htmx(h.main("content"))
+    @test page isa HTMLDocument
+    html = repr("text/html", page)
+    @test startswith(html, "<!DOCTYPE html>\n<html")
+    @test count("<!DOCTYPE", html) == 1
+
+    # …and it survives the response pipeline, which is what a browser sees.
+    body = String(to_response(page).body)
+    @test startswith(body, "<!DOCTYPE html>\n<html")
+
+    # Fragments are not documents: an HX swap must NOT carry a doctype.
+    @test !contains(String(to_response(h.div("fragment")).body), "<!DOCTYPE")
+
+    # The static-recording walkers must still reach inside the document:
+    # `_disable_for_static` strips non-GET hx attributes and
+    # `_inject_static_style` appends the disabled-element style to `<head>`.
+    with_post = htmx(h.main(h.button("go"; hx_post="/act")))
+    @test contains(repr("text/html", with_post), "hx-post=\"/act\"")
+    recorded = repr("text/html", HTMXObjects.static_transform(with_post))
+    @test startswith(recorded, "<!DOCTYPE html>\n<html")
+    @test !contains(recorded, "hx-post=\"/act\"")
+    @test contains(recorded, "data-static-disabled")
+end
+
 @testitem "save_response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     mktempdir() do dir
         resp = HTTP.Response(200, ["Content-Type" => "text/html"]; body="<p>hi</p>")
