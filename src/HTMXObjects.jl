@@ -2410,6 +2410,15 @@ _convert_param(val, ::Nothing) = val
 # misses (it only matches ::String, not ::SubString{String}).
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = convert(T, val)
 _convert_param(val::AbstractString, ::Type{Symbol}) = Symbol(val)
+# `parse` needs a concrete type — `parse(Integer, "3")` fails inside `tryparse`
+# on `typemax(::Type{Integer})`. An abstract numeric annotation is the natural
+# way to write an index parameter (`@include chains(chain::Integer)`), and it
+# says "any integer", so pick the machine default rather than making the
+# application name a width it does not care about.
+_convert_param(val::AbstractString, ::Type{Integer}) = parse(Int, val)
+_convert_param(val::AbstractString, ::Type{Signed}) = parse(Int, val)
+_convert_param(val::AbstractString, ::Type{AbstractFloat}) = parse(Float64, val)
+_convert_param(val::AbstractString, ::Type{Real}) = parse(Float64, val)
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
 _convert_param(val::AbstractVector, T::Type{<:AbstractString}) =
@@ -3756,7 +3765,11 @@ function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractStr
     end
     # `url_name` is kept on the step for backwards compatibility with
     # `_chain_steps` consumers that read it — always equal to `name`.
-    step = (name=name, types=types, url_name=name)
+    # `param_names` carries the INDEX PARAMETER names, which is what an
+    # `@options` declaration is keyed by: `@include compilation(stage::Stage)`
+    # declares its domain as `@options(stage)`, not `@options(compilation)`.
+    step = (name=name, types=types, url_name=name,
+            param_names=Symbol.(pos_idx_names))
     (nested_prefix, step)
 end
 
@@ -4094,6 +4107,84 @@ Never use `DynamicObjects.meta` to inspect properties — use `hasproperty` and 
 # URL-segment Type per index_param, with `nothing` for untyped). For indexed
 # steps the corresponding URL segments after the name segment are extracted
 # and converted via `_convert_param`, then threaded into the property call.
+"""
+    _index_candidates(parent, param, T) -> collection or nothing
+
+The admissible values for one index parameter of a mount, or `nothing` when
+none are known.
+
+Two sources, in order:
+
+- the DECLARED domain — `@options(param) = <expr>`, evaluated against `parent`
+  by DynamicObjects. Whatever the expression produces is what you get; DO does
+  not coerce or wrap it, so a domain of nodes yields nodes and a domain of keys
+  yields keys.
+- an INFERRED enum domain — an `Enum`-typed parameter has a closed, knowable
+  set with no declaration needed.
+
+`nothing` (rather than an empty collection) means "no domain is claimed", which
+is what sends a scalar parameter down the ordinary parse path. A declared but
+genuinely empty domain admits nothing, and is not the same answer.
+"""
+function _index_candidates(parent, param, T)
+    if param isa Symbol && isdefined(DynamicObjects, :property_options)
+        declared = try
+            Base.invokelatest(getproperty(DynamicObjects, :property_options),
+                              parent, param)
+        catch
+            # No declaration, or a domain expression that cannot be evaluated
+            # in this state. Neither is an error here — it only means the
+            # declared source has no answer.
+            nothing
+        end
+        isnothing(declared) || return declared
+    end
+    T isa Type && T <: Base.Enum && return instances(T)
+    nothing
+end
+
+"""
+    _resolve_index_arg(parent, param, raw, T) -> value
+
+Turn one URL segment into the value an indexed mount is selected by.
+
+When the parameter has a domain ([`_index_candidates`](@ref)), the segment is
+matched against the SERIALIZED form of each candidate and the candidate ITSELF
+is returned — so `/dataset/synthetic_depot` reconstructs the `Dataset` node,
+not the string `"synthetic_depot"`. An option is a node, not its label, and the
+application should not have to flatten one to select the other.
+
+A segment outside the domain is rejected rather than parsed: a closed domain
+that silently admits an unlisted value is not a domain. The rejection carries
+the admissible values, since for a closed set that is the useful error.
+
+With no domain, the ordinary `_convert_param` parse applies unchanged, which is
+what every scalar mount keeps doing.
+"""
+function _resolve_index_arg(parent, param, raw, T)
+    candidates = _index_candidates(parent, param, T)
+    isnothing(candidates) && return _convert_param(raw, T)
+    target = String(raw)
+    for candidate in candidates
+        string(candidate) == target && return candidate
+    end
+    # A declared domain may serialize through the same conversion a scalar
+    # would — `@options(chain) = 1:4` against `/chains/2`. Compare on the
+    # converted value before giving up.
+    converted = try
+        _convert_param(raw, T)
+    catch
+        nothing
+    end
+    isnothing(converted) || for candidate in candidates
+        candidate == converted && return candidate
+    end
+    throw(ArgumentError(string(
+        "no ", param === nothing ? "option" : param, " matching ", repr(target),
+        "; admissible values are ",
+        isempty(candidates) ? "none" : join((repr(string(c)) for c in candidates), ", "))))
+end
+
 function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs::Int)
     parts = split(split(req.target, "?")[1], "/", keepempty=false)
     cursor = root_segs
@@ -4110,10 +4201,14 @@ function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs:
         url_name = step isa Symbol ? name :
                    (hasproperty(step, :url_name) ? step.url_name : name)
         url_name === :index || (cursor += 1)
+        param_names = step isa Symbol ? Symbol[] :
+                      (hasproperty(step, :param_names) ? step.param_names : Symbol[])
         obj = if isempty(types)
             getproperty(obj, name)
         else
-            args = Any[_convert_param(parts[cursor + j], types[j]) for j in 1:length(types)]
+            args = Any[_resolve_index_arg(obj, get(param_names, j, nothing),
+                                          parts[cursor + j], types[j])
+                       for j in 1:length(types)]
             cursor += length(types)
             getproperty(obj, name)(args...)
         end

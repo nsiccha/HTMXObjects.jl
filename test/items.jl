@@ -470,6 +470,43 @@ end
     @include item(key::String) = IndexedMountChild(key)
 end
 
+# --- Indexed selection by domain candidate ----------------------------------
+#
+# A node-valued mount and an enum-valued one. `string(::DomainNode)` is the
+# stable serialized identity the URL segment carries — the application owns
+# that, the framework only matches on it.
+
+abstract type AbstractDomainNode end
+
+struct DomainNode <: AbstractDomainNode
+    key::Symbol
+    payload::String
+end
+Base.string(node::DomainNode) = string(node.key)
+
+@enum SelStage draft review final
+
+@htmx struct DomainChild
+    node::Any
+    @get index() = string("node=", string(node), " payload=", node.payload)
+end
+
+@htmx struct StageChild
+    stage::Any
+    @get index() = string("stage=", stage, "::", typeof(stage))
+end
+
+@htmx struct DomainRoot
+    catalogue = AbstractDomainNode[DomainNode(:synthetic_depot, "depot"),
+                                   DomainNode(:real_survey, "survey")]
+    @options(node) = catalogue
+    @include dataset(node::AbstractDomainNode) = DomainChild(node)
+    # No `@options`: the enum's instances ARE the domain.
+    @include compilation(stage::SelStage) = StageChild(stage)
+    @include chains(chain::Integer) = StageChild(chain)
+    @get index() = "domain-root"
+end
+
 end # @testmodule HTMXOTestFixtures
 
 # --- Tests ---
@@ -2876,4 +2913,37 @@ end
     response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
     @test response.status == 200
     @test contains(String(response.body), "abc")
+end
+
+@testitem "an indexed mount selects the domain candidate, not its label" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path) = begin
+        req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(DomainRoot())
+
+    # A declared object domain: the segment matches a candidate's serialized
+    # identity, and the CANDIDATE ITSELF reaches the child — `payload` is only
+    # reachable from the node, never from the string.
+    response = drive("/dataset/synthetic_depot")
+    @test response.status == 200
+    body = String(response.body)
+    @test contains(body, "node=synthetic_depot")
+    @test contains(body, "payload=depot")
+
+    @test contains(String(drive("/dataset/real_survey").body), "payload=survey")
+
+    # An inferred enum domain needs no declaration, and the child receives the
+    # enum instance rather than a parsed name.
+    stage = String(drive("/compilation/review").body)
+    @test contains(stage, "stage=review")
+    @test contains(stage, "SelStage")
+
+    # A value outside a closed domain is rejected, not parsed into existence.
+    @test drive("/dataset/no_such_node").status >= 400
+    @test drive("/compilation/no_such_stage").status >= 400
+
+    # A scalar mount with no domain keeps the ordinary parse path.
+    @test contains(String(drive("/chains/3").body), "stage=3")
 end
