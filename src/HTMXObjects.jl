@@ -6,7 +6,7 @@ export @semantic, property_descriptor, property_descriptors, option_descriptor,
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
-export auto, htmx, h, Node, @__str, HyperscriptString, Raw
+export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
 export safely, ERROR_DIR
@@ -1444,11 +1444,45 @@ macro htmx(args...)
 end
 
 """
+    HTMLDocument(root::Node)
+
+A complete HTML document: the `<html>` element `root` plus the `<!DOCTYPE html>`
+preamble that must precede it in the serialized bytes. This is what [`htmx`](@ref)
+returns — and therefore what [`pico_page`](@ref) and every `__page__` built on
+them return.
+
+A doctype is not an element, so it cannot live inside the `HTMX.Node` tree; it is
+emitted by this type's `show(::IO, ::MIME"text/html", …)` method, immediately
+ahead of `root`. Serializing a `HTMLDocument` (via `repr("text/html", …)`, the
+response pipeline, or as a child of another node) therefore always yields a
+standards-mode document.
+
+Without the doctype a browser renders the page in **quirks mode**, which is not
+only a legacy box-model detail — libraries refuse to run in it. KaTeX's
+`katex.render(tex, el)` throws `ParseError: KaTeX doesn't work in quirks mode`
+outright, and `throwOnError: false` does *not* downgrade that (the option covers
+parse errors; the quirks-mode check is a precondition).
+
+`root` stays a plain `Node`, so the recording pipeline
+([`static_transform`](@ref)) walks the document exactly as it walked the bare
+`<html>` node before.
+"""
+struct HTMLDocument
+    root::Node
+end
+
+Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
+    (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
+
+"""
     htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", pico_version=nothing, feedback=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
+
+Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
+`<!DOCTYPE html>` preamble, so the page renders in standards mode.
 """
 function htmx(args...;
     head = h.head,
@@ -1465,7 +1499,7 @@ function htmx(args...;
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
     isnothing(hyperscript_version) || push!(cdn, h.script(src="https://unpkg.com/hyperscript.org@$(hyperscript_version)"))
     isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css"))
-    h.html(
+    HTMLDocument(h.html(
         head(
             h.meta(charset="utf-8"),
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
@@ -1489,7 +1523,7 @@ function htmx(args...;
             extra_head...,
         ),
         body(args...),
-    )
+    ))
 end
 
 """
@@ -1805,6 +1839,12 @@ Walk a Node tree and disable elements that won't work on a static server:
 Non-Node values pass through unchanged.
 """
 _disable_for_static(val; record_base::String="") = val
+# A full page arrives as an `HTMLDocument`; unwrap so the `<html>` tree is
+# walked and re-wrap so the recorded file keeps its doctype. Without this
+# method the catch-all above would return the document untouched and every
+# recorded page would keep its live (non-static) hx attributes.
+_disable_for_static(doc::HTMLDocument; record_base::String="") =
+    HTMLDocument(_disable_for_static(doc.root; record_base))
 _disable_for_static(val::AbstractArray; record_base::String="") = [_disable_for_static(x; record_base) for x in val]
 _disable_for_static(val::Tuple; record_base::String="") = Tuple(_disable_for_static(x; record_base) for x in val)
 _disable_for_static((content, id)::Pair; record_base::String="") = _disable_for_static(content; record_base) => id
@@ -1889,6 +1929,9 @@ _disable_child(child::Node, record_base) = _disable_for_static(child; record_bas
 If val is a full HTML page (contains a `<head>`), inject the disabled-element style block.
 """
 _inject_static_style(val) = val
+# Same unwrap/re-wrap as `_disable_for_static`: the `<head>` to inject into
+# lives inside the document's `<html>` root.
+_inject_static_style(doc::HTMLDocument) = HTMLDocument(_inject_static_style(doc.root))
 function _inject_static_style(node::Node)
     if HTMX.tag(node) == :head
         new_children = vcat(HTMX.children(node), [_STATIC_DISABLED_STYLE])

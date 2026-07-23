@@ -27,7 +27,9 @@ HTMXObjects builds on [DynamicObjects.jl](https://github.com/nsiccha/DynamicObje
 
 ## HTMX.jl re-exports
 
-`auto`, `htmx`, `h`, `Node`, `@__str`, `HyperscriptString`. See the [HTMX.jl docs](https://nsiccha.github.io/HTMX.jl/dev/) for full details.
+`auto`, `h`, `Node`, `Raw`, `@__str`, `HyperscriptString`. See the [HTMX.jl docs](https://nsiccha.github.io/HTMX.jl/dev/) for full details.
+
+`htmx(...)` is **not** one of them — it is HTMXObjects' own page shell, documented under [The page shell](@ref).
 
 ### Which HTMX.jl
 
@@ -58,6 +60,32 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
+
+## The page shell
+
+A route's return value is a *fragment*. On direct browser navigation the
+framework wraps it with the app's `__page__` property, which is normally built
+on `htmx(...)` (or its `pico_page` shorthand). That shell — not the route — owns
+the document preamble: `<!DOCTYPE html>`, `<meta charset>`, the viewport and
+color-scheme metas, the CDN tags, and the injected theme/feedback assets.
+
+`htmx(...)` returns an [`HTMLDocument`](@ref), *not* a bare `Node`: the doctype
+is not an element, so it cannot live in the `HTMX.Node` tree and is emitted by
+`HTMLDocument`'s `show(::IO, ::MIME"text/html", …)` ahead of the `<html>` root.
+Serialize it however you like — `repr("text/html", page)`, the response
+pipeline, static recording — and the bytes always start with the doctype, so
+pages render in **standards mode**. That matters beyond the legacy box model:
+browser libraries refuse to run in quirks mode outright (KaTeX's
+`katex.render` throws `KaTeX doesn't work in quirks mode`, and
+`throwOnError: false` does not suppress it).
+
+Fragments are not documents and never carry a doctype.
+
+```@docs
+htmx
+HTMXObjects.pico_page
+HTMLDocument
+```
 
 ## Markdown / agent-readable responses
 
