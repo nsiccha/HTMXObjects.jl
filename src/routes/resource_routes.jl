@@ -144,14 +144,19 @@ end
 # authorize -> validate -> precondition, in that order, at ONE site. Each
 # operation differs only in what it does after the gate, so forking the gate per
 # verb would be five near-copies of the same three checks.
-function _resource_gate(context)
-    context.resource.policy.authorize(context) ||
+#
+# The `Resource` is passed alongside the context rather than read back off it:
+# `context.resource` is the resource NAME, because a policy is written against
+# the context and wants a label it can put in a message, not a handle back to
+# the object that is already calling it.
+function _resource_gate(resource, context)
+    resource.policy.authorize(context) ||
         throw(_ResourceRefused(403, "Forbidden"))
-    let message = context.resource.policy.validate(context)
+    let message = resource.policy.validate(context)
         message === nothing ||
             throw(_ResourceRefused(400, string(message)))
     end
-    context.resource.policy.precondition(context) ||
+    resource.policy.precondition(context) ||
         throw(_ResourceRefused(409, "Conflict"))
     context
 end
@@ -230,7 +235,7 @@ transformational work is an explicit route, not a resource verb.
 
     """List the collection."""
     @get index() = let context = _resource_context(__self__, :list; req=__req__)
-        _resource_gate(context)
+        _resource_gate(__self__, context)
         _resource_respond(__self__, context,
                           _resource_render(__self__, context, _resource_keys(collection)))
     end
@@ -238,7 +243,7 @@ transformational work is an explicit route, not a resource verb.
     """Create one item in the collection."""
     @post index() = let draft = _resource_draft(__self__, __req__, nothing, false)
         context = _resource_context(__self__, :create; draft, req=__req__)
-        _resource_gate(context)
+        _resource_gate(__self__, context)
         key = policy.key(context)
         collection[key] = draft
         stored = _resource_context(__self__, :create; key, draft,
@@ -303,7 +308,7 @@ function _resource_item(action, item, operation::Symbol; draft=() -> nothing)
     context = _resource_context(resource, operation; key=item.stored_key,
                                 draft=draft(), current=item.current,
                                 req=item.__req__)
-    _resource_gate(context)
+    _resource_gate(resource, context)
     _resource_respond(resource, context, action(context))
 end
 

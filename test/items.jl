@@ -394,6 +394,38 @@ end
     @get index() = "slurproot"
 end
 
+# --- Resource fixtures ------------------------------------------------------
+
+struct NoteDraft
+    title::String
+    body::String
+end
+
+# A real Base-shaped store, plus a deliberately inert value standing in for the
+# stub-backed collections a mock uses. The inert one must survive construction
+# and route registration untouched.
+struct InertCollection end
+
+# The store lives OUTSIDE the root. Under the default `:request` root scope the
+# root is reconstructed per request, so a collection declared as a root property
+# is a fresh object on every request and a write in one request is invisible to
+# the next. That is root-lifetime semantics, not a `Resource` question — a
+# `Resource` is a view over whatever collection it is handed, and it is the
+# application's job to hand it one that outlives a request (a module-level
+# store, a `RootProvider(...; scope=:session)`, a database handle, a directory).
+const NOTE_STORE = Dict{String,NoteDraft}()
+
+_reset_note_store!() = (empty!(NOTE_STORE);
+                        NOTE_STORE["a"] = NoteDraft("A", "first"); NOTE_STORE)
+
+@htmx struct ResourceApp
+    notes = NOTE_STORE
+    @include note = Resource(notes; input=NoteDraft, name="note",
+                             policy=ResourcePolicy(; key=context -> context.draft.title))
+    @include stub = Resource(InertCollection(); input=NoteDraft, name="stub")
+    @get index() = "resource-root"
+end
+
 end # @testmodule HTMXOTestFixtures
 
 # --- Tests ---
@@ -2672,4 +2704,73 @@ end
     @test contains(schema_body, "\"verb\"")
     @test contains(schema_body, "\"params\"")
     @test !contains(schema_body, "\"children\"")
+end
+
+@testitem "Resource mounts a Base-shaped collection surface" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(verb, path, body="") = begin
+        req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
+                           Vector{UInt8}(body))
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    _reset_note_store!()
+    route!(ResourceApp())
+
+    # The collection half registers at the URL the `:index` collapse rule
+    # dictates, for both verbs, with no second routing scheme.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(ResourceApp)]
+    @test (:GET, "/note") in paths
+    @test (:POST, "/note") in paths
+
+    @test drive("GET", "/note").status == 200
+
+    # Create goes through the policy's key derivation and lands in the store the
+    # mount was handed — asserted on `NOTE_STORE`, not on a root instance: the
+    # default root scope rebuilds the root per request, so no root instance is
+    # the one the handler ran against.
+    @test drive("POST", "/note", "title=B&body=second").status == 200
+    @test haskey(NOTE_STORE, "B")
+    @test NOTE_STORE["B"].body == "second"
+end
+
+@testitem "Resource never forces its collection during construction or registration" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: resource_descriptor
+
+    # `InertCollection` supports none of `keys`/`haskey`/`getindex`. Building the
+    # app and registering its routes must not touch it — several real mounts are
+    # backed by an unresolved stub, and describing a route surface is not a
+    # reason to make one exist.
+    _reset_note_store!()
+    app = ResourceApp()
+    route!(app)
+    @test_throws MethodError keys(InertCollection())
+
+    # Reflection probes rather than forces: it reports `nothing` for the facts a
+    # non-store cannot answer, instead of throwing or inventing them.
+    descriptor = resource_descriptor(app.stub)
+    @test descriptor.inspectable === false
+    @test descriptor.count === nothing
+    @test descriptor.key_type === nothing
+    @test descriptor.input === NoteDraft
+    # `fields` carries the type alongside the name — a form builder needs both.
+    @test (name=:title, type=String) in descriptor.fields
+
+    # The same descriptor over a real store does answer.
+    live = resource_descriptor(app.note)
+    @test live.inspectable === true
+    @test live.count == 1
+    @test live.key_type === String
+
+    # The stub-backed mount still registers its collection surface.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(ResourceApp)]
+    @test (:GET, "/stub") in paths
+    @test (:POST, "/stub") in paths
+end
+
+@testitem "Resource item routes register for a call-form indexed mount" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    route!(ResourceApp())
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(ResourceApp)]
+    for verb in (:GET, :PUT, :PATCH, :DELETE)
+        @test_broken (verb, "/note/{key}") in paths
+    end
 end

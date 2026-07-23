@@ -26,8 +26,7 @@ export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
 export ReflectionRoutes, semantic_graph_view, navigation
-# Resource/ResourceItem/ResourcePolicy/resource_descriptor are NOT exported while
-# `routes/resource_routes.jl` is gated — see the blocker note at its `include`.
+export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
 export semantic_descriptor, operation_form, semantic_app
@@ -3096,6 +3095,32 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
         end
     end
     _check_root_request(root, RootT, context)
+    _sync_root!(root)
+    root
+end
+
+# The request/render boundary sync. DynamicObjects tracked values
+# (`TrackedDirectory`/`TrackedFile`/`ProviderRoots`/`ThreadSafeDict`) carry a
+# version that nothing polls on its own — a stamp is only read when someone
+# asks. `sync!` is that ask: it walks the root's fields and cached properties,
+# recurses into nested DynamicObjects (including through arrays, tuples and
+# dicts), and drops the transitive dependents of anything whose stamp moved.
+#
+# Here, once, is the right place: it is the single seam every request's root
+# passes through, and it runs before any property is read, so a request never
+# observes a half-invalidated object. A `:request`-scoped root is freshly built
+# and has nothing to drop, which costs one integer compare per tracked value;
+# `:session`/`:job` roots outlive requests and are exactly the case that needs
+# it. There is no hot-path cost — property reads are untouched.
+#
+# Guarded, not required: an older DynamicObjects has no `sync!`, and a non-DO
+# root (a custom provider may return one) has no method for it. Neither is an
+# error — it only means there is nothing tracked to invalidate.
+function _sync_root!(root)
+    isdefined(DynamicObjects, :sync!) || return root
+    sync! = getproperty(DynamicObjects, :sync!)
+    Base.invokelatest(applicable, sync!, root) || return root
+    Base.invokelatest(sync!, root)
     root
 end
 
@@ -5952,27 +5977,7 @@ include("routes/structure_routes.jl")
 
 include("routes/reflection_routes.jl")
 
-# BLOCKED — not a style choice, do not "clean this up" by deleting the file.
-#
-# `Resource` mounts its item child as `@include index(key::String) = ResourceItem(key)`.
-# EVERY indexed `@include` currently dies at macro expansion with
-# `MethodError: no method matching union!(::Nothing, ::Set{Any})`
-# (DynamicObjects.jl:4617). Reproduced on the UNMODIFIED HTMXObjects canonical
-# tip 25ae8e7, so it is not a regression from this branch, and it reproduces in
-# pure DynamicObjects with no HTMXObjects involved:
-#
-#     @dynamicstruct struct D; a = 1; f(i); end     # rhs-less indexed decl → same error
-#     @dynamicstruct struct D; a = 1; f(i) = a + i; end   # with rhs → fine
-#
-# Present in DynamicObjects `pre-inference` @ c6132a4 AND in the in-flight
-# `kb-impl/DynamicObjects-sbpmx-reflect` @ 8764d2a. Snagged to DynamicObjects.
-# Non-indexed `@include sub = Child()` is unaffected.
-#
-# The include is gated rather than the bundle rewritten: splitting `Resource`
-# to avoid an indexed child would ship a crippled CRUD surface to dodge someone
-# else's bug. Restore this line unchanged once DynamicObjects accepts the
-# declaration; nothing in `resource_routes.jl` needs to change.
-# include("routes/resource_routes.jl")
+include("routes/resource_routes.jl")
 
 include("routes/shared_ops_routes.jl")
 
