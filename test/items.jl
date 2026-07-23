@@ -426,6 +426,50 @@ _reset_note_store!() = (empty!(NOTE_STORE);
     @get index() = "resource-root"
 end
 
+
+# --- Callable-value page wrapper --------------------------------------------
+#
+# The concise form an application actually writes: `__page__ = shell(...)`,
+# whose VALUE is callable and takes `navigation`. The property itself declares
+# no signature, so only the value can answer the question.
+
+struct MockPage
+    label::String
+end
+(page::MockPage)(content; navigation=nothing) =
+    string(page.label, "|nav=", isnothing(navigation) ? "none" :
+           join([child.name for child in navigation.descendants], ","), "|", content)
+
+struct BluntPage end
+(page::BluntPage)(content) = string("blunt|", content)
+
+@htmx struct ValuePageLeaf
+    @get index() = "leaf"
+end
+
+@htmx struct ValuePageRoot
+    __page__ = MockPage("shell")
+    @include section = ValuePageLeaf()
+    @get index() = "value-root"
+end
+
+@htmx struct BluntPageRoot
+    __page__ = BluntPage()
+    @include section = ValuePageLeaf()
+    @get index() = "blunt-root"
+end
+
+@htmx struct IndexedMountChild
+    key::String
+    @get index() = "child $key"
+    @get extra() = "extra $key"
+end
+
+@htmx struct IndexedMountRoot
+    @get index() = "indexed-root"
+    @include item(key::String) = IndexedMountChild(key)
+end
+
 end # @testmodule HTMXOTestFixtures
 
 # --- Tests ---
@@ -2768,9 +2812,68 @@ end
 end
 
 @testitem "Resource item routes register for a call-form indexed mount" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    _reset_note_store!()
     route!(ResourceApp())
     paths = [(route.verb, route.path) for route in HTMXObjects.reflect(ResourceApp)]
     for verb in (:GET, :PUT, :PATCH, :DELETE)
-        @test_broken (verb, "/note/{key}") in paths
+        @test (verb, "/note/{key}") in paths
     end
+
+    drive(verb, path, body="") = begin
+        req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
+                           Vector{UInt8}(body))
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # The item half addresses the same store the collection half writes to.
+    @test drive("GET", "/note/a").status == 200
+    @test drive("PATCH", "/note/a", "body=edited").status == 200
+    @test NOTE_STORE["a"].body == "edited"
+    @test NOTE_STORE["a"].title == "A"      # PATCH merges, it does not replace.
+    @test drive("DELETE", "/note/a").status == 200
+    @test !haskey(NOTE_STORE, "a")
+    @test drive("GET", "/note/a").status == 404
+end
+
+@testitem "a callable page-wrapper VALUE receives navigation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path) = begin
+        req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # `__page__ = MockPage(...)` declares no signature of its own — the value is
+    # what takes `navigation`. Reading the empty property signature as a refusal
+    # is what previously rendered a literal `nothing` in place of the chrome.
+    route!(ValuePageRoot())
+    body = String(drive("/").body)
+    @test contains(body, "shell|")
+    @test contains(body, "value-root")
+    # Navigation actually arrived, and carries this node's descendants.
+    @test contains(body, "nav=section")
+    @test !contains(body, "nav=none")
+    @test !contains(body, "nothing")
+
+    # A callable value that does NOT accept the keyword is still called without
+    # it, rather than throwing on every full-page response.
+    route!(BluntPageRoot())
+    blunt = String(drive("/").body)
+    @test contains(blunt, "blunt|")
+    @test contains(blunt, "blunt-root")
+end
+
+@testitem "an indexed @include registers its child's routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    # `@include mount(idx) = Child(idx)` is a short-form function definition, so
+    # the parser wraps its body in a block. Missing that unwrap made every
+    # indexed mount invisible to route registration — silently: the struct
+    # compiled, and only the child's routes went missing.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(IndexedMountRoot)]
+    @test (:GET, "/") in paths
+    @test (:GET, "/item/{key}") in paths
+    @test (:GET, "/item/{key}/extra") in paths
+
+    route!(IndexedMountRoot())
+    req = HTTP.Request("GET", "/item/abc", Pair{String,String}[], UInt8[])
+    response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    @test response.status == 200
+    @test contains(String(response.body), "abc")
 end

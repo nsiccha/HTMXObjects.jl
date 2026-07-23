@@ -682,6 +682,29 @@ end
 #   @include prop(args…) = ExternalStruct(args…; …)    # indexed include
 # Returns list of (prop_name, type_name_expr, index_params) tuples where
 # `index_params` is a `Vector{Symbol}` (empty for non-indexed).
+"""
+    _unwrap_short_form_body(rhs) -> Expr
+
+Undo the `:block` the parser wraps a short-form method body in.
+
+`f(x) = g(x)` and `f(x) = begin g(x) end` parse to the SAME head, so an
+`@include mount(idx) = Child(idx)` is indistinguishable from a block-form
+mount by head alone. The payload discriminates: one statement (LineNumberNodes
+aside) is the parser's wrapping and unwraps to the bare call; several
+statements is a body the author wrote and is returned untouched.
+
+Delegates to DynamicObjects when available so both sides of the same
+declaration agree by construction rather than by two copies of one rule.
+"""
+function _unwrap_short_form_body(rhs)
+    if isdefined(DynamicObjects, :_unwrap_short_form_body)
+        return getproperty(DynamicObjects, :_unwrap_short_form_body)(rhs)
+    end
+    Meta.isexpr(rhs, :block) || return rhs
+    body = [a for a in rhs.args if !(a isa LineNumberNode)]
+    length(body) == 1 ? only(body) : rhs
+end
+
 function _find_include_externals(struct_expr)
     body = struct_expr.args[3]
     result = Tuple{Symbol, Any, Vector{Symbol}}[]
@@ -696,6 +719,16 @@ function _find_include_externals(struct_expr)
         Meta.isexpr(inner, :(=)) || continue
         lhs = inner.args[1]
         rhs = inner.args[2]
+        # The INDEXED form `@include mount(key::T) = Child(key)` is a short-form
+        # function definition, and the parser wraps a short form's body in a
+        # `begin` block carrying its LineNumberNode. The value form
+        # `@include mount = Child(...)` is a plain assignment and is not
+        # wrapped. Unwrap before the shape check, or every indexed mount is
+        # silently skipped here — and skipping is invisible: the struct still
+        # compiles, DynamicObjects' own `_nested_struct_type` (returning its
+        # memoizing wrapper, whose meta declares no routes) is the only method
+        # left standing, and the child's routes simply never register.
+        rhs = _unwrap_short_form_body(rhs)
         # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type.
         Meta.isexpr(rhs, :call) || continue
         type_expr = rhs.args[1]
@@ -727,6 +760,26 @@ end
 
 # Default: no inline struct properties.
 _inline_struct_props(::Type) = ()
+
+"""
+    _include_child_type(::Type{T}, ::Val{name}) -> Type or nothing
+
+The type an INDEXED `@include name(idx…) = Child(idx…)` mounts, recorded by
+`@htmx` from the declaration itself.
+
+DynamicObjects answers `_nested_struct_type` for the same mount with its
+memoizing wrapper — the thing that constructs and caches one child per index.
+That wrapper declares no routes of its own and exposes the child only as an
+`Any`-typed field, so walking it finds nothing to register. Both answers are
+needed and neither replaces the other, which is why this is a separate generic
+rather than another method on DO's.
+"""
+_include_child_type(::Type, ::Val) = nothing
+
+# Route walking wants the type whose `meta` declares the child's routes: the
+# recorded child for an indexed mount, DO's answer otherwise.
+_child_struct_type(T, v::Val) =
+    something(_include_child_type(T, v), _nested_struct_type(T, v), Some(nothing))
 
 # Map a route-macro symbol to the verb short symbol used in `Verb{V}` and
 # `_http_verbs`. `Symbol("@get")` → `:GET`; `Symbol("@ws")` → `:WEBSOCKET`
@@ -779,6 +832,19 @@ function _convert_include_to_struct!(struct_expr)
         else
             continue
         end
+        # `@include mount(idx…) = Child(idx…)` is a short-form METHOD
+        # definition, so the parser wraps its rhs in a `:block` — the same head
+        # `= begin … end` produces. Head alone cannot tell the two apart; the
+        # payload can. One statement (LineNumberNodes aside) means the parser
+        # did the wrapping, so unwrap it and let the call form below handle it.
+        # Several statements is a real body and stays an inline child.
+        #
+        # Without this, an indexed external mount was converted into an INLINE
+        # child whose body is the call `Child(idx)`, which makes `Child` a
+        # property of the generated wrapper rather than the type to mount — the
+        # `Any`-typed field with no routes behind it. DynamicObjects had the
+        # identical bug on its side of the same declaration.
+        rhs = _unwrap_short_form_body(rhs)
         if Meta.isexpr(rhs, :block)
             # Convert to: prop[(args…)] = struct _Include_prop ... end
             # __prefix__ extends the parent's prefix with the include name
@@ -1193,13 +1259,24 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     for ri in route_info
         push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.verb, ri.pos_params, ri.kw_params))
     end
-    # Emit _nested_struct_type methods for @include externals.
+    # Emit the child-type methods for @include externals.
     # (Inline `@struct` children are emitted by DO's macro itself, on the same
     # generic, so HTMXO only needs to add the @include-external methods here.)
+    #
+    # The INDEXED form goes on HTMXObjects' own `_include_child_type`, NOT on
+    # `_nested_struct_type`: DynamicObjects already defines the latter for an
+    # indexed mount, returning its memoizing wrapper. Defining ours on the same
+    # signature would overwrite DO's — which is both a precompilation error
+    # ("method overwriting is not permitted") and wrong, since the wrapper is
+    # what actually constructs and caches the child per index. We need a second
+    # answer, not a replacement: the wrapper for construction, the child type
+    # for walking routes.
     _type_fname = Expr(:., DynamicObjects, QuoteNode(:_nested_struct_type))
-    for (prop, type_expr) in include_externals
+    _child_fname = Expr(:., @__MODULE__, QuoteNode(:_include_child_type))
+    for (prop, type_expr, index_params) in include_externals
+        fname = isempty(index_params) ? _type_fname : _child_fname
         push!(block.args[1].args, Expr(:(=),
-            Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
+            Expr(:call, fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
             type_expr))
     end
     # Emit _param_names method if this struct declared any @param properties
@@ -3822,7 +3899,7 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
         end
 
         # Not a route — try nested-include recursion.
-        nested_type = _nested_struct_type(IterT, Val(name))
+        nested_type = _child_struct_type(IterT, Val(name))
         if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
             recurse_nested(name, info, nested_type)
             continue
@@ -3901,17 +3978,63 @@ counted (the conservative direction: never push an unexpected argument into a
 page wrapper that might reject it).
 """
 function _page_accepts_navigation(obj)
+    _page_navigation_declaration(obj) === :yes
+end
+
+"""
+    _page_navigation_declaration(obj) -> :yes, :no or :unknown
+
+Tri-state, because "the declaration says no" and "there is no declaration to
+read" must lead to different behaviour.
+
+A page property written as a call — `__page__(content; navigation=nothing)` —
+declares its own answer, and that answer is final in both directions: `:yes`
+threads navigation, `:no` must never receive it (a wrapper that rejects the
+kwarg would otherwise throw on every full-page response).
+
+A page property written as a VALUE — `__page__ = shell(...)`, where the value
+is some callable — declares nothing at all. Its DynamicObjects signature is
+empty because the property takes no arguments; the thing that takes arguments
+is the value it returns. Reading that as `:no` is what made a callable-value
+wrapper silently render `nothing` in place of its chrome. `:unknown` sends the
+question to the callable instead ([`_wrapper_accepts_navigation`](@ref)).
+"""
+function _page_navigation_declaration(obj)
     T = typeof(obj)
-    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return false
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return :unknown
     for prop in (:__page__, :page)
         hasproperty(obj, prop) || continue
         info = Base.invokelatest(DynamicObjects.metafirst, T, prop)
         info === nothing && continue
         sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(T))
-        sig === nothing && return false
-        return any(kw -> kw.name === :navigation || get(kw, :vararg, false), sig.kwargs)
+        sig === nothing && return :unknown
+        kwargs = get(sig, :kwargs, ())
+        # No parameters of any kind is the value form, not a refusal.
+        isempty(get(sig, :positional, ())) && isempty(kwargs) && return :unknown
+        return any(kw -> kw.name === :navigation || get(kw, :vararg, false), kwargs) ?
+               :yes : :no
     end
-    false
+    :unknown
+end
+
+"""
+    _wrapper_accepts_navigation(wrapper) -> Bool
+
+Ask a page-wrapper VALUE whether it takes a `navigation` keyword, without
+calling it. `hasmethod(f, Tuple{Any}, (:navigation,))` answers for callable
+objects and plain functions alike, and is true for a keyword slurp — a wrapper
+that accepts `; kwargs...` has said it will tolerate the argument.
+
+Non-invoking on purpose: a page wrapper renders a whole page, and probing must
+not be able to run that, twice, or for its side effects.
+"""
+function _wrapper_accepts_navigation(wrapper)
+    try
+        Base.invokelatest(hasmethod, wrapper, Tuple{Any}, (:navigation,))
+    catch
+        # A non-callable, or a callable whose signature cannot be introspected.
+        false
+    end
 end
 
 """
@@ -3928,7 +4051,10 @@ Only reached on the full-page branch of the response pipeline: HTMX fragment and
 stripping chrome exactly as before.
 """
 function _apply_page(obj, wrapper, content; depth::Integer=1)
-    _page_accepts_navigation(obj) || return wrapper(content)
+    declared = _page_navigation_declaration(obj)
+    wants = declared === :yes ||
+            (declared === :unknown && _wrapper_accepts_navigation(wrapper))
+    wants || return wrapper(content)
     wrapper(content; navigation=navigation(obj; depth))
 end
 
