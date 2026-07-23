@@ -25,6 +25,9 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
+export ReflectionRoutes, semantic_graph_view, navigation
+# Resource/ResourceItem/ResourcePolicy/resource_descriptor are NOT exported while
+# `routes/resource_routes.jl` is gated — see the blocker note at its `include`.
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
 export semantic_descriptor, operation_form, semantic_app
@@ -2833,8 +2836,14 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 #     except missing/invalid submitted parameters, which map to 400.
 # If the user's `__error__` hook returns an `HTTP.Response` directly, their
 # status choice is respected — not rewritten.
-_error_status_code(err) =
-    unwrap_error(err) isa Union{MissingRequiredParam,InvalidDomainValue} ? 400 : 500
+# Unwrap ONCE here (a route-body throw arrives wrapped in a
+# `PropertyComputationError`), then dispatch on the real error. Method dispatch
+# rather than a growing `isa` chain so a new error type can carry its own status
+# from wherever it is defined — including a `routes/*.jl` bundle included after
+# this file — and stays hot-reloadable, exactly like `_finalized_response`.
+_error_status_code(err) = _unwrapped_status_code(unwrap_error(err))
+_unwrapped_status_code(::Union{MissingRequiredParam,InvalidDomainValue}) = 400
+_unwrapped_status_code(_err) = 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
@@ -2862,7 +2871,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     is_htmx(req) && return _stamp_error_id(to_response(err_val), uid)   # always 200 for HTMX
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (err_val = wrapper(err_val))
+        isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
     end
     _stamp_error_id(_with_error_status(req, to_response(err_val), err), uid)
 end
@@ -2938,7 +2947,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
-            save_response(record_dir, save_path, to_response(static_transform(wrapper(_html_value(val)); record_base)))
+            save_response(record_dir, save_path, to_response(static_transform(_apply_page(obj, wrapper, _html_value(val)); record_base)))
         else
             save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
         end
@@ -2971,7 +2980,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     # otherwise a plain value reaches the wrapper as a bare Node child and
     # renders as `show(::MIME"text/plain")` text in full-page mode while
     # rendering structurally over HX.
-    to_response(wrapper(_html_value(val)))
+    to_response(_apply_page(obj, wrapper, _html_value(val)))
 end
 
 # For URL paths whose only `{x}` placeholders are at the very end (the
@@ -3138,6 +3147,17 @@ end
 function _property_descriptors(T)
     isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
     Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)
+end
+
+# Descriptor for one EXACT declaration. The `(T, name)` method resolves through
+# `metafirst` (first-declaration-wins), which collapses a name carrying several
+# declarations — `@get index`, `@post index` and `@include index(x)` can all
+# coexist under one key. Callers already holding the `info` that
+# `_walk_route_meta` handed them pass it here so they descriptor-ize the
+# declaration they actually walked.
+function _property_descriptor(T, name::Symbol, info::NamedTuple)
+    isdefined(DynamicObjects, :property_descriptor) || return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :property_descriptor), T, name, info)
 end
 
 function _property_descriptor(T, name::Symbol, verb::Symbol)
@@ -3838,6 +3858,56 @@ True if `obj` defines either `__page__` or the legacy `page` property.
 _has_page(obj) = hasproperty(obj, :__page__) || hasproperty(obj, :page)
 
 """
+    _page_accepts_navigation(obj) -> Bool
+
+True when `obj`'s page wrapper declares a `navigation` keyword argument —
+`__page__(content; navigation=nothing) = …`. Read from the DynamicObjects
+signature rather than by probing the callable, so a wrapper that does not ask
+for navigation is never called with it and its behaviour is byte-unchanged.
+
+A `navigation` keyword declared BY NAME counts, and so does a `; kwargs...`
+slurp — a slurp provably cannot error on an extra keyword, so passing one is
+safe and lets a wrapper forward navigation on to its own children. Telling the
+two apart needs DynamicObjects to mark a splat, which it does via the `vararg`
+field on each signature argument; `get(kw, :vararg, false)` keeps this correct
+against a DynamicObjects that predates that field, where a slurp is
+indistinguishable from an ordinary defaulted keyword and is therefore NOT
+counted (the conservative direction: never push an unexpected argument into a
+page wrapper that might reject it).
+"""
+function _page_accepts_navigation(obj)
+    T = typeof(obj)
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return false
+    for prop in (:__page__, :page)
+        hasproperty(obj, prop) || continue
+        info = Base.invokelatest(DynamicObjects.metafirst, T, prop)
+        info === nothing && continue
+        sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(T))
+        sig === nothing && return false
+        return any(kw -> kw.name === :navigation || get(kw, :vararg, false), sig.kwargs)
+    end
+    false
+end
+
+"""
+    _apply_page(obj, wrapper, content; depth=1) -> wrapped content
+
+Apply one page wrapper, threading [`navigation`](@ref) metadata into it when it
+asked for it. Called once per page-bearing object in the chain, so a recursively
+nested `__page__` receives the navigation of ITS OWN node — an outer shell sees
+the root's sections, an inner one sees its own — rather than one shared record
+computed at the leaf.
+
+Only reached on the full-page branch of the response pipeline: HTMX fragment and
+`?plain` markdown requests never apply page wrappers at all, so they keep
+stripping chrome exactly as before.
+"""
+function _apply_page(obj, wrapper, content; depth::Integer=1)
+    _page_accepts_navigation(obj) || return wrapper(content)
+    wrapper(content; navigation=navigation(obj; depth))
+end
+
+"""
     _req_of(obj) -> HTTP.Request or nothing
 
 Look up the framework-managed request on `obj`. `@htmx` always injects
@@ -3948,7 +4018,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
             wrapped = _html_value(val)
             for obj in reverse(page_chain)
                 wrapper = _page_wrapper(obj)
-                isnothing(wrapper) || (wrapped = wrapper(wrapped))
+                isnothing(wrapper) || (wrapped = _apply_page(obj, wrapper, wrapped))
             end
             save_response(record_dir, save_path, to_response(static_transform(wrapped; record_base)))
         end
@@ -3969,7 +4039,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
     val = _html_value(val)
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (val = wrapper(val))
+        isnothing(wrapper) || (val = _apply_page(obj, wrapper, val))
     end
     to_response(val)
 end
@@ -4152,6 +4222,21 @@ function _reflect_param_props(OwnerT, method, parent_stack)
     out
 end
 
+# Build one route descriptor. Factored out of `_reflect_walk!` so the flat
+# transport view and the hierarchical semantic graph derive a route from the
+# SAME body — two walks, one answer. Anything route-shaped that needs a
+# descriptor calls this; nobody re-derives paths or params locally.
+function _reflect_route(IterT, name::Symbol, info, method, prefix, parent_stack)
+    route_doc = _decl_doc(info)
+    arg_docs = isnothing(route_doc) ? Dict{Symbol,String}() :
+               _parse_arguments_section(route_doc)
+    path_params, kwargs = _reflect_call_params(IterT, info, method, arg_docs)
+    param_strs = [string(p.name) for p in path_params]
+    path = _route_path(prefix, name, param_strs)
+    params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
+    (verb=Symbol(method), path=path, name=name, doc=route_doc, params=params)
+end
+
 function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
         enrich=(owner, route) -> route)
     _walk_route_meta(IterT,
@@ -4160,18 +4245,8 @@ function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
             _reflect_walk!(acc, nested_type, nested_prefix,
                            push!(copy(parent_stack), IterT); enrich)
         end,
-        (name, info, method) -> begin
-            route_doc = _decl_doc(info)
-            arg_docs = isnothing(route_doc) ? Dict{Symbol,String}() :
-                       _parse_arguments_section(route_doc)
-            path_params, kwargs = _reflect_call_params(IterT, info, method, arg_docs)
-            param_strs = [string(p.name) for p in path_params]
-            path = _route_path(prefix, name, param_strs)
-            params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
-            route = (verb=Symbol(method), path=path, name=name,
-                     doc=route_doc, params=params)
-            push!(acc, enrich(IterT, route))
-        end)
+        (name, info, method) -> push!(acc, enrich(IterT,
+            _reflect_route(IterT, name, info, method, prefix, parent_stack))))
 end
 
 """
@@ -4246,14 +4321,172 @@ function _semantic_route(owner, route)
     merge(route, (owner=owner, params=params, property=property))
 end
 
-function _semantic_graph(T)
-    children = NamedTuple[]
+# --- Node identity, labels, and the semantic graph --------------------------
+#
+# A "node" is one mounted `@htmx` struct. Everything below answers structural
+# questions about nodes — what a node is called, where it lives, what hangs off
+# it. It answers NO semantic question itself: dependencies, option domains,
+# lifecycle and materialization are DynamicObjects' `property_descriptor`
+# records, carried verbatim. Deriving those here would be a second, drifting
+# answer to a question DO already owns.
+#
+# Paths are always built by `_route_path` / `_nested_prefix_and_step` — the
+# same pair the registrar uses. That is deliberate: the `:index` URL-collapse
+# rule already spans five agreeing sites, and navigation must not become a
+# sixth copy of it.
+
+# `__prefix__` is a mounted URL prefix carrying a leading slash (`""` at an
+# unmounted root); `_route_path` / `_nested_prefix_and_step` take the slashless
+# form. These two convert between them in one place.
+_nav_path(prefix::AbstractString) = isempty(prefix) ? "/" : String(prefix)
+_nav_prefix_arg(path::AbstractString) = String(strip(path, '/'))
+
+_nav_prefix(obj) = hasproperty(obj, :__prefix__) ? string(getproperty(obj, :__prefix__)) : ""
+_nav_parent(obj) = hasproperty(obj, :__parent__) ? getproperty(obj, :__parent__) : nothing
+
+# `:prediction_grid` -> "Prediction Grid". A deterministic fallback label, not a
+# guess at intent: a node's real prose is its docstring, carried as `doc`.
+function _humanize(name::Symbol)
+    words = split(replace(String(name), '_' => ' '), ' ')
+    join((isempty(w) ? w : uppercase(w[1:1]) * w[2:end] for w in words), " ")
+end
+
+"""
+    _node_type_descriptor(T) -> NamedTuple or nothing
+
+The type-level record for a node: `(; type, name, description, options)`, taken
+verbatim from `DynamicObjects.type_descriptor`. `description` is the type's own
+user-attached docstring; `options` are its `@options` declarations.
+
+This deliberately does NOT read Julia's doc system directly. An earlier version
+did, and reported the property-list docstring `@dynamicstruct` installs as a
+`?T` fallback — reference text, not a human label — as if the author had written
+it. DynamicObjects knows which docstring is the author's and which is generated;
+HTMXObjects does not, and a wrong label is worse than no label.
+
+`nothing` against a DynamicObjects predating `type_descriptor`, which degrades
+the graph's `doc`/`options` fields to empty rather than to guessed text.
+"""
+function _node_type_descriptor(T)
+    T isa Type || return nothing
+    isdefined(DynamicObjects, :type_descriptor) || return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :type_descriptor), T)
+end
+
+# Where a node's routes come from. HTMXObjects has exactly one structural
+# distinction available here and this is it: a bundle whose type is defined by
+# the framework (`SchemaRoutes`, `TestRoutes`, `RecordingRoutes`, …) contributes
+# routes the application author never wrote — they mounted one `@include` and
+# received a surface. Read it as "who authored these routes", nothing more; it
+# is NOT a claim that the framework synthesizes routes at registration time (it
+# does not — every registered route traces to a `@get`/`@post`/… declaration).
+#
+# The parentheses around `@__MODULE__` are load-bearing: a bare macro call
+# consumes the `?` as a further argument and the ternary never parses.
+_node_origin(T) = (parentmodule(T) === (@__MODULE__)) ? :framework : :declared
+
+# The selection identity of an indexed mount (`@include sub(x::Symbol) = …`):
+# the DO input descriptors for its positional index params, carrying each one's
+# type and option `domain`. Empty for a plain mount — which is exactly the
+# `indexed` test.
+function _nav_selection(T, name::Symbol, info)
+    descriptor = _property_descriptor(T, name, info)
+    descriptor === nothing && return NamedTuple[]
+    NamedTuple[input for input in get(descriptor, :inputs, NamedTuple[])
+               if get(input, :kind, nothing) === :positional]
+end
+
+# One node's identity record. `name`/`label` describe the MOUNT (the property
+# the parent included it under, which is what a breadcrumb shows); `type` and
+# `doc` describe the TYPE. They differ — the same bundle type mounted twice is
+# two nodes with two labels — so both are reported rather than collapsed.
+function _nav_node(name::Symbol, T, path::AbstractString;
+                   indexed::Bool=false, selection::Vector{NamedTuple}=NamedTuple[])
+    descriptor = _node_type_descriptor(T)
+    (; name, type=T, path=_nav_path(path), label=_humanize(name),
+       doc=isnothing(descriptor) ? nothing : descriptor.description,
+       options=isnothing(descriptor) ? Pair{Symbol,NamedTuple}[] : descriptor.options,
+       origin=_node_origin(T), indexed, selection)
+end
+
+# Routes declared AT one node, mount-resolved against `path`. Shares
+# `_reflect_route` with the flat transport view, so a route cannot describe
+# itself one way in the graph and another way in `reflect`.
+function _nav_routes(T, path::AbstractString, parent_stack=Any[];
+                     enrich=(owner, route) -> route)
+    out = NamedTuple[]
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return out
+    prefix = _nav_prefix_arg(path)
+    origin = _node_origin(T)
     _walk_route_meta(T,
-        (name, _info, nested_type) ->
-            push!(children, (name=name, graph=_semantic_graph(nested_type))),
-        (_name, _info, _method) -> nothing,
-    )
-    (type=T, properties=_property_descriptors(T), children=children)
+        (_name, _info, _nested) -> nothing,
+        (name, info, method) -> begin
+            route = _reflect_route(T, name, info, method, prefix, parent_stack)
+            push!(out, merge(enrich(T, route), (; label=_humanize(name), origin)))
+        end)
+    out
+end
+
+# A node's durable artifacts: properties DynamicObjects reports as materializing
+# to disk (`@mmap` / `@cached`). Projected from the DO descriptors already on
+# the node — not separately derived.
+_nav_resources(properties) =
+    NamedTuple[(; descriptor.name, descriptor.role,
+                 tier=descriptor.output.materialization.tier,
+                 type=descriptor.output.type,
+                 versioned=get(descriptor.semantics, :versioned, false))
+               for descriptor in properties
+               if descriptor.output.materialization.tier in (:mmap, :serialized)]
+
+"""
+    _semantic_graph(T, name, prefix, parent_stack; indexed, selection) -> NamedTuple
+
+One node of the semantic graph, recursing over `@include` mount edges. Every
+node has the same shape, root included, so a consumer walks it with one rule:
+
+  identity  — `name`, `label`, `type`, `doc`, `path`, `origin`
+  selection — `indexed`, `selection` (the index params that pick this node,
+              each with its type and option `domain`)
+  content   — `properties` (verbatim DynamicObjects descriptors: role,
+              dependencies, materialization, domains), `options` (the node's
+              `@options` declarations), `resources` (the on-disk projection),
+              `routes` (mount-resolved, shared with `reflect`)
+  structure — `children`
+
+Mount edges come from `_walk_route_meta` and paths from
+`_nested_prefix_and_step`, i.e. the same pair the registrar uses, so a node's
+`path` is the URL its routes actually register under and the `:index`-collapse
+rule is not re-implemented here.
+
+A type that is not a DynamicObjects type still yields a well-formed node with
+empty content — reflection describes what it finds and does not throw on a
+plain `struct` mounted somewhere in the tree.
+"""
+function _semantic_graph(T, name::Symbol=nameof(T), prefix::AbstractString="",
+                         parent_stack=Any[];
+                         indexed::Bool=false,
+                         selection::Vector{NamedTuple}=NamedTuple[])
+    path = _nav_path(isempty(prefix) ? "" : "/" * prefix)
+    is_dynamic = hasmethod(DynamicObjects.meta, Tuple{Type{T}})
+    properties = is_dynamic ? _property_descriptors(T) : NamedTuple[]
+    children = NamedTuple[]
+    if is_dynamic
+        _walk_route_meta(T,
+            (child, info, nested_type) -> begin
+                nested_prefix, _step = _nested_prefix_and_step(T, child, info, prefix)
+                child_selection = _nav_selection(T, child, info)
+                push!(children, _semantic_graph(nested_type, child, nested_prefix,
+                                                push!(copy(parent_stack), T);
+                                                indexed=!isempty(child_selection),
+                                                selection=child_selection))
+            end,
+            (_name, _info, _method) -> nothing)
+    end
+    (; _nav_node(name, T, path; indexed, selection)...,
+       properties,
+       resources=_nav_resources(properties),
+       routes=_nav_routes(T, path, parent_stack; enrich=_semantic_route),
+       children)
 end
 
 """
@@ -4268,15 +4501,164 @@ the owning type, its matching property descriptor, effective fixed-field
 `domain`. Existing `reflect(T)` output is unchanged.
 """
 function semantic_descriptor(::Type{T}) where {T}
-    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ||
-        return (type=T, graph=(type=T, properties=NamedTuple[], children=NamedTuple[]),
-                routes=NamedTuple[])
     routes = NamedTuple[]
-    _reflect_walk!(routes, T, ""; enrich=_semantic_route)
+    # `_reflect_walk!` needs a route table to walk; `_semantic_graph` degrades to
+    # an empty node on its own, so the non-`@htmx` case only has to skip the walk
+    # — it must NOT hand back a differently-shaped hand-built graph, or a consumer
+    # that handles the root uniformly breaks on exactly the degenerate input.
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) &&
+        _reflect_walk!(routes, T, ""; enrich=_semantic_route)
     (type=T, graph=_semantic_graph(T), routes=routes)
 end
 
 semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
+
+# --- Navigation ------------------------------------------------------------
+
+# Identify a MOUNTED object against its parent: which `@include` property mounts
+# it, and — for an indexed mount — the DO input descriptors that make up its
+# selection identity. An object does not know its own property name; the parent
+# does.
+function _nav_identity(obj)
+    T = typeof(obj)
+    parent = _nav_parent(obj)
+    parent === nothing && return (; name=nameof(T), selection=NamedTuple[])
+    ParentT = typeof(parent)
+    hasmethod(DynamicObjects.meta, Tuple{Type{ParentT}}) ||
+        return (; name=nameof(T), selection=NamedTuple[])
+    found_name = nothing
+    found_selection = NamedTuple[]
+    _walk_route_meta(ParentT,
+        (name, info, nested_type) -> begin
+            if found_name === nothing && nested_type === T
+                found_name = name
+                found_selection = _nav_selection(ParentT, name, info)
+            end
+        end,
+        (_name, _info, _method) -> nothing)
+    found_name === nothing ? (; name=nameof(T), selection=NamedTuple[]) :
+                             (; name=found_name, selection=found_selection)
+end
+
+function _nav_self(obj)
+    identity = _nav_identity(obj)
+    _nav_node(identity.name, typeof(obj), _nav_prefix(obj);
+              indexed=!isempty(identity.selection), selection=identity.selection)
+end
+
+function _nav_ancestors(obj)
+    out = NamedTuple[]
+    node = _nav_parent(obj)
+    while node !== nothing
+        pushfirst!(out, _nav_self(node))
+        node = _nav_parent(node)
+    end
+    out
+end
+
+"""
+    _nav_options(obj, name) -> options or nothing
+
+Evaluate the option domain declared for parameter `name` against a REAL object.
+
+Type-level reflection can only render the declaration (`@options model =
+models_for(study)`); what it evaluates TO is an object question, because a
+dependent domain reads sibling values off that specific node. DynamicObjects
+lowers a declaration to an ordinary lazily computed property, so it memoizes and
+invalidates the result — evaluating here re-derives nothing and needs no cache of
+its own.
+
+`nothing` means "not answered here", which is deliberately distinct from an empty
+option list meaning "no valid values". It is returned when DynamicObjects predates
+`property_options`, when no declaration governs `name`, and when evaluation
+throws — a dependent domain may legitimately fail on a node whose dependencies
+are not yet satisfied, and navigation is page chrome: it must not be able to take
+a working page down to decorate a link.
+"""
+function _nav_options(obj, name::Symbol)
+    isdefined(DynamicObjects, :property_options) || return nothing
+    isdefined(DynamicObjects, :has_option_declaration) || return nothing
+    declared = Base.invokelatest(
+        getproperty(DynamicObjects, :has_option_declaration), typeof(obj), name)
+    declared === nothing && return nothing
+    try
+        Base.invokelatest(getproperty(DynamicObjects, :property_options), obj, name)
+    catch
+        nothing
+    end
+end
+
+# `obj` is the object OWNING these children, when one exists. Only the first
+# level gets it: descending would mean constructing each child to hold one, and
+# building objects is a side effect reflection has no business causing. So the
+# immediate descendants can report evaluated option domains and deeper ones
+# report the declaration only — the depth at which a UI actually renders a picker.
+function _nav_children(T, path::AbstractString, depth::Integer, obj=nothing)
+    out = NamedTuple[]
+    depth <= 0 && return out
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return out
+    prefix = _nav_prefix_arg(path)
+    _walk_route_meta(T,
+        (name, info, nested_type) -> begin
+            nested_prefix, _step = _nested_prefix_and_step(T, name, info, prefix)
+            child_path = _nav_path(isempty(nested_prefix) ? "" : "/" * nested_prefix)
+            selection = _nav_selection(T, name, info)
+            isnothing(obj) || (selection = NamedTuple[
+                merge(input, (; options=_nav_options(obj, input.name)))
+                for input in selection])
+            push!(out, (; _nav_node(name, nested_type, child_path;
+                                    indexed=!isempty(selection), selection)...,
+                        routes=_nav_routes(nested_type, child_path),
+                        children=_nav_children(nested_type, child_path, depth - 1)))
+        end,
+        (_name, _info, _method) -> nothing)
+    out
+end
+
+# How the current request wants this response rendered. The three modes are the
+# response pipeline's own branches, reported rather than re-decided — a caller
+# must never have to sniff headers itself to know whether chrome will survive.
+function _nav_request(obj)
+    req = _req_of(obj)
+    req === nothing && return (; path=nothing, mode=:none)
+    (; path=String(split(req.target, "?")[1]),
+       mode=wants_markdown(req) ? :markdown : is_htmx(req) ? :fragment : :page)
+end
+
+"""
+    navigation(obj; depth=1) -> NamedTuple
+
+Navigation metadata for the mounted `@htmx` object `obj`, as plain data. Builds
+no DOM: what a breadcrumb, sidebar or tab strip looks like stays entirely the
+application's choice.
+
+    (; current, ancestors, descendants, request)
+
+- `current` — this node: `name`, `type`, `path`, `label`, `doc`, `origin`,
+  `indexed`, `selection`, and the `routes` declared on it.
+- `ancestors` — the mount chain from the root down to this node's parent
+  (root first), each the same node record.
+- `descendants` — `@include`d children, `depth` levels deep; each carries its
+  own `routes` and nested `children`.
+- `request` — `(; path, mode)` where `mode` is `:page`, `:fragment`,
+  `:markdown`, or `:none` when the object carries no request.
+
+Paths on `current` and `ancestors` are CONCRETE — an indexed mount's segment
+holds the value it was selected with. Paths on `descendants` are TEMPLATES
+(`/models/{name}`), because which children exist is not a question this
+function asks; `selection` names the placeholder and carries its
+DynamicObjects option `domain`.
+
+`depth=0` returns no descendants; a large `depth` walks the whole subtree.
+"""
+function navigation(obj; depth::Integer=1)
+    T = typeof(obj)
+    path = _nav_path(_nav_prefix(obj))
+    (; current=(; _nav_self(obj)..., routes=_nav_routes(T, path)),
+       ancestors=_nav_ancestors(obj),
+       descendants=_nav_children(T, path, depth, obj),
+       request=_nav_request(obj))
+end
 
 """
     route!(app; prefix="", record_dir=nothing, record_base="",
@@ -5567,6 +5949,30 @@ include("test_items.jl")
 include("routes/test_routes.jl")
 
 include("routes/structure_routes.jl")
+
+include("routes/reflection_routes.jl")
+
+# BLOCKED — not a style choice, do not "clean this up" by deleting the file.
+#
+# `Resource` mounts its item child as `@include index(key::String) = ResourceItem(key)`.
+# EVERY indexed `@include` currently dies at macro expansion with
+# `MethodError: no method matching union!(::Nothing, ::Set{Any})`
+# (DynamicObjects.jl:4617). Reproduced on the UNMODIFIED HTMXObjects canonical
+# tip 25ae8e7, so it is not a regression from this branch, and it reproduces in
+# pure DynamicObjects with no HTMXObjects involved:
+#
+#     @dynamicstruct struct D; a = 1; f(i); end     # rhs-less indexed decl → same error
+#     @dynamicstruct struct D; a = 1; f(i) = a + i; end   # with rhs → fine
+#
+# Present in DynamicObjects `pre-inference` @ c6132a4 AND in the in-flight
+# `kb-impl/DynamicObjects-sbpmx-reflect` @ 8764d2a. Snagged to DynamicObjects.
+# Non-indexed `@include sub = Child()` is unaffected.
+#
+# The include is gated rather than the bundle rewritten: splitting `Resource`
+# to avoid an indexed child would ship a crippled CRUD surface to dodge someone
+# else's bug. Restore this line unchanged once DynamicObjects accepts the
+# declaration; nothing in `resource_routes.jl` needs to change.
+# include("routes/resource_routes.jl")
 
 include("routes/shared_ops_routes.jl")
 

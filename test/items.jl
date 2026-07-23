@@ -325,6 +325,55 @@ end
         collect(1.0:count)
 end
 
+# --- Navigation / reflection-graph fixtures --------------------------------
+#
+# A three-level mount chain with a computed dependency at the leaf, one node
+# whose `__page__` asks for navigation and one whose `__page__` does not. The
+# pair is the point: the framework must thread navigation into the first and
+# leave the second byte-identical.
+
+@htmx struct NavLeaf
+    """The number this leaf reports."""
+    value::Int = 7
+    doubled = 2 * value
+    @get index() = string(doubled)
+end
+
+@htmx struct NavSection
+    label::String = "sec"
+    @include leaf = NavLeaf()
+    @get index() = "section $label"
+    @post act(; note="") = "acted $note"
+end
+
+"""An application root used for navigation and reflection tests."""
+@htmx struct NavRoot
+    @include section = NavSection()
+    @include reflect = ReflectionRoutes(; root=NavRoot)
+    @include schema = SchemaRoutes(; root=NavRoot)
+    __page__(content; navigation=nothing) =
+        h.div(h.nav(isnothing(navigation) ? "NONAV" : "NAV:" * navigation.current.path),
+              content)
+    @get index() = "root"
+end
+
+# Same shape, but the page wrapper never declared `navigation`. Nothing may be
+# passed to it.
+@htmx struct NavPlainRoot
+    @include section = NavSection()
+    __page__(content) = h.div(h.nav("PLAIN-SHELL"), content)
+    @get index() = "plainroot"
+end
+
+# A page wrapper that slurps. It cannot error on an extra keyword, so the
+# framework is free to pass navigation through.
+@htmx struct NavSlurpRoot
+    @include section = NavSection()
+    __page__(content; kwargs...) =
+        h.div(h.nav(haskey(kwargs, :navigation) ? "SLURP-GOT-NAV" : "SLURP-NONE"), content)
+    @get index() = "slurproot"
+end
+
 end # @testmodule HTMXOTestFixtures
 
 # --- Tests ---
@@ -2438,4 +2487,137 @@ answer an HX request with the grid itself — status 200 *and* the data — not
     finally
         terminate()
     end
+end
+
+# --- Navigation and the semantic reflection graph ---------------------------
+
+@testitem "navigation reports current node, ancestors and configurable descendants" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: navigation
+
+    route!(NavRoot())
+    nav = navigation(NavRoot())
+
+    # The root is its own current node and has no ancestors.
+    @test nav.current.path == "/"
+    @test nav.current.name === :NavRoot
+    @test isempty(nav.ancestors)
+
+    # Descendants stop at `depth`, which is what makes the scope configurable
+    # rather than "the whole tree, always".
+    section = only(filter(child -> child.name === :section, nav.descendants))
+    @test section.path == "/section"
+    @test isempty(section.children)
+    @test :leaf in [c.name for c in only(filter(
+        child -> child.name === :section,
+        navigation(NavRoot(); depth=2).descendants)).children]
+
+    # Routes are reported per node and are mount-resolved, not root-relative.
+    @test any(route -> route.verb === :POST && route.path == "/section/act", section.routes)
+    @test any(route -> route.verb === :GET && route.path == "/", nav.current.routes)
+
+    # A framework-supplied bundle is distinguishable from application nodes.
+    @test only(filter(c -> c.name === :reflect, nav.descendants)).origin === :framework
+    @test section.origin === :declared
+
+    # Labels are derived, docs are not invented.
+    @test section.label == "Section"
+    @test nav.request.mode === :none
+end
+
+@testitem "navigation is threaded through page wrappers only when asked for" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # `__page__(content; navigation=nothing)` receives it.
+    route!(NavRoot())
+    full = drive("/")
+    @test full.status == 200
+    @test contains(String(full.body), "NAV:/")
+    @test contains(String(full.body), "root")
+
+    # HTMX and markdown requests never apply a page wrapper, so chrome is
+    # stripped exactly as before this feature existed.
+    @test !contains(String(drive("/", ["HX-Request" => "true"]).body), "NAV:")
+    @test !contains(String(drive("/", ["Accept" => "text/markdown"]).body), "NAV:")
+
+    # A wrapper that never declared `navigation` is called with one argument.
+    route!(NavPlainRoot())
+    plain = drive("/")
+    @test plain.status == 200
+    @test contains(String(plain.body), "PLAIN-SHELL")
+    @test contains(String(plain.body), "plainroot")
+
+    # A slurping wrapper cannot error on an extra keyword, so it is passed.
+    route!(NavSlurpRoot())
+    slurp = drive("/")
+    @test slurp.status == 200
+    @test contains(String(slurp.body), "SLURP-GOT-NAV")
+end
+
+@testitem "the semantic graph carries containment, dependency and route edges" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    graph = semantic_descriptor(NavRoot).graph
+
+    # Containment: mount edges, with paths from the registrar's own pair.
+    @test graph.path == "/"
+    section = only(filter(child -> child.name === :section, graph.children))
+    leaf = only(filter(child -> child.name === :leaf, section.children))
+    @test section.path == "/section"
+    @test leaf.path == "/section/leaf"
+
+    # Routes belong to the node that declares them, at their mounted path.
+    @test any(route -> route.verb === :GET && route.path == "/section/leaf", leaf.routes)
+    @test any(route -> route.verb === :POST && route.path == "/section/act", section.routes)
+
+    # A declared computation dependency — the edge a route table cannot show.
+    doubled = only(filter(p -> p.name === :doubled, leaf.properties))
+    @test :value in doubled.dependencies
+
+    # Human labels and docs, carried not invented.
+    @test leaf.label == "Leaf"
+    @test only(filter(p -> p.name === :value, leaf.properties)).description ==
+          "The number this leaf reports."
+
+    # Every node has the same shape, root included.
+    for node in (graph, section, leaf)
+        @test haskey(node, :properties) && haskey(node, :children) &&
+              haskey(node, :routes) && haskey(node, :resources) &&
+              haskey(node, :selection) && haskey(node, :indexed)
+    end
+
+    # The flat transport view is unchanged by any of this.
+    reflected = only(filter(route -> route.name === :act, HTMXObjects.reflect(NavRoot)))
+    @test keys(reflected) == (:verb, :path, :name, :doc, :params)
+end
+
+@testitem "ReflectionRoutes serves a human-readable graph without disturbing /schema" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(NavRoot())
+
+    # Human-readable: structure and semantics, not a route dump.
+    reflect_response = drive("/reflect")
+    @test reflect_response.status == 200
+    body = String(reflect_response.body)
+    @test contains(body, "Leaf")               # node label
+    @test contains(body, "/section/leaf")      # mount-resolved path
+    @test contains(body, "doubled")            # a property, not a route
+    @test contains(body, "The number this leaf reports.")
+
+    # Same graph as JSON for tooling.
+    graph_response = drive("/reflect/graph")
+    @test graph_response.status == 200
+    @test contains(String(graph_response.body), "\"children\"")
+
+    # /schema keeps serving the flat route index it always did.
+    schema_response = drive("/schema")
+    @test schema_response.status == 200
+    schema_body = String(schema_response.body)
+    @test contains(schema_body, "\"verb\"")
+    @test contains(schema_body, "\"params\"")
+    @test !contains(schema_body, "\"children\"")
 end
