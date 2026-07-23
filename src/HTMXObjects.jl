@@ -2211,7 +2211,7 @@ struct RootProvider{F,K}
 end
 
 """
-    OperationPolicy(mode=:blocking; poll_interval="200ms", keep_progress=true)
+    OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true)
 
 Select route execution transport. `:blocking` preserves historical synchronous
 responses. `:polling` uses the Treebars extension for pending-capable HTML
@@ -2220,6 +2220,20 @@ advertises pending capability. Polling is limited to GET operations because the
 Treebars poller issues GET refreshes; mutation verbs therefore remain direct.
 Declared `HTTP.Response` and `MIMEResponse` outputs always remain direct, as do
 WebSocket route lambdas.
+
+`:auto` is the DEFAULT, so an ordinary `@get` route whose body reads a slow
+nested DynamicObjects property answers immediately with a live progress tree and
+swaps in the final value on its own — no `route!(…; operation_policy=…)`
+registration, no `polling_fetchindex`, no hand-written poller or JavaScript. The
+tree fills itself in because DynamicObjects mounts each nested property's
+progress node under the node currently being computed (Treebars' ambient node),
+so nesting needs no `@progress` / `@fetch!` annotation either.
+
+Nothing that was previously direct becomes a poller by default: `:auto` still
+requires a GET, an HTMX request, and a descriptor advertising
+`semantics.pending`, so `?plain`, `curl`, API clients and fixed/`@fresh`
+properties all keep returning the finished value in one response. Pass
+`operation_policy=:blocking` to restore the old transport for a root type.
 """
 struct OperationPolicy
     mode::Symbol
@@ -2227,7 +2241,7 @@ struct OperationPolicy
     keep_progress::Bool
 end
 
-function OperationPolicy(mode::Symbol=:blocking; poll_interval="200ms",
+function OperationPolicy(mode::Symbol=:auto; poll_interval="200ms",
         keep_progress::Bool=true)
     mode in (:blocking, :polling, :auto) || throw(ArgumentError(
         "operation-policy mode must be :blocking, :polling, or :auto (got $(repr(mode)))"))
@@ -4936,7 +4950,9 @@ Oxygen router. Returns `app`.
   both HTTP and WebSocket operations. `nothing` preserves the historic
   fresh-root-per-request behavior.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
-  polling, or HTMX-aware automatic execution. Defaults to blocking.
+  polling, or HTMX-aware automatic execution. Defaults to `:auto`, so a slow
+  route answers an HTMX request with a live progress tree and no hand-written
+  poller; pass `:blocking` to keep a root type on the historic transport.
 
 `route!` stores its registration settings per type in internal registries so the
 `_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
