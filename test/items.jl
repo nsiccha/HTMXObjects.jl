@@ -20,8 +20,19 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     PolicyApp, SlowPolicyApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
-    BareExternalApp, InlineContextApp,
-    _SINGLETON_APPDATA
+    BareExternalApp, BareExternalChild, InlineContextApp,
+    _SINGLETON_APPDATA,
+    # Navigation / reflection-graph, Resource and page-wrapper fixtures. A
+    # `@testmodule` is an ordinary module, so an item only sees what is
+    # exported here — an unexported fixture is `UndefVarError` at the item,
+    # not a load failure, which is why the omission survived every selective
+    # run and only a full suite exposed it.
+    NavLeaf, NavSection, NavRoot, NavPlainRoot,
+    NavChainChild, NavChainRoot, NavSlurpRoot,
+    NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
+    MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
+    IndexedMountChild, IndexedMountRoot,
+    DomainNode, DomainChild, StageChild, DomainRoot, BoolPropRoot
 
 @htmx struct TestApp
     title = "Test"
@@ -137,24 +148,32 @@ end
 end
 
 @htmx struct SemanticApp
-    choices(cohort::Symbol) = cohort === :north ? (
+    # `dataset`'s domain depends on `cohort`, so `cohort` is a FIELD: a declared
+    # domain reads the node it is evaluated against, and the framework remakes
+    # that node with the submitted value before asking. `run` never declares
+    # `cohort` — reading it in the body is enough for the `dependson` walk to
+    # promote it to a `:context` input, and DO infers the domain's dependency
+    # from the same walk, so there is no `dependencies=` to keep in sync by hand.
+    @options cohort = (:north, :south)
+    cohort::Symbol
+
+    choices(key::Symbol) = key === :north ? (
         (value=:n1, label="North 1", group="North"),
         (value=:n2, label="North 2", disabled=true),
     ) : (:s1,)
 
-    @semantic (inputs=(
-        dataset=(domain=dynamic_domain(:choices; dependencies=(:cohort,)),),
-        mode=(domain=static_domain((
-            (value=:fast, label="Fast"),
-            (value=:safe, label="Safe", help="Full checks"),
-            (value=:unsafe, label="Unsafe", disabled=true),
-        )),),
-    ),) @get run(; dataset::Symbol, cohort::Symbol=:north,
-                    mode::Symbol=:fast, count::Int=1) =
+    @options dataset = choices(cohort)
+    @options mode = (
+        (value=:fast, label="Fast"),
+        (value=:safe, label="Safe", help="Full checks"),
+        (value=:unsafe, label="Unsafe", disabled=true),
+    )
+    @get run(; dataset::Symbol, mode::Symbol=:fast, count::Int=1) =
         h.p("$(dataset):$(cohort):$(mode):$(count)")
 
     @include nested = begin
-        @semantic (inputs=(quality=(domain=static_domain((:quick, :full)),),),) @post execute(; quality::Symbol=:quick) =
+        @options quality = (:quick, :full)
+        @post execute(; quality::Symbol=:quick) =
             h.p("nested:$(quality)")
     end
 end
@@ -166,24 +185,29 @@ end
     @param study::Symbol = :alpha
 
     @include models = begin
-        @semantic (inputs=(model=(domain=static_domain((:base, :full)),),),) @get fit(; model::Symbol=:base) =
+        @options model = (:base, :full)
+        @get fit(; model::Symbol=:base) =
             h.p("fit:$(study):$(model)")
 
-        @semantic (inputs=(draws=(domain=static_domain((10, 20)),),),) @post predict(; draws::Int=10) =
+        @options draws = (10, 20)
+        @post predict(; draws::Int=10) =
             h.p("predict:$(study):$(draws)")
     end
 end
 
 @htmx struct IndexedSemanticAutoApp
     @include models(model::Symbol) = begin
-        @semantic (inputs=(mode=(domain=static_domain((:quick, :full)),),),) @get run(; mode::Symbol=:quick) =
+        @options mode = (:quick, :full)
+        @get run(; mode::Symbol=:quick) =
             h.p("$(model):$(mode)")
     end
 end
 
 @htmx struct ZeroConfigSemanticApp
-    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
-    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+    @options study = (:north, :south)
+    study::Symbol
+    @options dose = (50, 100)
+    dose::Int
 
     unrelated = Ref("survives")
 
@@ -193,8 +217,10 @@ end
 
 
 @htmx struct ZeroConfigSemanticChild
-    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
-    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+    @options study = (:north, :south)
+    study::Symbol
+    @options dose = (50, 100)
+    dose::Int
 
     unrelated = Ref("mounted-survives")
 
@@ -206,31 +232,40 @@ end
     @include models = ZeroConfigSemanticChild(:north, 50)
 end
 
+# `model`'s domain depends on `study`, so `study` is a field of the node the
+# domain is evaluated against — not another argument of `analyze`. That makes
+# the child an external one: an inline `@include … = begin … end` is constructed
+# with no arguments and so cannot carry a required field. `fit_key` still comes
+# from the enclosing `@param` by delegation, and is carried as hidden context
+# rather than generated as a control.
+@htmx struct ContextAnalysisChild
+    @param (; fit_key) = __parent__
+
+    model_options(key::Symbol) = key === :alpha ? (
+        (value=:a1, label="Alpha 1"),
+        (value=:a2, label="Alpha 2"),
+    ) : (
+        (value=:b1, label="Beta 1"),
+        (value=:b2, label="Beta 2"),
+    )
+
+    @options study = (
+        (value=:alpha, label="Alpha"),
+        (value=:beta, label="Beta"),
+    )
+    study::Symbol
+
+    @options model = model_options(study)
+    @get analyze(; model::Symbol) =
+        h.p("$(fit_key):$(study):$(model)")
+
+    @get raw_context(; count::Int=1)::MIMEResponse =
+        MIMEResponse("text/plain", "$(fit_key):$(count)")
+end
+
 @htmx struct ContextSemanticApp
     @param fit_key::String
-
-    @include analysis = begin
-        model_options(study::Symbol) = study === :alpha ? (
-            (value=:a1, label="Alpha 1"),
-            (value=:a2, label="Alpha 2"),
-        ) : (
-            (value=:b1, label="Beta 1"),
-            (value=:b2, label="Beta 2"),
-        )
-
-        @semantic (inputs=(
-            study=(domain=static_domain((
-                (value=:alpha, label="Alpha"),
-                (value=:beta, label="Beta"),
-            )),),
-            model=(domain=dynamic_domain(:model_options;
-                                         dependencies=(:study,)),),
-        ),) @get analyze(; study::Symbol=:alpha, model::Symbol) =
-            h.p("$(fit_key):$(study):$(model)")
-
-        @get raw_context(; count::Int=1)::MIMEResponse =
-            MIMEResponse("text/plain", "$(fit_key):$(count)")
-    end
+    @include analysis = ContextAnalysisChild(:alpha)
 end
 
 # A separately declared child that also *reads* the enclosing `@param` in its
@@ -241,7 +276,8 @@ end
 # `UndefVarError` the first time it is actually executed.
 @htmx struct ExternalContextChild
     @param (; fit_key) = __parent__
-    @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
+    @options value = (:ok, :alt)
+    @get analyze(; value::Symbol=:ok) =
         h.p("$(fit_key):$(value)")
     @get structured(; value::Symbol=:ok) =
         (summary=h.p("structured:$(value)"), status="ready")
@@ -255,7 +291,8 @@ end
 # A parent that declares NO params: its @include child stays renderable
 # standalone, since there is no inherited context to lose.
 @htmx struct ParamlessHostChild
-    @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
+    @options value = (:ok, :alt)
+    @get analyze(; value::Symbol=:ok) =
         h.p("paramless:$(value)")
 end
 
@@ -310,9 +347,11 @@ end
 end
 
 @htmx struct MultiVerbPolicyApp
-    @semantic (inputs=(mode=(domain=static_domain((:raw, :json)),),),) @get exchange(; mode::Symbol=:raw)::MIMEResponse =
+    @options mode = (:raw, :json)
+    @get exchange(; mode::Symbol=:raw)::MIMEResponse =
         MIMEResponse("text/plain", "get:$(mode)")
-    @semantic (inputs=(count=(domain=static_domain((1, 2)),),),) @post exchange(; count::Int=1) =
+    @options count = (1, 2)
+    @post exchange(; count::Int=1) =
         h.p("post:$(count)")
 end
 
@@ -321,7 +360,8 @@ end
 # parser while leaving the annotation visible to DynamicObjects.
 @htmx struct StackedSemanticRoute
     __cache_base__ = tempdir()
-    @semantic (inputs=(count=(domain=static_domain((1, 2, 3)),),),) @get @mmap @progress model(; count::Int=2)::Vector{Float64} =
+    @options count = (1, 2, 3)
+    @get @mmap @progress model(; count::Int=2)::Vector{Float64} =
         collect(1.0:count)
 end
 
@@ -661,18 +701,41 @@ end
     @test route.property.semantics.pending
     dataset = only(filter(param -> param.name === :dataset, route.params))
     mode = only(filter(param -> param.name === :mode, route.params))
-    @test dataset.domain.kind === :dynamic
-    @test dataset.domain.provider === :choices
-    @test dataset.domain.dependencies == [:cohort]
-    @test mode.domain.kind === :static
-    @test mode.domain.cardinality == 3
+    # Reflection reports the DECLARATION, never its value: `@options` lowers to
+    # a lazily computed property, so describing a type runs nothing and the
+    # option list is empty here by construction. What the declaration reads is
+    # inferred, not authored — `choices` (the property) and `cohort` (the field
+    # it is called with) both come from the one `dependson` walk.
+    @test dataset.domain.kind === :declared
+    @test dataset.domain.options == NamedTuple[]
+    @test dataset.domain.cardinality === nothing
+    @test dataset.domain.declaration.expression_string == "choices(cohort)"
+    @test dataset.domain.declaration.dependencies == [:choices, :cohort]
+    @test !dataset.domain.declaration.static
+    @test mode.domain.kind === :declared
+    @test mode.domain.declaration.static
     @test mode.default === :fast
+
+    # `cohort` is not declared by `run`; the body reads it, so it arrives as a
+    # `:context` input carrying the field's own declared domain.
+    cohort = only(filter(param -> param.name === :cohort, route.params))
+    @test cohort.kind === :context
+    @test cohort.domain.kind === :declared
 
     # The pre-existing reflection API remains byte-shape compatible.
     reflected = only(filter(route -> route.name === :run, HTMXObjects.reflect(SemanticApp)))
     @test keys(reflected) == (:verb, :path, :name, :doc, :params)
 
-    app = SemanticApp()
+    app = SemanticApp(:north)
+
+    # Evaluating the same declarations against an object is the object-level
+    # half of the contract, and it is what the generated controls below read.
+    @test HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(app, :mode)).cardinality == 3
+    @test [option.value for option in HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(app, :dataset)).options] == [:n1, :n2]
+    @test HTMXObjects.DynamicObjects.property_options(
+        HTMXObjects.DynamicObjects.remake(app; cohort=:south), :dataset) == (:s1,)
     html = repr("text/html", operation_form(app, :run; values=(cohort=:north,),
                                              target_id="#semantic-result"))
     @test contains(html, "hx-get=\"/run\"")
@@ -683,7 +746,15 @@ end
     @test contains(html, "type=\"number\"")
     @test contains(html, "name=\"count\"")
 
-    route!(app)
+    # A domain dependency has to be object state, and object state that is
+    # REQUIRED has no zero-argument root for the default factory to rebuild per
+    # request — so the instance is what gets served. `semantic_app` installs an
+    # equivalent provider on its own; here the provider is explicit because this
+    # item drives the raw route, not the compiled surface.
+    route!(app; root_provider=RootProvider() do _RootT, context
+        HTMXObjects.DynamicObjects.remount(app; __req__=context.request,
+                                           __route__=context.route)
+    end)
     good = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=fast&count=2")
     good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, good))
     good_response = good_handler(good)
@@ -923,7 +994,10 @@ end
             operation_policy=OperationPolicy(:auto),
         )
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
-        @test transport[].call_kwargs == (study=:alpha, model=:a1)
+        # `study` is node state now, not a declared argument of `analyze`: it is
+        # bound as context and the node is remade with it, so only `model`
+        # reaches the call.
+        @test transport[].call_kwargs == (model=:a1,)
         @test transport[].seen_transport.poll_url ==
               "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1&__htmxo_poll=1"
         @test poll_leaf.fit_key == "fit-17"
@@ -1292,10 +1366,17 @@ end
     post_exchange = only(filter(route -> route.verb === :POST, exchange))
     @test get_exchange.property.output.type === MIMEResponse
     @test post_exchange.property.output.type === nothing
+    # The descriptor carries the DECLARATION; the option list is an object
+    # question and stays empty until something evaluates it.
     @test only(filter(input -> input.name === :mode,
-                      get_exchange.property.inputs)).domain.cardinality == 2
+                      get_exchange.property.inputs)).domain.kind === :declared
     @test only(filter(input -> input.name === :count,
-                      post_exchange.property.inputs)).domain.cardinality == 2
+                      post_exchange.property.inputs)).domain.kind === :declared
+    multi = MultiVerbPolicyApp()
+    @test length(HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(multi, :mode)).options) == 2
+    @test length(HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(multi, :count)).options) == 2
     @test _operation_execution_mode(OperationPolicy(:polling),
                                     get_exchange.property, hx,
                                     Verb{:GET}()) === :blocking
@@ -1414,7 +1495,10 @@ end
     @test stacked.property.semantics.progress
     @test stacked.property.semantics.pending
     @test only(filter(input -> input.name === :count,
-                      stacked.property.inputs)).domain.cardinality == 3
+                      stacked.property.inputs)).domain.kind === :declared
+    @test length(HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(
+            StackedSemanticRoute(), :count)).options) == 3
 end
 
 # Polling transport is only real if the value is started NON-BLOCKINGLY. Every
@@ -2337,7 +2421,17 @@ catalog GET and a rejected selective POST through the in-process HTTP router.
     route!(TestUIHost())
     router = HTMXObjects.CONTEXT[].service.router
 
-    get_request = HTTP.Request("GET", "/tests", ["HX-Request" => "true"], UInt8[])
+    hx_request = HTTP.Request("GET", "/tests", ["HX-Request" => "true"], UInt8[])
+    hx_handler = first(HTTP.Handlers.gethandler(router, hx_request))
+    @test hx_handler !== HTTP.Handlers.default404
+    @test hx_handler(hx_request).status == 200
+
+    # Catalog discovery is a pending-capable GET, so under the `:auto` default
+    # an HTMX request may legitimately answer with the live progress tree and
+    # resolve the catalog on the poll — which body arrives first depends on how
+    # long the scan takes. The catalog contract is asserted on the plain
+    # request, where the finished page is the only possible response.
+    get_request = HTTP.Request("GET", "/tests", Pair{String,String}[], UInt8[])
     get_handler = first(HTTP.Handlers.gethandler(router, get_request))
     @test get_handler !== HTTP.Handlers.default404
     get_response = get_handler(get_request)

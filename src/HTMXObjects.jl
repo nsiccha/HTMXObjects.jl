@@ -1,8 +1,13 @@
 module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
-export @semantic, property_descriptor, property_descriptors, option_descriptor,
-    static_domain, dynamic_domain, materialization_observation, materialization_plan
+# Re-exports of the DynamicObjects reflection surface. `@semantic`,
+# `option_descriptor`, `dynamic_domain` and `materialization_plan` were dropped
+# when DO removed authored semantic metadata (DO `9490b55`); nothing defines
+# them here, so exporting them only handed consumers a name that resolves to
+# nothing at use site. Domains are declared with `@options` now.
+export property_descriptor, property_descriptors, static_domain,
+    materialization_observation
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
@@ -2229,11 +2234,17 @@ tree fills itself in because DynamicObjects mounts each nested property's
 progress node under the node currently being computed (Treebars' ambient node),
 so nesting needs no `@progress` / `@fetch!` annotation either.
 
-Nothing that was previously direct becomes a poller by default: `:auto` still
-requires a GET, an HTMX request, and a descriptor advertising
-`semantics.pending`, so `?plain`, `curl`, API clients and fixed/`@fresh`
-properties all keep returning the finished value in one response. Pass
-`operation_policy=:blocking` to restore the old transport for a root type.
+A slow HTMX GET that used to block DOES now answer with a poller — that is the
+point of the default, not an edge case, and a route that takes long enough to be
+worth a progress tree will get one. What is unchanged is everything outside that
+intersection: `:auto` requires a GET, an HTMX request, and a descriptor
+advertising `semantics.pending`, so `?plain`, `curl`, API clients, mutation
+verbs and fixed/`@fresh` properties all keep returning the finished value in one
+response. A pending-capable route that finishes inside the extension's grace
+period also answers directly, so fast routes do not acquire a poller they would
+immediately replace. Pass `operation_policy=:blocking` to restore the old
+transport for a root type; a caller that must see the finished body in one
+response can drop the `HX-Request` header or follow the poll URL.
 """
 struct OperationPolicy
     mode::Symbol
@@ -3424,30 +3435,78 @@ function _bind_operation_context(target, descriptor, req::HTTP.Request)
     (merge(target, (; leaf=last(objects), objects)), values)
 end
 
-function _domain_dependency_value(obj, values, name::Symbol)
-    haskey(values, name) && return values[name]
-    hasproperty(obj, name) || throw(ArgumentError(
-        "dynamic domain dependency $(repr(name)) is unavailable on $(typeof(obj))"))
-    getproperty(obj, name)
+"""
+    _declared_domain_object(obj, domain, values) -> object
+
+The object a declared domain is evaluated against: `obj`, or `obj` remade with
+the submitted value of any dependency it carries as a field.
+
+`@options(dataset) = choices(cohort)` reads `cohort` off the node, so "the
+options for the cohort the user just picked" is expressed by asking a node that
+HAS that cohort. The test is `hasproperty`, not `fieldnames`: `remake` overrides
+a computed property (an overrideable default, a `@param`) by prepopulating its
+cache, and those are exactly the shapes a submitted context value takes — keying
+on physical fields would silently evaluate the domain against the pre-submission
+value. It is also why a dependent domain's dependency has to be node state
+rather than a sibling argument of the same operation: a keyword argument belongs
+to no node, so no node can be built that answers for it.
+"""
+function _declared_domain_object(obj, domain, values)
+    isdefined(DynamicObjects, :remake) || return obj
+    declaration = get(domain, :declaration, nothing)
+    declaration === nothing && return obj
+    overrides = Pair{Symbol,Any}[]
+    for dep in get(declaration, :dependencies, Symbol[])
+        haskey(values, dep) && hasproperty(obj, dep) || continue
+        submitted = values[dep]
+        isequal(submitted, getproperty(obj, dep)) && continue
+        push!(overrides, dep => submitted)
+    end
+    isempty(overrides) && return obj
+    Base.invokelatest(getproperty(DynamicObjects, :remake), obj; overrides...)
+end
+
+"""
+    _declared_input_domain(obj, input, domain, values) -> domain or nothing
+
+Evaluate an `@options` declaration into a resolved domain.
+
+Reflection reports `kind === :declared` with `options` empty on purpose:
+DynamicObjects records the declared expression and never runs it while
+describing a type, so the values are an OBJECT question. This asks it, through
+`property_options`, and normalizes the answer with `static_domain` so every
+consumer downstream — validation, radio/select choice, label rendering — sees
+the one shape it already handles.
+"""
+function _declared_input_domain(obj, input, domain, values)
+    isdefined(DynamicObjects, :property_options) || return nothing
+    source = obj
+    declared = try
+        source = _declared_domain_object(obj, domain, values)
+        Base.invokelatest(
+            getproperty(DynamicObjects, :property_options), source, input.name)
+    catch err
+        declaration = get(domain, :declaration, nothing)
+        expression = declaration === nothing ? "" :
+            " (`@options $(input.name) = $(get(declaration, :expression_string, "?"))`)"
+        throw(ArgumentError(string(
+            "the declared domain for $(repr(input.name)) on $(typeof(source))",
+            expression, " could not be evaluated: ", sprint(showerror, err),
+            "\nA declared domain reads the node it is evaluated against, so every ",
+            "name it depends on must be a property of that node — promote a ",
+            "dependency that is currently only an operation argument to a field.")))
+    end
+    declared === nothing && return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :static_domain), declared;
+        multiple=get(domain, :multiple, false),
+        allow_custom=get(domain, :allow_custom, false))
 end
 
 function _resolved_input_domain(obj, T, input, values)
     domain = get(input, :domain, nothing)
-    (domain === nothing || get(domain, :kind, :unrestricted) !== :dynamic) && return domain
-
-    provider = get(domain, :provider, nothing)
-    provider isa Symbol || throw(ArgumentError(
-        "dynamic domain for $(input.name) has no provider property"))
-    provider_descriptor = _property_descriptor(T, provider)
-    provider_descriptor === nothing && throw(ArgumentError(
-        "dynamic domain provider $(repr(provider)) is not described on $(T)"))
-    dependencies = get(domain, :dependencies, Symbol[])
-    args = [_domain_dependency_value(obj, values, dep) for dep in dependencies]
-    prop = getproperty(obj, provider)
-    raw_options = get(provider_descriptor, :indexed, false) ? prop(args...) : prop
-    Base.invokelatest(getproperty(DynamicObjects, :static_domain), raw_options;
-        multiple=get(domain, :multiple, false),
-        allow_custom=get(domain, :allow_custom, false))
+    domain === nothing && return domain
+    get(domain, :kind, :unrestricted) === :declared || return domain
+    _declared_input_domain(obj, input, domain, values)
 end
 
 _submitted_domain_values(value, multiple::Bool) =
@@ -7036,13 +7095,28 @@ function _check_mounted_include_child(obj, route)
         "the child; do not inject a detached child into the new root.")))
 end
 
+"""
+    _semantic_refresh_dependencies(route) -> Set{Symbol}
+
+The inputs whose value changes another input's option list, and therefore have
+to re-fetch the form when they change.
+
+A declaration that reads nothing (`static`) is fixed for the type and needs no
+refresh wiring; one that reads something names what it read, from the same
+`dependson` walk every property RHS gets. Not every dependency is an input —
+`@options(dataset) = choices(cohort)` reads the property `choices` as well as
+the field `cohort` — so the caller intersects this with the form's own controls.
+"""
 function _semantic_refresh_dependencies(route)
     dependencies = Set{Symbol}()
     for param in route.params
         domain = get(param, :domain, nothing)
         domain === nothing && continue
-        get(domain, :kind, :unrestricted) === :dynamic || continue
-        union!(dependencies, Symbol.(get(domain, :dependencies, Symbol[])))
+        get(domain, :kind, :unrestricted) === :declared || continue
+        declaration = get(domain, :declaration, nothing)
+        declaration === nothing && continue
+        get(declaration, :static, true) && continue
+        union!(dependencies, Symbol.(get(declaration, :dependencies, Symbol[])))
     end
     dependencies
 end
@@ -7266,13 +7340,16 @@ function _semantic_mounts!(mounts, obj, graph, root_prefix)
         hasproperty(obj, child.name) || throw(ArgumentError(
             "semantic_app descriptor names child $(repr(child.name)) on $(typeof(obj)), but the mounted object has no such property"))
         mounted = getproperty(obj, child.name)
-        ChildT = child.graph.type
+        # A child IS a node — `_semantic_graph` gives every node the same shape,
+        # root included, so a child is walked with the same rule as the root and
+        # is not wrapped in a `graph` field.
+        ChildT = child.type
         mounted isa ChildT || throw(ArgumentError(string(
             "semantic_app cannot materialize child $(repr(child.name)) on $(typeof(obj)): ",
             "the descriptor expects $(ChildT), but `getproperty` produced $(typeof(mounted)). ",
             "Indexed `@include` children need a selected index; render `semantic_app` on ",
             "that selected child, or mount a plain semantic child.")))
-        _semantic_mounts!(mounts, mounted, child.graph, root_prefix)
+        _semantic_mounts!(mounts, mounted, child, root_prefix)
     end
     mounts
 end

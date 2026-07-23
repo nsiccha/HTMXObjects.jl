@@ -399,10 +399,12 @@ function _test_job_view(job; prefix="/tests")
                 "Job ", h.code(job.id),
                 isnothing(job.exitcode) ? "" : " · exit $(job.exitcode)",
             ),
+            # `h.pre` escapes its text children itself, so the output goes in
+            # RAW: pre-escaping here would render `&lt;` to the reader as the
+            # literal five characters instead of `<`, and captured test output
+            # is exactly where angle brackets show up.
             isempty(output) ? h.p(; class="u-text-muted")("Waiting for output…") :
-                h.pre(; class="u-text-xs u-scroll-y u-pre-wrap")(
-                    escape_html(output),
-                ),
+                h.pre(; class="u-text-xs u-scroll-y u-pre-wrap")(output),
             bounded ? h.p(
                 h.a("Open complete output"; href="$(prefix)/output/$(job.id)",
                     target="_blank"),
@@ -440,7 +442,7 @@ function test_output(project, id; prefix="/tests")
             " · job ", h.code(job.id),
         ),
         isempty(output) ? h.p(; class="u-text-muted")("Waiting for output…") :
-            h.pre(; class="u-text-xs u-scroll-y u-pre-wrap")(escape_html(output)),
+            h.pre(; class="u-text-xs u-scroll-y u-pre-wrap")(output),
     )
 end
 

@@ -64,7 +64,7 @@ _view_option_label(x::NamedTuple) =
 """
     _view_domain(domain) -> renderable
 
-Render one input's option domain. The four `kind`s answer genuinely different
+Render one input's option domain. The `kind`s answer genuinely different
 questions and are NOT flattened into one "here are the choices" cell:
 
 - `:static` — DynamicObjects proved the value set (a `Bool`, an `Enum`); the
@@ -73,13 +73,15 @@ questions and are NOT flattened into one "here are the choices" cell:
   records the expression and never evaluates it, so `options` is empty by
   design. Shown as the expression plus what it depends on. Rendering this as
   "no options" would assert the opposite of what it means.
-- `:dynamic` — a provider supplies the values at runtime.
 - `:unrestricted` / absent — no domain is claimed.
+
+The dependency list lives on the `declaration`, not on the domain: the domain
+is what reflection could decide about a TYPE, and a declared one decides
+nothing, so everything it knows sits in the record of what was written.
 """
 function _view_domain(domain)
     domain === nothing && return "—"
     kind = get(domain, :kind, :unrestricted)
-    deps = get(domain, :dependencies, Symbol[])
     if kind === :static
         options = get(domain, :options, [])
         isempty(options) ? _view_code(kind) :
@@ -88,14 +90,10 @@ function _view_domain(domain)
         declaration = get(domain, :declaration, nothing)
         expression = declaration === nothing ? nothing :
                      get(declaration, :expression_string, nothing)
+        deps = declaration === nothing ? Symbol[] :
+               get(declaration, :dependencies, Symbol[])
         children = Any[_view_code(kind)]
         isnothing(expression) || (push!(children, " "); push!(children, h.code(expression)))
-        isempty(deps) || (push!(children, " depends on "); push!(children, _view_list(deps)))
-        h.span(children...)
-    elseif kind === :dynamic
-        provider = get(domain, :provider, nothing)
-        children = Any[_view_code(kind)]
-        isnothing(provider) || (push!(children, " via "); push!(children, _view_code(provider)))
         isempty(deps) || (push!(children, " depends on "); push!(children, _view_list(deps)))
         h.span(children...)
     else
