@@ -217,7 +217,7 @@ effect/side-effect policy key at all.
 | Which control is rendered | `domain` if present, else the declared Julia `type` |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |
-| Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key. It governs every route under the app root, not just compiled operations; see [What the policy governs](#What-the-policy-governs) |
+| Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key. Defaults to `:auto`; it governs every route under the app root, not just compiled operations; see [What the policy governs](#What-the-policy-governs) |
 
 Two property-level keys do matter to the compiler: `role` must be `:operation`
 (`semantic_app` rejects any discovered route whose descriptor says otherwise),
@@ -319,14 +319,32 @@ factory whose returned root does not. Retain the **payload** — a fitted model,
 dataset, a cache — never a mounted `@include` child, which belongs to the
 request-scoped object graph.
 
-Execution transport is a separate, app-level choice, passed alongside the root
-provider at `route!` time:
+Execution transport is a separate, app-level choice. You do not have to make it:
+`route!` defaults `operation_policy` to `OperationPolicy(:auto)`, so the app
+below already serves long routes without blocking the request task.
 
 ```julia
-route!(ModelApp(); root_provider=provider, operation_policy=OperationPolicy(:auto))
+route!(ModelApp(); root_provider=provider)
+```
+
+Pass an explicit policy only to **tune** it or to **opt out**:
+
+```julia
+# tune the poller
+route!(ModelApp(); operation_policy=OperationPolicy(; poll_interval="500ms"))
+# opt out — a route surface that must answer inline
+route!(ModelApp(); operation_policy=OperationPolicy(:blocking))
 ```
 
 ### What the policy governs
+
+**The default is `:auto`.** An app that declares no `operation_policy` gets it,
+and that is the whole configuration story: `OperationPolicy` exists to tune the
+poller or to opt out, never to switch the good behaviour on. `:blocking` — the
+historical transport, where a long route computes on the request task and the
+response waits for it — is now reached only by asking for it. [`record!`](@ref)
+is the one built-in caller that does: static export wants finished HTML, not a
+poller written to disk.
 
 "App-level" is literal, and it is the answer to the question this section is
 otherwise easy to misread: the policy is stored per **root type** and threaded
