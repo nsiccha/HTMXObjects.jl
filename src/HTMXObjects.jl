@@ -2275,6 +2275,13 @@ refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
 You never have to write `OperationPolicy` to get non-blocking long routes —
 `route!(app)` alone already does. Reach for it to tune (`poll_interval`,
 `keep_progress`) or to opt out (`:blocking`).
+
+Nested progress follows source-visible DynamicObjects property reads and
+indexed-property calls in generated route/property bodies. Their lowering
+carries the caller's progress node explicitly; ordinary Julia calls,
+constructors, arithmetic and loops remain ordinary. Use DynamicObjects'
+explicit progress markers when work hidden in a foreign helper should attach to
+the caller too.
 """
 struct OperationPolicy
     mode::Symbol

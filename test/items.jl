@@ -3208,82 +3208,83 @@ end
 # An ordinary `@get` route whose body reads a slow nested DynamicObjects indexed
 # property. There is no `@progress`, no `@fetch!`, no `polling_fetchindex`, no
 # `route!(…; operation_policy=…)` and no JavaScript anywhere in these fixtures:
-# `:auto` is the default transport, and DynamicObjects mounts each nested
-# property's node under the one currently computing.
-@testmodule HTMXOAmbientFixtures begin
+# `:auto` is the default transport, and source-visible property reads/calls in
+# generated bodies carry the caller's progress node explicitly. Ordinary Julia
+# calls remain ordinary; there is no ambient or task-local progress context.
+@testmodule HTMXOPropertyScopedFixtures begin
 using HTMXObjects
 
-export AmbientRoute, AmbientFastRoute, AmbientFailRoute, ambient_gate,
-    ambient_descendants
+export PropertyScopedRoute, PropertyScopedFastRoute, PropertyScopedFailRoute,
+    property_gate, progress_descendants
 
 # The leaf blocks on this until the test releases it, so "the request came back
 # with the work still in flight" is asserted deterministically rather than by
 # racing a `sleep` against JIT compilation. Only the gated item touches it —
 # the other items use routes that never wait, so items stay independent even
 # when TestItemRunner runs them in one process.
-const ambient_gate = Ref(Base.Event())
+const property_gate = Ref(Base.Event())
 
-@htmx struct AmbientDeep
+@htmx struct PropertyScopedDeep
     "Deep leaf work"
-    deep(k) = (wait(ambient_gate[]); 10k)
+    deep(k) = (wait(property_gate[]); 10k)
 end
 
-@htmx struct AmbientMiddle
-    @include deep_child = AmbientDeep()
+@htmx struct PropertyScopedMiddle
+    @include deep_child = PropertyScopedDeep()
     "Middle work"
     middle(k) = deep_child.deep(k) + 1
 end
 
-@htmx struct AmbientRoute
-    @include mid = AmbientMiddle()
+@htmx struct PropertyScopedRoute
+    @include mid = PropertyScopedMiddle()
     "Slow page"
     @get slow(k::Int) = h.p(string(mid.middle(k)))
 end
 
 # Same shape, no gate: used where the test needs the work to finish.
-@htmx struct AmbientFastDeep
+@htmx struct PropertyScopedFastDeep
     "Deep leaf work"
     deep(k) = 10k
 end
 
-@htmx struct AmbientFastMiddle
-    @include deep_child = AmbientFastDeep()
+@htmx struct PropertyScopedFastMiddle
+    @include deep_child = PropertyScopedFastDeep()
     "Middle work"
     middle(k) = deep_child.deep(k) + 1
 end
 
-@htmx struct AmbientFastRoute
-    @include mid = AmbientFastMiddle()
+@htmx struct PropertyScopedFastRoute
+    @include mid = PropertyScopedFastMiddle()
     "Slow page"
     @get slow(k::Int) = h.p(string(mid.middle(k)))
 end
 
-@htmx struct AmbientFailRoute
+@htmx struct PropertyScopedFailRoute
     "Failing leaf"
     boom(k) = error("nested boom $k")
     "Failing page"
     @get bad(k::Int) = h.p(string(boom(k)))
 end
 
-function ambient_descendants(node, acc=String[])
+function progress_descendants(node, acc=String[])
     for child in node.children
         push!(acc, child.impl.description)
-        ambient_descendants(child, acc)
+        progress_descendants(child, acc)
     end
     acc
 end
-end # @testmodule HTMXOAmbientFixtures
+end # @testmodule HTMXOPropertyScopedFixtures
 
-@testitem "automatic progress — an ordinary route polls and nests with no annotations" setup=[HTMXOAmbientFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+@testitem "automatic progress — property-scoped route calls poll and nest without annotations" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _run_operation, _operation_polling_impl, Verb
     import HTMXObjects.DynamicObjects
     const TBNode = DynamicObjects.Treebars.ProgressNode
 
-    app = AmbientRoute()
+    app = PropertyScopedRoute()
     target = (context=nothing, root=app, leaf=app)
     hx = HTTP.Request("GET", "/slow/2", ["HX-Request" => "true"])
 
-    ambient_gate[] = Base.Event()          # closed: the leaf cannot finish yet
+    property_gate[] = Base.Event()         # closed: the leaf cannot finish yet
     seen = Ref{Any}(nothing)
     old = _operation_polling_impl[]
     _operation_polling_impl[] =
@@ -3293,7 +3294,7 @@ end # @testmodule HTMXOAmbientFixtures
         end
     node = try
         # No `operation_policy=` kwarg anywhere — this is the DEFAULT path.
-        operation = _run_operation(target, AmbientRoute, :slow, Verb{:GET}(),
+        operation = _run_operation(target, PropertyScopedRoute, :slow, Verb{:GET}(),
                                    hx, 1, 1)
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
         # The request returned while the leaf is still parked on the gate, so an
@@ -3312,18 +3313,18 @@ end # @testmodule HTMXOAmbientFixtures
     @test node isa TBNode
     @test node.impl.description == "Slow page"
     @test timedwait(10.0; pollint=0.05) do
-        "Deep leaf work" in ambient_descendants(node)
+        "Deep leaf work" in progress_descendants(node)
     end === :ok
-    descendants = ambient_descendants(node)
+    descendants = progress_descendants(node)
     @test "Middle work" in descendants
     @test "Deep leaf work" in descendants
 
     # And the final value still arrives once the leaf is released.
-    notify(ambient_gate[])
+    notify(property_gate[])
     @test repr("text/html", app.slow(Verb{:GET}(), 2)) == "<p>21</p>"
 end
 
-@testitem "automatic progress — plain requests stay direct, failures stay visible" setup=[HTMXOAmbientFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+@testitem "automatic progress — property-scoped direct requests and failures stay visible" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _run_operation, Verb
     import HTMXObjects.DynamicObjects
     const TBNode = DynamicObjects.Treebars.ProgressNode
@@ -3333,18 +3334,18 @@ end
     # value in one response rather than a poller.
     @test OperationPolicy().mode === :auto
 
-    app = AmbientFastRoute()
+    app = PropertyScopedFastRoute()
     target = (context=nothing, root=app, leaf=app)
-    direct = _run_operation(target, AmbientFastRoute, :slow, Verb{:GET}(),
+    direct = _run_operation(target, PropertyScopedFastRoute, :slow, Verb{:GET}(),
                             HTTP.Request("GET", "/slow/3"), 1, 1)
     @test repr("text/html", direct.value) == "<p>31</p>"
     @test !(direct.value isa DynamicObjects.Pending)
 
     # A nested failure surfaces as a pinned node, so the tree still shows WHICH
     # step failed rather than collapsing to a bare error.
-    bad_app = AmbientFailRoute()
+    bad_app = PropertyScopedFailRoute()
     @test_throws DynamicObjects.PropertyComputationError bad_app.bad(Verb{:GET}(), 1)
     bad_node = DynamicObjects.getstatus(bad_app.bad, Verb{:GET}(), 1)
     @test bad_node isa TBNode
-    @test "Failing leaf" in ambient_descendants(bad_node)
+    @test "Failing leaf" in progress_descendants(bad_node)
 end

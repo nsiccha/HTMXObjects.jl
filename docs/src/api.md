@@ -409,6 +409,15 @@ poller and returns its value directly. `polling_fetchindex` therefore remains
 useful only for what the policy does not cover — a non-GET operation, a declared
 final response, or a poller you want to shape by hand.
 
+The progress tree is property-scoped. In generated DynamicObjects bodies,
+source-visible `object.property` reads and `object.indexed(args...)` calls carry
+the caller's progress node explicitly into the nested computation. Ordinary
+Julia calls, constructors, arithmetic and loops remain ordinary: a property
+read hidden inside a foreign helper is not attached to its caller. Use the
+explicit DynamicObjects progress markers when that exhaustive/foreign-frame
+instrumentation is intentional. No ambient or task-local progress context is
+installed.
+
 ```@docs
 RootProvider
 RootRetention
