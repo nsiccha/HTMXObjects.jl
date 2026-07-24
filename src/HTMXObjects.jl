@@ -863,7 +863,14 @@ function _convert_include_to_struct!(struct_expr)
         # Symbol LHS, was never wrapped by the parser, and is a real inline
         # sub-router — unwrapping a single-statement one would reinterpret it
         # as an external mount.
-        isempty(index_params) || (rhs = _unwrap_short_form_body(rhs))
+        if !isempty(index_params)
+            rhs = _unwrap_short_form_body(rhs)
+            # Persist the classification into the AST DynamicObjects receives.
+            # Mutating the unwrapped call below is not enough: without replacing
+            # the parser's outer one-statement block, DO still sees an inline
+            # sub-router and rejects it under its plain `@dynamicstruct` pass.
+            inner.args[2] = rhs
+        end
         if Meta.isexpr(rhs, :block)
             # Convert to: prop[(args…)] = struct _Include_prop ... end
             # __prefix__ extends the parent's prefix with the include name
