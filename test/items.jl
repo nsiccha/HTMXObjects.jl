@@ -336,6 +336,17 @@ end
 
 end # @testmodule HTMXOTestFixtures
 
+@testmodule HTMXOBoolRadioFixtures begin
+using HTMXObjects
+
+export BoolRadioApp
+
+@htmx struct BoolRadioApp
+    @get run(; flag::Bool=false) = string(flag)
+end
+
+end # @testmodule HTMXOBoolRadioFixtures
+
 # --- Tests ---
 
 """
@@ -1871,6 +1882,37 @@ end
     node3 = soption("x"; selected_value="x")
     html3 = repr("text/html", node3)
     @test contains(html3, "selected=\"true\">")
+end
+
+@testitem "Bool radio values render and validate" setup=[HTMXOBoolRadioFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    # Raw Bool attributes are treated as boolean attributes by the HTML
+    # renderer. Form values must be strings so `false` is not omitted.
+    @test contains(repr("text/html", soption(false)), "value=\"false\"")
+    group_html = repr("text/html", radio_group((; flag=false), (false, true)))
+    @test contains(group_html, "name=\"flag\" value=\"false\" checked=\"true\"")
+    @test contains(group_html, "name=\"flag\" value=\"true\"")
+
+    app = BoolRadioApp()
+    form_html = repr("text/html", operation_form(app, :run))
+    @test contains(form_html, "name=\"flag\" value=\"false\" checked=\"true\"")
+    @test contains(form_html, "name=\"flag\" value=\"true\"")
+
+    route!(app)
+    submitted = HTTP.Request("GET", "/run?flag=false")
+    submitted_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, submitted))
+    submitted_response = submitted_handler(submitted)
+    @test submitted_response.status == 200
+    @test String(submitted_response.body) == "false"
+
+    tampered = HTTP.Request("GET", "/run?flag=on")
+    tampered_handler = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, tampered))
+    tampered_response = tampered_handler(tampered)
+    @test tampered_response.status == 400
+    @test contains(String(tampered_response.body), "Bad Request")
 end
 
 @testitem "linput" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin

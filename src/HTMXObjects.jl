@@ -2416,7 +2416,16 @@ function _lookup_param(src, fallback, name, T)
         v = get(fallback, key, nothing)
     end
     (v === nothing || v == "") && return _NO_DEFAULT
-    _convert_param(v, T)
+    try
+        _convert_param(v, T)
+    catch err
+        # HTML checkboxes/radios submit strings. A malformed Bool is a bad
+        # parameter value, not an internal server failure; keep the narrower
+        # status policy for other parse errors intact.
+        T === Bool && err isa ArgumentError &&
+            throw(InvalidDomainValue(Symbol(name), v, (false, true)))
+        rethrow()
+    end
 end
 
 """
@@ -6074,7 +6083,7 @@ soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, 
 _is_selected(value, selected_value) = value == selected_value
 _is_selected(value, selected_value::AbstractVector) = string(value) in string.(selected_value)
 soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
-    option; value, selected=string(_is_selected(value, selected_value)), kwargs...
+    option; value=string(value), selected=string(_is_selected(value, selected_value)), kwargs...
 )
 
 """
@@ -6162,7 +6171,8 @@ radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, k
             opt_value, opt_label = _option_pair(option)
             checked_attrs = string(opt_value) == string(value) ? (; checked="true") : (;)
             h.label(
-                h.input(; type="radio", name, value=opt_value, checked_attrs..., kwargs...),
+                h.input(; type="radio", name, value=string(opt_value),
+                        checked_attrs..., kwargs...),
                 string(opt_label)
             )
         end for option in options]...;
@@ -6260,7 +6270,7 @@ function _semantic_option_node(option, selected)
     disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
     help = get(option, :help, nothing)
     help_attrs = isnothing(help) ? (;) : (; title=help)
-    h.option(option.label; value=option.value, selected_attrs..., disabled_attrs...,
+    h.option(option.label; value=string(option.value), selected_attrs..., disabled_attrs...,
              help_attrs...)
 end
 
@@ -6298,7 +6308,7 @@ function _semantic_radio(name, label, domain, selected; required=false)
             help = get(option, :help, nothing)
             option_label = isnothing(help) ? option.label : "$(option.label) — $(help)"
             h.label(
-                h.input(; type="radio", name=string(name), value=option.value,
+                h.input(; type="radio", name=string(name), value=string(option.value),
                         checked_attrs..., disabled_attrs..., required_attrs...),
                 option_label,
             )
