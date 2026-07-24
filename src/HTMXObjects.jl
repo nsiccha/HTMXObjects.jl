@@ -37,6 +37,7 @@ export OperationContext, RootProvider, RootRetention, OperationPolicy
 export semantic_descriptor, operation_form, semantic_app
 
 using DynamicObjects, HTTP, Tables
+import Random
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
@@ -2284,11 +2285,12 @@ explicit progress markers when work hidden in a foreign helper should attach to
 the caller too.
 
 When a request crosses the grace period, HTMXObjects retains that exact
-operation behind an opaque poll token. The token is bound to its route, typed
-arguments, and provider scope/key, then removed on successful terminal
-rendering. A bounded process-local registry expires abandoned or failed
-operations, so fresh request roots can follow in-flight work without making
-DynamicObjects caches global.
+operation behind an independently generated OS-random bearer token. Possession
+authorizes polling that operation; route, typed-argument, and provider scope/key
+checks constrain where the token is valid. Successful terminal rendering
+removes it, while a bounded process-local registry expires abandoned or failed
+operations. Fresh request roots can therefore follow in-flight work without
+making DynamicObjects caches global.
 """
 struct OperationPolicy
     mode::Symbol
@@ -3652,18 +3654,17 @@ _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
 # constructs a fresh DynamicObject root for each one. DynamicObjects caches are
 # instance-local, so a poll cannot rediscover a Pending handle by recomputing
 # the route on that fresh root. Retain the exact original IP/handle behind an
-# opaque capability token instead.
+# independently generated OS-random bearer token instead.
 #
-# The registry is process-local, bounded, and expiring. The token is also bound
-# to the routed root/leaf types, route, typed args, and provider scope/key, so a
-# token presented to another mount, operation, session, or job is rejected.
+# The registry is process-local, bounded, and expiring. Possession of the
+# non-enumerable token authorizes polling one operation; it is also bound to the
+# routed root/leaf types, route, typed args, and provider scope/key, so a token
+# presented to another mount, operation, session, or job is rejected.
 # Successful terminal rendering deletes the entry immediately; abandoned or
 # failed pollers fall out through TTL/LRU pruning.
 const _OPERATION_POLL_LIMIT = 256
 const _OPERATION_POLL_TTL = 600.0
 const _operation_poll_lock = ReentrantLock()
-const _operation_poll_nonce = Ref("")
-const _operation_poll_serial = Threads.Atomic{UInt64}(0)
 
 mutable struct _OperationPollEntry
     token::String
@@ -3683,8 +3684,7 @@ const _operation_polls = Dict{String,_OperationPollEntry}()
 _operation_poll_now() = _root_retention_time()
 
 function _new_operation_poll_token()
-    serial = Threads.atomic_add!(_operation_poll_serial, UInt64(1))
-    string(_operation_poll_nonce[], "-", string(serial; base=16))
+    bytes2hex(Random.rand(Random.RandomDevice(), UInt8, 32))
 end
 
 function _prune_operation_polls!(now::Real=_operation_poll_now())
@@ -10187,8 +10187,6 @@ include("routes/editor_routes.jl")
 function __init__()
     # Per-process error log dir for caught route exceptions.
     ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
-    _operation_poll_nonce[] = string(Base.UUID(rand(UInt128)))
-    _operation_poll_serial[] = 0
     _clear_operation_polls!()
     isassigned(_managed_root_release_handler) ||
         (_managed_root_release_handler[] = nothing)

@@ -409,13 +409,14 @@ poller and returns its value directly. `polling_fetchindex` therefore remains
 useful only for what the policy does not cover — a non-GET operation, a declared
 final response, or a poller you want to shape by hand.
 
-Every emitted poller carries an opaque operation token. HTMXObjects binds that
-token to the original route, typed arguments, and `RootProvider` scope/key, so a
-poll request reaches the exact in-flight property even though the default
-provider constructs a fresh root per request. Concurrent identical operations
-receive distinct tokens. Successful terminal rendering removes the retained
-operation immediately; a bounded process-local registry expires abandoned or
-failed pollers.
+Every emitted poller carries an independently generated, OS-random bearer
+token. Keep it confidential: possession authorizes polling that one operation.
+HTMXObjects also binds the token to the original route, typed arguments, and
+`RootProvider` scope/key, so a poll request reaches the exact in-flight property
+even though the default provider constructs a fresh root per request.
+Concurrent identical operations receive distinct, non-enumerable tokens.
+Successful terminal rendering removes the retained operation immediately; a
+bounded process-local registry expires abandoned or failed pollers.
 
 The progress tree is property-scoped. In generated DynamicObjects bodies,
 source-visible `object.property` reads and `object.indexed(args...)` calls carry

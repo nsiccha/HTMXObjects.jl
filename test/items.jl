@@ -3331,7 +3331,7 @@ end # @testmodule HTMXOPollIdentityFixtures
 @testitem "polling operation identity survives fresh roots and stays bounded" setup=[HTMXOPollIdentityFixtures, HTMXOTestImports] tags=[:integration, :semantic] begin
     import HTMXObjects: _OperationPollEntry, _OPERATION_POLL_LIMIT,
         _OPERATION_POLL_TTL, _clear_operation_polls!,
-        _operation_poll_now, _operation_poll_snapshot,
+        _new_operation_poll_token, _operation_poll_now, _operation_poll_snapshot,
         _retain_operation_poll!
 
     function drive(target; session="session-a")
@@ -3351,6 +3351,11 @@ end # @testmodule HTMXOPollIdentityFixtures
                       body)
         @test !isnothing(found)
         replace(only(found.captures), "&amp;" => "&")
+    end
+    function poll_token(target)
+        found = match(r"__htmxo_operation=([^&]+)", target)
+        @test !isnothing(found)
+        only(found.captures)
     end
     function settle(target; session="session-a")
         body = drive(target; session)
@@ -3380,6 +3385,19 @@ end # @testmodule HTMXOPollIdentityFixtures
         first_url = poll_url(first_body)
         second_url = poll_url(second_body)
         @test first_url != second_url
+        first_token = poll_token(first_url)
+        second_token = poll_token(second_url)
+        @test occursin(r"^[0-9a-f]{64}$", first_token)
+        @test occursin(r"^[0-9a-f]{64}$", second_token)
+
+        # Each bearer capability comes directly from OS randomness. A
+        # process-wide nonce plus a visible counter would share this prefix and
+        # let the first client enumerate every later operation.
+        sample = [_new_operation_poll_token() for _ in 1:32]
+        @test length(unique(sample)) == length(sample)
+        @test all(token -> occursin(r"^[0-9a-f]{64}$", token), sample)
+        @test length(unique(first(token, 32) for token in sample)) ==
+              length(sample)
         @test timedwait(() -> poll_identity_count() == 2, 10.0;
                         pollint=0.01) === :ok
         @test length(_operation_poll_snapshot()) == 2
