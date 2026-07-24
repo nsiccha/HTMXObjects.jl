@@ -2282,6 +2282,13 @@ carries the caller's progress node explicitly; ordinary Julia calls,
 constructors, arithmetic and loops remain ordinary. Use DynamicObjects'
 explicit progress markers when work hidden in a foreign helper should attach to
 the caller too.
+
+When a request crosses the grace period, HTMXObjects retains that exact
+operation behind an opaque poll token. The token is bound to its route, typed
+arguments, and provider scope/key, then removed on successful terminal
+rendering. A bounded process-local registry expires abandoned or failed
+operations, so fresh request roots can follow in-flight work without making
+DynamicObjects caches global.
 """
 struct OperationPolicy
     mode::Symbol
@@ -3613,16 +3620,25 @@ _operation_poll_request(req::HTTP.Request) =
 _operation_form_request(req::HTTP.Request) =
     _operation_poll_marker(get(queryparams(req), "__htmxo_form", nothing))
 
-function _operation_marker_url(target::AbstractString, marker::AbstractString)
+_operation_poll_token(value::AbstractString) = String(value)
+_operation_poll_token(values::AbstractVector) =
+    length(values) == 1 ? _operation_poll_token(only(values)) : nothing
+_operation_poll_token(_) = nothing
+
+_operation_poll_token(req::HTTP.Request) =
+    _operation_poll_token(get(queryparams(req), "__htmxo_operation", nothing))
+
+function _operation_marker_url(target::AbstractString, marker::AbstractString,
+        value::AbstractString="1")
     separator = occursin('?', target) ? '&' : '?'
-    target * separator * marker * "=1"
+    target * separator * marker * "=" * value
 end
 
-function _operation_poll_url(policy::OperationPolicy, req::HTTP.Request)
+function _operation_poll_url(req::HTTP.Request, token::AbstractString)
     target = String(req.target)
-    policy.mode === :auto || return target
     _operation_poll_request(req) && return target
-    _operation_marker_url(target, "__htmxo_poll")
+    target = _operation_marker_url(target, "__htmxo_poll")
+    _operation_marker_url(target, "__htmxo_operation", token)
 end
 
 # `:auto` spends a small part of Oxygen's existing request task waiting on the
@@ -3631,6 +3647,156 @@ end
 # shape so the public type remains Revise-safe on Julia 1.10.
 _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
     policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
+
+# Polls are separate HTTP requests, and the default RootProvider deliberately
+# constructs a fresh DynamicObject root for each one. DynamicObjects caches are
+# instance-local, so a poll cannot rediscover a Pending handle by recomputing
+# the route on that fresh root. Retain the exact original IP/handle behind an
+# opaque capability token instead.
+#
+# The registry is process-local, bounded, and expiring. The token is also bound
+# to the routed root/leaf types, route, typed args, and provider scope/key, so a
+# token presented to another mount, operation, session, or job is rejected.
+# Successful terminal rendering deletes the entry immediately; abandoned or
+# failed pollers fall out through TTL/LRU pruning.
+const _OPERATION_POLL_LIMIT = 256
+const _OPERATION_POLL_TTL = 600.0
+const _operation_poll_lock = ReentrantLock()
+const _operation_poll_nonce = Ref("")
+const _operation_poll_serial = Threads.Atomic{UInt64}(0)
+
+mutable struct _OperationPollEntry
+    token::String
+    signature::Any
+    prop::Any
+    keys::Tuple
+    call_kwargs::NamedTuple
+    started::Any
+    error_obj::Any
+    request::HTTP.Request
+    created_at::Float64
+    touched_at::Float64
+end
+
+const _operation_polls = Dict{String,_OperationPollEntry}()
+
+_operation_poll_now() = _root_retention_time()
+
+function _new_operation_poll_token()
+    serial = Threads.atomic_add!(_operation_poll_serial, UInt64(1))
+    string(_operation_poll_nonce[], "-", string(serial; base=16))
+end
+
+function _prune_operation_polls!(now::Real=_operation_poll_now())
+    expired = String[]
+    for (token, entry) in _operation_polls
+        now - entry.touched_at >= _OPERATION_POLL_TTL && push!(expired, token)
+    end
+    foreach(token -> delete!(_operation_polls, token), expired)
+    nothing
+end
+
+function _evict_oldest_operation_poll!()
+    isempty(_operation_polls) && return nothing
+    token = first(keys(_operation_polls))
+    touched = _operation_polls[token].touched_at
+    for (candidate, entry) in _operation_polls
+        if entry.touched_at < touched
+            token = candidate
+            touched = entry.touched_at
+        end
+    end
+    delete!(_operation_polls, token)
+    nothing
+end
+
+function _retain_operation_poll!(entry::_OperationPollEntry;
+        now::Real=_operation_poll_now())
+    lock(_operation_poll_lock)
+    try
+        _prune_operation_polls!(now)
+        while length(_operation_polls) >= _OPERATION_POLL_LIMIT
+            _evict_oldest_operation_poll!()
+        end
+        entry.touched_at = Float64(now)
+        _operation_polls[entry.token] = entry
+    finally
+        unlock(_operation_poll_lock)
+    end
+    entry
+end
+
+function _lookup_operation_poll(token::AbstractString, signature;
+        now::Real=_operation_poll_now())
+    lock(_operation_poll_lock)
+    try
+        _prune_operation_polls!(now)
+        entry = get(_operation_polls, String(token), nothing)
+        entry isa _OperationPollEntry || return nothing
+        isequal(entry.signature, signature) || return nothing
+        entry.touched_at = Float64(now)
+        entry
+    finally
+        unlock(_operation_poll_lock)
+    end
+end
+
+function _delete_operation_poll!(token::AbstractString)
+    lock(_operation_poll_lock)
+    try
+        delete!(_operation_polls, String(token))
+    finally
+        unlock(_operation_poll_lock)
+    end
+    nothing
+end
+
+function _clear_operation_polls!()
+    lock(_operation_poll_lock)
+    try
+        empty!(_operation_polls)
+    finally
+        unlock(_operation_poll_lock)
+    end
+    nothing
+end
+
+function _operation_poll_snapshot(; now::Real=_operation_poll_now())
+    lock(_operation_poll_lock)
+    try
+        _prune_operation_polls!(now)
+        copy(_operation_polls)
+    finally
+        unlock(_operation_poll_lock)
+    end
+end
+
+function _operation_poll_signature(target, LeafT, name, verb_inst, idx_vals,
+        kw_pairs)
+    context = get(target, :context, nothing)
+    route = context isa OperationContext ? context.route : ""
+    scope = context isa OperationContext ? context.scope : :request
+    scope_key = context isa OperationContext ? context.key : nothing
+    (;
+        root_type=typeof(target.root),
+        leaf_type=LeafT,
+        route,
+        name,
+        verb=_verb_symbol(verb_inst),
+        idx_vals=Tuple(idx_vals),
+        call_kwargs=NamedTuple(kw_pairs),
+        scope,
+        scope_key,
+    )
+end
+
+function _finish_operation_poll(token::AbstractString, value)
+    try
+        _resolve_operation_value(value)
+    finally
+        _delete_operation_poll!(token)
+    end
+end
 
 # A DO compute-at-most-once handle is CONTROL FLOW, never response content: the
 # progress/poll transport already carries "still running", so a handle that
@@ -3684,8 +3850,36 @@ end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req)
-    prop = getproperty(target.leaf, name)
     mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
+    prop = getproperty(target.leaf, name)
+    keys = (verb_inst, idx_vals...)
+    call_kwargs = NamedTuple(kw_pairs)
+
+    if mode === :polling && _operation_poll_request(req)
+        token = _operation_poll_token(req)
+        isnothing(token) && throw(ArgumentError(
+            "polling operation token is missing or ambiguous"))
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = _lookup_operation_poll(token, signature)
+        entry isa _OperationPollEntry || throw(ArgumentError(
+            "polling operation is expired or does not match this route, its arguments, or its scope"))
+        transport = (
+            poll_url=String(req.target),
+            label=Long(name),
+            poll_interval=policy.poll_interval,
+            keep_progress=policy.keep_progress,
+            error_obj=entry.error_obj,
+            req=entry.request,
+            grace_period=0.0,
+            retain=() -> nothing,
+            cleanup=() -> _delete_operation_poll!(token),
+        )
+        return _operation_polling(
+            value -> _finish_operation_poll(token, value),
+            entry.started, entry.prop, entry.keys, entry.call_kwargs, transport)
+    end
+
     # Decide the transport BEFORE starting the work, and start it the way that
     # transport needs. Starting blockingly and then wrapping the finished value
     # in a poller is a no-op: the request has already paid the full compute, so
@@ -3697,14 +3891,23 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                                        fetch=mode === :polling ? identity :
                                              Base.fetch)
     if mode === :polling
-        transport = (poll_url=_operation_poll_url(policy, req), label=Long(name),
+        token = _new_operation_poll_token()
+        now = _operation_poll_now()
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = _OperationPollEntry(
+            token, signature, prop, keys, call_kwargs, started,
+            target.leaf, req, now, now)
+        transport = (poll_url=_operation_poll_url(req, token), label=Long(name),
                      poll_interval=policy.poll_interval,
                      keep_progress=policy.keep_progress,
                      error_obj=target.leaf, req=req,
-                     grace_period=_operation_grace_period(policy, req))
-        return _operation_polling(_resolve_operation_value, started, prop,
-                                  (verb_inst, idx_vals...),
-                                  NamedTuple(kw_pairs), transport)
+                     grace_period=_operation_grace_period(policy, req),
+                     retain=() -> _retain_operation_poll!(entry),
+                     cleanup=() -> _delete_operation_poll!(token))
+        return _operation_polling(
+            value -> _finish_operation_poll(token, value),
+            started, prop, keys, call_kwargs, transport)
     end
     started
 end
@@ -9984,6 +10187,9 @@ include("routes/editor_routes.jl")
 function __init__()
     # Per-process error log dir for caught route exceptions.
     ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
+    _operation_poll_nonce[] = string(Base.UUID(rand(UInt128)))
+    _operation_poll_serial[] = 0
+    _clear_operation_polls!()
     isassigned(_managed_root_release_handler) ||
         (_managed_root_release_handler[] = nothing)
 end

@@ -1007,8 +1007,9 @@ end
         # bound as context and the node is remade with it, so only `model`
         # reaches the call.
         @test transport[].call_kwargs == (model=:a1,)
-        @test transport[].seen_transport.poll_url ==
-              "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1&__htmxo_poll=1"
+        @test startswith(transport[].seen_transport.poll_url,
+            "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1&" *
+            "__htmxo_poll=1&__htmxo_operation=")
         @test poll_leaf.fit_key == "fit-17"
     finally
         _operation_polling_impl[] = old_polling
@@ -1339,8 +1340,9 @@ end
 end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _operation_execution_mode, _operation_polling_impl,
-        _property_descriptor, _run_operation, _resolve_operation_value
+    import HTMXObjects: _clear_operation_polls!, _operation_execution_mode,
+        _operation_polling_impl, _property_descriptor, _run_operation,
+        _resolve_operation_value
     import HTMXObjects.DynamicObjects
 
     # `:auto` is the default so an ordinary route gets the live progress tree
@@ -1400,6 +1402,7 @@ end
     _operation_polling_impl[] =
         (render_result, _started, ip, keys, call_kwargs, transport) -> begin
             push!(polls, (; keys, call_kwargs, transport))
+            transport.retain()
             h.aside("polling")
         end
     try
@@ -1409,20 +1412,20 @@ end
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
         @test length(polls) == 1
         @test only(polls).call_kwargs == (count=2,)
-        @test only(polls).transport.poll_url ==
-              "/html?count=2&__htmxo_poll=1"
+        poll_url = only(polls).transport.poll_url
+        @test startswith(poll_url,
+            "/html?count=2&__htmxo_poll=1&__htmxo_operation=")
         @test only(polls).transport.grace_period == 0.1
 
         poll_request = HTTP.Request(
-            "GET", "/html?count=2&__htmxo_poll=1", ["HX-Request" => "true"])
+            "GET", poll_url, ["HX-Request" => "true"])
         polled = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
                                 poll_request, 0, 0;
                                 operation_policy=OperationPolicy(:auto))
         @test repr("text/html", polled.value) == "<aside>polling</aside>"
         @test length(polls) == 2
         @test last(polls).call_kwargs == (count=2,)
-        @test last(polls).transport.poll_url ==
-              "/html?count=2&__htmxo_poll=1"
+        @test last(polls).transport.poll_url == poll_url
         @test last(polls).transport.grace_period == 0.0
 
         raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
@@ -1464,6 +1467,7 @@ end
         @test length(polls) == 2
     finally
         _operation_polling_impl[] = old_polling
+        _clear_operation_polls!()
     end
 
     # A DO handle is control flow, never body content. Treebars' `_polling_resolve`
@@ -2544,16 +2548,21 @@ transport actually *delivers*, not merely that it engages.
     function settle()
         body = drive("/tests")
         for _ in 1:100
-            contains(body, "treebar-poller") || return body
-            @test contains(body, "/tests?__htmxo_poll=1")
+            contains(body, "hx-trigger=\"every ") || return body
+            found = match(Regex("hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\""),
+                          body)
+            @test !isnothing(found)
+            poll_target = replace(only(found.captures), "&amp;" => "&")
+            @test startswith(poll_target,
+                "/tests?__htmxo_poll=1&__htmxo_operation=")
             sleep(0.05)
-            body = drive("/tests?__htmxo_poll=1")
+            body = drive(poll_target)
         end
         body
     end
 
     get_body = settle()
-    @test !contains(get_body, "treebar-poller")
+    @test !contains(get_body, "hx-trigger=\"every ")
     @test contains(get_body, "documented test item discovery")
     @test contains(get_body, "Run selected")
     @test contains(get_body, "/tests/run_tag/unit")
@@ -3275,6 +3284,167 @@ function progress_descendants(node, acc=String[])
 end
 end # @testmodule HTMXOPropertyScopedFixtures
 
+@testmodule HTMXOPollIdentityFixtures begin
+using HTMXObjects
+
+export PollIdentityRoute, reset_poll_identity!, poll_identity_count,
+    release_poll_identity!
+
+const poll_identity_lock = ReentrantLock()
+const poll_identity_gates = Base.Event[]
+
+function reset_poll_identity!()
+    lock(poll_identity_lock)
+    try
+        empty!(poll_identity_gates)
+    finally
+        unlock(poll_identity_lock)
+    end
+end
+
+poll_identity_count() = lock(poll_identity_lock) do
+    length(poll_identity_gates)
+end
+
+function release_poll_identity!(index)
+    gate = lock(poll_identity_lock) do
+        poll_identity_gates[index]
+    end
+    notify(gate)
+end
+
+function poll_identity_work(id)
+    gate, sequence = lock(poll_identity_lock) do
+        gate = Base.Event()
+        push!(poll_identity_gates, gate)
+        gate, length(poll_identity_gates)
+    end
+    wait(gate)
+    h.p("poll:$id:$sequence")
+end
+
+@htmx struct PollIdentityRoute
+    @get poll_identity(id::Int) = poll_identity_work(id)
+end
+end # @testmodule HTMXOPollIdentityFixtures
+
+@testitem "polling operation identity survives fresh roots and stays bounded" setup=[HTMXOPollIdentityFixtures, HTMXOTestImports] tags=[:integration, :semantic] begin
+    import HTMXObjects: _OperationPollEntry, _OPERATION_POLL_LIMIT,
+        _OPERATION_POLL_TTL, _clear_operation_polls!,
+        _operation_poll_now, _operation_poll_snapshot,
+        _retain_operation_poll!
+
+    function drive(target; session="session-a")
+        request = HTTP.Request("GET", target,
+            ["HX-Request" => "true", "X-Session" => session], UInt8[])
+        handler = first(HTTP.Handlers.gethandler(
+            HTMXObjects.CONTEXT[].service.router, request))
+        @test handler !== HTTP.Handlers.default404
+        response = handler(request)
+        @test response.status == 200
+        String(response.body)
+    end
+
+    running(body) = contains(body, "hx-trigger=\"every ")
+    function poll_url(body)
+        found = match(Regex("hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\""),
+                      body)
+        @test !isnothing(found)
+        replace(only(found.captures), "&amp;" => "&")
+    end
+    function settle(target; session="session-a")
+        body = drive(target; session)
+        for _ in 1:100
+            running(body) || return body
+            sleep(0.05)
+            body = drive(target; session)
+        end
+        body
+    end
+
+    _clear_operation_polls!()
+    reset_poll_identity!()
+    try
+        # A session key is part of the retained operation's identity, while the
+        # opaque token keeps two same-route, same-argument runs independent.
+        provider = RootProvider(
+            scope=:session,
+            key=req -> HTTP.header(req, "X-Session", ""),
+        )
+        route!(PollIdentityRoute(); root_provider=provider)
+
+        first_body = drive("/poll_identity/7")
+        second_body = drive("/poll_identity/7")
+        @test running(first_body)
+        @test running(second_body)
+        first_url = poll_url(first_body)
+        second_url = poll_url(second_body)
+        @test first_url != second_url
+        @test timedwait(() -> poll_identity_count() == 2, 10.0;
+                        pollint=0.01) === :ok
+        @test length(_operation_poll_snapshot()) == 2
+
+        # A token is a capability, not the identity by itself. Route arguments
+        # and provider scope/key are checked before the retained IP is exposed.
+        wrong_arg = replace(first_url, "/poll_identity/7?" => "/poll_identity/8?")
+        @test contains(drive(wrong_arg), "aria-invalid=\"true\"")
+        @test contains(drive(first_url; session="session-b"),
+                       "aria-invalid=\"true\"")
+        @test length(_operation_poll_snapshot()) == 2
+
+        release_poll_identity!(1)
+        first_done = settle(first_url)
+        @test !running(first_done)
+        @test contains(first_done, "poll:7:1")
+        @test length(_operation_poll_snapshot()) == 1
+        @test running(drive(second_url))
+
+        release_poll_identity!(2)
+        second_done = settle(second_url)
+        @test !running(second_done)
+        @test contains(second_done, "poll:7:2")
+        @test isempty(_operation_poll_snapshot())
+
+        # An abandoned operation expires even if its producer is still alive.
+        reset_poll_identity!()
+        abandoned = drive("/poll_identity/9")
+        abandoned_url = poll_url(abandoned)
+        @test timedwait(() -> poll_identity_count() == 1, 10.0;
+                        pollint=0.01) === :ok
+        future = _operation_poll_now() + _OPERATION_POLL_TTL + 1
+        @test isempty(_operation_poll_snapshot(; now=future))
+        expired = drive(abandoned_url)
+        @test !running(expired)
+        @test contains(expired, "aria-invalid=\"true\"")
+        release_poll_identity!(1)
+
+        # Capacity is an LRU bound, independent of TTL cleanup.
+        _clear_operation_polls!()
+        now = _operation_poll_now()
+        request = HTTP.Request("GET", "/capacity")
+        for index in 1:(_OPERATION_POLL_LIMIT + 1)
+            token = "capacity-$index"
+            touched = now + index / 1000
+            entry = _OperationPollEntry(
+                token, (; index), nothing, (), (;), nothing, nothing,
+                request, touched, touched)
+            _retain_operation_poll!(entry; now=touched)
+        end
+        retained = _operation_poll_snapshot()
+        @test length(retained) == _OPERATION_POLL_LIMIT
+        @test !haskey(retained, "capacity-1")
+        @test haskey(retained, "capacity-$(_OPERATION_POLL_LIMIT + 1)")
+    finally
+        for index in 1:poll_identity_count()
+            try
+                release_poll_identity!(index)
+            catch
+            end
+        end
+        _clear_operation_polls!()
+    end
+end
+
 @testitem "automatic progress — property-scoped route calls poll and nest without annotations" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _run_operation, _operation_polling_impl, Verb
     import HTMXObjects.DynamicObjects
@@ -3302,7 +3472,8 @@ end # @testmodule HTMXOPropertyScopedFixtures
         # A fully blocking start would satisfy "the poller was reached" too,
         # which is exactly the trap this assertion exists to close.
         @test seen[].started isa DynamicObjects.Pending
-        @test seen[].transport.poll_url == "/slow/2?__htmxo_poll=1"
+        @test startswith(seen[].transport.poll_url,
+                         "/slow/2?__htmxo_poll=1&__htmxo_operation=")
         DynamicObjects.getstatus(app.slow, seen[].keys...)
     finally
         _operation_polling_impl[] = old
