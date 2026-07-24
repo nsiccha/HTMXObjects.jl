@@ -27,7 +27,9 @@ HTMXObjects builds on [DynamicObjects.jl](https://github.com/nsiccha/DynamicObje
 
 ## HTMX.jl re-exports
 
-`auto`, `htmx`, `h`, `Node`, `@__str`, `HyperscriptString`. See the [HTMX.jl docs](https://nsiccha.github.io/HTMX.jl/dev/) for full details.
+`auto`, `h`, `Node`, `Raw`, `@__str`, `HyperscriptString`. See the [HTMX.jl docs](https://nsiccha.github.io/HTMX.jl/dev/) for full details.
+
+`htmx(...)` is **not** one of them — it is HTMXObjects' own page shell, documented under [The page shell](@ref).
 
 ### Which HTMX.jl
 
@@ -58,6 +60,32 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
+
+## The page shell
+
+A route's return value is a *fragment*. On direct browser navigation the
+framework wraps it with the app's `__page__` property, which is normally built
+on `htmx(...)` (or its `pico_page` shorthand). That shell — not the route — owns
+the document preamble: `<!DOCTYPE html>`, `<meta charset>`, the viewport and
+color-scheme metas, the CDN tags, and the injected theme/feedback assets.
+
+`htmx(...)` returns an [`HTMLDocument`](@ref), *not* a bare `Node`: the doctype
+is not an element, so it cannot live in the `HTMX.Node` tree and is emitted by
+`HTMLDocument`'s `show(::IO, ::MIME"text/html", …)` ahead of the `<html>` root.
+Serialize it however you like — `repr("text/html", page)`, the response
+pipeline, static recording — and the bytes always start with the doctype, so
+pages render in **standards mode**. That matters beyond the legacy box model:
+browser libraries refuse to run in quirks mode outright (KaTeX's
+`katex.render` throws `KaTeX doesn't work in quirks mode`, and
+`throwOnError: false` does not suppress it).
+
+Fragments are not documents and never carry a doctype.
+
+```@docs
+htmx
+HTMXObjects.pico_page
+HTMLDocument
+```
 
 ## Markdown / agent-readable responses
 
@@ -200,7 +228,7 @@ at all.
 | Which control is rendered | `domain` if present, else the declared Julia `type` |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |
-| Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key. It governs every route under the app root, not just compiled operations; see [What the policy governs](#What-the-policy-governs) |
+| Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key. Defaults to `:auto`; it governs every route under the app root, not just compiled operations; see [What the policy governs](#What-the-policy-governs) |
 
 Two property-level keys do matter to the compiler: `role` must be `:operation`
 (`semantic_app` rejects any discovered route whose descriptor says otherwise),
@@ -324,14 +352,32 @@ factory whose returned root does not. Retain the **payload** — a fitted model,
 dataset, a cache — never a mounted `@include` child, which belongs to the
 request-scoped object graph.
 
-Execution transport is a separate, app-level choice, passed alongside the root
-provider at `route!` time:
+Execution transport is a separate, app-level choice. You do not have to make it:
+`route!` defaults `operation_policy` to `OperationPolicy(:auto)`, so the app
+below already serves long routes without blocking the request task.
 
 ```julia
-route!(ModelApp(); root_provider=provider, operation_policy=OperationPolicy(:auto))
+route!(ModelApp(); root_provider=provider)
+```
+
+Pass an explicit policy only to **tune** it or to **opt out**:
+
+```julia
+# tune the poller
+route!(ModelApp(); operation_policy=OperationPolicy(; poll_interval="500ms"))
+# opt out — a route surface that must answer inline
+route!(ModelApp(); operation_policy=OperationPolicy(:blocking))
 ```
 
 ### What the policy governs
+
+**The default is `:auto`.** An app that declares no `operation_policy` gets it,
+and that is the whole configuration story: `OperationPolicy` exists to tune the
+poller or to opt out, never to switch the good behaviour on. `:blocking` — the
+historical transport, where a long route computes on the request task and the
+response waits for it — is now reached only by asking for it. [`record!`](@ref)
+is the one built-in caller that does: static export wants finished HTML, not a
+poller written to disk.
 
 "App-level" is literal, and it is the answer to the question this section is
 otherwise easy to misread: the policy is stored per **root type** and threaded

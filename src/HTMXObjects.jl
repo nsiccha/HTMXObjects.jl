@@ -11,7 +11,7 @@ export property_descriptor, property_descriptors, static_domain,
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
-export auto, htmx, h, Node, @__str, HyperscriptString, Raw
+export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
 export safely, ERROR_DIR
@@ -1539,11 +1539,45 @@ macro htmx(args...)
 end
 
 """
+    HTMLDocument(root::Node)
+
+A complete HTML document: the `<html>` element `root` plus the `<!DOCTYPE html>`
+preamble that must precede it in the serialized bytes. This is what [`htmx`](@ref)
+returns — and therefore what [`pico_page`](@ref) and every `__page__` built on
+them return.
+
+A doctype is not an element, so it cannot live inside the `HTMX.Node` tree; it is
+emitted by this type's `show(::IO, ::MIME"text/html", …)` method, immediately
+ahead of `root`. Serializing a `HTMLDocument` (via `repr("text/html", …)`, the
+response pipeline, or as a child of another node) therefore always yields a
+standards-mode document.
+
+Without the doctype a browser renders the page in **quirks mode**, which is not
+only a legacy box-model detail — libraries refuse to run in it. KaTeX's
+`katex.render(tex, el)` throws `ParseError: KaTeX doesn't work in quirks mode`
+outright, and `throwOnError: false` does *not* downgrade that (the option covers
+parse errors; the quirks-mode check is a precondition).
+
+`root` stays a plain `Node`, so the recording pipeline
+([`static_transform`](@ref)) walks the document exactly as it walked the bare
+`<html>` node before.
+"""
+struct HTMLDocument
+    root::Node
+end
+
+Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
+    (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
+
+"""
     htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", pico_version=nothing, feedback=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
+
+Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
+`<!DOCTYPE html>` preamble, so the page renders in standards mode.
 """
 function htmx(args...;
     head = h.head,
@@ -1560,7 +1594,7 @@ function htmx(args...;
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
     isnothing(hyperscript_version) || push!(cdn, h.script(src="https://unpkg.com/hyperscript.org@$(hyperscript_version)"))
     isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css"))
-    h.html(
+    HTMLDocument(h.html(
         head(
             h.meta(charset="utf-8"),
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
@@ -1584,7 +1618,7 @@ function htmx(args...;
             extra_head...,
         ),
         body(args...),
-    )
+    ))
 end
 
 """
@@ -1900,6 +1934,12 @@ Walk a Node tree and disable elements that won't work on a static server:
 Non-Node values pass through unchanged.
 """
 _disable_for_static(val; record_base::String="") = val
+# A full page arrives as an `HTMLDocument`; unwrap so the `<html>` tree is
+# walked and re-wrap so the recorded file keeps its doctype. Without this
+# method the catch-all above would return the document untouched and every
+# recorded page would keep its live (non-static) hx attributes.
+_disable_for_static(doc::HTMLDocument; record_base::String="") =
+    HTMLDocument(_disable_for_static(doc.root; record_base))
 _disable_for_static(val::AbstractArray; record_base::String="") = [_disable_for_static(x; record_base) for x in val]
 _disable_for_static(val::Tuple; record_base::String="") = Tuple(_disable_for_static(x; record_base) for x in val)
 _disable_for_static((content, id)::Pair; record_base::String="") = _disable_for_static(content; record_base) => id
@@ -1984,6 +2024,9 @@ _disable_child(child::Node, record_base) = _disable_for_static(child; record_bas
 If val is a full HTML page (contains a `<head>`), inject the disabled-element style block.
 """
 _inject_static_style(val) = val
+# Same unwrap/re-wrap as `_disable_for_static`: the `<head>` to inject into
+# lives inside the document's `<html>` root.
+_inject_static_style(doc::HTMLDocument) = HTMLDocument(_inject_static_style(doc.root))
 function _inject_static_style(node::Node)
     if HTMX.tag(node) == :head
         new_children = vcat(HTMX.children(node), [_STATIC_DISABLED_STYLE])
@@ -2218,33 +2261,20 @@ end
 """
     OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true)
 
-Select route execution transport. `:blocking` preserves historical synchronous
-responses. `:polling` uses the Treebars extension for pending-capable HTML
-operations. `:auto` polls only HTMX requests whose DynamicObjects descriptor
-advertises pending capability. Polling is limited to GET operations because the
-Treebars poller issues GET refreshes; mutation verbs therefore remain direct.
-Declared `HTTP.Response` and `MIMEResponse` outputs always remain direct, as do
-WebSocket route lambdas.
+Select route execution transport. `:auto` — **the default, applied to every app
+whether or not it declares a policy** — polls only HTMX requests whose
+DynamicObjects descriptor advertises pending capability. `:polling` drops the
+HTMX condition. `:blocking` keeps every route direct; it is the opt-out for a
+route surface that genuinely must answer inline.
 
-`:auto` is the DEFAULT, so an ordinary `@get` route whose body reads a slow
-nested DynamicObjects property answers immediately with a live progress tree and
-swaps in the final value on its own — no `route!(…; operation_policy=…)`
-registration, no `polling_fetchindex`, no hand-written poller or JavaScript. The
-tree fills itself in because DynamicObjects mounts each nested property's
-progress node under the node currently being computed (Treebars' ambient node),
-so nesting needs no `@progress` / `@fetch!` annotation either.
+Polling is limited to GET operations because the Treebars poller issues GET
+refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
+`MIMEResponse` outputs always remain direct, as do WebSocket route lambdas, and
+[`record!`](@ref) forces `:blocking` for its static-export pass.
 
-A slow HTMX GET that used to block DOES now answer with a poller — that is the
-point of the default, not an edge case, and a route that takes long enough to be
-worth a progress tree will get one. What is unchanged is everything outside that
-intersection: `:auto` requires a GET, an HTMX request, and a descriptor
-advertising `semantics.pending`, so `?plain`, `curl`, API clients, mutation
-verbs and fixed/`@fresh` properties all keep returning the finished value in one
-response. A pending-capable route that finishes inside the extension's grace
-period also answers directly, so fast routes do not acquire a poller they would
-immediately replace. Pass `operation_policy=:blocking` to restore the old
-transport for a root type; a caller that must see the finished body in one
-response can drop the `HX-Request` header or follow the poll URL.
+You never have to write `OperationPolicy` to get non-blocking long routes —
+`route!(app)` alone already does. Reach for it to tune (`poll_interval`,
+`keep_progress`) or to opt out (`:blocking`).
 """
 struct OperationPolicy
     mode::Symbol
@@ -2252,6 +2282,10 @@ struct OperationPolicy
     keep_progress::Bool
 end
 
+# One default, spelled once: `route!`'s kwarg default and every
+# `get(_operation_policies, T, OperationPolicy())` registry fallback read their
+# mode from here, so "what does an app that declares nothing get?" has a single
+# answer in the source as well as in the docs.
 function OperationPolicy(mode::Symbol=:auto; poll_interval="200ms",
         keep_progress::Bool=true)
     mode in (:blocking, :polling, :auto) || throw(ArgumentError(
@@ -5009,9 +5043,11 @@ Oxygen router. Returns `app`.
   both HTTP and WebSocket operations. `nothing` preserves the historic
   fresh-root-per-request behavior.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
-  polling, or HTMX-aware automatic execution. Defaults to `:auto`, so a slow
-  route answers an HTMX request with a live progress tree and no hand-written
-  poller; pass `:blocking` to keep a root type on the historic transport.
+  polling, or HTMX-aware automatic execution. **Defaults to
+  `OperationPolicy(:auto)`**, so an app that declares nothing already serves
+  long routes without blocking the request task. Pass one only to tune
+  (`poll_interval`, `keep_progress`) or to opt out — `:blocking` for a route
+  surface that must answer inline, `:polling` to force a tree.
 
 `route!` stores its registration settings per type in internal registries so the
 `_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
@@ -5052,8 +5088,12 @@ Each path is hit once per enabled variant:
   * `hx=true`       — `HX-Request: true`. Saves the body fragment at `<record_dir>/hx/<path>.html`.
   * `markdown=true` — `Accept: text/markdown`. Saves the markdown view at `<record_dir>/md/<path>.md` (only if the route's `to_markdown_string(val)` succeeds; otherwise skipped).
 
-Calls `route!(app; record_dir, record_base)` first to register the
-handlers with the recording config. Returns `app`.
+Calls `route!(app; record_dir, record_base, operation_policy=OperationPolicy(:blocking))`
+first to register the handlers with the recording config. Recording forces
+`:blocking` because the `hx=true` variant synthesizes an HTMX request, which the
+default `:auto` policy would answer with a Treebars poller — and a poller
+written to disk has nothing to poll. Static export wants the finished HTML.
+Returns `app`.
 
 Use this in place of the subprocess+HTTP recorder when you can drive an
 app from the same Julia process — much faster (no port, no warmup) and
@@ -5067,7 +5107,8 @@ function record!(app;
         hx::Bool=true,
         markdown::Bool=true,
     )
-    route!(app; record_dir, record_base)
+    route!(app; record_dir, record_base,
+           operation_policy=OperationPolicy(:blocking))
     isdir(record_dir) || mkpath(record_dir)
     router = CONTEXT[].service.router
     for path in paths
