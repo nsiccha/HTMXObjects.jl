@@ -17,7 +17,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
     TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
-    PolicyApp, SlowPolicyApp, SlowRecordApp, MultiVerbPolicyApp,
+    PolicyApp, SlowPolicyApp, SlowPagePolicyApp, SlowRecordApp,
+    MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -344,6 +345,67 @@ end
 # distinguish a genuine non-blocking start from a blocking one.
 @htmx struct SlowPolicyApp
     @get slow(; count::Int=1) = (sleep(3.0); h.p("slow:$(count)"))
+end
+
+const slow_page_gate = Ref{Base.Event}(Base.Event())
+const slow_page_runs = Ref(0)
+
+function reset_slow_page!()
+    slow_page_gate[] = Base.Event()
+    slow_page_runs[] = 0
+    nothing
+end
+
+release_slow_page!() = notify(slow_page_gate[])
+
+function slow_page_work(count)
+    slow_page_runs[] += 1
+    wait(slow_page_gate[])
+    h.p("terminal:$(count)"; id="slow-page-terminal")
+end
+
+function slow_page_driver()
+    h.script(Raw(raw"""
+    (function() {
+      var phaseKey = 'htmxo-direct-page-phase';
+      var phase = sessionStorage.getItem(phaseKey) || 'first';
+
+      document.addEventListener('DOMContentLoaded', function() {
+        if (document.getElementById('slow-page-shell') &&
+            document.querySelector('[data-htmxo-operation-load]')) {
+          document.body.dataset[phase === 'first' ? 'firstShell' : 'secondShell'] = '1';
+        }
+      });
+
+      document.body.addEventListener('htmx:afterSwap', function() {
+        if (document.querySelector('[hx-trigger*="every"]')) {
+          document.body.dataset[phase === 'first' ? 'firstPoller' : 'secondPoller'] = '1';
+        }
+        if (!document.getElementById('slow-page-terminal')) return;
+
+        if (phase === 'first') {
+          sessionStorage.setItem('htmxo-saw-first-shell', document.body.dataset.firstShell || '');
+          sessionStorage.setItem('htmxo-saw-first-poller', document.body.dataset.firstPoller || '');
+          sessionStorage.setItem(phaseKey, 'second');
+          setTimeout(function() { location.reload(); }, 50);
+        } else {
+          document.body.dataset.firstShell = sessionStorage.getItem('htmxo-saw-first-shell') || '';
+          document.body.dataset.firstPoller = sessionStorage.getItem('htmxo-saw-first-poller') || '';
+          document.body.dataset.terminal = '1';
+          document.body.dataset.secondDirectTerminal =
+            document.body.dataset.secondPoller === '1' ? '0' : '1';
+        }
+      });
+    })();
+    """))
+end
+
+@htmx struct SlowPagePolicyApp
+    __page__(content) = htmx(
+        h.main(h.h1("DIRECT PAGE SHELL"), content; id="slow-page-shell"),
+        slow_page_driver(); hyperscript_version=nothing, feedback=false,
+        compose=false, overlay=false)
+    @get @progress slow(; count::Int=1) = slow_page_work(count)
 end
 
 # Slower than `record!`'s grace period, fast enough to record in a test. Pins
@@ -1523,6 +1585,169 @@ end
     @test length(HTMXObjects.DynamicObjects.static_domain(
         HTMXObjects.DynamicObjects.property_options(
             StackedSemanticRoute(), :count)).options) == 3
+end
+
+# A browser navigation has page chrome available before its slow operation does.
+# `:auto` therefore returns that shell immediately and lets one load-triggered
+# HX request enter the ordinary grace/poll transport. The proxy prefix must
+# survive BOTH generated hops: the initial load URL and every capability poll.
+@testitem "direct rich pages load async and preserve their external prefix" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_operation_polls!, _operation_polling_impl
+
+    reset_slow_page!()
+    _clear_operation_polls!()
+    provider = RootProvider(
+        scope=:job,
+        key=_req -> "direct-page-unit",
+        retention=RootRetention(max_entries=2),
+    )
+    route!(SlowPagePolicyApp(); root_provider=provider)
+    router = HTMXObjects.CONTEXT[].service.router
+
+    drive(target, headers=Pair{String,String}[]) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        handler = first(HTTP.Handlers.gethandler(router, request))
+        @test handler !== HTTP.Handlers.default404
+        handler(request)
+    end
+
+    direct_headers = [
+        "Accept" => "text/html,application/xhtml+xml",
+        "X-Forwarded-Prefix" => "/p/SbPMX/",
+    ]
+    # Exclude first-call Julia compilation from the latency assertion. The
+    # behavior under test is that an already-loaded route never waits for the
+    # slow operation before returning its shell.
+    warm = drive("/slow?count=4", direct_headers)
+    @test warm.status == 200
+    @test slow_page_runs[] == 0
+    elapsed = @elapsed direct = drive("/slow?count=4", direct_headers)
+    body = String(direct.body)
+    @test elapsed < 1.0
+    @test direct.status == 200
+    @test contains(body, "DIRECT PAGE SHELL")
+    @test contains(body, "data-htmxo-operation-load")
+    @test contains(body, "hx-get=\"/p/SbPMX/slow?count=4\"")
+    @test contains(body, "hx-trigger=\"load\"")
+    @test contains(body, "hx-target=\"this\"")
+    @test contains(body, "hx-swap=\"outerHTML\"")
+    @test slow_page_runs[] == 0
+
+    transports = Any[]
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _started, _ip, _keys, _call_kwargs, transport) -> begin
+            push!(transports, transport)
+            transport.retain()
+            h.aside("polling")
+        end
+    try
+        hx_headers = [
+            "Accept" => "text/html",
+            "HX-Request" => "true",
+            "X-Forwarded-Prefix" => "/p/SbPMX",
+        ]
+        started = drive("/slow?count=4", hx_headers)
+        @test String(started.body) == "<aside>polling</aside>"
+        @test timedwait(() -> slow_page_runs[] == 1, 5.0;
+                        pollint=0.01) === :ok
+        poll_url = only(transports).poll_url
+        @test startswith(poll_url,
+            "/p/SbPMX/slow?count=4&__htmxo_poll=1&__htmxo_operation=")
+
+        internal_poll_url = replace(poll_url, "/p/SbPMX" => ""; count=1)
+        polled = drive(internal_poll_url, hx_headers)
+        @test String(polled.body) == "<aside>polling</aside>"
+        @test last(transports).poll_url == poll_url
+    finally
+        release_slow_page!()
+        _operation_polling_impl[] = old_polling
+        _clear_operation_polls!()
+    end
+end
+
+@testitem "mounted direct-page polling completes in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_slow_page!()
+        _clear_operation_polls!()
+        provider = RootProvider(
+            scope=:job,
+            key=_req -> "direct-page-browser",
+            retention=RootRetention(max_entries=2),
+        )
+        route!(SlowPagePolicyApp(); root_provider=provider)
+        router = HTMXObjects.CONTEXT[].service.router
+        prefix = "/p/SbPMX"
+        forwarded_targets = String[]
+        released = Ref(false)
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do outer
+            external_target = String(outer.target)
+            path = HTTP.URI(external_target).path
+            startswith(path, prefix * "/") || return HTTP.Response(404)
+            push!(forwarded_targets, external_target)
+
+            internal_target = external_target[length(prefix) + 1:end]
+            headers = Pair{String,String}[
+                String(key) => String(value) for (key, value) in outer.headers
+                if lowercase(String(key)) != "x-forwarded-prefix"
+            ]
+            push!(headers, "X-Forwarded-Prefix" => prefix)
+            inner = HTTP.Request(String(outer.method), internal_target,
+                                 headers, outer.body)
+            handler = first(HTTP.Handlers.gethandler(router, inner))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            response = handler(inner)
+            body = String(response.body)
+            if !released[] && contains(body, "hx-trigger=\"every ")
+                released[] = true
+                @async begin
+                    sleep(0.4)
+                    release_slow_page!()
+                end
+            end
+            response
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port$prefix/slow?count=9"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=12000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            @test contains(dom, "data-first-shell=\"1\"")
+            @test contains(dom, "data-first-poller=\"1\"")
+            @test contains(dom, "data-second-shell=\"1\"")
+            @test contains(dom, "data-terminal=\"1\"")
+            @test contains(dom, "data-second-direct-terminal=\"1\"")
+            @test !contains(dom, "data-second-poller=\"1\"")
+            @test contains(dom, "id=\"slow-page-terminal\"")
+            @test contains(dom, "terminal:9")
+            @test slow_page_runs[] == 1
+            @test length(forwarded_targets) >= 5
+            @test all(target -> startswith(target, prefix * "/slow"),
+                      forwarded_targets)
+            @test any(target -> contains(target, "__htmxo_poll=1"),
+                      forwarded_targets)
+        finally
+            released[] || release_slow_page!()
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
 end
 
 # Polling transport is only real if the value is started NON-BLOCKINGLY. Every

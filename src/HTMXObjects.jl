@@ -2270,10 +2270,12 @@ end
     OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true)
 
 Select route execution transport. `:auto` — **the default, applied to every app
-whether or not it declares a policy** — polls only HTMX requests whose
-DynamicObjects descriptor advertises pending capability. `:polling` drops the
-HTMX condition. `:blocking` keeps every route direct; it is the opt-out for a
-route surface that genuinely must answer inline.
+whether or not it declares a policy** — polls pending-capable HTMX requests.
+A direct rich-page visit first returns its composed `__page__` shell with a
+load-triggered request for the same operation; that fragment then uses the same
+grace/polling path. Markdown/error requests and routes without page chrome stay
+direct. `:polling` forces the polling transport. `:blocking` keeps every route
+direct; it is the opt-out for a route surface that genuinely must answer inline.
 
 Polling is limited to GET operations because the Treebars poller issues GET
 refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
@@ -3618,14 +3620,17 @@ function _declared_final_response(descriptor)
 end
 
 function _operation_execution_mode(policy::OperationPolicy, descriptor,
-        req::HTTP.Request, verb_inst::Verb)
+        req::HTTP.Request, verb_inst::Verb; page_shell::Bool=false)
     _verb_symbol(verb_inst) === :GET || return :blocking
     _declared_final_response(descriptor) && return :blocking
     policy.mode === :auto || return policy.mode
     descriptor === nothing && return :blocking
     semantics = get(descriptor, :semantics, nothing)
     semantics === nothing && return :blocking
-    get(semantics, :pending, false) && is_htmx(req) ? :polling : :blocking
+    get(semantics, :pending, false) || return :blocking
+    is_htmx(req) && return :polling
+    page_shell && !wants_markdown(req) && !wants_errors(req) ?
+        :page_load : :blocking
 end
 
 _operation_poll_marker(value::AbstractString) = value == "1"
@@ -3652,12 +3657,39 @@ function _operation_marker_url(target::AbstractString, marker::AbstractString,
     target * separator * marker * "=" * value
 end
 
-function _operation_poll_url(req::HTTP.Request, token::AbstractString)
+function _operation_request_url(req::HTTP.Request, prefix::AbstractString="")
     target = String(req.target)
+    path = _request_route_path(req, prefix)
+    qi = findfirst('?', target)
+    isnothing(qi) ? path : path * target[qi:end]
+end
+
+function _operation_poll_url(req::HTTP.Request, token::AbstractString,
+        prefix::AbstractString="")
+    target = _operation_request_url(req, prefix)
     _operation_poll_request(req) && return target
     target = _operation_marker_url(target, "__htmxo_poll")
     _operation_marker_url(target, "__htmxo_operation", token)
 end
+
+function _operation_page_load(req::HTTP.Request, prefix::AbstractString)
+    h.div(; class="htmxo-operation-load",
+          data_htmxo_operation_load="",
+          hx_get=_operation_request_url(req, prefix),
+          hx_trigger="load", hx_target="this", hx_swap="outerHTML")
+end
+
+function _operation_has_page_shell(target)
+    objects = get(target, :objects, nothing)
+    if isnothing(objects)
+        leaf = get(target, :leaf, nothing)
+        return !isnothing(leaf) && _has_page(leaf)
+    end
+    any(_has_page, objects)
+end
+
+_operation_rich_page_request(req::HTTP.Request) =
+    contains(lowercase(HTTP.header(req, "Accept", "")), "text/html")
 
 # `:auto` spends a small part of Oxygen's existing request task waiting on the
 # DO Pending handle. The extension returns a fast value directly; only a
@@ -3865,8 +3897,13 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
 end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
-        verb_inst, idx_vals, kw_pairs, req)
-    mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
+        verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false)
+    mode = _operation_execution_mode(
+        policy, descriptor, req, verb_inst; page_shell)
+    context = get(target, :context, nothing)
+    prefix = context isa OperationContext ? context.prefix : ""
+    mode === :page_load && return _operation_page_load(req, prefix)
+
     prop = getproperty(target.leaf, name)
     keys = (verb_inst, idx_vals...)
     call_kwargs = NamedTuple(kw_pairs)
@@ -3881,7 +3918,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         entry isa _OperationPollEntry || throw(ArgumentError(
             "polling operation is expired or does not match this route, its arguments, or its scope"))
         transport = (
-            poll_url=String(req.target),
+            poll_url=_operation_request_url(req, prefix),
             label=Long(name),
             poll_interval=policy.poll_interval,
             keep_progress=policy.keep_progress,
@@ -3914,7 +3951,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
             target.leaf, req, now, now)
-        transport = (poll_url=_operation_poll_url(req, token), label=Long(name),
+        transport = (poll_url=_operation_poll_url(req, token, prefix), label=Long(name),
                      poll_interval=policy.poll_interval,
                      keep_progress=policy.keep_progress,
                      error_obj=target.leaf, req=req,
@@ -3944,8 +3981,10 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
     target, context_values = _bind_operation_context(target, descriptor, req)
     _validate_operation_domains!(target.leaf, LeafT, name, verb, idx_vals,
                                  kw_pairs, context_values)
+    page_shell = _operation_has_page_shell(target) &&
+                 _operation_rich_page_request(req)
     value = _execute_operation(operation_policy, descriptor, target, name,
-                               verb_inst, idx_vals, kw_pairs, req)
+                               verb_inst, idx_vals, kw_pairs, req; page_shell)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end

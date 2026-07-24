@@ -398,10 +398,20 @@ otherwise it stays direct:
 |-----------|---------------------|
 | The verb is `GET` | The poller issues GET refreshes, so mutations stay direct |
 | The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
-| The request is an HTMX request | A full-page navigation gets the finished document |
 | The descriptor advertises `semantics.pending` | True for any ordinary computed route body; false for a fixed field or a `@fresh` one |
 
-`:polling` drops only the HTMX condition; `:blocking` keeps every route direct.
+For an HTMX request, those conditions enter the polling transport directly.
+For a browser navigation that accepts `text/html` and has a `__page__` wrapper,
+`:auto` returns the composed page shell immediately. The route region carries
+`hx-trigger="load"` and requests the same operation; that fragment request then
+enters the ordinary grace/poll transport and replaces the region with progress
+and, finally, the terminal fragment. Markdown/error requests, API/curl requests,
+and routes without page chrome keep their direct response.
+
+Both the load URL and every capability-poll URL preserve the request-time
+external prefix (`X-Forwarded-Prefix`), so the sequence remains under a
+path-stripping reverse-proxy mount. `:polling` forces the polling transport on
+eligible GETs; `:blocking` keeps every route direct.
 
 A polling-mode route is *started* non-blockingly and answers within the grace
 period (~0.1s) with a poller; an operation that finishes inside grace skips the
