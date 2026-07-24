@@ -20,8 +20,19 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     PolicyApp, SlowPolicyApp, SlowRecordApp, MultiVerbPolicyApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
-    BareExternalApp, InlineContextApp,
-    _SINGLETON_APPDATA
+    BareExternalApp, BareExternalChild, InlineContextApp,
+    _SINGLETON_APPDATA,
+    # Navigation / reflection-graph, Resource and page-wrapper fixtures. A
+    # `@testmodule` is an ordinary module, so an item only sees what is
+    # exported here — an unexported fixture is `UndefVarError` at the item,
+    # not a load failure, which is why the omission survived every selective
+    # run and only a full suite exposed it.
+    NavLeaf, NavSection, NavRoot, NavPlainRoot,
+    NavChainChild, NavChainRoot, NavSlurpRoot,
+    NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
+    MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
+    IndexedMountChild, IndexedMountRoot,
+    DomainNode, DomainChild, StageChild, DomainRoot, BoolPropRoot
 
 @htmx struct TestApp
     title = "Test"
@@ -137,24 +148,32 @@ end
 end
 
 @htmx struct SemanticApp
-    choices(cohort::Symbol) = cohort === :north ? (
+    # `dataset`'s domain depends on `cohort`, so `cohort` is a FIELD: a declared
+    # domain reads the node it is evaluated against, and the framework remakes
+    # that node with the submitted value before asking. `run` never declares
+    # `cohort` — reading it in the body is enough for the `dependson` walk to
+    # promote it to a `:context` input, and DO infers the domain's dependency
+    # from the same walk, so there is no `dependencies=` to keep in sync by hand.
+    @options cohort = (:north, :south)
+    cohort::Symbol
+
+    choices(key::Symbol) = key === :north ? (
         (value=:n1, label="North 1", group="North"),
         (value=:n2, label="North 2", disabled=true),
     ) : (:s1,)
 
-    @semantic (inputs=(
-        dataset=(domain=dynamic_domain(:choices; dependencies=(:cohort,)),),
-        mode=(domain=static_domain((
-            (value=:fast, label="Fast"),
-            (value=:safe, label="Safe", help="Full checks"),
-            (value=:unsafe, label="Unsafe", disabled=true),
-        )),),
-    ),) @get run(; dataset::Symbol, cohort::Symbol=:north,
-                    mode::Symbol=:fast, count::Int=1) =
+    @options dataset = choices(cohort)
+    @options mode = (
+        (value=:fast, label="Fast"),
+        (value=:safe, label="Safe", help="Full checks"),
+        (value=:unsafe, label="Unsafe", disabled=true),
+    )
+    @get run(; dataset::Symbol, mode::Symbol=:fast, count::Int=1) =
         h.p("$(dataset):$(cohort):$(mode):$(count)")
 
     @include nested = begin
-        @semantic (inputs=(quality=(domain=static_domain((:quick, :full)),),),) @post execute(; quality::Symbol=:quick) =
+        @options quality = (:quick, :full)
+        @post execute(; quality::Symbol=:quick) =
             h.p("nested:$(quality)")
     end
 end
@@ -166,24 +185,29 @@ end
     @param study::Symbol = :alpha
 
     @include models = begin
-        @semantic (inputs=(model=(domain=static_domain((:base, :full)),),),) @get fit(; model::Symbol=:base) =
+        @options model = (:base, :full)
+        @get fit(; model::Symbol=:base) =
             h.p("fit:$(study):$(model)")
 
-        @semantic (inputs=(draws=(domain=static_domain((10, 20)),),),) @post predict(; draws::Int=10) =
+        @options draws = (10, 20)
+        @post predict(; draws::Int=10) =
             h.p("predict:$(study):$(draws)")
     end
 end
 
 @htmx struct IndexedSemanticAutoApp
     @include models(model::Symbol) = begin
-        @semantic (inputs=(mode=(domain=static_domain((:quick, :full)),),),) @get run(; mode::Symbol=:quick) =
+        @options mode = (:quick, :full)
+        @get run(; mode::Symbol=:quick) =
             h.p("$(model):$(mode)")
     end
 end
 
 @htmx struct ZeroConfigSemanticApp
-    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
-    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+    @options study = (:north, :south)
+    study::Symbol
+    @options dose = (50, 100)
+    dose::Int
 
     unrelated = Ref("survives")
 
@@ -193,8 +217,10 @@ end
 
 
 @htmx struct ZeroConfigSemanticChild
-    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
-    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+    @options study = (:north, :south)
+    study::Symbol
+    @options dose = (50, 100)
+    dose::Int
 
     unrelated = Ref("mounted-survives")
 
@@ -206,31 +232,40 @@ end
     @include models = ZeroConfigSemanticChild(:north, 50)
 end
 
+# `model`'s domain depends on `study`, so `study` is a field of the node the
+# domain is evaluated against — not another argument of `analyze`. That makes
+# the child an external one: an inline `@include … = begin … end` is constructed
+# with no arguments and so cannot carry a required field. `fit_key` still comes
+# from the enclosing `@param` by delegation, and is carried as hidden context
+# rather than generated as a control.
+@htmx struct ContextAnalysisChild
+    @param (; fit_key) = __parent__
+
+    model_options(key::Symbol) = key === :alpha ? (
+        (value=:a1, label="Alpha 1"),
+        (value=:a2, label="Alpha 2"),
+    ) : (
+        (value=:b1, label="Beta 1"),
+        (value=:b2, label="Beta 2"),
+    )
+
+    @options study = (
+        (value=:alpha, label="Alpha"),
+        (value=:beta, label="Beta"),
+    )
+    study::Symbol
+
+    @options model = model_options(study)
+    @get analyze(; model::Symbol) =
+        h.p("$(fit_key):$(study):$(model)")
+
+    @get raw_context(; count::Int=1)::MIMEResponse =
+        MIMEResponse("text/plain", "$(fit_key):$(count)")
+end
+
 @htmx struct ContextSemanticApp
     @param fit_key::String
-
-    @include analysis = begin
-        model_options(study::Symbol) = study === :alpha ? (
-            (value=:a1, label="Alpha 1"),
-            (value=:a2, label="Alpha 2"),
-        ) : (
-            (value=:b1, label="Beta 1"),
-            (value=:b2, label="Beta 2"),
-        )
-
-        @semantic (inputs=(
-            study=(domain=static_domain((
-                (value=:alpha, label="Alpha"),
-                (value=:beta, label="Beta"),
-            )),),
-            model=(domain=dynamic_domain(:model_options;
-                                         dependencies=(:study,)),),
-        ),) @get analyze(; study::Symbol=:alpha, model::Symbol) =
-            h.p("$(fit_key):$(study):$(model)")
-
-        @get raw_context(; count::Int=1)::MIMEResponse =
-            MIMEResponse("text/plain", "$(fit_key):$(count)")
-    end
+    @include analysis = ContextAnalysisChild(:alpha)
 end
 
 # A separately declared child that also *reads* the enclosing `@param` in its
@@ -241,7 +276,8 @@ end
 # `UndefVarError` the first time it is actually executed.
 @htmx struct ExternalContextChild
     @param (; fit_key) = __parent__
-    @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
+    @options value = (:ok, :alt)
+    @get analyze(; value::Symbol=:ok) =
         h.p("$(fit_key):$(value)")
     @get structured(; value::Symbol=:ok) =
         (summary=h.p("structured:$(value)"), status="ready")
@@ -255,7 +291,8 @@ end
 # A parent that declares NO params: its @include child stays renderable
 # standalone, since there is no inherited context to lose.
 @htmx struct ParamlessHostChild
-    @semantic (inputs=(value=(domain=static_domain((:ok, :alt)),),),) @get analyze(; value::Symbol=:ok) =
+    @options value = (:ok, :alt)
+    @get analyze(; value::Symbol=:ok) =
         h.p("paramless:$(value)")
 end
 
@@ -319,9 +356,11 @@ end
 end
 
 @htmx struct MultiVerbPolicyApp
-    @semantic (inputs=(mode=(domain=static_domain((:raw, :json)),),),) @get exchange(; mode::Symbol=:raw)::MIMEResponse =
+    @options mode = (:raw, :json)
+    @get exchange(; mode::Symbol=:raw)::MIMEResponse =
         MIMEResponse("text/plain", "get:$(mode)")
-    @semantic (inputs=(count=(domain=static_domain((1, 2)),),),) @post exchange(; count::Int=1) =
+    @options count = (1, 2)
+    @post exchange(; count::Int=1) =
         h.p("post:$(count)")
 end
 
@@ -330,8 +369,200 @@ end
 # parser while leaving the annotation visible to DynamicObjects.
 @htmx struct StackedSemanticRoute
     __cache_base__ = tempdir()
-    @semantic (inputs=(count=(domain=static_domain((1, 2, 3)),),),) @get @mmap @progress model(; count::Int=2)::Vector{Float64} =
+    @options count = (1, 2, 3)
+    @get @mmap @progress model(; count::Int=2)::Vector{Float64} =
         collect(1.0:count)
+end
+
+# --- Navigation / reflection-graph fixtures --------------------------------
+#
+# A three-level mount chain with a computed dependency at the leaf, one node
+# whose `__page__` asks for navigation and one whose `__page__` does not. The
+# pair is the point: the framework must thread navigation into the first and
+# leave the second byte-identical.
+
+@htmx struct NavLeaf
+    """The number this leaf reports."""
+    value::Int = 7
+    doubled = 2 * value
+    @get index() = string(doubled)
+end
+
+@htmx struct NavSection
+    label::String = "sec"
+    @include leaf = NavLeaf()
+    @get index() = "section $label"
+    @post act(; note="") = "acted $note"
+end
+
+"""An application root used for navigation and reflection tests."""
+@htmx struct NavRoot
+    @include section = NavSection()
+    @include reflect = ReflectionRoutes(; root=NavRoot)
+    @include schema = SchemaRoutes(; root=NavRoot)
+    __page__(content; navigation=nothing) =
+        h.div(h.nav(isnothing(navigation) ? "NONAV" : "NAV:" * navigation.current.path),
+              content)
+    @get index() = "root"
+end
+
+# Same shape, but the page wrapper never declared `navigation`. Nothing may be
+# passed to it.
+@htmx struct NavPlainRoot
+    @include section = NavSection()
+    __page__(content) = h.div(h.nav("PLAIN-SHELL"), content)
+    @get index() = "plainroot"
+end
+
+# A two-level page chain. Both nodes wrap, and each must receive the navigation
+# of ITS OWN node — the outer shell sees the root, the inner sees the child —
+# rather than one record computed at the leaf and shared up the chain.
+@htmx struct NavChainChild
+    __page__(content; navigation=nothing) =
+        h.section(h.span("INNER:" *
+                         (isnothing(navigation) ? "none" : navigation.current.path)),
+                  content)
+    @get index() = "child-body"
+end
+
+@htmx struct NavChainRoot
+    @include child = NavChainChild()
+    __page__(content; navigation=nothing) =
+        h.div(h.span("OUTER:" *
+                     (isnothing(navigation) ? "none" : navigation.current.path)),
+              content)
+    @get index() = "root-body"
+end
+
+# A page wrapper that slurps. It cannot error on an extra keyword, so the
+# framework is free to pass navigation through.
+@htmx struct NavSlurpRoot
+    @include section = NavSection()
+    __page__(content; kwargs...) =
+        h.div(h.nav(haskey(kwargs, :navigation) ? "SLURP-GOT-NAV" : "SLURP-NONE"), content)
+    @get index() = "slurproot"
+end
+
+# --- Resource fixtures ------------------------------------------------------
+
+struct NoteDraft
+    title::String
+    body::String
+end
+
+# A real Base-shaped store, plus a deliberately inert value standing in for the
+# stub-backed collections a mock uses. The inert one must survive construction
+# and route registration untouched.
+struct InertCollection end
+
+# The store lives OUTSIDE the root. Under the default `:request` root scope the
+# root is reconstructed per request, so a collection declared as a root property
+# is a fresh object on every request and a write in one request is invisible to
+# the next. That is root-lifetime semantics, not a `Resource` question — a
+# `Resource` is a view over whatever collection it is handed, and it is the
+# application's job to hand it one that outlives a request (a module-level
+# store, a `RootProvider(...; scope=:session)`, a database handle, a directory).
+const NOTE_STORE = Dict{String,NoteDraft}()
+
+_reset_note_store!() = (empty!(NOTE_STORE);
+                        NOTE_STORE["a"] = NoteDraft("A", "first"); NOTE_STORE)
+
+@htmx struct ResourceApp
+    notes = NOTE_STORE
+    @include note = Resource(notes; input=NoteDraft, name="note",
+                             policy=ResourcePolicy(; key=context -> context.draft.title))
+    @include stub = Resource(InertCollection(); input=NoteDraft, name="stub")
+    @get index() = "resource-root"
+end
+
+
+# --- Callable-value page wrapper --------------------------------------------
+#
+# The concise form an application actually writes: `__page__ = shell(...)`,
+# whose VALUE is callable and takes `navigation`. The property itself declares
+# no signature, so only the value can answer the question.
+
+struct MockPage
+    label::String
+end
+(page::MockPage)(content; navigation=nothing) =
+    string(page.label, "|nav=", isnothing(navigation) ? "none" :
+           join([child.name for child in navigation.descendants], ","), "|", content)
+
+struct BluntPage end
+(page::BluntPage)(content) = string("blunt|", content)
+
+@htmx struct ValuePageLeaf
+    @get index() = "leaf"
+end
+
+@htmx struct ValuePageRoot
+    __page__ = MockPage("shell")
+    @include section = ValuePageLeaf()
+    @get index() = "value-root"
+end
+
+@htmx struct BluntPageRoot
+    __page__ = BluntPage()
+    @include section = ValuePageLeaf()
+    @get index() = "blunt-root"
+end
+
+@htmx struct IndexedMountChild
+    key::String
+    @get index() = "child $key"
+    @get extra() = "extra $key"
+end
+
+@htmx struct IndexedMountRoot
+    @get index() = "indexed-root"
+    @include item(key::String) = IndexedMountChild(key)
+end
+
+# --- Indexed selection by domain candidate ----------------------------------
+#
+# A node-valued mount and an enum-valued one. `string(::DomainNode)` is the
+# stable serialized identity the URL segment carries — the application owns
+# that, the framework only matches on it.
+
+abstract type AbstractDomainNode end
+
+struct DomainNode <: AbstractDomainNode
+    key::Symbol
+    payload::String
+end
+Base.string(node::DomainNode) = string(node.key)
+
+@enum SelStage draft review final
+
+@htmx struct DomainChild
+    node::Any
+    @get index() = string("node=", string(node), " payload=", node.payload)
+end
+
+@htmx struct StageChild
+    stage::Any
+    @get index() = string("stage=", stage, "::", typeof(stage))
+end
+
+@htmx struct DomainRoot
+    catalogue = AbstractDomainNode[DomainNode(:synthetic_depot, "depot"),
+                                   DomainNode(:real_survey, "survey")]
+    @options(node) = catalogue
+    @include dataset(node::AbstractDomainNode) = DomainChild(node)
+    # No `@options`: the enum's instances ARE the domain.
+    @include compilation(stage::SelStage) = StageChild(stage)
+    @include chains(chain::Integer) = StageChild(chain)
+    @get index() = "domain-root"
+end
+
+# A typed computed property whose type is an ordinary Julia type, not a node.
+# `paginate::Bool = false` registers with DynamicObjects' analyzer hook, so a
+# route walk reading that hook raw would try to descend into `Bool`.
+
+@htmx struct BoolPropRoot
+    paginate::Bool = false
+    @get index() = string("paginate=", paginate)
 end
 
 end # @testmodule HTMXOTestFixtures
@@ -490,18 +721,41 @@ end
     @test route.property.semantics.pending
     dataset = only(filter(param -> param.name === :dataset, route.params))
     mode = only(filter(param -> param.name === :mode, route.params))
-    @test dataset.domain.kind === :dynamic
-    @test dataset.domain.provider === :choices
-    @test dataset.domain.dependencies == [:cohort]
-    @test mode.domain.kind === :static
-    @test mode.domain.cardinality == 3
+    # Reflection reports the DECLARATION, never its value: `@options` lowers to
+    # a lazily computed property, so describing a type runs nothing and the
+    # option list is empty here by construction. What the declaration reads is
+    # inferred, not authored — `choices` (the property) and `cohort` (the field
+    # it is called with) both come from the one `dependson` walk.
+    @test dataset.domain.kind === :declared
+    @test dataset.domain.options == NamedTuple[]
+    @test dataset.domain.cardinality === nothing
+    @test dataset.domain.declaration.expression_string == "choices(cohort)"
+    @test dataset.domain.declaration.dependencies == [:choices, :cohort]
+    @test !dataset.domain.declaration.static
+    @test mode.domain.kind === :declared
+    @test mode.domain.declaration.static
     @test mode.default === :fast
+
+    # `cohort` is not declared by `run`; the body reads it, so it arrives as a
+    # `:context` input carrying the field's own declared domain.
+    cohort = only(filter(param -> param.name === :cohort, route.params))
+    @test cohort.kind === :context
+    @test cohort.domain.kind === :declared
 
     # The pre-existing reflection API remains byte-shape compatible.
     reflected = only(filter(route -> route.name === :run, HTMXObjects.reflect(SemanticApp)))
     @test keys(reflected) == (:verb, :path, :name, :doc, :params)
 
-    app = SemanticApp()
+    app = SemanticApp(:north)
+
+    # Evaluating the same declarations against an object is the object-level
+    # half of the contract, and it is what the generated controls below read.
+    @test HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(app, :mode)).cardinality == 3
+    @test [option.value for option in HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(app, :dataset)).options] == [:n1, :n2]
+    @test HTMXObjects.DynamicObjects.property_options(
+        HTMXObjects.DynamicObjects.remake(app; cohort=:south), :dataset) == (:s1,)
     html = repr("text/html", operation_form(app, :run; values=(cohort=:north,),
                                              target_id="#semantic-result"))
     @test contains(html, "hx-get=\"/run\"")
@@ -512,7 +766,15 @@ end
     @test contains(html, "type=\"number\"")
     @test contains(html, "name=\"count\"")
 
-    route!(app)
+    # A domain dependency has to be object state, and object state that is
+    # REQUIRED has no zero-argument root for the default factory to rebuild per
+    # request — so the instance is what gets served. `semantic_app` installs an
+    # equivalent provider on its own; here the provider is explicit because this
+    # item drives the raw route, not the compiled surface.
+    route!(app; root_provider=RootProvider() do _RootT, context
+        HTMXObjects.DynamicObjects.remount(app; __req__=context.request,
+                                           __route__=context.route)
+    end)
     good = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=fast&count=2")
     good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, good))
     good_response = good_handler(good)
@@ -752,9 +1014,13 @@ end
             operation_policy=OperationPolicy(:auto),
         )
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
-        @test transport[].call_kwargs == (study=:alpha, model=:a1)
-        @test transport[].seen_transport.poll_url ==
-              "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1&__htmxo_poll=1"
+        # `study` is node state now, not a declared argument of `analyze`: it is
+        # bound as context and the node is remade with it, so only `model`
+        # reaches the call.
+        @test transport[].call_kwargs == (model=:a1,)
+        @test startswith(transport[].seen_transport.poll_url,
+            "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1&" *
+            "__htmxo_poll=1&__htmxo_operation=")
         @test poll_leaf.fit_key == "fit-17"
     finally
         _operation_polling_impl[] = old_polling
@@ -1085,11 +1351,17 @@ end
 end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _operation_execution_mode, _operation_polling_impl,
-        _property_descriptor, _run_operation, _resolve_operation_value
+    import HTMXObjects: _clear_operation_polls!, _operation_execution_mode,
+        _operation_polling_impl, _property_descriptor, _run_operation,
+        _resolve_operation_value
     import HTMXObjects.DynamicObjects
 
+    # `:auto` is the default so an ordinary route gets the live progress tree
+    # with no `route!(…; operation_policy=…)` registration. It stays conditional
+    # (GET + HTMX + a pending-capable descriptor), which the `plain` vs `hx`
+    # cases below pin — nothing that was direct becomes a poller by default.
     @test OperationPolicy().mode === :auto
+    @test OperationPolicy(:blocking).mode === :blocking
     @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
           OperationPolicy(:polling, "350ms", false)
     @test_throws ArgumentError OperationPolicy(:background)
@@ -1116,10 +1388,17 @@ end
     post_exchange = only(filter(route -> route.verb === :POST, exchange))
     @test get_exchange.property.output.type === MIMEResponse
     @test post_exchange.property.output.type === nothing
+    # The descriptor carries the DECLARATION; the option list is an object
+    # question and stays empty until something evaluates it.
     @test only(filter(input -> input.name === :mode,
-                      get_exchange.property.inputs)).domain.cardinality == 2
+                      get_exchange.property.inputs)).domain.kind === :declared
     @test only(filter(input -> input.name === :count,
-                      post_exchange.property.inputs)).domain.cardinality == 2
+                      post_exchange.property.inputs)).domain.kind === :declared
+    multi = MultiVerbPolicyApp()
+    @test length(HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(multi, :mode)).options) == 2
+    @test length(HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(multi, :count)).options) == 2
     @test _operation_execution_mode(OperationPolicy(:polling),
                                     get_exchange.property, hx,
                                     Verb{:GET}()) === :blocking
@@ -1134,6 +1413,7 @@ end
     _operation_polling_impl[] =
         (render_result, _started, ip, keys, call_kwargs, transport) -> begin
             push!(polls, (; keys, call_kwargs, transport))
+            transport.retain()
             h.aside("polling")
         end
     try
@@ -1143,20 +1423,20 @@ end
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
         @test length(polls) == 1
         @test only(polls).call_kwargs == (count=2,)
-        @test only(polls).transport.poll_url ==
-              "/html?count=2&__htmxo_poll=1"
+        poll_url = only(polls).transport.poll_url
+        @test startswith(poll_url,
+            "/html?count=2&__htmxo_poll=1&__htmxo_operation=")
         @test only(polls).transport.grace_period == 0.1
 
         poll_request = HTTP.Request(
-            "GET", "/html?count=2&__htmxo_poll=1", ["HX-Request" => "true"])
+            "GET", poll_url, ["HX-Request" => "true"])
         polled = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
                                 poll_request, 0, 0;
                                 operation_policy=OperationPolicy(:auto))
         @test repr("text/html", polled.value) == "<aside>polling</aside>"
         @test length(polls) == 2
         @test last(polls).call_kwargs == (count=2,)
-        @test last(polls).transport.poll_url ==
-              "/html?count=2&__htmxo_poll=1"
+        @test last(polls).transport.poll_url == poll_url
         @test last(polls).transport.grace_period == 0.0
 
         raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
@@ -1198,6 +1478,7 @@ end
         @test length(polls) == 2
     finally
         _operation_polling_impl[] = old_polling
+        _clear_operation_polls!()
     end
 
     # A DO handle is control flow, never body content. Treebars' `_polling_resolve`
@@ -1238,7 +1519,10 @@ end
     @test stacked.property.semantics.progress
     @test stacked.property.semantics.pending
     @test only(filter(input -> input.name === :count,
-                      stacked.property.inputs)).domain.cardinality == 3
+                      stacked.property.inputs)).domain.kind === :declared
+    @test length(HTMXObjects.DynamicObjects.static_domain(
+        HTMXObjects.DynamicObjects.property_options(
+            StackedSemanticRoute(), :count)).options) == 3
 end
 
 # Polling transport is only real if the value is started NON-BLOCKINGLY. Every
@@ -2306,16 +2590,21 @@ transport actually *delivers*, not merely that it engages.
     function settle()
         body = drive("/tests")
         for _ in 1:100
-            contains(body, "treebar-poller") || return body
-            @test contains(body, "/tests?__htmxo_poll=1")
+            contains(body, "hx-trigger=\"every ") || return body
+            found = match(Regex("hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\""),
+                          body)
+            @test !isnothing(found)
+            poll_target = replace(only(found.captures), "&amp;" => "&")
+            @test startswith(poll_target,
+                "/tests?__htmxo_poll=1&__htmxo_operation=")
             sleep(0.05)
-            body = drive("/tests?__htmxo_poll=1")
+            body = drive(poll_target)
         end
         body
     end
 
     get_body = settle()
-    @test !contains(get_body, "treebar-poller")
+    @test !contains(get_body, "hx-trigger=\"every ")
     @test contains(get_body, "documented test item discovery")
     @test contains(get_body, "Run selected")
     @test contains(get_body, "/tests/run_tag/unit")
@@ -2607,4 +2896,687 @@ answer an HX request with the grid itself — status 200 *and* the data — not
     finally
         terminate()
     end
+end
+
+# --- Navigation and the semantic reflection graph ---------------------------
+
+@testitem "navigation reports current node, ancestors and configurable descendants" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: navigation
+
+    route!(NavRoot())
+    nav = navigation(NavRoot())
+
+    # The root is its own current node and has no ancestors.
+    @test nav.current.path == "/"
+    @test nav.current.name === :NavRoot
+    @test isempty(nav.ancestors)
+
+    # Descendants stop at `depth`, which is what makes the scope configurable
+    # rather than "the whole tree, always".
+    section = only(filter(child -> child.name === :section, nav.descendants))
+    @test section.path == "/section"
+    @test isempty(section.children)
+    @test :leaf in [c.name for c in only(filter(
+        child -> child.name === :section,
+        navigation(NavRoot(); depth=2).descendants)).children]
+
+    # Routes are reported per node and are mount-resolved, not root-relative.
+    @test any(route -> route.verb === :POST && route.path == "/section/act", section.routes)
+    @test any(route -> route.verb === :GET && route.path == "/", nav.current.routes)
+
+    # A framework-supplied bundle is distinguishable from application nodes.
+    @test only(filter(c -> c.name === :reflect, nav.descendants)).origin === :framework
+    @test section.origin === :declared
+
+    # Labels are derived, docs are not invented.
+    @test section.label == "Section"
+    @test nav.request.mode === :none
+end
+
+@testitem "navigation is threaded through page wrappers only when asked for" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # `__page__(content; navigation=nothing)` receives it.
+    route!(NavRoot())
+    full = drive("/")
+    @test full.status == 200
+    @test contains(String(full.body), "NAV:/")
+    @test contains(String(full.body), "root")
+
+    # HTMX and markdown requests never apply a page wrapper, so chrome is
+    # stripped exactly as before this feature existed.
+    @test !contains(String(drive("/", ["HX-Request" => "true"]).body), "NAV:")
+    @test !contains(String(drive("/", ["Accept" => "text/markdown"]).body), "NAV:")
+
+    # A wrapper that never declared `navigation` is called with one argument.
+    route!(NavPlainRoot())
+    plain = drive("/")
+    @test plain.status == 200
+    @test contains(String(plain.body), "PLAIN-SHELL")
+    @test contains(String(plain.body), "plainroot")
+
+    # A slurping wrapper cannot error on an extra keyword, so it is passed.
+    route!(NavSlurpRoot())
+    slurp = drive("/")
+    @test slurp.status == 200
+    @test contains(String(slurp.body), "SLURP-GOT-NAV")
+end
+
+@testitem "recursively nested page wrappers each receive their own node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(NavChainRoot())
+
+    # Both wrappers in the chain run, innermost first, and neither sees the
+    # other's navigation: the outer shell reports the root, the inner reports
+    # the child. A single record computed at the leaf would print the same path
+    # twice, so the two distinct paths are the real assertion here.
+    nested = drive("/child")
+    @test nested.status == 200
+    body = String(nested.body)
+    @test contains(body, "OUTER:/")
+    @test contains(body, "INNER:/child")
+    @test contains(body, "child-body")
+    @test !contains(body, "INNER:/\"") && !contains(body, "OUTER:/child")
+
+    # The root's own request still nests exactly one wrapper.
+    root_body = String(drive("/").body)
+    @test contains(root_body, "OUTER:/")
+    @test contains(root_body, "root-body")
+    @test !contains(root_body, "INNER:")
+
+    # The whole chain is still stripped for HTMX and markdown requests.
+    @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "OUTER:")
+    @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "INNER:")
+    @test !contains(String(drive("/child", ["Accept" => "text/markdown"]).body), "OUTER:")
+end
+
+@testitem "the semantic graph carries containment, dependency and route edges" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    graph = semantic_descriptor(NavRoot).graph
+
+    # Containment: mount edges, with paths from the registrar's own pair.
+    @test graph.path == "/"
+    section = only(filter(child -> child.name === :section, graph.children))
+    leaf = only(filter(child -> child.name === :leaf, section.children))
+    @test section.path == "/section"
+    @test leaf.path == "/section/leaf"
+
+    # Routes belong to the node that declares them, at their mounted path.
+    @test any(route -> route.verb === :GET && route.path == "/section/leaf", leaf.routes)
+    @test any(route -> route.verb === :POST && route.path == "/section/act", section.routes)
+
+    # A declared computation dependency — the edge a route table cannot show.
+    doubled = only(filter(p -> p.name === :doubled, leaf.properties))
+    @test :value in doubled.dependencies
+
+    # Human labels and docs, carried not invented.
+    @test leaf.label == "Leaf"
+    @test only(filter(p -> p.name === :value, leaf.properties)).description ==
+          "The number this leaf reports."
+
+    # Every node has the same shape, root included.
+    for node in (graph, section, leaf)
+        @test haskey(node, :properties) && haskey(node, :children) &&
+              haskey(node, :routes) && haskey(node, :resources) &&
+              haskey(node, :selection) && haskey(node, :indexed)
+    end
+
+    # The flat transport view is unchanged by any of this.
+    reflected = only(filter(route -> route.name === :act, HTMXObjects.reflect(NavRoot)))
+    @test keys(reflected) == (:verb, :path, :name, :doc, :params)
+end
+
+@testitem "ReflectionRoutes serves a human-readable graph without disturbing /schema" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(NavRoot())
+
+    # Human-readable: structure and semantics, not a route dump.
+    reflect_response = drive("/reflect")
+    @test reflect_response.status == 200
+    body = String(reflect_response.body)
+    @test contains(body, "Leaf")               # node label
+    @test contains(body, "/section/leaf")      # mount-resolved path
+    @test contains(body, "doubled")            # a property, not a route
+    @test contains(body, "The number this leaf reports.")
+
+    # Same graph as JSON for tooling.
+    graph_response = drive("/reflect/graph")
+    @test graph_response.status == 200
+    @test contains(String(graph_response.body), "\"children\"")
+
+    # /schema keeps serving the flat route index it always did.
+    schema_response = drive("/schema")
+    @test schema_response.status == 200
+    schema_body = String(schema_response.body)
+    @test contains(schema_body, "\"verb\"")
+    @test contains(schema_body, "\"params\"")
+    @test !contains(schema_body, "\"children\"")
+end
+
+@testitem "Resource mounts a Base-shaped collection surface" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(verb, path, body="") = begin
+        req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
+                           Vector{UInt8}(body))
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    _reset_note_store!()
+    route!(ResourceApp())
+
+    # The collection half registers at the URL the `:index` collapse rule
+    # dictates, for both verbs, with no second routing scheme.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(ResourceApp)]
+    @test (:GET, "/note") in paths
+    @test (:POST, "/note") in paths
+
+    @test drive("GET", "/note").status == 200
+
+    # Create goes through the policy's key derivation and lands in the store the
+    # mount was handed — asserted on `NOTE_STORE`, not on a root instance: the
+    # default root scope rebuilds the root per request, so no root instance is
+    # the one the handler ran against.
+    @test drive("POST", "/note", "title=B&body=second").status == 200
+    @test haskey(NOTE_STORE, "B")
+    @test NOTE_STORE["B"].body == "second"
+end
+
+@testitem "Resource never forces its collection during construction or registration" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: resource_descriptor
+
+    # `InertCollection` supports none of `keys`/`haskey`/`getindex`. Building the
+    # app and registering its routes must not touch it — several real mounts are
+    # backed by an unresolved stub, and describing a route surface is not a
+    # reason to make one exist.
+    _reset_note_store!()
+    app = ResourceApp()
+    route!(app)
+    @test_throws MethodError keys(InertCollection())
+
+    # Reflection probes rather than forces: it reports `nothing` for the facts a
+    # non-store cannot answer, instead of throwing or inventing them.
+    descriptor = resource_descriptor(app.stub)
+    @test descriptor.inspectable === false
+    @test descriptor.count === nothing
+    @test descriptor.key_type === nothing
+    @test descriptor.input === NoteDraft
+    # `fields` carries the type alongside the name — a form builder needs both.
+    @test (name=:title, type=String) in descriptor.fields
+
+    # The same descriptor over a real store does answer.
+    live = resource_descriptor(app.note)
+    @test live.inspectable === true
+    @test live.count == 1
+    @test live.key_type === String
+
+    # The stub-backed mount still registers its collection surface.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(ResourceApp)]
+    @test (:GET, "/stub") in paths
+    @test (:POST, "/stub") in paths
+end
+
+@testitem "Resource item routes register for a call-form indexed mount" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    _reset_note_store!()
+    route!(ResourceApp())
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(ResourceApp)]
+    for verb in (:GET, :PUT, :PATCH, :DELETE)
+        @test (verb, "/note/{key}") in paths
+    end
+
+    drive(verb, path, body="") = begin
+        req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
+                           Vector{UInt8}(body))
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # The item half addresses the same store the collection half writes to.
+    @test drive("GET", "/note/a").status == 200
+    @test drive("PATCH", "/note/a", "body=edited").status == 200
+    @test NOTE_STORE["a"].body == "edited"
+    @test NOTE_STORE["a"].title == "A"      # PATCH merges, it does not replace.
+    @test drive("DELETE", "/note/a").status == 200
+    @test !haskey(NOTE_STORE, "a")
+    @test drive("GET", "/note/a").status == 404
+end
+
+@testitem "a callable page-wrapper VALUE receives navigation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path) = begin
+        req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    # `__page__ = MockPage(...)` declares no signature of its own — the value is
+    # what takes `navigation`. Reading the empty property signature as a refusal
+    # is what previously rendered a literal `nothing` in place of the chrome.
+    route!(ValuePageRoot())
+    body = String(drive("/").body)
+    @test contains(body, "shell|")
+    @test contains(body, "value-root")
+    # Navigation actually arrived, and carries this node's descendants.
+    @test contains(body, "nav=section")
+    @test !contains(body, "nav=none")
+    @test !contains(body, "nothing")
+
+    # A callable value that does NOT accept the keyword is still called without
+    # it, rather than throwing on every full-page response.
+    route!(BluntPageRoot())
+    blunt = String(drive("/").body)
+    @test contains(blunt, "blunt|")
+    @test contains(blunt, "blunt-root")
+end
+
+@testitem "an indexed @include registers its child's routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    # `@include mount(idx) = Child(idx)` is a short-form function definition, so
+    # the parser wraps its body in a block. Missing that unwrap made every
+    # indexed mount invisible to route registration — silently: the struct
+    # compiled, and only the child's routes went missing.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(IndexedMountRoot)]
+    @test (:GET, "/") in paths
+    @test (:GET, "/item/{key}") in paths
+    @test (:GET, "/item/{key}/extra") in paths
+
+    route!(IndexedMountRoot())
+    req = HTTP.Request("GET", "/item/abc", Pair{String,String}[], UInt8[])
+    response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    @test response.status == 200
+    @test contains(String(response.body), "abc")
+end
+
+@testitem "an indexed mount selects the domain candidate, not its label" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path) = begin
+        req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(DomainRoot())
+
+    # A declared object domain: the segment matches a candidate's serialized
+    # identity, and the CANDIDATE ITSELF reaches the child — `payload` is only
+    # reachable from the node, never from the string.
+    response = drive("/dataset/synthetic_depot")
+    @test response.status == 200
+    body = String(response.body)
+    @test contains(body, "node=synthetic_depot")
+    @test contains(body, "payload=depot")
+
+    @test contains(String(drive("/dataset/real_survey").body), "payload=survey")
+
+    # An inferred enum domain needs no declaration, and the child receives the
+    # enum instance rather than a parsed name.
+    stage = String(drive("/compilation/review").body)
+    @test contains(stage, "stage=review")
+    @test contains(stage, "SelStage")
+
+    # A value outside a closed domain is rejected, not parsed into existence.
+    @test drive("/dataset/no_such_node").status >= 400
+    @test drive("/compilation/no_such_stage").status >= 400
+
+    # A scalar mount with no domain keeps the ordinary parse path.
+    @test contains(String(drive("/chains/3").body), "stage=3")
+end
+
+@testitem "a typed computed property is not a mount, and its domain is proven" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: semantic_descriptor, semantic_graph_view
+
+    # The guard: `paginate::Bool = false` is a property, not a child to descend
+    # into. Registering it as a mount would put `Bool`'s (nonexistent) routes
+    # under `/paginate`.
+    paths = [route.path for route in HTMXObjects.reflect(BoolPropRoot)]
+    @test paths == ["/"]
+    @test !any(path -> contains(path, "paginate"), paths)
+
+    graph = semantic_descriptor(BoolPropRoot).graph
+    @test isempty(graph.children)
+
+    # It still appears as a PROPERTY, with a domain DynamicObjects proved
+    # rather than one anybody declared — a real two-option control, not
+    # "unrestricted".
+    descriptor = only(filter(p -> p.name === :paginate, graph.properties))
+    domain = get(descriptor, :domain, nothing)
+    @test !isnothing(domain)
+    @test domain.kind === :static
+    # Options are RECORDS, not bare values: each carries the value plus the
+    # label a control renders. Both halves matter — the value is what selects,
+    # the label is what a human reads.
+    @test Set(option.value for option in domain.options) == Set([false, true])
+    @test Set(option.label for option in domain.options) == Set(["false", "true"])
+
+    rendered = repr("text/html", semantic_graph_view(BoolPropRoot))
+    @test contains(rendered, "paginate")
+    @test contains(rendered, "static")
+end
+
+# ── Automatic progress over the generic operation path ───────────────────────
+# An ordinary `@get` route whose body reads a slow nested DynamicObjects indexed
+# property. There is no `@progress`, no `@fetch!`, no `polling_fetchindex`, no
+# `route!(…; operation_policy=…)` and no JavaScript anywhere in these fixtures:
+# `:auto` is the default transport, and source-visible property reads/calls in
+# generated bodies carry the caller's progress node explicitly. Ordinary Julia
+# calls remain ordinary; there is no ambient or task-local progress context.
+@testmodule HTMXOPropertyScopedFixtures begin
+using HTMXObjects
+
+export PropertyScopedRoute, PropertyScopedFastRoute, PropertyScopedFailRoute,
+    property_gate, progress_descendants
+
+# The leaf blocks on this until the test releases it, so "the request came back
+# with the work still in flight" is asserted deterministically rather than by
+# racing a `sleep` against JIT compilation. Only the gated item touches it —
+# the other items use routes that never wait, so items stay independent even
+# when TestItemRunner runs them in one process.
+const property_gate = Ref(Base.Event())
+
+@htmx struct PropertyScopedDeep
+    "Deep leaf work"
+    deep(k) = (wait(property_gate[]); 10k)
+end
+
+@htmx struct PropertyScopedMiddle
+    @include deep_child = PropertyScopedDeep()
+    "Middle work"
+    middle(k) = deep_child.deep(k) + 1
+end
+
+@htmx struct PropertyScopedRoute
+    @include mid = PropertyScopedMiddle()
+    "Slow page"
+    @get slow(k::Int) = h.p(string(mid.middle(k)))
+end
+
+# Same shape, no gate: used where the test needs the work to finish.
+@htmx struct PropertyScopedFastDeep
+    "Deep leaf work"
+    deep(k) = 10k
+end
+
+@htmx struct PropertyScopedFastMiddle
+    @include deep_child = PropertyScopedFastDeep()
+    "Middle work"
+    middle(k) = deep_child.deep(k) + 1
+end
+
+@htmx struct PropertyScopedFastRoute
+    @include mid = PropertyScopedFastMiddle()
+    "Slow page"
+    @get slow(k::Int) = h.p(string(mid.middle(k)))
+end
+
+@htmx struct PropertyScopedFailRoute
+    "Failing leaf"
+    boom(k) = error("nested boom $k")
+    "Failing page"
+    @get bad(k::Int) = h.p(string(boom(k)))
+end
+
+function progress_descendants(node, acc=String[])
+    for child in node.children
+        push!(acc, child.impl.description)
+        progress_descendants(child, acc)
+    end
+    acc
+end
+end # @testmodule HTMXOPropertyScopedFixtures
+
+@testmodule HTMXOPollIdentityFixtures begin
+using HTMXObjects
+
+export PollIdentityRoute, reset_poll_identity!, poll_identity_count,
+    release_poll_identity!
+
+const poll_identity_lock = ReentrantLock()
+const poll_identity_gates = Base.Event[]
+
+function reset_poll_identity!()
+    lock(poll_identity_lock)
+    try
+        empty!(poll_identity_gates)
+    finally
+        unlock(poll_identity_lock)
+    end
+end
+
+poll_identity_count() = lock(poll_identity_lock) do
+    length(poll_identity_gates)
+end
+
+function release_poll_identity!(index)
+    gate = lock(poll_identity_lock) do
+        poll_identity_gates[index]
+    end
+    notify(gate)
+end
+
+function poll_identity_work(id)
+    gate, sequence = lock(poll_identity_lock) do
+        gate = Base.Event()
+        push!(poll_identity_gates, gate)
+        gate, length(poll_identity_gates)
+    end
+    wait(gate)
+    h.p("poll:$id:$sequence")
+end
+
+@htmx struct PollIdentityRoute
+    @get poll_identity(id::Int) = poll_identity_work(id)
+end
+end # @testmodule HTMXOPollIdentityFixtures
+
+@testitem "polling operation identity survives fresh roots and stays bounded" setup=[HTMXOPollIdentityFixtures, HTMXOTestImports] tags=[:integration, :semantic] begin
+    import HTMXObjects: _OperationPollEntry, _OPERATION_POLL_LIMIT,
+        _OPERATION_POLL_TTL, _clear_operation_polls!,
+        _new_operation_poll_token, _operation_poll_now, _operation_poll_snapshot,
+        _retain_operation_poll!
+
+    function drive(target; session="session-a")
+        request = HTTP.Request("GET", target,
+            ["HX-Request" => "true", "X-Session" => session], UInt8[])
+        handler = first(HTTP.Handlers.gethandler(
+            HTMXObjects.CONTEXT[].service.router, request))
+        @test handler !== HTTP.Handlers.default404
+        response = handler(request)
+        @test response.status == 200
+        String(response.body)
+    end
+
+    running(body) = contains(body, "hx-trigger=\"every ")
+    function poll_url(body)
+        found = match(Regex("hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\""),
+                      body)
+        @test !isnothing(found)
+        replace(only(found.captures), "&amp;" => "&")
+    end
+    function poll_token(target)
+        found = match(r"__htmxo_operation=([^&]+)", target)
+        @test !isnothing(found)
+        only(found.captures)
+    end
+    function settle(target; session="session-a")
+        body = drive(target; session)
+        for _ in 1:100
+            running(body) || return body
+            sleep(0.05)
+            body = drive(target; session)
+        end
+        body
+    end
+
+    _clear_operation_polls!()
+    reset_poll_identity!()
+    try
+        # A session key is part of the retained operation's identity, while the
+        # opaque token keeps two same-route, same-argument runs independent.
+        provider = RootProvider(
+            scope=:session,
+            key=req -> HTTP.header(req, "X-Session", ""),
+        )
+        route!(PollIdentityRoute(); root_provider=provider)
+
+        first_body = drive("/poll_identity/7")
+        second_body = drive("/poll_identity/7")
+        @test running(first_body)
+        @test running(second_body)
+        first_url = poll_url(first_body)
+        second_url = poll_url(second_body)
+        @test first_url != second_url
+        first_token = poll_token(first_url)
+        second_token = poll_token(second_url)
+        @test occursin(r"^[0-9a-f]{64}$", first_token)
+        @test occursin(r"^[0-9a-f]{64}$", second_token)
+
+        # Each bearer capability comes directly from OS randomness. A
+        # process-wide nonce plus a visible counter would share this prefix and
+        # let the first client enumerate every later operation.
+        sample = [_new_operation_poll_token() for _ in 1:32]
+        @test length(unique(sample)) == length(sample)
+        @test all(token -> occursin(r"^[0-9a-f]{64}$", token), sample)
+        @test length(unique(first(token, 32) for token in sample)) ==
+              length(sample)
+        @test timedwait(() -> poll_identity_count() == 2, 10.0;
+                        pollint=0.01) === :ok
+        @test length(_operation_poll_snapshot()) == 2
+
+        # A token is a capability, not the identity by itself. Route arguments
+        # and provider scope/key are checked before the retained IP is exposed.
+        wrong_arg = replace(first_url, "/poll_identity/7?" => "/poll_identity/8?")
+        @test contains(drive(wrong_arg), "aria-invalid=\"true\"")
+        @test contains(drive(first_url; session="session-b"),
+                       "aria-invalid=\"true\"")
+        @test length(_operation_poll_snapshot()) == 2
+
+        release_poll_identity!(1)
+        first_done = settle(first_url)
+        @test !running(first_done)
+        @test contains(first_done, "poll:7:1")
+        @test length(_operation_poll_snapshot()) == 1
+        @test running(drive(second_url))
+
+        release_poll_identity!(2)
+        second_done = settle(second_url)
+        @test !running(second_done)
+        @test contains(second_done, "poll:7:2")
+        @test isempty(_operation_poll_snapshot())
+
+        # An abandoned operation expires even if its producer is still alive.
+        reset_poll_identity!()
+        abandoned = drive("/poll_identity/9")
+        abandoned_url = poll_url(abandoned)
+        @test timedwait(() -> poll_identity_count() == 1, 10.0;
+                        pollint=0.01) === :ok
+        future = _operation_poll_now() + _OPERATION_POLL_TTL + 1
+        @test isempty(_operation_poll_snapshot(; now=future))
+        expired = drive(abandoned_url)
+        @test !running(expired)
+        @test contains(expired, "aria-invalid=\"true\"")
+        release_poll_identity!(1)
+
+        # Capacity is an LRU bound, independent of TTL cleanup.
+        _clear_operation_polls!()
+        now = _operation_poll_now()
+        request = HTTP.Request("GET", "/capacity")
+        for index in 1:(_OPERATION_POLL_LIMIT + 1)
+            token = "capacity-$index"
+            touched = now + index / 1000
+            entry = _OperationPollEntry(
+                token, (; index), nothing, (), (;), nothing, nothing,
+                request, touched, touched)
+            _retain_operation_poll!(entry; now=touched)
+        end
+        retained = _operation_poll_snapshot()
+        @test length(retained) == _OPERATION_POLL_LIMIT
+        @test !haskey(retained, "capacity-1")
+        @test haskey(retained, "capacity-$(_OPERATION_POLL_LIMIT + 1)")
+    finally
+        for index in 1:poll_identity_count()
+            try
+                release_poll_identity!(index)
+            catch
+            end
+        end
+        _clear_operation_polls!()
+    end
+end
+
+@testitem "automatic progress — property-scoped route calls poll and nest without annotations" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _run_operation, _operation_polling_impl, Verb
+    import HTMXObjects.DynamicObjects
+    const TBNode = DynamicObjects.Treebars.ProgressNode
+
+    app = PropertyScopedRoute()
+    target = (context=nothing, root=app, leaf=app)
+    hx = HTTP.Request("GET", "/slow/2", ["HX-Request" => "true"])
+
+    property_gate[] = Base.Event()         # closed: the leaf cannot finish yet
+    seen = Ref{Any}(nothing)
+    old = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (render_result, started, ip, keys, call_kwargs, transport) -> begin
+            seen[] = (; started, keys, transport)
+            h.aside("polling")
+        end
+    node = try
+        # No `operation_policy=` kwarg anywhere — this is the DEFAULT path.
+        operation = _run_operation(target, PropertyScopedRoute, :slow, Verb{:GET}(),
+                                   hx, 1, 1)
+        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        # The request returned while the leaf is still parked on the gate, so an
+        # in-flight handle — not a finished value — reached the polling seam.
+        # A fully blocking start would satisfy "the poller was reached" too,
+        # which is exactly the trap this assertion exists to close.
+        @test seen[].started isa DynamicObjects.Pending
+        @test startswith(seen[].transport.poll_url,
+                         "/slow/2?__htmxo_poll=1&__htmxo_operation=")
+        DynamicObjects.getstatus(app.slow, seen[].keys...)
+    finally
+        _operation_polling_impl[] = old
+    end
+
+    # The tree fills itself in WHILE the work runs — three levels, discovered
+    # from execution nesting alone.
+    @test node isa TBNode
+    @test node.impl.description == "Slow page"
+    @test timedwait(10.0; pollint=0.05) do
+        "Deep leaf work" in progress_descendants(node)
+    end === :ok
+    descendants = progress_descendants(node)
+    @test "Middle work" in descendants
+    @test "Deep leaf work" in descendants
+
+    # And the final value still arrives once the leaf is released.
+    notify(property_gate[])
+    @test repr("text/html", app.slow(Verb{:GET}(), 2)) == "<p>21</p>"
+end
+
+@testitem "automatic progress — property-scoped direct requests and failures stay visible" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _run_operation, Verb
+    import HTMXObjects.DynamicObjects
+    const TBNode = DynamicObjects.Treebars.ProgressNode
+
+    # `:auto` is the default, but it stays conditional: a non-HTMX request (a
+    # browser hard load, `?plain`, curl, an API client) still gets the finished
+    # value in one response rather than a poller.
+    @test OperationPolicy().mode === :auto
+
+    app = PropertyScopedFastRoute()
+    target = (context=nothing, root=app, leaf=app)
+    direct = _run_operation(target, PropertyScopedFastRoute, :slow, Verb{:GET}(),
+                            HTTP.Request("GET", "/slow/3"), 1, 1)
+    @test repr("text/html", direct.value) == "<p>31</p>"
+    @test !(direct.value isa DynamicObjects.Pending)
+
+    # A nested failure surfaces as a pinned node, so the tree still shows WHICH
+    # step failed rather than collapsing to a bare error.
+    bad_app = PropertyScopedFailRoute()
+    @test_throws DynamicObjects.PropertyComputationError bad_app.bad(Verb{:GET}(), 1)
+    bad_node = DynamicObjects.getstatus(bad_app.bad, Verb{:GET}(), 1)
+    @test bad_node isa TBNode
+    @test "Failing leaf" in progress_descendants(bad_node)
 end

@@ -1,8 +1,13 @@
 module HTMXObjects
 
 export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
-export @semantic, property_descriptor, property_descriptors, option_descriptor,
-    static_domain, dynamic_domain, materialization_observation, materialization_plan
+# Re-exports of the DynamicObjects reflection surface. `@semantic`,
+# `option_descriptor`, `dynamic_domain` and `materialization_plan` were dropped
+# when DO removed authored semantic metadata (DO `9490b55`); nothing defines
+# them here, so exporting them only handed consumers a name that resolves to
+# nothing at use site. Domains are declared with `@options` now.
+export property_descriptor, property_descriptors, static_domain,
+    materialization_observation
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
 export terminate, serve, staticfiles, dynamicfiles
@@ -25,11 +30,14 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
+export ReflectionRoutes, semantic_graph_view, navigation
+export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
 export semantic_descriptor, operation_form, semantic_app
 
 using DynamicObjects, HTTP, Tables
+import Random
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
@@ -680,6 +688,29 @@ end
 #   @include prop(args…) = ExternalStruct(args…; …)    # indexed include
 # Returns list of (prop_name, type_name_expr, index_params) tuples where
 # `index_params` is a `Vector{Symbol}` (empty for non-indexed).
+"""
+    _unwrap_short_form_body(rhs) -> Expr
+
+Undo the `:block` the parser wraps a short-form method body in.
+
+`f(x) = g(x)` and `f(x) = begin g(x) end` parse to the SAME head, so an
+`@include mount(idx) = Child(idx)` is indistinguishable from a block-form
+mount by head alone. The payload discriminates: one statement (LineNumberNodes
+aside) is the parser's wrapping and unwraps to the bare call; several
+statements is a body the author wrote and is returned untouched.
+
+Delegates to DynamicObjects when available so both sides of the same
+declaration agree by construction rather than by two copies of one rule.
+"""
+function _unwrap_short_form_body(rhs)
+    if isdefined(DynamicObjects, :_unwrap_short_form_body)
+        return getproperty(DynamicObjects, :_unwrap_short_form_body)(rhs)
+    end
+    Meta.isexpr(rhs, :block) || return rhs
+    body = [a for a in rhs.args if !(a isa LineNumberNode)]
+    length(body) == 1 ? only(body) : rhs
+end
+
 function _find_include_externals(struct_expr)
     body = struct_expr.args[3]
     result = Tuple{Symbol, Any, Vector{Symbol}}[]
@@ -694,6 +725,19 @@ function _find_include_externals(struct_expr)
         Meta.isexpr(inner, :(=)) || continue
         lhs = inner.args[1]
         rhs = inner.args[2]
+        # The INDEXED form `@include mount(key::T) = Child(key)` is a short-form
+        # function definition, and the parser wraps a short form's body in a
+        # `begin` block carrying its LineNumberNode. The value form
+        # `@include mount = Child(...)` is a plain assignment and is not
+        # wrapped. Unwrap before the shape check, or every indexed mount is
+        # silently skipped here — and skipping is invisible: the struct still
+        # compiles, DynamicObjects' own `_nested_struct_type` (returning its
+        # memoizing wrapper, whose meta declares no routes) is the only method
+        # left standing, and the child's routes simply never register.
+        # Only an indexed mount — a `:call` LHS — can have had its rhs wrapped
+        # by the parser. With a plain Symbol LHS a block is always a genuine
+        # inline sub-router and unwrapping it would silently reinterpret it.
+        Meta.isexpr(lhs, :call) && (rhs = _unwrap_short_form_body(rhs))
         # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type.
         Meta.isexpr(rhs, :call) || continue
         type_expr = rhs.args[1]
@@ -725,6 +769,31 @@ end
 
 # Default: no inline struct properties.
 _inline_struct_props(::Type) = ()
+
+"""
+    _child_struct_type(T, ::Val{name}) -> Type or nothing
+
+The type whose `meta` declares the routes of the child mounted at `name`.
+
+`@htmx` records what it knows from each `@include` declaration by emitting a
+`_nested_struct_type` method — the hook DynamicObjects documents for exactly
+this. Reading goes through `nested_object_type`, which combines that with
+inline `@struct` children and DO's own `@include` externals and applies the
+DynamicObject guard: `_nested_struct_type` alone misses externals declared
+under a plain `@dynamicstruct`, and the unguarded analysis paths happily answer
+`Int` for `port::Int = 8080`, which a route walker must never follow.
+
+Falls back to the raw hook when DynamicObjects is too old to export the
+accessor.
+"""
+function _child_struct_type(T, v::Val)
+    if isdefined(DynamicObjects, :nested_object_type)
+        name = typeof(v).parameters[1]
+        return Base.invokelatest(
+            getproperty(DynamicObjects, :nested_object_type), T, name)
+    end
+    _nested_struct_type(T, v)
+end
 
 # Map a route-macro symbol to the verb short symbol used in `Verb{V}` and
 # `_http_verbs`. `Symbol("@get")` → `:GET`; `Symbol("@ws")` → `:WEBSOCKET`
@@ -777,6 +846,24 @@ function _convert_include_to_struct!(struct_expr)
         else
             continue
         end
+        # `@include mount(idx…) = Child(idx…)` is a short-form METHOD
+        # definition, so the parser wraps its rhs in a `:block` — the same head
+        # `= begin … end` produces. Head alone cannot tell the two apart; the
+        # payload can. One statement (LineNumberNodes aside) means the parser
+        # did the wrapping, so unwrap it and let the call form below handle it.
+        # Several statements is a real body and stays an inline child.
+        #
+        # Without this, an indexed external mount was converted into an INLINE
+        # child whose body is the call `Child(idx)`, which makes `Child` a
+        # property of the generated wrapper rather than the type to mount — the
+        # `Any`-typed field with no routes behind it. DynamicObjects had the
+        # identical bug on its side of the same declaration.
+        #
+        # ONLY for an indexed mount: `@include name = begin … end` has a plain
+        # Symbol LHS, was never wrapped by the parser, and is a real inline
+        # sub-router — unwrapping a single-statement one would reinterpret it
+        # as an external mount.
+        isempty(index_params) || (rhs = _unwrap_short_form_body(rhs))
         if Meta.isexpr(rhs, :block)
             # Convert to: prop[(args…)] = struct _Include_prop ... end
             # __prefix__ extends the parent's prefix with the include name
@@ -1191,11 +1278,20 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     for ri in route_info
         push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.verb, ri.pos_params, ri.kw_params))
     end
-    # Emit _nested_struct_type methods for @include externals.
+    # Emit the child-type methods for @include externals.
     # (Inline `@struct` children are emitted by DO's macro itself, on the same
     # generic, so HTMXO only needs to add the @include-external methods here.)
+    #
+    # The INDEXED form goes on HTMXObjects' own `_include_child_type`, NOT on
+    # `_nested_struct_type`: DynamicObjects already defines the latter for an
+    # indexed mount, returning its memoizing wrapper. Defining ours on the same
+    # signature would overwrite DO's — which is both a precompilation error
+    # ("method overwriting is not permitted") and wrong, since the wrapper is
+    # what actually constructs and caches the child per index. We need a second
+    # answer, not a replacement: the wrapper for construction, the child type
+    # for walking routes.
     _type_fname = Expr(:., DynamicObjects, QuoteNode(:_nested_struct_type))
-    for (prop, type_expr) in include_externals
+    for (prop, type_expr, _index_params) in include_externals
         push!(block.args[1].args, Expr(:(=),
             Expr(:call, _type_fname, :(::Type{$type_name}), :(::Val{$(QuoteNode(prop))})),
             type_expr))
@@ -2180,6 +2276,21 @@ refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
 You never have to write `OperationPolicy` to get non-blocking long routes —
 `route!(app)` alone already does. Reach for it to tune (`poll_interval`,
 `keep_progress`) or to opt out (`:blocking`).
+
+Nested progress follows source-visible DynamicObjects property reads and
+indexed-property calls in generated route/property bodies. Their lowering
+carries the caller's progress node explicitly; ordinary Julia calls,
+constructors, arithmetic and loops remain ordinary. Use DynamicObjects'
+explicit progress markers when work hidden in a foreign helper should attach to
+the caller too.
+
+When a request crosses the grace period, HTMXObjects retains that exact
+operation behind an independently generated OS-random bearer token. Possession
+authorizes polling that operation; route, typed-argument, and provider scope/key
+checks constrain where the token is valid. Successful terminal rendering
+removes it, while a bounded process-local registry expires abandoned or failed
+operations. Fresh request roots can therefore follow in-flight work without
+making DynamicObjects caches global.
 """
 struct OperationPolicy
     mode::Symbol
@@ -2374,6 +2485,15 @@ _convert_param(val, ::Nothing) = val
 # misses (it only matches ::String, not ::SubString{String}).
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = convert(T, val)
 _convert_param(val::AbstractString, ::Type{Symbol}) = Symbol(val)
+# `parse` needs a concrete type — `parse(Integer, "3")` fails inside `tryparse`
+# on `typemax(::Type{Integer})`. An abstract numeric annotation is the natural
+# way to write an index parameter (`@include chains(chain::Integer)`), and it
+# says "any integer", so pick the machine default rather than making the
+# application name a width it does not care about.
+_convert_param(val::AbstractString, ::Type{Integer}) = parse(Int, val)
+_convert_param(val::AbstractString, ::Type{Signed}) = parse(Int, val)
+_convert_param(val::AbstractString, ::Type{AbstractFloat}) = parse(Float64, val)
+_convert_param(val::AbstractString, ::Type{Real}) = parse(Float64, val)
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
 _convert_param(val::AbstractVector, T::Type{<:AbstractString}) =
@@ -2896,8 +3016,14 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 #     except missing/invalid submitted parameters, which map to 400.
 # If the user's `__error__` hook returns an `HTTP.Response` directly, their
 # status choice is respected — not rewritten.
-_error_status_code(err) =
-    unwrap_error(err) isa Union{MissingRequiredParam,InvalidDomainValue} ? 400 : 500
+# Unwrap ONCE here (a route-body throw arrives wrapped in a
+# `PropertyComputationError`), then dispatch on the real error. Method dispatch
+# rather than a growing `isa` chain so a new error type can carry its own status
+# from wherever it is defined — including a `routes/*.jl` bundle included after
+# this file — and stays hot-reloadable, exactly like `_finalized_response`.
+_error_status_code(err) = _unwrapped_status_code(unwrap_error(err))
+_unwrapped_status_code(::Union{MissingRequiredParam,InvalidDomainValue}) = 400
+_unwrapped_status_code(_err) = 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
@@ -2925,7 +3051,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     is_htmx(req) && return _stamp_error_id(to_response(err_val), uid)   # always 200 for HTMX
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (err_val = wrapper(err_val))
+        isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
     end
     _stamp_error_id(_with_error_status(req, to_response(err_val), err), uid)
 end
@@ -3001,7 +3127,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         elseif is_htmx(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
-            save_response(record_dir, save_path, to_response(static_transform(wrapper(_html_value(val)); record_base)))
+            save_response(record_dir, save_path, to_response(static_transform(_apply_page(obj, wrapper, _html_value(val)); record_base)))
         else
             save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
         end
@@ -3034,7 +3160,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     # otherwise a plain value reaches the wrapper as a bare Node child and
     # renders as `show(::MIME"text/plain")` text in full-page mode while
     # rendering structurally over HX.
-    to_response(wrapper(_html_value(val)))
+    to_response(_apply_page(obj, wrapper, _html_value(val)))
 end
 
 # For URL paths whose only `{x}` placeholders are at the very end (the
@@ -3150,6 +3276,32 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
         end
     end
     _check_root_request(root, RootT, context)
+    _sync_root!(root)
+    root
+end
+
+# The request/render boundary sync. DynamicObjects tracked values
+# (`TrackedDirectory`/`TrackedFile`/`ProviderRoots`/`ThreadSafeDict`) carry a
+# version that nothing polls on its own — a stamp is only read when someone
+# asks. `sync!` is that ask: it walks the root's fields and cached properties,
+# recurses into nested DynamicObjects (including through arrays, tuples and
+# dicts), and drops the transitive dependents of anything whose stamp moved.
+#
+# Here, once, is the right place: it is the single seam every request's root
+# passes through, and it runs before any property is read, so a request never
+# observes a half-invalidated object. A `:request`-scoped root is freshly built
+# and has nothing to drop, which costs one integer compare per tracked value;
+# `:session`/`:job` roots outlive requests and are exactly the case that needs
+# it. There is no hot-path cost — property reads are untouched.
+#
+# Guarded, not required: an older DynamicObjects has no `sync!`, and a non-DO
+# root (a custom provider may return one) has no method for it. Neither is an
+# error — it only means there is nothing tracked to invalidate.
+function _sync_root!(root)
+    isdefined(DynamicObjects, :sync!) || return root
+    sync! = getproperty(DynamicObjects, :sync!)
+    Base.invokelatest(applicable, sync!, root) || return root
+    Base.invokelatest(sync!, root)
     root
 end
 
@@ -3201,6 +3353,17 @@ end
 function _property_descriptors(T)
     isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
     Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)
+end
+
+# Descriptor for one EXACT declaration. The `(T, name)` method resolves through
+# `metafirst` (first-declaration-wins), which collapses a name carrying several
+# declarations — `@get index`, `@post index` and `@include index(x)` can all
+# coexist under one key. Callers already holding the `info` that
+# `_walk_route_meta` handed them pass it here so they descriptor-ize the
+# declaration they actually walked.
+function _property_descriptor(T, name::Symbol, info::NamedTuple)
+    isdefined(DynamicObjects, :property_descriptor) || return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :property_descriptor), T, name, info)
 end
 
 function _property_descriptor(T, name::Symbol, verb::Symbol)
@@ -3331,30 +3494,78 @@ function _bind_operation_context(target, descriptor, req::HTTP.Request)
     (merge(target, (; leaf=last(objects), objects)), values)
 end
 
-function _domain_dependency_value(obj, values, name::Symbol)
-    haskey(values, name) && return values[name]
-    hasproperty(obj, name) || throw(ArgumentError(
-        "dynamic domain dependency $(repr(name)) is unavailable on $(typeof(obj))"))
-    getproperty(obj, name)
+"""
+    _declared_domain_object(obj, domain, values) -> object
+
+The object a declared domain is evaluated against: `obj`, or `obj` remade with
+the submitted value of any dependency it carries as a field.
+
+`@options(dataset) = choices(cohort)` reads `cohort` off the node, so "the
+options for the cohort the user just picked" is expressed by asking a node that
+HAS that cohort. The test is `hasproperty`, not `fieldnames`: `remake` overrides
+a computed property (an overrideable default, a `@param`) by prepopulating its
+cache, and those are exactly the shapes a submitted context value takes — keying
+on physical fields would silently evaluate the domain against the pre-submission
+value. It is also why a dependent domain's dependency has to be node state
+rather than a sibling argument of the same operation: a keyword argument belongs
+to no node, so no node can be built that answers for it.
+"""
+function _declared_domain_object(obj, domain, values)
+    isdefined(DynamicObjects, :remake) || return obj
+    declaration = get(domain, :declaration, nothing)
+    declaration === nothing && return obj
+    overrides = Pair{Symbol,Any}[]
+    for dep in get(declaration, :dependencies, Symbol[])
+        haskey(values, dep) && hasproperty(obj, dep) || continue
+        submitted = values[dep]
+        isequal(submitted, getproperty(obj, dep)) && continue
+        push!(overrides, dep => submitted)
+    end
+    isempty(overrides) && return obj
+    Base.invokelatest(getproperty(DynamicObjects, :remake), obj; overrides...)
+end
+
+"""
+    _declared_input_domain(obj, input, domain, values) -> domain or nothing
+
+Evaluate an `@options` declaration into a resolved domain.
+
+Reflection reports `kind === :declared` with `options` empty on purpose:
+DynamicObjects records the declared expression and never runs it while
+describing a type, so the values are an OBJECT question. This asks it, through
+`property_options`, and normalizes the answer with `static_domain` so every
+consumer downstream — validation, radio/select choice, label rendering — sees
+the one shape it already handles.
+"""
+function _declared_input_domain(obj, input, domain, values)
+    isdefined(DynamicObjects, :property_options) || return nothing
+    source = obj
+    declared = try
+        source = _declared_domain_object(obj, domain, values)
+        Base.invokelatest(
+            getproperty(DynamicObjects, :property_options), source, input.name)
+    catch err
+        declaration = get(domain, :declaration, nothing)
+        expression = declaration === nothing ? "" :
+            " (`@options $(input.name) = $(get(declaration, :expression_string, "?"))`)"
+        throw(ArgumentError(string(
+            "the declared domain for $(repr(input.name)) on $(typeof(source))",
+            expression, " could not be evaluated: ", sprint(showerror, err),
+            "\nA declared domain reads the node it is evaluated against, so every ",
+            "name it depends on must be a property of that node — promote a ",
+            "dependency that is currently only an operation argument to a field.")))
+    end
+    declared === nothing && return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :static_domain), declared;
+        multiple=get(domain, :multiple, false),
+        allow_custom=get(domain, :allow_custom, false))
 end
 
 function _resolved_input_domain(obj, T, input, values)
     domain = get(input, :domain, nothing)
-    (domain === nothing || get(domain, :kind, :unrestricted) !== :dynamic) && return domain
-
-    provider = get(domain, :provider, nothing)
-    provider isa Symbol || throw(ArgumentError(
-        "dynamic domain for $(input.name) has no provider property"))
-    provider_descriptor = _property_descriptor(T, provider)
-    provider_descriptor === nothing && throw(ArgumentError(
-        "dynamic domain provider $(repr(provider)) is not described on $(T)"))
-    dependencies = get(domain, :dependencies, Symbol[])
-    args = [_domain_dependency_value(obj, values, dep) for dep in dependencies]
-    prop = getproperty(obj, provider)
-    raw_options = get(provider_descriptor, :indexed, false) ? prop(args...) : prop
-    Base.invokelatest(getproperty(DynamicObjects, :static_domain), raw_options;
-        multiple=get(domain, :multiple, false),
-        allow_custom=get(domain, :allow_custom, false))
+    domain === nothing && return domain
+    get(domain, :kind, :unrestricted) === :declared || return domain
+    _declared_input_domain(obj, input, domain, values)
 end
 
 _submitted_domain_values(value, multiple::Bool) =
@@ -3420,16 +3631,25 @@ _operation_poll_request(req::HTTP.Request) =
 _operation_form_request(req::HTTP.Request) =
     _operation_poll_marker(get(queryparams(req), "__htmxo_form", nothing))
 
-function _operation_marker_url(target::AbstractString, marker::AbstractString)
+_operation_poll_token(value::AbstractString) = String(value)
+_operation_poll_token(values::AbstractVector) =
+    length(values) == 1 ? _operation_poll_token(only(values)) : nothing
+_operation_poll_token(_) = nothing
+
+_operation_poll_token(req::HTTP.Request) =
+    _operation_poll_token(get(queryparams(req), "__htmxo_operation", nothing))
+
+function _operation_marker_url(target::AbstractString, marker::AbstractString,
+        value::AbstractString="1")
     separator = occursin('?', target) ? '&' : '?'
-    target * separator * marker * "=1"
+    target * separator * marker * "=" * value
 end
 
-function _operation_poll_url(policy::OperationPolicy, req::HTTP.Request)
+function _operation_poll_url(req::HTTP.Request, token::AbstractString)
     target = String(req.target)
-    policy.mode === :auto || return target
     _operation_poll_request(req) && return target
-    _operation_marker_url(target, "__htmxo_poll")
+    target = _operation_marker_url(target, "__htmxo_poll")
+    _operation_marker_url(target, "__htmxo_operation", token)
 end
 
 # `:auto` spends a small part of Oxygen's existing request task waiting on the
@@ -3438,6 +3658,154 @@ end
 # shape so the public type remains Revise-safe on Julia 1.10.
 _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
     policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
+
+# Polls are separate HTTP requests, and the default RootProvider deliberately
+# constructs a fresh DynamicObject root for each one. DynamicObjects caches are
+# instance-local, so a poll cannot rediscover a Pending handle by recomputing
+# the route on that fresh root. Retain the exact original IP/handle behind an
+# independently generated OS-random bearer token instead.
+#
+# The registry is process-local, bounded, and expiring. Possession of the
+# non-enumerable token authorizes polling one operation; it is also bound to the
+# routed root/leaf types, route, typed args, and provider scope/key, so a token
+# presented to another mount, operation, session, or job is rejected.
+# Successful terminal rendering deletes the entry immediately; abandoned or
+# failed pollers fall out through TTL/LRU pruning.
+const _OPERATION_POLL_LIMIT = 256
+const _OPERATION_POLL_TTL = 600.0
+const _operation_poll_lock = ReentrantLock()
+
+mutable struct _OperationPollEntry
+    token::String
+    signature::Any
+    prop::Any
+    keys::Tuple
+    call_kwargs::NamedTuple
+    started::Any
+    error_obj::Any
+    request::HTTP.Request
+    created_at::Float64
+    touched_at::Float64
+end
+
+const _operation_polls = Dict{String,_OperationPollEntry}()
+
+_operation_poll_now() = _root_retention_time()
+
+function _new_operation_poll_token()
+    bytes2hex(Random.rand(Random.RandomDevice(), UInt8, 32))
+end
+
+function _prune_operation_polls!(now::Real=_operation_poll_now())
+    expired = String[]
+    for (token, entry) in _operation_polls
+        now - entry.touched_at >= _OPERATION_POLL_TTL && push!(expired, token)
+    end
+    foreach(token -> delete!(_operation_polls, token), expired)
+    nothing
+end
+
+function _evict_oldest_operation_poll!()
+    isempty(_operation_polls) && return nothing
+    token = first(keys(_operation_polls))
+    touched = _operation_polls[token].touched_at
+    for (candidate, entry) in _operation_polls
+        if entry.touched_at < touched
+            token = candidate
+            touched = entry.touched_at
+        end
+    end
+    delete!(_operation_polls, token)
+    nothing
+end
+
+function _retain_operation_poll!(entry::_OperationPollEntry;
+        now::Real=_operation_poll_now())
+    lock(_operation_poll_lock)
+    try
+        _prune_operation_polls!(now)
+        while length(_operation_polls) >= _OPERATION_POLL_LIMIT
+            _evict_oldest_operation_poll!()
+        end
+        entry.touched_at = Float64(now)
+        _operation_polls[entry.token] = entry
+    finally
+        unlock(_operation_poll_lock)
+    end
+    entry
+end
+
+function _lookup_operation_poll(token::AbstractString, signature;
+        now::Real=_operation_poll_now())
+    lock(_operation_poll_lock)
+    try
+        _prune_operation_polls!(now)
+        entry = get(_operation_polls, String(token), nothing)
+        entry isa _OperationPollEntry || return nothing
+        isequal(entry.signature, signature) || return nothing
+        entry.touched_at = Float64(now)
+        entry
+    finally
+        unlock(_operation_poll_lock)
+    end
+end
+
+function _delete_operation_poll!(token::AbstractString)
+    lock(_operation_poll_lock)
+    try
+        delete!(_operation_polls, String(token))
+    finally
+        unlock(_operation_poll_lock)
+    end
+    nothing
+end
+
+function _clear_operation_polls!()
+    lock(_operation_poll_lock)
+    try
+        empty!(_operation_polls)
+    finally
+        unlock(_operation_poll_lock)
+    end
+    nothing
+end
+
+function _operation_poll_snapshot(; now::Real=_operation_poll_now())
+    lock(_operation_poll_lock)
+    try
+        _prune_operation_polls!(now)
+        copy(_operation_polls)
+    finally
+        unlock(_operation_poll_lock)
+    end
+end
+
+function _operation_poll_signature(target, LeafT, name, verb_inst, idx_vals,
+        kw_pairs)
+    context = get(target, :context, nothing)
+    route = context isa OperationContext ? context.route : ""
+    scope = context isa OperationContext ? context.scope : :request
+    scope_key = context isa OperationContext ? context.key : nothing
+    (;
+        root_type=typeof(target.root),
+        leaf_type=LeafT,
+        route,
+        name,
+        verb=_verb_symbol(verb_inst),
+        idx_vals=Tuple(idx_vals),
+        call_kwargs=NamedTuple(kw_pairs),
+        scope,
+        scope_key,
+    )
+end
+
+function _finish_operation_poll(token::AbstractString, value)
+    try
+        _resolve_operation_value(value)
+    finally
+        _delete_operation_poll!(token)
+    end
+end
 
 # A DO compute-at-most-once handle is CONTROL FLOW, never response content: the
 # progress/poll transport already carries "still running", so a handle that
@@ -3491,8 +3859,36 @@ end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req)
-    prop = getproperty(target.leaf, name)
     mode = _operation_execution_mode(policy, descriptor, req, verb_inst)
+    prop = getproperty(target.leaf, name)
+    keys = (verb_inst, idx_vals...)
+    call_kwargs = NamedTuple(kw_pairs)
+
+    if mode === :polling && _operation_poll_request(req)
+        token = _operation_poll_token(req)
+        isnothing(token) && throw(ArgumentError(
+            "polling operation token is missing or ambiguous"))
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = _lookup_operation_poll(token, signature)
+        entry isa _OperationPollEntry || throw(ArgumentError(
+            "polling operation is expired or does not match this route, its arguments, or its scope"))
+        transport = (
+            poll_url=String(req.target),
+            label=Long(name),
+            poll_interval=policy.poll_interval,
+            keep_progress=policy.keep_progress,
+            error_obj=entry.error_obj,
+            req=entry.request,
+            grace_period=0.0,
+            retain=() -> nothing,
+            cleanup=() -> _delete_operation_poll!(token),
+        )
+        return _operation_polling(
+            value -> _finish_operation_poll(token, value),
+            entry.started, entry.prop, entry.keys, entry.call_kwargs, transport)
+    end
+
     # Decide the transport BEFORE starting the work, and start it the way that
     # transport needs. Starting blockingly and then wrapping the finished value
     # in a poller is a no-op: the request has already paid the full compute, so
@@ -3504,14 +3900,23 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                                        fetch=mode === :polling ? identity :
                                              Base.fetch)
     if mode === :polling
-        transport = (poll_url=_operation_poll_url(policy, req), label=Long(name),
+        token = _new_operation_poll_token()
+        now = _operation_poll_now()
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = _OperationPollEntry(
+            token, signature, prop, keys, call_kwargs, started,
+            target.leaf, req, now, now)
+        transport = (poll_url=_operation_poll_url(req, token), label=Long(name),
                      poll_interval=policy.poll_interval,
                      keep_progress=policy.keep_progress,
                      error_obj=target.leaf, req=req,
-                     grace_period=_operation_grace_period(policy, req))
-        return _operation_polling(_resolve_operation_value, started, prop,
-                                  (verb_inst, idx_vals...),
-                                  NamedTuple(kw_pairs), transport)
+                     grace_period=_operation_grace_period(policy, req),
+                     retain=() -> _retain_operation_poll!(entry),
+                     cleanup=() -> _delete_operation_poll!(token))
+        return _operation_polling(
+            value -> _finish_operation_poll(token, value),
+            started, prop, keys, call_kwargs, transport)
     end
     started
 end
@@ -3686,7 +4091,11 @@ function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractStr
     end
     # `url_name` is kept on the step for backwards compatibility with
     # `_chain_steps` consumers that read it — always equal to `name`.
-    step = (name=name, types=types, url_name=name)
+    # `param_names` carries the INDEX PARAMETER names, which is what an
+    # `@options` declaration is keyed by: `@include compilation(stage::Stage)`
+    # declares its domain as `@options(stage)`, not `@options(compilation)`.
+    step = (name=name, types=types, url_name=name,
+            param_names=Symbol.(pos_idx_names))
     (nested_prefix, step)
 end
 
@@ -3840,7 +4249,7 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
         end
 
         # Not a route — try nested-include recursion.
-        nested_type = _nested_struct_type(IterT, Val(name))
+        nested_type = _child_struct_type(IterT, Val(name))
         if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
             recurse_nested(name, info, nested_type)
             continue
@@ -3901,6 +4310,105 @@ True if `obj` defines either `__page__` or the legacy `page` property.
 _has_page(obj) = hasproperty(obj, :__page__) || hasproperty(obj, :page)
 
 """
+    _page_accepts_navigation(obj) -> Bool
+
+True when `obj`'s page wrapper declares a `navigation` keyword argument —
+`__page__(content; navigation=nothing) = …`. Read from the DynamicObjects
+signature rather than by probing the callable, so a wrapper that does not ask
+for navigation is never called with it and its behaviour is byte-unchanged.
+
+A `navigation` keyword declared BY NAME counts, and so does a `; kwargs...`
+slurp — a slurp provably cannot error on an extra keyword, so passing one is
+safe and lets a wrapper forward navigation on to its own children. Telling the
+two apart needs DynamicObjects to mark a splat, which it does via the `vararg`
+field on each signature argument; `get(kw, :vararg, false)` keeps this correct
+against a DynamicObjects that predates that field, where a slurp is
+indistinguishable from an ordinary defaulted keyword and is therefore NOT
+counted (the conservative direction: never push an unexpected argument into a
+page wrapper that might reject it).
+"""
+function _page_accepts_navigation(obj)
+    _page_navigation_declaration(obj) === :yes
+end
+
+"""
+    _page_navigation_declaration(obj) -> :yes, :no or :unknown
+
+Tri-state, because "the declaration says no" and "there is no declaration to
+read" must lead to different behaviour.
+
+A page property written as a call — `__page__(content; navigation=nothing)` —
+declares its own answer, and that answer is final in both directions: `:yes`
+threads navigation, `:no` must never receive it (a wrapper that rejects the
+kwarg would otherwise throw on every full-page response).
+
+A page property written as a VALUE — `__page__ = shell(...)`, where the value
+is some callable — declares nothing at all. Its DynamicObjects signature is
+empty because the property takes no arguments; the thing that takes arguments
+is the value it returns. Reading that as `:no` is what made a callable-value
+wrapper silently render `nothing` in place of its chrome. `:unknown` sends the
+question to the callable instead ([`_wrapper_accepts_navigation`](@ref)).
+"""
+function _page_navigation_declaration(obj)
+    T = typeof(obj)
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return :unknown
+    for prop in (:__page__, :page)
+        hasproperty(obj, prop) || continue
+        info = Base.invokelatest(DynamicObjects.metafirst, T, prop)
+        info === nothing && continue
+        sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(T))
+        sig === nothing && return :unknown
+        kwargs = get(sig, :kwargs, ())
+        # No parameters of any kind is the value form, not a refusal.
+        isempty(get(sig, :positional, ())) && isempty(kwargs) && return :unknown
+        return any(kw -> kw.name === :navigation || get(kw, :vararg, false), kwargs) ?
+               :yes : :no
+    end
+    :unknown
+end
+
+"""
+    _wrapper_accepts_navigation(wrapper) -> Bool
+
+Ask a page-wrapper VALUE whether it takes a `navigation` keyword, without
+calling it. `hasmethod(f, Tuple{Any}, (:navigation,))` answers for callable
+objects and plain functions alike, and is true for a keyword slurp — a wrapper
+that accepts `; kwargs...` has said it will tolerate the argument.
+
+Non-invoking on purpose: a page wrapper renders a whole page, and probing must
+not be able to run that, twice, or for its side effects.
+"""
+function _wrapper_accepts_navigation(wrapper)
+    try
+        Base.invokelatest(hasmethod, wrapper, Tuple{Any}, (:navigation,))
+    catch
+        # A non-callable, or a callable whose signature cannot be introspected.
+        false
+    end
+end
+
+"""
+    _apply_page(obj, wrapper, content; depth=1) -> wrapped content
+
+Apply one page wrapper, threading [`navigation`](@ref) metadata into it when it
+asked for it. Called once per page-bearing object in the chain, so a recursively
+nested `__page__` receives the navigation of ITS OWN node — an outer shell sees
+the root's sections, an inner one sees its own — rather than one shared record
+computed at the leaf.
+
+Only reached on the full-page branch of the response pipeline: HTMX fragment and
+`?plain` markdown requests never apply page wrappers at all, so they keep
+stripping chrome exactly as before.
+"""
+function _apply_page(obj, wrapper, content; depth::Integer=1)
+    declared = _page_navigation_declaration(obj)
+    wants = declared === :yes ||
+            (declared === :unknown && _wrapper_accepts_navigation(wrapper))
+    wants || return wrapper(content)
+    wrapper(content; navigation=navigation(obj; depth))
+end
+
+"""
     _req_of(obj) -> HTTP.Request or nothing
 
 Look up the framework-managed request on `obj`. `@htmx` always injects
@@ -3925,6 +4433,84 @@ Never use `DynamicObjects.meta` to inspect properties — use `hasproperty` and 
 # URL-segment Type per index_param, with `nothing` for untyped). For indexed
 # steps the corresponding URL segments after the name segment are extracted
 # and converted via `_convert_param`, then threaded into the property call.
+"""
+    _index_candidates(parent, param, T) -> collection or nothing
+
+The admissible values for one index parameter of a mount, or `nothing` when
+none are known.
+
+Two sources, in order:
+
+- the DECLARED domain — `@options(param) = <expr>`, evaluated against `parent`
+  by DynamicObjects. Whatever the expression produces is what you get; DO does
+  not coerce or wrap it, so a domain of nodes yields nodes and a domain of keys
+  yields keys.
+- an INFERRED enum domain — an `Enum`-typed parameter has a closed, knowable
+  set with no declaration needed.
+
+`nothing` (rather than an empty collection) means "no domain is claimed", which
+is what sends a scalar parameter down the ordinary parse path. A declared but
+genuinely empty domain admits nothing, and is not the same answer.
+"""
+function _index_candidates(parent, param, T)
+    if param isa Symbol && isdefined(DynamicObjects, :property_options)
+        declared = try
+            Base.invokelatest(getproperty(DynamicObjects, :property_options),
+                              parent, param)
+        catch
+            # No declaration, or a domain expression that cannot be evaluated
+            # in this state. Neither is an error here — it only means the
+            # declared source has no answer.
+            nothing
+        end
+        isnothing(declared) || return declared
+    end
+    T isa Type && T <: Base.Enum && return instances(T)
+    nothing
+end
+
+"""
+    _resolve_index_arg(parent, param, raw, T) -> value
+
+Turn one URL segment into the value an indexed mount is selected by.
+
+When the parameter has a domain ([`_index_candidates`](@ref)), the segment is
+matched against the SERIALIZED form of each candidate and the candidate ITSELF
+is returned — so `/dataset/synthetic_depot` reconstructs the `Dataset` node,
+not the string `"synthetic_depot"`. An option is a node, not its label, and the
+application should not have to flatten one to select the other.
+
+A segment outside the domain is rejected rather than parsed: a closed domain
+that silently admits an unlisted value is not a domain. The rejection carries
+the admissible values, since for a closed set that is the useful error.
+
+With no domain, the ordinary `_convert_param` parse applies unchanged, which is
+what every scalar mount keeps doing.
+"""
+function _resolve_index_arg(parent, param, raw, T)
+    candidates = _index_candidates(parent, param, T)
+    isnothing(candidates) && return _convert_param(raw, T)
+    target = String(raw)
+    for candidate in candidates
+        string(candidate) == target && return candidate
+    end
+    # A declared domain may serialize through the same conversion a scalar
+    # would — `@options(chain) = 1:4` against `/chains/2`. Compare on the
+    # converted value before giving up.
+    converted = try
+        _convert_param(raw, T)
+    catch
+        nothing
+    end
+    isnothing(converted) || for candidate in candidates
+        candidate == converted && return candidate
+    end
+    throw(ArgumentError(string(
+        "no ", param === nothing ? "option" : param, " matching ", repr(target),
+        "; admissible values are ",
+        isempty(candidates) ? "none" : join((repr(string(c)) for c in candidates), ", "))))
+end
+
 function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs::Int)
     parts = split(split(req.target, "?")[1], "/", keepempty=false)
     cursor = root_segs
@@ -3941,10 +4527,14 @@ function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs:
         url_name = step isa Symbol ? name :
                    (hasproperty(step, :url_name) ? step.url_name : name)
         url_name === :index || (cursor += 1)
+        param_names = step isa Symbol ? Symbol[] :
+                      (hasproperty(step, :param_names) ? step.param_names : Symbol[])
         obj = if isempty(types)
             getproperty(obj, name)
         else
-            args = Any[_convert_param(parts[cursor + j], types[j]) for j in 1:length(types)]
+            args = Any[_resolve_index_arg(obj, get(param_names, j, nothing),
+                                          parts[cursor + j], types[j])
+                       for j in 1:length(types)]
             cursor += length(types)
             getproperty(obj, name)(args...)
         end
@@ -4011,7 +4601,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
             wrapped = _html_value(val)
             for obj in reverse(page_chain)
                 wrapper = _page_wrapper(obj)
-                isnothing(wrapper) || (wrapped = wrapper(wrapped))
+                isnothing(wrapper) || (wrapped = _apply_page(obj, wrapper, wrapped))
             end
             save_response(record_dir, save_path, to_response(static_transform(wrapped; record_base)))
         end
@@ -4032,7 +4622,7 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
     val = _html_value(val)
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (val = wrapper(val))
+        isnothing(wrapper) || (val = _apply_page(obj, wrapper, val))
     end
     to_response(val)
 end
@@ -4215,6 +4805,21 @@ function _reflect_param_props(OwnerT, method, parent_stack)
     out
 end
 
+# Build one route descriptor. Factored out of `_reflect_walk!` so the flat
+# transport view and the hierarchical semantic graph derive a route from the
+# SAME body — two walks, one answer. Anything route-shaped that needs a
+# descriptor calls this; nobody re-derives paths or params locally.
+function _reflect_route(IterT, name::Symbol, info, method, prefix, parent_stack)
+    route_doc = _decl_doc(info)
+    arg_docs = isnothing(route_doc) ? Dict{Symbol,String}() :
+               _parse_arguments_section(route_doc)
+    path_params, kwargs = _reflect_call_params(IterT, info, method, arg_docs)
+    param_strs = [string(p.name) for p in path_params]
+    path = _route_path(prefix, name, param_strs)
+    params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
+    (verb=Symbol(method), path=path, name=name, doc=route_doc, params=params)
+end
+
 function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
         enrich=(owner, route) -> route)
     _walk_route_meta(IterT,
@@ -4223,18 +4828,8 @@ function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
             _reflect_walk!(acc, nested_type, nested_prefix,
                            push!(copy(parent_stack), IterT); enrich)
         end,
-        (name, info, method) -> begin
-            route_doc = _decl_doc(info)
-            arg_docs = isnothing(route_doc) ? Dict{Symbol,String}() :
-                       _parse_arguments_section(route_doc)
-            path_params, kwargs = _reflect_call_params(IterT, info, method, arg_docs)
-            param_strs = [string(p.name) for p in path_params]
-            path = _route_path(prefix, name, param_strs)
-            params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
-            route = (verb=Symbol(method), path=path, name=name,
-                     doc=route_doc, params=params)
-            push!(acc, enrich(IterT, route))
-        end)
+        (name, info, method) -> push!(acc, enrich(IterT,
+            _reflect_route(IterT, name, info, method, prefix, parent_stack))))
 end
 
 """
@@ -4309,14 +4904,172 @@ function _semantic_route(owner, route)
     merge(route, (owner=owner, params=params, property=property))
 end
 
-function _semantic_graph(T)
-    children = NamedTuple[]
+# --- Node identity, labels, and the semantic graph --------------------------
+#
+# A "node" is one mounted `@htmx` struct. Everything below answers structural
+# questions about nodes — what a node is called, where it lives, what hangs off
+# it. It answers NO semantic question itself: dependencies, option domains,
+# lifecycle and materialization are DynamicObjects' `property_descriptor`
+# records, carried verbatim. Deriving those here would be a second, drifting
+# answer to a question DO already owns.
+#
+# Paths are always built by `_route_path` / `_nested_prefix_and_step` — the
+# same pair the registrar uses. That is deliberate: the `:index` URL-collapse
+# rule already spans five agreeing sites, and navigation must not become a
+# sixth copy of it.
+
+# `__prefix__` is a mounted URL prefix carrying a leading slash (`""` at an
+# unmounted root); `_route_path` / `_nested_prefix_and_step` take the slashless
+# form. These two convert between them in one place.
+_nav_path(prefix::AbstractString) = isempty(prefix) ? "/" : String(prefix)
+_nav_prefix_arg(path::AbstractString) = String(strip(path, '/'))
+
+_nav_prefix(obj) = hasproperty(obj, :__prefix__) ? string(getproperty(obj, :__prefix__)) : ""
+_nav_parent(obj) = hasproperty(obj, :__parent__) ? getproperty(obj, :__parent__) : nothing
+
+# `:prediction_grid` -> "Prediction Grid". A deterministic fallback label, not a
+# guess at intent: a node's real prose is its docstring, carried as `doc`.
+function _humanize(name::Symbol)
+    words = split(replace(String(name), '_' => ' '), ' ')
+    join((isempty(w) ? w : uppercase(w[1:1]) * w[2:end] for w in words), " ")
+end
+
+"""
+    _node_type_descriptor(T) -> NamedTuple or nothing
+
+The type-level record for a node: `(; type, name, description, options)`, taken
+verbatim from `DynamicObjects.type_descriptor`. `description` is the type's own
+user-attached docstring; `options` are its `@options` declarations.
+
+This deliberately does NOT read Julia's doc system directly. An earlier version
+did, and reported the property-list docstring `@dynamicstruct` installs as a
+`?T` fallback — reference text, not a human label — as if the author had written
+it. DynamicObjects knows which docstring is the author's and which is generated;
+HTMXObjects does not, and a wrong label is worse than no label.
+
+`nothing` against a DynamicObjects predating `type_descriptor`, which degrades
+the graph's `doc`/`options` fields to empty rather than to guessed text.
+"""
+function _node_type_descriptor(T)
+    T isa Type || return nothing
+    isdefined(DynamicObjects, :type_descriptor) || return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :type_descriptor), T)
+end
+
+# Where a node's routes come from. HTMXObjects has exactly one structural
+# distinction available here and this is it: a bundle whose type is defined by
+# the framework (`SchemaRoutes`, `TestRoutes`, `RecordingRoutes`, …) contributes
+# routes the application author never wrote — they mounted one `@include` and
+# received a surface. Read it as "who authored these routes", nothing more; it
+# is NOT a claim that the framework synthesizes routes at registration time (it
+# does not — every registered route traces to a `@get`/`@post`/… declaration).
+#
+# The parentheses around `@__MODULE__` are load-bearing: a bare macro call
+# consumes the `?` as a further argument and the ternary never parses.
+_node_origin(T) = (parentmodule(T) === (@__MODULE__)) ? :framework : :declared
+
+# The selection identity of an indexed mount (`@include sub(x::Symbol) = …`):
+# the DO input descriptors for its positional index params, carrying each one's
+# type and option `domain`. Empty for a plain mount — which is exactly the
+# `indexed` test.
+function _nav_selection(T, name::Symbol, info)
+    descriptor = _property_descriptor(T, name, info)
+    descriptor === nothing && return NamedTuple[]
+    NamedTuple[input for input in get(descriptor, :inputs, NamedTuple[])
+               if get(input, :kind, nothing) === :positional]
+end
+
+# One node's identity record. `name`/`label` describe the MOUNT (the property
+# the parent included it under, which is what a breadcrumb shows); `type` and
+# `doc` describe the TYPE. They differ — the same bundle type mounted twice is
+# two nodes with two labels — so both are reported rather than collapsed.
+function _nav_node(name::Symbol, T, path::AbstractString;
+                   indexed::Bool=false, selection::Vector{NamedTuple}=NamedTuple[])
+    descriptor = _node_type_descriptor(T)
+    (; name, type=T, path=_nav_path(path), label=_humanize(name),
+       doc=isnothing(descriptor) ? nothing : descriptor.description,
+       options=isnothing(descriptor) ? Pair{Symbol,NamedTuple}[] : descriptor.options,
+       origin=_node_origin(T), indexed, selection)
+end
+
+# Routes declared AT one node, mount-resolved against `path`. Shares
+# `_reflect_route` with the flat transport view, so a route cannot describe
+# itself one way in the graph and another way in `reflect`.
+function _nav_routes(T, path::AbstractString, parent_stack=Any[];
+                     enrich=(owner, route) -> route)
+    out = NamedTuple[]
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return out
+    prefix = _nav_prefix_arg(path)
+    origin = _node_origin(T)
     _walk_route_meta(T,
-        (name, _info, nested_type) ->
-            push!(children, (name=name, graph=_semantic_graph(nested_type))),
-        (_name, _info, _method) -> nothing,
-    )
-    (type=T, properties=_property_descriptors(T), children=children)
+        (_name, _info, _nested) -> nothing,
+        (name, info, method) -> begin
+            route = _reflect_route(T, name, info, method, prefix, parent_stack)
+            push!(out, merge(enrich(T, route), (; label=_humanize(name), origin)))
+        end)
+    out
+end
+
+# A node's durable artifacts: properties DynamicObjects reports as materializing
+# to disk (`@mmap` / `@cached`). Projected from the DO descriptors already on
+# the node — not separately derived.
+_nav_resources(properties) =
+    NamedTuple[(; descriptor.name, descriptor.role,
+                 tier=descriptor.output.materialization.tier,
+                 type=descriptor.output.type,
+                 versioned=get(descriptor.semantics, :versioned, false))
+               for descriptor in properties
+               if descriptor.output.materialization.tier in (:mmap, :serialized)]
+
+"""
+    _semantic_graph(T, name, prefix, parent_stack; indexed, selection) -> NamedTuple
+
+One node of the semantic graph, recursing over `@include` mount edges. Every
+node has the same shape, root included, so a consumer walks it with one rule:
+
+  identity  — `name`, `label`, `type`, `doc`, `path`, `origin`
+  selection — `indexed`, `selection` (the index params that pick this node,
+              each with its type and option `domain`)
+  content   — `properties` (verbatim DynamicObjects descriptors: role,
+              dependencies, materialization, domains), `options` (the node's
+              `@options` declarations), `resources` (the on-disk projection),
+              `routes` (mount-resolved, shared with `reflect`)
+  structure — `children`
+
+Mount edges come from `_walk_route_meta` and paths from
+`_nested_prefix_and_step`, i.e. the same pair the registrar uses, so a node's
+`path` is the URL its routes actually register under and the `:index`-collapse
+rule is not re-implemented here.
+
+A type that is not a DynamicObjects type still yields a well-formed node with
+empty content — reflection describes what it finds and does not throw on a
+plain `struct` mounted somewhere in the tree.
+"""
+function _semantic_graph(T, name::Symbol=nameof(T), prefix::AbstractString="",
+                         parent_stack=Any[];
+                         indexed::Bool=false,
+                         selection::Vector{NamedTuple}=NamedTuple[])
+    path = _nav_path(isempty(prefix) ? "" : "/" * prefix)
+    is_dynamic = hasmethod(DynamicObjects.meta, Tuple{Type{T}})
+    properties = is_dynamic ? _property_descriptors(T) : NamedTuple[]
+    children = NamedTuple[]
+    if is_dynamic
+        _walk_route_meta(T,
+            (child, info, nested_type) -> begin
+                nested_prefix, _step = _nested_prefix_and_step(T, child, info, prefix)
+                child_selection = _nav_selection(T, child, info)
+                push!(children, _semantic_graph(nested_type, child, nested_prefix,
+                                                push!(copy(parent_stack), T);
+                                                indexed=!isempty(child_selection),
+                                                selection=child_selection))
+            end,
+            (_name, _info, _method) -> nothing)
+    end
+    (; _nav_node(name, T, path; indexed, selection)...,
+       properties,
+       resources=_nav_resources(properties),
+       routes=_nav_routes(T, path, parent_stack; enrich=_semantic_route),
+       children)
 end
 
 """
@@ -4331,15 +5084,164 @@ the owning type, its matching property descriptor, effective fixed-field
 `domain`. Existing `reflect(T)` output is unchanged.
 """
 function semantic_descriptor(::Type{T}) where {T}
-    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ||
-        return (type=T, graph=(type=T, properties=NamedTuple[], children=NamedTuple[]),
-                routes=NamedTuple[])
     routes = NamedTuple[]
-    _reflect_walk!(routes, T, ""; enrich=_semantic_route)
+    # `_reflect_walk!` needs a route table to walk; `_semantic_graph` degrades to
+    # an empty node on its own, so the non-`@htmx` case only has to skip the walk
+    # — it must NOT hand back a differently-shaped hand-built graph, or a consumer
+    # that handles the root uniformly breaks on exactly the degenerate input.
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) &&
+        _reflect_walk!(routes, T, ""; enrich=_semantic_route)
     (type=T, graph=_semantic_graph(T), routes=routes)
 end
 
 semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
+
+# --- Navigation ------------------------------------------------------------
+
+# Identify a MOUNTED object against its parent: which `@include` property mounts
+# it, and — for an indexed mount — the DO input descriptors that make up its
+# selection identity. An object does not know its own property name; the parent
+# does.
+function _nav_identity(obj)
+    T = typeof(obj)
+    parent = _nav_parent(obj)
+    parent === nothing && return (; name=nameof(T), selection=NamedTuple[])
+    ParentT = typeof(parent)
+    hasmethod(DynamicObjects.meta, Tuple{Type{ParentT}}) ||
+        return (; name=nameof(T), selection=NamedTuple[])
+    found_name = nothing
+    found_selection = NamedTuple[]
+    _walk_route_meta(ParentT,
+        (name, info, nested_type) -> begin
+            if found_name === nothing && nested_type === T
+                found_name = name
+                found_selection = _nav_selection(ParentT, name, info)
+            end
+        end,
+        (_name, _info, _method) -> nothing)
+    found_name === nothing ? (; name=nameof(T), selection=NamedTuple[]) :
+                             (; name=found_name, selection=found_selection)
+end
+
+function _nav_self(obj)
+    identity = _nav_identity(obj)
+    _nav_node(identity.name, typeof(obj), _nav_prefix(obj);
+              indexed=!isempty(identity.selection), selection=identity.selection)
+end
+
+function _nav_ancestors(obj)
+    out = NamedTuple[]
+    node = _nav_parent(obj)
+    while node !== nothing
+        pushfirst!(out, _nav_self(node))
+        node = _nav_parent(node)
+    end
+    out
+end
+
+"""
+    _nav_options(obj, name) -> options or nothing
+
+Evaluate the option domain declared for parameter `name` against a REAL object.
+
+Type-level reflection can only render the declaration (`@options model =
+models_for(study)`); what it evaluates TO is an object question, because a
+dependent domain reads sibling values off that specific node. DynamicObjects
+lowers a declaration to an ordinary lazily computed property, so it memoizes and
+invalidates the result — evaluating here re-derives nothing and needs no cache of
+its own.
+
+`nothing` means "not answered here", which is deliberately distinct from an empty
+option list meaning "no valid values". It is returned when DynamicObjects predates
+`property_options`, when no declaration governs `name`, and when evaluation
+throws — a dependent domain may legitimately fail on a node whose dependencies
+are not yet satisfied, and navigation is page chrome: it must not be able to take
+a working page down to decorate a link.
+"""
+function _nav_options(obj, name::Symbol)
+    isdefined(DynamicObjects, :property_options) || return nothing
+    isdefined(DynamicObjects, :has_option_declaration) || return nothing
+    declared = Base.invokelatest(
+        getproperty(DynamicObjects, :has_option_declaration), typeof(obj), name)
+    declared === nothing && return nothing
+    try
+        Base.invokelatest(getproperty(DynamicObjects, :property_options), obj, name)
+    catch
+        nothing
+    end
+end
+
+# `obj` is the object OWNING these children, when one exists. Only the first
+# level gets it: descending would mean constructing each child to hold one, and
+# building objects is a side effect reflection has no business causing. So the
+# immediate descendants can report evaluated option domains and deeper ones
+# report the declaration only — the depth at which a UI actually renders a picker.
+function _nav_children(T, path::AbstractString, depth::Integer, obj=nothing)
+    out = NamedTuple[]
+    depth <= 0 && return out
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return out
+    prefix = _nav_prefix_arg(path)
+    _walk_route_meta(T,
+        (name, info, nested_type) -> begin
+            nested_prefix, _step = _nested_prefix_and_step(T, name, info, prefix)
+            child_path = _nav_path(isempty(nested_prefix) ? "" : "/" * nested_prefix)
+            selection = _nav_selection(T, name, info)
+            isnothing(obj) || (selection = NamedTuple[
+                merge(input, (; options=_nav_options(obj, input.name)))
+                for input in selection])
+            push!(out, (; _nav_node(name, nested_type, child_path;
+                                    indexed=!isempty(selection), selection)...,
+                        routes=_nav_routes(nested_type, child_path),
+                        children=_nav_children(nested_type, child_path, depth - 1)))
+        end,
+        (_name, _info, _method) -> nothing)
+    out
+end
+
+# How the current request wants this response rendered. The three modes are the
+# response pipeline's own branches, reported rather than re-decided — a caller
+# must never have to sniff headers itself to know whether chrome will survive.
+function _nav_request(obj)
+    req = _req_of(obj)
+    req === nothing && return (; path=nothing, mode=:none)
+    (; path=String(split(req.target, "?")[1]),
+       mode=wants_markdown(req) ? :markdown : is_htmx(req) ? :fragment : :page)
+end
+
+"""
+    navigation(obj; depth=1) -> NamedTuple
+
+Navigation metadata for the mounted `@htmx` object `obj`, as plain data. Builds
+no DOM: what a breadcrumb, sidebar or tab strip looks like stays entirely the
+application's choice.
+
+    (; current, ancestors, descendants, request)
+
+- `current` — this node: `name`, `type`, `path`, `label`, `doc`, `origin`,
+  `indexed`, `selection`, and the `routes` declared on it.
+- `ancestors` — the mount chain from the root down to this node's parent
+  (root first), each the same node record.
+- `descendants` — `@include`d children, `depth` levels deep; each carries its
+  own `routes` and nested `children`.
+- `request` — `(; path, mode)` where `mode` is `:page`, `:fragment`,
+  `:markdown`, or `:none` when the object carries no request.
+
+Paths on `current` and `ancestors` are CONCRETE — an indexed mount's segment
+holds the value it was selected with. Paths on `descendants` are TEMPLATES
+(`/models/{name}`), because which children exist is not a question this
+function asks; `selection` names the placeholder and carries its
+DynamicObjects option `domain`.
+
+`depth=0` returns no descendants; a large `depth` walks the whole subtree.
+"""
+function navigation(obj; depth::Integer=1)
+    T = typeof(obj)
+    path = _nav_path(_nav_prefix(obj))
+    (; current=(; _nav_self(obj)..., routes=_nav_routes(T, path)),
+       ancestors=_nav_ancestors(obj),
+       descendants=_nav_children(T, path, depth, obj),
+       request=_nav_request(obj))
+end
 
 """
     route!(app; prefix="", record_dir=nothing, record_base="",
@@ -5640,6 +6542,10 @@ include("routes/test_routes.jl")
 
 include("routes/structure_routes.jl")
 
+include("routes/reflection_routes.jl")
+
+include("routes/resource_routes.jl")
+
 include("routes/shared_ops_routes.jl")
 
 _hidden_input(k, v) = [h.input(; type="hidden", name=string(k), value=string(v))]
@@ -6450,13 +7356,28 @@ function _check_mounted_include_child(obj, route)
         "the child; do not inject a detached child into the new root.")))
 end
 
+"""
+    _semantic_refresh_dependencies(route) -> Set{Symbol}
+
+The inputs whose value changes another input's option list, and therefore have
+to re-fetch the form when they change.
+
+A declaration that reads nothing (`static`) is fixed for the type and needs no
+refresh wiring; one that reads something names what it read, from the same
+`dependson` walk every property RHS gets. Not every dependency is an input —
+`@options(dataset) = choices(cohort)` reads the property `choices` as well as
+the field `cohort` — so the caller intersects this with the form's own controls.
+"""
 function _semantic_refresh_dependencies(route)
     dependencies = Set{Symbol}()
     for param in route.params
         domain = get(param, :domain, nothing)
         domain === nothing && continue
-        get(domain, :kind, :unrestricted) === :dynamic || continue
-        union!(dependencies, Symbol.(get(domain, :dependencies, Symbol[])))
+        get(domain, :kind, :unrestricted) === :declared || continue
+        declaration = get(domain, :declaration, nothing)
+        declaration === nothing && continue
+        get(declaration, :static, true) && continue
+        union!(dependencies, Symbol.(get(declaration, :dependencies, Symbol[])))
     end
     dependencies
 end
@@ -6680,13 +7601,16 @@ function _semantic_mounts!(mounts, obj, graph, root_prefix)
         hasproperty(obj, child.name) || throw(ArgumentError(
             "semantic_app descriptor names child $(repr(child.name)) on $(typeof(obj)), but the mounted object has no such property"))
         mounted = getproperty(obj, child.name)
-        ChildT = child.graph.type
+        # A child IS a node — `_semantic_graph` gives every node the same shape,
+        # root included, so a child is walked with the same rule as the root and
+        # is not wrapped in a `graph` field.
+        ChildT = child.type
         mounted isa ChildT || throw(ArgumentError(string(
             "semantic_app cannot materialize child $(repr(child.name)) on $(typeof(obj)): ",
             "the descriptor expects $(ChildT), but `getproperty` produced $(typeof(mounted)). ",
             "Indexed `@include` children need a selected index; render `semantic_app` on ",
             "that selected child, or mount a plain semantic child.")))
-        _semantic_mounts!(mounts, mounted, child.graph, root_prefix)
+        _semantic_mounts!(mounts, mounted, child, root_prefix)
     end
     mounts
 end
@@ -9273,6 +10197,7 @@ include("routes/editor_routes.jl")
 function __init__()
     # Per-process error log dir for caught route exceptions.
     ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
+    _clear_operation_polls!()
     isassigned(_managed_root_release_handler) ||
         (_managed_root_release_handler[] = nothing)
 end
