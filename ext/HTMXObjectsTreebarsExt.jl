@@ -38,6 +38,10 @@ function __init__()
         (render_result, started, ip, keys, call_kwargs, transport) -> begin
             fast = _grace_fetch(render_result, started, transport.grace_period)
             fast.ready && return fast.value
+            # Only retain operations that actually cross the grace boundary and
+            # emit a poller. Fast values and test seams that replace this
+            # extension never occupy the bounded operation registry.
+            transport.retain()
             treebars_transport = (
                 poll_url=transport.poll_url,
                 label=transport.label,
@@ -47,7 +51,14 @@ function __init__()
                 req=transport.req,
             )
             kwargs = merge(call_kwargs, treebars_transport)
-            Treebars.polling_fetchindex(render_result, ip, keys...; kwargs...)
+            try
+                Treebars.polling_fetchindex(render_result, ip, keys...; kwargs...)
+            catch
+                # keep_progress=true renders failures internally; propagated
+                # failures (including keep_progress=false) have no future poll.
+                transport.cleanup()
+                rethrow()
+            end
         end
 end
 

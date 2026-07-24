@@ -119,7 +119,8 @@ operation needs custom placement.
     @param study::Symbol = :alpha
 
     @include models = begin
-        @semantic (inputs=(model=(domain=static_domain((:base, :full)),),),) @get fit(; model::Symbol=:base) =
+        @options model = (:base, :full)
+        @get fit(; model::Symbol=:base) =
             h.p("$(study):$(model)")
     end
 
@@ -141,8 +142,10 @@ form includes that group automatically:
 
 ```julia
 @htmx struct ModelGraph
-    @semantic (inputs=(study=(domain=static_domain((:north, :south)),),),) study::Symbol
-    @semantic (inputs=(dose=(domain=static_domain((50, 100)),),),) dose::Int
+    @options study = (:north, :south)
+    study::Symbol
+    @options dose = (50, 100)
+    dose::Int
 
     @get fit() = h.p("fit:$(study):$(dose)")
     @post predict() = h.p("predict:$(study):$(dose)")
@@ -186,19 +189,27 @@ semantic_app
 operation_form
 ```
 
-### What the compiler reads from a `@semantic` descriptor
+### What the compiler reads from a descriptor
 
-`@semantic`, `property_descriptor`, `property_descriptors`, `option_descriptor`,
-`static_domain` and `dynamic_domain` are **re-exported from DynamicObjects** —
-the descriptor schema itself is DynamicObjects'. What follows is the other half
-of the contract: which of those descriptor keys HTMXObjects' form compiler
-actually consumes, and what each one does to the generated UI. A key not listed
-here has no rendering effect.
+`property_descriptor`, `property_descriptors` and `static_domain` are
+**re-exported from DynamicObjects** — the descriptor schema itself is
+DynamicObjects'. What follows is the other half of the contract: which of those
+descriptor keys HTMXObjects' form compiler actually consumes, and what each one
+does to the generated UI. A key not listed here has no rendering effect.
 
-A `@semantic` input override accepts exactly `name`, `type`, `required`,
-`default`, `kind` and `domain`; an unrecognised key is a loud error at macro
-expansion (`unknown @semantic fields for input ...`), not a silent no-op. For
-an ordinary route argument, **only `kind` and `domain` are merged into the
+There is no authored-metadata macro. DynamicObjects **reflects** ordinary
+fields, property signatures, inferred dependencies, result annotations,
+`Bool`/`Enum` types and cache markers directly, so a descriptor is derived from
+the declaration you already wrote. The single thing reflection cannot prove — a
+finite domain that the type does not imply — is declared with
+`@options <parameter> = <domain expression>`, as in the examples above. One
+declaration covers **every** operation taking that parameter name.
+
+(`@semantic`, `option_descriptor` and `dynamic_domain` were removed in
+DynamicObjects `9490b55`. A stale `@semantic` block is a loud error at macro
+expansion, not a silent no-op.)
+
+For an ordinary route argument, **only the declared domain is merged into the
 rendered control** — the rest comes from the route declaration. Effective
 `kind=:context` inputs instead carry their type/default/domain and
 `source=(; type, property)` from the fixed field descriptor; HTMXObjects uses
@@ -206,8 +217,8 @@ that source to resolve, deduplicate, render, validate and rebuild the mounted
 target.
 
 So, to answer the obvious question directly: labels, help text, units and
-ordering are **not** expressible in the `@semantic` block, and there is no
-effect/side-effect policy key at all.
+ordering are **not** declarable, and there is no effect/side-effect policy key
+at all.
 
 | What you want to control | Where it actually comes from |
 |--------------------------|------------------------------|
@@ -226,17 +237,39 @@ on the direct, non-polling transport regardless of policy.
 
 ### Domains and control selection
 
-A domain is a `NamedTuple`; `static_domain` and `dynamic_domain` are the
-DynamicObjects constructors that build one. HTMXObjects reads these keys:
+A domain is a `NamedTuple`. `static_domain(values; multiple, allow_custom)` is
+the DynamicObjects constructor that normalises a list of values into one;
+`@options` produces the other kind, which reflection reports **undecided**.
+HTMXObjects reads these keys:
 
 | Domain key | Meaning |
 |------------|---------|
-| `kind` | `:unrestricted` (or absent) falls back to the typed control; `:dynamic` resolves `provider` per request; anything else is a fixed option set |
-| `options` | Vector of option `NamedTuple`s (see below) |
+| `kind` | `:unrestricted` (or absent) falls back to the typed control; `:static` is a fixed option set; `:declared` is an `@options` declaration that HTMXObjects evaluates per request |
+| `options` | Vector of option `NamedTuple`s (see below). **Empty for `:declared`** — see the next paragraph |
 | `multiple` | Emits `multiple` on the select and accepts a vector on submit |
 | `allow_custom` | Renders `sinput_custom` (datalist + free text) and **skips server-side domain validation** |
-| `provider` | `:dynamic` only — a `Symbol` naming a DynamicObjects property on the owning type that yields the options |
-| `dependencies` | `:dynamic` only — input names whose current values are passed to `provider`; changing one re-renders the form without executing the operation |
+| `declaration` | `:declared` only — the recorded declaration: `parameter`, `expression`, `expression_string`, `dependencies`, `static`, `source`, `lnn` |
+
+Reflection describes a **type**, and `@options` lowers to a lazily computed
+property, so describing a type evaluates nothing: a `:declared` domain always
+reports `options == NamedTuple[]` and `cardinality === nothing`. HTMXObjects
+resolves it per request by calling
+`DynamicObjects.property_options(object, parameter)` and normalising the result
+through `static_domain`, carrying `multiple`/`allow_custom` across. That is the
+only reason the option list ever has values — nothing pre-enumerates it.
+
+A declared domain is evaluated against **the node**, so every name it reads must
+be a property of that node. `@options dataset = choices(cohort)` requires
+`cohort` to be a field (or otherwise a property) of the type declaring it — a
+sibling argument of the same operation is not in scope and raises
+`UndefVarError` at evaluation time. Promote such a dependency to a fixed field;
+the `dependson` walk then also surfaces it as a `:context` input, so it is
+submitted with the form and the node is remade with it before the domain is
+asked.
+
+`declaration.dependencies` with `static == false` additionally drives
+**dependent refresh**: an input naming such a dependency re-fetches the form
+when it changes, instead of executing the operation.
 
 Each option carries `value` and `label`, plus optional `disabled` (rendered
 disabled and excluded from validation), `help` (a `title=` tooltip on a
@@ -348,14 +381,15 @@ poller written to disk.
 
 "App-level" is literal, and it is the answer to the question this section is
 otherwise easy to misread: the policy is stored per **root type** and threaded
-into **every** route registered under that root — `@semantic` or not, inside the
-`semantic_app` graph or not. It is documented here because `semantic_app` is
-where it usually first matters, not because it is scoped to the compiler.
+into **every** route registered under that root — declared with `@options` or
+not, inside the `semantic_app` graph or not. It is documented here because
+`semantic_app` is where it usually first matters, not because it is scoped to
+the compiler.
 
 So a hand-written route that renders bespoke HTML into an htmx-targeted
 fragment — a master/detail row detail, say — is governed by the policy exactly
-like a compiled operation card is. It needs no `@semantic` block, no descriptor
-key, and no hand-written poller.
+like a compiled operation card is. It needs no declaration, no descriptor key,
+and no hand-written poller.
 
 Under `:auto` a route takes the polling transport when **all** of these hold;
 otherwise it stays direct:
@@ -374,6 +408,24 @@ period (~0.1s) with a poller; an operation that finishes inside grace skips the
 poller and returns its value directly. `polling_fetchindex` therefore remains
 useful only for what the policy does not cover — a non-GET operation, a declared
 final response, or a poller you want to shape by hand.
+
+Every emitted poller carries an independently generated, OS-random bearer
+token. Keep it confidential: possession authorizes polling that one operation.
+HTMXObjects also binds the token to the original route, typed arguments, and
+`RootProvider` scope/key, so a poll request reaches the exact in-flight property
+even though the default provider constructs a fresh root per request.
+Concurrent identical operations receive distinct, non-enumerable tokens.
+Successful terminal rendering removes the retained operation immediately; a
+bounded process-local registry expires abandoned or failed pollers.
+
+The progress tree is property-scoped. In generated DynamicObjects bodies,
+source-visible `object.property` reads and `object.indexed(args...)` calls carry
+the caller's progress node explicitly into the nested computation. Ordinary
+Julia calls, constructors, arithmetic and loops remain ordinary: a property
+read hidden inside a foreign helper is not attached to its caller. Use the
+explicit DynamicObjects progress markers when that exhaustive/foreign-frame
+instrumentation is intentional. No ambient or task-local progress context is
+installed.
 
 ```@docs
 RootProvider
