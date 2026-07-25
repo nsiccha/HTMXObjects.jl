@@ -938,24 +938,39 @@ See the docstrings for full signatures.
 Three primitives for editable content backed by a git repository:
 
 - `GitRepo` — `@dynamicstruct` owning a working directory. Auto-`git init`s
-  on first access. API: `blob_sha`, `read_blob`, `list_commits`,
-  `write_file!`, `locked_update!`, `editor(relpath)`.
+  on first access. API: `path`, `author`, `read_blob(spec)`,
+  `editor(relpath; default_content="")`.
 - `editor_form(; id, post_url, content, version, ...)` — HTML form with
   Save/Cancel buttons and Escape-to-cancel.
 - `EditorRoutes` — `@htmx` mountable via `@include` under a parent that
-  exposes `editor` (`GitRepo.editor(relpath)`) and `container_id::String`
-  locals. Ships with `@get form`, `@post save`, `@get history`,
-  `@post restore`.
+  exposes `editor` and `container_id::String` locals. Ships with
+  `@get form`, `@post save`, `@get history`, `@post restore`.
+
+`editor(relpath)` returns the per-file handle `EditorRoutes` consumes, and
+that handle **is** the `editor` local's contract — any object with the same
+five properties works:
+
+| Property | Returns |
+|---|---|
+| `current_content()` | current content, `String` |
+| `current_version()` | current blob sha, `String` (`""` if unborn) |
+| `versions()` | iterable of revisions with `sha`, `timestamp`, `author`, `message`, `blob_sha`; empty when nothing is committed yet |
+| `read_version(sha)` | that revision's content, `String` |
+| `write!(content; version, message)` | `(:ok, commit_sha)`, or `(:conflict, current_blob_sha)` if `version` is stale |
+| `update!(f; message)` | atomic read-modify-write under the per-repo lock; `(:ok, sha)` or `(:nochange, sha)` |
+
+A value that lacks these (a placeholder, an un-called handle) is rejected by
+the route with a message naming the route and the missing properties.
 
 Parent `@param` values auto-forward through edit/save/cancel/history/
 restore via `query_url(path, __parent__)`, so a parameterised parent
 (`@param name::String` picking a file) round-trips with no extra wiring.
 
 For partial-file edits (e.g. one key of a multi-key YAML), use
-`repo.locked_update!(relpath; message) do current ... end` instead of
-`write_file!` — the former serialises under the per-repo lock and composes
-with `write_file!`, avoiding the read-then-write race that optimistic
-concurrency would surface as a spurious conflict.
+`repo.editor(relpath).update!(; message) do current ... end` instead of
+`write!` — the former serialises under the per-repo lock and composes with
+`write!`, avoiding the read-then-write race that optimistic concurrency
+would surface as a spurious conflict.
 
 See `HTMXObjects/web/src/git_editor_demo.jl` for a worked example.
 
