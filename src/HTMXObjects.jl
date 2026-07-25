@@ -10210,6 +10210,46 @@ function htmxo_syntax_head(; languages=("julia", "stan"))
      h.style(Raw(syntax_css)))
 end
 
+# Blob sha of `relpath` at revspec `rev` — a commit sha, `"HEAD"`, `"<sha>^2"`.
+# `""` when the revision does not resolve or the path does not exist there: an
+# unborn file, a deleted one, or a root commit's parent.
+function _blob_sha_at(repo, rev::AbstractString, relpath::AbstractString)
+    try
+        obj = LibGit2.GitObject(repo, rev * ":" * relpath)
+        try
+            string(LibGit2.GitHash(obj))
+        finally
+            close(obj)
+        end
+    catch err
+        err isa LibGit2.GitError || rethrow()
+        ""
+    end
+end
+
+# Parent commit shas of `sha`, in order; empty for a root commit. Julia's
+# LibGit2 wrapper exposes no parent accessor, so probe the `<sha>^1`, `<sha>^2`,
+# … revspecs until one stops resolving.
+function _parent_shas(repo, sha::AbstractString)
+    out = String[]
+    i = 1
+    while true
+        obj = try
+            LibGit2.GitObject(repo, sha * "^" * string(i))
+        catch err
+            err isa LibGit2.GitError || rethrow()
+            break
+        end
+        try
+            push!(out, string(LibGit2.GitHash(obj)))
+        finally
+            close(obj)
+        end
+        i += 1
+    end
+    out
+end
+
 @dynamicstruct struct GitRepo
     path::String
     author::String = "HTMXObjects <noreply@localhost>"
@@ -10262,22 +10302,24 @@ end
             _ensure()
             repo = LibGit2.GitRepo(path)
             try
-                try
-                    obj = LibGit2.GitObject(repo, "HEAD:" * relpath)
-                    try
-                        string(LibGit2.GitHash(obj))
-                    finally
-                        close(obj)
-                    end
-                catch err
-                    err isa LibGit2.GitError || rethrow()
-                    ""
-                end
+                _blob_sha_at(repo, "HEAD", relpath)
             finally
                 close(repo)
             end
         end
 
+        # Revisions OF THIS FILE, newest first: the commits where `relpath`
+        # exists and its blob differs from EVERY parent's — git's own
+        # `log -- <path>` simplification, so the result is independent of the
+        # order the repo-wide walker happens to yield commits in.
+        #
+        # This used to compare each commit's blob against the PREVIOUS
+        # ITERATION's and record the current (older) commit on a difference.
+        # The walk is repo-WIDE and reverse-chronological, so that neighbour is
+        # another file's commit as often as not: every entry came out one
+        # recorded change too old, and HEAD was listed for every file whatever
+        # it touched. The entry COUNT stayed right, which is what made it look
+        # correct on a single-file repo (snag `editorroutes-the`).
         versions() = begin
             _ensure()
             Base.lock(_lock) do
@@ -10298,28 +10340,23 @@ end
                             err isa LibGit2.GitError || rethrow()
                             return out
                         end
-                        prev_blob = ""
                         for oid in walker
+                            sha = string(oid)
+                            blob = _blob_sha_at(repo, sha, relpath)
+                            # Unborn or deleted here — no content to restore.
+                            isempty(blob) && continue
+                            any(p -> _blob_sha_at(repo, p, relpath) == blob,
+                                _parent_shas(repo, sha)) && continue
                             commit = LibGit2.GitCommit(repo, oid)
                             try
-                                blob = try
-                                    o = LibGit2.GitObject(repo, string(oid) * ":" * relpath)
-                                    try string(LibGit2.GitHash(o)) finally close(o) end
-                                catch err
-                                    err isa LibGit2.GitError || rethrow()
-                                    ""
-                                end
-                                if !isempty(blob) && blob != prev_blob
-                                    sig = LibGit2.author(commit)
-                                    push!(out, (
-                                        sha       = string(oid),
-                                        timestamp = Int64(sig.time),
-                                        author    = sig.name * " <" * sig.email * ">",
-                                        message   = LibGit2.message(commit),
-                                        blob_sha  = blob,
-                                    ))
-                                end
-                                prev_blob = blob
+                                sig = LibGit2.author(commit)
+                                push!(out, (
+                                    sha       = sha,
+                                    timestamp = Int64(sig.time),
+                                    author    = sig.name * " <" * sig.email * ">",
+                                    message   = LibGit2.message(commit),
+                                    blob_sha  = blob,
+                                ))
                             finally
                                 close(commit)
                             end

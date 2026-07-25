@@ -19,7 +19,7 @@ the built-in implementation, but any object with the same surface works:
 |---|---|
 | `current_content()` | current file content, `String` |
 | `current_version()` | current blob sha, `String` (`""` for an unborn file) |
-| `versions()` | iterable of revisions, each with `sha`, `author`, `message` — empty when nothing is committed yet |
+| `versions()` | iterable of **that file's own** revisions, newest first, each with `sha`, `author`, `message` — empty when nothing is committed yet |
 | `read_version(sha)` | that revision's content, `String` |
 | `write!(content; version, message)` | `(:ok, commit_sha)`, or `(:conflict, current_blob_sha)` when `version` is stale |
 
