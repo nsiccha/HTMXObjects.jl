@@ -34,7 +34,7 @@ export ReflectionRoutes, semantic_graph_view, navigation
 export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
-export semantic_descriptor, operation_form, semantic_app
+export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
 import Random
@@ -3356,14 +3356,79 @@ function _operation_target(provider::RootProvider, RootT, chain::Vector,
        governed)
 end
 
+# --- Framework-injected inputs ---------------------------------------------
+#
+# `_inject_verb_in_route_lhs!` prepends `__verb__::Verb{V}` to every routed
+# property's call LHS, so DynamicObjects sees an ordinary leading positional
+# argument and reports it as one. That is DO working as designed — its
+# `property_signature` is "intentionally verb-agnostic: this returns *every*
+# positional arg, including any framework-injected leading arg … Filtering such
+# args … is the consumer's job" — and `property_descriptor(T, prop).inputs` is
+# built from that signature, so the injected arg rides along into the
+# descriptor too.
+#
+# We are that consumer, and until now every site filtered it with a bare
+# `name === :__verb__` check. A downstream consumer walking `inputs`
+# generically had to copy the same hardcoded name — a phantom positional with
+# an unrestricted domain and nothing on the record saying "internal" — which is
+# exactly the special-case the semantic surface exists to avoid. So MARK rather
+# than omit: every descriptor HTMXObjects hands out carries `internal::Bool` on
+# each of its `inputs`, the descriptor stays a faithful account of the
+# generated signature, and `internal_input` is the supported predicate for a
+# consumer holding a raw DO record.
+const INJECTED_INPUT_NAMES = (:__verb__,)
+
+"""
+    internal_input(input) -> Bool
+
+`true` when `input` is an argument HTMXObjects *injected* into a routed
+property's signature, rather than one the application author declared.
+
+`input` is one entry of a DynamicObjects `property_descriptor(T, prop).inputs`
+list (or of `property_signature`'s `positional` / `kwargs`). Today the only
+injected argument is the leading `__verb__::Verb{V}` that makes verb dispatch a
+method-table lookup; it is reachable as `Verb{:GET}()` at any call site, so a
+consumer enumerating what a route *requires* wants it filtered out.
+
+Descriptors obtained from HTMXObjects' own reflection — [`semantic_descriptor`](@ref),
+and every `property` / `properties` record hanging off it — already carry an
+`internal::Bool` field on each input, so a generic walker can filter on the
+declared property. Use this predicate for a descriptor read straight from
+`DynamicObjects.property_descriptor`, which reports the injected arg unmarked
+by design.
+
+```julia
+declared = [input for input in descriptor.inputs if !internal_input(input)]
+```
+"""
+internal_input(input) = get(input, :internal, nothing) === true ||
+    get(input, :name, nothing) in INJECTED_INPUT_NAMES
+
+# Annotate each input of one DO descriptor with `internal`. Additive and
+# idempotent: an already-marked record is returned untouched, and every other
+# field (including `inputs`' position in the descriptor) is preserved, so a
+# consumer reading `kind` / `domain` / `type` is unaffected.
+function _mark_internal_inputs(descriptor)
+    descriptor === nothing && return nothing
+    inputs = get(descriptor, :inputs, nothing)
+    inputs === nothing && return descriptor
+    all(input -> haskey(input, :internal), inputs) && return descriptor
+    merge(descriptor, (; inputs=NamedTuple[
+        haskey(input, :internal) ? input :
+            merge(input, (; internal=internal_input(input)))
+        for input in inputs]))
+end
+
 function _property_descriptor(T, name::Symbol)
     isdefined(DynamicObjects, :property_descriptor) || return nothing
-    Base.invokelatest(getproperty(DynamicObjects, :property_descriptor), T, name)
+    _mark_internal_inputs(Base.invokelatest(
+        getproperty(DynamicObjects, :property_descriptor), T, name))
 end
 
 function _property_descriptors(T)
     isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
-    Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)
+    NamedTuple[_mark_internal_inputs(descriptor) for descriptor in
+               Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)]
 end
 
 # Descriptor for one EXACT declaration. The `(T, name)` method resolves through
@@ -3374,7 +3439,8 @@ end
 # declaration they actually walked.
 function _property_descriptor(T, name::Symbol, info::NamedTuple)
     isdefined(DynamicObjects, :property_descriptor) || return nothing
-    Base.invokelatest(getproperty(DynamicObjects, :property_descriptor), T, name, info)
+    _mark_internal_inputs(Base.invokelatest(
+        getproperty(DynamicObjects, :property_descriptor), T, name, info))
 end
 
 function _property_descriptor(T, name::Symbol, verb::Symbol)
@@ -3382,6 +3448,9 @@ function _property_descriptor(T, name::Symbol, verb::Symbol)
     for descriptor in _property_descriptors(T)
         descriptor.name === name || continue
         inputs = get(descriptor, :inputs, NamedTuple[])
+        # Matches on the injected arg's TYPE, so it must not use
+        # `internal_input` — that says "injected", not "injected for THIS verb",
+        # and every verb's declaration carries an injected arg.
         any(input -> input.name === :__verb__ &&
                      get(input, :type, nothing) === expected, inputs) &&
             return descriptor
@@ -3394,7 +3463,7 @@ function _operation_input_values(descriptor, idx_vals, kw_pairs)
     descriptor === nothing && return values
     positional = [input for input in get(descriptor, :inputs, NamedTuple[])
                   if get(input, :kind, nothing) === :positional &&
-                     input.name !== :__verb__]
+                     !internal_input(input)]
     for (input, value) in zip(positional, idx_vals)
         values[input.name] = value
     end
@@ -3604,7 +3673,7 @@ function _validate_operation_domains!(obj, T, name::Symbol, verb::Symbol,
     values = _operation_input_values(descriptor, idx_vals, kw_pairs)
     merge!(values, context_values)
     for input in get(descriptor, :inputs, NamedTuple[])
-        input.name === :__verb__ && continue
+        internal_input(input) && continue
         get(input, :kind, nothing) === :context && continue
         haskey(values, input.name) || continue
         _validate_input_domain!(obj, T, input, values[input.name], values)
@@ -4923,9 +4992,10 @@ _reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET") ? :query :
 # `(T, prop)` form would collapse them via `metafirst` (first-decl-wins). The
 # `(info, mod)` form never returns `nothing` (empty indices → empty lists), but
 # we guard anyway. Positionals become path params (skipping the injected
-# `__verb__::Verb{V}`, filtered by name per DO's verb-agnostic contract);
-# kwargs read from query/body by method. `type` is a resolved `Type` (or
-# `nothing`); `default` is meaningful only when `!required`.
+# `__verb__::Verb{V}` via `internal_input`, since DO's contract is
+# verb-agnostic and hands back every positional); kwargs read from query/body
+# by method. `type` is a resolved `Type` (or `nothing`); `default` is
+# meaningful only when `!required`.
 function _reflect_call_params(OwnerT, info, method, arg_docs=Dict{Symbol,String}())
     sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(OwnerT))
     kwsrc = _reflect_kw_source(method)
@@ -4936,7 +5006,7 @@ function _reflect_call_params(OwnerT, info, method, arg_docs=Dict{Symbol,String}
                          default=(p.required ? nothing : _unquote(p.default)),
                          doc=get(arg_docs, p.name, nothing), inherited=false)
     for p in sig.positional
-        p.name === :__verb__ && continue
+        internal_input(p) && continue
         push!(path_params, mk(p, :path))
     end
     for p in sig.kwargs
@@ -5107,8 +5177,9 @@ end
 # questions about nodes — what a node is called, where it lives, what hangs off
 # it. It answers NO semantic question itself: dependencies, option domains,
 # lifecycle and materialization are DynamicObjects' `property_descriptor`
-# records, carried verbatim. Deriving those here would be a second, drifting
-# answer to a question DO already owns.
+# records, carried through unchanged apart from the additive `internal` flag we
+# owe on our OWN injected `__verb__` arg. Deriving those here would be a
+# second, drifting answer to a question DO already owns.
 #
 # Paths are always built by `_route_path` / `_nested_prefix_and_step` — the
 # same pair the registrar uses. That is deliberate: the `:index` URL-collapse
@@ -5274,11 +5345,20 @@ end
 
 Return the merged, HTML-free semantic application descriptor for an `@htmx`
 graph. `graph` is hierarchical across `@include` boundaries and carries the
-exact DynamicObjects `property_descriptors` records at every node. `routes` is
+DynamicObjects `property_descriptors` records at every node. `routes` is
 the flat, mount-resolved transport view from [`reflect`](@ref), enriched with
 the owning type, its matching property descriptor, effective fixed-field
 `kind=:context` inputs, and each declared parameter's semantic `kind` and
 `domain`. Existing `reflect(T)` output is unchanged.
+
+Those DO records are reported as DO builds them, with one additive
+annotation: every entry of a descriptor's `inputs` carries `internal::Bool`.
+A routed property's signature has the framework-injected
+`__verb__::Verb{V}` prepended to it, and DO — deliberately verb-agnostic —
+reports that as an ordinary positional input; the flag is what lets a
+generic walker drop it without hardcoding the name. See
+[`internal_input`](@ref), which is the same predicate for a descriptor read
+straight from `DynamicObjects.property_descriptor`.
 """
 function semantic_descriptor(::Type{T}) where {T}
     routes = NamedTuple[]

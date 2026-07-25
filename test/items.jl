@@ -882,6 +882,66 @@ end
     @test tampered_response.status == 400
 end
 
+@testitem "injected __verb__ input is marked internal, never omitted" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _property_descriptor, reflect
+    import HTMXObjects.DynamicObjects
+
+    # A routed property's signature carries the framework-injected
+    # `__verb__::Verb{V}`, and DO is deliberately verb-agnostic: it reports
+    # every positional arg, so the RAW descriptor lists it as an ordinary
+    # positional alongside the operation's own parameters, with an
+    # unrestricted domain and nothing saying "internal". That is the shape a
+    # generic consumer trips over.
+    raw = DynamicObjects.property_descriptor(SemanticApp, :run)
+    verb = only(filter(input -> input.name === :__verb__, raw.inputs))
+    @test verb.kind === :positional
+    @test verb.domain.kind === :unrestricted
+    @test !haskey(verb, :internal)
+    # …and `internal_input` is the supported filter for it, so a consumer never
+    # has to hardcode the name.
+    @test internal_input(verb)
+    @test [input.name for input in raw.inputs if !internal_input(input)] ==
+          [:cohort, :dataset, :mode, :count]
+
+    # Every descriptor HTMXObjects hands back annotates each input instead:
+    # marked, never dropped, so the record stays a faithful account of the
+    # generated signature.
+    marked = _property_descriptor(SemanticApp, :run)
+    @test [input.name for input in marked.inputs] == [input.name for input in raw.inputs]
+    @test all(input -> haskey(input, :internal), marked.inputs)
+    @test [input.name for input in marked.inputs if input.internal] == [:__verb__]
+
+    # The same annotation reaches the public semantic surface, on the graph
+    # node's properties and on each route's matching property descriptor.
+    descriptor = semantic_descriptor(SemanticApp)
+    graph_run = only(filter(property -> property.name === :run,
+                            descriptor.graph.properties))
+    @test [input.name for input in graph_run.inputs if input.internal] == [:__verb__]
+    route = only(filter(route -> route.owner === SemanticApp &&
+                                 route.name === :run && route.verb === :GET,
+                        descriptor.routes))
+    @test [input.name for input in route.property.inputs if input.internal] == [:__verb__]
+    # A `:context` input is author-declared state, not framework plumbing.
+    cohort = only(filter(input -> input.name === :cohort, route.property.inputs))
+    @test cohort.kind === :context
+    @test !cohort.internal
+
+    # An UNROUTED property of the same shape has nothing to mark: the injection
+    # is what the flag reports, so a plain `@dynamicstruct` operation reads
+    # `internal=false` throughout rather than gaining a phantom argument.
+    plain = _property_descriptor(SemanticApp, :choices)
+    @test [input.name for input in plain.inputs] == [:key]
+    @test !only(plain.inputs).internal
+
+    # `internal_input` also reads `property_signature` entries — the records
+    # `_reflect_call_params` filters — so an indexed route's path params stay
+    # free of the verb, which is the behaviour that was already correct and
+    # must remain so after the name check became a predicate.
+    stream = only(filter(route -> route.name === :stream, reflect(ProviderApp)))
+    @test [param.name for param in stream.params if param.source === :path] == [:id]
+    @test all(param -> !internal_input(param), stream.params)
+end
+
 @testitem "semantic app compiles one mounted graph without an operation registry" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _is_semantic_root_provider, _operation_context,
                         _root_providers
