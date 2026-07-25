@@ -3968,3 +3968,48 @@ end
     @test bad_node isa TBNode
     @test "Failing leaf" in progress_descendants(bad_node)
 end
+
+@testitem "GitRepo editor versions() lists that file's own revisions" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: GitRepo
+
+    dir = mktempdir()
+    # A handle per read, as `EditorRoutes` and the docs use it
+    # (`GitRepo(path).editor(relpath)`).
+    ed(rel) = GitRepo(dir).editor(rel; default_content="")
+    save(rel, content) = begin
+        handle = ed(rel)
+        status, value = handle.write!(content; version=handle.current_version())
+        @test status === :ok
+        value                      # the commit sha this save created
+    end
+
+    # Interleaved saves across three paths at two depths. The interleaving is
+    # what separates "this file's history" from "the repository's history":
+    # with a single file the two are indistinguishable, which is why the bug
+    # this pins survived a single-file round-trip check (snag `editorroutes-the`).
+    s1 = save("s/scratch.md", "S1")
+    s2 = save("s/scratch.md", "S2")
+    a1 = save("s/alpha.md",   "A1")
+    k1 = save("known.md",     "K1")
+    a2 = save("s/alpha.md",   "A2")
+    k2 = save("known.md",     "K2")
+
+    # Each handle reports ITS OWN commits, newest first — not the repository
+    # HEAD, and not a neighbouring file's commit.
+    for (rel, shas, contents) in (("s/alpha.md",   [a2, a1], ["A2", "A1"]),
+                                  ("s/scratch.md", [s2, s1], ["S2", "S1"]),
+                                  ("known.md",     [k2, k1], ["K2", "K1"]))
+        handle = ed(rel)
+        revs = handle.versions()
+        @test [v.sha for v in revs] == shas
+        @test all(v -> v.message == "edit " * rel, revs)
+        @test [handle.read_version(v.sha) for v in revs] == contents
+        @test first(revs).blob_sha == handle.current_version()
+        @test handle.current_content() == first(contents)
+    end
+
+    # A path that was never committed has no history, and neither does a repo
+    # with no commits at all.
+    @test isempty(ed("never-saved.md").versions())
+    @test isempty(GitRepo(mktempdir()).editor("x.md").versions())
+end
