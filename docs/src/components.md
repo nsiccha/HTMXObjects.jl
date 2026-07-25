@@ -252,8 +252,10 @@ end
 
 (`__req__` is a magic property on every `@htmx` instance — don't declare it
 as a path param. Prefer defining `__page__(content)` and returning the bare
-`content_fragment` — the response pipeline applies `__page__` for direct
-browser visits and skips it on HTMX swaps automatically.)
+`content_fragment` — the response pipeline applies the `__page__` levels the
+request actually needs, all of them on a direct visit and only the ones not
+already on screen on an HTMX swap. See the response-pipeline section of the
+manual.)
 
 ## Formatting
 

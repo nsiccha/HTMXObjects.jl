@@ -30,6 +30,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     # run and only a full suite exposed it.
     NavLeaf, NavSection, NavRoot, NavPlainRoot,
     NavChainChild, NavChainRoot, NavSlurpRoot,
+    SwapView, SwapSection, SwapRoot,
     NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
     IndexedMountChild, IndexedMountRoot,
@@ -493,6 +494,32 @@ end
         h.div(h.span("OUTER:" *
                      (isnothing(navigation) ? "none" : navigation.current.path)),
               content)
+    @get index() = "root-body"
+end
+
+# A three-level page chain for PARTIAL swaps. Every level tags its own chrome,
+# so a response body names exactly which wrappers it carries. The indexed mount
+# is the sibling case: `/section/item/a` and `/section/item/b` are the same
+# level but different mount prefixes, so switching between them brings new
+# chrome even though nothing about the chain's shape changed.
+
+@htmx struct SwapView
+    key::String
+    __page__(content) = h.div(h.nav("VIEW-CHROME:" * key), content)
+    @get index() = "view-body"
+    @get detail() = "detail-body"
+end
+
+@htmx struct SwapSection
+    @include view = SwapView("v")
+    @include item(key::String) = SwapView(key)
+    __page__(content) = h.section(h.nav("SECTION-CHROME"), content)
+    @get index() = "section-body"
+end
+
+@htmx struct SwapRoot
+    @include section = SwapSection()
+    __page__(content) = h.div(h.nav("ROOT-CHROME"), content)
     @get index() = "root-body"
 end
 
@@ -3216,10 +3243,86 @@ end
     @test contains(root_body, "root-body")
     @test !contains(root_body, "INNER:")
 
-    # The whole chain is still stripped for HTMX and markdown requests.
+    # A swap that cannot say where it came from still gets a bare fragment, and
+    # markdown never carries chrome at all.
     @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "OUTER:")
     @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "INNER:")
     @test !contains(String(drive("/child", ["Accept" => "text/markdown"]).body), "OUTER:")
+end
+
+@testitem "a partial swap carries the chrome below the swap target" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+    swap(path, from) = String(drive(path, ["HX-Request" => "true",
+                                           "HX-Current-URL" => from]).body)
+
+    route!(SwapRoot())
+
+    # A direct visit is unchanged: every level of the chain wraps, innermost
+    # first. This is the reference the partial cases are measured against.
+    direct = String(drive("/section/view/detail").body)
+    @test contains(direct, "ROOT-CHROME") && contains(direct, "SECTION-CHROME") &&
+          contains(direct, "VIEW-CHROME:v") && contains(direct, "detail-body")
+
+    # THE FIX. Swapping from the section into one of its views: the root and
+    # section shells are on screen already, so re-sending them would duplicate
+    # chrome — but the view's own nav is NOT, and sending the bare fragment is
+    # what left the user one level in with nothing further to click.
+    from_section = swap("/section/view/detail", "http://host/section")
+    @test contains(from_section, "VIEW-CHROME:v")
+    @test !contains(from_section, "SECTION-CHROME")
+    @test !contains(from_section, "ROOT-CHROME")
+    @test contains(from_section, "detail-body")
+
+    # Deeper in, the view's chrome is on screen too, so the swap is bare — the
+    # endpoint the old behaviour got right, reached by the same rule.
+    within_view = swap("/section/view/detail", "http://host/section/view")
+    @test !contains(within_view, "CHROME")
+    @test contains(within_view, "detail-body")
+
+    # From the root, two levels are new and both are sent.
+    from_root = swap("/section/view/detail", "http://host/")
+    @test contains(from_root, "SECTION-CHROME") && contains(from_root, "VIEW-CHROME:v")
+    @test !contains(from_root, "ROOT-CHROME")
+
+    # Sibling switch under an indexed mount: same level, different mount prefix,
+    # so the incoming item's chrome is new. A prefix comparison that stopped at
+    # the level rather than the path would wrongly call this already-on-screen.
+    sibling = swap("/section/item/b/detail", "http://host/section/item/a")
+    @test contains(sibling, "VIEW-CHROME:b")
+    @test !contains(sibling, "SECTION-CHROME")
+    # …while staying inside one item is bare, and the key it reports is its own.
+    @test !contains(swap("/section/item/a/detail", "http://host/section/item/a"), "CHROME")
+
+    # `/section` must not be read as covering `/sectionless` — the comparison is
+    # segment-wise, not `startswith`.
+    sectionless = swap("/section/view/detail", "http://host/sectionless")
+    @test contains(sectionless, "SECTION-CHROME") && !contains(sectionless, "ROOT-CHROME")
+    @test !HTMXObjects._path_covers("/section", "/sectionless")
+    @test HTMXObjects._path_covers("/section", "/section/view")
+    @test HTMXObjects._path_covers("", "/anything")
+    # An encoded segment is the same segment, whichever side carries the escape.
+    @test HTMXObjects._path_covers("/item/a b", "/item/a%20b/detail")
+
+    # No `HX-Current-URL` (a hand-rolled fetch) — position unknown, so bare.
+    @test !contains(String(drive("/section/view/detail",
+                                 ["HX-Request" => "true"]).body), "CHROME")
+
+    # The root's own shell is a whole document, so it is never injected into a
+    # swap — not even from a location this chain does not cover.
+    @test !contains(swap("/section/view/detail", "http://host/elsewhere/deep"),
+                    "ROOT-CHROME")
+
+    # The explicit overrides, both directions.
+    @test !contains(String(drive("/section/view/detail?__chrome__=none").body), "CHROME")
+    forced = swap("/section/view/detail?__chrome__=full", "http://host/section/view")
+    @test contains(forced, "ROOT-CHROME") && contains(forced, "SECTION-CHROME") &&
+          contains(forced, "VIEW-CHROME:v")
+
+    # A misspelled override is an error, not a silent fallback.
+    @test drive("/section/view/detail?__chrome__=partial").status >= 400
 end
 
 @testitem "the semantic graph carries containment, dependency and route edges" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

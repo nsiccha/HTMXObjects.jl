@@ -394,8 +394,45 @@ already an `HTTP.Response`. Precedence (first match wins):
    nodes and their ancestors.
 3. Markdown requested (`?markdown`, `?plain`, or `Accept: text/markdown`/
    `text/plain`) → `to_markdown_string(val)`.
-4. HTMX request (`HX-Request: true`) → fragment returned as-is.
-5. Otherwise → wrap in `__page__(content)` if any ancestor defines one.
+4. HTMX request (`HX-Request: true`) → fragment, wrapped in the `__page__`
+   levels that are **not already on screen** (see below).
+5. Otherwise → wrap in every `__page__(content)` an ancestor defines,
+   innermost-out.
+
+### How much chrome a swap carries
+
+`__page__` composes down the property chain, so `/section/view/detail` under
+three page-defining levels renders as
+`root.__page__(section.__page__(view.__page__(fragment)))` on a direct visit.
+
+A partial swap replaces a region that one of those levels owns. The wrappers
+from the root down to that level are already in the DOM — re-sending them would
+duplicate chrome. The wrappers *below* it are not: they are the chrome of the
+thing being swapped in, and dropping them is what leaves a nested page with no
+navigation of its own.
+
+So the pipeline sends the chain's **suffix**, and derives where it starts from
+what the request already carries — `HX-Current-URL` says where the browser is,
+`__prefix__` says where each level is mounted, and a level is on screen exactly
+when its mount prefix covers the current location:
+
+| Request | Chrome applied |
+|---|---|
+| direct visit | all levels — nothing is on screen |
+| swap from `/section` into `/section/view/detail` | `view` only |
+| swap from `/section/view` into `/section/view/detail` | none — the target's own chrome is on screen |
+| swap from `/section/item/a` into `/section/item/b/…` | the new item's level (a different mount prefix) |
+| swap with no `HX-Current-URL` (a hand-rolled `fetch`) | none — position unknown |
+
+A root's own shell is a whole document, so it is never injected into a swap.
+
+Override per request with `?__chrome__=`:
+
+* `none` — no wrappers at all. For an out-of-band swap, or a fragment
+  deliberately wanted bare.
+* `full` — the whole chain. For a swap that replaces the document body.
+* `auto` — the default described above. Any other value is an error rather than
+  a silent fallback.
 
 **Never branch on request mode inside a route body.** Return bare content;
 the framework handles the rest:
