@@ -65,7 +65,10 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 
 A route's return value is a *fragment*. On direct browser navigation the
 framework wraps it with the app's `__page__` property, which is normally built
-on `htmx(...)` (or its `pico_page` shorthand). That shell — not the route — owns
+on `htmx(...)` (or its `pico_page` shorthand). An HTMX swap gets the levels of
+that chain which are not on screen yet — never the root shell, which is a whole
+document; the manual's response-pipeline section has the rule and the
+`?__chrome__=` override. That shell — not the route — owns
 the document preamble: `<!DOCTYPE html>`, `<meta charset>`, the viewport and
 color-scheme metas, the CDN tags, and the injected theme/feedback assets.
 

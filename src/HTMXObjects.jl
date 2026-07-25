@@ -3157,12 +3157,14 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         end
     end
 
-    # HTMX fragment or no page wrapper defined → return as-is
+    # HTMX fragment or no page wrapper defined → return as-is. A single-object
+    # chain is the root's own, so `_page_chain_skip` drops it for every swap
+    # made from inside this mount — the same answer `is_htmx(req)` gave — while
+    # still honouring an explicit `?__chrome__=` override in either direction.
     fragment_resp = to_response(val)
     wrapper = _page_wrapper(obj)
-    if is_htmx(req) || isnothing(wrapper)
-        return fragment_resp
-    end
+    isnothing(wrapper) && return fragment_resp
+    isempty(_page_chain_to_apply(Any[obj], req; root=obj)) && return fragment_resp
 
     # Full page wrap for direct browser navigation. Normalize first so
     # `__page__` receives the same renderable the HX branch above sent —
@@ -4065,7 +4067,8 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
-                return _resolve_response_nested(page_chain, req, val; record_dir, save_path, record_base)
+                return _resolve_response_nested(page_chain, req, val;
+                                                root, record_dir, save_path, record_base)
             else
                 return _resolve_response(leaf, req, val; record_dir, save_path, record_base)
             end
@@ -4328,6 +4331,11 @@ end
 # defines `__page__` and a nested struct also defines one, the result is
 # `root.__page__(nested.__page__(fragment))` — innermost wraps first, then
 # each ancestor.
+#
+# An HTMX swap gets the SUFFIX of that chain rather than all of it or none of
+# it: the levels the browser is already inside are on screen already, the ones
+# below the swap target are the incoming region's own chrome. `_page_chain_skip`
+# derives the split from `HX-Current-URL` and each level's `__prefix__`.
 #
 # TODO: add an API to opt out of page nesting for specific structs (e.g. a
 # `page_nest=false` property or a `_page_passthrough` convention) for cases
@@ -4610,8 +4618,147 @@ function _collect_page_chain(root, chain, req::HTTP.Request, root_segs::Int)
     pages
 end
 
+"""
+    _mount_prefix(obj) -> String or nothing
+
+The externally-visible URL prefix `obj` is mounted at — `""` for a root at the
+server root, `"/section"` for an `@include`d child, `"/item/abc"` for an indexed
+one. `@htmx` injects `__prefix__` on every struct it expands and the `@include`
+desugar extends it one segment per level, so this is the very string
+`string(obj)` and `__self__/"…"` build their URLs from, request prefix included.
+
+`nothing` when the object carries no `__prefix__` at all. Callers must read that
+as "position unknown", never as the server root — the two lead to opposite
+answers in [`_page_chain_skip`](@ref).
+"""
+_mount_prefix(obj) = hasproperty(obj, :__prefix__) ?
+                     string(getproperty(obj, :__prefix__)) : nothing
+
+# One URL segment, compared tolerantly across encodings: `__prefix__` is built
+# from decoded values (`string(arg)` for an indexed mount) while the browser
+# reports the encoded form in `HX-Current-URL`, so `a b` and `a%20b` are the
+# same segment.
+_seg_eq(a, b) = a == b ||
+                String(HTTP.URIs.unescapeuri(a)) == String(HTTP.URIs.unescapeuri(b))
+
+"""
+    _path_covers(prefix, path) -> Bool
+
+True when `path` is at or below `prefix`. Compared segment by segment, so
+`/item` does not cover `/items/1` the way a plain `startswith` would. The empty
+prefix covers everything, which is what makes a root mounted at the server root
+an ancestor of every request.
+"""
+function _path_covers(prefix::AbstractString, path::AbstractString)
+    pre = split(prefix, '/'; keepempty=false)
+    cur = split(path, '/'; keepempty=false)
+    length(pre) <= length(cur) && all(i -> _seg_eq(pre[i], cur[i]), eachindex(pre))
+end
+
+"""
+    _hx_current_path(req) -> String or nothing
+
+The path component of `HX-Current-URL` — where the browser is at the time of the
+request. htmx sends `window.location.href` on every request it makes, so this is
+normally an absolute URL; a hand-rolled `fetch` that sets only `HX-Request`
+sends no such header, and `nothing` is the honest answer for it rather than a
+guess at the caller's location.
+"""
+function _hx_current_path(req::HTTP.Request)
+    raw = hx_current_url(req)
+    isempty(raw) && return nothing
+    path = HTTP.URI(raw).path
+    isempty(path) ? nothing : String(path)
+end
+
+"""
+    _page_chrome_mode(req) -> :auto, :none or :full
+
+Per-request override for how much `__page__` chrome a response carries, read
+from the `?__chrome__=` query parameter. The dunder spelling is the framework's
+own namespace (as `__page__` / `__prefix__` / `__req__` are), so it cannot
+collide with an application's declared route parameters.
+
+* `:auto` (the default) — derived per request; see [`_page_chain_skip`](@ref).
+* `:none` — no wrappers at all, whatever the request looks like. The escape
+  hatch for an out-of-band swap, or a fragment deliberately wanted bare.
+* `:full` — the whole chain, whatever the request looks like. The escape hatch
+  for a swap that replaces the document body.
+
+An unrecognized value throws instead of falling back to `:auto`: a misspelled
+override that silently rendered something else is precisely the failure this
+parameter exists to make explicit.
+"""
+function _page_chrome_mode(req::HTTP.Request)
+    raw = get(queryparams(req), "__chrome__", nothing)
+    isnothing(raw) && return :auto
+    value = raw isa AbstractVector ? String(last(raw)) : String(raw)
+    value in ("auto", "none", "full") || throw(ArgumentError(
+        "`?__chrome__=$(value)` is not a page-chrome mode — use `auto`, `none` or `full`."))
+    Symbol(value)
+end
+
+"""
+    _page_chain_skip(page_chain, req; root=nothing) -> Int
+
+How many wrappers to drop from the FRONT of `page_chain` (which runs
+outermost-first, root → leaf, as [`_collect_page_chain`](@ref) returns it).
+
+A partial swap replaces a region that some wrapper level owns. Every wrapper
+from the root down to that level is ALREADY in the DOM, so re-sending it would
+duplicate chrome. Every wrapper BELOW it is not — those are the chrome of the
+thing being swapped in, and dropping them too is what leaves a nested page with
+no navigation of its own, one click from a dead end.
+
+Under `:auto` the split point is derived rather than configured, from two things
+the request already carries: `HX-Current-URL` says where the browser is, and
+`__prefix__` says where each level is mounted. A level is already on screen
+exactly when its mount prefix covers the current location.
+
+* direct browser visit — no current location, so nothing is on screen and the
+  whole chain applies.
+* HTMX swap from inside this root's mount — skip the levels the current location
+  is already within, apply the rest.
+* HTMX request with no `HX-Current-URL` (a hand-rolled `fetch`), or one made from
+  outside this root's mount — where the swap target sits is unknowable, so no
+  chrome is applied. This is also what keeps a root's own `<html>` document shell
+  from ever being injected into a fragment.
+
+`root` is the object the chain was walked from; its mount prefix is what bounds
+"inside this root's mount". Passing `nothing` drops that bound.
+"""
+function _page_chain_skip(page_chain, req::HTTP.Request; root=nothing)
+    mode = _page_chrome_mode(req)
+    mode === :none && return length(page_chain)
+    mode === :full && return 0
+    is_htmx(req) || return 0
+    current = _hx_current_path(req)
+    isnothing(current) && return length(page_chain)
+    root_prefix = isnothing(root) ? nothing : _mount_prefix(root)
+    isnothing(root_prefix) || _path_covers(root_prefix, current) ||
+        return length(page_chain)
+    skip = 0
+    for obj in page_chain
+        prefix = _mount_prefix(obj)
+        isnothing(prefix) && break
+        _path_covers(prefix, current) || break
+        skip += 1
+    end
+    skip
+end
+
+"""
+    _page_chain_to_apply(page_chain, req; root=nothing) -> chain
+
+`page_chain` with the already-on-screen prefix removed — see
+[`_page_chain_skip`](@ref) for which levels those are and why.
+"""
+_page_chain_to_apply(page_chain, req::HTTP.Request; root=nothing) =
+    page_chain[(_page_chain_skip(page_chain, req; root) + 1):end]
+
 """Like `_resolve_response`, but applies nested page wrappers (innermost first, then outward)."""
-function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
+function _resolve_response_nested(page_chain, req, val; root=nothing,
+        record_dir=nothing, save_path=nothing, record_base::String="")
     # Same finalized-value passthrough as `_resolve_response`. Routes
     # inside `@include`d substructs (e.g. `PipelineRoutes.aov_runtime_js`
     # returning `MIMEResponse("application/javascript", …)`) land here,
@@ -4661,12 +4808,16 @@ function _resolve_response_nested(page_chain, req, val; record_dir=nothing, save
             return markdown_response(to_markdown_string(val))
         end
     end
-    is_htmx(req) && return to_response(val)
+    # Which wrappers this response owes — the whole chain for a direct visit,
+    # only the levels below the swap target for a partial swap, none when the
+    # target's position cannot be established (`_page_chain_skip`).
+    chain = _page_chain_to_apply(page_chain, req; root)
+    isempty(chain) && return to_response(val)
     # Apply page wrappers: innermost (last) wraps first, then each outer one.
     # Normalized first, so a plain value renders the same structurally in
-    # full-page mode as the HX branch above already returns.
+    # full-page mode as the bare-fragment branch above already returns.
     val = _html_value(val)
-    for obj in reverse(page_chain)
+    for obj in reverse(chain)
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (val = _apply_page(obj, wrapper, val))
     end
