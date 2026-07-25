@@ -21,6 +21,24 @@ function _grace_fetch(render_result, started, grace_period)
     (ready=true, value=render_result(rv))
 end
 
+function _operation_render_result(render_result, value, transport)
+    rendered = render_result(value)
+    transport.replace_page_load || return rendered
+
+    terminal = HTMXObjects.h.div(
+        rendered;
+        id=transport.page_load_id,
+        class="htmxo-operation-terminal",
+        data_htmxo_operation_terminal="",
+        hx_swap_oob="outerHTML",
+    )
+    # Treebars' running fragment selects its own inner region from every poll
+    # response. Keep that selector satisfied while the nested OOB fragment
+    # replaces HTMXObjects' stable direct-page wrapper as a whole, removing the
+    # now-terminal poller and its Pause control.
+    HTMXObjects.h.div(terminal; class="treebar-poller-inner")
+end
+
 function __init__()
     HTMXObjects._recording_progress_init_impl[] =
         () -> Treebars.initialize_progress!(:state; description="Recording")
@@ -36,7 +54,10 @@ function __init__()
 
     HTMXObjects._operation_polling_impl[] =
         (render_result, started, ip, keys, call_kwargs, transport) -> begin
-            fast = _grace_fetch(render_result, started, transport.grace_period)
+            render_operation_result = value ->
+                _operation_render_result(render_result, value, transport)
+            fast = _grace_fetch(
+                render_operation_result, started, transport.grace_period)
             fast.ready && return fast.value
             # Only retain operations that actually cross the grace boundary and
             # emit a poller. Fast values and test seams that replace this
@@ -52,7 +73,8 @@ function __init__()
             )
             kwargs = merge(call_kwargs, treebars_transport)
             try
-                Treebars.polling_fetchindex(render_result, ip, keys...; kwargs...)
+                Treebars.polling_fetchindex(
+                    render_operation_result, ip, keys...; kwargs...)
             catch
                 # keep_progress=true renders failures internally; propagated
                 # failures (including keep_progress=false) have no future poll.
