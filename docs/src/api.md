@@ -185,11 +185,13 @@ provider lock. Applications construct no executor/store and call no GC.
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
+| `internal_input(input)` | Is this descriptor input framework-injected rather than author-declared? |
 
 ```@docs
 semantic_descriptor
 semantic_app
 operation_form
+internal_input
 ```
 
 ### What the compiler reads from a descriptor
@@ -222,6 +224,38 @@ target.
 So, to answer the obvious question directly: labels, help text, units and
 ordering are **not** declarable, and there is no effect/side-effect policy key
 at all.
+
+#### Injected inputs — the `internal` flag
+
+`@get`/`@post`/… prepend `__verb__::HTMXObjects.Verb{V}` to the routed
+property's signature so verb dispatch is a method-table lookup. DynamicObjects
+is deliberately verb-agnostic — `property_signature` "returns *every*
+positional arg, including any framework-injected leading arg" — so a raw
+`DynamicObjects.property_descriptor(T, prop).inputs` reports that argument as
+an ordinary positional with an unrestricted domain, **ahead of** the
+operation's own parameters.
+
+Every descriptor HTMXObjects itself hands back — `semantic_descriptor`'s node
+`properties` and each route's `property` — therefore annotates each input with
+an additive `internal::Bool`. A consumer enumerating what a route *requires*
+filters on that flag rather than on the argument's name:
+
+```julia
+declared = [input for input in route.property.inputs if !input.internal]
+```
+
+For a descriptor read straight from DynamicObjects (the re-exported
+`property_descriptor`, which reports the injected argument unmarked by design),
+[`internal_input`](@ref) is the same predicate:
+
+```julia
+declared = [input for input in DynamicObjects.property_descriptor(T, :op).inputs
+            if !internal_input(input)]
+```
+
+The argument is only ever *marked*, never dropped: the descriptor stays a
+faithful account of the generated signature, and the verb is reachable as
+`Verb{:GET}()` at any call site regardless.
 
 | What you want to control | Where it actually comes from |
 |--------------------------|------------------------------|
