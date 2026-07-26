@@ -657,6 +657,16 @@ struct DomainNode <: AbstractDomainNode
     payload::String
 end
 
+HTMXObjects.semantic_card(node::DomainNode) = begin
+    state = node.key === :model_13 ? :blocked : :available
+    SemanticCard(
+        "Model $(node.key)",
+        SemanticFields(family="test family", execution_source="fixture"),
+        SemanticCode(:stan, "response ~ $(node.payload)"),
+        SemanticStatus(state; detail="Sampling $(state)"),
+    )
+end
+
 @enum SelStage draft review final
 
 @htmx struct DomainChild
@@ -1263,7 +1273,8 @@ end
     leaf = app.analysis
     html = repr("text/html", operation_form(
         leaf, :analyze; values=(study=:alpha,), target_id="#analysis",
-        submit="Analyze", form_class="semantic-form", navigate=true))
+        submit="Analyze", form_class="semantic-form", navigate=true,
+        presentation=:cards))
 
     # Root context is inferred from the request and carried, never exposed as
     # another generated operation control.
@@ -1278,6 +1289,8 @@ end
     @test contains(html, "action=\"/analysis/analyze\"")
     @test !contains(html, "hx-push-url=")
     @test contains(html, "__htmxo_navigate=true")
+    @test contains(html, "__htmxo_presentation=cards")
+    @test contains(html, "class=\"htmxo-semantic-cards\"")
     @test !contains(html, "name=\"__htmxo_")
 
     # The same query context survives the automatic poll URL. The poll marker
@@ -1320,7 +1333,8 @@ end
         "/analysis/analyze?__htmxo_form=1&fit_key=fit-17&study=beta&" *
         "__htmxo_target_id=%23analysis&__htmxo_submit=Analyze&" *
         "__htmxo_form_class=semantic-form&__htmxo_swap=innerHTML&" *
-        "__htmxo_radio_max=4&__htmxo_navigate=true",
+        "__htmxo_radio_max=4&__htmxo_navigate=true&" *
+        "__htmxo_presentation=cards",
         ["HX-Request" => "true"],
     )
     refresh_handler = first(HTTP.Handlers.gethandler(
@@ -1334,6 +1348,8 @@ end
     @test contains(refreshed_html, "action=\"/analysis/analyze\"")
     @test !contains(refreshed_html, "hx-push-url=")
     @test contains(refreshed_html, "__htmxo_navigate=true")
+    @test contains(refreshed_html, "__htmxo_presentation=cards")
+    @test contains(refreshed_html, "class=\"htmxo-semantic-cards\"")
     @test !contains(refreshed_html, "name=\"__htmxo_")
     @test contains(refreshed_html, "class=\"semantic-form\"")
     @test contains(refreshed_html,
@@ -3778,6 +3794,46 @@ end
     @test contains(String(drive("/chains/3").body), "stage=3")
 end
 
+@testitem "semantic cards project across HTML HXML Markdown and text" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    card = SemanticCard(
+        "Rich model",
+        SemanticFields(family="survival", execution_source="cohort"),
+        SemanticCode(:stan, "response <~> alpha + beta"),
+        SemanticStatus(:available; detail="Sampling ready"),
+    )
+
+    @test semantic_card(card) === card
+
+    html = repr("text/html", card)
+    @test startswith(html,
+        "<article class=\"htmxo-semantic-card-body\"><header><strong>Rich model</strong></header>")
+    @test contains(html, "<dt>family</dt><dd>survival</dd>")
+    @test contains(html, "<dt>execution_source</dt><dd>cohort</dd>")
+    @test contains(html,
+        "<pre><code class=\"language-stan\">response &lt;~&gt; alpha + beta</code></pre>")
+    @test contains(html, "✓ available")
+    @test contains(html, "Sampling ready")
+
+    markdown = repr("text/markdown", card)
+    @test startswith(markdown, "### Rich model\n\n")
+    @test contains(markdown, "- **family:** survival")
+    @test contains(markdown, "```stan\nresponse <~> alpha + beta\n```")
+    @test contains(markdown, "✓ **available** — Sampling ready")
+
+    hxml = repr("application/vnd.hyperview+xml", card)
+    @test startswith(hxml,
+        "<view style=\"article htmxo-semantic-card-body\">")
+    @test contains(hxml, "Rich model")
+    @test contains(hxml, "response &lt;~&gt; alpha + beta")
+    @test contains(hxml, "Sampling ready")
+
+    plain = repr("text/plain", card)
+    @test startswith(plain, "Rich model\n\n")
+    @test contains(plain, "family: survival")
+    @test contains(plain, "response <~> alpha + beta")
+    @test contains(plain, "[available] Sampling ready")
+end
+
 @testitem "a node-valued @param resolves through its live option domain" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
@@ -3815,6 +3871,58 @@ end
     @test !contains(custom_html, "type=\"hidden\" name=\"model\"")
     @test !contains(custom_html, "hx-include=")
     @test !contains(custom_html, "hx-push-url=")
+
+    # Rich choices are an explicit presentation policy. The option value owns
+    # one semantic article through its text/html renderer; the framework keeps
+    # the concise OptionRecord label as the exact accessible radio name and
+    # owns all native choice state.
+    cards_html = repr("text/html", operation_form(
+        custom_app, :index; presentation=:cards))
+    @test count("type=\"radio\" name=\"model\"", cards_html) == 13
+    @test count("class=\"htmxo-semantic-card\"", cards_html) == 13
+    @test count("<article class=\"htmxo-semantic-card-body\">", cards_html) == 13
+    @test !contains(cards_html, "<select")
+    @test contains(cards_html, "aria-label=\"Model 1\"")
+    @test contains(cards_html, "aria-label=\"Model 13\"")
+    @test contains(cards_html, "<header><strong>Model model_1</strong></header>")
+    @test contains(cards_html,
+                   "<pre><code class=\"language-stan\">response ~ payload 13</code></pre>")
+    @test contains(cards_html, "! blocked")
+    @test contains(cards_html, "Sampling blocked")
+    @test occursin(
+        r"<div class=\"htmxo-semantic-card\" data-rich=\"true\"><input id=\"([^\"]+)\"[^>]+aria-label=\"Model 1\"[^>]*><label for=\"\1\"[^>]*>.*?</label><article class=\"htmxo-semantic-card-body\">"s,
+        cards_html,
+    )
+    @test !contains(cards_html, " style=")
+    @test all(!contains(label.match, "<article>") for label in
+              eachmatch(r"<label[^>]*>.*?</label>"s, cards_html))
+
+    selected_model = last(collect(custom_app.catalogue))
+    selected_cards = repr("text/html", operation_form(
+        custom_app, :index; values=(model=selected_model,), navigate=true,
+        presentation=:cards))
+    @test occursin(
+        r"<input[^>]+value=\"model_13\"[^>]+checked=\"true\"",
+        selected_cards,
+    )
+    @test contains(selected_cards, "method=\"get\"")
+    @test contains(selected_cards, "action=\"/\"")
+    @test !contains(selected_cards, "hx-get=")
+
+    # Values without a rich renderer retain useful concise fallback content;
+    # help and disabled metadata remain owned by the generated native input.
+    fallback_cards = repr("text/html", operation_form(
+        SemanticApp(:north), :run; presentation=:cards))
+    @test contains(fallback_cards, "class=\"htmxo-semantic-card\" data-rich=\"false\"")
+    @test contains(fallback_cards, "<span>Safe</span></label>")
+    @test contains(fallback_cards, "aria-label=\"Safe\"")
+    @test contains(fallback_cards, "title=\"Full checks\"")
+    @test occursin(
+        r"<input[^>]+value=\"unsafe\"[^>]+disabled=\"true\"",
+        fallback_cards,
+    )
+    @test_throws ArgumentError operation_form(
+        custom_app, :index; presentation=:tiles)
 
     navigating_html = repr("text/html", operation_form(
         custom_app, :index; navigate=true))
@@ -3854,6 +3962,68 @@ end
     stale = drive("/?source=depot&node=real_survey")
     @test stale.status == 400
     @test contains(String(stale.body), "Bad Request")
+end
+
+@testitem "rich semantic card surface selects its native radio in a browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        cards = operation_form(SemanticNodeParamApp(), :index;
+                               presentation=:cards, navigate=true)
+        driver = h.script(Raw("""
+            window.addEventListener('load', function() {
+                var card = document.querySelectorAll('.htmxo-semantic-card')[12];
+                var input = card.querySelector(':scope > input[type="radio"]');
+                var heading = card.querySelector(':scope > article header');
+                heading.scrollIntoView({block: 'center'});
+                var rect = heading.getBoundingClientRect();
+                var target = document.elementFromPoint(
+                    rect.left + rect.width / 2,
+                    rect.top + rect.height / 2
+                );
+                document.body.dataset.cardHitTarget = target.tagName.toLowerCase();
+                target.click();
+                document.body.dataset.cardChecked = input.checked ? 'true' : 'false';
+                document.body.dataset.cardValue = input.value;
+            });
+            """))
+        page = repr("text/html", htmx(cards, driver;
+            htmx_version=nothing,
+            hyperscript_version=nothing,
+            pico_version=nothing,
+            feedback=false,
+            compose=false,
+            overlay=false,
+        ))
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+            HTTP.URI(req.target).path == "/" || return HTTP.Response(404)
+            HTTP.Response(200, ["Content-Type" => "text/html"], page)
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            @test contains(dom, "data-card-hit-target=\"label\"")
+            @test contains(dom, "data-card-checked=\"true\"")
+            @test contains(dom, "data-card-value=\"model_13\"")
+        finally
+            close(server)
+        end
+    end
 end
 
 @testitem "native operation navigation rebuilds the selected page shell" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

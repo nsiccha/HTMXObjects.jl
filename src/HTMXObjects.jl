@@ -14,6 +14,8 @@ export terminate, serve, staticfiles, dynamicfiles
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
+export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
+    semantic_card
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -1764,6 +1766,190 @@ function _generic_mapping_html(ks, vs)
         push!(items, h.dd(_html_value(v)))
     end
     h.dl(items...)
+end
+
+# --- Semantic presentation nodes ---
+
+"""
+    SemanticNode
+
+Abstract parent for reusable presentation values that sit above any one markup
+format. Built-in semantic nodes have peer HTML, Hyperview HXML, Markdown, and
+plain-text projections.
+"""
+abstract type SemanticNode end
+
+"""
+    SemanticCard(title, children...)
+
+A titled semantic summary. Children may be [`SemanticFields`](@ref),
+[`SemanticCode`](@ref), [`SemanticStatus`](@ref), another renderable value, or
+plain data.
+"""
+struct SemanticCard <: SemanticNode
+    title::String
+    children::Vector{Any}
+    SemanticCard(title::AbstractString, children::Vector{Any}) =
+        new(String(title), children)
+    SemanticCard(title::AbstractString, children...) =
+        new(String(title), Any[children...])
+end
+
+"""`SemanticFields(; facts...)` stores labelled facts for peer format rendering."""
+struct SemanticFields <: SemanticNode
+    pairs::Vector{Pair{Symbol,Any}}
+end
+
+SemanticFields(; kwargs...) = SemanticFields(
+    Pair{Symbol,Any}[Symbol(key) => value for (key, value) in pairs(kwargs)])
+
+"""
+    SemanticCode(language, text)
+
+Store source code without choosing markup. `language` is converted to a
+`Symbol` and becomes the HTML language class / Markdown fence info string.
+"""
+struct SemanticCode <: SemanticNode
+    language::Symbol
+    text::String
+    SemanticCode(language, text) = new(Symbol(language), String(text))
+end
+
+"""
+    SemanticStatus(state::Symbol; detail="")
+
+Store status meaning rather than styling. `:ok` / `:available`, `:warn` /
+`:blocked`, `:fail`, and `:pending` receive distinct text glyphs; any other
+symbol remains valid and uses a neutral glyph. The state also remains available
+as an HTML class and literal Markdown/HXML/text content.
+"""
+struct SemanticStatus <: SemanticNode
+    state::Symbol
+    detail::String
+end
+
+SemanticStatus(state::Symbol; detail="") = SemanticStatus(state, String(detail))
+
+"""
+    semantic_card(value) -> SemanticCard or nothing
+
+Return the reusable semantic card owned by `value`. Extend this for a domain
+value used with `operation_form(...; presentation=:cards)`. Values that are
+already `SemanticCard`s pass through; the default has no rich card.
+"""
+semantic_card(card::SemanticCard) = card
+semantic_card(_) = nothing
+
+_semantic_status_glyph(state::Symbol) = state === :ok || state === :available ? "✓" :
+    state === :warn || state === :blocked ? "!" :
+    state === :fail ? "✗" : state === :pending ? "…" : "•"
+
+function _semantic_fields_node(fields::SemanticFields)
+    nodes = Any[]
+    for (key, value) in fields.pairs
+        push!(nodes, h.dt(string(key)))
+        push!(nodes, h.dd(value))
+    end
+    h.dl(nodes...; class="htmxo-semantic-fields")
+end
+
+_semantic_code_node(code::SemanticCode) = h.pre(
+    h.code(code.text; class="language-$(code.language)"))
+
+function _semantic_status_node(status::SemanticStatus)
+    detail = isempty(status.detail) ? Any[] : Any[h.small(" $(status.detail)")]
+    h.span(
+        h.strong(string(_semantic_status_glyph(status.state), " ", status.state)),
+        detail...;
+        class="htmxo-semantic-status", data_status=string(status.state))
+end
+
+_semantic_html_node(fields::SemanticFields) = _semantic_fields_node(fields)
+_semantic_html_node(code::SemanticCode) = _semantic_code_node(code)
+_semantic_html_node(status::SemanticStatus) = _semantic_status_node(status)
+_semantic_html_node(card::SemanticCard) = h.article(
+    h.header(h.strong(card.title)), card.children...;
+    class="htmxo-semantic-card-body")
+
+for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus)
+    @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
+        show(io, mime, _semantic_html_node(value))
+end
+
+# HXML is a peer projection. Construct the target node tree explicitly so a
+# semantic child is classified as a view/text node before HTMX's strict HXML
+# serializer groups children into contexts.
+_semantic_hxml_node(fields::SemanticFields) = _semantic_fields_node(fields)
+_semantic_hxml_node(code::SemanticCode) = _semantic_code_node(code)
+_semantic_hxml_node(status::SemanticStatus) = _semantic_status_node(status)
+_semantic_hxml_child(value::SemanticNode) = _semantic_hxml_node(value)
+_semantic_hxml_child(value::Node) = value
+_semantic_hxml_child(value) = h.span(value)
+_semantic_hxml_node(card::SemanticCard) = h.article(
+    h.header(h.strong(card.title)),
+    map(_semantic_hxml_child, card.children)...;
+    class="htmxo-semantic-card-body")
+
+for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus)
+    @eval Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", value::$T) =
+        show(io, mime, _semantic_hxml_node(value))
+end
+
+_semantic_show_leaf(io::IO, mime::MIME, value) =
+    showable(mime, value) ? show(io, mime, value) : print(io, value)
+_semantic_show_leaf(io::IO, ::MIME, value::AbstractString) = print(io, value)
+
+function _semantic_show_children(io::IO, mime::MIME, children, separator)
+    for (index, child) in enumerate(children)
+        index == 1 || print(io, separator)
+        _semantic_show_leaf(io, mime, child)
+    end
+end
+
+function Base.show(io::IO, mime::MIME"text/markdown", fields::SemanticFields)
+    for (key, value) in fields.pairs
+        print(io, "- **", key, ":** ")
+        _semantic_show_leaf(io, mime, value)
+        print(io, '\n')
+    end
+end
+
+function _semantic_code_fence(text)
+    longest = maximum((length(match.match) for match in eachmatch(r"`+", text)); init=0)
+    repeat("`", max(3, longest + 1))
+end
+
+function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
+    fence = _semantic_code_fence(code.text)
+    print(io, fence, code.language, '\n', code.text, '\n', fence)
+end
+
+Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
+    io, _semantic_status_glyph(status.state), " **", status.state, "**",
+    isempty(status.detail) ? "" : " — $(status.detail)")
+
+function Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard)
+    print(io, "### ", card.title)
+    isempty(card.children) || print(io, "\n\n")
+    _semantic_show_children(io, mime, card.children, "\n\n")
+end
+
+function Base.show(io::IO, mime::MIME"text/plain", fields::SemanticFields)
+    for (key, value) in fields.pairs
+        print(io, key, ": ")
+        _semantic_show_leaf(io, mime, value)
+        print(io, '\n')
+    end
+end
+
+Base.show(io::IO, ::MIME"text/plain", code::SemanticCode) = print(io, code.text)
+Base.show(io::IO, ::MIME"text/plain", status::SemanticStatus) = print(
+    io, '[', status.state, ']', isempty(status.detail) ? "" : " $(status.detail)")
+
+function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
+    print(io, card.title)
+    isempty(card.children) || print(io, "\n\n")
+    _semantic_show_children(io, mime, card.children, "\n\n")
 end
 
 # Normalize a route return value into something `auto` can render, leaving
@@ -7723,7 +7909,53 @@ function _semantic_radio(name, label, domain, selected; required=false)
     )
 end
 
-function _semantic_control(obj, owner, param, values; radio_max::Int=4)
+const _SEMANTIC_CARD_SERIAL = Base.Threads.Atomic{UInt}(0)
+
+function _semantic_cards(name, label, domain, selected; required=false)
+    required_attrs = required ? (; required="true") : (;)
+    serial = Base.Threads.atomic_add!(_SEMANTIC_CARD_SERIAL, UInt(1)) + UInt(1)
+    h.fieldset(
+        h.legend(label),
+        [begin
+            checked_attrs = _is_selected(option.value, selected) ? (; checked="true") : (;)
+            disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
+            help = get(option, :help, nothing)
+            help_attrs = isnothing(help) ? (;) : (; title=help)
+            help_node = isnothing(help) ? Any[] : Any[h.small(help)]
+            # The value owns an above-markup SemanticCard. HTMXObjects selects
+            # its HTML projection here while the same node remains reusable in
+            # HXML, Markdown, and plain-text surfaces.
+            card = semantic_card(option.value)
+            card === nothing || card isa SemanticCard || throw(ArgumentError(
+                "semantic_card($(typeof(option.value))) must return " *
+                "SemanticCard or nothing, got $(typeof(card))"))
+            has_view = card !== nothing
+            view = has_view ? Any[card] : Any[]
+            input_id = "htmxo-semantic-card-$(serial)-$(index)"
+            for_attr = NamedTuple{(:for,)}((input_id,))
+            h.div(
+                h.input(; id=input_id, type="radio", name=string(name),
+                        value=_option_wire_string(option.value),
+                        aria_label=string(option.label),
+                        checked_attrs..., disabled_attrs..., required_attrs...,
+                        help_attrs...),
+                h.label(
+                    h.span(option.label);
+                    for_attr...,
+                ),
+                view...,
+                help_node...;
+                class="htmxo-semantic-card",
+                data_rich=string(has_view),
+            )
+        end for (index, option) in enumerate(
+            get(domain, :options, NamedTuple[]))]...;
+        class="htmxo-semantic-cards",
+    )
+end
+
+function _semantic_control(obj, owner, param, values;
+        radio_max::Int=4, presentation::Symbol=:auto)
     value = get(values, param.name, nothing)
     label = isnothing(param.doc) ? Long(param.name) : param.doc
     input = (name=param.name, domain=get(param, :domain, nothing))
@@ -7741,6 +7973,9 @@ function _semantic_control(obj, owner, param, values; radio_max::Int=4)
             enabled = [option.value => option.label for option in options
                        if !get(option, :disabled, false)]
             return sinput_custom(string(param.name), enabled; label, value)
+        elseif presentation === :cards && !get(domain, :multiple, false)
+            return _semantic_cards(param.name, label, domain, value;
+                                   required=param.required)
         elseif !get(domain, :multiple, false) && length(options) <= radio_max
             return _semantic_radio(param.name, label, domain, value;
                                    required=param.required)
@@ -7953,12 +8188,14 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     form_class = _operation_form_setting(req, :__htmxo_form_class, "")
     radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, "4"))
     navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
+    presentation = Symbol(_operation_form_setting(req, :__htmxo_presentation, "auto"))
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
     shared_context = _semantic_context_names(
         _operation_form_setting(req, :__htmxo_shared_context, ""))
     value = operation_form(target.leaf, route; values=extracted.values,
                            target=request_path, target_id, swap, submit,
-                           form_class, radio_max, navigate, context_selector,
+                           form_class, radio_max, navigate, presentation,
+                           context_selector,
                            shared_context)
     kw_pairs = Pair{Symbol,Any}[
         param.name => extracted.values[param.name] for param in route.params
@@ -7993,7 +8230,8 @@ function _operation_route(T, name::Symbol, verb::Symbol)
 end
 
 """
-    operation_form(obj, name::Symbol; verb=:GET, values=(;), navigate=false, kwargs...)
+    operation_form(obj, name::Symbol; verb=:GET, values=(;), navigate=false,
+                   presentation=:auto, kwargs...)
     operation_form(obj, route::NamedTuple; values=(;), target=obj/route.path, kwargs...)
 
 Generate an HTMX form from a merged semantic route descriptor. Static domains
@@ -8027,6 +8265,25 @@ rejects form-level `hx_*` kwargs. Low-level HTMX attributes such as
 `hx_push_url` remain available through `kwargs` in the default fragment-swap
 mode, but changing history alone does not rebuild an outer page shell.
 
+Set `presentation=:cards` to opt a standalone generated form into rich native
+radio cards for its finite, single-choice domains. Each option value owns a
+reusable above-markup view by extending `semantic_card(value)` to return a
+[`SemanticCard`](@ref), composed from semantic fields, code, status, and other
+children. That node has peer HTML, Hyperview HXML, Markdown, and plain-text
+projections; the model does not own raw HTML. The concise option label remains
+the radio's accessible name and fallback content.
+HTMXObjects continues to own the native input, checked and disabled state,
+help metadata, stable [`option_wire_value`](@ref), keyboard behavior, dependent
+refresh, and navigation semantics. The concise label contains only phrasing
+content; the rich view is its sibling in the generated card, so semantic block
+content such as `article` and `pre` stays valid HTML. A card view should remain
+presentational and avoid links, buttons, inputs, or other interactive controls
+that would compete with the radio. An associated label overlays the card, so
+the whole visual surface selects the radio without JavaScript while the native
+input remains focusable for keyboard use. Those structural styles live in
+[`htmxo_utility_styles`](@ref), which [`htmx`](@ref) includes automatically.
+The default `:auto` policy retains the existing radio/select/custom heuristic.
+
 Carrying the context is not the same as the child *owning* it. `@param`
 inheritance is resolved at macro expansion, so only an inline child gets the
 parent's `@param`s as its own properties; an external bundle was expanded
@@ -8043,17 +8300,20 @@ delegate explicitly:
 When a dynamic domain declares dependencies, changing one of those controls
 rerenders the generated form through the same verb and route without executing
 the operation. The refreshed form retains `target_id`, `swap`, submit label,
-form class, radio threshold, and navigation mode.
+form class, radio threshold, presentation policy, and navigation mode.
 """
 function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
         submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
-        form_class="", navigate::Bool=false, shared_context=(),
+        form_class="", navigate::Bool=false, presentation::Symbol=:auto,
+        shared_context=(),
         context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
     route = _semantic_runtime_route(obj, route)
     _check_mounted_include_child(obj, route)
+    presentation in (:auto, :cards) || throw(ArgumentError(
+        "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
     current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
     refresh_dependencies = _semantic_refresh_dependencies(route)
@@ -8071,14 +8331,16 @@ function operation_form(obj, route::NamedTuple; values=(;),
         isempty(shared_names) || throw(ArgumentError(
             "operation_form navigate=true does not support shared external context"))
     end
-    refresh_settings = navigate ? (;
+    refresh_settings = navigate ? merge((;
         __htmxo_swap=swap,
         __htmxo_submit=submit,
         __htmxo_form_class=form_class,
         __htmxo_radio_max=radio_max,
         __htmxo_navigate=true,
         __htmxo_target_id=target_id,
-    ) : (;)
+    ), presentation === :auto ? (;) : (;
+        __htmxo_presentation=presentation,
+    )) : (;)
     context_controls = Any[]
     controls = Any[]
     for param in route.params
@@ -8086,7 +8348,8 @@ function operation_form(obj, route::NamedTuple; values=(;),
         get(param, :kind, nothing) === nothing && continue
         get(param, :kind, nothing) === :context &&
             param.name in shared_names && continue
-        control = _semantic_control(obj, route.owner, param, current; radio_max)
+        control = _semantic_control(obj, route.owner, param, current;
+                                    radio_max, presentation)
         if param.name in refresh_dependencies
             control = h.div(control;
                 _semantic_refresh_attrs(route, action, refresh_settings)...)
@@ -8113,6 +8376,8 @@ function operation_form(obj, route::NamedTuple; values=(;),
         __htmxo_radio_max=radio_max,
     )
     if !isempty(config_inputs)
+        presentation === :auto || append!(config_inputs,
+            hidden_inputs(__htmxo_presentation=presentation))
         isempty(shared_names) || append!(config_inputs,
             hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
         isnothing(context_selector) || append!(config_inputs,
@@ -8719,6 +8984,42 @@ htmxo_utility_styles() = h.style(Raw("""
 /* === Generic behavior conventions === */
 /* Any element triggering an htmx action is clickable. */
 [hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }
+
+/* Rich generated option cards keep valid sibling DOM (radio + label +
+   semantic article). The associated label covers only rich cards, making the
+   whole presentational surface a native selection target without JavaScript;
+   concise fallback labels stay visible when no semantic card exists. */
+.htmxo-semantic-card { position: relative; }
+.htmxo-semantic-card[data-rich="true"] > input[type="radio"] {
+    position: relative;
+    z-index: 2;
+}
+.htmxo-semantic-card[data-rich="true"] > label {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    cursor: pointer;
+}
+.htmxo-semantic-card[data-rich="true"] > input:disabled + label {
+    cursor: not-allowed;
+}
+.htmxo-semantic-card[data-rich="true"] > label > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+.htmxo-semantic-status[data-status="ok"],
+.htmxo-semantic-status[data-status="available"] { color: var(--htmxo-success); }
+.htmxo-semantic-status[data-status="warn"],
+.htmxo-semantic-status[data-status="blocked"] { color: var(--htmxo-warning); }
+.htmxo-semantic-status[data-status="fail"] { color: var(--htmxo-error); }
+.htmxo-semantic-status[data-status="pending"] { color: var(--htmxo-muted); }
 
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the
