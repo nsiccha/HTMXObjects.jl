@@ -295,6 +295,15 @@ resolves it per request by calling
 through `static_domain`, carrying `multiple`/`allow_custom` across. That is the
 only reason the option list ever has values — nothing pre-enumerates it.
 
+Option values cross HTTP through [`option_wire_value`](@ref). The default uses
+`value.key` when that property exists and otherwise preserves `string(value)`.
+This lets a node-valued declaration such as `@options(model) = models` submit a
+stable key like `bordet`, then recover the exact current `Model` node without a
+`Base.parse` or `Base.string` shim. Extend `option_wire_value(::YourType)` when
+the node's stable identity is not named `key`; the result must be unique within
+each live domain. Generated controls, indexed mounts, query URLs, hidden inputs,
+and server-side option recovery all use the same spelling.
+
 A declared domain is evaluated against **the node**, so every name it reads must
 be a property of that node. `@options dataset = choices(cohort)` requires
 `cohort` to be a field (or otherwise a property) of the type declaring it — a

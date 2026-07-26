@@ -21,7 +21,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -83,6 +83,24 @@ struct Verb{V} end
 # file alongside the `@query_url` macro; this `function …end` just creates
 # the binding so the in-file `@htmx struct` blocks can attach methods.
 function query_url end
+
+"""
+    option_wire_value(value)
+
+Return the stable machine value used to carry an option through URL segments,
+query parameters, and form controls. Values exposing a `key` property use that
+property by default; every other value keeps the established `string(value)`
+spelling. Extend this function for an option type whose stable identity lives
+somewhere other than `key`.
+
+The returned value is stringified and URL/HTML escaped by the caller. Its
+spelling must be unique within each live option domain so a submission resolves
+to exactly one existing option object.
+"""
+option_wire_value(value) =
+    hasproperty(value, :key) ? getproperty(value, :key) : string(value)
+
+_option_wire_string(value) = string(option_wire_value(value))
 
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing, kwargs...)
@@ -996,8 +1014,9 @@ function _inject_include_prefix!(call_expr, prop_name; index_params::Vector{Symb
         prefix_expr = prop_name === :index ?
             :(__self__.__prefix__) :
             :(__self__.__prefix__ * "/" * $(string(prop_name)))
+        wire_string = GlobalRef(@__MODULE__, :_option_wire_string)
         for ip in index_params
-            prefix_expr = :($prefix_expr * "/" * string($ip))
+            prefix_expr = :($prefix_expr * "/" * $wire_string($ip))
         end
         push!(params.args, Expr(:kw, :__prefix__, prefix_expr))
     end
@@ -2591,7 +2610,7 @@ function _lookup_param(src, fallback, name, T)
     end
 end
 
-# A submitted option carries only its serialized machine value. Recover the
+# A submitted option carries only its stable wire value. Recover the
 # actual machine object from the bound, lazily evaluated `__options__` property
 # before the ordinary parser sees it. This is essential for node-valued domains
 # whose abstract/concrete element type deliberately has no `parse` method.
@@ -2607,7 +2626,7 @@ function _convert_option_param(options, val::AbstractString, name, T)
     allowed = Any[option.value for option in records
                   if !get(option, :disabled, false)]
     for candidate in allowed
-        string(candidate) == val && return candidate
+        _option_wire_string(candidate) == val && return candidate
     end
 
     # Keep the established scalar conversion as a fallback for domains whose
@@ -4276,9 +4295,10 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             save_path = if isnothing(record_dir)
                 nothing
             elseif is_included
-                "/" * join(vcat(string.(chain), string(name), string.(idx_vals)), "/")
+                "/" * join(vcat(string.(chain), string(name),
+                                _option_wire_string.(idx_vals)), "/")
             else
-                "/" * join(vcat(string(name), string.(idx_vals)), "/")
+                "/" * join(vcat(string(name), _option_wire_string.(idx_vals)), "/")
             end
 
             if is_included
@@ -4745,7 +4765,7 @@ end
 Turn one URL segment into the value an indexed mount is selected by.
 
 When the parameter has a domain ([`_index_candidates`](@ref)), the segment is
-matched against the SERIALIZED form of each candidate and the candidate ITSELF
+matched against [`option_wire_value`](@ref) for each candidate and the candidate ITSELF
 is returned — so `/dataset/synthetic_depot` reconstructs the `Dataset` node,
 not the string `"synthetic_depot"`. An option is a node, not its label, and the
 application should not have to flatten one to select the other.
@@ -4762,7 +4782,7 @@ function _resolve_index_arg(parent, param, raw, T)
     isnothing(candidates) && return _convert_param(raw, T)
     target = String(raw)
     for candidate in candidates
-        string(candidate) == target && return candidate
+        _option_wire_string(candidate) == target && return candidate
     end
     # A declared domain may serialize through the same conversion a scalar
     # would — `@options(chain) = 1:4` against `/chains/2`. Compare on the
@@ -4778,7 +4798,8 @@ function _resolve_index_arg(parent, param, raw, T)
     throw(ArgumentError(string(
         "no ", param === nothing ? "option" : param, " matching ", repr(target),
         "; admissible values are ",
-        isempty(candidates) ? "none" : join((repr(string(c)) for c in candidates), ", "))))
+        isempty(candidates) ? "none" :
+        join((repr(_option_wire_string(c)) for c in candidates), ", "))))
 end
 
 function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs::Int)
@@ -6972,8 +6993,10 @@ include("routes/resource_routes.jl")
 
 include("routes/shared_ops_routes.jl")
 
-_hidden_input(k, v) = [h.input(; type="hidden", name=string(k), value=string(v))]
-_hidden_input(k, v::AbstractVector) = [h.input(; type="hidden", name=string(k), value=string(x)) for x in v]
+_hidden_input(k, v) =
+    [h.input(; type="hidden", name=string(k), value=_option_wire_string(v))]
+_hidden_input(k, v::AbstractVector) =
+    [h.input(; type="hidden", name=string(k), value=_option_wire_string(x)) for x in v]
 
 """
     hidden_inputs(; kwargs...) -> Vector{Node}
@@ -7158,9 +7181,9 @@ are preserved as-is (no deduplication or override).
 # Append URL-encoded query-param entries: `Vector` values produce repeated keys,
 # everything else produces one `key=value` pair.
 _push_qparam!(parts, k, v::AbstractVector) =
-    for item in v; push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(item))); end
+    for item in v; push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(_option_wire_string(item))); end
 _push_qparam!(parts, k, v) =
-    push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(string(v)))
+    push!(parts, HTTP.URIs.escapeuri(string(k)) * "=" * HTTP.URIs.escapeuri(_option_wire_string(v)))
 
 query_url(path; kwargs...) = begin
     filtered = filter(p -> !isnothing(p.second), pairs(kwargs))
@@ -7261,7 +7284,8 @@ macro query_url(expr)
     if isempty(positional)
         path_expr = base
     else
-        segments = [base; [:("/" * string($(esc(a)))) for a in positional]...]
+        wire_string = GlobalRef(@__MODULE__, :_option_wire_string)
+        segments = [base; [:("/" * $wire_string($(esc(a)))) for a in positional]...]
         path_expr = Expr(:call, :*, segments...)
     end
 
@@ -7362,8 +7386,9 @@ sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
     uid = string(hash(name), base=16)
     sel_id = "sinput_custom_sel_$(uid)"
     inp_id = "sinput_custom_inp_$(uid)"
-    option_values = Set(string.([_option_key(o) for o in options]))
-    extra_options = isnothing(value) ? [] : [v for v in _as_vector(value) if !(string(v) in option_values)]
+    option_values = Set(_option_wire_string.([_option_key(o) for o in options]))
+    extra_options = isnothing(value) ? [] : [v for v in _as_vector(value)
+                                              if !(_option_wire_string(v) in option_values)]
     all_options = vcat(options, extra_options)
     h.label(
         label,
@@ -7411,9 +7436,11 @@ value attribute and the second is the display label.
 """
 soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, kwargs...)
 _is_selected(value, selected_value) = value == selected_value
-_is_selected(value, selected_value::AbstractVector) = string(value) in string.(selected_value)
+_is_selected(value, selected_value::AbstractVector) =
+    _option_wire_string(value) in _option_wire_string.(selected_value)
 soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
-    option; value=string(value), selected=string(_is_selected(value, selected_value)), kwargs...
+    option; value=_option_wire_string(value),
+    selected=string(_is_selected(value, selected_value)), kwargs...
 )
 
 """
@@ -7499,9 +7526,10 @@ radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, k
         h.legend(label),
         [begin
             opt_value, opt_label = _option_pair(option)
-            checked_attrs = string(opt_value) == string(value) ? (; checked="true") : (;)
+            checked_attrs = _option_wire_string(opt_value) == _option_wire_string(value) ?
+                            (; checked="true") : (;)
             h.label(
-                h.input(; type="radio", name, value=string(opt_value),
+                h.input(; type="radio", name, value=_option_wire_string(opt_value),
                         checked_attrs..., kwargs...),
                 string(opt_label)
             )
@@ -7600,7 +7628,8 @@ function _semantic_option_node(option, selected)
     disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
     help = get(option, :help, nothing)
     help_attrs = isnothing(help) ? (;) : (; title=help)
-    h.option(option.label; value=string(option.value), selected_attrs..., disabled_attrs...,
+    h.option(option.label; value=_option_wire_string(option.value),
+             selected_attrs..., disabled_attrs...,
              help_attrs...)
 end
 
@@ -7638,7 +7667,8 @@ function _semantic_radio(name, label, domain, selected; required=false)
             help = get(option, :help, nothing)
             option_label = isnothing(help) ? option.label : "$(option.label) — $(help)"
             h.label(
-                h.input(; type="radio", name=string(name), value=string(option.value),
+                h.input(; type="radio", name=string(name),
+                        value=_option_wire_string(option.value),
                         checked_attrs..., disabled_attrs..., required_attrs...),
                 option_label,
             )
