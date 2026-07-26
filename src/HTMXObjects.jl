@@ -3722,6 +3722,28 @@ _operation_poll_token(_) = nothing
 _operation_poll_token(req::HTTP.Request) =
     _operation_poll_token(get(queryparams(req), "__htmxo_operation", nothing))
 
+function _operation_page_load_token(value::AbstractString)
+    occursin(r"^[0-9a-f]{32}$", value) ? String(value) : nothing
+end
+_operation_page_load_token(values::AbstractVector) =
+    length(values) == 1 ? _operation_page_load_token(only(values)) : nothing
+_operation_page_load_token(_) = nothing
+
+_operation_page_load_token(req::HTTP.Request) =
+    _operation_page_load_token(
+        get(queryparams(req), "__htmxo_page_load", nothing))
+
+_new_operation_page_load_token() =
+    bytes2hex(Random.rand(Random.RandomDevice(), UInt8, 16))
+
+_operation_page_load_id(token::AbstractString) =
+    "htmxo-operation-load-" * token
+
+function _operation_page_load_id(req::HTTP.Request)
+    token = _operation_page_load_token(req)
+    isnothing(token) ? nothing : _operation_page_load_id(token)
+end
+
 function _operation_marker_url(target::AbstractString, marker::AbstractString,
         value::AbstractString="1")
     separator = occursin('?', target) ? '&' : '?'
@@ -3743,11 +3765,27 @@ function _operation_poll_url(req::HTTP.Request, token::AbstractString,
     _operation_marker_url(target, "__htmxo_operation", token)
 end
 
-function _operation_page_load(req::HTTP.Request, prefix::AbstractString)
-    h.div(; class="htmxo-operation-load",
+function _operation_page_load(req::HTTP.Request, prefix::AbstractString;
+        replace_terminal::Bool=false)
+    replace_terminal || return h.div(;
+        class="htmxo-operation-load", data_htmxo_operation_load="",
+        hx_get=_operation_request_url(req, prefix), hx_trigger="load",
+        hx_target="this", hx_swap="outerHTML")
+
+    token = _new_operation_page_load_token()
+    target = _operation_marker_url(
+        _operation_request_url(req, prefix), "__htmxo_page_load", token)
+    h.div(; id=_operation_page_load_id(token), class="htmxo-operation-load",
           data_htmxo_operation_load="",
-          hx_get=_operation_request_url(req, prefix),
+          hx_get=target,
           hx_trigger="load", hx_target="this", hx_swap="outerHTML")
+end
+
+function _operation_page_runtime(req::HTTP.Request, value)
+    id = _operation_page_load_id(req)
+    (isnothing(id) || _operation_poll_request(req)) && return value
+    h.div(value; id, class="htmxo-operation-runtime",
+          data_htmxo_operation_runtime="")
 end
 
 function _operation_has_page_shell(target)
@@ -3973,7 +4011,8 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         policy, descriptor, req, verb_inst; page_shell)
     context = get(target, :context, nothing)
     prefix = context isa OperationContext ? context.prefix : ""
-    mode === :page_load && return _operation_page_load(req, prefix)
+    mode === :page_load && return _operation_page_load(
+        req, prefix; replace_terminal=!policy.keep_progress)
 
     prop = getproperty(target.leaf, name)
     keys = (verb_inst, idx_vals...)
@@ -3988,20 +4027,24 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         entry = _lookup_operation_poll(token, signature)
         entry isa _OperationPollEntry || throw(ArgumentError(
             "polling operation is expired or does not match this route, its arguments, or its scope"))
+        page_load_id = _operation_page_load_id(req)
         transport = (
             poll_url=_operation_request_url(req, prefix),
             label=Long(name),
             poll_interval=policy.poll_interval,
             keep_progress=policy.keep_progress,
+            page_load_id,
+            replace_page_load=!policy.keep_progress &&
+                              !isnothing(page_load_id),
             error_obj=entry.error_obj,
             req=entry.request,
             grace_period=0.0,
             retain=() -> nothing,
             cleanup=() -> _delete_operation_poll!(token),
         )
-        return _operation_polling(
+        return _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
-            entry.started, entry.prop, entry.keys, entry.call_kwargs, transport)
+            entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
     end
 
     # Decide the transport BEFORE starting the work, and start it the way that
@@ -4022,16 +4065,19 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
             target.leaf, req, now, now)
+        page_load_id = _operation_page_load_id(req)
         transport = (poll_url=_operation_poll_url(req, token, prefix), label=Long(name),
                      poll_interval=policy.poll_interval,
                      keep_progress=policy.keep_progress,
+                     page_load_id,
+                     replace_page_load=false,
                      error_obj=target.leaf, req=req,
                      grace_period=_operation_grace_period(policy, req),
                      retain=() -> _retain_operation_poll!(entry),
                      cleanup=() -> _delete_operation_poll!(token))
-        return _operation_polling(
+        return _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
-            started, prop, keys, call_kwargs, transport)
+            started, prop, keys, call_kwargs, transport))
     end
     started
 end

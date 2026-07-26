@@ -384,14 +384,31 @@ function slow_page_driver()
         }
         if (!document.getElementById('slow-page-terminal')) return;
 
+        var hasPause = Array.from(document.querySelectorAll('button')).some(function(button) {
+          return button.textContent.indexOf('Pause') !== -1;
+        });
+        var hasPollTrigger = !!document.querySelector('[hx-trigger*="every"]');
+        var hasProgress = Array.from(document.querySelectorAll('details summary')).some(function(summary) {
+          return summary.textContent.indexOf('Progress') !== -1;
+        });
+
         if (phase === 'first') {
           sessionStorage.setItem('htmxo-saw-first-shell', document.body.dataset.firstShell || '');
           sessionStorage.setItem('htmxo-saw-first-poller', document.body.dataset.firstPoller || '');
+          sessionStorage.setItem('htmxo-saw-first-terminal-pause', hasPause ? '1' : '0');
+          sessionStorage.setItem('htmxo-saw-first-terminal-poll', hasPollTrigger ? '1' : '0');
+          sessionStorage.setItem('htmxo-saw-first-terminal-progress', hasProgress ? '1' : '0');
           sessionStorage.setItem(phaseKey, 'second');
           setTimeout(function() { location.reload(); }, 50);
         } else {
           document.body.dataset.firstShell = sessionStorage.getItem('htmxo-saw-first-shell') || '';
           document.body.dataset.firstPoller = sessionStorage.getItem('htmxo-saw-first-poller') || '';
+          document.body.dataset.firstTerminalPause =
+            sessionStorage.getItem('htmxo-saw-first-terminal-pause') || '';
+          document.body.dataset.firstTerminalPoll =
+            sessionStorage.getItem('htmxo-saw-first-terminal-poll') || '';
+          document.body.dataset.firstTerminalProgress =
+            sessionStorage.getItem('htmxo-saw-first-terminal-progress') || '';
           document.body.dataset.terminal = '1';
           document.body.dataset.secondDirectTerminal =
             document.body.dataset.secondPoller === '1' ? '0' : '1';
@@ -1679,7 +1696,8 @@ end
 # HX request enter the ordinary grace/poll transport. The proxy prefix must
 # survive BOTH generated hops: the initial load URL and every capability poll.
 @testitem "direct rich pages load async and preserve their external prefix" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _clear_operation_polls!, _operation_polling_impl
+    import HTMXObjects: _clear_operation_polls!, _operation_page_load,
+        _operation_polling_impl
 
     reset_slow_page!()
     _clear_operation_polls!()
@@ -1688,7 +1706,8 @@ end
         key=_req -> "direct-page-unit",
         retention=RootRetention(max_entries=2),
     )
-    route!(SlowPagePolicyApp(); root_provider=provider)
+    route!(SlowPagePolicyApp(); root_provider=provider,
+           operation_policy=OperationPolicy(:auto; keep_progress=false))
     router = HTMXObjects.CONTEXT[].service.router
 
     drive(target, headers=Pair{String,String}[]) = begin
@@ -1714,11 +1733,23 @@ end
     @test direct.status == 200
     @test contains(body, "DIRECT PAGE SHELL")
     @test contains(body, "data-htmxo-operation-load")
-    @test contains(body, "hx-get=\"/p/SbPMX/slow?count=4\"")
+    @test contains(body,
+        "hx-get=\"/p/SbPMX/slow?count=4&amp;__htmxo_page_load=")
     @test contains(body, "hx-trigger=\"load\"")
     @test contains(body, "hx-target=\"this\"")
     @test contains(body, "hx-swap=\"outerHTML\"")
     @test slow_page_runs[] == 0
+
+    progress_loader = repr("text/html", _operation_page_load(
+        HTTP.Request("GET", "/slow?count=4"), "/p/SbPMX"))
+    @test contains(progress_loader,
+        "hx-get=\"/p/SbPMX/slow?count=4\"")
+    @test !contains(progress_loader, "__htmxo_page_load")
+
+    load_match = match(r"hx-get=\"([^\"]+)\"", body)
+    @test load_match !== nothing
+    external_load_url = replace(only(load_match.captures), "&amp;" => "&")
+    internal_load_url = replace(external_load_url, "/p/SbPMX" => ""; count=1)
 
     transports = Any[]
     old_polling = _operation_polling_impl[]
@@ -1734,13 +1765,17 @@ end
             "HX-Request" => "true",
             "X-Forwarded-Prefix" => "/p/SbPMX",
         ]
-        started = drive("/slow?count=4", hx_headers)
-        @test String(started.body) == "<aside>polling</aside>"
+        started = drive(internal_load_url, hx_headers)
+        started_body = String(started.body)
+        @test contains(started_body, "data-htmxo-operation-runtime")
+        @test contains(started_body, "id=\"htmxo-operation-load-")
+        @test contains(started_body, "<aside>polling</aside>")
         @test timedwait(() -> slow_page_runs[] == 1, 5.0;
                         pollint=0.01) === :ok
         poll_url = only(transports).poll_url
-        @test startswith(poll_url,
-            "/p/SbPMX/slow?count=4&__htmxo_poll=1&__htmxo_operation=")
+        @test startswith(poll_url, "/p/SbPMX/slow?count=4&__htmxo_page_load=")
+        @test contains(poll_url, "&__htmxo_poll=1&__htmxo_operation=")
+        @test only(transports).page_load_id !== nothing
 
         internal_poll_url = replace(poll_url, "/p/SbPMX" => ""; count=1)
         polled = drive(internal_poll_url, hx_headers)
@@ -1772,7 +1807,8 @@ end
             key=_req -> "direct-page-browser",
             retention=RootRetention(max_entries=2),
         )
-        route!(SlowPagePolicyApp(); root_provider=provider)
+        route!(SlowPagePolicyApp(); root_provider=provider,
+               operation_policy=OperationPolicy(:auto; keep_progress=false))
         router = HTMXObjects.CONTEXT[].service.router
         prefix = "/p/SbPMX"
         forwarded_targets = String[]
@@ -1801,10 +1837,11 @@ end
             body = String(response.body)
             if !released[] && contains(body, "hx-trigger=\"every ")
                 released[] = true
-                @async begin
-                    sleep(0.4)
-                    release_slow_page!()
-                end
+                # The poller response is already materialized, so releasing
+                # here still guarantees that the browser mounts it before the
+                # first terminal poll. A real-time sleep races Chromium's
+                # virtual-time budget and can fire only after the dump ends.
+                release_slow_page!()
             end
             response
         end
@@ -1817,6 +1854,9 @@ end
             end
             @test contains(dom, "data-first-shell=\"1\"")
             @test contains(dom, "data-first-poller=\"1\"")
+            @test contains(dom, "data-first-terminal-pause=\"0\"")
+            @test contains(dom, "data-first-terminal-poll=\"0\"")
+            @test contains(dom, "data-first-terminal-progress=\"0\"")
             @test contains(dom, "data-second-shell=\"1\"")
             @test contains(dom, "data-terminal=\"1\"")
             @test contains(dom, "data-second-direct-terminal=\"1\"")
