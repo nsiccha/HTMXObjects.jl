@@ -2686,6 +2686,8 @@ function _extract_option_param(options, req::HTTP.Request, name, T,
     v = _lookup_option_param(options, src, fallback, name, T)
     _resolve_extracted(v, default, name)
 end
+_extract_option_param(_options, ::Nothing, name, _T, default=_NO_DEFAULT) =
+    _resolve_extracted(_NO_DEFAULT, default, name)
 _resolve_extracted(::_NoDefault, ::_NoDefault, name) = throw(MissingRequiredParam(name))
 _resolve_extracted(::_NoDefault, default, _) = default
 _resolve_extracted(v, _default, _name) = v
@@ -5185,20 +5187,25 @@ end
 
 # Parse a LOCAL `@param` on `T` into (type, required, default), or `nothing`
 # if `nm` is absent or only reaches `T` by inheritance/delegation. A local
-# `@param`'s emitted RHS is `_extract_param(req, :name, T[, default])` —
-# arity-4 (no default) ⇒ required, arity-5 ⇒ has default.
+# `@param`'s emitted RHS is `_extract_param(req, :name, T[, default])` or,
+# when the same name has `@options`,
+# `_extract_option_param(options, req, :name, T[, default])`.
 function _reflect_local_param(T, nm)
     info = Base.invokelatest(DynamicObjects.metafirst, T, nm)
     info === nothing && return nothing
     rhs = info.rhs
-    if Meta.isexpr(rhs, :call) && length(rhs.args) >= 4 && rhs.args[1] === _extract_param
-        has_default = length(rhs.args) >= 5
-        return (type=_reflect_resolve_type(parentmodule(T), rhs.args[4]),
-                required=!has_default,
-                default=has_default ? _unquote(rhs.args[5]) : nothing,
-                doc=_decl_doc(info))
-    end
-    nothing
+    Meta.isexpr(rhs, :call) || return nothing
+    extractor = rhs.args[1]
+    type_index = extractor === _extract_param ? 4 :
+                 extractor === _extract_option_param ? 5 : nothing
+    type_index === nothing && return nothing
+    length(rhs.args) >= type_index || return nothing
+    default_index = type_index + 1
+    has_default = length(rhs.args) >= default_index
+    return (type=_reflect_resolve_type(parentmodule(T), rhs.args[type_index]),
+            required=!has_default,
+            default=has_default ? _unquote(rhs.args[default_index]) : nothing,
+            doc=_decl_doc(info))
 end
 
 # Build param descriptors for every `@param` of `OwnerT` (`_param_names`
@@ -5256,15 +5263,16 @@ function _reflect_route(IterT, name::Symbol, info, method, prefix, parent_stack)
 end
 
 function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
-        enrich=(owner, route) -> route)
+        enrich=(owner, route, parents) -> route)
     _walk_route_meta(IterT,
         (name, info, nested_type) -> begin
             nested_prefix, _step = _nested_prefix_and_step(IterT, name, info, prefix)
             _reflect_walk!(acc, nested_type, nested_prefix,
                            push!(copy(parent_stack), IterT); enrich)
         end,
-        (name, info, method) -> push!(acc, enrich(IterT,
-            _reflect_route(IterT, name, info, method, prefix, parent_stack))))
+        (name, info, method) -> push!(acc, enrich(
+            IterT, _reflect_route(IterT, name, info, method, prefix, parent_stack),
+            parent_stack)))
 end
 
 """
@@ -5285,14 +5293,36 @@ function reflect(::Type{T}) where {T}
     acc
 end
 
-function _semantic_param(param, property)
-    property === nothing && return merge(param, (kind=nothing, domain=nothing))
-    input = findfirst(candidate -> candidate.name === param.name,
-                      get(property, :inputs, NamedTuple[]))
-    input === nothing && return merge(param, (kind=nothing, domain=nothing))
-    semantic_input = get(property, :inputs, NamedTuple[])[input]
-    merge(param, (kind=get(semantic_input, :kind, nothing),
-                  domain=get(semantic_input, :domain, nothing)))
+function _semantic_request_context_param(param, SourceT)
+    _reflect_local_param(SourceT, param.name) === nothing && return nothing
+    descriptor = _property_descriptor(SourceT, param.name)
+    descriptor === nothing && return nothing
+    domain = get(descriptor, :domain, nothing)
+    domain === nothing && return nothing
+    get(domain, :kind, :unrestricted) === :declared || return nothing
+    merge(param, (
+        kind=:context,
+        domain,
+        context_source=(type=SourceT, property=param.name),
+        context_scope=:request,
+    ))
+end
+
+function _semantic_param(param, property, owner, parent_stack=Any[])
+    if property !== nothing
+        inputs = get(property, :inputs, NamedTuple[])
+        input = findfirst(candidate -> candidate.name === param.name, inputs)
+        if input !== nothing
+            semantic_input = inputs[input]
+            return merge(param, (kind=get(semantic_input, :kind, nothing),
+                                 domain=get(semantic_input, :domain, nothing)))
+        end
+    end
+    for SourceT in (owner, Iterators.reverse(parent_stack)...)
+        promoted = _semantic_request_context_param(param, SourceT)
+        promoted === nothing || return promoted
+    end
+    merge(param, (kind=nothing, domain=nothing))
 end
 
 function _semantic_context_param(input, verb::Symbol)
@@ -5326,10 +5356,11 @@ function _semantic_context_params(property, verb::Symbol)
      if get(input, :kind, nothing) === :context]
 end
 
-function _semantic_route(owner, route)
+function _semantic_route(owner, route, parent_stack=Any[])
     property = _property_descriptor(owner, route.name, route.verb)
     context_params = _semantic_context_params(property, route.verb)
-    route_params = [_semantic_param(param, property) for param in route.params]
+    route_params = [_semantic_param(param, property, owner, parent_stack)
+                    for param in route.params]
     context_names = Set(param.name for param in context_params)
     overlap = [param.name for param in route_params if param.name in context_names]
     isempty(overlap) || throw(ArgumentError(string(
@@ -5432,7 +5463,7 @@ end
 # `_reflect_route` with the flat transport view, so a route cannot describe
 # itself one way in the graph and another way in `reflect`.
 function _nav_routes(T, path::AbstractString, parent_stack=Any[];
-                     enrich=(owner, route) -> route)
+                     enrich=(owner, route, parents) -> route)
     out = NamedTuple[]
     hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return out
     prefix = _nav_prefix_arg(path)
@@ -5441,7 +5472,8 @@ function _nav_routes(T, path::AbstractString, parent_stack=Any[];
         (_name, _info, _nested) -> nothing,
         (name, info, method) -> begin
             route = _reflect_route(T, name, info, method, prefix, parent_stack)
-            push!(out, merge(enrich(T, route), (; label=_humanize(name), origin)))
+            push!(out, merge(enrich(T, route, parent_stack),
+                             (; label=_humanize(name), origin)))
         end)
     out
 end
@@ -7586,7 +7618,13 @@ function _semantic_context_value(obj, param)
     source = get(param, :context_source, nothing)
     source isa NamedTuple || return _NO_DEFAULT
     source_obj = _semantic_source_object(obj, source)
-    getproperty(source_obj, source.property)
+    try
+        getproperty(source_obj, source.property)
+    catch err
+        get(param, :context_scope, :object) === :request &&
+            unwrap_error(err) isa MissingRequiredParam && return _NO_DEFAULT
+        rethrow()
+    end
 end
 
 function _semantic_form_values(obj, route, provided)
@@ -7730,6 +7768,7 @@ end
 
 function _semantic_runtime_route(obj, route)
     params = NamedTuple[route.params...]
+    resolved_sources = Set{Symbol}()
     parent = hasproperty(obj, :__parent__) ? getproperty(obj, :__parent__) : nothing
     while parent !== nothing
         ParentT = typeof(parent)
@@ -7737,6 +7776,7 @@ function _semantic_runtime_route(obj, route)
             local_info = _reflect_local_param(ParentT, name)
             existing = findfirst(param -> param.name === name, params)
             if existing !== nothing
+                name in resolved_sources && continue
                 # An inline child knows the inherited parameter name at macro
                 # expansion, but its standalone descriptor cannot know the
                 # enclosing declaration's type/default/doc. Enrich that
@@ -7749,6 +7789,11 @@ function _semantic_runtime_route(obj, route)
                         default=local_info.default,
                         doc=local_info.doc,
                     ))
+                    promoted = _semantic_request_context_param(params[existing], ParentT)
+                    promoted === nothing || (params[existing] = promoted)
+                    push!(resolved_sources, name)
+                elseif !get(params[existing], :inherited, false)
+                    push!(resolved_sources, name)
                 end
                 continue
             end
@@ -7757,10 +7802,13 @@ function _semantic_runtime_route(obj, route)
                                type=nothing, required=false, default=nothing,
                                doc=nothing, inherited=true, kind=nothing, domain=nothing))
             else
-                push!(params, (name=name, source=_reflect_kw_source(string(route.verb)),
-                               type=local_info.type, required=local_info.required,
-                               default=local_info.default, doc=local_info.doc,
-                               inherited=true, kind=nothing, domain=nothing))
+                param = (name=name, source=_reflect_kw_source(string(route.verb)),
+                         type=local_info.type, required=local_info.required,
+                         default=local_info.default, doc=local_info.doc,
+                         inherited=true, kind=nothing, domain=nothing)
+                promoted = _semantic_request_context_param(param, ParentT)
+                push!(params, promoted === nothing ? param : promoted)
+                push!(resolved_sources, name)
             end
         end
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
@@ -7836,9 +7884,10 @@ function _semantic_refresh_dependencies(route)
     dependencies
 end
 
-function _semantic_refresh_attrs(route, action)
+function _semantic_refresh_attrs(route, action, settings=(;))
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     refresh_url = _operation_marker_url(string(action), "__htmxo_form")
+    refresh_url = query_url(refresh_url; settings...)
     method_attrs = NamedTuple{(method_key,)}((refresh_url,))
     merge(method_attrs, (hx_trigger="change", hx_include="closest form",
                          hx_target="closest form", hx_swap="outerHTML"))
@@ -7894,12 +7943,13 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     submit = _operation_form_setting(req, :__htmxo_submit, "Run")
     form_class = _operation_form_setting(req, :__htmxo_form_class, "")
     radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, "4"))
+    navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
     shared_context = _semantic_context_names(
         _operation_form_setting(req, :__htmxo_shared_context, ""))
     value = operation_form(target.leaf, route; values=extracted.values,
                            target=request_path, target_id, swap, submit,
-                           form_class, radio_max, context_selector,
+                           form_class, radio_max, navigate, context_selector,
                            shared_context)
     kw_pairs = Pair{Symbol,Any}[
         param.name => extracted.values[param.name] for param in route.params
@@ -7934,7 +7984,7 @@ function _operation_route(T, name::Symbol, verb::Symbol)
 end
 
 """
-    operation_form(obj, name::Symbol; verb=:GET, values=(;), kwargs...)
+    operation_form(obj, name::Symbol; verb=:GET, values=(;), navigate=false, kwargs...)
     operation_form(obj, route::NamedTuple; values=(;), target=obj/route.path, kwargs...)
 
 Generate an HTMX form from a merged semantic route descriptor. Static domains
@@ -7944,14 +7994,29 @@ boolean, numeric, or text controls. Positional path inputs must be supplied in
 `values` and are encoded into the route URL. Submitted values still pass through
 the shared typed extractor and current-domain validation on the server.
 
-Enclosing `@param` values are inferred from the current request and carried as
-hidden inputs. Operation inputs and effective fixed-field `kind=:context`
-inputs become visible controls. A low-level one-operation form renders those
-context controls locally; [`semantic_app`](@ref) lifts and deduplicates them
-into one graph-level control group that every operation form includes.
+Enclosing `@param` values without a declared domain are inferred from the
+current request and carried as hidden inputs. An `@param` with matching
+`@options` is visible request context; operation inputs and effective
+fixed-field `kind=:context` inputs are visible as before. A low-level
+one-operation form renders one local `.htmxo-semantic-context` group;
+[`semantic_app`](@ref) lifts and deduplicates those controls into one
+graph-level group that every operation form includes.
 The enclosing set is resolved from `obj`'s runtime `__parent__` chain, so an
 inline `@include child = begin … end` and a separately declared bundle mounted
 as `@include child = ExternalChild()` emit the same hidden context.
+
+Set `navigate=true` when a standalone GET form is the generated selector for
+the page itself. The form uses native `method="get"` and `action` attributes,
+so submission performs a full browser navigation and the selected request
+rebuilds the page shell as well as its route fragment. HTMX is retained only on
+controls whose dynamic domains must refresh the form before submission. The
+mode survives such a refresh. It defaults to `false`, so [`semantic_app`](@ref)
+operation cards continue swapping into their local result targets. Navigation
+is rejected for non-GET operations and externally lifted context, neither of
+which has honest native GET form semantics. It also owns `method`/`action` and
+rejects form-level `hx_*` kwargs. Low-level HTMX attributes such as
+`hx_push_url` remain available through `kwargs` in the default fragment-swap
+mode, but changing history alone does not rebuild an outer page shell.
 
 Carrying the context is not the same as the child *owning* it. `@param`
 inheritance is resolved at macro expansion, so only an inline child gets the
@@ -7969,12 +8034,13 @@ delegate explicitly:
 When a dynamic domain declares dependencies, changing one of those controls
 rerenders the generated form through the same verb and route without executing
 the operation. The refreshed form retains `target_id`, `swap`, submit label,
-form class, and radio threshold.
+form class, radio threshold, and navigation mode.
 """
 function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
         submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
-        form_class="", shared_context=(), context_selector=nothing, kwargs...)
+        form_class="", navigate::Bool=false, shared_context=(),
+        context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
     route = _semantic_runtime_route(obj, route)
@@ -7983,6 +8049,28 @@ function operation_form(obj, route::NamedTuple; values=(;),
     action = _operation_form_action(route, current, target)
     refresh_dependencies = _semantic_refresh_dependencies(route)
     shared_names = _semantic_context_names(shared_context)
+    if navigate
+        route.verb === :GET || throw(ArgumentError(
+            "operation_form navigate=true only supports GET routes"))
+        conflicting = [key for key in keys(kwargs)
+                       if key in (:method, :action) || startswith(string(key), "hx_")]
+        isempty(conflicting) || throw(ArgumentError(
+            "operation_form navigate=true owns method/action and does not accept " *
+            "form-level HTMX attributes: $(join(string.(conflicting), ", "))"))
+        isnothing(context_selector) || throw(ArgumentError(
+            "operation_form navigate=true requires context inside the form"))
+        isempty(shared_names) || throw(ArgumentError(
+            "operation_form navigate=true does not support shared external context"))
+    end
+    refresh_settings = navigate ? (;
+        __htmxo_swap=swap,
+        __htmxo_submit=submit,
+        __htmxo_form_class=form_class,
+        __htmxo_radio_max=radio_max,
+        __htmxo_navigate=true,
+        __htmxo_target_id=target_id,
+    ) : (;)
+    context_controls = Any[]
     controls = Any[]
     for param in route.params
         param.source === :path && continue
@@ -7991,31 +8079,50 @@ function operation_form(obj, route::NamedTuple; values=(;),
             param.name in shared_names && continue
         control = _semantic_control(obj, route.owner, param, current; radio_max)
         if param.name in refresh_dependencies
-            control = h.div(control; _semantic_refresh_attrs(route, action)...)
+            control = h.div(control;
+                _semantic_refresh_attrs(route, action, refresh_settings)...)
         end
-        push!(controls, control)
+        if get(param, :kind, nothing) === :context
+            push!(context_controls, control)
+        else
+            push!(controls, control)
+        end
     end
+    local_context = isempty(context_controls) ? Any[] : Any[
+        h.fieldset(h.legend("Model inputs"), context_controls...;
+                   class="htmxo-semantic-context")
+    ]
     context_inputs = _semantic_context_inputs(route, current)
-    config_inputs = hidden_inputs(
+    # Default HTMX forms retain their established hidden reconstruction state.
+    # Native forms instead put that state directly on a dependent control's
+    # refresh URL, so no internal transport fields are successful controls in
+    # the final browser GET.
+    config_inputs = navigate ? Any[] : hidden_inputs(
         __htmxo_swap=swap,
         __htmxo_submit=submit,
         __htmxo_form_class=form_class,
         __htmxo_radio_max=radio_max,
     )
-    isempty(shared_names) || append!(config_inputs,
-        hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
-    isnothing(context_selector) || append!(config_inputs,
-        hidden_inputs(__htmxo_context_selector=context_selector))
-    isnothing(target_id) || append!(config_inputs,
-        hidden_inputs(__htmxo_target_id=target_id))
-    method_key = Symbol("hx_" * lowercase(string(route.verb)))
-    method_attrs = NamedTuple{(method_key,)}((action,))
-    target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
-    swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
-    include_attrs = isnothing(context_selector) ? (;) : (; hx_include=context_selector)
-    form_attrs = merge(method_attrs, target_attrs, swap_attrs, include_attrs,
-                       (; class=form_class), (; kwargs...))
-    h.form(context_inputs..., config_inputs..., controls...,
+    if !isempty(config_inputs)
+        isempty(shared_names) || append!(config_inputs,
+            hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
+        isnothing(context_selector) || append!(config_inputs,
+            hidden_inputs(__htmxo_context_selector=context_selector))
+        isnothing(target_id) || append!(config_inputs,
+            hidden_inputs(__htmxo_target_id=target_id))
+    end
+    form_attrs = if navigate
+        merge((; class=form_class), (; kwargs...), (; method="get", action))
+    else
+        method_key = Symbol("hx_" * lowercase(string(route.verb)))
+        method_attrs = NamedTuple{(method_key,)}((action,))
+        target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
+        swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
+        include_attrs = isnothing(context_selector) ? (;) : (; hx_include=context_selector)
+        merge(method_attrs, target_attrs, swap_attrs, include_attrs,
+              (; class=form_class), (; kwargs...))
+    end
+    h.form(context_inputs..., config_inputs..., local_context..., controls...,
            h.button(submit; type="submit");
            form_attrs...)
 end
@@ -8211,11 +8318,13 @@ operation surface. Routes are discovered in declaration order from
 [`operation_form`](@ref) and a stable result target, so adding another route to
 the graph requires no parallel form or route registry.
 
-Effective fixed-field `kind=:context` inputs are resolved from their mounted
-`source=(; type, property)`, deduplicated across operations, and rendered once
-above the operation cards. Submitting a changed selection remakes the mounted
-source and reconstructs its routed descendants; request/route/prefix context
-continues to use same-type remounting. Unrelated retained caches remain shared.
+Effective fixed-field and declared-domain request `kind=:context` inputs are
+resolved from their mounted `source=(; type, property)`, deduplicated across
+operations, and rendered once above the operation cards. Submitting a changed
+fixed selection remakes the mounted source and reconstructs its routed
+descendants; request parameters continue through the request extractor, while
+route/prefix context uses same-type remounting. Unrelated retained caches remain
+shared.
 
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` may likewise be a value or function. Override
@@ -8297,7 +8406,8 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
         context_names[param.name] = identity
         if haskey(context_indices, identity)
             prior = context_entries[context_indices[identity]]
-            isequal(prior.current[param.name], spec.current[param.name]) ||
+            isequal(get(prior.current, param.name, nothing),
+                    get(spec.current, param.name, nothing)) ||
                 throw(ArgumentError(string(
                     "semantic_app received conflicting values for shared context input ",
                     "$(repr(param.name))")))

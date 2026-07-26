@@ -133,9 +133,32 @@ end
 
 Adding another route inside `models` automatically adds its descriptor, form,
 result target, and registered operation; there is no second operation list.
-Mounted `@param` context and declared defaults become hidden inputs. An indexed
+Mounted `@param` context without a matching `@options` declaration, including
+its default, becomes a hidden input. A declared-domain `@param` is instead one
+visible shared control, deduplicated across every mounted operation that carries
+it; its submitted value still flows through the request extractor. An indexed
 `@include` is intentionally fail-closed until an index is selected—call
 `semantic_app(app.models(:chosen))` to compile that concrete subtree.
+
+For custom placement, `operation_form` renders its request/fixed context inside
+one local `.htmxo-semantic-context` fieldset. It does not need an external
+context selector; the selector/include wiring is only needed when
+`semantic_app` lifts that group outside several operation forms.
+
+If that standalone form selects the page represented by its request context,
+pass `navigate=true`. The generated GET form uses native `method` and `action`
+attributes, so selection performs a full browser navigation: the selected
+request rebuilds the page shell and navigation as well as its route fragment.
+HTMX remains only on controls that need a dependent-domain refresh before
+submission, and navigation mode is retained across that refresh. Static native
+forms omit the internal refresh query fields; dynamic forms carry reconstruction
+settings on the HTMX refresh URL rather than as successful form controls, so the
+eventual browser location stays clean. The mode is GET-only and requires context
+inside the form; `semantic_app` operation cards remain local HTMX swaps. A raw
+`hx_push_url="/custom"` is still available in that default HTMX mode, but
+changing history alone does not rebuild an outer shell. Native navigation owns
+its `method`/`action` and rejects form-level `hx_*` kwargs so this full-page
+contract cannot silently degrade back into a fragment swap.
 
 Fixed semantic state is the zero-boilerplate shared-control form. Declare each
 field and domain once; zero-argument operations that depend on those fields
@@ -216,10 +239,13 @@ expansion, not a silent no-op.)
 
 For an ordinary route argument, **only the declared domain is merged into the
 rendered control** — the rest comes from the route declaration. Effective
-`kind=:context` inputs instead carry their type/default/domain and
+fixed-field `kind=:context` inputs instead carry their type/default/domain and
 `source=(; type, property)` from the fixed field descriptor; HTMXObjects uses
 that source to resolve, deduplicate, render, validate and rebuild the mounted
-target.
+target. An option-backed `@param` is also `kind=:context`, with
+`context_scope=:request`: its declaring property supplies the live domain and
+shared-control identity, while submission continues through `@param` request
+extraction rather than remaking fixed object state.
 
 So, to answer the obvious question directly: labels, help text, units and
 ordering are **not** declarable, and there is no effect/side-effect policy key
@@ -261,7 +287,7 @@ faithful account of the generated signature, and the verb is reachable as
 |--------------------------|------------------------------|
 | Operation card title | The route's **docstring** — first non-empty line; falls back to a humanised property name |
 | Control label | The param's doc as recorded by `reflect(T)`; falls back to a humanised input name |
-| Control order | Fixed context source declaration order, then route parameter declaration order — there is no ordering key |
+| Control order | Shared context discovery order, then route parameter declaration order — there is no ordering key |
 | Which control is rendered | `domain` if present, else the declared Julia `type` |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |
