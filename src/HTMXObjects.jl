@@ -1012,7 +1012,10 @@ _param_names(::Type) = ()
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
 to plain derived-property assignments that call
-`_extract_param(_req_of(__self__), ...)` at property-access time. Supports:
+`_extract_param(_req_of(__self__), ...)` at property-access time. A parameter
+with a matching `@options` declaration instead calls `_extract_option_param`
+with the bound option evaluator, so serialized machine values can resolve
+against the live domain before scalar parsing. Supports:
 
     @param vessels::Vector{String} = ["Tablet-20"]
     @param fit_key::String                             # required, errors on miss
@@ -1032,6 +1035,11 @@ Returns the ordered list of declared param names for later `_param_names` emissi
 """
 function _convert_params!(struct_expr)
     body = struct_expr.args[3]
+    option_names = Set{Symbol}()
+    for arg in body.args
+        name = _option_parameter_name(arg)
+        name === nothing || push!(option_names, name)
+    end
     names = Symbol[]
     new_args = Any[]
     process_line! = inner -> begin
@@ -1043,7 +1051,7 @@ function _convert_params!(struct_expr)
             end
             return
         end
-        rewritten = _rewrite_param_line(inner)
+        rewritten = _rewrite_param_line(inner, option_names)
         rewritten === nothing && return
         push!(names, rewritten[1])
         push!(new_args, rewritten[2])
@@ -1100,6 +1108,30 @@ function _convert_params!(struct_expr)
     names
 end
 
+# Read the parameter name from either supported declaration spelling before
+# DynamicObjects lowers it:
+#
+#     @options node = catalogue
+#     @options(node) = catalogue
+function _option_parameter_name(arg)
+    if Meta.isexpr(arg, :(=), 2) && Meta.isexpr(arg.args[1], :macrocall)
+        lhs = arg.args[1]
+        mname = lhs.args[1]
+        (mname isa GlobalRef ? mname.name : mname) === Symbol("@options") ||
+            return nothing
+        payload = Any[x for x in lhs.args[2:end] if !(x isa LineNumberNode)]
+        return length(payload) == 1 && only(payload) isa Symbol ? only(payload) : nothing
+    end
+    Meta.isexpr(arg, :macrocall) || return nothing
+    mname = arg.args[1]
+    (mname isa GlobalRef ? mname.name : mname) === Symbol("@options") ||
+        return nothing
+    payload = Any[x for x in arg.args[2:end] if !(x isa LineNumberNode)]
+    length(payload) == 1 && Meta.isexpr(only(payload), :(=), 2) || return nothing
+    lhs = only(payload).args[1]
+    lhs isa Symbol ? lhs : nothing
+end
+
 # Parse a delegation form `@param (; a, b, c) = source` — register a/b/c as
 # params on this struct and resolve their values via `source.a` / `source.b`
 # / `source.c` at property-access time. Typical use: `@param (; a, b) = __parent__`
@@ -1127,7 +1159,7 @@ end
 
 # Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
 # and return `(name_sym, rewritten_assignment)` or `nothing` if unrecognized.
-function _rewrite_param_line(expr)
+function _rewrite_param_line(expr, option_names=Set{Symbol}())
     default_expr = nothing
     lhs = expr
     if Meta.isexpr(expr, :(=))
@@ -1138,9 +1170,11 @@ function _rewrite_param_line(expr)
     name_sym === nothing && return nothing
     t = type_expr === nothing ? :nothing : type_expr
     req_expr = :($(_req_of)(__self__))
-    rhs = default_expr === nothing ?
-        :($(_extract_param)($req_expr, $(QuoteNode(name_sym)), $t)) :
-        :($(_extract_param)($req_expr, $(QuoteNode(name_sym)), $t, $default_expr))
+    extractor = name_sym in option_names ? _extract_option_param : _extract_param
+    args = name_sym in option_names ? Any[:(__self__.__options__), req_expr] : Any[req_expr]
+    append!(args, (QuoteNode(name_sym), t))
+    default_expr === nothing || push!(args, default_expr)
+    rhs = Expr(:call, extractor, args...)
     (name_sym, Expr(:(=), name_sym, rhs))
 end
 
@@ -2557,6 +2591,56 @@ function _lookup_param(src, fallback, name, T)
     end
 end
 
+# A submitted option carries only its serialized machine value. Recover the
+# actual machine object from the bound, lazily evaluated `__options__` property
+# before the ordinary parser sees it. This is essential for node-valued domains
+# whose abstract/concrete element type deliberately has no `parse` method.
+function _declared_param_options(options, name)
+    declared = Base.invokelatest(options, Val(Symbol(name)))
+    isdefined(DynamicObjects, :option_records) || return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :option_records), declared)
+end
+
+function _convert_option_param(options, val::AbstractString, name, T)
+    records = _declared_param_options(options, name)
+    records === nothing && return _convert_param(val, T)
+    allowed = Any[option.value for option in records
+                  if !get(option, :disabled, false)]
+    for candidate in allowed
+        string(candidate) == val && return candidate
+    end
+
+    # Keep the established scalar conversion as a fallback for domains whose
+    # wire spelling is accepted by the annotated type. The resolved value must
+    # still belong to the CURRENT domain; this is the stale-form guard.
+    converted = try
+        _convert_param(val, T)
+    catch err
+        err isa Union{ArgumentError,MethodError} || rethrow()
+        throw(InvalidDomainValue(Symbol(name), val, allowed))
+    end
+    any(candidate -> isequal(candidate, converted), allowed) ||
+        throw(InvalidDomainValue(Symbol(name), converted, allowed))
+    converted
+end
+_convert_option_param(options, val, name, T) = _convert_param(val, T)
+
+function _lookup_option_param(options, src, fallback, name, T)
+    key = String(name)
+    v = get(src, key, nothing)
+    if (v === nothing || v == "") && fallback !== nothing
+        v = get(fallback, key, nothing)
+    end
+    (v === nothing || v == "") && return _NO_DEFAULT
+    try
+        _convert_option_param(options, v, name, T)
+    catch err
+        T === Bool && err isa ArgumentError &&
+            throw(InvalidDomainValue(Symbol(name), v, (false, true)))
+        rethrow()
+    end
+end
+
 """
     _extract_param(req, name, T, default=_NO_DEFAULT) -> value
 
@@ -2573,6 +2657,14 @@ function _extract_param(req, name, T, default=_NO_DEFAULT)
     src = _kwargs_source(req, method)
     fallback = method in _queryparams_verbs ? nothing : queryparams(req)
     v = _lookup_param(src, fallback, name, T)
+    _resolve_extracted(v, default, name)
+end
+function _extract_option_param(options, req::HTTP.Request, name, T,
+        default=_NO_DEFAULT)
+    method = req.method
+    src = _kwargs_source(req, method)
+    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
+    v = _lookup_option_param(options, src, fallback, name, T)
     _resolve_extracted(v, default, name)
 end
 _resolve_extracted(::_NoDefault, ::_NoDefault, name) = throw(MissingRequiredParam(name))
@@ -3474,11 +3566,20 @@ _operation_context_inputs(descriptor) = descriptor === nothing ? NamedTuple[] :
     [input for input in get(descriptor, :inputs, NamedTuple[])
      if get(input, :kind, nothing) === :context]
 
-function _operation_context_value(req::HTTP.Request, input, fallback_value)
+function _operation_context_value(obj, req::HTTP.Request, input, fallback_value)
     method = req.method
     src = _kwargs_source(req, method)
     fallback = method in _queryparams_verbs ? nothing : queryparams(req)
-    submitted = _lookup_param(src, fallback, input.name, get(input, :type, nothing))
+    name = input.name
+    T = get(input, :type, nothing)
+    submitted = if isdefined(DynamicObjects, :has_option_declaration) &&
+            Base.invokelatest(getproperty(DynamicObjects, :has_option_declaration),
+                              typeof(obj), name)
+        _lookup_option_param(getproperty(obj, :__options__), src, fallback,
+                             name, T)
+    else
+        _lookup_param(src, fallback, name, T)
+    end
     submitted === _NO_DEFAULT ? fallback_value : submitted
 end
 
@@ -3539,7 +3640,7 @@ function _bind_operation_context(target, descriptor, req::HTTP.Request)
         index = _operation_source_index(objects, source)
         source_obj = objects[index]
         current = getproperty(source_obj, source.property)
-        value = _operation_context_value(req, input, current)
+        value = _operation_context_value(source_obj, req, input, current)
         values[input.name] = value
         sources[input.name] = (index, source_obj, input)
         isequal(value, current) && continue

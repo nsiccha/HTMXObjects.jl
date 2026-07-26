@@ -34,7 +34,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
     IndexedMountChild, IndexedMountRoot,
-    DomainNode, DomainChild, StageChild, DomainRoot, BoolPropRoot
+    DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot, BoolPropRoot
 
 @htmx struct TestApp
     title = "Test"
@@ -660,6 +660,17 @@ end
     @include compilation(stage::SelStage) = StageChild(stage)
     @include chains(chain::Integer) = StageChild(chain)
     @get index() = "domain-root"
+end
+
+@htmx struct DomainParamRoot
+    @param source::Symbol = :depot
+    @options(source) = (:depot, :survey)
+    catalogue = source === :depot ?
+        AbstractDomainNode[DomainNode(:synthetic_depot, "depot")] :
+        AbstractDomainNode[DomainNode(:real_survey, "survey")]
+    @param node::AbstractDomainNode = first(catalogue)
+    @options(node) = catalogue
+    @get index() = string("node=", string(node), " payload=", node.payload)
 end
 
 # A typed computed property whose type is an ordinary Julia type, not a node.
@@ -3650,6 +3661,27 @@ end
 
     # A scalar mount with no domain keeps the ordinary parse path.
     @test contains(String(drive("/chains/3").body), "stage=3")
+end
+
+@testitem "a node-valued @param resolves through its live option domain" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path) = begin
+        req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(DomainParamRoot())
+
+    response = drive("/?source=survey&node=real_survey")
+    @test response.status == 200
+    body = String(response.body)
+    @test contains(body, "node=real_survey")
+    @test contains(body, "payload=survey")
+
+    # A value submitted from an older rendering does not fall through to an
+    # impossible `parse(AbstractDomainNode, ...)`; it remains a bad request.
+    stale = drive("/?source=depot&node=real_survey")
+    @test stale.status == 400
+    @test contains(String(stale.body), "Bad Request")
 end
 
 @testitem "a typed computed property is not a mount, and its domain is proven" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
