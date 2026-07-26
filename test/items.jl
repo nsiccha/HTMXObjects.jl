@@ -697,9 +697,10 @@ end
 end
 
 @htmx struct SemanticNodeParamApp
-    catalogue = AbstractDomainNode[
-        DomainNode(Symbol("model_$(index)"), "payload $(index)") for index in 1:13
-    ]
+    catalogue = HTMXObjects.DynamicObjects.option_domain(
+        DomainNode(Symbol("model_$(index)"), "payload $(index)") => "Model $(index)"
+        for index in 1:13
+    )
     @param model::AbstractDomainNode = first(catalogue)
     @options(model) = catalogue
     __page__(content) = h.html(h.body(
@@ -3808,6 +3809,9 @@ end
     @test count("<option", custom_html) == 13
     @test contains(custom_html, "value=\"model_1\"")
     @test contains(custom_html, "value=\"model_13\"")
+    @test contains(custom_html, ">Model 1</option>")
+    @test contains(custom_html, ">Model 13</option>")
+    @test !contains(custom_html, ">model_1</option>")
     @test !contains(custom_html, "type=\"hidden\" name=\"model\"")
     @test !contains(custom_html, "hx-include=")
     @test !contains(custom_html, "hx-push-url=")
@@ -3816,6 +3820,8 @@ end
         custom_app, :index; navigate=true))
     @test count("class=\"htmxo-semantic-context\"", navigating_html) == 1
     @test count("<option", navigating_html) == 13
+    @test contains(navigating_html, ">Model 1</option>")
+    @test contains(navigating_html, "value=\"model_13\"")
     @test contains(navigating_html, "method=\"get\"")
     @test contains(navigating_html, "action=\"/\"")
     @test !contains(navigating_html, "hx-get=")

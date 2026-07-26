@@ -3758,7 +3758,16 @@ function _declared_input_domain(obj, input, domain, values)
             "dependency that is currently only an operation argument to a field.")))
     end
     declared === nothing && return nothing
-    Base.invokelatest(getproperty(DynamicObjects, :static_domain), declared;
+    # An OptionDomain deliberately iterates its machine values so membership
+    # and validation behave exactly like a bare collection. Preserve its
+    # per-object label/help/disabled records before static_domain normalizes
+    # that collection; otherwise generated controls rebuild default labels
+    # from the values and discard the application's declared presentation.
+    normalized = isdefined(DynamicObjects, :option_records) ?
+        Base.invokelatest(getproperty(DynamicObjects, :option_records), declared) :
+        declared
+    normalized === nothing && return nothing
+    Base.invokelatest(getproperty(DynamicObjects, :static_domain), normalized;
         multiple=get(domain, :multiple, false),
         allow_custom=get(domain, :allow_custom, false))
 end
