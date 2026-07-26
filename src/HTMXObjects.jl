@@ -7884,9 +7884,10 @@ function _semantic_refresh_dependencies(route)
     dependencies
 end
 
-function _semantic_refresh_attrs(route, action)
+function _semantic_refresh_attrs(route, action, settings=(;))
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     refresh_url = _operation_marker_url(string(action), "__htmxo_form")
+    refresh_url = query_url(refresh_url; settings...)
     method_attrs = NamedTuple{(method_key,)}((refresh_url,))
     merge(method_attrs, (hx_trigger="change", hx_include="closest form",
                          hx_target="closest form", hx_swap="outerHTML"))
@@ -8004,14 +8005,18 @@ The enclosing set is resolved from `obj`'s runtime `__parent__` chain, so an
 inline `@include child = begin … end` and a separately declared bundle mounted
 as `@include child = ExternalChild()` emit the same hidden context.
 
-Set `navigate=true` when a standalone form is the generated selector for the
-page itself. The form keeps its HTMX swap behavior and adds
-`hx-push-url="true"`, so a successful submission records the requested URL —
-including the selected context — in browser history. The mode survives a
-dependent-domain form refresh. It defaults to `false`, so [`semantic_app`](@ref)
-operation cards continue swapping into their local result targets without
-changing the page URL. Explicit form attributes in `kwargs` are merged last, so
-`hx_push_url="/custom"` remains the escape hatch for a custom history URL.
+Set `navigate=true` when a standalone GET form is the generated selector for
+the page itself. The form uses native `method="get"` and `action` attributes,
+so submission performs a full browser navigation and the selected request
+rebuilds the page shell as well as its route fragment. HTMX is retained only on
+controls whose dynamic domains must refresh the form before submission. The
+mode survives such a refresh. It defaults to `false`, so [`semantic_app`](@ref)
+operation cards continue swapping into their local result targets. Navigation
+is rejected for non-GET operations and externally lifted context, neither of
+which has honest native GET form semantics. It also owns `method`/`action` and
+rejects form-level `hx_*` kwargs. Low-level HTMX attributes such as
+`hx_push_url` remain available through `kwargs` in the default fragment-swap
+mode, but changing history alone does not rebuild an outer page shell.
 
 Carrying the context is not the same as the child *owning* it. `@param`
 inheritance is resolved at macro expansion, so only an inline child gets the
@@ -8044,6 +8049,27 @@ function operation_form(obj, route::NamedTuple; values=(;),
     action = _operation_form_action(route, current, target)
     refresh_dependencies = _semantic_refresh_dependencies(route)
     shared_names = _semantic_context_names(shared_context)
+    if navigate
+        route.verb === :GET || throw(ArgumentError(
+            "operation_form navigate=true only supports GET routes"))
+        conflicting = [key for key in keys(kwargs)
+                       if key in (:method, :action) || startswith(string(key), "hx_")]
+        isempty(conflicting) || throw(ArgumentError(
+            "operation_form navigate=true owns method/action and does not accept " *
+            "form-level HTMX attributes: $(join(string.(conflicting), ", "))"))
+        isnothing(context_selector) || throw(ArgumentError(
+            "operation_form navigate=true requires context inside the form"))
+        isempty(shared_names) || throw(ArgumentError(
+            "operation_form navigate=true does not support shared external context"))
+    end
+    refresh_settings = navigate ? (;
+        __htmxo_swap=swap,
+        __htmxo_submit=submit,
+        __htmxo_form_class=form_class,
+        __htmxo_radio_max=radio_max,
+        __htmxo_navigate=true,
+        __htmxo_target_id=target_id,
+    ) : (;)
     context_controls = Any[]
     controls = Any[]
     for param in route.params
@@ -8053,7 +8079,8 @@ function operation_form(obj, route::NamedTuple; values=(;),
             param.name in shared_names && continue
         control = _semantic_control(obj, route.owner, param, current; radio_max)
         if param.name in refresh_dependencies
-            control = h.div(control; _semantic_refresh_attrs(route, action)...)
+            control = h.div(control;
+                _semantic_refresh_attrs(route, action, refresh_settings)...)
         end
         if get(param, :kind, nothing) === :context
             push!(context_controls, control)
@@ -8066,27 +8093,35 @@ function operation_form(obj, route::NamedTuple; values=(;),
                    class="htmxo-semantic-context")
     ]
     context_inputs = _semantic_context_inputs(route, current)
-    config_inputs = hidden_inputs(
+    # Default HTMX forms retain their established hidden reconstruction state.
+    # Native forms instead put that state directly on a dependent control's
+    # refresh URL, so no internal transport fields are successful controls in
+    # the final browser GET.
+    config_inputs = navigate ? Any[] : hidden_inputs(
         __htmxo_swap=swap,
         __htmxo_submit=submit,
         __htmxo_form_class=form_class,
         __htmxo_radio_max=radio_max,
     )
-    navigate && append!(config_inputs, hidden_inputs(__htmxo_navigate=true))
-    isempty(shared_names) || append!(config_inputs,
-        hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
-    isnothing(context_selector) || append!(config_inputs,
-        hidden_inputs(__htmxo_context_selector=context_selector))
-    isnothing(target_id) || append!(config_inputs,
-        hidden_inputs(__htmxo_target_id=target_id))
-    method_key = Symbol("hx_" * lowercase(string(route.verb)))
-    method_attrs = NamedTuple{(method_key,)}((action,))
-    target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
-    swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
-    include_attrs = isnothing(context_selector) ? (;) : (; hx_include=context_selector)
-    navigation_attrs = navigate ? (; hx_push_url="true") : (;)
-    form_attrs = merge(method_attrs, target_attrs, swap_attrs, include_attrs,
-                       navigation_attrs, (; class=form_class), (; kwargs...))
+    if !isempty(config_inputs)
+        isempty(shared_names) || append!(config_inputs,
+            hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
+        isnothing(context_selector) || append!(config_inputs,
+            hidden_inputs(__htmxo_context_selector=context_selector))
+        isnothing(target_id) || append!(config_inputs,
+            hidden_inputs(__htmxo_target_id=target_id))
+    end
+    form_attrs = if navigate
+        merge((; class=form_class), (; kwargs...), (; method="get", action))
+    else
+        method_key = Symbol("hx_" * lowercase(string(route.verb)))
+        method_attrs = NamedTuple{(method_key,)}((action,))
+        target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
+        swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
+        include_attrs = isnothing(context_selector) ? (;) : (; hx_include=context_selector)
+        merge(method_attrs, target_attrs, swap_attrs, include_attrs,
+              (; class=form_class), (; kwargs...))
+    end
     h.form(context_inputs..., config_inputs..., local_context..., controls...,
            h.button(submit; type="submit");
            form_attrs...)

@@ -702,6 +702,10 @@ end
     ]
     @param model::AbstractDomainNode = first(catalogue)
     @options(model) = catalogue
+    __page__(content) = h.html(h.body(
+        h.nav(h.a("Pipeline"; href=query_url("/pipeline"; model=model))),
+        content,
+    ))
     @get index() = string("model=", model.key)
 
     # The whole graph is intentionally not compilable until a run is selected;
@@ -1264,13 +1268,16 @@ end
     # another generated operation control.
     @test contains(html, "type=\"hidden\" name=\"fit_key\" value=\"fit-17\"")
     @test !contains(html, ">fit key<")
-    @test contains(html, "hx-get=\"/analysis/analyze?__htmxo_form=1\"")
+    @test contains(html, "hx-get=\"/analysis/analyze?__htmxo_form=1&amp;")
     @test contains(html, "hx-include=\"closest form\"")
     @test contains(html, "hx-target=\"closest form\"")
     @test contains(html, "Alpha 1")
-    @test contains(html, "name=\"__htmxo_target_id\" value=\"#analysis\"")
-    @test contains(html, "hx-push-url=\"true\"")
-    @test contains(html, "name=\"__htmxo_navigate\" value=\"true\"")
+    @test contains(html, "__htmxo_target_id=%23analysis")
+    @test contains(html, "method=\"get\"")
+    @test contains(html, "action=\"/analysis/analyze\"")
+    @test !contains(html, "hx-push-url=")
+    @test contains(html, "__htmxo_navigate=true")
+    @test !contains(html, "name=\"__htmxo_")
 
     # The same query context survives the automatic poll URL. The poll marker
     # is additive; typed operation inputs remain separate from root @params.
@@ -1322,8 +1329,11 @@ end
     @test refreshed.status == 200
     @test contains(refreshed_html, "Beta 1")
     @test !contains(refreshed_html, "Alpha 1")
-    @test contains(refreshed_html, "hx-target=\"#analysis\"")
-    @test contains(refreshed_html, "hx-push-url=\"true\"")
+    @test contains(refreshed_html, "method=\"get\"")
+    @test contains(refreshed_html, "action=\"/analysis/analyze\"")
+    @test !contains(refreshed_html, "hx-push-url=")
+    @test contains(refreshed_html, "__htmxo_navigate=true")
+    @test !contains(refreshed_html, "name=\"__htmxo_")
     @test contains(refreshed_html, "class=\"semantic-form\"")
     @test contains(refreshed_html,
                    "type=\"hidden\" name=\"fit_key\" value=\"fit-17\"")
@@ -3806,15 +3816,25 @@ end
         custom_app, :index; navigate=true))
     @test count("class=\"htmxo-semantic-context\"", navigating_html) == 1
     @test count("<option", navigating_html) == 13
-    @test contains(navigating_html, "hx-push-url=\"true\"")
-    @test contains(navigating_html,
-                   "name=\"__htmxo_navigate\" value=\"true\"")
+    @test contains(navigating_html, "method=\"get\"")
+    @test contains(navigating_html, "action=\"/\"")
+    @test !contains(navigating_html, "hx-get=")
+    @test !contains(navigating_html, "hx-push-url=")
+    @test !contains(navigating_html, "__htmxo_")
     @test !contains(navigating_html, "type=\"hidden\" name=\"model\"")
 
     custom_history_html = repr("text/html", operation_form(
-        custom_app, :index; navigate=true, hx_push_url="/chosen-model"))
+        custom_app, :index; hx_push_url="/chosen-model"))
     @test contains(custom_history_html, "hx-push-url=\"/chosen-model\"")
-    @test !contains(custom_history_html, "hx-push-url=\"true\"")
+    @test contains(custom_history_html, "hx-get=\"/\"")
+    @test_throws ArgumentError operation_form(
+        SemanticApp(:north).nested, :execute; verb=:POST, navigate=true)
+    @test_throws ArgumentError operation_form(
+        custom_app, :index; navigate=true, hx_push_url="/history-only")
+    @test_throws ArgumentError operation_form(
+        custom_app, :index; navigate=true, context_selector="#external")
+    @test_throws ArgumentError operation_form(
+        custom_app, :index; navigate=true, shared_context=(:model,))
     @test_throws ArgumentError semantic_app(custom_app)
 
     response = drive("/?source=survey&node=real_survey")
@@ -3828,6 +3848,37 @@ end
     stale = drive("/?source=depot&node=real_survey")
     @test stale.status == 400
     @test contains(String(stale.body), "Bad Request")
+end
+
+@testitem "native operation navigation rebuilds the selected page shell" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path; headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    app = SemanticNodeParamApp(; __prefix__="/model")
+    form_html = repr("text/html", operation_form(app, :index; navigate=true))
+    @test contains(form_html, "method=\"get\"")
+    @test occursin(r"action=\"/model/?\"", form_html)
+    @test !contains(form_html, "hx-get=")
+    @test !contains(form_html, "hx-push-url=")
+
+    route!(app; prefix="/model")
+    selected = drive("/model?model=model_2")
+    @test selected.status == 200
+    selected_html = String(selected.body)
+    @test contains(selected_html, "model=model_2")
+    @test contains(selected_html, "Pipeline")
+    @test contains(selected_html, "href=\"/pipeline?model=model_2\"")
+
+    # An HTMX request returns only the operation fragment. Native form
+    # submission deliberately omits HX-Request so the selected request reaches
+    # __page__ and rebuilds shell links from the selected model.
+    fragment = drive("/model?model=model_2";
+                     headers=["HX-Request" => "true"])
+    @test fragment.status == 200
+    @test contains(String(fragment.body), "model=model_2")
+    @test !contains(String(fragment.body), "Pipeline")
 end
 
 @testitem "a typed computed property is not a mount, and its domain is proven" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

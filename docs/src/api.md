@@ -146,12 +146,19 @@ context selector; the selector/include wiring is only needed when
 `semantic_app` lifts that group outside several operation forms.
 
 If that standalone form selects the page represented by its request context,
-pass `navigate=true`. The generated form adds `hx-push-url="true"`, so the
-successful request URL (including the selected `@param`) becomes the browser
-location and history entry. Navigation mode is retained when a dependent domain
-refreshes the form. It is off by default: `semantic_app` operation cards keep
-swapping results locally. Low-level `hx_push_url="/custom"` still overrides the
-generated value when a custom history URL is required.
+pass `navigate=true`. The generated GET form uses native `method` and `action`
+attributes, so selection performs a full browser navigation: the selected
+request rebuilds the page shell and navigation as well as its route fragment.
+HTMX remains only on controls that need a dependent-domain refresh before
+submission, and navigation mode is retained across that refresh. Static native
+forms omit the internal refresh query fields; dynamic forms carry reconstruction
+settings on the HTMX refresh URL rather than as successful form controls, so the
+eventual browser location stays clean. The mode is GET-only and requires context
+inside the form; `semantic_app` operation cards remain local HTMX swaps. A raw
+`hx_push_url="/custom"` is still available in that default HTMX mode, but
+changing history alone does not rebuild an outer shell. Native navigation owns
+its `method`/`action` and rejects form-level `hx_*` kwargs so this full-page
+contract cannot silently degrade back into a fragment swap.
 
 Fixed semantic state is the zero-boilerplate shared-control form. Declare each
 field and domain once; zero-argument operations that depend on those fields
