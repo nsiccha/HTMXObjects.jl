@@ -15,7 +15,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
-    TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, IndexedSemanticAutoApp,
+    TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, SemanticParamApp,
+    SemanticRequiredParamApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
     PolicyApp, SlowPolicyApp, SlowPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
@@ -34,7 +35,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
     IndexedMountChild, IndexedMountRoot,
-    DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot, BoolPropRoot
+    DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
+    SemanticNodeParamApp, BoolPropRoot
 
 @htmx struct TestApp
     title = "Test"
@@ -195,6 +197,24 @@ end
         @post predict(; draws::Int=10) =
             h.p("predict:$(study):$(draws)")
     end
+end
+
+# Unlike `study` above, this enclosing request parameter has an authored domain.
+# It is one shared visible selection for every operation in the mounted child.
+@htmx struct SemanticParamApp
+    @param model::Symbol = :one
+    @options(model) = (:one, :two)
+
+    @include workspace = begin
+        @get fit() = h.p("fit:$(model)")
+        @post predict() = h.p("predict:$(model)")
+    end
+end
+
+@htmx struct SemanticRequiredParamApp
+    @param model::Symbol
+    @options(model) = (:one, :two)
+    @get index() = h.p("required:$(model)")
 end
 
 @htmx struct IndexedSemanticAutoApp
@@ -671,6 +691,24 @@ end
     @get index() = string("node=", node.key, " payload=", node.payload)
 end
 
+@htmx struct SemanticNodeRun
+    run::Symbol
+    @get inspect() = string("run=", run)
+end
+
+@htmx struct SemanticNodeParamApp
+    catalogue = AbstractDomainNode[
+        DomainNode(Symbol("model_$(index)"), "payload $(index)") for index in 1:13
+    ]
+    @param model::AbstractDomainNode = first(catalogue)
+    @options(model) = catalogue
+    @get index() = string("model=", model.key)
+
+    # The whole graph is intentionally not compilable until a run is selected;
+    # custom placement of the root operation must remain available regardless.
+    @include runs(run::Symbol) = SemanticNodeRun(run)
+end
+
 # A typed computed property whose type is an ordinary Julia type, not a node.
 # `paginate::Bool = false` registers with DynamicObjects' analyzer hook, so a
 # route walk reading that hook raw would try to descend into `Bool`.
@@ -1063,6 +1101,70 @@ end
 
     selected_html = repr("text/html", semantic_app(IndexedSemanticAutoApp().models(:one)))
     @test contains(selected_html, "hx-get=\"/models/one/run\"")
+end
+
+@testitem "declared-domain @param is one shared visible semantic control" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    descriptor = semantic_descriptor(SemanticParamApp)
+    routes = filter(route -> route.name in (:fit, :predict), descriptor.routes)
+    @test length(routes) == 2
+    for route in routes
+        model = only(filter(param -> param.name === :model, route.params))
+        @test model.type === Symbol
+        @test !model.required
+        @test model.default === :one
+        @test model.inherited
+        @test model.kind === :context
+        @test model.context_scope === :request
+        @test model.context_source == (type=SemanticParamApp, property=:model)
+        @test model.domain.kind === :declared
+    end
+
+    # Transport reflection keeps its established shape while recovering the
+    # type/default that the option-aware extractor used to hide from it.
+    reflected = only(filter(route -> route.name === :fit,
+                            HTMXObjects.reflect(SemanticParamApp)))
+    model = only(filter(param -> param.name === :model, reflected.params))
+    @test keys(model) == (:name, :source, :type, :required, :default, :doc, :inherited)
+    @test model.type === Symbol
+    @test model.default === :one
+
+    app = SemanticParamApp()
+    html = repr("text/html", semantic_app(app))
+    @test count("<legend>model</legend>", html) == 1
+    @test count("name=\"model\"", html) == 2
+    @test contains(html, "value=\"one\" checked=\"true\"")
+    @test contains(html, "value=\"two\"")
+    @test !contains(html, "type=\"hidden\" name=\"model\"")
+    @test count("hx-include=\"#htmxo-semantic-context-semanticparamapp\"", html) == 2
+
+    # A required option-backed request parameter can render before a request
+    # supplies it, and explicit form values still select its visible control.
+    required_descriptor = only(semantic_descriptor(SemanticRequiredParamApp).routes)
+    required_model = only(filter(param -> param.name === :model,
+                                 required_descriptor.params))
+    @test required_model.required
+    required_html = repr("text/html", semantic_app(SemanticRequiredParamApp()))
+    @test count("name=\"model\"", required_html) == 2
+    selected_required = repr("text/html", semantic_app(
+        SemanticRequiredParamApp(); values=(model=:two,)))
+    @test contains(selected_required, "value=\"two\" checked=\"true\"")
+
+    route!(app)
+    fit = HTTP.Request("GET", "/workspace/fit?model=two")
+    fit_response = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, fit))(fit)
+    @test fit_response.status == 200
+    @test contains(String(fit_response.body), "fit:two")
+
+    predict = HTTP.Request(
+        "POST", "/workspace/predict",
+        ["Content-Type" => "application/x-www-form-urlencoded"],
+        "model=two",
+    )
+    predict_response = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, predict))(predict)
+    @test predict_response.status == 200
+    @test contains(String(predict_response.body), "predict:two")
 end
 
 @testitem "zero-config fixed semantic context remakes mounted targets" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -3675,6 +3777,26 @@ end
     option_html = repr("text/html", soption("Survey"; value=node))
     @test contains(option_html, "value=\"real_survey\"")
     @test !contains(option_html, "DomainNode")
+
+    # The same wire identity reaches the generated shared control when the
+    # declared domain belongs to an `@param`, not an operation argument.
+    semantic_html = repr("text/html", semantic_app(DomainParamRoot()))
+    @test contains(semantic_html, "name=\"node\" value=\"synthetic_depot\"")
+    @test !contains(semantic_html, "value=\"Main.")
+
+    # Production may deliberately place one operation from a graph whose
+    # indexed descendants are not selected yet. The standalone renderer owns
+    # one local context group; it needs no application-supplied selector.
+    custom_app = SemanticNodeParamApp()
+    custom_html = repr("text/html", operation_form(custom_app, :index))
+    @test count("class=\"htmxo-semantic-context\"", custom_html) == 1
+    @test count("name=\"model\"", custom_html) == 1
+    @test count("<option", custom_html) == 13
+    @test contains(custom_html, "value=\"model_1\"")
+    @test contains(custom_html, "value=\"model_13\"")
+    @test !contains(custom_html, "type=\"hidden\" name=\"model\"")
+    @test !contains(custom_html, "hx-include=")
+    @test_throws ArgumentError semantic_app(custom_app)
 
     response = drive("/?source=survey&node=real_survey")
     @test response.status == 200

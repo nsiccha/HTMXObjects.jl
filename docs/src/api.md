@@ -133,9 +133,17 @@ end
 
 Adding another route inside `models` automatically adds its descriptor, form,
 result target, and registered operation; there is no second operation list.
-Mounted `@param` context and declared defaults become hidden inputs. An indexed
+Mounted `@param` context without a matching `@options` declaration, including
+its default, becomes a hidden input. A declared-domain `@param` is instead one
+visible shared control, deduplicated across every mounted operation that carries
+it; its submitted value still flows through the request extractor. An indexed
 `@include` is intentionally fail-closed until an index is selected—call
 `semantic_app(app.models(:chosen))` to compile that concrete subtree.
+
+For custom placement, `operation_form` renders its request/fixed context inside
+one local `.htmxo-semantic-context` fieldset. It does not need an external
+context selector; the selector/include wiring is only needed when
+`semantic_app` lifts that group outside several operation forms.
 
 Fixed semantic state is the zero-boilerplate shared-control form. Declare each
 field and domain once; zero-argument operations that depend on those fields
@@ -216,10 +224,13 @@ expansion, not a silent no-op.)
 
 For an ordinary route argument, **only the declared domain is merged into the
 rendered control** — the rest comes from the route declaration. Effective
-`kind=:context` inputs instead carry their type/default/domain and
+fixed-field `kind=:context` inputs instead carry their type/default/domain and
 `source=(; type, property)` from the fixed field descriptor; HTMXObjects uses
 that source to resolve, deduplicate, render, validate and rebuild the mounted
-target.
+target. An option-backed `@param` is also `kind=:context`, with
+`context_scope=:request`: its declaring property supplies the live domain and
+shared-control identity, while submission continues through `@param` request
+extraction rather than remaking fixed object state.
 
 So, to answer the obvious question directly: labels, help text, units and
 ordering are **not** declarable, and there is no effect/side-effect policy key
@@ -261,7 +272,7 @@ faithful account of the generated signature, and the verb is reachable as
 |--------------------------|------------------------------|
 | Operation card title | The route's **docstring** — first non-empty line; falls back to a humanised property name |
 | Control label | The param's doc as recorded by `reflect(T)`; falls back to a humanised input name |
-| Control order | Fixed context source declaration order, then route parameter declaration order — there is no ordering key |
+| Control order | Shared context discovery order, then route parameter declaration order — there is no ordering key |
 | Which control is rendered | `domain` if present, else the declared Julia `type` |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |
