@@ -627,9 +627,8 @@ end
 
 # --- Indexed selection by domain candidate ----------------------------------
 #
-# A node-valued mount and an enum-valued one. `string(::DomainNode)` is the
-# stable serialized identity the URL segment carries — the application owns
-# that, the framework only matches on it.
+# A node-valued mount and an enum-valued one. A node's `key` is its default
+# stable wire identity; no broad Base.string/parse override is required.
 
 abstract type AbstractDomainNode end
 
@@ -637,13 +636,12 @@ struct DomainNode <: AbstractDomainNode
     key::Symbol
     payload::String
 end
-Base.string(node::DomainNode) = string(node.key)
 
 @enum SelStage draft review final
 
 @htmx struct DomainChild
     node::Any
-    @get index() = string("node=", string(node), " payload=", node.payload)
+    @get index() = string("node=", node.key, " payload=", node.payload)
 end
 
 @htmx struct StageChild
@@ -670,7 +668,7 @@ end
         AbstractDomainNode[DomainNode(:real_survey, "survey")]
     @param node::AbstractDomainNode = first(catalogue)
     @options(node) = catalogue
-    @get index() = string("node=", string(node), " payload=", node.payload)
+    @get index() = string("node=", node.key, " payload=", node.payload)
 end
 
 # A typed computed property whose type is an ordinary Julia type, not a node.
@@ -3670,6 +3668,13 @@ end
     end
 
     route!(DomainParamRoot())
+
+    node = DomainNode(:real_survey, "survey")
+    @test HTMXObjects.option_wire_value(node) === :real_survey
+    @test query_url("/next"; node) == "/next?node=real_survey"
+    option_html = repr("text/html", soption("Survey"; value=node))
+    @test contains(option_html, "value=\"real_survey\"")
+    @test !contains(option_html, "DomainNode")
 
     response = drive("/?source=survey&node=real_survey")
     @test response.status == 200
