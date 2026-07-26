@@ -1028,6 +1028,7 @@ end
     @test contains(html, "hx-post=\"/models/predict\"")
     @test contains(html, ">Fit</button>")
     @test contains(html, ">Predict</button>")
+    @test !contains(html, "hx-push-url=")
     @test contains(html, "type=\"hidden\" name=\"study\" value=\"alpha\"")
     @test count("class=\"htmxo-semantic-operation\"", html) == 2
     @test count("class=\"htmxo-semantic-operation-result\"", html) == 2
@@ -1257,7 +1258,7 @@ end
     leaf = app.analysis
     html = repr("text/html", operation_form(
         leaf, :analyze; values=(study=:alpha,), target_id="#analysis",
-        submit="Analyze", form_class="semantic-form"))
+        submit="Analyze", form_class="semantic-form", navigate=true))
 
     # Root context is inferred from the request and carried, never exposed as
     # another generated operation control.
@@ -1268,6 +1269,8 @@ end
     @test contains(html, "hx-target=\"closest form\"")
     @test contains(html, "Alpha 1")
     @test contains(html, "name=\"__htmxo_target_id\" value=\"#analysis\"")
+    @test contains(html, "hx-push-url=\"true\"")
+    @test contains(html, "name=\"__htmxo_navigate\" value=\"true\"")
 
     # The same query context survives the automatic poll URL. The poll marker
     # is additive; typed operation inputs remain separate from root @params.
@@ -1309,7 +1312,7 @@ end
         "/analysis/analyze?__htmxo_form=1&fit_key=fit-17&study=beta&" *
         "__htmxo_target_id=%23analysis&__htmxo_submit=Analyze&" *
         "__htmxo_form_class=semantic-form&__htmxo_swap=innerHTML&" *
-        "__htmxo_radio_max=4",
+        "__htmxo_radio_max=4&__htmxo_navigate=true",
         ["HX-Request" => "true"],
     )
     refresh_handler = first(HTTP.Handlers.gethandler(
@@ -1320,6 +1323,7 @@ end
     @test contains(refreshed_html, "Beta 1")
     @test !contains(refreshed_html, "Alpha 1")
     @test contains(refreshed_html, "hx-target=\"#analysis\"")
+    @test contains(refreshed_html, "hx-push-url=\"true\"")
     @test contains(refreshed_html, "class=\"semantic-form\"")
     @test contains(refreshed_html,
                    "type=\"hidden\" name=\"fit_key\" value=\"fit-17\"")
@@ -3796,6 +3800,21 @@ end
     @test contains(custom_html, "value=\"model_13\"")
     @test !contains(custom_html, "type=\"hidden\" name=\"model\"")
     @test !contains(custom_html, "hx-include=")
+    @test !contains(custom_html, "hx-push-url=")
+
+    navigating_html = repr("text/html", operation_form(
+        custom_app, :index; navigate=true))
+    @test count("class=\"htmxo-semantic-context\"", navigating_html) == 1
+    @test count("<option", navigating_html) == 13
+    @test contains(navigating_html, "hx-push-url=\"true\"")
+    @test contains(navigating_html,
+                   "name=\"__htmxo_navigate\" value=\"true\"")
+    @test !contains(navigating_html, "type=\"hidden\" name=\"model\"")
+
+    custom_history_html = repr("text/html", operation_form(
+        custom_app, :index; navigate=true, hx_push_url="/chosen-model"))
+    @test contains(custom_history_html, "hx-push-url=\"/chosen-model\"")
+    @test !contains(custom_history_html, "hx-push-url=\"true\"")
     @test_throws ArgumentError semantic_app(custom_app)
 
     response = drive("/?source=survey&node=real_survey")

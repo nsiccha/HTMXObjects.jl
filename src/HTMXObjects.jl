@@ -7942,12 +7942,13 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     submit = _operation_form_setting(req, :__htmxo_submit, "Run")
     form_class = _operation_form_setting(req, :__htmxo_form_class, "")
     radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, "4"))
+    navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
     shared_context = _semantic_context_names(
         _operation_form_setting(req, :__htmxo_shared_context, ""))
     value = operation_form(target.leaf, route; values=extracted.values,
                            target=request_path, target_id, swap, submit,
-                           form_class, radio_max, context_selector,
+                           form_class, radio_max, navigate, context_selector,
                            shared_context)
     kw_pairs = Pair{Symbol,Any}[
         param.name => extracted.values[param.name] for param in route.params
@@ -7982,7 +7983,7 @@ function _operation_route(T, name::Symbol, verb::Symbol)
 end
 
 """
-    operation_form(obj, name::Symbol; verb=:GET, values=(;), kwargs...)
+    operation_form(obj, name::Symbol; verb=:GET, values=(;), navigate=false, kwargs...)
     operation_form(obj, route::NamedTuple; values=(;), target=obj/route.path, kwargs...)
 
 Generate an HTMX form from a merged semantic route descriptor. Static domains
@@ -8003,6 +8004,15 @@ The enclosing set is resolved from `obj`'s runtime `__parent__` chain, so an
 inline `@include child = begin … end` and a separately declared bundle mounted
 as `@include child = ExternalChild()` emit the same hidden context.
 
+Set `navigate=true` when a standalone form is the generated selector for the
+page itself. The form keeps its HTMX swap behavior and adds
+`hx-push-url="true"`, so a successful submission records the requested URL —
+including the selected context — in browser history. The mode survives a
+dependent-domain form refresh. It defaults to `false`, so [`semantic_app`](@ref)
+operation cards continue swapping into their local result targets without
+changing the page URL. Explicit form attributes in `kwargs` are merged last, so
+`hx_push_url="/custom"` remains the escape hatch for a custom history URL.
+
 Carrying the context is not the same as the child *owning* it. `@param`
 inheritance is resolved at macro expansion, so only an inline child gets the
 parent's `@param`s as its own properties; an external bundle was expanded
@@ -8019,12 +8029,13 @@ delegate explicitly:
 When a dynamic domain declares dependencies, changing one of those controls
 rerenders the generated form through the same verb and route without executing
 the operation. The refreshed form retains `target_id`, `swap`, submit label,
-form class, and radio threshold.
+form class, radio threshold, and navigation mode.
 """
 function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
         submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
-        form_class="", shared_context=(), context_selector=nothing, kwargs...)
+        form_class="", navigate::Bool=false, shared_context=(),
+        context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
     route = _semantic_runtime_route(obj, route)
@@ -8061,6 +8072,7 @@ function operation_form(obj, route::NamedTuple; values=(;),
         __htmxo_form_class=form_class,
         __htmxo_radio_max=radio_max,
     )
+    navigate && append!(config_inputs, hidden_inputs(__htmxo_navigate=true))
     isempty(shared_names) || append!(config_inputs,
         hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
     isnothing(context_selector) || append!(config_inputs,
@@ -8072,8 +8084,9 @@ function operation_form(obj, route::NamedTuple; values=(;),
     target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
     swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
     include_attrs = isnothing(context_selector) ? (;) : (; hx_include=context_selector)
+    navigation_attrs = navigate ? (; hx_push_url="true") : (;)
     form_attrs = merge(method_attrs, target_attrs, swap_attrs, include_attrs,
-                       (; class=form_class), (; kwargs...))
+                       navigation_attrs, (; class=form_class), (; kwargs...))
     h.form(context_inputs..., config_inputs..., local_context..., controls...,
            h.button(submit; type="submit");
            form_attrs...)

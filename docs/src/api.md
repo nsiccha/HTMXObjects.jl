@@ -145,6 +145,14 @@ one local `.htmxo-semantic-context` fieldset. It does not need an external
 context selector; the selector/include wiring is only needed when
 `semantic_app` lifts that group outside several operation forms.
 
+If that standalone form selects the page represented by its request context,
+pass `navigate=true`. The generated form adds `hx-push-url="true"`, so the
+successful request URL (including the selected `@param`) becomes the browser
+location and history entry. Navigation mode is retained when a dependent domain
+refreshes the form. It is off by default: `semantic_app` operation cards keep
+swapping results locally. Low-level `hx_push_url="/custom"` still overrides the
+generated value when a custom history URL is required.
+
 Fixed semantic state is the zero-boilerplate shared-control form. Declare each
 field and domain once; zero-argument operations that depend on those fields
 inherit effective `kind=:context` inputs from DynamicObjects. `semantic_app`
