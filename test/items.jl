@@ -36,7 +36,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
     IndexedMountChild, IndexedMountRoot,
     DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
-    SemanticNodeParamApp, BoolPropRoot
+    SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot
 
 @htmx struct TestApp
     title = "Test"
@@ -722,6 +722,25 @@ end
     # The whole graph is intentionally not compilable until a run is selected;
     # custom placement of the root operation must remain available regardless.
     @include runs(run::Symbol) = SemanticNodeRun(run)
+end
+
+# A page that MOUNTS the card presentation, so a request can observe what the
+# response pipeline does to it. Projecting `semantic_card(value)` directly
+# proves the node projects; only a route read can prove the PAGE keeps it. The
+# hand-rolled panel is the control: it is the kind of leftover markup that made
+# a card-free markdown body look non-empty.
+@htmx struct SemanticCardPageApp
+    catalogue = HTMXObjects.DynamicObjects.option_domain(
+        DomainNode(Symbol("model_$(index)"), "payload $(index)") => "Model $(index)"
+        for index in 1:3
+    )
+    @param model::AbstractDomainNode = first(catalogue)
+    @options(model) = catalogue
+    @get index() = h.div(
+        h.section(h.h2("Hand-rolled panel"), h.p("selected=$(model.key)")),
+        operation_form(__self__, :index;
+                       verb=:GET, navigate=true, presentation=:cards),
+    )
 end
 
 # A typed computed property whose type is an ordinary Julia type, not a node.
@@ -3832,6 +3851,56 @@ end
     @test contains(plain, "family: survival")
     @test contains(plain, "response <~> alpha + beta")
     @test contains(plain, "[available] Sampling ready")
+end
+
+@testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path; headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(SemanticCardPageApp())
+
+    html = String(drive("/").body)
+    @test count("type=\"radio\" name=\"model\"", html) == 3
+    @test count("<article class=\"htmxo-semantic-card-body\">", html) == 3
+
+    # The cards sit INSIDE the generated `<form>`, and markdown drops chrome
+    # subtrees. A semantic node is exempt, so the facts still arrive — this is
+    # the assertion `repr(mime, semantic_card(value))` cannot make.
+    markdown_response = drive("/?markdown")
+    @test contains(HTTP.header(markdown_response, "Content-Type", ""), "text/markdown")
+    markdown = String(markdown_response.body)
+    @test contains(markdown, "### Model model_1")
+    @test contains(markdown, "### Model model_3")
+    @test count("- **family:** test family", markdown) == 3
+    # The semantic TREE is projected, so a code fence keeps its language and a
+    # status keeps its state rather than being recovered from emitted markup.
+    @test contains(markdown, "```stan\nresponse ~ payload 1\n```")
+    @test contains(markdown, "✓ **available** — Sampling available")
+    @test contains(markdown, "! **blocked**") == false
+    # Consecutive cards stay separate blocks.
+    @test !contains(markdown, "Sampling available### Model model_2")
+    # The control itself is still chrome, and still dropped.
+    @test !contains(markdown, "type=\"radio\"")
+    @test !contains(markdown, "<input")
+    @test !contains(markdown, "<form")
+    # The hand-rolled control panel is not what is carrying this body.
+    @test contains(markdown, "Hand-rolled panel")
+
+    # `?plain` reaches the same markdown projection.
+    @test contains(String(drive("/?plain").body), "### Model model_1")
+
+    # HXML is a NODE projection with no negotiated arm in the response
+    # pipeline: the route answers with its ordinary HTML page. Asserting this
+    # keeps the documented surface honest rather than implying reachability.
+    hxml_request = drive("/"; headers=["Accept" => "application/vnd.hyperview+xml"])
+    @test contains(HTTP.header(hxml_request, "Content-Type", ""), "text/html")
+    @test contains(String(hxml_request.body), "type=\"radio\"")
+    @test startswith(
+        repr("application/vnd.hyperview+xml",
+             semantic_card(DomainNode(:model_1, "payload 1"))),
+        "<view style=\"article htmxo-semantic-card-body\">")
 end
 
 @testitem "a node-valued @param resolves through its live option domain" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
