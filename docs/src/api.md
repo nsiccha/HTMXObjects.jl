@@ -298,23 +298,48 @@ chrome rather than part of a semantic projection.
 element can be cited from elsewhere. An unaddressed element emits no attribute
 at all rather than `id=""`.
 
-Every element but one projects into the HTML element whose native rendering
-already carries its meaning — `article` for a card, `section` for a division,
-`dl` for fields, `details` for a disclosure, `pre`/`code` for code — which is
-why HTMXObjects ships almost no CSS for them: Pico styles the element. A
-`SemanticGroup` has no such counterpart, so its HTML peer is a bare `div` and
-[`htmxo_utility_styles`](@ref) gives it the layout instead: **a group is a row
-that wraps.** Siblings share the width and each keeps a minimum before the row
-breaks, so a pair of figures sits side by side on a wide viewport and stacks on
-a narrow one, with nothing passed at the call site. Layout is an HTML-only
-affordance — the same reason a disclosure collapses only in HTML — so the
-Markdown and plain-text peers are unchanged, and a group projects there as its
-children in sequence either way. An app that wants a different run width
-overrides the variables in its own scoped stylesheet, never inline:
+Most elements project into the HTML element whose native rendering already
+carries their meaning — `article` for a card, `section` for a division, `dl` for
+fields, `details` for a disclosure, `pre`/`code` for code — which is why
+HTMXObjects ships almost no CSS for them: Pico styles the element. So the audit
+question for a semantic class is never *does it have CSS* but **does its HTML
+element render as anything by itself** — and where the answer is no, a missing
+rule is a bug rather than a deliberate default. **Two elements answer no**, and
+[`htmxo_utility_styles`](@ref) supplies what their markup cannot. Both knobs are
+CSS variables, so an app retunes them in its own scoped stylesheet, never
+inline.
+
+`SemanticGroup` is the **container** case: it has no counterpart element, so its
+peer is a bare `div`, and **a group is a row that wraps.** Siblings share the
+width and each keeps a minimum before the row breaks, so a pair of figures sits
+side by side on a wide viewport and stacks on a narrow one, with nothing passed
+at the call site.
+
+`SemanticMetric` is the **inline** case: its peer is a `span` next to a
+`strong`, and adjacent inline elements carry no separation of their own, so
+**a metric is a label/value row with a gap.** Without the rule
+`SemanticMetric("draws", 4000)` renders as the run-together `draws4000`, where a
+reader cannot tell the value from a label that ends in a digit. The separator is
+a gap rather than a literal colon in the markup: the text peers already say
+`draws: 4000` in their own idiom, and keeping punctuation out of the HTML leaves
+label and value independently styleable and scrapeable without stripping it back
+off. A metric is deliberately **not** projected into `dl`/`dt`/`dd` — that peer
+belongs to `SemanticFields`, and one HTML peer for both would erase the
+distinction between labelled facts in a list and a single measurement whose unit
+is data.
+
+Layout is an HTML-only affordance — the same reason a disclosure collapses only
+in HTML — so the Markdown and plain-text peers of both are unchanged: a group
+projects there as its children in sequence and a metric as `**label:** value`,
+either way.
 
 ```css
 .my-app-wide-run { --htmxo-semantic-group-min: 30rem; --htmxo-semantic-group-gap: 2rem; }
+.my-app-airy-metrics { --htmxo-semantic-metric-gap: 1rem; }
 ```
+
+An app wanting a figure-over-caption metric sets `flex-direction: column` in
+that same scoped stylesheet.
 
 ### What the compiler reads from a descriptor
 
