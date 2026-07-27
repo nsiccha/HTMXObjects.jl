@@ -36,7 +36,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
     IndexedMountChild, IndexedMountRoot,
     DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
-    SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot
+    SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
+    EditorMountRoot
 
 @htmx struct TestApp
     title = "Test"
@@ -493,6 +494,20 @@ end
     @include leaf = NavLeaf()
     @get index() = "section $label"
     @post act(; note="") = "acted $note"
+end
+
+# `EditorRoutes` is only reachable through a parent supplying `editor` and
+# `container_id`, so the mount point's own URL can only be asserted from a real
+# mount. A `GitRepo` handle, not a stub: the snag this pins was reproduced on
+# real handles and a stub would not exercise `current_content`/`current_version`.
+const EDITOR_MOUNT_DIR = mktempdir()
+
+@htmx struct EditorMountRoot
+    editor       = GitRepo(EDITOR_MOUNT_DIR).editor("known_issues.md";
+                                                    default_content="# Known issues\n")
+    container_id = "editor-mount"
+    @include editor_routes = EditorRoutes(; rows=4)
+    @get index() = h.div(; id=container_id)("editor host")
 end
 
 """An application root used for navigation and reflection tests."""
@@ -4675,6 +4690,40 @@ end
     bad_node = DynamicObjects.getstatus(bad_app.bad, Verb{:GET}(), 1)
     @test bad_node isa TBNode
     @test "Failing leaf" in progress_descendants(bad_node)
+end
+
+@testitem "EditorRoutes serves its own mount point" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    drive(path; headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers)
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(EditorMountRoot())
+
+    # The `:index` collapse rule puts `@get index()` on the include's own
+    # prefix, so the bundle registers the mount point alongside its siblings.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(EditorMountRoot)]
+    @test (:GET, "/editor_routes") in paths
+    @test (:GET, "/editor_routes/form") in paths
+    @test (:GET, "/editor_routes/history") in paths
+
+    # All three serve. Before the fix the mount point ALONE 404'd with a 0-byte
+    # body while `form`/`history` beside it served 200, so a crawler following
+    # every link the component emits hit exactly one dead end (snag
+    # `editorroutes-adv`). Asserting the siblings too keeps this a regression
+    # test for the mount point specifically, not for routing in general.
+    for path in ("/editor_routes", "/editor_routes/form", "/editor_routes/history")
+        response = drive(path)
+        @test response.status == 200
+        @test !isempty(response.body)
+    end
+
+    # And it is the EDITOR surface, not a placeholder: identical to `form`.
+    # Compared as HTMX fragments so page chrome — which may legitimately differ
+    # by request path — cannot mask a difference in the surface itself.
+    fragment(path) = String(drive(path; headers=["HX-Request" => "true"]).body)
+    @test fragment("/editor_routes") == fragment("/editor_routes/form")
+    @test occursin("Known issues", fragment("/editor_routes"))
 end
 
 @testitem "GitRepo editor versions() lists that file's own revisions" setup=[HTMXOTestImports] tags=[:unit] begin

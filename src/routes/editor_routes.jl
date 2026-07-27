@@ -29,6 +29,8 @@ a value that lacks these properties raises an error naming the route and
 the missing ones, rather than failing inside the route body.
 
 # Routes
+- `@get index` — the mount point itself (`…/editor`); renders the same editor
+  surface as `form`, so a link to the mount is not a dead end.
 - `@get form` — renders the editor form via [`editor_form`](@ref).
 - `@post save(; content, version)` — optimistic-concurrency write. On
   conflict, re-renders the form with a "content changed" banner.
@@ -77,17 +79,19 @@ end
     # so a parameterised parent (e.g. `@param name::String` picking a file) survives
     # the round-trip through edit/save/cancel/history/restore.
 
-    @get form() = begin
-        _check_editor(editor, :form, (:current_content, :current_version))
-        editor_form(;
-            id          = container_id,
-            post_url    = query_url(__self__ / "save", __parent__),
-            cancel_url  = query_url(__parent__.__prefix__, __parent__),
-            content     = editor.current_content(),
-            version     = editor.current_version(),
-            input, rows, placeholder, label,
-        )
-    end
+    # A mounted `@htmx` struct stringifies to its own `__prefix__` so route
+    # bodies can write `href=__self__` ("the struct's index URL"), and every
+    # other built-in bundle serves that URL with an `@get index()`. Without one
+    # here the mount point was the only dead link the bundle emitted — `form`
+    # and `history` beside it served 200 while `…/editor` 404'd with a 0-byte
+    # body (snag `editorroutes-adv`). `index` and `form` render the SAME
+    # surface through one helper rather than one delegating to the other,
+    # matching the `index`/`status` pair in `TestRoutes`.
+    @get index() = _editor_surface(__self__, __parent__, editor, :index,
+                                   container_id; input, rows, placeholder, label)
+
+    @get form() = _editor_surface(__self__, __parent__, editor, :form,
+                                  container_id; input, rows, placeholder, label)
 
     @post save(; content="", version="") = begin
         _check_editor(editor, :save, (:write!, :current_content))
@@ -131,6 +135,22 @@ end
                       message="restore " * sha)
         __parent__.index(Verb{:GET}())
     end
+end
+
+# The editor surface both `index` and `form` render. `route` is passed through
+# only so a bad `editor` handle is reported against the route the caller actually
+# requested, exactly as it was before this was factored out.
+function _editor_surface(self, parent, editor, route::Symbol, container_id;
+                         input, rows, placeholder, label)
+    _check_editor(editor, route, (:current_content, :current_version))
+    editor_form(;
+        id          = container_id,
+        post_url    = query_url(self / "save", parent),
+        cancel_url  = query_url(parent.__prefix__, parent),
+        content     = editor.current_content(),
+        version     = editor.current_version(),
+        input, rows, placeholder, label,
+    )
 end
 
 function _editor_conflict_fragment(editor, submitted, current_version, container_id,
