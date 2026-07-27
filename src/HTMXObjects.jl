@@ -613,18 +613,57 @@ function _warn_redundant_req_decl!(struct_expr)
 end
 
 """
+    _mounted_prefix(parent, step)
+
+Derive an `@htmx` object's absolute `__prefix__` from its parent and the
+parent-relative `__mount_step__` recorded at its mount site.
+
+`step === nothing` means the object is not mounted through an `@include` (it is
+a root, or a standalone construction), so its prefix is `""` unless the struct
+body or a constructor kwarg supplies one. An `:index` mount records `""` and
+therefore inherits the parent's prefix unchanged — the same URL-collapse rule
+`_route_path` and `_nested_prefix_and_step` apply.
+
+Deriving rather than baking in at construction is what makes the prefix survive
+`DynamicObjects.remount`: remount deliberately masks a retained `__prefix__` and
+recomputes it from the child's own body (see `_remount_child` — "`__prefix__` is
+route-relative, so mask the retained value and let the child's own generated
+property recompute it from its new `__parent__`"). An inline `@include` child
+already satisfied that contract, because `_convert_include_to_struct!` gives it
+a `__prefix__` body reading `__parent__.__prefix__`. An EXTERNAL `@include`
+child did not: its prefix arrived as a constructor kwarg, so recomputation fell
+back to the type default `""` and every URL built from it lost the mount.
+"""
+function _mounted_prefix(parent, step)
+    step === nothing && return ""
+    parent === nothing && return String(step)
+    hasproperty(parent, :__prefix__) || return String(step)
+    string(getproperty(parent, :__prefix__)) * step
+end
+
+"""
     _inject_dunder_props!(struct_expr)
 
-Ensure that `@htmx` struct bodies always declare `__parent__`, `__prefix__`,
-`__req__`, `__appdata__`, `__route__`, and `__on_error__` as properties so route
-bodies can reference them and so the `__parent__` chain threads request context,
-appdata, the mount prefix, the per-request route URL, and the error hook down
-through `@include`d sub-structs.
+Ensure that `@htmx` struct bodies always declare `__parent__`, `__mount_step__`,
+`__prefix__`, `__req__`, `__appdata__`, `__route__`, and `__on_error__` as
+properties so route bodies can reference them and so the `__parent__` chain
+threads request context, appdata, the mount prefix, the per-request route URL,
+and the error hook down through `@include`d sub-structs.
 
 Defaults:
 - `__parent__ = nothing` — set by `@include` desugar to point at the enclosing struct.
-- `__prefix__ = ""` — root-level mount path (no leading `/`); `@include` builds
-  `parent.__prefix__ * "/childname"` for each nested sub-struct.
+- `__mount_step__ = nothing` — the PARENT-RELATIVE URL step this object is
+  mounted at (`"/childname"`, `""` for an `:index` mount, or a step carrying
+  interpolated index arguments). `nothing` means "not mounted through an
+  `@include`" (a root, or a standalone construction). `_inject_include_prefix!`
+  supplies it at the mount site.
+- `__prefix__ = _mounted_prefix(__parent__, __mount_step__)` — the absolute
+  mount path (no trailing `/`; `""` at the root). It is DERIVED from the parent
+  rather than baked in at construction so that it stays correct when the object
+  is re-parented — `DynamicObjects.remount` deliberately masks a retained
+  `__prefix__` and recomputes it, which a construction-time constant cannot
+  survive (a retained semantic root then served root-relative URLs from its
+  second request on).
 - `__req__` / `__appdata__` / `__on_error__` — fall through `__parent__` if
   present, else `nothing`. `__req__` is supplied by HTMXO at request-handler
   construction. `__appdata__` is supplied by the user — the conventional pattern
@@ -654,6 +693,7 @@ function _inject_dunder_props!(struct_expr)
     has_appdata = false
     has_parent = false
     has_prefix = false
+    has_mount_step = false
     has_route = false
     has_on_error = false
     for arg in body.args
@@ -671,12 +711,15 @@ function _inject_dunder_props!(struct_expr)
         name === :__appdata__  && (has_appdata = true)
         name === :__parent__   && (has_parent = true)
         name === :__prefix__   && (has_prefix = true)
+        name === :__mount_step__ && (has_mount_step = true)
         name === :__route__    && (has_route = true)
         name === :__on_error__ && (has_on_error = true)
     end
     prepend = Any[]
     has_parent   || push!(prepend, :(__parent__ = nothing))
-    has_prefix   || push!(prepend, :(__prefix__ = ""))
+    has_mount_step || push!(prepend, :(__mount_step__ = nothing))
+    has_prefix   || push!(prepend, :(__prefix__ =
+        $(GlobalRef(@__MODULE__, :_mounted_prefix))(__parent__, __mount_step__)))
     has_req      || push!(prepend, :(__req__      = isnothing(__parent__) ? nothing : __parent__.__req__))
     has_appdata  || push!(prepend, :(__appdata__  = isnothing(__parent__) ? nothing : __parent__.__appdata__))
     has_route    || push!(prepend, :(__route__    = isnothing(__parent__) ? "" : __parent__.__route__))
@@ -838,10 +881,11 @@ Pre-process `@include` lines:
 - `@include prop = begin...end` is rewritten to `prop = struct _Include_prop ... end`
   so DO's inline-struct machinery wires `__parent__=__self__` automatically.
 - `@include prop = ExternalStruct(; ...)` keeps the external call but its kwargs
-  are augmented with `__parent__=__self__, __prefix__=__self__.__prefix__ * "/prop"`
-  so the sub-struct receives the request/appdata chain (via `__parent__`) and the
-  correct mount prefix at construction time. User-provided values for these kwargs
-  win; we only fill them in if absent.
+  are augmented with `__parent__=__self__, __mount_step__="/prop"` so the
+  sub-struct receives the request/appdata chain (via `__parent__`) and the
+  parent-relative URL step its `__prefix__` composes with the parent's
+  (`_mounted_prefix`). User-provided values for these kwargs win; we only fill
+  them in if absent.
 """
 function _convert_include_to_struct!(struct_expr)
     body = struct_expr.args[3]
@@ -996,11 +1040,17 @@ end
     _inject_include_prefix!(call_expr, prop_name; index_params=Symbol[])
 
 Mutate the kwargs of `SomeStruct(args...; ...)` so that
-`__prefix__=__self__.__prefix__ * "/prop_name"[ * "/" * string(arg)…]` is
-present (without overriding any user-provided value). For an indexed include
+`__mount_step__="/prop_name"[ * "/" * string(arg)…]` is present (without
+overriding any user-provided value). For an indexed include
 (`@include prop(x, y) = External(x, y)`), the `index_params` are interpolated
-into the prefix at runtime so each invocation of the property gets the URL
+into the step at runtime so each invocation of the property gets the URL
 segment for its current arg values.
+
+The recorded step is PARENT-RELATIVE; the child's injected `__prefix__` body
+composes it with `__parent__.__prefix__` at access time (see `_mounted_prefix`).
+Passing the composed absolute prefix here instead would not survive
+`DynamicObjects.remount`, which masks a retained `__prefix__` and recomputes it
+from the child's own body.
 
 `__parent__` and `__status__` are handled by DynamicObjects' `@include`
 processing.
@@ -1013,19 +1063,18 @@ function _inject_include_prefix!(call_expr, prop_name; index_params::Vector{Symb
     else
         params = call_expr.args[params_idx]
     end
-    has_prefix = any(kw -> _kwarg_name(kw) === :__prefix__, params.args)
+    has_prefix = any(kw -> _kwarg_name(kw) in (:__prefix__, :__mount_step__),
+                     params.args)
     if !has_prefix
         # `:index` drops the URL segment — mirrors `_route_path` and
         # `_nested_prefix_and_step`. So `@include index(x) = External(x)`
         # mounts children at `/parent/{x}`, not `/parent/index/{x}`.
-        prefix_expr = prop_name === :index ?
-            :(__self__.__prefix__) :
-            :(__self__.__prefix__ * "/" * $(string(prop_name)))
+        step_expr = prop_name === :index ? "" : "/" * string(prop_name)
         wire_string = GlobalRef(@__MODULE__, :_option_wire_string)
         for ip in index_params
-            prefix_expr = :($prefix_expr * "/" * $wire_string($ip))
+            step_expr = :($step_expr * "/" * $wire_string($ip))
         end
-        push!(params.args, Expr(:kw, :__prefix__, prefix_expr))
+        push!(params.args, Expr(:kw, :__mount_step__, step_expr))
     end
     call_expr
 end
