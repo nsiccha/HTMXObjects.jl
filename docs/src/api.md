@@ -369,8 +369,14 @@ owns the rich card body by extending `semantic_card(value)` to return a
 `SemanticCard(title, children...)`. Compose it with `SemanticFields`,
 `SemanticCode`, and `SemanticStatus`: these values sit above markup and provide
 peer HTML, Hyperview HXML (`application/vnd.hyperview+xml`), Markdown, and
-plain-text projections. Without a semantic card, the concise option label is
-rendered as fallback content. Code languages are converted to symbols;
+plain-text projections. Two of those four are reachable through the mounted
+route: a semantic node is exempt from markdown chrome-stripping, so the cards
+render in a `?plain` / `?markdown` read even though they sit inside the
+generated `<form>`. The response pipeline negotiates no
+`application/vnd.hyperview+xml` arm, so the HXML projection is reached only by
+`show`/`repr` on the node itself — requesting the route with that `Accept`
+header returns the ordinary HTML page. Without a semantic card, the concise
+option label is rendered as fallback content. Code languages are converted to symbols;
 statuses accept any symbol, with distinct glyphs for `:ok`/`:available`,
 `:warn`/`:blocked`, `:fail`, and `:pending`. HTMXObjects still owns the
 radio's exact accessible name (the concise label), checked/disabled/required

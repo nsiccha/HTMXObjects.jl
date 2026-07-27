@@ -1776,6 +1776,13 @@ end
 Abstract parent for reusable presentation values that sit above any one markup
 format. Built-in semantic nodes have peer HTML, Hyperview HXML, Markdown, and
 plain-text projections.
+
+Those are projections of the NODE, reached with `show(io, mime, node)` or
+`repr(mime, node)`. HTML and Markdown are additionally reachable through a
+route: a semantic node survives markdown chrome-stripping (see
+[`_strip_md_chrome`](@ref)), so it renders in `?plain` / `?markdown` reads even
+when mounted inside a generated `<form>`. The response pipeline negotiates no
+`application/vnd.hyperview+xml` arm, so the HXML projection is node-level only.
 """
 abstract type SemanticNode end
 
@@ -6289,6 +6296,11 @@ so they emit nothing into markdown. Everything else (prose, headings, links,
 tables, non-chrome structure, and ALL text) is preserved. Non-Node values pass
 through unchanged; a value that is itself all-chrome strips to `nothing`.
 
+A [`SemanticNode`](@ref) is the one exception to the subtree drop: it survives
+wherever it appears, including inside dropped chrome (see
+[`_rescue_semantic!`](@ref)). Its own children are still stripped, so no chrome
+reaches markdown through it.
+
 Applied automatically by [`to_markdown_string`](@ref) so every
 `?plain` / `?markdown` / `Accept: text/markdown` read drops form chrome with no
 consumer annotation — the automatic counterpart to [`html_only`](@ref), which
@@ -6301,14 +6313,65 @@ _strip_md_chrome((content, id)::Pair) = let f = _strip_md_chrome(content)
     isnothing(f) ? nothing : f => id
 end
 
+# A SemanticCard's children are free-form (`Vector{Any}`), so a consumer may put
+# a Node in there. The card itself is kept, but strip its children so the
+# no-chrome-in-markdown invariant holds even when a card breaks the
+# presentational contract. The other semantic nodes hold plain data only.
+_strip_md_chrome(card::SemanticCard) = SemanticCard(card.title,
+    Any[kept for kept in _strip_md_chrome.(card.children) if !isnothing(kept)])
+
+"""
+    _rescue_semantic!(out, val)
+
+Collect, in document order, the [`SemanticNode`](@ref)s inside a chrome subtree
+that [`_strip_md_chrome`](@ref) is about to drop.
+
+A semantic node sits ABOVE markup: it owns peer Markdown and plain-text
+projections, and its rich view is required to be presentational — no links,
+buttons, or inputs (the semantic-card contract in `htmxo-use`). So it is
+exactly the content a chrome drop must NOT take with it. Without this,
+`operation_form(...; presentation=:cards)` — which mounts every `SemanticCard`
+inside the generated `<form>` — loses its whole card grid from every
+`?plain` / `?markdown` read, leaving the page's markdown carried only by
+whatever hand-built HTML happens to sit outside the form.
+
+Rescuing the node (rather than salvaging its emitted HTML) is what keeps a
+`SemanticStatus`'s state and a `SemanticCode`'s language intact: the markdown
+path projects the semantic TREE through its own `show` methods.
+"""
+_rescue_semantic!(out, val) = nothing
+_rescue_semantic!(out, val::SemanticNode) =
+    (push!(out, _strip_md_chrome(val)); nothing)
+_rescue_semantic!(out, val::Union{AbstractArray,Tuple}) =
+    (foreach(child -> _rescue_semantic!(out, child), val); nothing)
+_rescue_semantic!(out, node::Node) =
+    (foreach(child -> _rescue_semantic!(out, child), HTMX.children(node)); nothing)
+
 # Re-insertable child: a surviving Node passes through; a chrome Node → nothing
-# (dropped). Unlike filter_errors (which prunes non-error text), text / primitive
-# children are KEPT as-is so non-chrome prose survives.
+# (dropped) or, when it held semantic nodes, the rescued run. Unlike
+# filter_errors (which prunes non-error text), text / primitive children are
+# KEPT as-is so non-chrome prose survives.
 _strip_md_chrome_child(child) = child
 _strip_md_chrome_child(child::Node) = _strip_md_chrome(child)
 
+# The rescued run is emitted where the chrome stood. Delimit it so consecutive
+# cards do not run together — a SemanticCard's markdown has no trailing
+# newline, so an undelimited run yields `…detail### Next title`.
+function _rescued_md_run(node::Node)
+    rescued = Any[]
+    _rescue_semantic!(rescued, HTMX.children(node))
+    isempty(rescued) && return nothing
+    run = Any["\n\n"]
+    for value in rescued
+        length(run) == 1 || push!(run, "\n\n")
+        push!(run, value)
+    end
+    push!(run, "\n")
+    run
+end
+
 function _strip_md_chrome(node::Node)
-    _is_md_chrome(HTMX.tag(node)) && return nothing
+    _is_md_chrome(HTMX.tag(node)) && return _rescued_md_run(node)
     new_children = []
     for child in HTMX.children(node)
         kept = _strip_md_chrome_child(child)
@@ -8271,7 +8334,10 @@ reusable above-markup view by extending `semantic_card(value)` to return a
 [`SemanticCard`](@ref), composed from semantic fields, code, status, and other
 children. That node has peer HTML, Hyperview HXML, Markdown, and plain-text
 projections; the model does not own raw HTML. The concise option label remains
-the radio's accessible name and fallback content.
+the radio's accessible name and fallback content. The cards survive a
+`?plain` / `?markdown` read of the mounted route even though they sit inside
+the generated `<form>`; the HXML projection is node-level only, because the
+response pipeline negotiates no `application/vnd.hyperview+xml` arm.
 HTMXObjects continues to own the native input, checked and disabled state,
 help metadata, stable [`option_wire_value`](@ref), keyboard behavior, dependent
 refresh, and navigation semantics. The concise label contains only phrasing
