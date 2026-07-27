@@ -18,6 +18,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     TestUIHost, ProviderApp, SemanticApp, SemanticAutoApp, SemanticParamApp,
     SemanticRequiredParamApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
+    MountedSemanticOps, MountedSemanticRoot,
     PolicyApp, SlowPolicyApp, SlowPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
@@ -253,6 +254,24 @@ end
 
 @htmx struct ZeroConfigSemanticHost
     @include models = ZeroConfigSemanticChild(:north, 50)
+end
+
+# `semantic_app` rendered on a mounted instance BELOW the root. Every generated
+# operation URL is built from that instance's `__prefix__`, so the prefix has to
+# stay correct on the second and later requests too — once the first render
+# installs the managed job-scoped provider, a request reaches the graph through
+# `DynamicObjects.remount`, which deliberately masks a retained `__prefix__`.
+@htmx struct MountedSemanticOps
+    @options model = (:base, :full)
+    @get fit(; model::Symbol=:base) = h.p("fit:$(model)")
+    @post predict(; draws::Int=10) = h.p("predict:$(draws)")
+end
+
+@htmx struct MountedSemanticRoot
+    @include mounted = begin
+        @include ops = MountedSemanticOps()
+        @get index() = semantic_app(ops; title="Mounted operations")
+    end
 end
 
 # `model`'s domain depends on `study`, so `study` is a field of the node the
@@ -1297,6 +1316,42 @@ end
     @test retained_host.models.study === :north
     @test retained_host.models.dose == 50
     @test retained_host.models.unrelated === mounted_unrelated
+end
+
+@testitem "mounted semantic operation URLs survive root retention and a stripping proxy" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    root = MountedSemanticRoot()
+    @test root.mounted.__prefix__ == "/mounted"
+    @test root.mounted.ops.__prefix__ == "/mounted/ops"
+
+    route!(root)
+    call(req) = first(HTTP.Handlers.gethandler(
+        HTMXObjects.CONTEXT[].service.router, req))(req)
+
+    # EVERY request, not only the first. Rendering `semantic_app` installs the
+    # managed job-scoped provider, so from the second request on the graph is
+    # rebound by `DynamicObjects.remount` — which masks the child's retained
+    # `__prefix__` and recomputes it. A prefix baked in at construction time did
+    # not survive that, and the generated buttons silently fell back to
+    # root-relative URLs that 404.
+    for _ in 1:3
+        body = String(call(HTTP.Request("GET", "/mounted")).body)
+        @test contains(body, "hx-get=\"/mounted/ops/fit\"")
+        @test contains(body, "hx-post=\"/mounted/ops/predict\"")
+        @test !contains(body, "hx-get=\"/fit\"")
+        @test !contains(body, "hx-post=\"/predict\"")
+    end
+
+    # A path-stripping reverse proxy moves the whole graph; generated operation
+    # URLs move with the hand-written ones.
+    forwarded = String(call(HTTP.Request(
+        "GET", "/mounted", ["X-Forwarded-Prefix" => "/p/app"])).body)
+    @test contains(forwarded, "hx-get=\"/p/app/mounted/ops/fit\"")
+    @test contains(forwarded, "hx-post=\"/p/app/mounted/ops/predict\"")
+
+    # The URLs the buttons emit are the routes that actually exist.
+    executed = call(HTTP.Request("GET", "/mounted/ops/fit"))
+    @test executed.status == 200
+    @test contains(String(executed.body), "fit:base")
 end
 
 @testitem "generated semantic form context and dependent refresh" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
