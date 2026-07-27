@@ -298,6 +298,24 @@ chrome rather than part of a semantic projection.
 element can be cited from elsewhere. An unaddressed element emits no attribute
 at all rather than `id=""`.
 
+Every element but one projects into the HTML element whose native rendering
+already carries its meaning — `article` for a card, `section` for a division,
+`dl` for fields, `details` for a disclosure, `pre`/`code` for code — which is
+why HTMXObjects ships almost no CSS for them: Pico styles the element. A
+`SemanticGroup` has no such counterpart, so its HTML peer is a bare `div` and
+[`htmxo_utility_styles`](@ref) gives it the layout instead: **a group is a row
+that wraps.** Siblings share the width and each keeps a minimum before the row
+breaks, so a pair of figures sits side by side on a wide viewport and stacks on
+a narrow one, with nothing passed at the call site. Layout is an HTML-only
+affordance — the same reason a disclosure collapses only in HTML — so the
+Markdown and plain-text peers are unchanged, and a group projects there as its
+children in sequence either way. An app that wants a different run width
+overrides the variables in its own scoped stylesheet, never inline:
+
+```css
+.my-app-wide-run { --htmxo-semantic-group-min: 30rem; --htmxo-semantic-group-gap: 2rem; }
+```
+
 ### What the compiler reads from a descriptor
 
 `property_descriptor`, `property_descriptors` and `static_domain` are

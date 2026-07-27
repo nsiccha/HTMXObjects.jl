@@ -9478,6 +9478,31 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-semantic-status[data-status="fail"] { color: var(--htmxo-error); }
 .htmxo-semantic-status[data-status="pending"] { color: var(--htmxo-muted); }
 
+/* `SemanticGroup` is an untitled RUN of siblings, and it is the one element in
+   the vocabulary whose meaning no HTML element carries — every other one picks
+   the element whose native rendering already says it (`article` for a card,
+   `section` for a division, `dl` for fields, `details` for a disclosure,
+   `pre>code` for code), which is why those classes need no rule here. A group
+   falls to a bare `div`, so without this rule it renders as nothing at all and
+   its children merely stack. Laid out as a row that WRAPS: siblings share the
+   width and each keeps a minimum before the row breaks, so a pair of figures
+   sits side by side on a wide viewport and stacks on a narrow one with no
+   consumer input — which is what a "run" reads like. `min-width: 0` lets a wide
+   child (a table, a `pre`) scroll inside its own box instead of blowing the row
+   out. Apps that want a different run width set the variables in their own
+   scoped stylesheet — never inline:
+       .my-app-wide-run { --htmxo-semantic-group-min: 30rem; } */
+.htmxo-semantic-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: start;
+    gap: var(--htmxo-semantic-group-gap, 1rem);
+}
+.htmxo-semantic-group > * {
+    flex: 1 1 var(--htmxo-semantic-group-min, 20rem);
+    min-width: 0;
+}
+
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the
    left border instead (see banner rules below). */
