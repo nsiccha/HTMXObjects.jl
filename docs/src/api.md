@@ -208,12 +208,20 @@ provider lock. Applications construct no executor/store and call no GC.
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
+| `SemanticCard` / `SemanticFields` / `SemanticCode` / `SemanticStatus` | Reusable above-markup presentation nodes with peer format projections |
+| `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
 | `internal_input(input)` | Is this descriptor input framework-injected rather than author-declared? |
 
 ```@docs
 semantic_descriptor
 semantic_app
 operation_form
+SemanticNode
+SemanticCard
+SemanticFields
+SemanticCode
+SemanticStatus
+semantic_card
 internal_input
 ```
 
@@ -353,6 +361,33 @@ Given a resolved domain the control is picked by this rule, in order:
 `radio_max` options (default 4) → a radio `fieldset`; otherwise a `<select>`.
 Only with no domain, or `kind=:unrestricted`, does the input fall back to the
 type-driven control.
+
+`operation_form(...; presentation=:cards)` is an explicit rich-presentation
+override for finite, single-choice domains. It emits one native radio label per
+option instead of applying the radio-count/select threshold. The option value
+owns the rich card body by extending `semantic_card(value)` to return a
+`SemanticCard(title, children...)`. Compose it with `SemanticFields`,
+`SemanticCode`, and `SemanticStatus`: these values sit above markup and provide
+peer HTML, Hyperview HXML (`application/vnd.hyperview+xml`), Markdown, and
+plain-text projections. Without a semantic card, the concise option label is
+rendered as fallback content. Code languages are converted to symbols;
+statuses accept any symbol, with distinct glyphs for `:ok`/`:available`,
+`:warn`/`:blocked`, `:fail`, and `:pending`. HTMXObjects still owns the
+radio's exact accessible name (the concise label), checked/disabled/required
+state, visible help, stable wire value, native keyboard behavior, dependent
+refresh, and `navigate=true` GET submission. Model-supplied card HTML is placed
+beside the concise radio label in the generated card, rather than inside it, so
+block content such as `article` and `pre` remains standards-compliant. Card
+views should remain presentational: do not include links, buttons, inputs, or
+other interactive controls that compete with the radio. HTMXObjects does not
+truncate card content. Its associated label overlays the full card surface, so
+clicking anywhere on the visual card selects the native radio without
+JavaScript; the input remains directly focusable and keeps native keyboard
+behavior. The overlay is part of `htmxo_utility_styles()`, auto-included by
+`htmx()`; a hand-built page shell must include that style block itself.
+`presentation=:auto` is the default and preserves the normal
+heuristic above. Multiple and custom-value domains retain their existing
+controls in either mode.
 
 ### Fail-closed contract
 
