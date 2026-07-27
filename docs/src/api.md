@@ -208,7 +208,7 @@ provider lock. Applications construct no executor/store and call no GC.
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
-| `SemanticCard` / `SemanticFields` / `SemanticCode` / `SemanticStatus` | Reusable above-markup presentation nodes with peer format projections |
+| `SemanticNode` and its fourteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
 | `internal_input(input)` | Is this descriptor input framework-injected rather than author-declared? |
 
@@ -221,9 +221,82 @@ SemanticCard
 SemanticFields
 SemanticCode
 SemanticStatus
+SemanticProse
+SemanticTable
+SemanticPlot
+SemanticMetric
+SemanticLink
+SemanticAction
+SemanticArtifact
+SemanticSection
+SemanticGroup
+SemanticDisclosure
 semantic_card
 internal_input
 ```
+
+### The semantic element vocabulary
+
+A `SemanticNode` sits ABOVE markup. Routes, properties and indexed properties
+return these instead of building markup, and each element projects itself into
+every output format through an ordinary `Base.show(::IO, ::MIME, ::Element)`
+method — so HTML, Hyperview HXML, Markdown and plain text are **peers**, none
+derived from another by translation. Elements nest, and a child that is not an
+element is shown through its OWN `show`, which is what lets a DynamicObjects
+node or an AlgebraOfVega layer drop in with no registration at all.
+
+| Element | Holds |
+|---------|-------|
+| `SemanticProse(markdown)` | A run of prose, authored as Markdown |
+| `SemanticFields(; facts...)` | Labelled facts |
+| `SemanticTable(source)` | Any Tables.jl-compatible source |
+| `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
+| `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
+| `SemanticStatus(state; detail="")` | A state, not a colour |
+| `SemanticLink(label, target)` | A navigation target |
+| `SemanticAction(label, target)` | An operation offered to the reader |
+| `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
+| `SemanticCode(language, text; anchor="")` | Source code, language kept as data |
+| `SemanticSection(title, children...; anchor="")` | A document division — opens a heading level |
+| `SemanticCard(title, children...; anchor="")` | A self-contained titled summary |
+| `SemanticGroup(children...)` | An untitled run of siblings |
+| `SemanticDisclosure(summary, children...)` | Content the reader opens |
+
+Five of these — `SemanticMetric`, `SemanticStatus`, `SemanticLink`,
+`SemanticAction`, `SemanticArtifact` — are the ones that pay, because HTML has
+no element for them. Written as markup, their meaning gets buried in a `<span
+class="badge">` or an `hx-*` attribute that no other format can read back out;
+held as data, a metric keeps its unit and a status keeps its state in every
+projection.
+
+Three points where a projection is deliberately not a translation of the HTML:
+
+- **`SemanticAction` degrades to a plain link** outside HTML. No other format
+  can express "swap this in place", and the target is the honest remainder of
+  the meaning.
+- **`SemanticDisclosure` is content the reader OPENS, not content that is
+  hidden** — which is exactly why it cannot be an `h.details` wrapper around
+  semantic children. HTML collapses it, but Markdown and plain text have no
+  viewport to collapse into, so their correct projection is the label followed
+  by the whole body. Wrapping the children in markup instead would force the
+  subtree down the HTML→Markdown path and lose every peer projection under it.
+- **`SemanticProse`'s HTML peer renders its Markdown**, through the `Markdown`
+  stdlib, which escapes inline markup — so prose cannot smuggle HTML through.
+  Its HXML peer is the source as plain text.
+
+`SemanticTable` is gated by `Tables.istable`, not by a duck-typed
+`propertynames` check: a `NamedTuple` of vectors, a `DataFrame` and a
+`TreeArrays.TreeData` are tables; a `NamedTuple` of scalars, a scalar, a
+`String`, a `Vector` and a `Dict` are not, and are shown through their own
+projection rather than mangled into a spurious one-row table. Prefer passing the
+richer source directly — materializing a `TreeData` into a `DataFrame` just to
+render it loses information for nothing. The HTML projection delegates to
+[`render_table`](@ref) with sorting and download off, since both are interactive
+chrome rather than part of a semantic projection.
+
+`anchor`, where present, becomes the HTML `id` — a document address, so an
+element can be cited from elsewhere. An unaddressed element emits no attribute
+at all rather than `id=""`.
 
 ### What the compiler reads from a descriptor
 
@@ -366,8 +439,8 @@ type-driven control.
 override for finite, single-choice domains. It emits one native radio label per
 option instead of applying the radio-count/select threshold. The option value
 owns the rich card body by extending `semantic_card(value)` to return a
-`SemanticCard(title, children...)`. Compose it with `SemanticFields`,
-`SemanticCode`, and `SemanticStatus`: these values sit above markup and provide
+`SemanticCard(title, children...)`. Compose it with any of the other elements in
+[The semantic element vocabulary](@ref): these values sit above markup and provide
 peer HTML, Hyperview HXML (`application/vnd.hyperview+xml`), Markdown, and
 plain-text projections. Two of those four are reachable through the mounted
 route: a semantic node is exempt from markdown chrome-stripping, so the cards

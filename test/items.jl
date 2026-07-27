@@ -3853,6 +3853,200 @@ end
     @test contains(plain, "[available] Sampling ready")
 end
 
+@testitem "every semantic element projects into all four formats" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    elements = Any[
+        SemanticProse("**bold**"),
+        SemanticFields(; a=1),
+        SemanticTable((x=[1, 2], y=["a", "b"])),
+        SemanticPlot("PLOTLAYER"),
+        SemanticMetric("AUC", 12.5; unit="ng·h/mL"),
+        SemanticStatus(:ok),
+        SemanticLink("home", "/"),
+        SemanticAction("run", "/run"),
+        SemanticArtifact("f.csv", "text/csv"; target="/dl"),
+        SemanticCode(:julia, "x = 1"),
+        SemanticSection("S", SemanticMetric("a", 1)),
+        SemanticCard("C", SemanticMetric("a", 1)),
+        SemanticGroup(SemanticMetric("a", 1)),
+        SemanticDisclosure("more", SemanticMetric("a", 1)),
+    ]
+    @test length(elements) == 14
+    @test all(e -> e isa SemanticNode, elements)
+
+    for element in elements,
+        mime in ("text/html", "application/vnd.hyperview+xml",
+                 "text/markdown", "text/plain")
+        projection = repr(mime, element)
+        @test !isempty(projection)
+        # A missing method would fall back to the struct repr.
+        @test !contains(projection, "Semantic" * "Node")
+    end
+end
+
+@testitem "semantic markdown is a peer projection, not a translation of the HTML" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # A metric keeps its unit and a status its state, instead of being recovered
+    # from a `<span class="badge">`.
+    @test repr("text/markdown", SemanticMetric("AUC", 12.5; unit="ng·h/mL")) ==
+        "**AUC:** 12.5 ng·h/mL"
+    @test repr("text/plain", SemanticMetric("AUC", 12.5; unit="ng·h/mL")) ==
+        "AUC: 12.5 ng·h/mL"
+    @test repr("text/markdown", SemanticMetric("n", 3)) == "**n:** 3"
+    @test repr("text/markdown", SemanticLink("home", "/x")) == "[home](/x)"
+    @test repr("text/markdown", SemanticStatus(:fail; detail="boom")) ==
+        "✗ **fail** — boom"
+
+    # An action degrades to a plain link: no other format can express an
+    # in-place swap, and the target is the honest remainder of the meaning.
+    action = SemanticAction("run", "/r")
+    @test repr("text/markdown", action) == "[run](/r)"
+    @test !contains(repr("text/markdown", action), "hx-get")
+    @test contains(repr("text/html", action), "hx-get")
+
+    # Prose is Markdown at the source; only the HTML peer renders it, and that
+    # rendering escapes inline markup.
+    @test repr("text/markdown", SemanticProse("**b**")) == "**b**"
+    @test contains(repr("text/html", SemanticProse("**b**")), "<strong>b</strong>")
+    @test contains(repr("text/html", SemanticProse("<script>alert(1)</script>")),
+        "&lt;script&gt;")
+    @test !contains(repr("text/html", SemanticProse("<script>alert(1)</script>")),
+        "<script>")
+    # HXML has no place for rendered HTML, so prose projects as plain text.
+    @test !contains(repr("application/vnd.hyperview+xml", SemanticProse("**b**")),
+        "<strong>")
+
+    # An artifact with no target addresses itself by name.
+    @test contains(repr("text/markdown",
+        SemanticArtifact("f.csv", "text/csv"; target="/dl")), "(/dl)")
+    @test contains(repr("text/markdown", SemanticArtifact("f.csv", "text/csv")),
+        "(f.csv)")
+    @test contains(repr("text/markdown", SemanticArtifact("f.csv", "text/csv")),
+        "`text/csv`")
+
+    # A plot owns no markup — every format is its layer's own projection.
+    @test repr("text/markdown", SemanticPlot("LAYER")) == "LAYER"
+    @test repr("text/plain", SemanticPlot("LAYER")) == "LAYER"
+end
+
+@testitem "SemanticTable is gated by Tables.istable, never duck-typed" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    table = SemanticTable((x=[1, 2], y=["a", "b"]))
+    @test contains(repr("text/markdown", table), "| x | y |")
+    @test contains(repr("text/markdown", table), "| 1 | a |")
+    @test contains(repr("text/html", table), "<table")
+    @test contains(repr("text/plain", table), "x\ty")
+    # Sorting and download are interactive chrome, not a semantic projection.
+    @test !contains(repr("text/html", table), "htmxoSort")
+
+    # A NamedTuple of SCALARS is not a table. Duck-typing on `propertynames`
+    # would render it as a spurious one-row table; `Tables.istable` does not.
+    for non_table in (SemanticTable((a=1, b=2)), SemanticTable(42),
+                      SemanticTable("hi"), SemanticTable([1, 2, 3]))
+        @test !contains(repr("text/markdown", non_table), "| --- |")
+    end
+    @test repr("text/markdown", SemanticTable("hi")) == "hi"
+end
+
+@testitem "semantic containers splat a narrowed child vector" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # `collect` and comprehensions NARROW, so these arrive as
+    # `Vector{SemanticMetric}`. Against a `Vector{Any}` arm that misses and the
+    # varargs arm silently wraps the whole vector as ONE child.
+    narrowed = collect(SemanticMetric("m", index) for index in 1:2)
+    @test narrowed isa Vector{SemanticMetric}
+    @test length(SemanticGroup(narrowed).children) == 2
+    @test length(SemanticSection("t", narrowed).children) == 2
+    @test length(SemanticCard("t", narrowed).children) == 2
+    @test length(SemanticDisclosure("s", narrowed).children) == 2
+
+    # A single non-vector child must not hit a converting constructor.
+    @test length(SemanticGroup(SemanticMetric("m", 1)).children) == 1
+    @test length(SemanticSection("t", SemanticMetric("m", 1)).children) == 1
+    @test length(SemanticCard("t", SemanticMetric("m", 1)).children) == 1
+    @test length(SemanticDisclosure("s", SemanticMetric("m", 1)).children) == 1
+    @test isempty(SemanticGroup().children)
+
+    # Non-String labels convert rather than erroring.
+    @test SemanticLink(:home, "/").label == "home"
+    @test SemanticAction(:run, "/run").label == "run"
+end
+
+@testitem "semantic anchors become ids and are absent when unset" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    @test contains(repr("text/html", SemanticCard("T", "x"; anchor="c1")), "id=\"c1\"")
+    @test contains(repr("text/html", SemanticSection("T", "x"; anchor="s1")), "id=\"s1\"")
+    @test contains(repr("text/html", SemanticCode(:julia, "x"; anchor="k1")), "id=\"k1\"")
+
+    # An unaddressed element emits no attribute at all, not `id=""`.
+    for element in (SemanticCard("T", "x"), SemanticSection("T", "x"),
+                    SemanticCode(:julia, "x"))
+        @test !contains(repr("text/html", element), "id=\"\"")
+    end
+
+    # The four that shipped before `anchor` keep their existing call forms.
+    @test SemanticCard("T", "x").anchor == ""
+    @test SemanticCode(:julia, "x = 1").anchor == ""
+    @test SemanticCode("julia", "x = 1").language === :julia
+end
+
+@testitem "chrome stripping keeps every semantic container and its anchor" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    strip_chrome = HTMXObjects._strip_md_chrome
+
+    stripped_card = strip_chrome(
+        SemanticCard("T", h.form(h.input(; type="text")), "keepme"; anchor="a1"))
+    @test stripped_card isa SemanticCard
+    @test stripped_card.anchor == "a1"
+    @test !contains(repr("text/markdown", stripped_card), "<form")
+    @test contains(repr("text/markdown", stripped_card), "keepme")
+
+    stripped_section = strip_chrome(
+        SemanticSection("T", h.form(h.input()), "keepme"; anchor="s1"))
+    @test stripped_section isa SemanticSection
+    @test stripped_section.anchor == "s1"
+    @test !contains(repr("text/markdown", stripped_section), "<form")
+    @test contains(repr("text/markdown", stripped_section), "keepme")
+
+    for container in (SemanticGroup(h.form(h.input()), "keepme"),
+                      SemanticDisclosure("s", h.form(h.input()), "keepme"))
+        stripped = strip_chrome(container)
+        @test stripped isa typeof(container)
+        @test !contains(repr("text/markdown", stripped), "<form")
+        @test contains(repr("text/markdown", stripped), "keepme")
+    end
+
+    # `_rescue_semantic!` dispatches on the abstract type, so every element is
+    # rescued out of a dropped chrome subtree, not just the ones with a method.
+    for element in (SemanticMetric("a", 1), SemanticStatus(:ok),
+                    SemanticLink("l", "/"), SemanticSection("S", "body"),
+                    SemanticGroup("body"), SemanticDisclosure("d", "body"),
+                    SemanticProse("p"))
+        rescued = Any[]
+        HTMXObjects._rescue_semantic!(rescued, h.form(h.div(element)))
+        @test length(rescued) == 1
+    end
+end
+
+@testitem "a page mounting semantic elements inside a form keeps them in markdown" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # The node-level projections above prove an element PROJECTS. This proves a
+    # whole page KEEPS it once the elements sit inside generated form chrome.
+    page = h.div(
+        h.h1("Report"),
+        h.form(
+            h.input(; type="text", name="q"),
+            SemanticCard("Fit",
+                SemanticMetric("AUC", 12.5; unit="ng·h/mL"),
+                SemanticStatus(:ok; detail="converged")),
+            SemanticSection("Detail", SemanticTable((x=[1], y=["a"]))),
+            h.button("Go"),
+        ),
+    )
+
+    markdown = HTMXObjects.to_markdown_string(page)
+    @test contains(markdown, "Report")
+    @test contains(markdown, "AUC") && contains(markdown, "ng·h/mL")
+    @test contains(markdown, "converged")
+    @test contains(markdown, "| x | y |")
+    @test !contains(markdown, "<form")
+    @test !contains(markdown, "<input")
+    @test !contains(markdown, "<button")
+end
+
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
