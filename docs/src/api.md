@@ -208,7 +208,7 @@ provider lock. Applications construct no executor/store and call no GC.
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
-| `SemanticNode` and its fourteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
+| `SemanticNode` and its fifteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
 | `internal_input(input)` | Is this descriptor input framework-injected rather than author-declared? |
 
@@ -221,6 +221,7 @@ SemanticCard
 SemanticFields
 SemanticCode
 SemanticStatus
+SemanticUnavailable
 SemanticProse
 SemanticTable
 SemanticPlot
@@ -253,6 +254,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
 | `SemanticStatus(state; detail="")` | A state, not a colour |
+| `SemanticUnavailable(reason)` | A declined computation, and why — not a state |
 | `SemanticLink(label, target)` | A navigation target |
 | `SemanticAction(label, target)` | An operation offered to the reader |
 | `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
@@ -262,12 +264,24 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticGroup(children...)` | An untitled run of siblings |
 | `SemanticDisclosure(summary, children...)` | Content the reader opens |
 
-Five of these — `SemanticMetric`, `SemanticStatus`, `SemanticLink`,
-`SemanticAction`, `SemanticArtifact` — are the ones that pay, because HTML has
-no element for them. Written as markup, their meaning gets buried in a `<span
-class="badge">` or an `hx-*` attribute that no other format can read back out;
-held as data, a metric keeps its unit and a status keeps its state in every
-projection.
+Six of these — `SemanticMetric`, `SemanticStatus`, `SemanticUnavailable`,
+`SemanticLink`, `SemanticAction`, `SemanticArtifact` — are the ones that pay,
+because HTML has no element for them. Written as markup, their meaning gets
+buried in a `<span class="badge">` or an `hx-*` attribute that no other format
+can read back out; held as data, a metric keeps its unit and a status keeps its
+state in every projection.
+
+`SemanticStatus` and `SemanticUnavailable` are the pair most often confused, and
+picking the wrong one is a lie the type system cannot catch. A **status** is a
+state the system is IN — running, converged, blocked, failed. An
+**unavailability** is a computation that was DECLINED: the diagnostic does not
+apply at this level, the summary needs draws this fit never produced. Nothing is
+warning, erroring or pending there, so every status symbol asserts something
+untrue, and `SemanticStatus(:warn)` type-checks while saying the opposite of
+what happened. Reach for `SemanticUnavailable(reason)` whenever the honest
+sentence is "there is nothing here, and here is why" — the whole point of the
+vocabulary is that this distinction survives into Markdown and plain text, where
+a mis-chosen element cannot be recovered from.
 
 Three points where a projection is deliberately not a translation of the HTML:
 

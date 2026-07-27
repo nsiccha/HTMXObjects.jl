@@ -15,9 +15,9 @@ export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
-    SemanticProse, SemanticTable, SemanticPlot, SemanticMetric, SemanticLink,
-    SemanticAction, SemanticArtifact, SemanticSection, SemanticGroup,
-    SemanticDisclosure, semantic_card
+    SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
+    SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
+    SemanticSection, SemanticGroup, SemanticDisclosure, semantic_card
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -1900,6 +1900,31 @@ end
 SemanticStatus(state::Symbol; detail="") = SemanticStatus(state, String(detail))
 
 """
+    SemanticUnavailable(reason)
+
+A DECLINED computation: content that was not produced, and why. The reason is
+held as data, so every peer format states it rather than leaving a slot the
+reader has to interpret.
+
+Deliberately NOT a [`SemanticStatus`](@ref), which reports a state the system is
+IN. A refusal is not a state: nothing is warning, failing or pending, so every
+status symbol asserts something untrue — and `SemanticStatus(:warn)` type-checks
+while saying exactly the wrong thing. This is the same distinction the
+vocabulary already draws between [`SemanticLink`](@ref) and
+[`SemanticAction`](@ref): one HTML idiom, two meanings, and the meaning is what
+must survive into the other formats.
+
+Its HTML peer is a `p` — a refusal REPLACES a block of content, where a status
+annotates something inline — carrying the framework-owned
+`htmxo-semantic-unavailable` class, which is where an app hangs its own styling
+rather than burying the meaning back in a call-site `class=`.
+"""
+struct SemanticUnavailable <: SemanticNode
+    reason::String
+    SemanticUnavailable(reason) = new(String(reason))
+end
+
+"""
     SemanticProse(markdown)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
@@ -2106,6 +2131,20 @@ function _semantic_status_node(status::SemanticStatus)
         class="htmxo-semantic-status", data_status=string(status.state))
 end
 
+# A refusal REPLACES a block of content, so its peer is a `p` rather than the
+# `span` a status annotates inline with. The marker word is emitted rather than
+# left to the reason: a bare reason would make the Markdown and plain peers
+# byte-identical to a `SemanticProse` of the same string, losing the meaning in
+# exactly the formats the vocabulary exists to carry it into — the same reason a
+# status prints its state even when `detail` restates it. An empty reason emits
+# no dangling separator, matching the status detail.
+function _semantic_unavailable_node(unavailable::SemanticUnavailable)
+    reason = isempty(unavailable.reason) ? Any[] :
+        Any[h.small(" — $(unavailable.reason)")]
+    h.p(h.strong("∅ unavailable"), reason...;
+        class="htmxo-semantic-unavailable")
+end
+
 # Splatted rather than branched at each call site, so an unaddressed element
 # emits no attribute at all instead of `id=""`.
 _semantic_anchor_attrs(anchor::AbstractString) =
@@ -2159,6 +2198,8 @@ end
 _semantic_html_node(fields::SemanticFields) = _semantic_fields_node(fields)
 _semantic_html_node(code::SemanticCode) = _semantic_code_node(code)
 _semantic_html_node(status::SemanticStatus) = _semantic_status_node(status)
+_semantic_html_node(unavailable::SemanticUnavailable) =
+    _semantic_unavailable_node(unavailable)
 _semantic_html_node(prose::SemanticProse) = _semantic_prose_node(prose)
 _semantic_html_node(table::SemanticTable) = _semantic_table_node(table)
 _semantic_html_node(metric::SemanticMetric) = h.div(
@@ -2218,9 +2259,9 @@ _semantic_hxml_node(disclosure::SemanticDisclosure) = h.details(
 # `SemanticPlot` is absent on purpose: it owns no markup of its own and
 # delegates every format to its layer's own `show` (below).
 for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
-          SemanticProse, SemanticTable, SemanticMetric, SemanticLink,
-          SemanticAction, SemanticArtifact, SemanticSection, SemanticGroup,
-          SemanticDisclosure)
+          SemanticUnavailable, SemanticProse, SemanticTable, SemanticMetric,
+          SemanticLink, SemanticAction, SemanticArtifact, SemanticSection,
+          SemanticGroup, SemanticDisclosure)
     @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
         show(io, mime, _semantic_html_node(value))
     @eval Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", value::$T) =
@@ -2275,6 +2316,12 @@ function Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard)
     isempty(card.children) || print(io, "\n\n")
     _semantic_show_children(io, mime, card.children, "\n\n")
 end
+
+# Same shape as the status peer above, for the same reason: the marker carries
+# the meaning, the reason carries the why.
+Base.show(io::IO, ::MIME"text/markdown", unavailable::SemanticUnavailable) =
+    print(io, "∅ **unavailable**",
+        isempty(unavailable.reason) ? "" : " — $(unavailable.reason)")
 
 Base.show(io::IO, ::MIME"text/markdown", prose::SemanticProse) =
     print(io, prose.markdown)
@@ -2343,6 +2390,10 @@ function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
     isempty(card.children) || print(io, "\n\n")
     _semantic_show_children(io, mime, card.children, "\n\n")
 end
+
+Base.show(io::IO, ::MIME"text/plain", unavailable::SemanticUnavailable) = print(
+    io, "[unavailable]",
+    isempty(unavailable.reason) ? "" : " $(unavailable.reason)")
 
 Base.show(io::IO, ::MIME"text/plain", prose::SemanticProse) =
     print(io, prose.markdown)
