@@ -3931,6 +3931,7 @@ end
         SemanticPlot("PLOTLAYER"),
         SemanticMetric("AUC", 12.5; unit="ng·h/mL"),
         SemanticStatus(:ok),
+        SemanticUnavailable("no draws at this level"),
         SemanticLink("home", "/"),
         SemanticAction("run", "/run"),
         SemanticArtifact("f.csv", "text/csv"; target="/dl"),
@@ -3940,7 +3941,7 @@ end
         SemanticGroup(SemanticMetric("a", 1)),
         SemanticDisclosure("more", SemanticMetric("a", 1)),
     ]
-    @test length(elements) == 14
+    @test length(elements) == 15
     @test all(e -> e isa SemanticNode, elements)
 
     for element in elements,
@@ -3964,6 +3965,27 @@ end
     @test repr("text/markdown", SemanticLink("home", "/x")) == "[home](/x)"
     @test repr("text/markdown", SemanticStatus(:fail; detail="boom")) ==
         "✗ **fail** — boom"
+
+    # A declined computation is NOT a state, so it keeps its own element. The
+    # marker survives into every peer: without it the text formats would be
+    # byte-identical to a `SemanticProse` of the same string, which is exactly
+    # the meaning-burial the vocabulary exists to prevent.
+    declined = SemanticUnavailable("no draws at this level")
+    @test repr("text/markdown", declined) ==
+        "∅ **unavailable** — no draws at this level"
+    @test repr("text/plain", declined) == "[unavailable] no draws at this level"
+    @test repr("text/markdown", declined) !=
+        repr("text/markdown", SemanticProse("no draws at this level"))
+    # It is a BLOCK that replaces content, not an inline annotation, and it
+    # carries a framework-owned class an app can style without a call-site hook.
+    @test contains(repr("text/html", declined), "<p")
+    @test contains(repr("text/html", declined), "htmxo-semantic-unavailable")
+    @test contains(repr("text/html", declined), "no draws at this level")
+    # No status is asserted anywhere — that is the whole point of the element.
+    @test !contains(repr("text/html", declined), "data-status")
+    # An empty reason emits no dangling separator, matching the status detail.
+    @test repr("text/markdown", SemanticUnavailable("")) == "∅ **unavailable**"
+    @test repr("text/plain", SemanticUnavailable("")) == "[unavailable]"
 
     # An action degrades to a plain link: no other format can express an
     # in-place swap, and the target is the honest remainder of the meaning.
@@ -4146,6 +4168,7 @@ end
     # `_rescue_semantic!` dispatches on the abstract type, so every element is
     # rescued out of a dropped chrome subtree, not just the ones with a method.
     for element in (SemanticMetric("a", 1), SemanticStatus(:ok),
+                    SemanticUnavailable("declined"),
                     SemanticLink("l", "/"), SemanticSection("S", "body"),
                     SemanticGroup("body"), SemanticDisclosure("d", "body"),
                     SemanticProse("p"))
