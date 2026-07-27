@@ -3983,6 +3983,33 @@ end
     @test SemanticAction(:run, "/run").label == "run"
 end
 
+@testitem "a semantic group lays out as a wrapping row, and only in HTML" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # The reporting measurement, inverted. `.htmxo-semantic-group` used to have
+    # NO rule at all, so a group was an unstyled block and its children stacked
+    # — the one element in the vocabulary whose HTML peer rendered as nothing,
+    # because it is the one whose meaning no HTML element carries.
+    css = repr("text/html", HTMXObjects.htmxo_utility_styles())
+    @test contains(css, ".htmxo-semantic-group {")
+    @test contains(css, ".htmxo-semantic-group > * {")
+    # A row that WRAPS, not a fixed column count: a narrow viewport stacks with
+    # no media query and nothing passed at the call site.
+    @test contains(css, "flex-wrap: wrap")
+    # Both knobs are CSS variables with defaults, so an app retunes the run in
+    # its own scoped stylesheet instead of inline (`htmxo-semantic-styling` §1).
+    @test contains(css, "var(--htmxo-semantic-group-gap, 1rem)")
+    @test contains(css, "var(--htmxo-semantic-group-min, 20rem)")
+
+    # The HTML peer still emits the hook the rule keys off.
+    group = SemanticGroup(SemanticMetric("a", 1), SemanticMetric("b", 2))
+    @test contains(repr("text/html", group), "htmxo-semantic-group")
+
+    # Layout is an HTML-only affordance, exactly as collapsing is for a
+    # disclosure. The peer projections are untouched — a group is still its
+    # children in sequence, so a `?markdown` read is unchanged by this rule.
+    @test repr("text/markdown", group) == "**a:** 1\n\n**b:** 2"
+    @test repr("text/plain", group) == "a: 1\n\nb: 2"
+end
+
 @testitem "semantic anchors become ids and are absent when unset" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     @test contains(repr("text/html", SemanticCard("T", "x"; anchor="c1")), "id=\"c1\"")
     @test contains(repr("text/html", SemanticSection("T", "x"; anchor="s1")), "id=\"s1\"")
