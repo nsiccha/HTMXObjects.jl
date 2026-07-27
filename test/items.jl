@@ -4010,6 +4010,42 @@ end
     @test repr("text/plain", group) == "a: 1\n\nb: 2"
 end
 
+@testitem "a semantic metric separates label from value, and only in HTML" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # The reporting measurement, inverted. `.htmxo-semantic-metric` had NO rule,
+    # and the HTML peer emits a `span` next to a `strong` — adjacent inline
+    # elements with no separation of their own — so this rendered `draws4000`.
+    # Same root cause as the group above: an element whose meaning no single
+    # HTML element carries falls to markup that renders as nothing on its own.
+    css = repr("text/html", HTMXObjects.htmxo_utility_styles())
+    @test contains(css, ".htmxo-semantic-metric {")
+    @test contains(css, "var(--htmxo-semantic-metric-gap, 0.4rem)")
+
+    metric = SemanticMetric("draws", 4000)
+    html = repr("text/html", metric)
+
+    # The hooks the rule keys off, and the label/value split it depends on.
+    @test contains(html, "htmxo-semantic-metric")
+    @test contains(html, "htmxo-semantic-metric-label")
+    @test contains(html, "htmxo-semantic-metric-value")
+
+    # The separator is the GAP, not a colon in the markup: the label and value
+    # stay independently styleable, and a consumer scraping the HTML gets the
+    # value without a punctuation strip. This is what makes the HTML peer a PEER
+    # of the text ones rather than a copy of them.
+    @test !contains(html, "draws:")
+    @test contains(html, ">draws<")
+    @test contains(html, ">4000<")
+
+    # The text peers are untouched — they carry their own separator, and this
+    # rule is an HTML-only affordance.
+    @test repr("text/markdown", metric) == "**draws:** 4000"
+    @test repr("text/plain", metric) == "draws: 4000"
+
+    # The unit arm still rides along on the value, not the label.
+    @test repr("text/plain", SemanticMetric("dose", 5; unit="mg")) == "dose: 5 mg"
+    @test contains(repr("text/html", SemanticMetric("dose", 5; unit="mg")), ">5 mg<")
+end
+
 @testitem "semantic anchors become ids and are absent when unset" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     @test contains(repr("text/html", SemanticCard("T", "x"; anchor="c1")), "id=\"c1\"")
     @test contains(repr("text/html", SemanticSection("T", "x"; anchor="s1")), "id=\"s1\"")
