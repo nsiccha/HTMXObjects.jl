@@ -9552,6 +9552,24 @@ htmxo_utility_styles() = h.style(Raw("""
     min-width: 0;
 }
 
+/* `SemanticMetric` is the OTHER element with no HTML counterpart (see the group
+   comment above): a label/value pair lowers to a `span` next to a `strong`, and
+   adjacent inline elements carry no separation of their own — so without this
+   rule `SemanticMetric("draws", 4000)` renders as the run-together `draws4000`.
+   The separator is a GAP, not a literal colon in the markup: the text peers
+   already say `draws: 4000` in their own idiom, and keeping it out of the HTML
+   leaves the label and value independently styleable, and scrapeable without a
+   punctuation strip. `baseline` keeps the value's baseline on the label's when
+   an app scales one of them up; `wrap` lets a long label drop the value to its
+   own line rather than overflow. Apps wanting a figure-over-caption metric set
+   `flex-direction: column` in their own scoped stylesheet — never inline. */
+.htmxo-semantic-metric {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--htmxo-semantic-metric-gap, 0.4rem);
+}
+
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the
    left border instead (see banner rules below). */
