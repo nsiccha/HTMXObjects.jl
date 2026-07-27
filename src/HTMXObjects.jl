@@ -15,7 +15,9 @@ export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
-    semantic_card
+    SemanticProse, SemanticTable, SemanticPlot, SemanticMetric, SemanticLink,
+    SemanticAction, SemanticArtifact, SemanticSection, SemanticGroup,
+    SemanticDisclosure, semantic_card
 export safely, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -40,6 +42,9 @@ export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
 import Random
+# Only for `SemanticProse`'s HTML peer, which renders its Markdown source rather
+# than showing it. Escapes inline markup, so prose cannot smuggle HTML through.
+import Markdown
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
@@ -1787,19 +1792,22 @@ when mounted inside a generated `<form>`. The response pipeline negotiates no
 abstract type SemanticNode end
 
 """
-    SemanticCard(title, children...)
+    SemanticCard(title, children...; anchor="")
 
-A titled semantic summary. Children may be [`SemanticFields`](@ref),
-[`SemanticCode`](@ref), [`SemanticStatus`](@ref), another renderable value, or
-plain data.
+A titled semantic summary. Children may be any other semantic node, another
+renderable value, or plain data.
+
+`anchor`, when non-empty, becomes the HTML `id` — a document address, so a card
+can be cited from elsewhere.
 """
 struct SemanticCard <: SemanticNode
     title::String
     children::Vector{Any}
-    SemanticCard(title::AbstractString, children::Vector{Any}) =
-        new(String(title), children)
-    SemanticCard(title::AbstractString, children...) =
-        new(String(title), Any[children...])
+    anchor::String
+    SemanticCard(title::AbstractString, children::AbstractVector; anchor="") =
+        new(String(title), Any[children...], String(anchor))
+    SemanticCard(title::AbstractString, children...; anchor="") =
+        new(String(title), Any[children...], String(anchor))
 end
 
 """`SemanticFields(; facts...)` stores labelled facts for peer format rendering."""
@@ -1811,15 +1819,20 @@ SemanticFields(; kwargs...) = SemanticFields(
     Pair{Symbol,Any}[Symbol(key) => value for (key, value) in pairs(kwargs)])
 
 """
-    SemanticCode(language, text)
+    SemanticCode(language, text; anchor="")
 
 Store source code without choosing markup. `language` is converted to a
 `Symbol` and becomes the HTML language class / Markdown fence info string.
+
+`anchor`, when non-empty, becomes the HTML `id`, so a code block that is cited
+from elsewhere has a document address.
 """
 struct SemanticCode <: SemanticNode
     language::Symbol
     text::String
-    SemanticCode(language, text) = new(Symbol(language), String(text))
+    anchor::String
+    SemanticCode(language, text; anchor="") =
+        new(Symbol(language), String(text), String(anchor))
 end
 
 """
@@ -1836,6 +1849,178 @@ struct SemanticStatus <: SemanticNode
 end
 
 SemanticStatus(state::Symbol; detail="") = SemanticStatus(state, String(detail))
+
+"""
+    SemanticProse(markdown)
+
+A run of prose, authored as Markdown. The Markdown and plain-text projections
+are the source itself; the HTML projection renders it through the `Markdown`
+stdlib, which escapes inline markup, so prose cannot smuggle HTML through.
+"""
+struct SemanticProse <: SemanticNode
+    markdown::String
+    SemanticProse(markdown) = new(String(markdown))
+end
+
+"""
+    SemanticTable(source)
+
+Tabular data held as DATA. `source` is any Tables.jl-compatible source — a
+`NamedTuple` of equal-length vectors, a `DataFrame`, a `TreeArrays.TreeData` —
+gated by `Tables.istable`, so a scalar, string, vector or dict is not silently
+mangled into a one-row table but shown through its own projection instead.
+
+Deliberately not `DataFrame`-shaped: a `TreeData` is already a lazy Tables.jl
+source and is strictly richer, so materializing one into a frame just to render
+it loses information for nothing.
+"""
+struct SemanticTable <: SemanticNode
+    source
+end
+
+"""
+    SemanticPlot(layer)
+
+A plot held as its specification rather than its picture. `layer` is normally an
+AlgebraOfVega spec/layer; it is projected through its OWN `show` methods, so
+HTMXObjects names no plotting package and the element costs no dependency.
+"""
+struct SemanticPlot <: SemanticNode
+    layer
+end
+
+"""
+    SemanticMetric(label, value; unit="")
+
+One labelled measurement, keeping the unit as DATA instead of burying it in the
+formatted string. HTML has no element for this.
+"""
+struct SemanticMetric <: SemanticNode
+    label::String
+    value
+    unit::String
+end
+
+SemanticMetric(label, value; unit="") =
+    SemanticMetric(String(label), value, String(unit))
+
+# `SemanticLink` and `SemanticAction` declare INNER constructors for the same
+# reason the containers below do, and the trap is easier to miss here: a struct
+# with one typed and one untyped field auto-generates BOTH an exact
+# `(String, Any)` constructor and a converting `(Any, Any)` one. An outer
+# `SemanticLink(label, target) = SemanticLink(String(label), target)` is itself
+# `(Any, Any)`, so it OVERWRITES the converting constructor — which is a hard
+# `ERROR: Method overwriting is not permitted during Module precompilation`.
+# Declaring the arm inside the struct suppresses the auto-generated pair instead.
+
+"""
+    SemanticLink(label, target)
+
+A navigation target held as data. Renders as an ordinary anchor in HTML and as
+a real link in Markdown, rather than as a bare stringified URL.
+"""
+struct SemanticLink <: SemanticNode
+    label::String
+    target
+    SemanticLink(label, target) = new(String(label), target)
+end
+
+"""
+    SemanticAction(label, target)
+
+An OPERATION offered to the reader, as opposed to a [`SemanticLink`](@ref)'s
+plain navigation. The HTML projection carries the `hx-*` attributes that make it
+an in-place HTMX swap; every other format degrades to an ordinary link, which is
+the point — the meaning stays readable where `hx-get` is not.
+"""
+struct SemanticAction <: SemanticNode
+    label::String
+    target
+    SemanticAction(label, target) = new(String(label), target)
+end
+
+"""
+    SemanticArtifact(name, mime, bytes=nothing; target=nothing)
+
+A downloadable payload: a name, a MIME type, and a PLACE to fetch it from.
+`bytes` stays positional and optional because an artifact is sometimes a payload
+the route already holds and sometimes just a name for what a URL will produce.
+
+With no `target` the artifact addresses itself by `name` — the pre-`target`
+behaviour, which could only ever resolve by accident, kept so an in-memory
+payload still renders.
+"""
+struct SemanticArtifact <: SemanticNode
+    name::String
+    mime::String
+    bytes
+    target
+end
+
+SemanticArtifact(name, mime, bytes=nothing; target=nothing) =
+    SemanticArtifact(String(name), String(mime), bytes, target)
+
+# The containers declare INNER constructors on purpose. With a `Vector{Any}`
+# field, Julia's auto-generated converting constructor and an outer `children...`
+# method are mutually ambiguous, and a single non-vector child resolves to the
+# converting constructor, which then cannot convert one element to a
+# `Vector{Any}`. Declaring both arms inside the struct suppresses the
+# auto-generated one and makes dispatch unambiguous.
+#
+# The vector arm takes `AbstractVector`, NOT `Vector{Any}`, and that is
+# load-bearing: `collect(...)` and a comprehension both NARROW, so
+# `SemanticSection("t", collect(metrics))` hands over a `Vector{SemanticMetric}`.
+# Against a `Vector{Any}` arm that misses, falls through to the varargs arm, and
+# silently wraps the whole vector as ONE child — a container that renders a
+# single mangled entry instead of N. Caught by running it, not by reading it.
+
+"""
+    SemanticSection(title, children...; anchor="")
+
+A document-level division — it opens a heading level, unlike
+[`SemanticCard`](@ref), which is a self-contained summary.
+"""
+struct SemanticSection <: SemanticNode
+    title::String
+    children::Vector{Any}
+    anchor::String
+    SemanticSection(title::AbstractString, children::AbstractVector; anchor="") =
+        new(String(title), Any[children...], String(anchor))
+    SemanticSection(title::AbstractString, children...; anchor="") =
+        new(String(title), Any[children...], String(anchor))
+end
+
+"""
+    SemanticGroup(children...)
+
+An untitled run of siblings — the container to reach for when children belong
+together but the grouping itself carries no label.
+"""
+struct SemanticGroup <: SemanticNode
+    children::Vector{Any}
+    SemanticGroup(children::AbstractVector) = new(Any[children...])
+    SemanticGroup(children...) = new(Any[children...])
+end
+
+"""
+    SemanticDisclosure(summary, children...)
+
+Content the reader OPENS — not content that is hidden. The distinction is per
+format and is exactly why this cannot be an `h.details` wrapper around semantic
+children: HTML collapses it, but Markdown and plain text have no viewport to
+collapse into, so their correct projection is the label followed by the whole
+body. Wrapping semantic children in markup instead would force the entire
+subtree down the HTML→Markdown translation path and lose every peer projection
+underneath it.
+"""
+struct SemanticDisclosure <: SemanticNode
+    summary::String
+    children::Vector{Any}
+    SemanticDisclosure(summary::AbstractString, children::AbstractVector) =
+        new(String(summary), Any[children...])
+    SemanticDisclosure(summary::AbstractString, children...) =
+        new(String(summary), Any[children...])
+end
 
 """
     semantic_card(value) -> SemanticCard or nothing
@@ -1861,7 +2046,8 @@ function _semantic_fields_node(fields::SemanticFields)
 end
 
 _semantic_code_node(code::SemanticCode) = h.pre(
-    h.code(code.text; class="language-$(code.language)"))
+    h.code(code.text; class="language-$(code.language)");
+    _semantic_anchor_attrs(code.anchor)...)
 
 function _semantic_status_node(status::SemanticStatus)
     detail = isempty(status.detail) ? Any[] : Any[h.small(" $(status.detail)")]
@@ -1871,33 +2057,123 @@ function _semantic_status_node(status::SemanticStatus)
         class="htmxo-semantic-status", data_status=string(status.state))
 end
 
+# Splatted rather than branched at each call site, so an unaddressed element
+# emits no attribute at all instead of `id=""`.
+_semantic_anchor_attrs(anchor::AbstractString) =
+    isempty(anchor) ? (;) : (; id=anchor)
+
+_semantic_metric_text(metric::SemanticMetric) = isempty(metric.unit) ?
+    string(metric.value) : string(metric.value, " ", metric.unit)
+
+# An artifact with no target addresses itself by name — the pre-`target`
+# behaviour, kept so an in-memory payload still renders.
+_semantic_artifact_href(artifact::SemanticArtifact) =
+    isnothing(artifact.target) ? artifact.name : string(artifact.target)
+
+"""
+    _semantic_table_columns(source) -> (names, columns) or nothing
+
+Resolve a [`SemanticTable`](@ref)'s source through Tables.jl, or `nothing` when
+it is not a table and must be shown through its own projection instead.
+
+`Tables.istable` is the gate rather than a duck-typed `propertynames` check:
+measured against the real dependency it is `true` for a `NamedTuple` of vectors,
+a `DataFrame` and a `TreeArrays.TreeData`, and `false` for a `NamedTuple` of
+scalars, a scalar, a `String`, a `Vector` and a `Dict` — so a non-table is never
+mangled into a spurious one-row table.
+"""
+function _semantic_table_columns(source)
+    Tables.istable(source) || return nothing
+    columns = Tables.columns(source)
+    names = collect(Tables.columnnames(columns))
+    isempty(names) && return nothing
+    (names, Any[Tables.getcolumn(columns, name) for name in names])
+end
+
+# Prose is authored as Markdown, so the HTML peer RENDERS it rather than showing
+# its source. `Markdown.html` escapes inline markup (`<script>` becomes text),
+# so `Raw` here cannot smuggle HTML in through prose.
+_semantic_prose_node(prose::SemanticProse) = h.div(
+    Raw(sprint(io -> Markdown.html(io, Markdown.parse(prose.markdown))));
+    class="htmxo-semantic-prose")
+
+# Delegates to the one table renderer rather than hand-building a second
+# `h.table`. Sorting and download are interactive chrome, not part of a semantic
+# projection, so both are off.
+function _semantic_table_node(table::SemanticTable)
+    isnothing(_semantic_table_columns(table.source)) &&
+        return h.div(table.source; class="htmxo-semantic-table")
+    render_table(table.source; sortable=false, download=false,
+        class="striped htmxo-semantic-table")
+end
+
 _semantic_html_node(fields::SemanticFields) = _semantic_fields_node(fields)
 _semantic_html_node(code::SemanticCode) = _semantic_code_node(code)
 _semantic_html_node(status::SemanticStatus) = _semantic_status_node(status)
+_semantic_html_node(prose::SemanticProse) = _semantic_prose_node(prose)
+_semantic_html_node(table::SemanticTable) = _semantic_table_node(table)
+_semantic_html_node(metric::SemanticMetric) = h.div(
+    h.span(metric.label; class="htmxo-semantic-metric-label"),
+    h.strong(_semantic_metric_text(metric); class="htmxo-semantic-metric-value");
+    class="htmxo-semantic-metric")
+_semantic_html_node(link::SemanticLink) = h.a(
+    link.label; href=string(link.target), class="htmxo-semantic-link")
+# An action is an OPERATION, so the HTML peer carries the `hx-*` attributes that
+# make it an in-place swap. `href` stays set so it degrades to a plain link.
+_semantic_html_node(action::SemanticAction) = h.a(
+    action.label; href=string(action.target), hx_get=string(action.target),
+    hx_target="this", hx_swap="outerHTML", aria_live="polite",
+    class="htmxo-semantic-action")
+_semantic_html_node(artifact::SemanticArtifact) = h.a(
+    artifact.name; href=_semantic_artifact_href(artifact),
+    download=artifact.name, type=artifact.mime, class="htmxo-semantic-artifact")
 _semantic_html_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)), card.children...;
-    class="htmxo-semantic-card-body")
-
-for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus)
-    @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
-        show(io, mime, _semantic_html_node(value))
-end
+    class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
+_semantic_html_node(section::SemanticSection) = h.section(
+    h.h2(section.title), section.children...;
+    class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
+_semantic_html_node(group::SemanticGroup) = h.div(
+    group.children...; class="htmxo-semantic-group")
+_semantic_html_node(disclosure::SemanticDisclosure) = h.details(
+    h.summary(disclosure.summary), disclosure.children...;
+    class="htmxo-semantic-disclosure")
 
 # HXML is a peer projection. Construct the target node tree explicitly so a
 # semantic child is classified as a view/text node before HTMX's strict HXML
 # serializer groups children into contexts.
-_semantic_hxml_node(fields::SemanticFields) = _semantic_fields_node(fields)
-_semantic_hxml_node(code::SemanticCode) = _semantic_code_node(code)
-_semantic_hxml_node(status::SemanticStatus) = _semantic_status_node(status)
 _semantic_hxml_child(value::SemanticNode) = _semantic_hxml_node(value)
 _semantic_hxml_child(value::Node) = value
 _semantic_hxml_child(value) = h.span(value)
+
+# Every leaf projects the same tree in both markup formats; only the containers
+# differ, because their children need classifying first.
+_semantic_hxml_node(value::SemanticNode) = _semantic_html_node(value)
+# The exception: prose's HTML peer is `Raw` rendered markup, which is not HXML.
+# Its HXML peer is the source as plain, escaped text.
+_semantic_hxml_node(prose::SemanticProse) = h.span(prose.markdown)
 _semantic_hxml_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)),
     map(_semantic_hxml_child, card.children)...;
-    class="htmxo-semantic-card-body")
+    class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
+_semantic_hxml_node(section::SemanticSection) = h.section(
+    h.h2(section.title), map(_semantic_hxml_child, section.children)...;
+    class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
+_semantic_hxml_node(group::SemanticGroup) = h.div(
+    map(_semantic_hxml_child, group.children)...; class="htmxo-semantic-group")
+_semantic_hxml_node(disclosure::SemanticDisclosure) = h.details(
+    h.summary(disclosure.summary),
+    map(_semantic_hxml_child, disclosure.children)...;
+    class="htmxo-semantic-disclosure")
 
-for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus)
+# `SemanticPlot` is absent on purpose: it owns no markup of its own and
+# delegates every format to its layer's own `show` (below).
+for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
+          SemanticProse, SemanticTable, SemanticMetric, SemanticLink,
+          SemanticAction, SemanticArtifact, SemanticSection, SemanticGroup,
+          SemanticDisclosure)
+    @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
+        show(io, mime, _semantic_html_node(value))
     @eval Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", value::$T) =
         show(io, mime, _semantic_hxml_node(value))
 end
@@ -1905,6 +2181,16 @@ end
 _semantic_show_leaf(io::IO, mime::MIME, value) =
     showable(mime, value) ? show(io, mime, value) : print(io, value)
 _semantic_show_leaf(io::IO, ::MIME, value::AbstractString) = print(io, value)
+
+# A plot owns no markup: every format is its layer's own projection. That is
+# what lets an AlgebraOfVega layer drop in with no registration here and no
+# dependency — including its bounded `text/markdown` summary, so a markdown read
+# of a plot is real content rather than an empty script node.
+for mime in (MIME"text/html", MIME"application/vnd.hyperview+xml",
+             MIME"text/markdown", MIME"text/plain")
+    @eval Base.show(io::IO, mime::$mime, plot::SemanticPlot) =
+        _semantic_show_leaf(io, mime, plot.layer)
+end
 
 function _semantic_show_children(io::IO, mime::MIME, children, separator)
     for (index, child) in enumerate(children)
@@ -1941,6 +2227,56 @@ function Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard)
     _semantic_show_children(io, mime, card.children, "\n\n")
 end
 
+Base.show(io::IO, ::MIME"text/markdown", prose::SemanticProse) =
+    print(io, prose.markdown)
+
+Base.show(io::IO, ::MIME"text/markdown", metric::SemanticMetric) =
+    print(io, "**", metric.label, ":** ", _semantic_metric_text(metric))
+
+Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink) =
+    print(io, "[", link.label, "](", string(link.target), ")")
+
+# An action degrades to an ordinary link. No format but HTML can express "swap
+# this in place", and the target is the honest remainder of the meaning — which
+# is the whole reason the operation is held as data rather than as `hx-get`.
+Base.show(io::IO, ::MIME"text/markdown", action::SemanticAction) =
+    print(io, "[", action.label, "](", string(action.target), ")")
+
+Base.show(io::IO, ::MIME"text/markdown", artifact::SemanticArtifact) = print(
+    io, "[", artifact.name, "](", _semantic_artifact_href(artifact), ") (`",
+    artifact.mime, "`)")
+
+function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
+    cells = _semantic_table_columns(table.source)
+    isnothing(cells) && return _semantic_show_leaf(io, mime, table.source)
+    names, columns = cells
+    print(io, "| ", join(names, " | "), " |\n")
+    print(io, "|", repeat(" --- |", length(names)), "\n")
+    for row in eachindex(first(columns))
+        print(io, "| ",
+            join((string(column[row]) for column in columns), " | "), " |\n")
+    end
+end
+
+function Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection)
+    print(io, "## ", section.title)
+    isempty(section.children) || print(io, "\n\n")
+    _semantic_show_children(io, mime, section.children, "\n\n")
+end
+
+Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
+    _semantic_show_children(io, mime, group.children, "\n\n")
+
+# Not a header: a disclosure's label names a body, it does not open a document
+# level. Collapsing is a viewport affordance HTML has and these formats do not,
+# so the body is simply present.
+function Base.show(io::IO, mime::MIME"text/markdown",
+                   disclosure::SemanticDisclosure)
+    print(io, "**", disclosure.summary, "**")
+    isempty(disclosure.children) || print(io, "\n\n")
+    _semantic_show_children(io, mime, disclosure.children, "\n\n")
+end
+
 function Base.show(io::IO, mime::MIME"text/plain", fields::SemanticFields)
     for (key, value) in fields.pairs
         print(io, key, ": ")
@@ -1957,6 +2293,48 @@ function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
     print(io, card.title)
     isempty(card.children) || print(io, "\n\n")
     _semantic_show_children(io, mime, card.children, "\n\n")
+end
+
+Base.show(io::IO, ::MIME"text/plain", prose::SemanticProse) =
+    print(io, prose.markdown)
+
+Base.show(io::IO, ::MIME"text/plain", metric::SemanticMetric) =
+    print(io, metric.label, ": ", _semantic_metric_text(metric))
+
+Base.show(io::IO, ::MIME"text/plain", link::SemanticLink) =
+    print(io, link.label, " (", string(link.target), ")")
+
+Base.show(io::IO, ::MIME"text/plain", action::SemanticAction) =
+    print(io, action.label, " (", string(action.target), ")")
+
+Base.show(io::IO, ::MIME"text/plain", artifact::SemanticArtifact) = print(
+    io, artifact.name, " [", artifact.mime, "]",
+    isnothing(artifact.target) ? "" : " ($(artifact.target))")
+
+function Base.show(io::IO, mime::MIME"text/plain", table::SemanticTable)
+    cells = _semantic_table_columns(table.source)
+    isnothing(cells) && return _semantic_show_leaf(io, mime, table.source)
+    names, columns = cells
+    print(io, join(names, '\t'), '\n')
+    for row in eachindex(first(columns))
+        print(io, join((string(column[row]) for column in columns), '\t'), '\n')
+    end
+end
+
+function Base.show(io::IO, mime::MIME"text/plain", section::SemanticSection)
+    print(io, section.title)
+    isempty(section.children) || print(io, "\n\n")
+    _semantic_show_children(io, mime, section.children, "\n\n")
+end
+
+Base.show(io::IO, mime::MIME"text/plain", group::SemanticGroup) =
+    _semantic_show_children(io, mime, group.children, "\n\n")
+
+function Base.show(io::IO, mime::MIME"text/plain",
+                   disclosure::SemanticDisclosure)
+    print(io, disclosure.summary)
+    isempty(disclosure.children) || print(io, "\n\n")
+    _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
 # Normalize a route return value into something `auto` can render, leaving
@@ -6313,12 +6691,25 @@ _strip_md_chrome((content, id)::Pair) = let f = _strip_md_chrome(content)
     isnothing(f) ? nothing : f => id
 end
 
-# A SemanticCard's children are free-form (`Vector{Any}`), so a consumer may put
-# a Node in there. The card itself is kept, but strip its children so the
-# no-chrome-in-markdown invariant holds even when a card breaks the
-# presentational contract. The other semantic nodes hold plain data only.
-_strip_md_chrome(card::SemanticCard) = SemanticCard(card.title,
-    Any[kept for kept in _strip_md_chrome.(card.children) if !isnothing(kept)])
+# The semantic CONTAINERS have free-form children (`Vector{Any}`), so a consumer
+# may put a Node in there. The container itself is kept, but its children are
+# stripped so the no-chrome-in-markdown invariant holds even when a consumer
+# breaks the presentational contract. The semantic leaves hold plain data only,
+# so they need no method here — the generic `_strip_md_chrome(val) = val` above
+# passes them through, and `_rescue_semantic!` dispatches on the abstract
+# `SemanticNode`, so every element is rescued whether or not it appears here.
+_strip_md_chrome_children(children) =
+    Any[kept for kept in _strip_md_chrome.(children) if !isnothing(kept)]
+
+_strip_md_chrome(card::SemanticCard) = SemanticCard(
+    card.title, _strip_md_chrome_children(card.children); anchor=card.anchor)
+_strip_md_chrome(section::SemanticSection) = SemanticSection(
+    section.title, _strip_md_chrome_children(section.children);
+    anchor=section.anchor)
+_strip_md_chrome(group::SemanticGroup) =
+    SemanticGroup(_strip_md_chrome_children(group.children))
+_strip_md_chrome(disclosure::SemanticDisclosure) = SemanticDisclosure(
+    disclosure.summary, _strip_md_chrome_children(disclosure.children))
 
 """
     _rescue_semantic!(out, val)
