@@ -2610,9 +2610,42 @@ function save_response(record_dir::String, url_path::String, response::HTTP.Resp
         rel * ext
     end
     dest = joinpath(record_dir, file)
+    _guard_record_destination!(record_dir, dest)
     mkpath(dirname(dest))
     write(dest, response.body)
     dest
+end
+
+# A record! call is synchronous, but multiple calls may run on independent
+# Tasks. Keep collision state task-local so a second requested URL cannot
+# silently overwrite a file emitted earlier in the same recording session.
+const _RECORDING_SESSION_KEY = :HTMXObjects_recording_session
+
+struct _RecordDestinationCollision <: Exception
+    previous::String
+    source::String
+    destination::String
+end
+
+function Base.showerror(io::IO, err::_RecordDestinationCollision)
+    print(io, "record!: requested paths ", repr(err.previous), " and ",
+          repr(err.source), " resolve to the same static destination ",
+          repr(err.destination))
+end
+
+function _guard_record_destination!(record_dir::String, dest::String)
+    session = get(task_local_storage(), _RECORDING_SESSION_KEY, nothing)
+    isnothing(session) && return
+    session.record_dir == abspath(record_dir) || return
+
+    destination = abspath(dest)
+    source = session.source[]
+    previous = get(session.destinations, destination, nothing)
+    if !isnothing(previous) && previous != source
+        throw(_RecordDestinationCollision(previous, source, destination))
+    end
+    session.destinations[destination] = source
+    nothing
 end
 
 # Paths that use kwargs (query params) and thus can't vary by query string on static servers.
@@ -4971,17 +5004,13 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                                            root_segs, request=req))
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy)
-            idx_vals = operation.idx_vals
             val = operation.value
 
-            save_path = if isnothing(record_dir)
-                nothing
-            elseif is_included
-                "/" * join(vcat(string.(chain), string(name),
-                                _option_wire_string.(idx_vals)), "/")
-            else
-                "/" * join(vcat(string(name), _option_wire_string.(idx_vals)), "/")
-            end
+            # The request target is the authoritative external route. Rebuilding
+            # it from `chain` loses indexed mount values because chain entries
+            # describe the mount signature, not the values parsed from this URL.
+            save_path = isnothing(record_dir) ? nothing :
+                        String(first(split(String(req.target), "?"; limit=2)))
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
@@ -4991,6 +5020,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                 return _resolve_response(leaf, req, val; record_dir, save_path, record_base)
             end
         catch err
+            err isa _RecordDestinationCollision && rethrow()
             bt = catch_backtrace()
             page_chain = is_included ?
                 _collect_page_chain(root, chain, req, root_segs) :
@@ -6471,6 +6501,9 @@ default `:auto` policy would answer with a Treebars poller — and a poller
 written to disk has nothing to poll. Static export wants the finished HTML.
 Returns `app`.
 
+Distinct requested paths that resolve to the same output file are rejected
+with an error before the later response can overwrite the earlier recording.
+
 Use this in place of the subprocess+HTTP recorder when you can drive an
 app from the same Julia process — much faster (no port, no warmup) and
 deterministic in CI.
@@ -6483,14 +6516,32 @@ function record!(app;
         hx::Bool=true,
         markdown::Bool=true,
     )
-    route!(app; record_dir, record_base,
-           operation_policy=OperationPolicy(:blocking))
-    isdir(record_dir) || mkpath(record_dir)
-    router = CONTEXT[].service.router
-    for path in paths
-        full     && _drive_record_path(router, String(path), Pair{String,String}[])
-        hx       && _drive_record_path(router, String(path), ["HX-Request" => "true"])
-        markdown && _drive_record_path(router, String(path), ["Accept" => "text/markdown"])
+    storage = task_local_storage()
+    had_session = haskey(storage, _RECORDING_SESSION_KEY)
+    previous_session = get(storage, _RECORDING_SESSION_KEY, nothing)
+    session = (;
+        record_dir=abspath(record_dir),
+        source=Ref(""),
+        destinations=Dict{String,String}(),
+    )
+    storage[_RECORDING_SESSION_KEY] = session
+    try
+        route!(app; record_dir, record_base,
+               operation_policy=OperationPolicy(:blocking))
+        isdir(record_dir) || mkpath(record_dir)
+        router = CONTEXT[].service.router
+        for path in paths
+            session.source[] = String(path)
+            full     && _drive_record_path(router, String(path), Pair{String,String}[])
+            hx       && _drive_record_path(router, String(path), ["HX-Request" => "true"])
+            markdown && _drive_record_path(router, String(path), ["Accept" => "text/markdown"])
+        end
+    finally
+        if had_session
+            storage[_RECORDING_SESSION_KEY] = previous_session
+        else
+            delete!(storage, _RECORDING_SESSION_KEY)
+        end
     end
     app
 end

@@ -2332,6 +2332,44 @@ because it binds a port and mutates Oxygen's process-global route context.
     end
 end
 
+@testitem "record! preserves indexed include paths and rejects collisions" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+    mktempdir() do dir
+        record!(IndexedMountRoot(); record_dir=dir,
+                paths=["/item/alpha", "/item/beta"],
+                full=true, hx=true, markdown=false)
+
+        expected = [
+            "item/alpha.html" => "child alpha",
+            "item/beta.html" => "child beta",
+            "hx/item/alpha.html" => "child alpha",
+            "hx/item/beta.html" => "child beta",
+        ]
+        for (path, body) in expected
+            file = joinpath(dir, split(path, '/')...)
+            @test isfile(file)
+            @test read(file, String) == body
+        end
+        files = [joinpath(root, file) for (root, _, names) in walkdir(dir) for file in names]
+        @test length(files) == length(expected)
+    end
+
+    mktempdir() do dir
+        err = try
+            record!(IndexedMountRoot(); record_dir=dir,
+                    paths=["/item/same?view=one", "/item/same?view=two"],
+                    full=true, hx=false, markdown=false)
+            nothing
+        catch caught
+            caught
+        end
+        @test err isa HTMXObjects._RecordDestinationCollision
+        message = sprint(showerror, err)
+        @test contains(message, "/item/same?view=one")
+        @test contains(message, "/item/same?view=two")
+        @test contains(message, "same static destination")
+    end
+end
+
 @testitem "hx_link helper" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     link = hx_link("/about")
     html = repr("text/html", link)
