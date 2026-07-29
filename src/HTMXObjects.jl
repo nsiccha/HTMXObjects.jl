@@ -779,6 +779,48 @@ function _unwrap_short_form_body(rhs)
     length(body) == 1 ? only(body) : rhs
 end
 
+"""
+    _is_inline_router_body(rhs) -> Bool
+
+Is this `@include` rhs a body the AUTHOR wrote, rather than the `:block` the
+parser wrapped a short-form method body in?
+
+`_unwrap_short_form_body` discriminates on statement COUNT, which is the whole
+truth in DynamicObjects' vocabulary — a mount's rhs is a constructor call, so a
+lone statement can only be the parser's doing. It is not the whole truth in
+HTMXObjects': a sub-router that declares exactly ONE route
+
+    @include index(id::String) = begin
+        @delete index() = ...
+    end
+
+is a one-statement block the author wrote. Unwrapping it leaves a bare
+`@delete` macrocall as the rhs — neither `:block` nor `:call`, so
+`_convert_include_to_struct!` falls through both branches, the `@include`
+survives into real macro expansion, and Julia reports
+`UndefVarError: @delete not defined` at the route line. The verbs are
+`@htmx`-consumed MARKERS, never exported macros, so that error names a symbol
+that is not supposed to exist by then and points nowhere near the include that
+swallowed it.
+
+A route macro or a nested `@include` settles it: neither can ever be the short
+form of an external mount, because you cannot mount a struct by declaring a
+route. Anything else (a call, an assignment) stays with the count heuristic.
+"""
+function _is_inline_router_body(rhs)
+    Meta.isexpr(rhs, :block) || return false
+    route_macros = _route_macros()
+    for a in rhs.args
+        expr = a
+        while Meta.isexpr(expr, :macrocall)
+            name = expr.args[1]
+            (name in route_macros || name === Symbol("@include")) && return true
+            expr = expr.args[end]
+        end
+    end
+    false
+end
+
 function _find_include_externals(struct_expr)
     body = struct_expr.args[3]
     result = Tuple{Symbol, Any, Vector{Symbol}}[]
@@ -805,7 +847,11 @@ function _find_include_externals(struct_expr)
         # Only an indexed mount — a `:call` LHS — can have had its rhs wrapped
         # by the parser. With a plain Symbol LHS a block is always a genuine
         # inline sub-router and unwrapping it would silently reinterpret it.
-        Meta.isexpr(lhs, :call) && (rhs = _unwrap_short_form_body(rhs))
+        # A body that DECLARES a route (or a nested `@include`) is the author's
+        # even at one statement — same rule as `_convert_include_to_struct!`,
+        # and the two must agree or one classifies a sub-router as a mount.
+        Meta.isexpr(lhs, :call) && !_is_inline_router_body(rhs) &&
+            (rhs = _unwrap_short_form_body(rhs))
         # RHS should be a call like ExternalStruct(; __req__, ...) — extract the type.
         Meta.isexpr(rhs, :call) || continue
         type_expr = rhs.args[1]
@@ -932,7 +978,11 @@ function _convert_include_to_struct!(struct_expr)
         # Symbol LHS, was never wrapped by the parser, and is a real inline
         # sub-router — unwrapping a single-statement one would reinterpret it
         # as an external mount.
-        if !isempty(index_params)
+        #
+        # And not even for every indexed mount: a body that DECLARES a route or
+        # a nested `@include` is the author's however few statements it has, so
+        # `_is_inline_router_body` overrides the count heuristic there.
+        if !isempty(index_params) && !_is_inline_router_body(rhs)
             rhs = _unwrap_short_form_body(rhs)
             # Persist the classification into the AST DynamicObjects receives.
             # Mutating the unwrapped call below is not enough: without replacing
