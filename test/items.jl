@@ -35,7 +35,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     SwapView, SwapSection, SwapRoot,
     NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
-    IndexedMountChild, IndexedMountRoot,
+    IndexedMountChild, IndexedMountRoot, SingleRouteIncludeRoot,
     DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
     EditorMountRoot
@@ -677,6 +677,22 @@ end
 @htmx struct IndexedMountRoot
     @get index() = "indexed-root"
     @include item(key::String) = IndexedMountChild(key)
+end
+
+# An indexed `@include` whose inline body declares exactly ONE route. The
+# short-form unwrap discriminates on statement COUNT, so this shape used to be
+# mistaken for `@include index(id) = SomeChild(id)`, leaving a bare `@delete`
+# macrocall behind for real macro expansion — reported as
+# `UndefVarError: @delete not defined`, naming a marker that is not an exported
+# macro and pointing nowhere near the include that swallowed it.
+@htmx struct SingleRouteIncludeRoot
+    @get index() = "single-route-root"
+    @include flags = begin
+        @get index() = "flags"
+        @include index(id::String) = begin
+            @delete index() = "deleted $id"
+        end
+    end
 end
 
 # --- Indexed selection by domain candidate ----------------------------------
@@ -3979,6 +3995,27 @@ end
     response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
     @test response.status == 200
     @test contains(String(response.body), "abc")
+end
+
+@testitem "an indexed @include declaring one route is a sub-router, not a mount" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    # The short-form unwrap reads a one-statement block as the parser's
+    # wrapping. That is right for `@include item(key) = Child(key)` and wrong
+    # for a sub-router whose whole body is one route: unwrapping left a bare
+    # `@delete` macrocall as the rhs, which is neither `:block` nor `:call`, so
+    # the `@include` reached real macro expansion and Julia reported
+    # `UndefVarError: @delete not defined`. The verbs are `@htmx`-consumed
+    # markers, never exported macros, so that error named a symbol that is not
+    # meant to survive the transform — the export contract was never the fault.
+    paths = [(route.verb, route.path) for route in HTMXObjects.reflect(SingleRouteIncludeRoot)]
+    @test (:GET, "/") in paths
+    @test (:GET, "/flags") in paths
+    @test (:DELETE, "/flags/{id}") in paths
+
+    route!(SingleRouteIncludeRoot())
+    req = HTTP.Request("DELETE", "/flags/abc", Pair{String,String}[], UInt8[])
+    response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    @test response.status == 200
+    @test contains(String(response.body), "deleted abc")
 end
 
 @testitem "an indexed mount selects the domain candidate, not its label" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
