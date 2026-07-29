@@ -2703,6 +2703,99 @@ end
     end
 end
 
+@testitem "lazy master/detail retry handler binds the DOM click event" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    html = repr("text/html", h.div(master_detail_pair("thing", (h.td("thing"),), nothing, 1;
+                                                      detail_url="/detail")...))
+
+    # htmx reads `hx-on-<event>` as a DOM event, but `hx-on--<event>` (like the
+    # double-colon `hx-on::<event>`) as shorthand for the `htmx:` namespace. The
+    # click-to-retry handler is a plain DOM click, so it MUST render with a
+    # single hyphen — `hx-on--click` would bind a non-existent `htmx:click`
+    # and clicking a failed slot would emit no request at all.
+    @test contains(html, "hx-on-click=")
+    @test !contains(html, "hx-on--click=")
+    # The two request-lifecycle handlers really are `htmx:*` events and keep
+    # the double form.
+    @test contains(html, "hx-on--before-request=")
+    @test contains(html, "hx-on--after-request=")
+end
+
+@testitem "lazy master/detail failed slot reloads on click" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        detail_requests = Ref(0)
+        tbl = master_detail_table(["Thing"], [1];
+            key=_ -> "thing",
+            master=_ -> (h.td("thing"),),
+            detail_url=_ -> "/detail",
+            id="thing-table")
+        # Expand once (the first load fails), then click the failed slot exactly
+        # as the documented retry contract instructs and wait for the reload.
+        driver = h.script(Raw("""
+            window.addEventListener('load', function() {
+                var slot = document.getElementById('detail-slot-thing');
+                setTimeout(function() { document.getElementById('row-thing').click(); }, 50);
+                var timer = setInterval(function() {
+                    if (slot.dataset.failed === '1' && !window.retryClicked) {
+                        window.retryClicked = true;
+                        document.body.dataset.failedSeen = '1';
+                        slot.click();
+                    } else if (window.retryClicked && slot.dataset.loaded === '1') {
+                        document.body.dataset.retryDone = '1';
+                        clearInterval(timer);
+                    }
+                }, 25);
+            });
+            """))
+        page = repr("text/html", htmx(tbl, driver;
+            hyperscript_version=nothing,
+            feedback=false,
+            compose=false,
+            overlay=false))
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif path == "/detail"
+                detail_requests[] += 1
+                detail_requests[] == 1 ? HTTP.Response(500, ["Content-Type" => "text/html"], "boom") :
+                    HTTP.Response(200, ["Content-Type" => "text/html"], "<p id=\"detail-loaded\">loaded</p>")
+            else
+                HTTP.Response(404)
+            end
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            # The 500 must set the retry state...
+            @test contains(dom, "data-failed-seen=\"1\"")
+            # ...and the click on the failed slot must emit a second request
+            # whose success clears `data-failed` and sets `data-loaded=1`.
+            @test contains(dom, "data-retry-done=\"1\"")
+            @test contains(dom, "id=\"detail-loaded\"")
+            @test !contains(dom, "data-failed=\"1\"")
+            @test detail_requests[] == 2
+        finally
+            close(server)
+        end
+    end
+end
+
 """
 Documents repeated query/form value conversion: untyped or vector-typed
 parameters retain repeated values, while a vector cannot silently collapse

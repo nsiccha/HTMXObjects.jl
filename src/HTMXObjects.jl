@@ -7545,8 +7545,13 @@ function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
                                "else{this.dataset.loaded='0';this.dataset.failed='1';" *
                                "var p=this.querySelector('[data-status]');" *
                                "if(p)p.textContent='Failed to load — click to retry';}",
-          hx_on__click="if(this.dataset.failed==='1'&&!this.dataset.loading){" *
-                       "this.dataset.loading='1';htmx.trigger(this,'$ev');}")(
+          # SINGLE underscore: `hx_on_click` → `hx-on-click`, the DOM `click`
+          # event. The DOUBLE-underscore spelling used by the two handlers
+          # above is htmx's `htmx:` shorthand (`hx-on--after-request` =
+          # `htmx:after-request`), so `hx_on__click` would bind a
+          # non-existent `htmx:click` and the retry would never fire.
+          hx_on_click="if(this.dataset.failed==='1'&&!this.dataset.loading){" *
+                      "this.dataset.loading='1';htmx.trigger(this,'$ev');}")(
         ph)
 end
 
