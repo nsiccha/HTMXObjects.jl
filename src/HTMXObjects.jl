@@ -250,19 +250,84 @@ _form_append(existing::AbstractVector, v) = (push!(existing, v); existing)
 
 # --- Form-encoded parsing (multi-value aware) ---
 
+# Hex digit value of one ASCII byte, or -1 when it isn't one. Used by the
+# lenient percent-decoder below to test a `%XY` escape without throwing.
+_hexval(b::UInt8) =
+    UInt8('0') <= b <= UInt8('9') ? Int(b - UInt8('0')) :
+    UInt8('a') <= b <= UInt8('f') ? Int(b - UInt8('a')) + 10 :
+    UInt8('A') <= b <= UInt8('F') ? Int(b - UInt8('A')) + 10 : -1
+
+"""
+    _percent_decode_lenient(s) -> String
+
+Percent-decode `s` per RFC 3986 (`%` HEXDIG HEXDIG), emitting a malformed
+escape as the literal `%` it was written as instead of throwing. This is the
+browser / `URLSearchParams` behaviour.
+
+Why it matters: this decoder runs on data the framework merely *guessed* was a
+form. `HTTP.URIs.unescapeuri` throws on any `%` not followed by two hex digits
+— `ArgumentError: invalid base 16 digit` on a non-hex digit, `EOFError` on a
+truncated escape at the end of the string. Julia's `%` operator, a printf `%s`,
+`?q=50%` typed into a URL bar, any compressed/binary byte — and the throw lands
+in the argument extractor, *before* the handler runs, so it surfaces as a bare
+500 whose log points at URI parsing. From the caller's side that reads as a
+corrupt payload rather than as a Content-Type negotiation problem
+(snag `bodyparams-form-525c2ab8`).
+
+Relationship to `unescapeuri`, measured rather than assumed. Identical on all
+484 well-formed `%XY` escapes, on every string containing no `%`, and on 153646
+randomly generated strings that `unescapeuri` accepts — multi-byte UTF-8
+included, since both reassemble it from decoded bytes. The two differ on
+exactly **264** two-character sequences after a `%`: `unescapeuri` delegates to
+`parse(UInt8, c1c2; base=16)`, which tolerates surrounding ASCII whitespace, so
+one hex digit beside a raw space/tab/newline (`"%a "`, `"% 9"`) currently
+decodes to a control byte in `0x00`–`0x0f`. Those now decode to the literal
+three characters. Such input is already non-conforming twice over — a bare `%`
+*and* raw whitespace inside a form value, which a real encoder writes as `%25`
+and `%20`/`%09` — and the byte it produced was an accident of `parse`, not URI
+semantics. Everything else that used to 500 now round-trips the `%` literally.
+"""
+function _percent_decode_lenient(s::AbstractString)
+    occursin('%', s) || return String(s)
+    b = codeunits(s)
+    n = length(b)
+    out = IOBuffer(sizehint=n)
+    i = 1
+    while i <= n
+        c = b[i]
+        if c == UInt8('%') && i + 2 <= n
+            hi = _hexval(b[i + 1])
+            lo = _hexval(b[i + 2])
+            if hi >= 0 && lo >= 0
+                write(out, UInt8(16 * hi + lo))
+                i += 3
+                continue
+            end
+        end
+        write(out, c)
+        i += 1
+    end
+    String(take!(out))
+end
+
 # Parse a form-encoded string ("a=1&b=2&b=3") into a multi-value-preserving
 # Dict. Shared by `queryparams` (URL query string) and `formparams` (request
 # body). Query and `application/x-www-form-urlencoded` bodies use the same
 # wire format, so one parser suffices.
+#
+# Never throws on malformed input: a bad percent escape degrades to a literal
+# '%' (see `_percent_decode_lenient`). A parameter *source* must not be able to
+# fail the request — it runs speculatively, ahead of the handler, on a body the
+# caller may never have meant as a form.
 function _parse_form_encoded(s::AbstractString)
     isempty(s) && return Dict{String, Union{String, Vector{String}}}()
     d = Dict{String, Union{String, Vector{String}}}()
-    # '+' represents a space in form-encoded data. `unescapeuri` only does
-    # percent-decoding, so translate '+' → ' ' before unescaping. Without this,
+    # '+' represents a space in form-encoded data. Percent-decoding alone does
+    # not cover it, so translate '+' → ' ' before unescaping. Without this,
     # values produced by JS `URLSearchParams.toString()` (which form-encodes
     # spaces as '+') round-trip spaces as literal '+' characters and break
     # downstream lookups.
-    _form_unescape(t) = String(HTTP.URIs.unescapeuri(replace(t, '+' => ' ')))
+    _form_unescape(t) = _percent_decode_lenient(replace(t, '+' => ' '))
     for part in split(s, "&", keepempty=false)
         kv = split(part, "=", limit=2)
         k = _form_unescape(kv[1])
@@ -285,6 +350,9 @@ values: single-value keys map to a `String`, duplicate keys map to a
 `Vector{String}`.
 
     queryparams("http://x/?a=1&b=2&b=3")  #=> Dict("a" => "1", "b" => ["2", "3"])
+
+Malformed percent-escapes degrade to a literal `%` rather than throwing, so a
+hand-typed `?q=50%` is a value, not a 500 (see `_percent_decode_lenient`).
 """
 queryparams(req::HTTP.Request) = _parse_form_encoded(HTTP.URI(req.target).query)
 
@@ -298,20 +366,25 @@ what `Oxygen.formdata` (a thin wrapper over `URIs.queryparams`) does. Used by
 the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
 receives every posted value.
 
-Reads the body via `HTTP.payload`; an empty body yields an empty dict.
+Reads the body via `HTTP.payload`; an empty body yields an empty dict. Never
+throws — a body that isn't really urlencoded yields junk keys at worst, never a
+500 (see `_percent_decode_lenient`).
 """
 function formparams(req::HTTP.Request)
     # Only an `application/x-www-form-urlencoded` body is parseable here — it's
     # the wire format `_parse_form_encoded` understands. A `multipart/form-data`
     # (file upload), JSON, or other binary body must NOT be fed to the
-    # urlencoded parser: `unescapeuri` hits a raw `%` (0x25) byte followed by
-    # non-hex bytes and throws `ArgumentError: invalid base 16 digit`. The
-    # codegen'd POST/PUT/PATCH arg extractor calls `formparams` unconditionally,
-    # so without this gate every multipart upload route 500s on a realistic
-    # (non-trivially-byte-patterned) file. Such handlers read the raw body
-    # themselves (e.g. `HTTP.parse_multipart_form`); any kwargs they declare
-    # fall back to `queryparams`. Parse only when the content-type says
-    # urlencoded, or is absent (a headerless client posting a urlencoded body).
+    # urlencoded parser at all: its bytes are not key/value pairs, so parsing
+    # them can only invent keys. Such handlers read the raw body themselves
+    # (e.g. `HTTP.parse_multipart_form`); any kwargs they declare fall back to
+    # `queryparams`. Parse only when the content-type says urlencoded, or is
+    # absent (a headerless client posting a urlencoded body).
+    #
+    # This gate is a CORRECTNESS filter, not a safety net: a caller that
+    # mislabels a binary payload as urlencoded (curl's `--data-binary` default,
+    # for one) walks straight through it. That case must therefore be
+    # survivable in the parser itself, which is why `_parse_form_encoded` is
+    # non-throwing (snag `bodyparams-form-525c2ab8`).
     ct = lowercase(HTTP.header(req, "Content-Type", ""))
     isempty(ct) || occursin("application/x-www-form-urlencoded", ct) ||
         return Dict{String, Union{String, Vector{String}}}()
@@ -1652,34 +1725,43 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
     # multipartparams (file fields → `Upload`, text fields → `String`).
     _is_query_verb = verb_short in (:GET, :DELETE, :WEBSOCKET)
 
+    # …and the sources are computed ONLY when the route declares kwargs to bind.
+    # A route with no kwargs (`@post stalecheck()`) has nothing to look them up
+    # for, so reading and parsing the request body for it is pure waste — and,
+    # before this, waste that could FAIL: the parse ran ahead of the handler, so
+    # a caller's raw payload could 500 a route that never asked for one body
+    # field, and the app had no way to opt out by changing what it declared
+    # (snag `bodyparams-form-525c2ab8`). Positional params are read from
+    # `__parts__` (URL segments) and never touch `__src__`/`__fallback__`, so
+    # omitting these assignments is unobservable for every other route shape.
+    _src_expr = if isempty(kw_stmts)
+        quote end
+    elseif _is_query_verb
+        quote
+            __src__ = $(queryparams)(__req__)
+            __fallback__ = nothing
+        end
+    else
+        quote
+            __src__ = $(bodyparams)(__req__)
+            __fallback__ = $(queryparams)(__req__)
+        end
+    end
+
     _M = @__MODULE__
     _fname = Expr(:., _M, QuoteNode(:_extract_args))
     _verb_ann = Expr(:(::), Expr(:curly, GlobalRef(_M, :Verb), QuoteNode(verb_short)))
     _call = Expr(:call, _fname,
         :(::Type{$type_name}), :(::Val{$(QuoteNode(prop_name))}), _verb_ann,
         :__req__, :(__base_segments__::Int), :(__n_params__::Int))
-    _body = if _is_query_verb
-        quote
-            __parts__ = split(split(__req__.target, "?")[1], "/", keepempty=false)
-            __src__ = $(queryparams)(__req__)
-            __fallback__ = nothing
-            __idx__ = Any[]
-            $(pos_stmts...)
-            __kw__ = Pair{Symbol,Any}[]
-            $(kw_stmts...)
-            (__idx__, __kw__)
-        end
-    else
-        quote
-            __parts__ = split(split(__req__.target, "?")[1], "/", keepempty=false)
-            __src__ = $(bodyparams)(__req__)
-            __fallback__ = $(queryparams)(__req__)
-            __idx__ = Any[]
-            $(pos_stmts...)
-            __kw__ = Pair{Symbol,Any}[]
-            $(kw_stmts...)
-            (__idx__, __kw__)
-        end
+    _body = quote
+        __parts__ = split(split(__req__.target, "?")[1], "/", keepempty=false)
+        $_src_expr
+        __idx__ = Any[]
+        $(pos_stmts...)
+        __kw__ = Pair{Symbol,Any}[]
+        $(kw_stmts...)
+        (__idx__, __kw__)
     end
     Expr(:(=), _call, _body)
 end

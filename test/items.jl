@@ -38,7 +38,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     IndexedMountChild, IndexedMountRoot, SingleRouteIncludeRoot,
     DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
-    EditorMountRoot
+    EditorMountRoot, RawBodyApp
 
 @htmx struct TestApp
     title = "Test"
@@ -56,6 +56,14 @@ end
 
 @htmx struct PostApp
     @post submit(; name="") = h.p("Hello $name")
+end
+
+# A POST route that declares a kwarg beside one that declares nothing at all —
+# the two shapes a raw (non-form) request body reaches through the argument
+# extractor. See the `raw POST body` test items (snag `bodyparams-form-525c2ab8`).
+@htmx struct RawBodyApp
+    @post upload(; ext="jl") = h.p("stored .$ext")
+    @post stalecheck() = h.p("ok")
 end
 
 @htmx struct TypedApp
@@ -2490,6 +2498,76 @@ end
     req_noval = HTTP.Request("GET", "/x?flag")
     qp_noval = queryparams(req_noval)
     @test qp_noval["flag"] == ""
+end
+
+@testitem "percent-decoding degrades instead of throwing" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    lenient = HTMXObjects._percent_decode_lenient
+    # Well-formed escapes are unchanged, multi-byte UTF-8 included.
+    @test lenient("a%20b") == "a b"
+    @test lenient("%C3%A9") == "é"
+    @test lenient("%c3%a9") == "é"
+    @test lenient("%25") == "%"
+    @test lenient("plain") == "plain"
+    for a in "0123456789abcdefABCDEF", b in "0123456789abcdefABCDEF"
+        s = "p%$(a)$(b)q"
+        @test lenient(s) == String(HTTP.URIs.unescapeuri(s))
+    end
+    # A `%` that is not a valid escape is the literal character, not a throw.
+    # `unescapeuri` raises on every one of these — `ArgumentError` on a non-hex
+    # digit, `EOFError` on a truncated escape at the end of the string.
+    for s in ("%zz", "%2z", "50%off", "x = y % I + 1")
+        @test lenient(s) == s
+        @test_throws ArgumentError HTTP.URIs.unescapeuri(s)
+    end
+    for s in ("100%", "%", "%2", "%%", "a%")
+        @test lenient(s) == s
+        @test_throws EOFError HTTP.URIs.unescapeuri(s)
+    end
+    # …and that reaches the parameter sources, so a bare `%` is a value.
+    @test queryparams(HTTP.Request("GET", "/s?q=50%&n=1"))["q"] == "50%"
+    body = HTTP.Request("POST", "/p", ["Content-Type" => "application/x-www-form-urlencoded"],
+                        "code=x %% y&ok=1")
+    @test formparams(body)["ok"] == "1"
+end
+
+@testitem "raw POST body never 500s the argument extractor" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    # A non-form payload posted to a route that declares a kwarg. Every
+    # Content-Type must reach the handler; none may throw out of `_extract_args`
+    # (which the response pipeline would surface as a bare 500 blaming URI
+    # parsing). `nothing` means the header is absent entirely — curl's
+    # `--data-binary` default is urlencoded, and `fetch(url, {body: blob})`
+    # sends none at all, so both shapes are real.
+    raw = "x = y % I + 1"
+    for ct in (nothing, "application/x-www-form-urlencoded", "text/plain",
+               "application/octet-stream", "application/json")
+        hdrs = ct === nothing ? Pair{String,String}[] : ["Content-Type" => ct]
+        for (prop, target) in ((:upload, "/upload"), (:stalecheck, "/stalecheck"))
+            req = HTTP.Request("POST", target, hdrs, Vector{UInt8}(raw))
+            idx, kw = HTMXObjects._extract_args(RawBodyApp, Val(prop),
+                                                HTMXObjects.Verb{:POST}(), req, 1, 0)
+            @test isempty(idx)
+        end
+    end
+    # A route declaring no kwargs must not read the body at all — nothing to
+    # bind means nothing to parse, whatever the payload is.
+    binary = HTTP.Request("POST", "/stalecheck",
+        ["Content-Type" => "application/x-www-form-urlencoded"], rand(UInt8, 4096))
+    _, kw = HTMXObjects._extract_args(RawBodyApp, Val(:stalecheck),
+                                      HTMXObjects.Verb{:POST}(), binary, 1, 0)
+    @test isempty(kw)
+    @test !isempty(binary.body)  # and the body is still there for the handler
+    # A declared kwarg still binds from a real urlencoded body, body over query.
+    form = HTTP.Request("POST", "/upload?ext=jl",
+        ["Content-Type" => "application/x-www-form-urlencoded"], "ext=csv")
+    _, kw_form = HTMXObjects._extract_args(RawBodyApp, Val(:upload),
+                                           HTMXObjects.Verb{:POST}(), form, 1, 0)
+    @test Dict(kw_form)[:ext] == "csv"
+    # …and falls back to the query string when the body is not a form.
+    blob = HTTP.Request("POST", "/upload?ext=jl",
+        ["Content-Type" => "application/octet-stream"], Vector{UInt8}("ext=csv"))
+    _, kw_blob = HTMXObjects._extract_args(RawBodyApp, Val(:upload),
+                                           HTMXObjects.Verb{:POST}(), blob, 1, 0)
+    @test Dict(kw_blob)[:ext] == "jl"
 end
 
 @testitem "nothing default in kwargs route" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
