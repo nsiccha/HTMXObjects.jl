@@ -3396,10 +3396,23 @@ _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
 _convert_param(val::AbstractVector, T::Type{<:AbstractString}) =
     error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
-_convert_param(val::AbstractVector, T::Type{<:AbstractVector}) = val  # multi-value + Vector annotation → keep as-is
+# Multi-value + an element-typed Vector annotation (`::Vector{Int}`): honour the
+# element type by running every entry through the SAME scalar conversion the
+# `::Int` path uses (`_convert_param` dispatches on the element type `T`, so
+# Symbol/Integer/Real/Float element types work too, not just what `parse` covers;
+# `Base.broadcastable(::Type)=Ref` makes `T` a scalar in the broadcast), then land
+# in the declared container `V`. Without this the element type was silently dropped
+# and the raw strings surfaced as a TypeError at the first typed callee.
+_convert_param(val::AbstractVector, ::Type{V}) where {T, V<:AbstractVector{T}} =
+    convert(V, _convert_param.(val, T))
+_convert_param(val::AbstractVector, T::Type{<:AbstractVector}) = val  # bare ::Vector / ::AbstractVector (no element type) → keep as-is
 _convert_param(val::AbstractVector, T::Type) =
     error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
-_convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # single/empty → vector
+# Single (or empty) value declared as an element-typed Vector: wrap the one
+# converted element (empty → an empty `V`).
+_convert_param(val::AbstractString, ::Type{V}) where {T, V<:AbstractVector{T}} =
+    isempty(val) ? V() : convert(V, [_convert_param(val, T)])
+_convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # bare ::Vector (no element type): single/empty → vector
 # Multipart Upload values flow through the same lookup path. Untyped (`::Nothing`)
 # is already covered by the `_convert_param(val, ::Nothing) = val` catch-all above.
 _convert_param(val::Upload, ::Type{Upload}) = val
