@@ -206,6 +206,10 @@ provider lock. Applications construct no executor/store and call no GC.
 | Export | Purpose |
 |--------|---------|
 | `semantic_descriptor(obj_or_type)` | HTML-free hierarchical graph plus declaration-ordered, mount-resolved operation routes |
+| `application_descriptor(obj_or_type; contributions)` | Deterministic flat DO+HTMXO declaration graph with stable node/edge IDs and source provenance |
+| `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
+| `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
+| `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its fifteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
@@ -214,6 +218,11 @@ provider lock. Applications construct no executor/store and call no GC.
 
 ```@docs
 semantic_descriptor
+application_descriptor
+application_observations
+application_explorer_view
+application_explorer_styles
+ReflectionRoutes
 semantic_app
 operation_form
 SemanticNode
@@ -235,6 +244,99 @@ SemanticDisclosure
 semantic_card
 internal_input
 ```
+
+### Application architecture explorer
+
+`application_descriptor` composes the declaration graph owned by
+DynamicObjects with HTMXObjects' mount-resolved route surface. It is pure
+reflection: constructing the descriptor never constructs an application,
+evaluates an `@options` expression, runs a route, or computes a property.
+The returned shape is:
+
+```julia
+(
+    schema = "htmxobjects.application-descriptor/v1",
+    declaration_schema = "dynamicobjects.declaration-graph/v1",
+    root = "…",               # stable DynamicObjects type-node ID
+    nodes = [(; id, kind, label, metadata, fragment), …],
+    edges = [(; id, kind, from, to, metadata, fragment), …],
+    metadata = (
+        root_type = "MyApp",
+        declarations = (;),
+        statistics = (mounts=1, routes=1, artifacts=0),
+    ),
+)
+```
+
+The DynamicObjects nodes retain declaration docs, signatures, direct declared
+dependencies, option domains, source location, full normalized source/code and
+extension metadata. HTMXObjects adds `:mount`, `:route` and `:artifact` nodes.
+The combined edge vocabulary is deliberately explicit and finite:
+
+| Edge | Meaning |
+|------|---------|
+| `:contains` | Declaration ownership or mounted containment |
+| `:mounts` | A declared type appears at one mounted application location |
+| `:serves` | A mount serves a route |
+| `:reads` | A route is backed by its declared operation property |
+| `:depends_on` | A direct dependency inferred from the authored DO declaration |
+| `:produces` | A materialized property declares a durable artifact |
+| `:describes` | An explicit external/domain descriptor link |
+
+There is no inferred transitive Julia call graph. Domain packages extend the
+descriptor through a plain-data contribution and remain optional dependencies:
+
+```julia
+base = DynamicObjects.declaration_graph(MyApp)
+domain = (
+    namespace = "my-domain",
+    nodes = [(;
+        id="my-domain:model:1", kind=:domain, label="Model declaration",
+        metadata=(; documentation="…", full_code="…"),
+    )],
+    edges = [(;
+        id="my-domain:edge:root-model", kind=:describes,
+        from=base.root, to="my-domain:model:1", metadata=(;),
+    )],
+)
+descriptor = application_descriptor(MyApp; contributions=(domain,))
+```
+
+Contributor IDs are globally unique and are never rewritten. The namespace is
+kept as provenance in each merged record; duplicate IDs and dangling edge
+endpoints are rejected by DynamicObjects. Unknown contribution kinds and
+metadata are preserved and rendered by the inspector.
+
+Mount the generated explorer wherever it belongs in the application:
+
+```julia
+@htmx struct MyApp
+    @include reflect = ReflectionRoutes(; root=MyApp)
+    # …
+end
+```
+
+This adds the following routes at the chosen mount prefix (`/reflect` here):
+
+| Route | Response |
+|-------|----------|
+| `GET /reflect` | Server-rendered Map, synchronized Inspector, and searchable Reference/table |
+| `GET /reflect/descriptor` | `htmxobjects.application-descriptor/v1` JSON |
+| `GET /reflect/graph` | Existing nested `semantic_descriptor(root).graph` JSON (compatibility surface) |
+| `GET /reflect/observations` | Optional noncomputing live overlay JSON when `target` is configured |
+
+Every map/reference entry is an ordinary anchor carrying `selected=<stable-id>`;
+search is an ordinary GET parameter. Full labels and the complete inspector are
+therefore usable without JavaScript or a client-side visualization library.
+The one scoped semantic stylesheet is available separately as
+`application_explorer_styles()`.
+
+Live state never mutates the declaration descriptor. Call
+`application_observations(object, descriptor)` explicitly, or mount
+`ReflectionRoutes(; root=MyApp, target=object)` and opt into `?live=true`.
+It delegates to DynamicObjects' `materialization_observation` path and does not
+compute a property merely to display it. Indexed observations require explicit
+`calls=(; node, args, kwargs)` records; unbound nested objects stay absent.
 
 ### The semantic element vocabulary
 
@@ -773,5 +875,6 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 | `TestRoutes`     | Test-runner UI (see Testing section) |
 | `EditorRoutes`   | Git-backed inline file editor (see Editor section) |
 | `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`) |
+| `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
 | `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
 | `RecordingRoutes`| Static-recording driver (see Gallery section) |
