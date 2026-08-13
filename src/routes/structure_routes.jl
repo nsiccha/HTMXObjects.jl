@@ -41,6 +41,25 @@ function _schema_json_encode(io::IO, xs::AbstractVector)
     end
     write(io, ']')
 end
+function _schema_json_encode(io::IO, xs::Tuple)
+    write(io, '[')
+    for (i, x) in enumerate(xs)
+        i == 1 || write(io, ',')
+        _schema_json_encode(io, x)
+    end
+    write(io, ']')
+end
+function _schema_json_encode(io::IO, dict::AbstractDict)
+    write(io, '{')
+    ordered = sort!(collect(pairs(dict)); by=pair -> string(first(pair)))
+    for (i, (k, v)) in enumerate(ordered)
+        i == 1 || write(io, ',')
+        _schema_json_encode(io, string(k))
+        write(io, ':')
+        _schema_json_encode(io, v)
+    end
+    write(io, '}')
+end
 function _schema_json_encode(io::IO, nt::NamedTuple)
     write(io, '{')
     for (i, (k, v)) in enumerate(pairs(nt))

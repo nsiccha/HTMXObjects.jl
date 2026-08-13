@@ -31,6 +31,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     # not a load failure, which is why the omission survived every selective
     # run and only a full suite exposed it.
     NavLeaf, NavSection, NavRoot, NavPlainRoot,
+    ArchitectureLeaf, ArchitectureRoot, ArchitectureExplorerHost,
+    ARCHITECTURE_TARGET, ARCHITECTURE_COMPUTES,
     NavChainChild, NavChainRoot, NavSlurpRoot,
     SwapView, SwapSection, SwapRoot,
     NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
@@ -546,6 +548,43 @@ end
         h.div(h.nav(isnothing(navigation) ? "NONAV" : "NAV:" * navigation.current.path),
               content)
     @get index() = "root"
+end
+
+# Generic application-architecture fixture. It deliberately knows nothing
+# about any downstream domain package: ordinary DO declarations, a nested
+# HTMXO mount, one materialized artifact and the opt-in ReflectionRoutes bundle
+# exercise the complete reusable seam.
+const ARCHITECTURE_COMPUTES = Ref(0)
+
+"""A reusable nested worker with source and an artifact declaration."""
+@htmx struct ArchitectureLeaf
+    __cache_base__ = tempdir()
+    "The source value used by the worker."
+    input::Int = 3
+    "An intentionally observable lazy declaration."
+    expensive = (ARCHITECTURE_COMPUTES[] += 1; input * 2)
+    "Build the worker's durable export."
+    @get @mmap artifact()::Vector{Int} = [expensive]
+end
+
+"""A generic application root for declaration-graph composition tests."""
+@htmx struct ArchitectureRoot
+    "The root value remains lazy while reflection and observation run."
+    seed::Int = 5
+    summary = (ARCHITECTURE_COMPUTES[] += 1; seed + 1)
+    @include worker = ArchitectureLeaf()
+    "Show the root without evaluating its summary."
+    @get index() = string(seed)
+end
+
+const ARCHITECTURE_TARGET = ArchitectureRoot()
+
+@htmx struct ArchitectureExplorerHost
+    @include architecture = ReflectionRoutes(;
+        root=ArchitectureRoot, target=ARCHITECTURE_TARGET)
+    __page__(content) = htmx(h.main(class="container-fluid")(content);
+                             pico_version="2")
+    @get index() = "explorer host"
 end
 
 # Same shape, but the page wrapper never declared `navigation`. Nothing may be
@@ -3945,6 +3984,124 @@ end
     @test contains(schema_body, "\"verb\"")
     @test contains(schema_body, "\"params\"")
     @test !contains(schema_body, "\"children\"")
+end
+
+@testitem "application architecture composes declarations, routes, contributions and observations" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    ARCHITECTURE_COMPUTES[] = 0
+
+    base = DynamicObjects.declaration_graph(ArchitectureRoot)
+    external_id = "fixture:domain:posterior-summary"
+    contribution = (
+        namespace="fixture-domain",
+        nodes=[(
+            id=external_id,
+            kind=:domain,
+            label="Posterior summary domain descriptor — full unabridged label",
+            metadata=(
+                documentation="A generic external contribution used by the fixture.",
+                full_code="describe(root) = posterior_summary(root)",
+            ),
+        )],
+        edges=[(
+            id="fixture:edge:root-describes-posterior-summary",
+            kind=:describes,
+            from=base.root,
+            to=external_id,
+            metadata=(; role=:domain_descriptor),
+        )],
+    )
+
+    descriptor = application_descriptor(ArchitectureRoot;
+                                        contributions=(contribution,))
+    @test ARCHITECTURE_COMPUTES[] == 0
+    @test descriptor.schema == "htmxobjects.application-descriptor/v1"
+    @test descriptor.declaration_schema == "dynamicobjects.declaration-graph/v1"
+    @test descriptor == application_descriptor(ArchitectureRoot;
+                                               contributions=(contribution,))
+
+    node_ids = [node.id for node in descriptor.nodes]
+    edge_ids = [edge.id for edge in descriptor.edges]
+    @test length(node_ids) == length(unique(node_ids))
+    @test length(edge_ids) == length(unique(edge_ids))
+    @test isempty(intersect(Set(node_ids), Set(edge_ids)))
+    @test all(edge -> edge.from in node_ids && edge.to in node_ids,
+              descriptor.edges)
+
+    node_kinds = Set(node.kind for node in descriptor.nodes)
+    edge_kinds = Set(edge.kind for edge in descriptor.edges)
+    @test all(kind -> kind in node_kinds,
+              (:type, :property, :mount, :route, :artifact, :domain))
+    @test all(kind -> kind in edge_kinds,
+              (:contains, :depends_on, :describes, :mounts, :serves,
+               :reads, :produces))
+
+    external = only(filter(node -> node.id == external_id, descriptor.nodes))
+    @test external.fragment == "fixture-domain"
+    @test external.label ==
+          "Posterior summary domain descriptor — full unabridged label"
+
+    summary_id = DynamicObjects.declaration_node_id(
+        base, ArchitectureRoot, :summary)
+    summary = only(filter(node -> node.id == summary_id, descriptor.nodes))
+    @test summary.metadata.name === :summary
+    @test contains(string(summary.metadata.source), "ARCHITECTURE_COMPUTES")
+
+    artifact = only(filter(node -> node.kind === :artifact, descriptor.nodes))
+    @test artifact.metadata.name === :artifact
+    @test any(edge -> edge.kind === :produces && edge.to == artifact.id,
+              descriptor.edges)
+    artifact_route = only(filter(node -> node.kind === :route &&
+                                          node.metadata.name === :artifact,
+                                 descriptor.nodes))
+    @test any(edge -> edge.kind === :reads && edge.from == artifact_route.id,
+              descriptor.edges)
+
+    overlay = application_observations(ARCHITECTURE_TARGET, descriptor)
+    @test ARCHITECTURE_COMPUTES[] == 0
+    @test overlay.schema == "htmxobjects.application-observations/v1"
+    @test overlay.graph == descriptor.root
+    @test any(record -> record.node == summary_id, overlay.observations)
+
+    route_html = repr("text/html", application_explorer_view(
+        descriptor; selected=artifact_route.id, base="/architecture"))
+    expected_deep_link = query_url("/architecture";
+                                   selected=artifact_route.id) *
+                         "#architecture-inspector"
+    @test contains(route_html, expected_deep_link)
+    @test contains(route_html, "aria-current=\"true\"")
+    @test contains(route_html, "Map, Inspector, Reference")
+    @test contains(route_html, "role=\"search\"")
+    @test contains(route_html, artifact_route.label)
+    @test !contains(route_html, "style=\"")
+
+    external_html = repr("text/html", application_explorer_view(
+        descriptor; selected=external_id, query="posterior",
+        overlay, base="/architecture", live=true))
+    @test contains(external_html, external.label)
+    @test contains(external_html, "describe(root) = posterior_summary(root)")
+    @test contains(external_html, "q=posterior")
+
+    drive(path) = begin
+        req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+    route!(ArchitectureExplorerHost())
+
+    page = drive("/architecture")
+    @test page.status == 200
+    @test contains(String(page.body), "Application architecture")
+    descriptor_response = drive("/architecture/descriptor")
+    @test descriptor_response.status == 200
+    @test contains(String(descriptor_response.body),
+                   "\"schema\":\"htmxobjects.application-descriptor/v1\"")
+    observation_response = drive("/architecture/observations")
+    @test observation_response.status == 200
+    @test contains(String(observation_response.body),
+                   "\"schema\":\"htmxobjects.application-observations/v1\"")
+    live_page = drive(query_url("/architecture"; selected=summary_id, live=true))
+    @test live_page.status == 200
+    @test contains(String(live_page.body), "Live observation")
+    @test ARCHITECTURE_COMPUTES[] == 0
 end
 
 @testitem "Resource mounts a Base-shaped collection surface" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

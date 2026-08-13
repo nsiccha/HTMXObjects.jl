@@ -34,7 +34,9 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
-export ReflectionRoutes, semantic_graph_view, navigation
+export ReflectionRoutes, semantic_graph_view, application_descriptor,
+    application_observations, application_explorer_view,
+    application_explorer_styles, navigation
 export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
