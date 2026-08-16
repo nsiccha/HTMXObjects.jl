@@ -1886,6 +1886,7 @@ end
         poll_url = only(polls).transport.poll_url
         @test startswith(poll_url,
             "/html?count=2&__htmxo_poll=1&__htmxo_operation=")
+        @test only(polls).transport.label == Long(:html)
         @test only(polls).transport.grace_period == 0.1
 
         poll_request = HTTP.Request(
@@ -1897,6 +1898,7 @@ end
         @test length(polls) == 2
         @test last(polls).call_kwargs == (count=2,)
         @test last(polls).transport.poll_url == poll_url
+        @test last(polls).transport.label == Long(:html)
         @test last(polls).transport.grace_period == 0.0
 
         raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
@@ -4964,7 +4966,8 @@ end
 using HTMXObjects
 
 export PropertyScopedRoute, PropertyScopedFastRoute, PropertyScopedFailRoute,
-    property_gate, progress_descendants
+    PropertyScopedLabelRoute, property_gate, property_label_gate,
+    progress_descendants
 
 # The leaf blocks on this until the test releases it, so "the request came back
 # with the work still in flight" is asserted deterministically rather than by
@@ -4988,6 +4991,13 @@ end
     @include mid = PropertyScopedMiddle()
     "Slow page"
     @get slow(k::Int) = h.p(string(mid.middle(k)))
+end
+
+const property_label_gate = Ref(Base.Event())
+
+@htmx struct PropertyScopedLabelRoute
+    "Transpiling prepared example"
+    @get index() = (wait(property_label_gate[]); h.p("done"))
 end
 
 # Same shape, no gate: used where the test needs the work to finish.
@@ -5203,6 +5213,37 @@ end # @testmodule HTMXOPollIdentityFixtures
     end
 end
 
+@testitem "automatic polling renders a documented operation label once" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_operation_polls!, _run_operation, Verb
+
+    property_label_gate[] = Base.Event()
+    app = PropertyScopedLabelRoute()
+    target = (context=nothing, root=app, leaf=app)
+    hx = HTTP.Request("GET", "/", ["HX-Request" => "true"])
+
+    try
+        initial = _run_operation(target, PropertyScopedLabelRoute, :index,
+                                 Verb{:GET}(), hx, 0, 0)
+        initial_html = repr("text/html", initial.value)
+        @test contains(initial_html, "treebar-poller")
+        @test length(findall("Transpiling prepared example", initial_html)) == 1
+        @test !contains(initial_html, "index — running")
+
+        poll_match = match(r"hx-get=\"([^\"]+)\"", initial_html)
+        @test !isnothing(poll_match)
+        poll_url = replace(only(poll_match.captures), "&amp;" => "&")
+        polled = _run_operation(
+            target, PropertyScopedLabelRoute, :index, Verb{:GET}(),
+            HTTP.Request("GET", poll_url, ["HX-Request" => "true"]), 0, 0)
+        polled_html = repr("text/html", polled.value)
+        @test length(findall("Transpiling prepared example", polled_html)) == 1
+        @test !contains(polled_html, "index — running")
+    finally
+        notify(property_label_gate[])
+        _clear_operation_polls!()
+    end
+end
+
 @testitem "automatic progress — property-scoped route calls poll and nest without annotations" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _run_operation, _operation_polling_impl, Verb
     import HTMXObjects.DynamicObjects
@@ -5232,6 +5273,7 @@ end
         @test seen[].started isa DynamicObjects.Pending
         @test startswith(seen[].transport.poll_url,
                          "/slow/2?__htmxo_poll=1&__htmxo_operation=")
+        @test isnothing(seen[].transport.label)
         DynamicObjects.getstatus(app.slow, seen[].keys...)
     finally
         _operation_polling_impl[] = old
