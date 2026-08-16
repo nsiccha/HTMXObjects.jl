@@ -36,7 +36,9 @@ jobs:
           julia --project -e '
             using Pkg
             project_path = Base.active_project()
-            project = read(project_path, String)
+            # actions/checkout materializes CRLF on Windows; normalize before
+            # matching the exact source block used on every runner.
+            project = replace(read(project_path, String), "\r\n" => "\n")
             remote_source = "[sources.Treebars]\nurl = \"https://github.com/nsiccha/Treebars.jl\"\nrev = \"42be351bdbdcbf22572da5c8cf896fcc39047126\""
             local_source = "[sources.Treebars]\npath = \"../Treebars.jl\""
             @assert occursin(remote_source, project)
