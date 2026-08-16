@@ -29,21 +29,32 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Install unregistered dependencies
         run: |
-          git clone -b dev https://github.com/nsiccha/DynamicObjects.jl.git
-          git clone -b dev https://github.com/nsiccha/HTMX.jl.git
-          git clone https://github.com/nsiccha/Treebars.jl.git
-          cp Project.toml Project.toml.test-backup
+          git clone -b pre-inference https://github.com/nsiccha/DynamicObjects.jl.git ../DynamicObjects.jl
+          git clone -b dev https://github.com/nsiccha/HTMX.jl.git ../HTMX.jl
+          git clone -b perf/step5-typed-slots https://github.com/nsiccha/Treebars.jl.git ../Treebars.jl
+          git -C ../Treebars.jl checkout 42be351bdbdcbf22572da5c8cf896fcc39047126
           julia --project -e '
             using Pkg
+            project_path = Base.active_project()
+            project = read(project_path, String)
+            remote_source = "[sources.Treebars]\nurl = \"https://github.com/nsiccha/Treebars.jl\"\nrev = \"42be351bdbdcbf22572da5c8cf896fcc39047126\""
+            local_source = "[sources.Treebars]\npath = \"../Treebars.jl\""
+            @assert occursin(remote_source, project)
+            ci_project = replace(project, remote_source => local_source)
+            write(project_path, ci_project)
             packages = [
-              PackageSpec(path="DynamicObjects.jl"),
-              PackageSpec(path="HTMX.jl"),
+              PackageSpec(path="../DynamicObjects.jl"),
+              PackageSpec(path="../HTMX.jl"),
+              PackageSpec(path="../Treebars.jl"),
             ]
-            VERSION < v"1.11" && push!(packages, PackageSpec(path="Treebars.jl"))
             Pkg.develop(packages)
+            Pkg.instantiate()
+            # Pkg 1.10 drops [weakdeps] when developing a package that is
+            # simultaneously a test extra. The manifest already records the
+            # exact local checkout, so restore the CI-local source declaration
+            # and extension metadata before Pkg.test creates its environment.
+            write(project_path, ci_project)
           '
-          mv Project.toml.test-backup Project.toml
-          julia --project -e 'using Pkg; Pkg.resolve()'
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run tests
         run: julia --project=. -e 'using Pkg; Pkg.test(; coverage=true)'
