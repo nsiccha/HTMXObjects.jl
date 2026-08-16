@@ -3565,6 +3565,8 @@ and child-process side effects remain explicit rather than mutating host state.
         @test isempty(catalog.errors)
         @test length(catalog.items) == 3
         by_name = Dict(item.name => item for item in catalog.items)
+        @test HTMXObjects._test_load_path(false) == "@:@stdlib"
+        @test HTMXObjects._test_load_path(true) == "@;@stdlib"
 
         function await_job(count; timeout=60.0)
             deadline = time() + timeout
