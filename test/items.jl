@@ -1985,6 +1985,49 @@ end
             StackedSemanticRoute(), :count)).options) == 3
 end
 
+# A route computation may finish quickly by returning ANOTHER compute-at-most-
+# once handle. The grace path must keep the whole handle chain inside one grace
+# budget; treating the ready outer handle as a terminal value makes
+# `_resolve_operation_value` fetch the inner handle and blocks the first HX
+# response until the real work finishes.
+@testitem "automatic polling grace does not block on a nested pending handle" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _resolve_operation_value
+    import HTMXObjects.DynamicObjects
+
+    extension = Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt)
+    @test extension !== nothing
+
+    gate = Base.Event()
+    inner_cache = DynamicObjects.ThreadsafeDict()
+    outer_cache = DynamicObjects.ThreadsafeDict()
+    inner = Base.get!(inner_cache, :inner; fetch=identity) do _status
+        wait(gate)
+        7
+    end
+    outer = Base.get!(outer_cache, :outer; fetch=identity) do _status
+        inner
+    end
+    @test timedwait(() -> isready(outer), 2.0;
+                    pollint=0.001) === :ok
+
+    grace_task = @async extension._grace_fetch(
+        _resolve_operation_value, outer, 0.1)
+    grace_state = timedwait(() -> istaskdone(grace_task), 0.5;
+                           pollint=0.005)
+    grace_state === :ok || notify(gate)
+    grace = fetch(grace_task)
+    @test grace_state === :ok
+    @test !grace.ready
+
+    grace_state === :ok && notify(gate)
+    @test timedwait(() -> isready(inner), 2.0;
+                    pollint=0.001) === :ok
+    terminal = extension._grace_fetch(
+        _resolve_operation_value, outer, 0.1)
+    @test terminal.ready
+    @test terminal.value == 7
+end
+
 # A browser navigation has page chrome available before its slow operation does.
 # `:auto` therefore returns that shell immediately and lets one load-triggered
 # HX request enter the ordinary grace/poll transport. The proxy prefix must
