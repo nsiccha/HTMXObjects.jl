@@ -59,7 +59,30 @@ jobs:
           '
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run tests
-        run: julia --project=. -e 'using Pkg; Pkg.test(; coverage=true)'
+        shell: bash
+        run: |
+          set +e
+          julia --project=. --color=no -e 'using Pkg; Pkg.test(; coverage=true)' 2>&1 | tee test-output.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            {
+              echo '### Failed test log tail'
+              echo '```text'
+              tail -n 500 test-output.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            details=$(awk '
+              /Test Failed|Error During Test|Some tests did not pass/ { remaining = 100 }
+              remaining > 0 { print; remaining-- }
+            ' test-output.log | tail -n 300)
+            [ -n "$details" ] || details=$(tail -n 160 test-output.log)
+            details=${details//'%'/'%25'}
+            details=${details//$'\r'/'%0D'}
+            details=${details//$'\n'/'%0A'}
+            echo "::error title=Pkg.test failure details::$details"
+          fi
+          exit "$status"
       - uses: julia-actions/julia-processcoverage@v1
         if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
       - uses: codecov/codecov-action@v4
