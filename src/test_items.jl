@@ -214,8 +214,10 @@ function _test_command(project, selection)
     julia = Base.julia_cmd()
     expression = "using Pkg; Pkg.test(; test_args=ARGS)"
     command = `$julia --startup-file=no --history-file=no --project=$project -e $expression -- $args`
-    addenv(command, "JULIA_LOAD_PATH" => "@:@stdlib")
+    addenv(command, "JULIA_LOAD_PATH" => _test_load_path(Sys.iswindows()))
 end
+
+_test_load_path(is_windows::Bool) = join(("@", "@stdlib"), is_windows ? ';' : ':')
 
 function _set_job!(store, job; status=job.status, started_at=job.started_at,
         finished_at=job.finished_at, exitcode=job.exitcode, process=job.process,
