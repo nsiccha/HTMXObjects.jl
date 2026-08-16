@@ -1161,59 +1161,6 @@ function _inject_verb_in_route_lhs!(struct_expr)
     struct_expr
 end
 
-# `@htmx` owns annotation-free progress for its generated property graph.  DO's
-# canonical line deliberately keeps progress instrumentation explicit, so add
-# that marker at this boundary instead of depending on a non-canonical DO
-# branch.  The marker is applied only to ordinary computed properties/routes:
-# structural declarations and request-binding declarations keep their existing
-# lowering, dunders stay transparent, and an authored progress marker wins.
-function _imply_htmx_progress!(struct_expr)
-    body = struct_expr.args[3]
-    lnn = LineNumberNode(0, :unknown)
-    structural = Set((Symbol("@include"), Symbol("@param"),
-                      Symbol("@header"), Symbol("@options"), Symbol("@struct")))
-    explicit = Set((Symbol("@progress"), Symbol("@PROGRESS"),
-                    Symbol("@fetch!"), Symbol("@dynamic_progress")))
-
-    for (i, arg) in enumerate(body.args)
-        if arg isa LineNumberNode
-            lnn = arg
-            continue
-        end
-        arg isa Expr || continue
-
-        inner = arg
-        markers = Set{Symbol}()
-        while Meta.isexpr(inner, :macrocall)
-            marker = inner.args[1]
-            push!(markers, marker isa GlobalRef ? marker.name : marker)
-            inner = inner.args[end]
-        end
-        isempty(intersect(markers, structural)) || continue
-        isempty(intersect(markers, explicit)) || continue
-        Meta.isexpr(inner, :(=), 2) || continue
-
-        lhs, rhs = inner.args
-        payload = rhs
-        while Meta.isexpr(payload, :block)
-            values = [value for value in payload.args if !(value isa LineNumberNode)]
-            length(values) == 1 || break
-            payload = only(values)
-        end
-        Meta.isexpr(payload, :struct) && continue
-        (payload isa AbstractString || Meta.isexpr(payload, :string)) && continue
-        while Meta.isexpr(lhs, :(::))
-            lhs = lhs.args[1]
-        end
-        Meta.isexpr(lhs, :call) && (lhs = lhs.args[1])
-        lhs isa Symbol || continue
-        startswith(String(lhs), "__") && endswith(String(lhs), "__") && continue
-
-        body.args[i] = Expr(:macrocall, Symbol("@PROGRESS"), lnn, arg)
-    end
-    struct_expr
-end
-
 """
     _inject_include_prefix!(call_expr, prop_name; index_params=Symbol[])
 
@@ -1538,7 +1485,6 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     _convert_include_to_struct!(struct_expr)
 
     _wrap_ws_bodies!(struct_expr)
-    _imply_htmx_progress!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
     reroute && _warn_redundant_req_decl!(struct_expr)
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)

@@ -4957,13 +4957,12 @@ end
     @test contains(rendered, "static")
 end
 
-# ── Automatic progress over the generic operation path ───────────────────────
+# ── Default operation status roots ───────────────────────────────────────────
 # An ordinary `@get` route whose body reads a slow nested DynamicObjects indexed
-# property. There is no `@progress`, no `@fetch!`, no `polling_fetchindex`, no
-# `route!(…; operation_policy=…)` and no JavaScript anywhere in these fixtures:
-# `:auto` is the default transport, and source-visible property reads/calls in
-# generated bodies carry the caller's progress node explicitly. Ordinary Julia
-# calls remain ordinary; there is no ambient or task-local progress context.
+# property. There is no progress marker here: DynamicObjects supplies the
+# structural status roots, while OperationPolicy(:auto) supplies the default
+# non-blocking operation transport. Ordinary Julia calls, helpers, and loops
+# remain ordinary and are not implicitly rewritten.
 @testmodule HTMXOPropertyScopedFixtures begin
 using HTMXObjects
 
@@ -5246,10 +5245,21 @@ end
     end
 end
 
-@testitem "automatic progress — property-scoped route calls poll and nest without annotations" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+@testitem "default operation roots — ordinary properties stay uninstrumented" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _run_operation, _operation_polling_impl, Verb
     import HTMXObjects.DynamicObjects
     const TBNode = DynamicObjects.Treebars.ProgressNode
+
+    ordinary = Dict(DynamicObjects.meta(PropertyScopedRoute))
+    @test !haskey(ordinary, :__progress__)
+    @test !any(m -> m in (Symbol("@progress"), Symbol("@PROGRESS"),
+                          Symbol("@dynamic_progress")),
+               get(ordinary[:slow], :macros, Set{Symbol}()))
+    @htmx struct ExplicitProgressFixture
+        @get @progress run() = h.p("ok")
+    end
+    explicit = Dict(DynamicObjects.meta(ExplicitProgressFixture))
+    @test Symbol("@progress") in get(explicit[:run], :macros, Set{Symbol}())
 
     app = PropertyScopedRoute()
     target = (context=nothing, root=app, leaf=app)
@@ -5281,16 +5291,11 @@ end
         _operation_polling_impl[] = old
     end
 
-    # The tree fills itself in WHILE the work runs — three levels, discovered
-    # from execution nesting alone.
+    # The operation has a structural root, but no implicit nested progress:
+    # ordinary property calls are not rewritten by HTMXObjects.
     @test node isa TBNode
     @test node.impl.description == "Slow page"
-    @test timedwait(10.0; pollint=0.05) do
-        "Deep leaf work" in progress_descendants(node)
-    end === :ok
-    descendants = progress_descendants(node)
-    @test "Middle work" in descendants
-    @test "Deep leaf work" in descendants
+    @test progress_descendants(node) == String[]
 
     # And the final value still arrives once the leaf is released.
     notify(property_gate[])
@@ -5314,13 +5319,13 @@ end
     @test repr("text/html", direct.value) == "<p>31</p>"
     @test !(direct.value isa DynamicObjects.Pending)
 
-    # A nested failure surfaces as a pinned node, so the tree still shows WHICH
-    # step failed rather than collapsing to a bare error.
+    # A nested failure still surfaces through the normal operation error path;
+    # no implicit child progress node is fabricated for the foreign helper.
     bad_app = PropertyScopedFailRoute()
     @test_throws DynamicObjects.PropertyComputationError bad_app.bad(Verb{:GET}(), 1)
     bad_node = DynamicObjects.getstatus(bad_app.bad, Verb{:GET}(), 1)
     @test bad_node isa TBNode
-    @test "Failing leaf" in progress_descendants(bad_node)
+    @test progress_descendants(bad_node) == String[]
 end
 
 @testitem "EditorRoutes serves its own mount point" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
