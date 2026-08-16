@@ -5008,6 +5008,15 @@ end
 _resolve_operation_value(value) =
     value isa DynamicObjects.Pending ? fetch(value) : value
 
+# A documented DO property already renders its description on its progress
+# root. Treebars' `label=nothing` path promotes that root into the poller header,
+# so the operation appears once. An undocumented property's root is structural
+# and needs the humanized property name as the outer fallback.
+function _operation_poll_label(descriptor, name)
+    description = get(descriptor, :description, "")
+    description isa AbstractString && !isempty(description) ? nothing : Long(name)
+end
+
 # Extension seam: core degrades polling requests to the historical blocking
 # call when Treebars is absent. The extension replaces this Ref without method
 # overwrites, matching the recording bridge's precompile-safe pattern.
@@ -5068,7 +5077,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         page_load_id = _operation_page_load_id(req)
         transport = (
             poll_url=_operation_request_url(req, prefix),
-            label=Long(name),
+            label=_operation_poll_label(descriptor, name),
             poll_interval=policy.poll_interval,
             keep_progress=policy.keep_progress,
             page_load_id,
@@ -5104,7 +5113,8 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             token, signature, prop, keys, call_kwargs, started,
             target.leaf, req, now, now)
         page_load_id = _operation_page_load_id(req)
-        transport = (poll_url=_operation_poll_url(req, token, prefix), label=Long(name),
+        transport = (poll_url=_operation_poll_url(req, token, prefix),
+                     label=_operation_poll_label(descriptor, name),
                      poll_interval=policy.poll_interval,
                      keep_progress=policy.keep_progress,
                      page_load_id,
