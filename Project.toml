@@ -32,6 +32,7 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
+rev = "42be351bdbdcbf22572da5c8cf896fcc39047126"
 
 [targets]
-test = ["Sockets", "Test", "TestItemRunner"]
+test = ["Sockets", "Test", "TestItemRunner", "Treebars"]
