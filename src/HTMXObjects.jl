@@ -18,7 +18,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, semantic_card
-export safely, ERROR_DIR
+export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
@@ -3903,6 +3903,39 @@ function _record_error(err, bt, req)
     @error "HTMXObjects caught an error: $path"
     (uid, path)
 end
+
+"""
+    record_error(err, bt, req) -> (uid, path)
+
+Record a **caught, recovered-from** error to HTMXObjects' error-log surface
+(`ERROR_DIR[]/<uid>.log`, the same sink the `?run=latest` error feeds read) and
+return the short `uid` and the full `path`, **without aborting the request or
+rendering an error article**. Use it from a route body that caught an
+exception, handled it (a fallback value, a visible stand-in, a partial result),
+and still wants the trace to reach the error surface where triage tooling can
+see it.
+
+`bt` is the backtrace — pass `catch_backtrace()` from inside the `catch` block.
+`req` is the live `HTTP.Request` (`__req__` in a route body) and may be
+`nothing`.
+
+This is the counterpart to the route-error pipeline, which fires only when an
+exception **propagates out** of a route and the framework catches it — i.e.
+when the request aborts. `__error__` (the render hook) and `__on_error__` (the
+post-error side-effect hook) both belong to that abort path; `record_error`
+covers the log-but-keep-serving case they do not. `safely` remains the
+widget-containment tool when you want the standard error *article* substituted
+for one failed panel; reach for `record_error` when you supply your own
+fallback and just need the trace recorded.
+
+    result = try
+        render_embed(fig)
+    catch err
+        record_error(err, catch_backtrace(), __req__)   # trace reaches the error surface
+        placeholder_for(fig)                             # request still succeeds
+    end
+"""
+record_error(err, bt, req) = _record_error(err, bt, req)
 
 """
     _default_error_render(uid, path)
