@@ -918,21 +918,18 @@ end
 @testitem "hx_response headers" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     base = h.div("content")
     resp = hx_response(base; trigger="myEvent")
-    @test any(p.first == "HX-Trigger" && p.second == "myEvent"
-              for p in resp.headers)
+    @test HTTP.header(resp, "HX-Trigger") == "myEvent"
     resp = hx_response(base; push_url="/new-path")
-    @test any(p.first == "HX-Push-Url" && p.second == "/new-path"
-              for p in resp.headers)
+    @test HTTP.header(resp, "HX-Push-Url") == "/new-path"
     resp = hx_response(base; replace_url="/replaced")
-    @test any(p.first == "HX-Replace-Url" for p in resp.headers)
+    @test HTTP.header(resp, "HX-Replace-Url") == "/replaced"
     resp = hx_response(base; redirect="/other")
-    @test any(p.first == "HX-Redirect" for p in resp.headers)
+    @test HTTP.header(resp, "HX-Redirect") == "/other"
     resp = hx_response(base; refresh=true)
-    @test any(p.first == "HX-Refresh" && p.second == "true"
-              for p in resp.headers)
+    @test HTTP.header(resp, "HX-Refresh") == "true"
     resp = hx_response(base; retarget="#foo", reswap="outerHTML")
-    @test any(p.first == "HX-Retarget" && p.second == "#foo" for p in resp.headers)
-    @test any(p.first == "HX-Reswap" && p.second == "outerHTML" for p in resp.headers)
+    @test HTTP.header(resp, "HX-Retarget") == "#foo"
+    @test HTTP.header(resp, "HX-Reswap") == "outerHTML"
     @test contains(String(resp.body), "<div>")
     resp0 = hx_response(base)
     @test !any(startswith(p.first, "HX-") for p in resp0.headers)
@@ -2402,6 +2399,12 @@ end
         @test isfile(dest2)
         @test basename(dest2) == "42.html"
         @test basename(dirname(dest2)) == "post"
+
+        bytes = UInt8[0x00, 0x7f, 0xff]
+        body = isdefined(HTTP, :BytesBody) ? getproperty(HTTP, :BytesBody)(bytes) : bytes
+        binary = HTTP.Response(200, ["Content-Type" => "application/octet-stream"]; body)
+        binary_dest = save_response(dir, "/payload", binary; ext=".bin")
+        @test read(binary_dest) == bytes
     end
 end
 
@@ -2438,6 +2441,55 @@ because it binds a port and mutates Oxygen's process-global route context.
             terminate()
         end
     end
+end
+
+@testitem "access-log timing supports both Oxygen dependency worlds" setup=[HTMXOTestImports] tags=[:unit] begin
+    formatter = HTMXObjects._select_access_log_base_formatter()
+    @test formatter isa Function
+
+    request = HTTP.Request("GET", "/timed")
+    request.context[:t0] = time() - 0.01
+    if isdefined(HTMXObjects.Oxygen, :oxygen_logfmt)
+        request.context[:ip] = "127.0.0.1"
+        request.context[:response] = HTTP.Response(204)
+        access_event = request
+        @test formatter === getproperty(HTMXObjects.Oxygen, :oxygen_logfmt)
+    else
+        request.response = HTTP.Response(204)
+        access_event = (;
+            message=request,
+            stream=(; peerip="127.0.0.1", peerport=8080),
+            nwritten=0,
+        )
+        @test isdefined(HTTP, Symbol("@logfmt_str"))
+    end
+
+    io = IOBuffer()
+    HTMXObjects._timed_access_log(io, access_event)
+    line = String(take!(io))
+    @test contains(line, "127.0.0.1")
+    @test contains(line, "\"GET /timed HTTP/1.1\" 204")
+    @test occursin(r" [0-9.]+(μs|ms|s|min)$", line)
+
+    request_only = HTTP.Request("GET", "/")
+    @test HTMXObjects._access_log_request(request_only) === request_only
+    @test HTMXObjects._access_log_request((; message=request_only)) === request_only
+
+    defaults = HTMXObjects._with_access_timing((;))
+    @test defaults[:access_log] === HTMXObjects._timed_access_log
+    @test first(defaults[:middleware]) === HTMXObjects._timing_middleware
+
+    custom_log(io, event) = nothing
+    existing_middleware(handler) = handler
+    custom = HTMXObjects._with_access_timing(pairs((;
+        access_log=custom_log,
+        middleware=[existing_middleware],
+    )))
+    @test custom[:access_log] === custom_log
+    @test custom[:middleware] == Any[
+        HTMXObjects._timing_middleware,
+        existing_middleware,
+    ]
 end
 
 @testitem "record! preserves indexed include paths and rejects collisions" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
@@ -2552,8 +2604,7 @@ end
 
 @testitem "hx_response with location" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     resp = hx_response(h.div("content"); location="/new")
-    @test any(p.first == "HX-Location" && p.second == "/new"
-              for p in resp.headers)
+    @test HTTP.header(resp, "HX-Location") == "/new"
     @test contains(String(resp.body), "<div>")
 end
 
@@ -2643,9 +2694,11 @@ end
     # A declared kwarg still binds from a real urlencoded body, body over query.
     form = HTTP.Request("POST", "/upload?ext=jl",
         ["Content-Type" => "application/x-www-form-urlencoded"], "ext=csv")
+    form_body_before = HTMXObjects._request_body_bytes(form)
     _, kw_form = HTMXObjects._extract_args(RawBodyApp, Val(:upload),
                                            HTMXObjects.Verb{:POST}(), form, 1, 0)
     @test Dict(kw_form)[:ext] == "csv"
+    @test HTMXObjects._request_body_bytes(form) == form_body_before
     # …and falls back to the query string when the body is not a form.
     blob = HTTP.Request("POST", "/upload?ext=jl",
         ["Content-Type" => "application/octet-stream"], Vector{UInt8}("ext=csv"))

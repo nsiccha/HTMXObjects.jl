@@ -21,13 +21,8 @@ HTMXObjectsTreebarsExt = "Treebars"
 
 [compat]
 HTMX = "1"
-# HTTP 2.x removed the `@logfmt_str` string macro that `src/HTMXObjects.jl`'s
-# access-log line relies on (still exported by HTTP 1.x). Pinning HTTP to 1.x
-# also transitively holds Oxygen at 1.10.x (Oxygen 1.11.0 requires HTTP ^2.4),
-# which is the dependency world this package's Oxygen-wrapping code is written
-# against. Without this, Julia >=1.11 resolves HTTP 2.x + Oxygen 1.11.0 and
-# precompilation fails at the `logfmt"..."` line. See snag logfmt-str-undef.
-HTTP = "1"
+HTTP = "1, 2"
+Oxygen = "1.10"
 julia = "1"
 TestItemRunner = "1"
 
