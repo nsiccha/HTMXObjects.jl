@@ -154,14 +154,35 @@ end
 # --- Access-log request timing ---------------------------------------------
 # `serve` installs, by default, a middleware that stamps each request's start
 # time plus a custom access-log line that appends the elapsed handling time.
-# HTTP.jl's `logfmt` has no duration token and records no request-start, so the
-# two pieces are required together. A caller can override either by passing their
-# own `middleware` / `access_log` to `serve` — both are respected.
+# The dependency-provided log format has no duration token and records no
+# request-start, so the two pieces are required together. A caller can override
+# either by passing their own `middleware` / `access_log` to `serve` — both are
+# respected.
 
-# Mirrors Oxygen's default access-log line (Oxygen `core.jl`: the `logfmt`
-# assigned in `serve`) so the output is purely additive: the standard line, then
-# a trailing elapsed time.
-const _ACCESS_LOG_BASE = logfmt"$time_iso8601 - $remote_addr:$remote_port - \"$request\" $status"
+# Oxygen 1.11 moved access logging out of HTTP.jl and exposes its vendored
+# `oxygen_logfmt`; Oxygen 1.10 still delegates to HTTP 1.x's formatter. Select
+# once when HTMXObjects is compiled without importing a macro that is absent in
+# the other dependency world.
+macro _oxygen_access_log_formatter()
+    if isdefined(Oxygen, :oxygen_logfmt)
+        return :(getproperty(Oxygen, :oxygen_logfmt))
+    elseif isdefined(HTTP, Symbol("@logfmt_str"))
+        return getproperty(HTTP, Symbol("@logfmt_str"))(
+            __source__,
+            __module__,
+            raw"""$time_iso8601 - $remote_addr:$remote_port - "$request" $status""",
+        )
+    end
+    return :(error("No Oxygen-compatible access-log formatter is available"))
+end
+
+const _ACCESS_LOG_BASE_FORMATTER = @_oxygen_access_log_formatter
+
+_select_access_log_base_formatter() = _ACCESS_LOG_BASE_FORMATTER
+_access_log_base(io::IO, http) = _ACCESS_LOG_BASE_FORMATTER(io, http)
+
+_access_log_request(http::HTTP.Request) = http
+_access_log_request(http) = http.message
 
 """
     _timing_middleware(handler)
@@ -185,8 +206,8 @@ request's elapsed handling time, formatted with SI units (e.g. ` 78.9ms`,
 through [`_timing_middleware`](@ref) (e.g. connections rejected before routing).
 """
 function _timed_access_log(io::IO, http)
-    _ACCESS_LOG_BASE(io, http)
-    t0 = Base.get(http.message.context, :t0, nothing)
+    _access_log_base(io, http)
+    t0 = Base.get(_access_log_request(http).context, :t0, nothing)
     t0 === nothing || print(io, " ", fmt_time(time() - t0))
 end
 
@@ -368,10 +389,35 @@ what `Oxygen.formdata` (a thin wrapper over `URIs.queryparams`) does. Used by
 the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
 receives every posted value.
 
-Reads the body via `HTTP.payload`; an empty body yields an empty dict. Never
-throws — a body that isn't really urlencoded yields junk keys at worst, never a
-500 (see `_percent_decode_lenient`).
+Reads a non-destructive copy of the request body; an empty body yields an empty
+dict. Never throws — a body that isn't really urlencoded yields junk keys at
+worst, never a 500 (see `_percent_decode_lenient`).
 """
+function _request_body_bytes(req::HTTP.Request)
+    # HTTP 1.x exposes `payload(message)` and stores ordinary request bodies as
+    # byte vectors. HTTP 2.x replaced it with explicit body objects; BytesBody
+    # conversion copies only the unread bytes and therefore keeps argument
+    # extraction non-destructive in both worlds.
+    if isdefined(HTTP, :payload)
+        return copy(getproperty(HTTP, :payload)(req))
+    end
+    body = req.body
+    if isdefined(HTTP, :BytesBody) && isa(body, getproperty(HTTP, :BytesBody))
+        return Vector{UInt8}(body)
+    elseif isdefined(HTTP, :EmptyBody) && isa(body, getproperty(HTTP, :EmptyBody))
+        return UInt8[]
+    elseif body isa AbstractVector{UInt8}
+        return copy(body)
+    elseif body isa AbstractString
+        return Vector{UInt8}(codeunits(body))
+    end
+    # A streaming body cannot be copied without consuming it. Server-side form
+    # requests arrive buffered in both supported HTTP worlds; for a custom
+    # programmatic request, preserve the non-destructive contract and expose no
+    # body-sourced kwargs rather than draining its stream.
+    return UInt8[]
+end
+
 function formparams(req::HTTP.Request)
     # Only an `application/x-www-form-urlencoded` body is parseable here — it's
     # the wire format `_parse_form_encoded` understands. A `multipart/form-data`
@@ -390,12 +436,9 @@ function formparams(req::HTTP.Request)
     ct = lowercase(HTTP.header(req, "Content-Type", ""))
     isempty(ct) || occursin("application/x-www-form-urlencoded", ct) ||
         return Dict{String, Union{String, Vector{String}}}()
-    # `copy` the payload before `String` consumes it: `String(::Vector{UInt8})`
-    # takes ownership and EMPTIES the source vector (`HTTP.payload(req)` IS
-    # `req.body`), which would zero the body for any handler that reads it after
-    # the arg extractor runs. The copy is read-only w.r.t. `req`; existing
-    # urlencoded callers only read the parsed Dict, so behaviour is unchanged.
-    _parse_form_encoded(String(copy(HTTP.payload(req))))
+    # `String(::Vector{UInt8})` takes ownership and empties the vector, so the
+    # compatibility helper above always hands it a detached copy.
+    _parse_form_encoded(String(_request_body_bytes(req)))
 end
 
 """
@@ -2746,7 +2789,13 @@ function save_response(record_dir::String, url_path::String, response::HTTP.Resp
     dest = joinpath(record_dir, file)
     _guard_record_destination!(record_dir, dest)
     mkpath(dirname(dest))
-    write(dest, response.body)
+    body = response.body
+    if isdefined(HTTP, :BytesBody) && isa(body, getproperty(HTTP, :BytesBody))
+        body = Vector{UInt8}(body)
+    elseif isdefined(HTTP, :EmptyBody) && isa(body, getproperty(HTTP, :EmptyBody))
+        body = UInt8[]
+    end
+    write(dest, body)
     dest
 end
 

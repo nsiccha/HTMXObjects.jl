@@ -1023,6 +1023,8 @@ serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing
   free for heavy computation. Launch Julia with e.g. `julia -t 8,4` for 8
   computation threads + 4 request-handling threads.
 - `revise=:lazy` is the usual dev setting.
+- Unless `access_log` is supplied explicitly, each access-log line keeps
+  Oxygen's standard fields and appends the request duration.
 
 ## What belongs where — summary
 
