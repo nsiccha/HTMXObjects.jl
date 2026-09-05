@@ -43,6 +43,7 @@ export OperationContext, RootProvider, RootRetention, OperationPolicy
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
+import Dates
 import Random
 # Only for `SemanticProse`'s HTML peer, which renders its Markdown source rather
 # than showing it. Escapes inline markup, so prose cannot smuggle HTML through.
@@ -160,23 +161,36 @@ end
 # respected.
 
 # Oxygen 1.11 moved access logging out of HTTP.jl and exposes its vendored
-# `oxygen_logfmt`; Oxygen 1.10 still delegates to HTTP 1.x's formatter. Select
-# once when HTMXObjects is compiled without importing a macro that is absent in
-# the other dependency world.
-macro _oxygen_access_log_formatter()
-    if isdefined(Oxygen, :oxygen_logfmt)
-        return :(getproperty(Oxygen, :oxygen_logfmt))
-    elseif isdefined(HTTP, Symbol("@logfmt_str"))
-        return getproperty(HTTP, Symbol("@logfmt_str"))(
-            __source__,
-            __module__,
-            raw"""$time_iso8601 - $remote_addr:$remote_port - "$request" $status""",
-        )
+# `oxygen_logfmt`; Oxygen 1.10 still delegates to HTTP 1.x's formatter. Calling
+# HTTP 1.x's `@logfmt_str` from this module is not hygienic on Windows: its
+# expansion contains an unqualified `dateformat"..."` macro, which is resolved
+# in the caller and breaks a fresh HTMXObjects precompile. Keep the small
+# Oxygen-compatible HTTP 1.x format local instead.
+const _ACCESS_LOG_WINDOWS_DATEFORMAT = Dates.DateFormat("yyyy-mm-dd\\THH:MM:SS")
+
+function _access_log_timestamp(windows::Bool=Sys.iswindows())
+    if windows
+        return Dates.format(Dates.now(), _ACCESS_LOG_WINDOWS_DATEFORMAT)
     end
-    return :(error("No Oxygen-compatible access-log formatter is available"))
+    return Libc.strftime("%FT%T%z", time())
 end
 
-const _ACCESS_LOG_BASE_FORMATTER = @_oxygen_access_log_formatter
+function _http1_oxygen_logfmt(io::IO, http)
+    message = http.message
+    print(io,
+        _access_log_timestamp(), " - ",
+        http.stream.peerip, ":", http.stream.peerport, " - \"",
+        message.method, " ", message.target, " HTTP/",
+        message.version.major, ".", message.version.minor, "\" ",
+        message.response.status,
+    )
+end
+
+const _ACCESS_LOG_BASE_FORMATTER = if isdefined(Oxygen, :oxygen_logfmt)
+    getproperty(Oxygen, :oxygen_logfmt)
+else
+    _http1_oxygen_logfmt
+end
 
 _select_access_log_base_formatter() = _ACCESS_LOG_BASE_FORMATTER
 _access_log_base(io::IO, http) = _ACCESS_LOG_BASE_FORMATTER(io, http)
