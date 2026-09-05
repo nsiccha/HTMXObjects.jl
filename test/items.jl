@@ -2461,8 +2461,26 @@ end
             stream=(; peerip="127.0.0.1", peerport=8080),
             nwritten=0,
         )
-        @test isdefined(HTTP, Symbol("@logfmt_str"))
+        @test formatter === HTMXObjects._http1_oxygen_logfmt
     end
+
+    windows_timestamp = HTMXObjects._access_log_timestamp(true)
+    @test occursin(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", windows_timestamp)
+
+    http1_event = (;
+        message=(;
+            method="GET",
+            target="/compat",
+            version=(; major=1, minor=1),
+            response=(; status=201),
+        ),
+        stream=(; peerip="127.0.0.2", peerport=8081),
+    )
+    http1_io = IOBuffer()
+    HTMXObjects._http1_oxygen_logfmt(http1_io, http1_event)
+    http1_line = String(take!(http1_io))
+    @test contains(http1_line, "127.0.0.2:8081")
+    @test contains(http1_line, "\"GET /compat HTTP/1.1\" 201")
 
     io = IOBuffer()
     HTMXObjects._timed_access_log(io, access_event)
