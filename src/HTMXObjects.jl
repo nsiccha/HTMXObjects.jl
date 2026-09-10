@@ -34,6 +34,7 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi
+export reflect, select_routes, precompile_routes!, prewarm_routes!
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -6256,6 +6257,410 @@ function reflect(::Type{T}) where {T}
     acc = NamedTuple[]
     _reflect_walk!(acc, T, "")
     acc
+end
+
+"""
+    reflect(root) -> Vector{NamedTuple}
+
+Instance form of [`reflect`](@ref): reflects `typeof(root)`. Handy
+when the app value is already at hand (e.g. the same `app` passed to
+`route!`); never constructs anything.
+"""
+reflect(root) = reflect(typeof(root))
+
+# --- Ergonomic route collections: select, precompile, prewarm ----------------
+#
+# `reflect` is the inventory; `select_routes` filters it into a plain route
+# collection (a `Vector` of route descriptors — the same NamedTuples
+# `reflect` returns); `precompile_routes!` warms handler code pre-listen
+# without executing bodies; `prewarm_routes!` validates post-listen over
+# real HTTP. Collections are plain data — never server-side saved state —
+# so a downstream app keeps ONE warm list for both halves:
+#
+#     warm = select_routes(MyApp; verb=:GET, prefix="/agents")
+#     precompile_routes!(MyApp, warm)   # safe pre-listen, never executes
+#     prewarm_routes!(base_url, warm)   # post-listen validation
+#
+# `precompile_routes!` / `prewarm_routes!` also accept the ergonomic entry
+# shorthands below wherever a collection goes: concrete URL strings
+# (`"/agents/Claude"`), route-name `Symbol`s (`:foryou`), and `Regex`es over
+# paths (`r"^/agents/"`). Shorthands resolve against the root inventory, so
+# the `(root, coll)` forms are the ones that take them; the
+# `prewarm_routes!(base_url, coll)` form takes descriptors and concrete URLs.
+
+"""
+    select_routes(routes; verb=nothing, prefix=nothing, names=nothing, pattern=nothing)
+    select_routes(::Type{T}; kwargs...)
+
+Pure, stateless filter over a `reflect` inventory. Every keyword is optional;
+provided filters combine with AND. Returns a fresh `Vector` of the matching
+route descriptors (the same NamedTuples `reflect` returns) — the route
+collection `precompile_routes!` / `prewarm_routes!` consume. Never touches a
+server, never saves state; the input is left unmodified.
+
+- `verb` — a `Symbol`/`String` (`:GET`, `"post"`, case-insensitive) or a
+  collection thereof. Matches `route.verb`.
+- `prefix` — a path prefix `String` (`"/agents"`) or a collection thereof.
+  Matches `startswith(route.path, prefix)`.
+- `names` — a route-name `Symbol` (`:foryou`) or a collection thereof.
+  Matches `route.name`.
+- `pattern` — a `Regex` (or a collection thereof) matched with
+  `occursin` against `route.path`.
+
+Elements that are not `reflect` descriptors (NamedTuples carrying at least
+`verb`, `path`, `name`) are rejected with an `ArgumentError`.
+"""
+function select_routes(routes::AbstractVector; verb=nothing, prefix=nothing,
+        names=nothing, pattern=nothing)
+    verbs = _select_verbs(verb)
+    prefixes = _select_strs(prefix, "prefix")
+    name_set = _select_names(names)
+    patterns = _select_patterns(pattern)
+    out = NamedTuple[]
+    for r in routes
+        r isa NamedTuple && (:verb in keys(r)) && (:path in keys(r)) &&
+            (:name in keys(r)) ||
+            throw(ArgumentError(
+                "select_routes expects reflect() descriptors, got $(repr(r))"))
+        isnothing(verbs) || r.verb in verbs || continue
+        isnothing(prefixes) || any(p -> startswith(r.path, p), prefixes) || continue
+        isnothing(name_set) || r.name in name_set || continue
+        isnothing(patterns) || any(p -> occursin(p, r.path), patterns) || continue
+        push!(out, r)
+    end
+    out
+end
+select_routes(::Type{T}; kwargs...) where {T} = select_routes(reflect(T); kwargs...)
+
+_select_verbs(::Nothing) = nothing
+_select_verbs(v::Union{Symbol,AbstractString}) = Set([_select_verb_sym(v)])
+_select_verbs(::Type{Verb{V}}) where {V} = Set([Symbol(V)])
+_select_verbs(v::Verb{V}) where {V} = Set([Symbol(V)])
+_select_verbs(vs) = Set(_select_verb_sym(v) for v in vs)
+_select_verb_sym(v::Symbol) = Symbol(uppercase(string(v)))
+_select_verb_sym(v::AbstractString) = Symbol(uppercase(v))
+_select_verb_sym(::Type{Verb{V}}) where {V} = Symbol(V)
+_select_verb_sym(v::Verb{V}) where {V} = Symbol(V)
+
+_select_strs(::Nothing, _what) = nothing
+_select_strs(s::AbstractString, _what) = String[String(s)]
+_select_strs(ss, _what) = String[String(s) for s in ss]
+
+_select_names(::Nothing) = nothing
+_select_names(n::Symbol) = Set([n])
+_select_names(n::AbstractString) = Set([Symbol(n)])
+_select_names(ns) = Set(n isa Symbol ? n : Symbol(n) for n in ns)
+
+_select_patterns(::Nothing) = nothing
+_select_patterns(p::Regex) = Regex[p]
+_select_patterns(ps) = Regex[ps...]
+
+# Owner-aware inventory: `(leaf-type, descriptor)` pairs. `reflect` drops the
+# owner (its descriptor contract is fixed); precompilation needs it, because
+# the handler method is keyed on the leaf struct that declares the route.
+function _route_inventory(::Type{T}) where {T}
+    inv = Tuple{Type,NamedTuple}[]
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return inv
+    _reflect_walk!(inv, T, ""; enrich=(owner, route, _parents) -> (owner, route))
+    inv
+end
+
+# Strip a full URL down to its path, then drop query/fragment. Accepts plain
+# paths unchanged, so `"/agents/x"`, `"/agents/x?a=1"` and
+# `"http://127.0.0.1:8080/agents/x"` all resolve to `"/agents/x"`.
+function _url_path_only(u::AbstractString)
+    s = String(u)
+    i = findfirst("://", s)
+    if i !== nothing
+        j = findnext('/', s, last(i) + 1)
+        s = j === nothing ? "/" : s[j:end]
+    end
+    s = first(split(s, '#'; limit=2))
+    s = first(split(s, '?'; limit=2))
+    isempty(s) ? "/" : s
+end
+
+_split_segments(path::AbstractString) =
+    filter(!isempty, split(path, '/'; keepempty=false))
+
+_is_param_segment(seg::AbstractString) =
+    startswith(seg, "{") && endswith(seg, "}")
+
+# Resolve one concrete URL against the inventory. A route matches when every
+# segment aligns: template `{param}` segments match anything, other segments
+# must equal. Among matches, exact segments beat `{param}` ones — only the
+# matches with the highest exact-segment count are returned — so
+# `"/agents/foryou"` resolves to a literal `/agents/foryou` route even when
+# `/agents/{id}` also matches.
+function _match_url(inv::AbstractVector{Tuple{Type,NamedTuple}}, url::AbstractString)
+    segs = _split_segments(_url_path_only(url))
+    scored = Tuple{Int,Tuple{Type,NamedTuple}}[]
+    for entry in inv
+        tsegs = _split_segments(entry[2].path)
+        length(tsegs) == length(segs) || continue
+        exact = 0
+        ok = true
+        for (t, s) in zip(tsegs, segs)
+            if _is_param_segment(t)
+                continue
+            elseif t == s
+                exact += 1
+            else
+                ok = false
+                break
+            end
+        end
+        ok && push!(scored, (exact, entry))
+    end
+    isempty(scored) && return Tuple{Type,NamedTuple}[]
+    best = maximum(first, scored)
+    [entry for (exact, entry) in scored if exact == best]
+end
+
+# Normalize one ergonomic collection into deduped `(owner, descriptor)` pairs.
+# `nothing` selects the whole inventory. Anything resolving to zero routes is
+# an `ArgumentError` — a warm list that silently matches nothing is how a
+# hand-rolled list rots unnoticed.
+function _resolve_collection(::Type{T}, coll) where {T}
+    inv = _route_inventory(T)
+    entries = _resolve_entries(inv, coll)
+    seen = Set{Tuple{Type,Symbol,Symbol,String}}()
+    out = Tuple{Type,NamedTuple}[]
+    for (owner, route) in entries
+        key = (owner, route.name, route.verb, route.path)
+        key in seen && continue
+        push!(seen, key)
+        push!(out, (owner, route))
+    end
+    out
+end
+
+_resolve_entries(inv, ::Nothing) = inv
+function _resolve_entries(inv, nt::NamedTuple)
+    (:verb in keys(nt)) && (:path in keys(nt)) && (:name in keys(nt)) || throw(
+        ArgumentError("unresolvable route entry $(repr(nt)): pass a reflect() " *
+                      "descriptor, a \"/url\" string, a :route_name symbol, or a regex"))
+    hits = filter(e -> e[2].verb === nt.verb && e[2].path == nt.path &&
+                       e[2].name === nt.name, inv)
+    isempty(hits) && throw(ArgumentError(
+        "route entry $(repr((nt.verb, nt.path, nt.name))) matches no route " *
+        "in this app's inventory ($(length(inv)) routes)"))
+    hits
+end
+function _resolve_entries(inv, url::AbstractString)
+    hits = _match_url(inv, url)
+    isempty(hits) && throw(ArgumentError(
+        "URL $(repr(String(url))) matches no route in this app's inventory " *
+        "($(length(inv)) routes)"))
+    hits
+end
+function _resolve_entries(inv, nm::Symbol)
+    hits = filter(e -> e[2].name === nm, inv)
+    isempty(hits) && throw(ArgumentError(
+        "route name $(repr(nm)) matches no route in this app's inventory " *
+        "($(length(inv)) routes)"))
+    hits
+end
+function _resolve_entries(inv, rx::Regex)
+    hits = filter(e -> occursin(rx, e[2].path), inv)
+    isempty(hits) && throw(ArgumentError(
+        "pattern $(repr(rx)) matches no route in this app's inventory " *
+        "($(length(inv)) routes)"))
+    hits
+end
+function _resolve_entries(inv, coll::AbstractVector)
+    out = Tuple{Type,NamedTuple}[]
+    for entry in coll
+        append!(out, _resolve_entries(inv, entry))
+    end
+    out
+end
+_resolve_entries(_inv, other) = throw(ArgumentError(
+    "unresolvable route entry $(repr(other)): pass a reflect() descriptor, " *
+    "a \"/url\" string, a :route_name symbol, or a regex"))
+
+# Precompile one route's handler shapes without executing anything: the
+# verb-keyed `compute_property` body plus the generated `_extract_args`
+# parser. Path-param types come from the descriptor (`nothing` — an
+# unresolvable annotation — degrades to `Any`); kwargs are intentionally left
+# to their defaults, so a first call with unusual kwargs may still infer.
+function _precompile_route(owner::Type, route::NamedTuple)
+    nm = route.name::Symbol
+    V = Verb{route.verb::Symbol}
+    path_types = Any[p.type isa Type ? p.type : Any
+                     for p in route.params if p.source === :path]
+    ok_body = try
+        Base.precompile(Tuple{typeof(DynamicObjects.compute_property),
+                              owner, Val{nm}, V, path_types...})
+    catch
+        false
+    end
+    ok_args = try
+        Base.precompile(Tuple{typeof(_extract_args),
+                              Type{owner}, Val{nm}, V, HTTP.Request, Int, Int})
+    catch
+        false
+    end
+    ok_body || ok_args
+end
+
+"""
+    precompile_routes!(::Type{T}, coll=nothing) -> Vector{NamedTuple}
+    precompile_routes!(root, coll=nothing) -> Vector{NamedTuple}
+
+Compile selected route handlers without executing them — the safe pre-listen
+half of warming an app before it serves live traffic. For every resolved
+route, issues `Base.precompile` for the verb-keyed handler body and the
+generated argument parser, then reports one row per route
+`(verb, path, name, precompiled)`. `precompiled=true` means at least one of
+the two shapes compiled now; `false` means both were already compiled (or a
+shape has no compilable method — e.g. WebSocket transport). Bodies never run:
+no root is constructed, no request is issued.
+
+`coll` is one ergonomic route collection (default: every route):
+
+- `nothing` — the whole inventory;
+- a `reflect` descriptor (or a `Vector` of them, e.g. `select_routes` output);
+- a concrete `\"/url\"` string — resolved against the inventory with exact
+  segments beating `{param}` placeholders, across all verbs at that path;
+- a `:route_name` symbol — all verbs/prefixes carrying that name;
+- a `Regex` — all routes whose path matches.
+
+Zero-match entries throw an `ArgumentError` naming the entry, so a stale warm
+list fails loudly instead of warming nothing.
+"""
+function precompile_routes!(::Type{T}, coll=nothing) where {T}
+    [(; verb=route.verb, path=route.path, name=route.name,
+       precompiled=_precompile_route(owner, route))
+     for (owner, route) in _resolve_collection(T, coll)]
+end
+precompile_routes!(root, coll=nothing) = precompile_routes!(typeof(root), coll)
+
+# Sample path/query value for a param type, used to concretize `{param}`
+# templates into requestable URLs. Deliberately boring values: an id-lookup
+# route may still 404 on them (warming dispatch but not the body) — callers
+# that need an exact warm pass concrete URLs instead.
+_sample_param(::Type{<:Integer}) = "1"
+_sample_param(::Type{<:AbstractFloat}) = "1.0"
+_sample_param(::Type{Bool}) = "true"
+_sample_param(::Type{Symbol}) = "prewarm"
+_sample_param(::Type{<:AbstractString}) = "prewarm"
+_sample_param(::Type{<:AbstractVector}) = "prewarm"
+_sample_param(::Type) = "prewarm"
+_sample_param(::Any) = "prewarm"
+
+# Concretize a descriptor into a request path: substitute `{param}` segments
+# with type samples and append required non-path params as a query string
+# (body-source params fall back to the query string at request time).
+function _warm_path(route::NamedTuple)
+    url = route.path
+    for p in route.params
+        p.source === :path || continue
+        url = replace(url, "{" * string(p.name) * "}" =>
+                           _sample_param(p.type))
+    end
+    qs = String[]
+    for p in route.params
+        (p.source === :query || p.source === :body) && p.required &&
+            push!(qs, string(p.name) * "=" * _sample_param(p.type))
+    end
+    isempty(qs) ? url : url * "?" * join(qs, "&")
+end
+
+_prewarm_base(base_url::AbstractString) = rstrip(String(base_url), '/')
+
+# One concrete request. Never throws: transport failures are data.
+function _prewarm_request(verb::Symbol, url::AbstractString, timeout::Real)
+    try
+        resp = HTTP.request(string(verb), url; readtimeout=Int(timeout),
+                            connect_timeout=10, status_exception=false,
+                            retry=false)
+        (; status=resp.status, error=nothing)
+    catch err
+        (; status=nothing, error=sprint(showerror, err))
+    end
+end
+
+"""
+    prewarm_routes!(base_url, coll; include_post=false, timeout=45) -> Vector{NamedTuple}
+    prewarm_routes!(::Type{T}, base_url, coll=nothing; kwargs...) -> Vector{NamedTuple}
+
+Validate selected routes post-listen with real HTTP requests — the live half
+of warming an app, for routes whose first hit would otherwise pay JIT on live
+traffic. Issues one request per resolved route and reports one row per route
+`(verb, path, name, url, status, error)`; `status` is the HTTP status code
+(`nothing` when the route was skipped or the request failed) and `error` the
+skip/failure reason (`nothing` on a completed request, whatever the status).
+
+Safety rules:
+
+- Only `:GET` routes are requested by default. `:POST`/`:PUT`/`:PATCH`/
+  `:DELETE` routes are skipped unless `include_post=true` — pass it only for
+  routes whose bodies are safe to run twice.
+- `:WEBSOCKET` routes are always skipped (no HTTP-upgrade in prewarm).
+- `{param}` templates are concretized with boring type samples (`1`,
+  `"prewarm"`); an id-lookup route may 404 on them while still warming
+  dispatch. For an exact warm, pass concrete URLs.
+- A failed request never throws: it is reported as `(status=nothing, error)`.
+
+`coll` takes the same ergonomic collection as [`precompile_routes!`](@ref)
+(descriptors, `\"/url\"` strings, `:names`, regexes) with two differences in
+this form: a lone `\"/url\"` string warms just that concrete URL as a GET,
+and entries that are already absolute (`"http://…"`) are requested as-is.
+`:name` symbols and `Regex`es need the inventory to resolve, so they require
+the `(::Type{T}, base_url, coll)` form — or a `select_routes` descriptor
+vector, which is the recommended shape: one collection for both halves.
+"""
+function prewarm_routes!(base_url::AbstractString, coll;
+        include_post::Bool=false, timeout::Real=45)
+    base = _prewarm_base(base_url)
+    # Concrete entries need no inventory: plain descriptors and URL strings.
+    # Anything else names the Type-taking form explicitly.
+    out = NamedTuple[]
+    for entry in (coll isa AbstractVector ? coll : (coll,))
+        if entry isa AbstractString
+            s = String(entry)
+            url = startswith(s, "http://") || startswith(s, "https://") ? s :
+                  base * (startswith(s, "/") ? s : "/" * s)
+            r = _prewarm_request(:GET, url, timeout)
+            push!(out, (; verb=:GET, path=_url_path_only(s), name=:index,
+                         url, status=r.status, error=r.error))
+        elseif entry isa NamedTuple && (:verb in keys(entry)) &&
+                (:path in keys(entry)) && (:name in keys(entry))
+            push!(out, _prewarm_descriptor(base, entry, include_post, timeout))
+        else
+            throw(ArgumentError(
+                "prewarm_routes!(base_url, coll) takes reflect() descriptors " *
+                "and concrete \"/url\" strings; $(repr(entry)) needs the " *
+                "inventory — use prewarm_routes!(T, base_url, coll) or " *
+                "select_routes(T, …) first"))
+        end
+    end
+    out
+end
+
+function prewarm_routes!(::Type{T}, base_url::AbstractString, coll=nothing;
+        include_post::Bool=false, timeout::Real=45) where {T}
+    base = _prewarm_base(base_url)
+    [_prewarm_descriptor(base, route, include_post, timeout)
+     for (_owner, route) in _resolve_collection(T, coll)]
+end
+
+function _prewarm_descriptor(base::AbstractString, route::NamedTuple,
+        include_post::Bool, timeout::Real)
+    verb = route.verb::Symbol
+    if verb === :WEBSOCKET
+        return (; verb, path=route.path, name=route.name, url="",
+                status=nothing, error="websocket skipped: prewarm issues HTTP only")
+    end
+    if verb !== :GET && !include_post
+        return (; verb, path=route.path, name=route.name, url="",
+                status=nothing,
+                error="non-GET skipped without include_post=true")
+    end
+    url = base * _warm_path(route)
+    r = _prewarm_request(verb, url, timeout)
+    (; verb, path=route.path, name=route.name, url, status=r.status, error=r.error)
 end
 
 function _semantic_request_context_param(param, SourceT)
