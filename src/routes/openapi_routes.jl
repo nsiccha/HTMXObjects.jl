@@ -252,3 +252,82 @@ generators, and anything else that speaks OpenAPI.
     @get index() = MIMEResponse("application/json",
         _schema_json_encode(openapi(root; title, version, description, servers)))
 end
+
+# --- Swagger UI endpoint ----------------------------------------------------
+#
+# `SwaggerRoutes` is the human companion to `OpenAPIRoutes`: a mountable
+# bundle serving a version-pinned Swagger UI initialized against the app's
+# OpenAPI document. Mounted at `/docs` it answers the standard address —
+# which requires `serve(docs=false)` (see `_warn_docs_prefix`): with
+# Oxygen's built-in docs enabled, its `DocsMiddleware` intercepts every
+# `/docs*` request before the main router and serves Oxygen's own
+# (for `@htmx` apps, empty) Swagger instead.
+
+# Pinned Swagger UI release. 5.x reads OpenAPI 3.1; the pin keeps the
+# rendered viewer reproducible. Bumped deliberately, never floating.
+const _SWAGGER_UI_VERSION = "5.7.2"
+
+# Standalone viewer page. Assets load from a pinned CDN release
+# (`cdn_base` re-points air-gapped deployments at a local mirror without a
+# code change); the spec URL is emitted as a JSON string literal so
+# quoting/escaping cannot break the initializer.
+function _swagger_html(; title::AbstractString, spec_url::AbstractString,
+        swagger_version::AbstractString, cdn_base::AbstractString)
+    base = rstrip(String(cdn_base), '/') * "/swagger-ui@" * String(swagger_version)
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>$(html_escape(String(title)))</title>
+        <link rel="stylesheet" href="$(base)/swagger-ui.css" />
+    </head>
+    <body>
+        <div id="swagger-ui"></div>
+        <script src="$(base)/swagger-ui-bundle.js"></script>
+        <script>
+            window.onload = () => {
+                window.ui = SwaggerUIBundle({
+                    url: $(_schema_json_encode(String(spec_url))),
+                    dom_id: '#swagger-ui',
+                });
+            };
+        </script>
+    </body>
+    </html>
+    """
+end
+
+"""
+    SwaggerRoutes(; title="API docs", spec_url="/openapi", swagger_version=_SWAGGER_UI_VERSION, cdn_base="https://cdn.jsdelivr.net/npm")
+
+Opt-in Swagger UI viewer for an `@htmx` app's OpenAPI document. Mount via
+`@include` on any `@htmx struct`, next to its [`OpenAPIRoutes`](@ref):
+
+```julia
+@include openapi = OpenAPIRoutes(; root=MyApp)   # → GET /openapi
+@include docs = SwaggerRoutes(; spec_url="/openapi")   # → GET /docs
+```
+
+The single `GET` route (the `@get index()`) returns a standalone HTML page
+(`text/html` via [`MIMEResponse`](@ref), so no page shell is wrapped around
+it) running a version-pinned Swagger UI release initialized against
+`spec_url`. `spec_url` is explicit because the document's mount point is the
+consumer's choice — point it at wherever the companion `OpenAPIRoutes`
+lives. `cdn_base` re-points air-gapped deployments at a local mirror of the
+pinned release.
+
+Mounting at `/docs` requires `serve(docs=false)`: with Oxygen's built-in
+docs enabled, its middleware serves its own Swagger for every `/docs*`
+request and the mounted route never fires.
+"""
+@htmx struct SwaggerRoutes
+    title::String = "API docs"
+    spec_url::String = "/openapi"
+    swagger_version::String = _SWAGGER_UI_VERSION
+    cdn_base::String = "https://cdn.jsdelivr.net/npm"
+
+    @get index() = MIMEResponse("text/html",
+        _swagger_html(; title, spec_url, swagger_version, cdn_base))
+end
