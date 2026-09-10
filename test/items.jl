@@ -137,6 +137,7 @@ end
 @htmx struct OpenAPIRoot
     @include api = OpenAPIWidgets()
     @include openapi = OpenAPIRoutes(; root=OpenAPIRoot, title="Widgets", version="2.0.0")
+    @include docs = SwaggerRoutes(; title="Widgets docs", spec_url="/openapi")
 end
 
 @htmx struct NothingDefaultApp
@@ -4249,6 +4250,32 @@ end
     widgets_response = drive("/api/widgets")
     @test widgets_response.status == 200
     @test contains(String(widgets_response.body), "all")
+end
+
+@testitem "SwaggerRoutes serves a pinned viewer against the OpenAPI document" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(OpenAPIRoot())
+
+    response = drive("/docs")
+    @test response.status == 200
+    @test contains(HTTP.header(response, "Content-Type"), "text/html")
+    body = String(response.body)
+    # A standalone viewer page — no page shell wrapped around it.
+    @test startswith(body, "<!DOCTYPE html>")
+    @test contains(body, "<title>Widgets docs</title>")
+    @test contains(body, "swagger-ui@5.7.2/swagger-ui-bundle.js")
+    @test contains(body, "swagger-ui@5.7.2/swagger-ui.css")
+    @test contains(body, "SwaggerUIBundle")
+    # Initialized against the companion document route.
+    @test contains(body, "\"/openapi\"")
+
+    # Sane out-of-the-box mount: standard spec address, pinned release.
+    @test SwaggerRoutes().spec_url == "/openapi"
+    @test SwaggerRoutes().swagger_version == "5.7.2"
 end
 
 @testitem "application architecture composes declarations, routes, contributions and observations" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

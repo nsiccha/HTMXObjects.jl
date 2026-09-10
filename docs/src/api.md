@@ -876,6 +876,7 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 | `EditorRoutes`   | Git-backed inline file editor (see Editor section) |
 | `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`) |
 | `OpenAPIRoutes` | OpenAPI 3.1 endpoint for an `@htmx` app's route tree (opt-in via `@include openapi = OpenAPIRoutes(; root=T)`) — see [OpenAPI](#openapi) |
+| `SwaggerRoutes` | Version-pinned Swagger UI viewer for the app's OpenAPI document (opt-in via `@include docs = SwaggerRoutes(; spec_url="/openapi")`) — see [OpenAPI](#openapi) |
 | `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
 | `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
 | `RecordingRoutes`| Static-recording driver (see Gallery section) |
@@ -904,9 +905,32 @@ end
 This serves the document as JSON at `GET /openapi` (the mount prefix is
 yours — mount wherever the document should live).
 
+The human companion is [`SwaggerRoutes`](@ref): a version-pinned Swagger UI
+viewer initialized against the document. Mount it next to the document
+route:
+
+```julia
+@htmx struct MyApp
+    @include openapi = OpenAPIRoutes(; root=MyApp, title="My API")
+    @include docs = SwaggerRoutes(; spec_url="/openapi")   # → GET /docs
+end
+```
+
+`spec_url` is explicit because the document's mount point is the consumer's
+choice. Viewer assets load from a pinned CDN release (`swagger_version`,
+`cdn_base` re-points air-gapped deployments at a local mirror).
+
+Mounting at `/docs` requires `serve(docs=false)`: with Oxygen's built-in
+docs enabled, its middleware answers every `/docs*` request with Oxygen's
+own Swagger — which is empty for `@htmx` apps (they register directly on
+the router, never into Oxygen's autodoc registry), so the mounted viewer
+would never fire. The same switch also disables Oxygen's `/docs/metrics`
+dashboard UI; metrics *collection* is on a separate flag and is unaffected.
+
 ```@docs
 openapi
 OpenAPIRoutes
+SwaggerRoutes
 ```
 
 ## Route inventory, selection, and warming

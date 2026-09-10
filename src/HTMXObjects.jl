@@ -33,7 +33,7 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
     default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
-export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi
+export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
 export reflect, select_routes, precompile_routes!, prewarm_routes!
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
@@ -5288,7 +5288,7 @@ end
 
 function _warn_docs_prefix(path, name)
     startswith(lstrip(path, '/'), "docs") &&
-        @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — Oxygen reserves this prefix for its Swagger UI. The route will silently 404. Rename the route to avoid the \"/docs\" prefix."
+        @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — with Oxygen's built-in docs enabled, its DocsMiddleware serves Oxygen's own (for @htmx apps, empty) Swagger for every \"/docs*\" request and this route never fires. Either pass `docs=false` to `serve` (also disables Oxygen's Swagger and its /docs/metrics dashboard UI; metrics collection is unaffected) or mount the route outside \"/docs\"."
 end
 
 # Build the URL path for a route property. `prefix` is the enclosing mount
