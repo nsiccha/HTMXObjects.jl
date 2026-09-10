@@ -908,3 +908,29 @@ yours — mount wherever the document should live).
 openapi
 OpenAPIRoutes
 ```
+
+## Route inventory, selection, and warming
+
+One shared collection drives both halves of warming an app before it serves
+live traffic — pre-listen compilation without executing anything, and
+post-listen validation over real HTTP:
+
+```julia
+warm = select_routes(MyApp; verb=:GET, prefix="/agents")
+precompile_routes!(MyApp, warm)  # safe pre-listen, never executes bodies
+prewarm_routes!(base_url, warm)  # post-listen validation
+```
+
+| Export | Purpose |
+|--------|---------|
+| `reflect(T)` / `reflect(app)` | In-process route inventory: one `(verb, path, name, doc, params)` NamedTuple per route, mirroring what `route!` registers. `SchemaRoutes` serves this same inventory as JSON |
+| `select_routes(routes; verb, prefix, names, pattern)` | Pure, stateless filter over the inventory (filters combine with AND); also accepts the app type directly. Returns the collection the two functions below consume |
+| `precompile_routes!(root, coll=nothing)` | Pre-listen: `Base.precompile` each resolved handler body + argument parser. Reports `(verb, path, name, precompiled)` per route; bodies never run |
+| `prewarm_routes!(base_url, coll; include_post=false)` | Post-listen: one real request per resolved route. Reports `(verb, path, name, url, status, error)` per route; non-`GET` routes are skipped unless `include_post=true`, failures never throw |
+
+Collections also accept ergonomic shorthands wherever they go: concrete
+`"/url"` strings (exact segments beat `{param}` placeholders), `:route_name`
+symbols, and `Regex`es over paths. Zero-match entries throw an
+`ArgumentError`, so a stale warm list fails loudly instead of warming
+nothing. `{param}` templates are concretized with boring type samples for
+requests — pass concrete URLs for an exact warm of id-lookup routes.

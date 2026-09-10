@@ -11,7 +11,8 @@ end
 @testmodule HTMXOTestFixtures begin
 using HTMXObjects
 
-export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
+export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
+    WarmupPrecompileApp, WarmupLiveApp, _WARMUP_PRECOMPILE_CALLS, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
@@ -59,6 +60,33 @@ end
 
 @htmx struct PostApp
     @post submit(; name="") = h.p("Hello $name")
+end
+
+# Fixtures for the ergonomic warm collection (reflect/select/precompile/prewarm).
+# WarmupSelectApp carries the load-bearing collision: a literal
+# `/agents/foryou` beside an indexed `/agents/{id}`, so URL resolution must
+# prefer the exact segment over the `{param}` one.
+@htmx struct WarmupSelectApp
+    @get status() = h.p("ok")
+    @post submit(; name="") = h.p("Hello $name")
+    @include agents = begin
+        @get foryou() = h.p("foryou")
+        @get index(id::Int) = h.p("agent $id")
+    end
+end
+
+# Never served anywhere: the canary proves precompile_routes! compiles
+# without executing (any execution increments the counter).
+const _WARMUP_PRECOMPILE_CALLS = Ref(0)
+@htmx struct WarmupPrecompileApp
+    @get index() = (_WARMUP_PRECOMPILE_CALLS[] += 1; h.p("warm"))
+    @get item(id::Int) = h.p("item $id")
+end
+
+@htmx struct WarmupLiveApp
+    @get index() = h.p("home")
+    @get item(id::Int) = h.p("item $id")
+    @post submit(; name="world") = h.p("hi $name")
 end
 
 # A POST route that declares a kwarg beside one that declares nothing at all —
@@ -5595,4 +5623,100 @@ end
     # with no commits at all.
     @test isempty(ed("never-saved.md").versions())
     @test isempty(GitRepo(mktempdir()).editor("x.md").versions())
+end
+
+@testitem "warmup - exported in-process reflect inventory" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    # `reflect` is used unqualified here: this item proves the export.
+    inv = reflect(WarmupSelectApp)
+    @test length(inv) == 4
+    @test Set(r.name for r in inv) == Set([:status, :submit, :foryou, :index])
+    byname = Dict(r.name => r for r in inv)
+    @test byname[:status].path == "/status" && byname[:status].verb == :GET
+    @test byname[:submit].path == "/submit" && byname[:submit].verb == :POST
+    @test byname[:foryou].path == "/agents/foryou"
+    @test byname[:index].path == "/agents/{id}"
+    @test all(r -> keys(r) == (:verb, :path, :name, :doc, :params), inv)
+    # Instance form reflects the same inventory without constructing anything.
+    @test reflect(WarmupSelectApp()) == inv
+end
+
+@testitem "warmup - select_routes combinator" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    inv = reflect(WarmupSelectApp)
+    @test length(select_routes(inv)) == length(inv)
+    @test Set(r.name for r in select_routes(inv; verb=:GET)) ==
+        Set([:status, :foryou, :index])
+    @test length(select_routes(inv; verb="post")) == 1
+    @test Set(r.path for r in select_routes(inv; prefix="/agents")) ==
+        Set(["/agents/foryou", "/agents/{id}"])
+    @test [r.name for r in select_routes(inv; names=:status)] == [:status]
+    @test length(select_routes(inv; names=[:status, :submit])) == 2
+    @test [r.name for r in select_routes(inv; pattern=r"foryou")] == [:foryou]
+    # Filters combine with AND.
+    @test Set(r.name for r in select_routes(inv; verb=:GET, prefix="/agents")) ==
+        Set([:foryou, :index])
+    @test isempty(select_routes(inv; prefix="/nope"))
+    # Pure: the input inventory is untouched.
+    @test length(inv) == 4
+    # The Type convenience reflects first.
+    @test length(select_routes(WarmupSelectApp; verb=:POST)) == 1
+    # Non-descriptors are rejected, not silently dropped.
+    @test_throws ArgumentError select_routes(["/agents"]; verb=:GET)
+end
+
+@testitem "warmup - precompile resolves URLs and never executes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    # Exact segments beat {param}: only the literal route resolves.
+    exact = precompile_routes!(WarmupSelectApp, ["/agents/foryou"])
+    @test length(exact) == 1
+    @test exact[1].name === :foryou && exact[1].path == "/agents/foryou"
+    # A param-shaped URL resolves to the indexed route; query strings strip.
+    param = precompile_routes!(WarmupSelectApp, ["/agents/7?x=1"])
+    @test length(param) == 1 && param[1].path == "/agents/{id}"
+    # Names and patterns resolve across verbs and prefixes.
+    mixed = precompile_routes!(WarmupSelectApp, [:submit, r"^/status"])
+    @test Set(r.name for r in mixed) == Set([:submit, :status])
+    # The canary app is never served: precompile must compile, not run.
+    @test _WARMUP_PRECOMPILE_CALLS[] == 0
+    results = precompile_routes!(WarmupPrecompileApp)
+    @test length(results) == 2
+    @test length(reflect(WarmupPrecompileApp)) == 2
+    @test all(r -> r.precompiled, results)
+    @test _WARMUP_PRECOMPILE_CALLS[] == 0
+    # Instance root resolves the same inventory.
+    @test length(precompile_routes!(WarmupPrecompileApp())) == 2
+    # Zero-match entries fail loudly instead of warming nothing.
+    @test_throws ArgumentError precompile_routes!(WarmupSelectApp, ["/nope"])
+    @test_throws ArgumentError precompile_routes!(WarmupSelectApp, [:nosuch])
+    @test_throws ArgumentError precompile_routes!(WarmupSelectApp, [r"^/zzz/"])
+end
+
+@testitem "warmup - prewarm validates live routes, POST opt-in" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+    route!(WarmupLiveApp())
+    serve(; port=8123, async=true)
+    try
+        base = "http://127.0.0.1:8123"
+        # One shared collection drives both halves: precompile it, then warm it.
+        coll = select_routes(WarmupLiveApp)
+        precompile_routes!(WarmupLiveApp, coll)
+        defaulted = prewarm_routes!(base, coll)
+        @test length(defaulted) == 3
+        @test length(coll) == 3
+        hits = filter(r -> r.status !== nothing, defaulted)
+        @test all(r -> r.status == 200 && r.error === nothing, hits)
+        @test all(r -> r.verb === :GET, hits)
+        # The POST route is skipped without opt-in, and says so.
+        skipped = filter(r -> r.status === nothing, defaulted)
+        @test length(skipped) == 1 && skipped[1].verb === :POST
+        @test occursin("include_post", skipped[1].error)
+        # Explicit opt-in requests it for real.
+        opted = prewarm_routes!(base, coll; include_post=true)
+        @test all(r -> r.status == 200, opted)
+        # Concrete URLs work verbatim (the promoter hand-list shape).
+        concrete = prewarm_routes!(base, ["/", "/item/7"])
+        @test all(r -> r.status == 200, concrete)
+        # The Type form resolves shorthands against the inventory.
+        typed = prewarm_routes!(WarmupLiveApp, base, [:submit]; include_post=true)
+        @test length(typed) == 1 && typed[1].status == 200
+    finally
+        terminate()
+    end
 end
