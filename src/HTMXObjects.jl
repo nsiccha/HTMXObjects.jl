@@ -33,7 +33,7 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
     default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
-export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes
+export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -8078,6 +8078,8 @@ include("test_items.jl")
 include("routes/test_routes.jl")
 
 include("routes/structure_routes.jl")
+
+include("routes/openapi_routes.jl")
 
 include("routes/reflection_routes.jl")
 

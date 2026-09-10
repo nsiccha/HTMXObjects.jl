@@ -40,7 +40,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, TypedApp,
     IndexedMountChild, IndexedMountRoot, SingleRouteIncludeRoot,
     DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
-    EditorMountRoot, RawBodyApp
+    EditorMountRoot, RawBodyApp,
+    OpenAPIWidgets, OpenAPIRoot
 
 @htmx struct TestApp
     title = "Test"
@@ -70,6 +71,44 @@ end
 
 @htmx struct TypedApp
     @get typed(n::Int) = h.p("N=$n")
+end
+
+# Docstring'd routes exercising the OpenAPI serializer: a plain docstring, a
+# `# Arguments`-documented path param, a POST body param, a same-named
+# GET+POST pair (operationId dedup), an inherited `@param`, varied scalar
+# types, and a `@ws` route (skipped — OpenAPI has no WebSocket operation).
+@htmx struct OpenAPIWidgets
+    @param token::String = "anon"
+
+    "List all widgets."
+    @get widgets() = h.p("all")
+
+    """
+    Fetch one widget.
+
+    # Arguments
+    - `id`: the widget id
+    """
+    @get widget(id::Int) = h.p("one $id")
+
+    "Create a widget."
+    @post widget(; name::String="w") = h.p("made $name")
+
+    "Current status."
+    @get status() = h.p("ok")
+
+    "Update status."
+    @post status(; level::Int=1) = h.p("set")
+
+    @get search(; q::String="", limit::Int=10, exact::Bool=false, score::Float64=0.0) =
+        h.p("q=$q limit=$limit exact=$exact score=$score")
+
+    @ws live() = h.p("ws")
+end
+
+@htmx struct OpenAPIRoot
+    @include api = OpenAPIWidgets()
+    @include openapi = OpenAPIRoutes(; root=OpenAPIRoot, title="Widgets", version="2.0.0")
 end
 
 @htmx struct NothingDefaultApp
@@ -4102,6 +4141,86 @@ end
     @test contains(schema_body, "\"verb\"")
     @test contains(schema_body, "\"params\"")
     @test !contains(schema_body, "\"children\"")
+end
+
+@testitem "openapi() renders routes, docs, params, and bodies" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    doc = openapi(OpenAPIWidgets; title="Widgets", version="2.0.0")
+    @test doc.openapi == "3.1.0"
+    @test doc.info == (title="Widgets", version="2.0.0")
+    @test !haskey(doc, :servers)
+    # Every HTTP route is present; the `@ws` route has no OpenAPI operation.
+    @test sort!(collect(keys(doc.paths))) ==
+        ["/search", "/status", "/widget", "/widget/{id}", "/widgets"]
+    @test !any(contains(string(path), "live") for path in keys(doc.paths))
+
+    list_op = doc.paths["/widgets"]["get"]
+    @test list_op.operationId == "widgets"
+    @test list_op.summary == "List all widgets."
+    token = only(filter(p -> p.name == "token", list_op.parameters))
+    @test (token.in, token.required, token.schema) ==
+        ("query", false, (type="string", default="anon"))
+
+    get_op = doc.paths["/widget/{id}"]["get"]
+    @test get_op.operationId == "widget"
+    @test get_op.summary == "Fetch one widget."
+    # The body is just the summary once `# Arguments` is stripped — omitted.
+    @test !haskey(get_op, :description)
+    id_param = only(filter(p -> p.name == "id", get_op.parameters))
+    @test (id_param.in, id_param.required) == ("path", true)
+    @test id_param.schema == (type="integer", description="the widget id")
+
+    post_op = doc.paths["/widget"]["post"]
+    @test post_op.operationId == "widget"
+    @test post_op.summary == "Create a widget."
+    # POST params ride the form body, not the query string.
+    @test !haskey(post_op, :parameters)
+    form_schema = post_op.requestBody.content["application/x-www-form-urlencoded"].schema
+    @test form_schema.properties["name"] == (type="string", default="w")
+    @test form_schema.properties["token"] == (type="string", default="anon")
+
+    # One path, two same-named routes: the operationIds disambiguate by method.
+    @test doc.paths["/status"]["get"].operationId == "status_get"
+    @test doc.paths["/status"]["post"].operationId == "status_post"
+    @test doc.paths["/status"]["post"].requestBody.content[
+        "application/x-www-form-urlencoded"].schema.properties["level"] ==
+        (type="integer", default=1)
+
+    search_op = doc.paths["/search"]["get"]
+    @test !haskey(search_op, :summary)
+    by_name = Dict(p.name => p for p in search_op.parameters)
+    @test by_name["limit"].schema == (type="integer", default=10)
+    @test by_name["exact"].schema == (type="boolean", default=false)
+    @test by_name["score"].schema == (type="number", default=0.0)
+    @test by_name["q"].schema == (type="string", default="")
+
+    # Title falls back to the app type; servers appear only when given.
+    @test openapi(OpenAPIWidgets).info.title == string(OpenAPIWidgets)
+    served = openapi(OpenAPIWidgets; servers=["https://api.example.com"])
+    @test served.servers == [(url="https://api.example.com",)]
+end
+
+@testitem "OpenAPIRoutes serves the OpenAPI document as JSON" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    end
+
+    route!(OpenAPIRoot())
+
+    response = drive("/openapi")
+    @test response.status == 200
+    @test contains(HTTP.header(response, "Content-Type"), "application/json")
+    body = String(response.body)
+    @test contains(body, "\"openapi\":\"3.1.0\"")
+    @test contains(body, "\"title\":\"Widgets\"")
+    @test contains(body, "\"operationId\":\"widget\"")
+    @test contains(body, "/widget/{id}")
+    @test contains(body, "requestBody")
+
+    # Sibling routes under the same root are undisturbed.
+    widgets_response = drive("/api/widgets")
+    @test widgets_response.status == 200
+    @test contains(String(widgets_response.body), "all")
 end
 
 @testitem "application architecture composes declarations, routes, contributions and observations" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

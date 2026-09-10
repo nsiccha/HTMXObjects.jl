@@ -875,6 +875,36 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 | `TestRoutes`     | Test-runner UI (see Testing section) |
 | `EditorRoutes`   | Git-backed inline file editor (see Editor section) |
 | `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`) |
+| `OpenAPIRoutes` | OpenAPI 3.1 endpoint for an `@htmx` app's route tree (opt-in via `@include openapi = OpenAPIRoutes(; root=T)`) — see [OpenAPI](#openapi) |
 | `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
 | `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
 | `RecordingRoutes`| Static-recording driver (see Gallery section) |
+
+### OpenAPI
+
+`openapi(T; title, version, description, servers)` renders the route tree of
+an `@htmx` app type `T` as an OpenAPI 3.1 document — plain data, directly
+JSON-serializable. It reads the stable `reflect(T)` descriptors, so the
+`reflect` contract is unchanged. A route docstring's first line becomes the
+operation `summary` (the rest, minus any `# Arguments` section, becomes
+`description`); path params keep their `{name}` spelling; GET/DELETE params
+become `parameters` entries while POST/PUT/PATCH params become an
+`application/x-www-form-urlencoded` `requestBody`. `@ws` routes are skipped —
+OpenAPI has no WebSocket operation.
+
+```julia
+@htmx struct MyApp
+    "List all widgets."
+    @get widgets() = h.p("all")
+
+    @include openapi = OpenAPIRoutes(; root=MyApp, title="My API", version="1.0.0")
+end
+```
+
+This serves the document as JSON at `GET /openapi` (the mount prefix is
+yours — mount wherever the document should live).
+
+```@docs
+openapi
+OpenAPIRoutes
+```
