@@ -22,6 +22,7 @@ HTMXObjectsTreebarsExt = "Treebars"
 
 [compat]
 Dates = "1"
+DynamicObjects = "0.4.4, 0.5"
 HTMX = "1"
 HTTP = "1, 2"
 Oxygen = "1.10"
