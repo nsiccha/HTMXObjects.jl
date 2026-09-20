@@ -5797,6 +5797,42 @@ end
     @test !_operation_ready_terminal_fallback(render, failed).ready
 end
 
+# `htmx()` shells carry the Treebars stylesheet + script while the extension
+# is loaded, so pollers render quietly and terminalize with no per-app wiring
+# (a manual `extra_head` install alongside stays harmless but redundant). The
+# flag opts a shell out; without Treebars the seam is empty and shells are
+# unchanged.
+@testitem "htmx page shells auto-install Treebars assets" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _polling_page_assets, _polling_page_assets_impl
+
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    shell = repr("text/html", htmx(h.p("body")))
+    @test contains(shell, ".treebar-poller")
+    @test contains(shell, "terminalizePoller")
+
+    opted_out = repr("text/html", htmx(h.p("body"); treebars_assets=false))
+    @test !contains(opted_out, ".treebar-poller")
+    @test !contains(opted_out, "terminalizePoller")
+
+    titled = repr("text/html",
+        htmx(h.p("body"); extra_head=(h.title("App"),)))
+    @test first(findfirst(".treebar-poller", titled)) <
+        first(findfirst("<title>App</title>", titled))
+
+    old_assets = _polling_page_assets_impl[]
+    _polling_page_assets_impl[] = nothing
+    try
+        @test isempty(_polling_page_assets())
+        bare = repr("text/html", htmx(h.p("body")))
+        @test !contains(bare, ".treebar-poller")
+        @test !contains(bare, "terminalizePoller")
+    finally
+        _polling_page_assets_impl[] = old_assets
+    end
+    @test !isempty(_polling_page_assets())
+end
+
 @testitem "automatic polling renders a documented operation label once" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _clear_operation_polls!, _run_operation, Verb
 

@@ -1917,6 +1917,7 @@ function htmx(args...;
     compose              = true,
     overlay              = true,
     extra_head          = (),
+    treebars_assets     = true,
 )
     cdn = []
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
@@ -1943,6 +1944,11 @@ function htmx(args...;
             htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
+            # Poller quietness by default: the Treebars stylesheet + script
+            # ride every shell while the extension is loaded (no-op without
+            # Treebars), ahead of `extra_head` so apps can still override.
+            # A manual install alongside stays harmless but redundant.
+            (treebars_assets ? _polling_page_assets() : ())...,
             extra_head...,
         ),
         body(args...),
@@ -5108,6 +5114,17 @@ const _operation_polling_impl = Ref{Any}(
 )
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
+
+# Extension seam: `htmx()` page shells carry the Treebars stylesheet + script
+# so pollers render quietly and terminalize with no per-app wiring. Without
+# Treebars the Ref stays `nothing` and shells are unchanged.
+const _polling_page_assets_impl = Ref{Any}(nothing)
+
+function _polling_page_assets()
+    impl = _polling_page_assets_impl[]
+    isnothing(impl) && return ()
+    impl()
+end
 
 # `fetch` is DO's two-phase selector, threaded through the IP call form (and
 # through `execute_materialization`, which forwards its kwargs to that same call

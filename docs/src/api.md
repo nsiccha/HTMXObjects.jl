@@ -791,6 +791,13 @@ inspection chrome. `keep_progress` still governs hand-shaped
 `polling_fetchindex` pollers, which keep their frozen tree for post-hoc
 inspection.
 
+Every `htmx()` page shell carries the Treebars stylesheet + script while the
+Treebars extension is loaded, so pollers render quietly and terminalize with
+no per-app wiring — ahead of `extra_head`, so apps can still override.
+`treebars_assets=false` opts a shell out (the escape hatch for strict script
+policies); a manual `extra_head` install alongside stays harmless but
+redundant.
+
 The progress tree is property-scoped. In generated DynamicObjects bodies,
 source-visible `object.property` reads and `object.indexed(args...)` calls carry
 the caller's progress node explicitly into the nested computation. Ordinary

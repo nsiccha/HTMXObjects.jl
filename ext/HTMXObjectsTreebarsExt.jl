@@ -108,6 +108,8 @@ function __init__()
         end
 
     HTMXObjects._operation_ready_terminal_impl[] = _operation_ready_terminal
+    HTMXObjects._polling_page_assets_impl[] =
+        () -> (Treebars.htmx_treebar_styles(), Treebars.htmx_treebar_script())
 end
 
 end # module
