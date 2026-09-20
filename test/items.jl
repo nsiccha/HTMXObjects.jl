@@ -20,7 +20,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticRequiredParamApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
     MountedSemanticOps, MountedSemanticRoot,
-    PolicyApp, MediaRangeApp, SlowPolicyApp, SlowPagePolicyApp, SlowRecordApp,
+    PolicyApp, MediaRangeApp, SlowPolicyApp, SlowInstrumentedPolicyApp,
+    SlowPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
@@ -479,6 +480,14 @@ end
 # distinguish a genuine non-blocking start from a blocking one.
 @htmx struct SlowPolicyApp
     @get slow(; count::Int=1) = (sleep(3.0); h.p("slow:$(count)"))
+end
+
+# Instrumented counterpart to SlowPolicyApp: the same slow body plus an instant
+# route, both carrying explicit async intent, so `:auto` keeps polling them
+# while the plain fixture above stays direct.
+@htmx struct SlowInstrumentedPolicyApp
+    @get @progress instant(; count::Int=1) = h.p("instant:$(count)")
+    @get @progress slow(; count::Int=1) = (sleep(3.0); h.p("slow:$(count)"))
 end
 
 const slow_page_gate = Ref{Base.Event}(Base.Event())
@@ -1525,8 +1534,11 @@ end
     @test contains(html, "class=\"htmxo-semantic-cards\"")
     @test !contains(html, "name=\"__htmxo_")
 
-    # The same query context survives the automatic poll URL. The poll marker
+    # The same query context survives the poll URL. The poll marker
     # is additive; typed operation inputs remain separate from root @params.
+    # Forced `:polling` here: the route is unmarked, so `:auto` stays direct,
+    # and this half is about context plumbing through the transport, not the
+    # `:auto` decision itself.
     poll_req = HTTP.Request(
         "GET", "/analysis/analyze?fit_key=fit-17&study=alpha&model=a1",
         ["HX-Request" => "true"],
@@ -1544,7 +1556,7 @@ end
         operation = _run_operation(
             (context=nothing, root=poll_app, leaf=poll_leaf),
             typeof(poll_leaf), :analyze, Verb{:GET}(), poll_req, 0, 0;
-            operation_policy=OperationPolicy(:auto),
+            operation_policy=OperationPolicy(:polling),
         )
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
         # `study` is node state now, not a declared argument of `analyze`: it is
@@ -1896,10 +1908,11 @@ end
         _resolve_operation_value
     import HTMXObjects.DynamicObjects
 
-    # `:auto` is the default so an ordinary route gets the live progress tree
-    # with no `route!(…; operation_policy=…)` registration. It stays conditional
-    # (GET + HTMX + a pending-capable descriptor), which the `plain` vs `hx`
-    # cases below pin — nothing that was direct becomes a poller by default.
+    # `:auto` is the default so an instrumented route gets the live progress
+    # tree with no `route!(…; operation_policy=…)` registration. It stays
+    # conditional (GET + HTMX + a pending-capable descriptor + explicit async
+    # intent), which the `plain` vs `hx` vs `marked` cases below pin — a plain
+    # computed route stays direct even for HTMX requests.
     @test OperationPolicy().mode === :auto
     @test OperationPolicy(:blocking).mode === :blocking
     @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
@@ -1909,12 +1922,40 @@ end
     html_descriptor = _property_descriptor(PolicyApp, :html)
     raw_descriptor = _property_descriptor(PolicyApp, :raw)
     response_descriptor = _property_descriptor(PolicyApp, :response)
+    marked_descriptor =
+        _property_descriptor(SlowInstrumentedPolicyApp, :instant)
+    @test marked_descriptor.semantics.pending
+    @test marked_descriptor.semantics.progress_mode === :instrumented
+    @test html_descriptor.semantics.pending
+    @test html_descriptor.semantics.progress_mode === :automatic
     plain = HTTP.Request("GET", "/html?count=2")
     hx = HTTP.Request("GET", "/html?count=2", ["HX-Request" => "true"])
+    marked_hx = HTTP.Request(
+        "GET", "/instant?count=2", ["HX-Request" => "true"])
     @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
                                     plain, Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
-                                    hx, Verb{:GET}()) === :polling
+                                    hx, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:auto), marked_descriptor,
+                                    plain, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:auto), marked_descriptor,
+                                    marked_hx, Verb{:GET}()) === :polling
+    # The intent gate, cell by cell: only a non-`:automatic` progress mode
+    # polls, the pending capability still gates first, and a descriptor that
+    # predates the field stays blocking.
+    function intent_mode(pending, progress_mode)
+        descriptor = (; output=(; type=Nothing),
+            semantics=(; pending, progress_mode))
+        _operation_execution_mode(OperationPolicy(:auto), descriptor,
+                                  marked_hx, Verb{:GET}())
+    end
+    @test intent_mode(true, :automatic) === :blocking
+    @test intent_mode(true, :forwarded) === :polling
+    @test intent_mode(true, :instrumented) === :polling
+    @test intent_mode(false, :instrumented) === :blocking
+    legacy = (; output=(; type=Nothing), semantics=(; pending=true))
+    @test _operation_execution_mode(OperationPolicy(:auto), legacy,
+                                    marked_hx, Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:polling), raw_descriptor,
                                     hx, Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:polling), response_descriptor,
@@ -1948,6 +1989,8 @@ end
 
     app = PolicyApp()
     target = (context=nothing, root=app, leaf=app)
+    marked_app = SlowInstrumentedPolicyApp()
+    marked_target = (context=nothing, root=marked_app, leaf=marked_app)
     polls = NamedTuple[]
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
@@ -1957,28 +2000,37 @@ end
             h.aside("polling")
         end
     try
-        operation = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
-                                   hx, 0, 0;
+        # A plain `:auto` route answers inline and never reaches the seam.
+        direct = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
+                                hx, 0, 0;
+                                operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", direct.value) == "<p>html:2</p>"
+        @test isempty(polls)
+
+        operation = _run_operation(marked_target,
+                                   SlowInstrumentedPolicyApp, :instant,
+                                   Verb{:GET}(), marked_hx, 0, 0;
                                    operation_policy=OperationPolicy(:auto))
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
         @test length(polls) == 1
         @test only(polls).call_kwargs == (count=2,)
         poll_url = only(polls).transport.poll_url
         @test startswith(poll_url,
-            "/html?count=2&__htmxo_poll=1&__htmxo_operation=")
-        @test only(polls).transport.label == Long(:html)
+            "/instant?count=2&__htmxo_poll=1&__htmxo_operation=")
+        @test only(polls).transport.label == Long(:instant)
         @test only(polls).transport.grace_period == 0.1
 
         poll_request = HTTP.Request(
             "GET", poll_url, ["HX-Request" => "true"])
-        polled = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
-                                poll_request, 0, 0;
+        polled = _run_operation(marked_target,
+                                SlowInstrumentedPolicyApp, :instant,
+                                Verb{:GET}(), poll_request, 0, 0;
                                 operation_policy=OperationPolicy(:auto))
         @test repr("text/html", polled.value) == "<aside>polling</aside>"
         @test length(polls) == 2
         @test last(polls).call_kwargs == (count=2,)
         @test last(polls).transport.poll_url == poll_url
-        @test last(polls).transport.label == Long(:html)
+        @test last(polls).transport.label == Long(:instant)
         @test last(polls).transport.grace_period == 0.0
 
         raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
@@ -2031,8 +2083,9 @@ end
         (render_result, started, _ip, _keys, _call_kwargs, _transport) ->
             h.div(string(render_result(started)))
     try
-        resolved = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
-                                  hx, 0, 0;
+        resolved = _run_operation(marked_target,
+                                  SlowInstrumentedPolicyApp, :instant,
+                                  Verb{:GET}(), marked_hx, 0, 0;
                                   operation_policy=OperationPolicy(:auto))
         html = repr("text/html", resolved.value)
         @test !contains(html, "Pending")
@@ -2301,14 +2354,18 @@ end
 # *reached* — which a fully-blocking start also satisfies, because the wrapper
 # still runs, just over an already-finished value. So those tests pass whether
 # or not the transport does anything, and the regression they miss is total:
-# `:auto`/`:polling` degrading to `:blocking` for every route. Pin the actual
-# contract — what reaches the seam is an in-flight handle, not a finished value.
+# The polling transport starts the operation without blocking the request,
+# whatever selected it. Pin the actual contract — what reaches the seam is an
+# in-flight handle, not a finished value — once through forced `:polling` and
+# once through `:auto` on an instrumented route.
 @testitem "polling transport starts the operation without blocking" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_polling_impl, _run_operation
     import HTMXObjects.DynamicObjects
 
     app = SlowPolicyApp()
     target = (context=nothing, root=app, leaf=app)
+    marked_app = SlowInstrumentedPolicyApp()
+    marked_target = (context=nothing, root=marked_app, leaf=marked_app)
     starts = Any[]
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
@@ -2321,16 +2378,35 @@ end
         # for seconds, which would swamp the wall-clock assertion below.
         warm = HTTP.Request("GET", "/slow?count=0", ["HX-Request" => "true"])
         _run_operation(target, SlowPolicyApp, :slow, Verb{:GET}(), warm, 0, 0;
-                       operation_policy=OperationPolicy(:auto))
+                       operation_policy=OperationPolicy(:polling))
         @test only(starts) isa DynamicObjects.Pending
 
         empty!(starts)
         hx = HTTP.Request("GET", "/slow?count=1", ["HX-Request" => "true"])
         elapsed = @elapsed _run_operation(target, SlowPolicyApp, :slow,
                                           Verb{:GET}(), hx, 0, 0;
-                                          operation_policy=OperationPolicy(:auto))
+                                          operation_policy=OperationPolicy(:polling))
         # The 3s body must NOT have run to completion on the request task.
         @test elapsed < 1.0
+        @test only(starts) isa DynamicObjects.Pending
+
+        # `:auto` keeps the same non-blocking start for an instrumented route.
+        empty!(starts)
+        marked_warm = HTTP.Request(
+            "GET", "/slow?count=10", ["HX-Request" => "true"])
+        _run_operation(marked_target, SlowInstrumentedPolicyApp, :slow,
+                       Verb{:GET}(), marked_warm, 0, 0;
+                       operation_policy=OperationPolicy(:auto))
+        @test only(starts) isa DynamicObjects.Pending
+
+        empty!(starts)
+        marked_hx = HTTP.Request(
+            "GET", "/slow?count=11", ["HX-Request" => "true"])
+        marked_elapsed = @elapsed _run_operation(
+            marked_target, SlowInstrumentedPolicyApp, :slow,
+            Verb{:GET}(), marked_hx, 0, 0;
+            operation_policy=OperationPolicy(:auto))
+        @test marked_elapsed < 1.0
         @test only(starts) isa DynamicObjects.Pending
 
         # `:blocking` is unchanged: the value is fully computed, never a handle.
@@ -2353,7 +2429,8 @@ end
 # nothing gets `:auto` or `:blocking` — which is exactly the question a
 # consumer cannot answer from the code either. Pin it from the registry AND
 # through a real route registration, so a future change to `route!`'s kwarg
-# default cannot silently put long routes back on the request task.
+# default cannot silently change what an unmarked long route does: it answers
+# inline, while an instrumented one stays off the request task.
 @testitem "zero-config apps default to :auto" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_policies, _operation_polling_impl,
         _run_operation
@@ -2362,11 +2439,11 @@ end
     @test OperationPolicy().mode === :auto
 
     # `route!` with no `operation_policy` at all — the SbPMX `__init__` shape.
-    route!(SlowPolicyApp())
-    policy = _operation_policies[SlowPolicyApp]
+    route!(SlowInstrumentedPolicyApp())
+    policy = _operation_policies[SlowInstrumentedPolicyApp]
     @test policy.mode === :auto
 
-    app = SlowPolicyApp()
+    app = SlowInstrumentedPolicyApp()
     target = (context=nothing, root=app, leaf=app)
     starts = Any[]
     old_polling = _operation_polling_impl[]
@@ -2379,13 +2456,14 @@ end
         # Warm on its own key: a cold `_run_operation` compiles for seconds,
         # which would swamp the wall-clock assertion below.
         warm = HTTP.Request("GET", "/slow?count=100", ["HX-Request" => "true"])
-        _run_operation(target, SlowPolicyApp, :slow, Verb{:GET}(), warm, 0, 0;
+        _run_operation(target, SlowInstrumentedPolicyApp, :slow,
+                       Verb{:GET}(), warm, 0, 0;
                        operation_policy=policy)
         empty!(starts)
 
         hx = HTTP.Request("GET", "/slow?count=101", ["HX-Request" => "true"])
-        elapsed = @elapsed _run_operation(target, SlowPolicyApp, :slow,
-                                          Verb{:GET}(), hx, 0, 0;
+        elapsed = @elapsed _run_operation(target, SlowInstrumentedPolicyApp,
+                                          :slow, Verb{:GET}(), hx, 0, 0;
                                           operation_policy=policy)
         @test elapsed < 1.0
         @test only(starts) isa DynamicObjects.Pending
@@ -3635,10 +3713,10 @@ Mounts `TestRoutes` through the normal `@include` registrar and drives both a
 catalog GET and a rejected selective POST through the in-process HTTP router.
 
 `TestUIHost` declares no `operation_policy`, so it runs on the zero-config
-`:auto` default — and scanning the catalog takes longer than the grace period.
-An HTMX GET therefore answers with a poller and the content arrives on a
-subsequent poll. Following that round trip is the point: it proves the default
-transport actually *delivers*, not merely that it engages.
+`:auto` default — and its routes are unmarked, so an HTMX GET answers direct
+even though scanning the catalog takes longer than the grace period.
+`settle()` still follows a poller if one ever appears, so the round trip below
+keeps proving the transport *delivers* either way.
 """
 @testitem "web-included test routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :test_ui] begin
     route!(TestUIHost())
@@ -5410,7 +5488,11 @@ end # @testmodule HTMXOPollIdentityFixtures
             scope=:session,
             key=req -> HTTP.header(req, "X-Session", ""),
         )
-        route!(PollIdentityRoute(); root_provider=provider)
+        # Forced `:polling`: the route is unmarked (and gated — `:auto`
+        # would block each `drive` on its gate forever), while this item is
+        # about poll identity/retention/bounding, not the `:auto` decision.
+        route!(PollIdentityRoute(); root_provider=provider,
+               operation_policy=:polling)
 
         first_body = drive("/poll_identity/7")
         second_body = drive("/poll_identity/7")
@@ -5504,10 +5586,14 @@ end
     app = PropertyScopedLabelRoute()
     target = (context=nothing, root=app, leaf=app)
     hx = HTTP.Request("GET", "/", ["HX-Request" => "true"])
+    # Forced transport: the route is unmarked, so `:auto` stays direct, and
+    # this item is about label rendering, not the `:auto` decision.
+    polling = OperationPolicy(:polling)
 
     try
         initial = _run_operation(target, PropertyScopedLabelRoute, :index,
-                                 Verb{:GET}(), hx, 0, 0)
+                                 Verb{:GET}(), hx, 0, 0;
+                                 operation_policy=polling)
         initial_html = repr("text/html", initial.value)
         @test contains(initial_html, "treebar-poller")
         @test length(findall("Transpiling prepared example", initial_html)) == 1
@@ -5518,7 +5604,8 @@ end
         poll_url = replace(only(poll_match.captures), "&amp;" => "&")
         polled = _run_operation(
             target, PropertyScopedLabelRoute, :index, Verb{:GET}(),
-            HTTP.Request("GET", poll_url, ["HX-Request" => "true"]), 0, 0)
+            HTTP.Request("GET", poll_url, ["HX-Request" => "true"]), 0, 0;
+            operation_policy=polling)
         polled_html = repr("text/html", polled.value)
         @test length(findall("Transpiling prepared example", polled_html)) == 1
         @test !contains(polled_html, "index — running")
@@ -5557,9 +5644,12 @@ end
             h.aside("polling")
         end
     node = try
-        # No `operation_policy=` kwarg anywhere — this is the DEFAULT path.
+        # Forced `:polling`: the route is deliberately unmarked (pinned
+        # above), so the default path stays direct — the seam half below
+        # needs the transport, not the `:auto` decision.
         operation = _run_operation(target, PropertyScopedRoute, :slow, Verb{:GET}(),
-                                   hx, 1, 1)
+                                   hx, 1, 1;
+                                   operation_policy=OperationPolicy(:polling))
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
         # The request returned while the leaf is still parked on the gate, so an
         # in-flight handle — not a finished value — reached the polling seam.
