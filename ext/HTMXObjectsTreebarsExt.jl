@@ -98,7 +98,7 @@ function __init__()
         (render_result, started, ip, keys, call_kwargs, transport) -> begin
             render_operation_result = value ->
                 _operation_render_result(render_result, value, transport)
-            fast = _grace_fetch(
+            fast = HTMXObjects._operation_grace_fetch(
                 render_operation_result, started, transport.grace_period)
             fast.ready && return fast.value
             # Only retain operations that actually cross the grace boundary and

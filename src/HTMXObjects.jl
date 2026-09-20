@@ -3251,11 +3251,14 @@ end
 
 Select route execution transport. `:auto` — **the default, applied to every app
 whether or not it declares a policy** — polls pending-capable HTMX requests.
-A direct rich-page visit first returns its composed `__page__` shell with a
-load-triggered request for the same operation; that fragment then uses the same
-grace/polling path. Markdown/error requests and routes without page chrome stay
-direct. `:polling` forces the polling transport. `:blocking` keeps every route
-direct; it is the opt-out for a route surface that genuinely must answer inline.
+A direct rich-page visit spends the same grace budget an HTMX request would:
+an operation that finishes within it renders inline in its composed `__page__`
+shell — one response, no placeholder, no refetch. Only a slower operation
+defers, returning the shell with a load-triggered request that joins the
+already-running operation; that fragment then uses the same grace/polling path.
+Markdown/error requests and routes without page chrome stay direct. `:polling`
+forces the polling transport. `:blocking` keeps every route direct; it is the
+opt-out for a route surface that genuinely must answer inline.
 
 Polling is limited to GET operations because the Treebars poller issues GET
 refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
@@ -4844,6 +4847,14 @@ _operation_poll_marker(_) = false
 _operation_poll_request(req::HTTP.Request) =
     _operation_poll_marker(get(queryparams(req), "__htmxo_poll", nothing))
 
+# An attach carries a poll token WITHOUT the poll marker: the load-triggered
+# refetch joining the operation the initial direct-page request retained. The
+# poll marker is reserved for follow-up polls, which render bare fragments
+# into the live poller while the attach establishes the runtime wrapper.
+_operation_attach_request(req::HTTP.Request) =
+    !_operation_poll_request(req) &&
+        _operation_poll_token(req) !== nothing
+
 _operation_form_request(req::HTTP.Request) =
     _operation_poll_marker(get(queryparams(req), "__htmxo_form", nothing))
 
@@ -4898,19 +4909,31 @@ function _operation_poll_url(req::HTTP.Request, token::AbstractString,
     _operation_marker_url(target, "__htmxo_operation", token)
 end
 
-function _operation_page_load(req::HTTP.Request, prefix::AbstractString;
-        replace_terminal::Bool=false)
-    replace_terminal || return h.div(;
-        class="htmxo-operation-load", data_htmxo_operation_load="",
-        hx_get=_operation_request_url(req, prefix), hx_trigger="load",
-        hx_target="this", hx_swap="outerHTML")
+# A deferred direct-page placeholder carries the poll token WITHOUT the poll
+# marker (see `_operation_attach_request`): the load-triggered refetch then
+# joins the retained in-flight operation instead of starting a second compute
+# on its fresh root, and establishes the runtime wrapper the bare follow-up
+# polls swap into.
+_operation_poll_token_url(target, ::Nothing) = target
+_operation_poll_token_url(target, token::AbstractString) =
+    _operation_marker_url(target, "__htmxo_operation", token)
 
-    token = _new_operation_page_load_token()
-    target = _operation_marker_url(
-        _operation_request_url(req, prefix), "__htmxo_page_load", token)
-    h.div(; id=_operation_page_load_id(token), class="htmxo-operation-load",
-          data_htmxo_operation_load="",
-          hx_get=target,
+function _operation_page_load(req::HTTP.Request, prefix::AbstractString;
+        replace_terminal::Bool=false,
+        poll_token::Union{Nothing,AbstractString}=nothing)
+    target = _operation_request_url(req, prefix)
+    if replace_terminal
+        page_token = _new_operation_page_load_token()
+        target = _operation_marker_url(target, "__htmxo_page_load", page_token)
+        target = _operation_poll_token_url(target, poll_token)
+        return h.div(; id=_operation_page_load_id(page_token),
+                     class="htmxo-operation-load",
+                     data_htmxo_operation_load="",
+                     hx_get=target,
+                     hx_trigger="load", hx_target="this", hx_swap="outerHTML")
+    end
+    h.div(; class="htmxo-operation-load", data_htmxo_operation_load="",
+          hx_get=_operation_poll_token_url(target, poll_token),
           hx_trigger="load", hx_target="this", hx_swap="outerHTML")
 end
 
@@ -4939,6 +4962,28 @@ _operation_rich_page_request(req::HTTP.Request) =
 # shape so the public type remains Revise-safe on Julia 1.10.
 _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
     policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
+
+# Grace fast-path shared by the polling transport (via the Treebars extension
+# seam) and the direct-page initial request: wait up to `grace_period` for
+# `started`, following nested Pending handles inside the one budget — a route
+# may finish by returning another Pending, and rendering an unresolved inner
+# handle would synchronously fetch it and hold the request open. A non-Pending
+# `started` is ready at once. Returns `(ready, value)`; only `ready` values
+# have passed through `render_result`.
+function _operation_grace_fetch(render_result, started, grace_period::Real)
+    rv = started
+    grace_started = time_ns()
+    while rv isa DynamicObjects.Pending
+        elapsed = (time_ns() - grace_started) / 1.0e9
+        remaining = grace_period - elapsed
+        remaining > 0 || return (ready=false, value=nothing)
+        outcome = timedwait(() -> isready(rv), remaining;
+                            pollint=min(0.005, remaining))
+        outcome === :ok || return (ready=false, value=nothing)
+        rv = fetch(rv)
+    end
+    (ready=true, value=render_result(rv))
+end
 
 # Polls are separate HTTP requests, and the default RootProvider deliberately
 # constructs a fresh DynamicObject root for each one. DynamicObjects caches are
@@ -5307,8 +5352,13 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
             value -> _finish_operation_poll(token, value), entry.started)
         probe.ready && return _operation_page_runtime(req, probe.value)
     end
+    # A follow-up poll already carries its marker; an attach promotes its
+    # marker-free URL to one for the live poller that the attach response
+    # establishes.
+    request_url = _operation_request_url(req, prefix)
     transport = (
-        poll_url=_operation_request_url(req, prefix),
+        poll_url=_operation_poll_request(req) ? request_url :
+                 _operation_marker_url(request_url, "__htmxo_poll"),
         label=_operation_poll_label(descriptor, name),
         poll_interval=policy.poll_interval,
         keep_progress=policy.keep_progress,
@@ -5369,14 +5419,41 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         policy, descriptor, req, verb_inst; page_shell)
     context = get(target, :context, nothing)
     prefix = context isa OperationContext ? context.prefix : ""
-    mode === :page_load && return _operation_page_load(
-        req, prefix; replace_terminal=!policy.keep_progress)
-
     prop = getproperty(target.leaf, name)
     keys = (verb_inst, idx_vals...)
     call_kwargs = NamedTuple(kw_pairs)
 
-    if mode === :polling && _operation_poll_request(req)
+    if mode === :page_load
+        # A direct rich-page visit spends the same grace budget an HTMX request
+        # would: a fast operation renders inline in the shell — one response,
+        # no blank placeholder, no refetch. Only a timeout defers, and the
+        # deferred placeholder carries this request's poll token so the
+        # load-triggered refetch joins the in-flight operation instead of
+        # starting a second compute. The shell therefore never waits for a
+        # slow operation, but the operation always starts at most once.
+        started = _execute_materialization(target, name, verb_inst, idx_vals,
+                                           kw_pairs; fetch=identity,
+                                           parent_progress=parent_progress,
+                                           declared_fresh=
+                                               _operation_declared_fresh(descriptor))
+        fast = _operation_grace_fetch(_resolve_operation_value, started,
+                                      _operation_grace_period(policy, req))
+        fast.ready && return fast.value
+        token = _new_operation_poll_token()
+        now = _operation_poll_now()
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = _OperationPollEntry(
+            token, signature, prop, keys, call_kwargs, started,
+            target.leaf, req, now, now)
+        _retain_operation_poll!(entry)
+        return _operation_page_load(
+            req, prefix; replace_terminal=!policy.keep_progress,
+            poll_token=token)
+    end
+
+    if mode === :polling &&
+            (_operation_poll_request(req) || _operation_attach_request(req))
         token = _operation_poll_token(req)
         signature = _operation_poll_signature(
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)

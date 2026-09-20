@@ -22,7 +22,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     MountedSemanticOps, MountedSemanticRoot,
     PolicyApp, FreshPolicyApp, MediaRangeApp, SlowPolicyApp,
     SlowInstrumentedPolicyApp,
-    SlowPagePolicyApp, SlowRecordApp,
+    SlowPagePolicyApp, FastPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
@@ -526,9 +526,34 @@ function slow_page_driver()
       var phase = sessionStorage.getItem(phaseKey) || 'first';
 
       document.addEventListener('DOMContentLoaded', function() {
-        if (document.getElementById('slow-page-shell') &&
-            document.querySelector('[data-htmxo-operation-load]')) {
-          document.body.dataset[phase === 'first' ? 'firstShell' : 'secondShell'] = '1';
+        var hasShell = !!document.getElementById('slow-page-shell');
+        var hasLoader = !!document.querySelector('[data-htmxo-operation-load]');
+        var hasTerminal = !!document.getElementById('slow-page-terminal');
+        if (phase === 'first') {
+          if (hasShell && hasLoader) document.body.dataset.firstShell = '1';
+        } else {
+          // The reload revisits a memoized operation: the shell returns with
+          // the terminal already inline — no placeholder, no refetch, no
+          // poller — so the second-visit terminal markers are set here rather
+          // than in the afterSwap flow below, which never fires. The
+          // first-visit markers come along from sessionStorage for the same
+          // reason: nothing else restores them.
+          document.body.dataset.firstShell =
+            sessionStorage.getItem('htmxo-saw-first-shell') || '';
+          document.body.dataset.firstPoller =
+            sessionStorage.getItem('htmxo-saw-first-poller') || '';
+          document.body.dataset.firstTerminalPause =
+            sessionStorage.getItem('htmxo-saw-first-terminal-pause') || '';
+          document.body.dataset.firstTerminalPoll =
+            sessionStorage.getItem('htmxo-saw-first-terminal-poll') || '';
+          document.body.dataset.firstTerminalProgress =
+            sessionStorage.getItem('htmxo-saw-first-terminal-progress') || '';
+          if (hasShell) document.body.dataset.secondShell = '1';
+          if (hasShell && hasTerminal && !hasLoader) {
+            document.body.dataset.secondInlineTerminal = '1';
+            document.body.dataset.terminal = '1';
+            document.body.dataset.secondDirectTerminal = '1';
+          }
         }
       });
 
@@ -578,6 +603,16 @@ end
         slow_page_driver(); hyperscript_version=nothing, feedback=false,
         compose=false, overlay=false)
     @get @progress slow(; count::Int=1) = slow_page_work(count)
+end
+
+# Fast counterpart to SlowPagePolicyApp: a computed page-shell route that
+# finishes inside the grace budget, so a direct visit must render it inline.
+@htmx struct FastPagePolicyApp
+    __page__(content) = htmx(
+        h.main(h.h1("FAST PAGE SHELL"), content; id="fast-page-shell");
+        hyperscript_version=nothing, feedback=false,
+        compose=false, overlay=false)
+    @get fast() = h.p("fast content"; id="fast-page-terminal")
 end
 
 # Slower than `record!`'s grace period, fast enough to record in a test. Pins
@@ -2379,7 +2414,7 @@ end
 # `_resolve_operation_value` fetch the inner handle and blocks the first HX
 # response until the real work finishes.
 @testitem "automatic polling grace does not block on a nested pending handle" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _resolve_operation_value
+    import HTMXObjects: _operation_grace_fetch, _resolve_operation_value
     import HTMXObjects.DynamicObjects
 
     extension = Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt)
@@ -2398,7 +2433,7 @@ end
     @test timedwait(() -> isready(outer), 2.0;
                     pollint=0.001) === :ok
 
-    grace_task = @async extension._grace_fetch(
+    grace_task = @async _operation_grace_fetch(
         _resolve_operation_value, outer, 0.1)
     grace_state = timedwait(() -> istaskdone(grace_task), 0.5;
                            pollint=0.005)
@@ -2410,16 +2445,18 @@ end
     grace_state === :ok && notify(gate)
     @test timedwait(() -> isready(inner), 2.0;
                     pollint=0.001) === :ok
-    terminal = extension._grace_fetch(
+    terminal = _operation_grace_fetch(
         _resolve_operation_value, outer, 0.1)
     @test terminal.ready
     @test terminal.value == 7
 end
 
 # A browser navigation has page chrome available before its slow operation does.
-# `:auto` therefore returns that shell immediately and lets one load-triggered
-# HX request enter the ordinary grace/poll transport. The proxy prefix must
-# survive BOTH generated hops: the initial load URL and every capability poll.
+# `:auto` therefore spends the grace budget on the initial request and defers
+# only past it: the shell returns without waiting for the slow operation, the
+# operation starts exactly once, and the load-triggered HX request joins that
+# in-flight operation instead of starting a second compute. The proxy prefix
+# must survive BOTH generated hops: the initial load URL and every later poll.
 @testitem "direct rich pages load async and preserve their external prefix" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _clear_operation_polls!, _operation_page_load,
         _operation_polling_impl
@@ -2446,12 +2483,17 @@ end
         "Accept" => "text/html,application/xhtml+xml",
         "X-Forwarded-Prefix" => "/p/SbPMX/",
     ]
-    # Exclude first-call Julia compilation from the latency assertion. The
-    # behavior under test is that an already-loaded route never waits for the
-    # slow operation before returning its shell.
-    warm = drive("/slow?count=4", direct_headers)
+    # Exclude first-call Julia compilation from the latency assertion. The warm
+    # call runs on its own memoization key so the measured call still starts a
+    # fresh (gated) operation; release it, let it finish, then reset to pristine.
+    warm = drive("/slow?count=0", direct_headers)
     @test warm.status == 200
-    @test slow_page_runs[] == 0
+    @test timedwait(() -> slow_page_runs[] == 1, 5.0;
+                    pollint=0.01) === :ok
+    release_slow_page!()
+    sleep(0.2)
+    reset_slow_page!()
+    _clear_operation_polls!()
     elapsed = @elapsed direct = drive("/slow?count=4", direct_headers)
     body = String(direct.body)
     @test elapsed < 1.0
@@ -2460,10 +2502,20 @@ end
     @test contains(body, "data-htmxo-operation-load")
     @test contains(body,
         "hx-get=\"/p/SbPMX/slow?count=4&amp;__htmxo_page_load=")
+    @test contains(body, "&amp;__htmxo_operation=")
+    @test match(r"__htmxo_page_load=[0-9a-f]{32}&amp;__htmxo_operation=[0-9a-f]{64}",
+        body) !== nothing
+    load_match = match(r"hx-get=\"([^\"]+)\"", body)
+    @test load_match !== nothing
+    external_load_url = replace(only(load_match.captures), "&amp;" => "&")
+    @test !contains(external_load_url, "__htmxo_poll")
     @test contains(body, "hx-trigger=\"load\"")
     @test contains(body, "hx-target=\"this\"")
     @test contains(body, "hx-swap=\"outerHTML\"")
-    @test slow_page_runs[] == 0
+    # Started but not awaited: the response above already returned while the
+    # gate is still closed, and the body runs exactly once.
+    @test timedwait(() -> slow_page_runs[] == 1, 5.0;
+                    pollint=0.01) === :ok
 
     progress_loader = repr("text/html", _operation_page_load(
         HTTP.Request("GET", "/slow?count=4"), "/p/SbPMX"))
@@ -2471,9 +2523,22 @@ end
         "hx-get=\"/p/SbPMX/slow?count=4\"")
     @test !contains(progress_loader, "__htmxo_page_load")
 
-    load_match = match(r"hx-get=\"([^\"]+)\"", body)
-    @test load_match !== nothing
-    external_load_url = replace(only(load_match.captures), "&amp;" => "&")
+    attached_loader = repr("text/html", _operation_page_load(
+        HTTP.Request("GET", "/slow?count=4"), "/p/SbPMX"; poll_token="abc"))
+    @test contains(attached_loader,
+        "hx-get=\"/p/SbPMX/slow?count=4&amp;__htmxo_operation=abc\"")
+    @test !contains(attached_loader, "__htmxo_page_load")
+    @test !contains(attached_loader, "__htmxo_poll")
+
+    terminal_loader = repr("text/html", _operation_page_load(
+        HTTP.Request("GET", "/slow?count=4"), "/p/SbPMX";
+        replace_terminal=true, poll_token="abc"))
+    @test contains(terminal_loader, "id=\"htmxo-operation-load-")
+    terminal_match = match(r"hx-get=\"([^\"]+)\"", terminal_loader)
+    @test terminal_match !== nothing
+    @test match(r"^/p/SbPMX/slow\?count=4&amp;__htmxo_page_load=[0-9a-f]{32}&amp;__htmxo_operation=abc$",
+        only(terminal_match.captures)) !== nothing
+
     internal_load_url = replace(external_load_url, "/p/SbPMX" => ""; count=1)
 
     transports = Any[]
@@ -2495,11 +2560,16 @@ end
         @test contains(started_body, "data-htmxo-operation-runtime")
         @test contains(started_body, "id=\"htmxo-operation-load-")
         @test contains(started_body, "<aside>polling</aside>")
-        @test timedwait(() -> slow_page_runs[] == 1, 5.0;
-                        pollint=0.01) === :ok
+        # The refetch joins the initial request's operation: the body runs
+        # exactly once across both hops. A second spawn would increment at
+        # body start, immediately, so a short settle proves the negative.
+        @test slow_page_runs[] == 1
+        sleep(0.3)
+        @test slow_page_runs[] == 1
         poll_url = only(transports).poll_url
         @test startswith(poll_url, "/p/SbPMX/slow?count=4&__htmxo_page_load=")
-        @test contains(poll_url, "&__htmxo_poll=1&__htmxo_operation=")
+        @test contains(poll_url, "&__htmxo_operation=")
+        @test contains(poll_url, "&__htmxo_poll=1")
         @test only(transports).page_load_id !== nothing
 
         internal_poll_url = replace(poll_url, "/p/SbPMX" => ""; count=1)
@@ -2511,6 +2581,36 @@ end
         _operation_polling_impl[] = old_polling
         _clear_operation_polls!()
     end
+end
+
+# A direct visit spends the grace budget before deferring, so an operation
+# that finishes within it renders inline in the shell: one response, no blank
+# placeholder, no hx-load refetch. Pins the byte shape against the `:blocking`
+# workaround — for a fast operation the two must agree exactly.
+@testitem "fast direct-page operations render inline in a single response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    route!(FastPagePolicyApp())
+    router = HTMXObjects.CONTEXT[].service.router
+
+    drive(target, headers=Pair{String,String}[]) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        handler = first(HTTP.Handlers.gethandler(router, request))
+        @test handler !== HTTP.Handlers.default404
+        handler(request)
+    end
+
+    direct_headers = ["Accept" => "text/html,application/xhtml+xml"]
+    direct = drive("/fast", direct_headers)
+    body = String(direct.body)
+    @test direct.status == 200
+    @test contains(body, "FAST PAGE SHELL")
+    @test contains(body, "fast content")
+    @test !contains(body, "data-htmxo-operation-load")
+    @test !contains(body, "hx-trigger=\"load\"")
+
+    route!(FastPagePolicyApp(); operation_policy=OperationPolicy(:blocking))
+    blocked = drive("/fast", direct_headers)
+    @test blocked.status == 200
+    @test String(blocked.body) == body
 end
 
 @testitem "mounted direct-page polling completes in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser, :semantic] begin
@@ -2583,13 +2683,17 @@ end
             @test contains(dom, "data-first-terminal-poll=\"0\"")
             @test contains(dom, "data-first-terminal-progress=\"0\"")
             @test contains(dom, "data-second-shell=\"1\"")
+            @test contains(dom, "data-second-inline-terminal=\"1\"")
             @test contains(dom, "data-terminal=\"1\"")
             @test contains(dom, "data-second-direct-terminal=\"1\"")
             @test !contains(dom, "data-second-poller=\"1\"")
             @test contains(dom, "id=\"slow-page-terminal\"")
             @test contains(dom, "terminal:9")
             @test slow_page_runs[] == 1
-            @test length(forwarded_targets) >= 5
+            # Four proxied hops under the attach flow: the visit-1 shell, its
+            # attach refetch, the terminal poll, and the memoized inline
+            # reload (which needs no refetch of its own).
+            @test length(forwarded_targets) >= 4
             @test all(target -> startswith(target, prefix * "/slow"),
                       forwarded_targets)
             @test any(target -> contains(target, "__htmxo_poll=1"),
