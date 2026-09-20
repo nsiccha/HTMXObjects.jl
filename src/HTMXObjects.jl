@@ -1917,6 +1917,7 @@ function htmx(args...;
     compose              = true,
     overlay              = true,
     extra_head          = (),
+    treebars_assets     = true,
 )
     cdn = []
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
@@ -1943,6 +1944,11 @@ function htmx(args...;
             htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
+            # Poller quietness by default: the Treebars stylesheet + script
+            # ride every shell while the extension is loaded (no-op without
+            # Treebars), ahead of `extra_head` so apps can still override.
+            # A manual install alongside stays harmless but redundant.
+            (treebars_assets ? _polling_page_assets() : ())...,
             extra_head...,
         ),
         body(args...),
@@ -3244,12 +3250,8 @@ end
     OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true)
 
 Select route execution transport. `:auto` — **the default, applied to every app
-whether or not it declares a policy** — polls an HTMX request only when the
-route opts into async execution: an explicitly instrumented
-(`@progress`/`@PROGRESS`/`@dynamic_progress`) or `@fetch!`-forwarded
-descriptor. A plain computed route stays direct even under `:auto` — a
-pending-capable descriptor alone is not enough. A direct rich-page visit to an
-opted-in route first returns its composed `__page__` shell with a
+whether or not it declares a policy** — polls pending-capable HTMX requests.
+A direct rich-page visit first returns its composed `__page__` shell with a
 load-triggered request for the same operation; that fragment then uses the same
 grace/polling path. Markdown/error requests and routes without page chrome stay
 direct. `:polling` forces the polling transport. `:blocking` keeps every route
@@ -3260,10 +3262,9 @@ refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
 `MIMEResponse` outputs always remain direct, as do WebSocket route lambdas, and
 [`record!`](@ref) forces `:blocking` for its static-export pass.
 
-Mark a long route with `@progress` (or force `OperationPolicy(:polling)` for
-the whole root) to get non-blocking execution with live progress — plain
-`route!(app)` alone no longer implies it. Reach for the policy to tune
-(`poll_interval`, `keep_progress`) or to opt out (`:blocking`).
+You never have to write `OperationPolicy` to get non-blocking long routes —
+`route!(app)` alone already does. Reach for it to tune (`poll_interval`,
+`keep_progress`) or to opt out (`:blocking`).
 
 Nested progress follows source-visible DynamicObjects property reads and
 indexed-property calls in generated route/property bodies. Their lowering
@@ -3274,11 +3275,26 @@ the caller too.
 
 When a request crosses the grace period, HTMXObjects retains that exact
 operation behind an independently generated OS-random bearer token. Possession
-authorizes polling that operation; route, typed-argument, and provider scope/key
-checks constrain where the token is valid. Successful terminal rendering
-removes it, while a bounded process-local registry expires abandoned or failed
-operations. Fresh request roots can therefore follow in-flight work without
-making DynamicObjects caches global.
+authorizes polling that operation only while its bindings still match: the
+routed root/leaf types, route, typed args, and provider scope/key are checked
+before the retained operation is resumed. A poll that cannot resume — an
+unknown token (process restart wiped the registry), an expired entry
+(TTL/LRU), arguments that drifted since creation, or a missing token — heals
+by re-executing a fresh operation with the poll request's current args
+instead of failing. The token is a resumption hint: a healed request computes
+exactly what a fresh GET of the same URL would, so healing grants no
+authority a direct request lacks, and a token bound to one operation never
+exposes another — a mismatch resumes nothing and heals only the requesting
+route. Successful terminal rendering removes the entry, while a bounded
+process-local registry expires abandoned or failed operations. Fresh request
+roots can therefore follow in-flight work without making DynamicObjects
+caches global.
+
+A resolved `:auto` poll answers with the bare result fragment — no poller
+wrapper, no kept progress tree — so an ordinary fragment never carries
+inspection chrome and never depends on Treebars page assets to look terminal.
+`keep_progress` still governs hand-shaped `polling_fetchindex` pollers (which
+keep their frozen tree) and the direct-page replacement flow.
 """
 struct OperationPolicy
     mode::Symbol
@@ -4804,13 +4820,11 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     semantics = get(descriptor, :semantics, nothing)
     semantics === nothing && return :blocking
     get(semantics, :pending, false) || return :blocking
-    # `pending` is a capability (a Pending handle CAN exist — true for every
-    # computed route since DynamicObjects' semantic descriptors), not a polling
-    # directive. `:auto` additionally requires explicit async INTENT: an
-    # instrumented (`@progress`/`@PROGRESS`/`@dynamic_progress`) or forwarded
-    # (`@fetch!`) route. `:automatic` (neither marker) stays blocking.
-    get(semantics, :progress_mode, :automatic) !== :automatic ||
-        return :blocking
+    # `pending` is a capability (a Pending handle CAN exist), and `:auto`
+    # deliberately polls on it alone: an ordinary route over slow work polls
+    # with no annotation (a881161). No explicit-intent gate belongs here — the
+    # transport underneath (heal-on-unknown-token, chrome-free terminal) is
+    # what makes the marker-free default safe, not narrowing who may poll.
     is_htmx(req) && return :polling
     page_shell && !wants_markdown(req) && !wants_errors(req) ?
         :page_load : :blocking
@@ -5101,6 +5115,17 @@ const _operation_polling_impl = Ref{Any}(
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
 
+# Extension seam: `htmx()` page shells carry the Treebars stylesheet + script
+# so pollers render quietly and terminalize with no per-app wiring. Without
+# Treebars the Ref stays `nothing` and shells are unchanged.
+const _polling_page_assets_impl = Ref{Any}(nothing)
+
+function _polling_page_assets()
+    impl = _polling_page_assets_impl[]
+    isnothing(impl) && return ()
+    impl()
+end
+
 # `fetch` is DO's two-phase selector, threaded through the IP call form (and
 # through `execute_materialization`, which forwards its kwargs to that same call
 # form — so the governed lease is preserved either way). `Base.fetch` takes DO's
@@ -5126,6 +5151,115 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
     prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
 end
 
+# A healed poll points the live poller at its FRESH token: the poll request
+# already carries `__htmxo_poll=1` and a stale `__htmxo_operation=<old>`, so
+# reusing the request URL unchanged would re-present the dead token on every
+# follow-up poll and heal forever without converging. Splice the new token
+# into that parameter; a tokenless poll URL gains both markers.
+const _OPERATION_TOKEN_PARAM = r"[?&]__htmxo_operation=[^&]*"
+
+function _operation_heal_poll_url(req::HTTP.Request, token::AbstractString,
+        prefix::AbstractString="")
+    target = _operation_request_url(req, prefix)
+    if occursin(_OPERATION_TOKEN_PARAM, target)
+        return replace(target, _OPERATION_TOKEN_PARAM =>
+            matched -> string(first(matched)) * "__htmxo_operation=$(token)")
+    end
+    marked = _operation_poll_request(req) ? target :
+        _operation_marker_url(target, "__htmxo_poll")
+    _operation_marker_url(marked, "__htmxo_operation", token)
+end
+
+# Extension seam: when a poll finds its operation already resolved, answer the
+# terminal WITHOUT the Treebars wrapper/kept-progress — an auto-poll terminal
+# is an ordinary fragment, not an inspection surface. The probe never waits:
+# it follows ready Pending handles (a route may finish by returning another
+# Pending) and answers `ready=false` for anything unresolved — including a
+# FAILED handle, which must flow to the normal failure render (`safely` +
+# failure article + open tree), never to a bare value terminal. Without
+# Treebars there is no poller, so the core default answers bare; the extension
+# keeps the `.treebar-terminal-content` marker so the live poller's hx-select
+# still matches and the swap retires the transport.
+function _operation_ready_terminal_fallback(render_result, started)
+    value = started
+    while value isa DynamicObjects.Pending
+        isready(value) || return (ready=false, value=nothing)
+        try
+            value = fetch(value)
+        catch
+            return (ready=false, value=nothing)
+        end
+    end
+    (ready=true, value=render_result(value))
+end
+
+const _operation_ready_terminal_impl =
+    Ref{Any}(_operation_ready_terminal_fallback)
+
+_operation_ready_terminal(render_result, started) =
+    _operation_ready_terminal_impl[](render_result, started)
+
+function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
+        name, verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
+    page_load_id = _operation_page_load_id(req)
+    replace_page_load = !policy.keep_progress && !isnothing(page_load_id)
+    if !replace_page_load
+        probe = _operation_ready_terminal(
+            value -> _finish_operation_poll(token, value), entry.started)
+        probe.ready && return _operation_page_runtime(req, probe.value)
+    end
+    transport = (
+        poll_url=_operation_request_url(req, prefix),
+        label=_operation_poll_label(descriptor, name),
+        poll_interval=policy.poll_interval,
+        keep_progress=policy.keep_progress,
+        page_load_id,
+        replace_page_load,
+        error_obj=entry.error_obj,
+        req=entry.request,
+        grace_period=0.0,
+        retain=() -> nothing,
+        cleanup=() -> _delete_operation_poll!(token),
+    )
+    _operation_page_runtime(req, _operation_polling(
+        value -> _finish_operation_poll(token, value),
+        entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
+end
+
+function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
+        name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
+        call_kwargs)
+    started = _execute_materialization(target, name, verb_inst, idx_vals,
+                                       kw_pairs; fetch=identity)
+    token = _new_operation_poll_token()
+    now = _operation_poll_now()
+    signature = _operation_poll_signature(
+        target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+    entry = _OperationPollEntry(
+        token, signature, prop, keys, call_kwargs, started,
+        target.leaf, req, now, now)
+    page_load_id = _operation_page_load_id(req)
+    replace_page_load = !policy.keep_progress && !isnothing(page_load_id)
+    if !replace_page_load
+        probe = _operation_ready_terminal(
+            value -> _finish_operation_poll(token, value), started)
+        probe.ready && return _operation_page_runtime(req, probe.value)
+    end
+    transport = (poll_url=_operation_heal_poll_url(req, token, prefix),
+                 label=_operation_poll_label(descriptor, name),
+                 poll_interval=policy.poll_interval,
+                 keep_progress=policy.keep_progress,
+                 page_load_id,
+                 replace_page_load,
+                 error_obj=target.leaf, req=req,
+                 grace_period=0.0,
+                 retain=() -> _retain_operation_poll!(entry),
+                 cleanup=() -> _delete_operation_poll!(token))
+    _operation_page_runtime(req, _operation_polling(
+        value -> _finish_operation_poll(token, value),
+        started, prop, keys, call_kwargs, transport))
+end
+
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false)
     mode = _operation_execution_mode(
@@ -5141,31 +5275,22 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
 
     if mode === :polling && _operation_poll_request(req)
         token = _operation_poll_token(req)
-        isnothing(token) && throw(ArgumentError(
-            "polling operation token is missing or ambiguous"))
         signature = _operation_poll_signature(
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
-        entry = _lookup_operation_poll(token, signature)
-        entry isa _OperationPollEntry || throw(ArgumentError(
-            "polling operation is expired or does not match this route, its arguments, or its scope"))
-        page_load_id = _operation_page_load_id(req)
-        transport = (
-            poll_url=_operation_request_url(req, prefix),
-            label=_operation_poll_label(descriptor, name),
-            poll_interval=policy.poll_interval,
-            keep_progress=policy.keep_progress,
-            page_load_id,
-            replace_page_load=!policy.keep_progress &&
-                              !isnothing(page_load_id),
-            error_obj=entry.error_obj,
-            req=entry.request,
-            grace_period=0.0,
-            retain=() -> nothing,
-            cleanup=() -> _delete_operation_poll!(token),
-        )
-        return _operation_page_runtime(req, _operation_polling(
-            value -> _finish_operation_poll(token, value),
-            entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
+        entry = isnothing(token) ? nothing :
+            _lookup_operation_poll(token, signature)
+        if entry isa _OperationPollEntry
+            return _execute_operation_resume(policy, descriptor, target, name,
+                verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
+        end
+        # Heal: no resumable operation — the token is unknown (a restart
+        # wiped the registry), expired (TTL/LRU), bound to different args
+        # (hx-vals drift), or missing/ambiguous. Re-execute fresh with the
+        # poll request's current args; that computes what a fresh GET would,
+        # so the poll recovers instead of failing.
+        return _execute_operation_heal(policy, descriptor, target, name,
+            verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
+            call_kwargs)
     end
 
     # Decide the transport BEFORE starting the work, and start it the way that
@@ -5200,6 +5325,15 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         return _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
             started, prop, keys, call_kwargs, transport))
+    end
+    if _operation_poll_request(req)
+        # A poll-marked request that landed on `:blocking` (the descriptor
+        # lost `pending` across a Revise re-eval between poller-emit and
+        # poll) still answers a LIVE poller: wrap terminal-compatible so the
+        # poller's hx-select matches and the transport retires instead of
+        # sticking. Unresolved falls through bare — the poller retries.
+        probe = _operation_ready_terminal(_resolve_operation_value, started)
+        probe.ready && return _operation_page_runtime(req, probe.value)
     end
     started
 end

@@ -27,6 +27,24 @@ function _grace_fetch(render_result, started, grace_period)
     (ready=true, value=render_result(rv))
 end
 
+function _operation_ready_terminal(render_result, started)
+    value = started
+    while value isa HTMXObjects.DynamicObjects.Pending
+        isready(value) || return (ready=false, value=nothing)
+        try
+            value = fetch(value)
+        catch
+            # A failed operation is not a value-terminal: answer unresolved
+            # so the normal path renders it (`safely` + failure article +
+            # open tree).
+            return (ready=false, value=nothing)
+        end
+    end
+    terminal = render_result(value)
+    (ready=true,
+        value=HTMXObjects.h.div(terminal; class="treebar-terminal-content"))
+end
+
 function _operation_render_result(render_result, value, transport)
     rendered = render_result(value)
     transport.replace_page_load || return rendered
@@ -88,6 +106,10 @@ function __init__()
                 rethrow()
             end
         end
+
+    HTMXObjects._operation_ready_terminal_impl[] = _operation_ready_terminal
+    HTMXObjects._polling_page_assets_impl[] =
+        () -> (Treebars.htmx_treebar_styles(), Treebars.htmx_treebar_script())
 end
 
 end # module
