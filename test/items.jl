@@ -20,7 +20,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticRequiredParamApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
     MountedSemanticOps, MountedSemanticRoot,
-    PolicyApp, SlowPolicyApp, SlowPagePolicyApp, SlowRecordApp,
+    PolicyApp, MediaRangeApp, SlowPolicyApp, SlowPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
@@ -457,6 +457,21 @@ end
         HTTP.Response(202, ["Content-Type" => "application/json"];
                       body="{\"count\":$(count)}")
     @ws stream(; count::Int=1) = "ws:$(count)"
+end
+
+# A route returning a raw 206 byte-range response with a `Vector{UInt8}` body.
+# The body type is load-bearing: Oxygen 1.10's metrics middleware reads every
+# non-200 body via `String(response.body)`, which steals a Vector buffer and
+# serves headers with zero body bytes (snag `206-response-bod-9c3f8c18`).
+@htmx struct MediaRangeApp
+    @get ping() = h.p("pong")
+    @get media(key::String, file::String) = HTTP.Response(
+        206,
+        ["Content-Type" => "video/mp4",
+         "Content-Length" => "1000",
+         "Content-Range" => "bytes 0-999/5000",
+         "Accept-Ranges" => "bytes"];
+        body=Vector{UInt8}(codeunits("0123456789"^100)))
 end
 
 # A route whose body is slow enough that "did the request task run it to
@@ -2511,6 +2526,26 @@ because it binds a port and mutates Oxygen's process-global route context.
     end
 end
 
+@testitem "serve delivers non-200 Vector-body responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+    route!(MediaRangeApp())
+    port = 8131
+    serve(; port, async=true)
+    try
+        # Warm the shared route machinery first: first-request compile takes
+        # seconds, which would race the bounded 206 read below.
+        warm = HTTP.get("http://127.0.0.1:$port/ping"; retry=false)
+        @test warm.status == 200
+        r = HTTP.get("http://127.0.0.1:$port/media/k/f";
+                     headers=["Range" => "bytes=0-999"], readtimeout=15, retry=false)
+        @test r.status == 206
+        @test HTTP.header(r, "Content-Range") == "bytes 0-999/5000"
+        @test HTTP.header(r, "Accept-Ranges") == "bytes"
+        @test r.body == Vector{UInt8}(codeunits("0123456789"^100))
+    finally
+        terminate()
+    end
+end
+
 @testitem "access-log timing supports both Oxygen dependency worlds" setup=[HTMXOTestImports] tags=[:unit] begin
     formatter = HTMXObjects._select_access_log_base_formatter()
     @test formatter isa Function
@@ -2564,18 +2599,21 @@ end
     defaults = HTMXObjects._with_access_timing((;))
     @test defaults[:access_log] === HTMXObjects._timed_access_log
     @test first(defaults[:middleware]) === HTMXObjects._timing_middleware
+    @test defaults[:metrics] === false
 
     custom_log(io, event) = nothing
     existing_middleware(handler) = handler
     custom = HTMXObjects._with_access_timing(pairs((;
         access_log=custom_log,
         middleware=[existing_middleware],
+        metrics=true,
     )))
     @test custom[:access_log] === custom_log
     @test custom[:middleware] == Any[
         HTMXObjects._timing_middleware,
         existing_middleware,
     ]
+    @test custom[:metrics] === true
 end
 
 @testitem "record! preserves indexed include paths and rejects collisions" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin

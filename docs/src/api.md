@@ -61,6 +61,13 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 
+A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
+response — and it passes through the response pipeline unchanged. `serve`
+defaults `metrics` to `false` so Oxygen 1.10's metrics middleware (which reads
+every non-200 body into a `String`, stealing a `Vector{UInt8}` buffer and
+sending zero body bytes) stays out of that path; pass `metrics=true` to
+re-enable collection and the `/docs/metrics` dashboard.
+
 ## The page shell
 
 A route's return value is a *fragment*. On direct browser navigation the
