@@ -119,6 +119,14 @@ _option_wire_string(value) = string(option_wire_value(value))
 Start the HTTP server. Passes all keyword arguments through to `Oxygen.Core.serve`.
 When `async=false` (the default), blocks until interrupted and calls [`terminate`](@ref) on exit.
 
+Two defaults differ from Oxygen's: the access log also reports per-request
+handling time (override with `access_log`/`middleware`), and `metrics`
+defaults to `false` — Oxygen 1.10's metrics middleware reads every non-200
+response body into a `String`, which steals a `Vector{UInt8}` body buffer, so
+a 206 media response would go out with headers but zero body bytes and hang
+the client. Pass `metrics=true` to re-enable collection and the
+`/docs/metrics` dashboard.
+
 `parallel` controls request concurrency:
 - `false` — single-threaded (default)
 - `true` — multi-threaded on the `:default` threadpool (Oxygen's `serveparallel`)
@@ -226,13 +234,24 @@ function _timed_access_log(io::IO, http)
     t0 === nothing || print(io, " ", fmt_time(time() - t0))
 end
 
-# Prepend the timing middleware to any caller-supplied `middleware`, and install
-# the timed access-log writer unless the caller passed their own `access_log`
-# (matching Oxygen's own default-only-if-absent behaviour).
+# Prepend the timing middleware to any caller-supplied `middleware`, install
+# the timed access-log writer unless the caller passed their own `access_log`,
+# and default `metrics` to `false` (default-only-if-absent throughout, matching
+# Oxygen's own convention for `access_log`).
+#
+# The `metrics=false` default is load-bearing: Oxygen 1.10's MetricsMiddleware
+# records every non-200 response via `text(response)` (`String(response.body)`),
+# and `String(::Vector{UInt8})` *steals* the vector's buffer — the served
+# response keeps its `Content-Length` but goes out with zero body bytes, so a
+# 206 media response hangs the client until timeout (snag
+# `206-response-bod-9c3f8c18`). 200s are recorded without reading the body, so
+# only the status gates the corruption. Pass `metrics=true` explicitly to
+# re-enable collection and the `/docs/metrics` dashboard.
 function _with_access_timing(kwargs)
     kw = Dict{Symbol,Any}(kwargs)
     kw[:middleware] = Any[_timing_middleware, Base.get(kw, :middleware, [])...]
     haskey(kw, :access_log) || (kw[:access_log] = _timed_access_log)
+    haskey(kw, :metrics) || (kw[:metrics] = false)
     return kw
 end
 
