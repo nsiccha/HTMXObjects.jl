@@ -3244,8 +3244,12 @@ end
     OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true)
 
 Select route execution transport. `:auto` — **the default, applied to every app
-whether or not it declares a policy** — polls pending-capable HTMX requests.
-A direct rich-page visit first returns its composed `__page__` shell with a
+whether or not it declares a policy** — polls an HTMX request only when the
+route opts into async execution: an explicitly instrumented
+(`@progress`/`@PROGRESS`/`@dynamic_progress`) or `@fetch!`-forwarded
+descriptor. A plain computed route stays direct even under `:auto` — a
+pending-capable descriptor alone is not enough. A direct rich-page visit to an
+opted-in route first returns its composed `__page__` shell with a
 load-triggered request for the same operation; that fragment then uses the same
 grace/polling path. Markdown/error requests and routes without page chrome stay
 direct. `:polling` forces the polling transport. `:blocking` keeps every route
@@ -3256,9 +3260,10 @@ refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
 `MIMEResponse` outputs always remain direct, as do WebSocket route lambdas, and
 [`record!`](@ref) forces `:blocking` for its static-export pass.
 
-You never have to write `OperationPolicy` to get non-blocking long routes —
-`route!(app)` alone already does. Reach for it to tune (`poll_interval`,
-`keep_progress`) or to opt out (`:blocking`).
+Mark a long route with `@progress` (or force `OperationPolicy(:polling)` for
+the whole root) to get non-blocking execution with live progress — plain
+`route!(app)` alone no longer implies it. Reach for the policy to tune
+(`poll_interval`, `keep_progress`) or to opt out (`:blocking`).
 
 Nested progress follows source-visible DynamicObjects property reads and
 indexed-property calls in generated route/property bodies. Their lowering
@@ -4799,6 +4804,13 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     semantics = get(descriptor, :semantics, nothing)
     semantics === nothing && return :blocking
     get(semantics, :pending, false) || return :blocking
+    # `pending` is a capability (a Pending handle CAN exist — true for every
+    # computed route since DynamicObjects' semantic descriptors), not a polling
+    # directive. `:auto` additionally requires explicit async INTENT: an
+    # instrumented (`@progress`/`@PROGRESS`/`@dynamic_progress`) or forwarded
+    # (`@fetch!`) route. `:automatic` (neither marker) stays blocking.
+    get(semantics, :progress_mode, :automatic) !== :automatic ||
+        return :blocking
     is_htmx(req) && return :polling
     page_shell && !wants_markdown(req) && !wants_errors(req) ?
         :page_load : :blocking

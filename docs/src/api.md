@@ -706,7 +706,9 @@ request-scoped object graph.
 
 Execution transport is a separate, app-level choice. You do not have to make it:
 `route!` defaults `operation_policy` to `OperationPolicy(:auto)`, so the app
-below already serves long routes without blocking the request task.
+below already serves instrumented long routes without blocking the request
+task. Plain routes answer inline; mark a long one with `@progress` (or force
+`OperationPolicy(:polling)` for the root) to opt it into the polling transport.
 
 ```julia
 route!(ModelApp(); root_provider=provider)
@@ -724,12 +726,14 @@ route!(ModelApp(); operation_policy=OperationPolicy(:blocking))
 ### What the policy governs
 
 **The default is `:auto`.** An app that declares no `operation_policy` gets it,
-and that is the whole configuration story: `OperationPolicy` exists to tune the
-poller or to opt out, never to switch the good behaviour on. `:blocking` — the
-historical transport, where a long route computes on the request task and the
-response waits for it — is now reached only by asking for it. [`record!`](@ref)
-is the one built-in caller that does: static export wants finished HTML, not a
-poller written to disk.
+and that is most of the configuration story: `OperationPolicy` exists to tune
+the poller or to opt out. Switching the polling transport on for a route that
+does not already opt in takes an explicit marker (`@progress` /
+`@PROGRESS` / `@dynamic_progress`, or `@fetch!`) or a forced `:polling`
+policy. `:blocking` keeps every route on the historical transport, where a
+long route computes on the request task and the response waits for it.
+[`record!`](@ref) is the one built-in caller that forces it: static export
+wants finished HTML, not a poller written to disk.
 
 "App-level" is literal, and it is the answer to the question this section is
 otherwise easy to misread: the policy is stored per **root type** and threaded
@@ -740,8 +744,8 @@ the compiler.
 
 So a hand-written route that renders bespoke HTML into an htmx-targeted
 fragment — a master/detail row detail, say — is governed by the policy exactly
-like a compiled operation card is. It needs no declaration, no descriptor key,
-and no hand-written poller.
+like a compiled operation card is. It needs no hand-written poller; it does
+need one of the opt-in markers below for `:auto` to poll it.
 
 Under `:auto` a route takes the polling transport when **all** of these hold;
 otherwise it stays direct:
@@ -750,15 +754,17 @@ otherwise it stays direct:
 |-----------|---------------------|
 | The verb is `GET` | The poller issues GET refreshes, so mutations stay direct |
 | The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
-| The descriptor advertises `semantics.pending` | True for any ordinary computed route body; false for a fixed field or a `@fresh` one |
+| The descriptor advertises `semantics.pending` | A Pending handle can exist; false for a fixed field or a `@fresh` one |
+| The descriptor signals async intent (`progress_mode`) | `@progress` / `@PROGRESS` / `@dynamic_progress` (`:instrumented`) or `@fetch!` (`:forwarded`); a plain computed route reports `:automatic` and stays direct |
 
 For an HTMX request, those conditions enter the polling transport directly.
 For a browser navigation that accepts `text/html` and has a `__page__` wrapper,
-`:auto` returns the composed page shell immediately. The route region carries
-`hx-trigger="load"` and requests the same operation; that fragment request then
-enters the ordinary grace/poll transport and replaces the region with progress
-and, finally, the terminal fragment. Markdown/error requests, API/curl requests,
-and routes without page chrome keep their direct response.
+`:auto` returns the composed page shell immediately for an opted-in route. The
+route region carries `hx-trigger="load"` and requests the same operation; that
+fragment request then enters the ordinary grace/poll transport and replaces the
+region with progress and, finally, the terminal fragment. Plain routes,
+Markdown/error requests, API/curl requests, and routes without page chrome keep
+their direct response.
 
 Both the load URL and every capability-poll URL preserve the request-time
 external prefix (`X-Forwarded-Prefix`), so the sequence remains under a
