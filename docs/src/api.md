@@ -983,3 +983,47 @@ symbols, and `Regex`es over paths. Zero-match entries throw an
 `ArgumentError`, so a stale warm list fails loudly instead of warming
 nothing. `{param}` templates are concretized with boring type samples for
 requests — pass concrete URLs for an exact warm of id-lookup routes.
+
+## In-process dispatch
+
+`dispatch` runs one request against the registered route tree in-process
+and returns the handler's `HTTP.Response` — the same status, body, and
+headers a loopback request would see, with no listener, no socket, and no
+serialization round-trip. `route!` must have registered the app first
+(exactly as for `record!`):
+
+```julia
+route!(MyApp())
+resp = dispatch(:GET, "/figure/qoi"; headers=["Accept" => "text/markdown"])
+resp.status == 200 || error("embed failed: $(resp.status)")
+markdown = String(resp.body)
+```
+
+| Argument | Shape |
+|----------|-------|
+| `method` | A `Verb` (`Verb{:GET}()`), `Symbol` (`:GET`), or `String` (`"GET"`, case-insensitive) |
+| `url` | An app-relative target (`"/plot/x?plain=1"`); absolute URLs keep path + query, fragments strip |
+| `headers` | A `Vector` of pairs, a `Dict`, or a `NamedTuple` |
+| `body` | A `String` or `Vector{UInt8}` (for `POST`/`PUT`/`PATCH` routes) |
+| `parent` | An optional Treebars progress node the route's compute hangs under |
+
+The request resolves through the live router, so `:index` collapse, verb
+dispatch, path/query/body extraction (including repeated-key vectors), the
+response pipeline (`Accept` negotiation, `?plain`/`?error` shapes,
+`__page__` wrap), and the error pipeline (per-error log file plus the
+`X-HTMXO-Error-Id` header) all behave exactly as over loopback.
+Unmatched targets return the router's own 404/405 responses rather than
+throwing, so `(resp.status, String(resp.body))` is the complete fetch
+contract — the same shape `HTTP.get(...; status_exception=false)` yields.
+
+`parent` exists for callers assembling a larger job in-process — a PDF
+export fetching embeds, a batch warmup: the route's compute nests under
+the caller's node instead of rooting a fresh `__status__` tree. There is
+no ambient parent: without it the execution roots its own tree, exactly
+as over loopback. Scoped-root (governed) and polling-mode executions
+attach best-effort after the fact; when no progress node exists to
+attach (an uncached `@fresh` route), `dispatch` warns rather than
+returning a silently unparented response.
+
+Serve-time Oxygen middleware (access log, metrics, docs) does not run:
+`dispatch` resolves at the router, beneath the middleware stack.

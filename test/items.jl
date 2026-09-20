@@ -43,7 +43,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
     EditorMountRoot, RawBodyApp,
-    OpenAPIWidgets, OpenAPIRoot
+    OpenAPIWidgets, OpenAPIRoot,
+    DispatchProbeApp
 
 @htmx struct TestApp
     title = "Test"
@@ -940,6 +941,20 @@ end
 @htmx struct BoolPropRoot
     paginate::Bool = false
     @get index() = string("paginate=", paginate)
+end
+
+# Fixture for in-process `dispatch` (snag `in-process-route-ccc2f1cc`):
+# distinct route names keep its paths off every other fixture's on the
+# shared test router. `dplot` carries a docstring: `render_text` inlines
+# undocumented nodes, so only a documented route lets the parenting test
+# distinguish attach from miss.
+@htmx struct DispatchProbeApp
+    @param tag::String = "untagged"
+    "Dispatch probe plot."
+    @get dplot(name::String; smooth::Int=1) = h.div("plot:$name:$tag:smooth=$smooth")
+    @get dmulti(; ids::Vector{Int}=Int[]) = h.p(join(ids, ","))
+    @post dsubmit(; label::String="none") = h.p("submitted:$label")
+    @get dboom() = error("boom-dispatch-probe")
 end
 
 end # @testmodule HTMXOTestFixtures
@@ -6162,6 +6177,135 @@ end
         # The Type form resolves shorthands against the inventory.
         typed = prewarm_routes!(WarmupLiveApp, base, [:submit]; include_post=true)
         @test length(typed) == 1 && typed[1].status == 200
+    finally
+        terminate()
+    end
+end
+
+@testitem "dispatch serves registered routes in-process" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: Verb
+    route!(DispatchProbeApp())
+
+    # Markdown negotiation via header and via ?plain; path, @param, and
+    # query-kwarg extraction all flow through the real pipeline.
+    md = dispatch(:GET, "/dplot/q?tag=t1&smooth=3"; headers=["Accept" => "text/markdown"])
+    @test md.status == 200
+    @test contains(String(md.body), "plot:q:t1:smooth=3")
+    plain = dispatch("get", "/dplot/p?plain=1")
+    @test plain.status == 200
+    @test contains(String(plain.body), "plot:p:untagged:smooth=1")
+    html = dispatch(Verb{:GET}(), "/dplot/h")
+    @test html.status == 200
+    @test contains(String(html.body), "<div>plot:h:untagged:smooth=1</div>")
+
+    # Repeated query keys bind a Vector; POST bodies bind from urlencoded form.
+    multi = dispatch(:GET, "/dmulti?ids=1&ids=2")
+    @test multi.status == 200
+    @test contains(String(multi.body), "1,2")
+    posted = dispatch(:POST, "/dsubmit";
+                      headers=Dict("Content-Type" => "application/x-www-form-urlencoded"),
+                      body="label=hi")
+    @test posted.status == 200
+    @test contains(String(posted.body), "submitted:hi")
+
+    # Header/body spellings: NamedTuple headers, absolute URL origin strip.
+    nt = dispatch(:GET, "/dplot/n"; headers=(Accept="text/markdown",))
+    @test nt.status == 200 && contains(String(nt.body), "plot:n:")
+    abs_url = dispatch(:GET, "http://127.0.0.1:1/dplot/a?tag=t9#frag")
+    @test abs_url.status == 200 && contains(String(abs_url.body), "plot:a:t9:")
+
+    # Misses return the router's own responses; they never throw.
+    @test dispatch(:GET, "/dispatch-missing").status == 404
+    @test dispatch(:POST, "/dplot/x").status == 405
+
+    # Malformed calls fail loudly at construction, before touching the router.
+    @test_throws ArgumentError dispatch(:GET, "   ")
+    @test_throws ArgumentError dispatch([:GET], "/dplot/x")
+    @test_throws ArgumentError dispatch(:POST, "/dsubmit"; body=42)
+    @test_throws ArgumentError dispatch(:GET, "/dplot/x"; headers=["Accept"])
+
+    # Error parity: 500 + error-log uid header + log file on disk.
+    err = dispatch(:GET, "/dboom"; headers=["Accept" => "text/markdown"])
+    @test err.status == 500
+    uid = HTTP.header(err, "X-HTMXO-Error-Id", "")
+    @test !isempty(uid)
+    @test isfile(joinpath(HTMXObjects.ERROR_DIR[], "$uid.log"))
+    @test contains(String(err.body), uid)
+end
+
+@testitem "dispatch parents progress under caller node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import Treebars
+    import HTMXObjects: Verb, _attach_parent_progress!, _clear_operation_polls!
+    route!(DispatchProbeApp())
+
+    # The inner compute hangs under the caller's node instead of rooting
+    # its own tree: the documented route description renders nested.
+    Treebars.with_progress(:state; description="pdf-assembly") do parent
+        resp = dispatch(:GET, "/dplot/emb?tag=t2";
+                        headers=["Accept" => "text/markdown"], parent=parent)
+        @test resp.status == 200
+        @test contains(Treebars.render_text(parent), "Dispatch probe plot.")
+    end
+
+    # Control: without a parent the caller's tree stays bare.
+    Treebars.with_progress(:state; description="control") do parent
+        resp = dispatch(:GET, "/dplot/ctl"; headers=["Accept" => "text/markdown"])
+        @test resp.status == 200
+        @test !contains(Treebars.render_text(parent), "Dispatch probe plot.")
+    end
+
+    # Spawned (polling-mode) executions attach their operation node too.
+    route!(DispatchProbeApp(); operation_policy=OperationPolicy(:polling))
+    try
+        Treebars.with_progress(:state; description="poll-parent") do parent
+            resp = dispatch(:GET, "/dplot/pol"; parent=parent)
+            @test resp.status == 200
+            @test contains(Treebars.render_text(parent), "Dispatch probe plot.")
+        end
+    finally
+        _clear_operation_polls!()
+    end
+
+    # No attachable node (a key never computed — the uncached-`@fresh`
+    # shape): warn rather than silently returning an unparented response.
+    app = DispatchProbeApp()
+    Treebars.with_progress(:state; description="warn-parent") do parent
+        @test_logs (:warn, r"no attachable progress node") _attach_parent_progress!(
+            parent, app, :dplot, Verb{:GET}(), ["never-computed-xyz"], [])
+    end
+end
+
+@testitem "dispatch matches loopback bytes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+    route!(DispatchProbeApp())
+    port = 8137
+    serve(; port, async=true)
+    base = "http://127.0.0.1:$port"
+    try
+        cases = [
+            (:GET, "/dplot/q?tag=t1&smooth=3", ["Accept" => "text/markdown"], nothing),
+            (:GET, "/dplot/h", [], nothing),
+            (:POST, "/dsubmit", ["Content-Type" => "application/x-www-form-urlencoded"], "label=hi"),
+            (:GET, "/dispatch-missing", [], nothing),
+        ]
+        for (m, url, hdrs, body) in cases
+            # Compile in-process first so the loopback leg never races JIT.
+            compiled = body === nothing ? dispatch(m, url; headers=hdrs) :
+                dispatch(m, url; headers=hdrs, body=body)
+            loop = m === :GET ?
+                HTTP.get(base * url; headers=hdrs, status_exception=false, retry=false) :
+                HTTP.post(base * url; headers=hdrs, body=something(body, ""),
+                          status_exception=false, retry=false)
+            @test loop.status == compiled.status
+            @test loop.body == compiled.body
+        end
+        # Error parity: same status, and each leg records its own uid-bearing log.
+        el = HTTP.get(base * "/dboom"; headers=["Accept" => "text/markdown"],
+                      status_exception=false, retry=false)
+        ed = dispatch(:GET, "/dboom"; headers=["Accept" => "text/markdown"])
+        @test el.status == 500 && ed.status == 500
+        ul = HTTP.header(el, "X-HTMXO-Error-Id", "")
+        ud = HTTP.header(ed, "X-HTMXO-Error-Id", "")
+        @test !isempty(ul) && !isempty(ud) && ul != ud
     finally
         terminate()
     end
