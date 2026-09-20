@@ -12282,7 +12282,7 @@ end
         LibGit2.Signature(name, email)
     end
 
-    read_blob(spec) = begin
+    @fresh read_blob(spec) = begin
         _ensure()
         repo = LibGit2.GitRepo(path)
         try
@@ -12301,7 +12301,17 @@ end
     @struct editor(relpath; default_content="") = begin
         abs_path = joinpath(path, relpath)
 
-        current_content() = begin
+        # Every git-state-dependent call below is `@fresh`: DynamicObjects
+        # memoizes ALL indexed-property calls — including zero-arg `x()` ones
+        # (memoize-by-default flip, DO `4c71ccf`) — so a bare `versions()`
+        # would serve its first read forever while the repo moves underneath
+        # it, and a bare `write!` would replay a stale `:ok` instead of
+        # executing (snag `hold-one-gitrepo-a9b4d2eb`). `@fresh` (DO
+        # `312542d`, carried by the `DynamicObjects = "0.4.4, 0.5"` floor)
+        # recomputes on every call. What stays memoized is pure: `read_version`
+        # is addressed by immutable commit sha, `_ensure`/`_signature` are
+        # idempotent.
+        @fresh current_content() = begin
             if !isfile(abs_path)
                 mkpath(dirname(abs_path))
                 write(abs_path, default_content)
@@ -12309,10 +12319,7 @@ end
             read(abs_path, String)
         end
 
-        # IP form (`name() = …`) keeps these recomputed on every call.
-        # Bare-property form would cache per editor instance and silently go
-        # stale when the underlying git state changes.
-        current_version() = begin
+        @fresh current_version() = begin
             _ensure()
             repo = LibGit2.GitRepo(path)
             try
@@ -12334,7 +12341,7 @@ end
         # recorded change too old, and HEAD was listed for every file whatever
         # it touched. The entry COUNT stayed right, which is what made it look
         # correct on a single-file repo (snag `editorroutes-the`).
-        versions() = begin
+        @fresh versions() = begin
             _ensure()
             Base.lock(_lock) do
                 repo = LibGit2.GitRepo(path)
@@ -12390,8 +12397,8 @@ end
         # Optimistic-concurrency write: `version` must match the current
         # blob_sha (or "" for a brand-new file). On mismatch returns
         # `(:conflict, current_blob_sha)` without writing.
-        write!(content; version::AbstractString="",
-                        message::AbstractString="edit " * relpath) = begin
+        @fresh write!(content; version::AbstractString="",
+                      message::AbstractString="edit " * relpath) = begin
             Base.lock(_lock) do
                 _ensure()
                 current = current_version()
@@ -12416,7 +12423,7 @@ end
         # read-then-write race that `write!`'s optimistic concurrency would
         # report as a spurious conflict. Returns `(:ok, commit_sha)` on change
         # or `(:nochange, current_blob_sha)` if `f` returned identical content.
-        update!(f; message::AbstractString="edit " * relpath) = begin
+        @fresh update!(f; message::AbstractString="edit " * relpath) = begin
             Base.lock(_lock) do
                 _ensure()
                 current = isfile(abs_path) ? read(abs_path, String) : ""

@@ -5690,6 +5690,51 @@ end
     @test isempty(GitRepo(mktempdir()).editor("x.md").versions())
 end
 
+@testitem "GitRepo held handle sees commits made after its first read" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: GitRepo
+
+    # ONE editor handle held across commits, as a server-side store does — not
+    # the fresh-handle-per-read shape the item above uses. Every read below
+    # goes through this same handle, including the pre-commit ones.
+    dir = mktempdir()
+    ed = GitRepo(dir).editor("notes.md"; default_content="# notes\n")
+
+    # First reads on the unborn repo: empty history, empty version.
+    @test isempty(ed.versions())
+    @test ed.current_version() == ""
+    @test ed.current_content() == "# notes\n"
+
+    # Commit through the SAME handle.
+    status, sha = ed.update!(c -> c * "hello\n"; message="first")
+    @test status === :ok
+
+    # The same handle sees the new commit: reads recompute on every call and
+    # are not memoized on first read (snag `hold-one-gitrepo-a9b4d2eb`).
+    # Before the fix, `versions()` stayed `[]` and `current_version()` stayed
+    # `""` forever while a fresh `GitRepo(dir)` handle saw the commit.
+    revs = ed.versions()
+    @test length(revs) == 1
+    @test first(revs).sha == sha
+    @test ed.current_version() == first(revs).blob_sha
+    @test ed.current_content() == "# notes\nhello\n"
+
+    # A repeat identical write! is a real optimistic-concurrency conflict, not
+    # a replayed :ok: mutations execute on every call, never from cache.
+    seed = GitRepo(mktempdir()).editor("f.md")
+    @test first(seed.write!("hello"; version="")) === :ok
+    conflicted, current = seed.write!("hello"; version="")
+    @test conflicted === :conflict
+    @test current == seed.current_version()
+
+    # `read_blob` with a mutable revspec tracks HEAD through the same handle.
+    r3 = GitRepo(mktempdir())
+    ed3 = r3.editor("g.md"; default_content="")
+    ed3.write!("v1"; version="")
+    @test r3.read_blob("HEAD:g.md") == "v1"
+    ed3.write!("v2"; version=ed3.current_version())
+    @test r3.read_blob("HEAD:g.md") == "v2"
+end
+
 @testitem "warmup - exported in-process reflect inventory" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # `reflect` is used unqualified here: this item proves the export.
     inv = reflect(WarmupSelectApp)
