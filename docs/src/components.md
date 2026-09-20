@@ -94,7 +94,7 @@ post_form("/respond/$slug/approved";
 )
 ```
 
-`get_form` is identical but uses `hx-get`. Positional `children` are inserted between the hidden inputs and the submit button (so you can put visible widgets in there).
+`get_form` is identical but uses `hx-get`. Positional `children` are inserted between the hidden inputs and the submit button (so you can put visible widgets in there). Pass them positionally: the returned form is a complete node, so calling it again later (`post_form(url; …)(extra...)`) appends `extra` after the submit button instead of inserting before it — collect conditionally-built widgets first and splat them (`post_form(url, rows...; …)`).
 
 ### `hidden_inputs(; key=val…)` — splat the hidden fields directly
 

@@ -8594,6 +8594,13 @@ Hidden inputs come from one of two paths, depending on `obj`:
 `obj` is a keyword (not positional) because route objects are plain structs
 (`<: Any`), so a positional `obj` would be indistinguishable from a `children`
 node in the existing `get_form(url, children...)` varargs.
+
+Children placement: the returned value is a complete `Node` — hidden inputs,
+then positional `children`, then the submit button. Calling it again later
+(`form(extra...)`) APPENDS `extra` after the button (generic `Node` call
+semantics), it does not insert before it. To place visible widgets before the
+button, pass them positionally — collect them first and splat
+(`post_form(url, rows...; …)`) when they are built conditionally.
 """
 const _FORM_KEYS = Set([:label, :btn_class, :confirm, :form_class])
 _is_form_attr(k) = startswith(String(k), "hx_") || k in (:id, :class, :style, :enctype)
@@ -8633,6 +8640,11 @@ Pass `obj=<route object>` to auto-forward its set `@param`s as hidden inputs
 with zero hand-listing (see [`hidden_inputs(obj)`](@ref) / [`get_form`](@ref));
 `skip` drops params a visible control supplies, and the extra kwargs become
 `query_url`-style overrides.
+
+Children placement: positional `children` render between the hidden inputs
+and the submit button. The returned form is a complete `Node`, so calling it
+again (`post_form(url; …)(extra...)`) appends `extra` AFTER the button —
+pass children positionally (or splat a collected vector) to keep them before it.
 """
 post_form(url, children...; kwargs...) = _form(:hx_post, url, children...; kwargs...)
 
@@ -8660,6 +8672,9 @@ overrides. See [`hidden_inputs(obj)`](@ref).
         obj=__self__, skip=[:source],  # forward every OTHER set @param, zero hand-list
         hx_target="#fit", hx_swap="innerHTML",
     )
+
+Children placement follows [`post_form`](@ref): only positional children land
+before the submit button — calling the returned form again appends after it.
 """
 get_form(url, children...; label=nothing, kwargs...) = _form(:hx_get, url, children...; label, kwargs...)
 
