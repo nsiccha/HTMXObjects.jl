@@ -76,6 +76,9 @@ function __init__()
     HTMXObjects._recording_polling_impl[] =
         (args...; kwargs...) -> Treebars.polling_fetchindex(args...; kwargs...)
 
+    HTMXObjects._progress_attach_impl[] =
+        (parent, node) -> Treebars.add_child!(parent, node)
+
     HTMXObjects._operation_polling_impl[] =
         (render_result, started, ip, keys, call_kwargs, transport) -> begin
             render_operation_result = value ->

@@ -34,7 +34,7 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
-export reflect, select_routes, precompile_routes!, prewarm_routes!
+export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -5126,6 +5126,16 @@ function _polling_page_assets()
     impl()
 end
 
+# Extension seam: hang a route execution's progress subtree under a
+# caller-supplied node. `dispatch(; parent=...)` threads the node down to
+# `_execute_materialization`, which attaches through this Ref. Without the
+# Treebars extension the attach no-ops — but a caller holding a real node
+# necessarily has Treebars loaded, so the extension is present and the seam
+# installed. Same precompile-safe Ref pattern as the recording bridge above.
+const _progress_attach_impl = Ref{Any}((parent, node) -> nothing)
+
+_progress_attach(parent, node) = _progress_attach_impl[](parent, node)
+
 # `fetch` is DO's two-phase selector, threaded through the IP call form (and
 # through `execute_materialization`, which forwards its kwargs to that same call
 # form — so the governed lease is preserved either way). `Base.fetch` takes DO's
@@ -5133,22 +5143,65 @@ end
 # the `:spawn` branch: kick the compute off and hand back a `Pending`. Only the
 # latter makes polling transport real — see `_execute_operation`.
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
-        fetch=Base.fetch)
+        fetch=Base.fetch, parent_progress=nothing)
     context = get(target, :context, nothing)
-    if get(target, :governed, false) && context isa OperationContext &&
-            isdefined(DynamicObjects, :execute_materialization)
+    governed = get(target, :governed, false) && context isa OperationContext &&
+        isdefined(DynamicObjects, :execute_materialization)
+    started = if governed
         framework_context = (;
             scope=context.scope,
             key=context.key,
             retention=get(target, :retention, nothing),
         )
-        return Base.invokelatest(
+        Base.invokelatest(
             getproperty(DynamicObjects, :execute_materialization),
             framework_context, target.root, target.leaf, name,
             verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+    else
+        prop = getproperty(target.leaf, name)
+        if parent_progress !== nothing && fetch === Base.fetch
+            # DO's own parenthesized call: a cached IP attaches its shared
+            # substatus under the caller node (relabeling cache hits); an
+            # uncached `@fresh` IP opens a per-call substatus under it
+            # instead of defaulting to the leaf's own `__status__` root.
+            # Restricted to the inline branch: the `ProgressNode`
+            # `fetchindex!` overload always blocks, so using it for a
+            # spawned (`fetch = identity`) polling execution would silently
+            # degrade polling to blocking.
+            DynamicObjects.maybefetchindex!(
+                parent_progress, prop, verb_inst, idx_vals...;
+                fetch, NamedTuple(kw_pairs)...)
+        else
+            prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+        end
     end
-    prop = getproperty(target.leaf, name)
-    prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+    if parent_progress !== nothing && (governed || fetch !== Base.fetch)
+        _attach_parent_progress!(parent_progress, target.leaf, name,
+                                 verb_inst, idx_vals, kw_pairs)
+    end
+    started
+end
+
+# Best-effort post-hoc attach for executions that cannot thread the caller
+# node through the IP call itself: scoped-root (governed) executions, which
+# must run inside `execute_materialization`'s lease, and spawned
+# (`fetch = identity`) polling executions, whose `Pending` handle DO's
+# parenthesized `fetchindex!` would block on. Re-reads the execution's
+# shared substatus — present even while in flight — and hangs it under the
+# caller's node via the Treebars extension seam. A `nothing` node means the
+# execution produced no substatus (an uncached `@fresh` route): warn rather
+# than silently returning a response whose compute escaped the caller's tree.
+function _attach_parent_progress!(parent, leaf, name::Symbol,
+        verb_inst::Verb, idx_vals, kw_pairs)
+    prop = getproperty(leaf, name)
+    node = DynamicObjects.getstatus(prop, verb_inst, idx_vals...;
+                                    NamedTuple(kw_pairs)...)
+    if node === nothing
+        @warn "dispatch: parent progress supplied but the route execution produced no attachable progress node — its compute runs outside the caller's tree" route = name verb = _verb_symbol(verb_inst)
+        return nothing
+    end
+    _progress_attach(parent, node)
+    nothing
 end
 
 # A healed poll points the live poller at its FRESH token: the poll request
@@ -5228,9 +5281,10 @@ end
 
 function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-        call_kwargs)
+        call_kwargs; parent_progress=nothing)
     started = _execute_materialization(target, name, verb_inst, idx_vals,
-                                       kw_pairs; fetch=identity)
+                                       kw_pairs; fetch=identity,
+                                       parent_progress=parent_progress)
     token = _new_operation_poll_token()
     now = _operation_poll_now()
     signature = _operation_poll_signature(
@@ -5261,7 +5315,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
 end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
-        verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false)
+        verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false,
+        parent_progress=nothing)
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell)
     context = get(target, :context, nothing)
@@ -5290,7 +5345,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         # so the poll recovers instead of failing.
         return _execute_operation_heal(policy, descriptor, target, name,
             verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-            call_kwargs)
+            call_kwargs; parent_progress=parent_progress)
     end
 
     # Decide the transport BEFORE starting the work, and start it the way that
@@ -5302,7 +5357,8 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     started = _execute_materialization(target, name, verb_inst, idx_vals,
                                        kw_pairs;
                                        fetch=mode === :polling ? identity :
-                                             Base.fetch)
+                                             Base.fetch,
+                                       parent_progress=parent_progress)
     if mode === :polling
         token = _new_operation_poll_token()
         now = _operation_poll_now()
@@ -5343,7 +5399,8 @@ end
 # method validates/coerces them, then the verb-keyed DO property is invoked.
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
-        operation_policy::OperationPolicy=OperationPolicy())
+        operation_policy::OperationPolicy=OperationPolicy(),
+        parent_progress=nothing)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
@@ -5357,7 +5414,8 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
     page_shell = _operation_has_page_shell(target) &&
                  _operation_rich_page_request(req)
     value = _execute_operation(operation_policy, descriptor, target, name,
-                               verb_inst, idx_vals, kw_pairs, req; page_shell)
+                               verb_inst, idx_vals, kw_pairs, req; page_shell,
+                               parent_progress=parent_progress)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -5423,8 +5481,13 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                       _chain_steps(root, chain, req, root_segs)
             target = merge(root_target, (; leaf, objects, chain,
                                            root_segs, request=req))
+            # In-process callers (`dispatch`) thread a Treebars progress
+            # node through the request context; real HTTP requests never
+            # carry this key (context is server-side, not client-controlled).
+            parent_progress = get(req.context, :htmxo_parent_progress, nothing)
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
-                                       operation_policy)
+                                       operation_policy,
+                                       parent_progress=parent_progress)
             val = operation.value
 
             # The request target is the authoritative external route. Rebuilding
@@ -7383,6 +7446,108 @@ function _drive_record_path(router, path::AbstractString, headers)
         return
     end
     handler(req)
+end
+
+# --- In-process dispatch ---------------------------------------------------
+#
+# `dispatch` is the public sibling of `_drive_record_path`: where recording
+# drives fixed GET header-sets for their save side effects, `dispatch`
+# answers one (method, url) with the handler's `HTTP.Response` — the same
+# status, body, and headers (including `X-HTMXO-Error-Id` on failures) a
+# loopback request would see, with no listener, no socket, and no
+# serialization round-trip.
+
+_dispatch_method(::Verb{V}) where {V} = String(V)
+_dispatch_method(m::Symbol) = uppercase(String(m))
+_dispatch_method(m::AbstractString) = uppercase(String(m))
+_dispatch_method(other) = throw(ArgumentError(
+    "dispatch takes the method as a Verb (Verb{:GET}()), a Symbol (:GET), " *
+    "or a String (\"GET\"); got $(repr(other))"))
+
+# Origin-form request target: absolute URLs keep their path + query (the
+# origin is meaningless in-process), fragments strip (never sent to a
+# server), and a missing leading slash is added.
+function _dispatch_target(url::AbstractString)
+    s = strip(String(url))
+    isempty(s) && throw(ArgumentError(
+        "dispatch requires a request target, got an empty URL"))
+    i = findfirst("://", s)
+    if i !== nothing
+        j = findnext('/', s, last(i) + 1)
+        s = j === nothing ? "/" : String(s[j:end])
+    end
+    s = String(first(split(s, '#'; limit=2)))
+    isempty(s) ? "/" : (startswith(s, "/") ? s : "/" * s)
+end
+
+_dispatch_headers(::Nothing) = Pair{String,String}[]
+_dispatch_headers(h::AbstractVector) = Pair{String,String}[
+    p isa Pair ? string(p.first) => string(p.second) : throw(ArgumentError(
+        "dispatch headers must be pairs, got $(repr(p))")) for p in h]
+_dispatch_headers(h::AbstractDict) =
+    Pair{String,String}[string(k) => string(v) for (k, v) in h]
+_dispatch_headers(h::NamedTuple) =
+    Pair{String,String}[string(k) => string(v) for (k, v) in pairs(h)]
+
+_dispatch_body(::Nothing) = UInt8[]
+_dispatch_body(b::Vector{UInt8}) = b
+_dispatch_body(b::AbstractVector{UInt8}) = Vector{UInt8}(b)
+_dispatch_body(b::AbstractString) = Vector{UInt8}(codeunits(b))
+_dispatch_body(other) = throw(ArgumentError(
+    "dispatch takes the body as a String or a Vector{UInt8}; " *
+    "got $(repr(typeof(other)))"))
+
+"""
+    dispatch(method, url; headers=[], body=UInt8[], parent=nothing) -> HTTP.Response
+
+Run one request against the registered route tree in-process and return the
+handler's `HTTP.Response` — no listener, no socket, no serialization
+round-trip. `route!` must have registered the app first (exactly as for
+`record!`); the request resolves through the live router, so `:index`
+collapse, verb dispatch, path/query/body extraction, the response pipeline
+(`Accept` negotiation, `?plain`/`?error` shapes, `__page__` wrap), and the
+error pipeline (log file + `X-HTMXO-Error-Id` header) all behave exactly as
+for a loopback request.
+
+- `method` — a `Verb` (`Verb{:GET}()`), `Symbol` (`:GET`), or `String`
+  (`"GET"`, case-insensitive).
+- `url` — an app-relative target (`"/plot/x?plain=1"`). Absolute URLs are
+  accepted and their origin stripped; fragments strip.
+- `headers` — request headers as a `Vector` of pairs, a `Dict`, or a
+  `NamedTuple` (`["Accept" => "text/markdown"]`).
+- `body` — request body as a `String` or `Vector{UInt8}` (for
+  `POST`/`PUT`/`PATCH` routes).
+- `parent` — an optional Treebars progress node. The route's compute hangs
+  under it instead of rooting a fresh `__status__` tree, so a caller
+  assembling a larger job (a PDF export fetching embeds, a batch warmup)
+  sees the inner compute nested in its own tree. There is no ambient
+  parent: without this argument the execution roots its own tree, exactly
+  as over loopback.
+
+Unmatched targets return the router's own 404/405 responses rather than
+throwing, so `(resp.status, String(resp.body))` is the complete fetch
+contract — the same shape `HTTP.get(...; status_exception=false)` yields.
+
+Serve-time Oxygen middleware (access log, metrics, docs) does not run:
+`dispatch` resolves at the router, beneath the middleware stack. Routes
+mounted under `/docs` therefore answer here even when Oxygen's docs
+middleware would intercept them over the wire (see `_warn_docs_prefix`).
+`:page_load` responses start no compute, so there is nothing to parent;
+polling-mode responses attach their in-flight operation node.
+
+```julia
+route!(MyApp())
+resp = dispatch(:GET, "/figure/qoi"; headers=["Accept" => "text/markdown"])
+resp.status == 200 || error("embed failed: \$(resp.status)")
+markdown = String(resp.body)
+```
+"""
+function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
+        parent=nothing)
+    req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
+                       _dispatch_headers(headers), _dispatch_body(body))
+    parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
+    CONTEXT[].service.router(req)
 end
 
 # Recording shims. Implementation is held in mutable `Ref`s so the
