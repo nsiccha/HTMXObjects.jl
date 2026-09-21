@@ -20,7 +20,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticRequiredParamApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
     MountedSemanticOps, MountedSemanticRoot,
-    PolicyApp, MediaRangeApp, SlowPolicyApp, SlowInstrumentedPolicyApp,
+    PolicyApp, FreshPolicyApp, MediaRangeApp, SlowPolicyApp,
+    SlowInstrumentedPolicyApp,
     SlowPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
@@ -459,6 +460,13 @@ end
         HTTP.Response(202, ["Content-Type" => "application/json"];
                       body="{\"count\":$(count)}")
     @ws stream(; count::Int=1) = "ws:$(count)"
+end
+
+# A declaration-site fresh route is the per-route opt-out used when the route
+# renders its own `polling_fetchindex` transport. Its body must execute without
+# receiving HTMXObjects' reserved two-phase `fetch` keyword.
+@htmx struct FreshPolicyApp
+    @fresh @get html(; count::Int=1) = h.p("fresh:$(count)")
 end
 
 # A route returning a raw 206 byte-range response with a `Vector{UInt8}` body.
@@ -1935,11 +1943,14 @@ end
     html_descriptor = _property_descriptor(PolicyApp, :html)
     raw_descriptor = _property_descriptor(PolicyApp, :raw)
     response_descriptor = _property_descriptor(PolicyApp, :response)
+    fresh_descriptor = _property_descriptor(FreshPolicyApp, :html)
     marked_descriptor =
         _property_descriptor(SlowInstrumentedPolicyApp, :instant)
     @test marked_descriptor.semantics.pending
     @test marked_descriptor.semantics.progress_mode === :instrumented
     @test html_descriptor.semantics.pending
+    @test fresh_descriptor.semantics.fresh
+    @test !fresh_descriptor.semantics.pending
     @test html_descriptor.semantics.progress_mode === :automatic
     plain = HTTP.Request("GET", "/html?count=2")
     hx = HTTP.Request("GET", "/html?count=2", ["HX-Request" => "true"])
@@ -1953,6 +1964,29 @@ end
                                     plain, Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:auto), marked_descriptor,
                                     marked_hx, Verb{:GET}()) === :polling
+    @test _operation_execution_mode(OperationPolicy(:auto), fresh_descriptor,
+                                    hx, Verb{:GET}()) === :blocking
+
+    # `@fresh` is both a cache-policy declaration and the supported per-route
+    # opt-out for a hand-shaped poller under app-wide `:auto`. The blocking
+    # executor must not leak its private `fetch` selector into the route body.
+    fresh_app = FreshPolicyApp()
+    fresh_target = (context=nothing, root=fresh_app, leaf=fresh_app)
+    fresh_result = _run_operation(
+        fresh_target, FreshPolicyApp, :html, Verb{:GET}(), hx, 0, 0;
+        operation_policy=OperationPolicy(:auto))
+    @test repr("text/html", fresh_result.value) == "<p>fresh:2</p>"
+
+    # The governed executor forwards its kwargs through DynamicObjects'
+    # materialization lease, so pin the same reserved-keyword boundary there.
+    governed_context = OperationContext(
+        hx, "", "/html", :http, :request, nothing)
+    governed_target = (context=governed_context, root=fresh_app,
+                       leaf=fresh_app, governed=true, retention=nothing)
+    governed_result = _run_operation(
+        governed_target, FreshPolicyApp, :html, Verb{:GET}(), hx, 0, 0;
+        operation_policy=OperationPolicy(:auto))
+    @test repr("text/html", governed_result.value) == "<p>fresh:2</p>"
     # The pending gate, cell by cell: the `pending` capability alone selects
     # polling — `progress_mode` is descriptive (it shapes the progress tree),
     # never a transport gate — and a descriptor that predates the field polls
