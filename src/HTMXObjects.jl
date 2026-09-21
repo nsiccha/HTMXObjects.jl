@@ -4830,6 +4830,13 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
         :page_load : :blocking
 end
 
+function _operation_declared_fresh(descriptor)
+    descriptor === nothing && return false
+    semantics = get(descriptor, :semantics, nothing)
+    semantics === nothing && return false
+    get(semantics, :fresh, false)
+end
+
 _operation_poll_marker(value::AbstractString) = value == "1"
 _operation_poll_marker(values::AbstractVector) = "1" in values
 _operation_poll_marker(_) = false
@@ -5136,14 +5143,17 @@ const _progress_attach_impl = Ref{Any}((parent, node) -> nothing)
 
 _progress_attach(parent, node) = _progress_attach_impl[](parent, node)
 
-# `fetch` is DO's two-phase selector, threaded through the IP call form (and
-# through `execute_materialization`, which forwards its kwargs to that same call
-# form — so the governed lease is preserved either way). `Base.fetch` takes DO's
-# `:inline` branch: compute on THIS task and return the value. `identity` takes
-# the `:spawn` branch: kick the compute off and hand back a `Pending`. Only the
-# latter makes polling transport real — see `_execute_operation`.
+# `fetch` is DO's two-phase selector for memoized IPs, threaded through the IP
+# call form (and through `execute_materialization`, which forwards its kwargs to
+# that same call form — so the governed lease is preserved either way).
+# `Base.fetch` takes DO's `:inline` branch: compute on THIS task and return the
+# value. `identity` takes the `:spawn` branch: kick the compute off and hand back
+# a `Pending`. A declaration-site `@fresh` IP has no two-phase selector; its
+# descriptor lets us keep this framework-only keyword out of the authored call.
+# Only the spawned branch makes polling transport real — see
+# `_execute_operation`.
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
-        fetch=Base.fetch, parent_progress=nothing)
+        fetch=Base.fetch, parent_progress=nothing, declared_fresh::Bool=false)
     context = get(target, :context, nothing)
     governed = get(target, :governed, false) && context isa OperationContext &&
         isdefined(DynamicObjects, :execute_materialization)
@@ -5153,10 +5163,20 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
             key=context.key,
             retention=get(target, :retention, nothing),
         )
-        Base.invokelatest(
-            getproperty(DynamicObjects, :execute_materialization),
-            framework_context, target.root, target.leaf, name,
-            verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+        executor = getproperty(DynamicObjects, :execute_materialization)
+        if declared_fresh
+            # A declaration-site `@fresh` IP computes directly and therefore
+            # has no two-phase `fetch` selector to consume. Its descriptor is
+            # what selected blocking transport under `:auto`; keep the
+            # framework-only keyword out of the route's authored kwargs.
+            Base.invokelatest(
+                executor, framework_context, target.root, target.leaf, name,
+                verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+        else
+            Base.invokelatest(
+                executor, framework_context, target.root, target.leaf, name,
+                verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+        end
     else
         prop = getproperty(target.leaf, name)
         if parent_progress !== nothing && fetch === Base.fetch
@@ -5168,9 +5188,17 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
             # `fetchindex!` overload always blocks, so using it for a
             # spawned (`fetch = identity`) polling execution would silently
             # degrade polling to blocking.
-            DynamicObjects.maybefetchindex!(
-                parent_progress, prop, verb_inst, idx_vals...;
-                fetch, NamedTuple(kw_pairs)...)
+            if declared_fresh
+                DynamicObjects.maybefetchindex!(
+                    parent_progress, prop, verb_inst, idx_vals...;
+                    NamedTuple(kw_pairs)...)
+            else
+                DynamicObjects.maybefetchindex!(
+                    parent_progress, prop, verb_inst, idx_vals...;
+                    fetch, NamedTuple(kw_pairs)...)
+            end
+        elseif declared_fresh
+            prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
         else
             prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
         end
@@ -5287,7 +5315,9 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         call_kwargs; parent_progress=nothing)
     started = _execute_materialization(target, name, verb_inst, idx_vals,
                                        kw_pairs; fetch=identity,
-                                       parent_progress=parent_progress)
+                                       parent_progress=parent_progress,
+                                       declared_fresh=
+                                           _operation_declared_fresh(descriptor))
     token = _new_operation_poll_token()
     now = _operation_poll_now()
     signature = _operation_poll_signature(
@@ -5361,7 +5391,9 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                                        kw_pairs;
                                        fetch=mode === :polling ? identity :
                                              Base.fetch,
-                                       parent_progress=parent_progress)
+                                       parent_progress=parent_progress,
+                                       declared_fresh=
+                                           _operation_declared_fresh(descriptor))
     if mode === :polling
         token = _new_operation_poll_token()
         now = _operation_poll_now()

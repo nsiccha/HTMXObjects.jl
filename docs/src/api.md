@@ -772,6 +772,30 @@ poller and returns its value directly. `polling_fetchindex` therefore remains
 useful only for what the policy does not cover — a non-GET operation, a declared
 final response, or a poller you want to shape by hand.
 
+A hand-shaped poller under the default `:auto` policy must own the route's
+transport by itself. Mark its wrapper route `@fresh @get`: `@fresh` makes that
+route's descriptor non-pending, so the app-wide outer transport stays blocking,
+while the route body re-runs on each inner poll to inspect the indexed
+property's current state. The indexed property itself remains memoized and
+coalesces the long-running work.
+
+```julia
+@fresh @get stage(name::Symbol) = polling_fetchindex(
+    compute_steps, name;
+    poll_url=query_url(__self__/"stage/$name"),
+    label="Preparing $name",
+) do result
+    h.div(result)
+end
+```
+
+Without the wrapper's `@fresh`, both transports are active: a slow inner
+re-poll can cross the outer grace period and temporarily replace the shaped
+Treebars fragment with HTMXObjects' generic interim poller. That presents as a
+visible flip-flop between the two fragments. `OperationPolicy(:blocking)` also
+avoids the conflict, but it applies to every route under the root type rather
+than to this route alone.
+
 Every emitted poller carries an independently generated, OS-random bearer
 token. Keep it confidential. HTMXObjects binds the token to the original route,
 typed arguments, and `RootProvider` scope/key, so a poll request reaches the
