@@ -1049,5 +1049,13 @@ attach best-effort after the fact; when no progress node exists to
 attach (an uncached `@fresh` route), `dispatch` warns rather than
 returning a silently unparented response.
 
+`dispatch_parent(req)` reads that node back inside a route body (`__req__`
+is the live request): `parent=dispatch_parent(__req__)` on a nested
+`polling_fetchindex` hangs the nested compute under the dispatch caller,
+which does not happen automatically — a hand-rolled poller roots its own
+tree otherwise. Route bodies that run no nested polling need nothing: the
+route's own execution already parents automatically. Off `dispatch` the
+accessor returns `nothing`, so the kwarg is a no-op on ordinary requests.
+
 Serve-time Oxygen middleware (access log, metrics, docs) does not run:
 `dispatch` resolves at the router, beneath the middleware stack.

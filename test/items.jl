@@ -45,7 +45,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
     EditorMountRoot, RawBodyApp,
     OpenAPIWidgets, OpenAPIRoot,
-    DispatchProbeApp
+    DispatchProbeApp, DPARENT_SEEN
 
 @htmx struct TestApp
     title = "Test"
@@ -956,6 +956,7 @@ end
 # shared test router. `dplot` carries a docstring: `render_text` inlines
 # undocumented nodes, so only a documented route lets the parenting test
 # distinguish attach from miss.
+const DPARENT_SEEN = Ref{Any}(nothing)
 @htmx struct DispatchProbeApp
     @param tag::String = "untagged"
     "Dispatch probe plot."
@@ -963,6 +964,11 @@ end
     @get dmulti(; ids::Vector{Int}=Int[]) = h.p(join(ids, ","))
     @post dsubmit(; label::String="none") = h.p("submitted:$label")
     @get dboom() = error("boom-dispatch-probe")
+    # `dispatch_parent` probe (snag `consume-landed-t-ea068eff`): records
+    # the accessor's value so the test can assert identity with the node
+    # the `dispatch` caller passed (or `nothing` off `dispatch`).
+    @get dparent() = (DPARENT_SEEN[] = dispatch_parent(__req__);
+                      h.div("ok"))
 end
 
 end # @testmodule HTMXOTestFixtures
@@ -6312,6 +6318,26 @@ end
         @test_logs (:warn, r"no attachable progress node") _attach_parent_progress!(
             parent, app, :dplot, Verb{:GET}(), ["never-computed-xyz"], [])
     end
+end
+
+@testitem "dispatch_parent exposes the dispatch caller node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import Treebars
+    route!(DispatchProbeApp())
+
+    # The accessor hands the route body the exact node the `dispatch`
+    # caller passed — the value a nested `polling_fetchindex` forwards
+    # as `parent=` (snag `consume-landed-t-ea068eff`).
+    Treebars.with_progress(:state; description="accessor") do parent
+        resp = dispatch(:GET, "/dparent"; parent=parent)
+        @test resp.status == 200
+        @test DPARENT_SEEN[] === parent
+    end
+
+    # Off `dispatch` (and on a parentless `dispatch`) there is no key,
+    # so the accessor is `nothing` — the poller's default, a no-op.
+    resp = dispatch(:GET, "/dparent")
+    @test resp.status == 200
+    @test DPARENT_SEEN[] === nothing
 end
 
 @testitem "dispatch matches loopback bytes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
