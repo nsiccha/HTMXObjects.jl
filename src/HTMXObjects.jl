@@ -5143,6 +5143,21 @@ const _progress_attach_impl = Ref{Any}((parent, node) -> nothing)
 
 _progress_attach(parent, node) = _progress_attach_impl[](parent, node)
 
+# Ambient dispatch-parent seam: `dispatch` binds the caller node for the
+# dynamic extent of the in-process request, and Treebars' `parent=:auto`
+# default reads it — so a route body that nests a bare `polling_fetchindex`
+# hangs its compute under the dispatch caller with zero per-site edits
+# (companion of Treebars `b4c2182`). Same precompile-safe Ref pattern as the
+# recording bridge above; the extension swaps the Ref at `__init__`. The
+# default is a no-op passthrough, so the seam is inert without the
+# extension. The bind is UNCONDITIONAL (even `parent === nothing`) so a
+# nested parentless `dispatch` shadows an outer scope and the inner route's
+# own execution — detached, on a fresh request without the key — agrees
+# with its nested pollers.
+const _with_dispatch_parent_impl = Ref{Any}((f, node) -> f())
+
+_with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
+
 # `fetch` is DO's two-phase selector for memoized IPs, threaded through the IP
 # call form (and through `execute_materialization`, which forwards its kwargs to
 # that same call form — so the governed lease is preserved either way).
@@ -7539,11 +7554,14 @@ The caller progress node a `dispatch(...; parent=node)` call stashed on this
 request, or `nothing` for a plain loopback/browser request (which carries no
 key) and for a `dispatch` without `parent`.
 
-`dispatch` parents the route's own execution automatically, but a route body
-that runs nested compute through a hand-rolled
-`Treebars.polling_fetchindex` must forward the node itself — that call roots
-its own tree otherwise. The one-liner, inside any route body (`__req__` is
-the live request):
+`dispatch` parents the route's own execution automatically, and (with
+Treebars' ambient dispatch-parent protocol, `b4c2182` and later) also binds
+the caller so a bare `Treebars.polling_fetchindex` — no `parent=` — hangs
+its compute under it. `parent=:auto` reads this request leg FIRST, so the
+one-liner is optional in-dispatch; it stays the portable spelling, because
+it survives the spawned-task boundary on Julia 1.10 that the task-local
+ambient bind does not, and it is the only form on older Treebars. Inside
+any route body (`__req__` is the live request):
 
 ```julia
 polling_fetchindex(ip, key; sync=wants_markdown(__req__),
@@ -7581,12 +7599,20 @@ for a loopback request.
 - `parent` — an optional Treebars progress node. The route's compute hangs
   under it instead of rooting a fresh `__status__` tree, so a caller
   assembling a larger job (a PDF export fetching embeds, a batch warmup)
-  sees the inner compute nested in its own tree. There is no ambient
-  parent: without this argument the execution roots its own tree, exactly
-  as over loopback. A route body that runs nested compute through a
-  hand-rolled `polling_fetchindex` must forward the node itself with
-  `parent=dispatch_parent(__req__)` — that call roots its own tree
-  otherwise.
+  sees the inner compute nested in its own tree. It is also the explicit
+  form of dispatch parenting: `dispatch` binds `parent` as the ambient
+  dispatch parent for the extent of the request (Treebars'
+  `with_dispatch_parent`, companion of Treebars `b4c2182`), so a route
+  body that nests a bare `polling_fetchindex` — no `parent=` — hangs its
+  compute under the caller automatically. On Treebars generations without
+  the ambient protocol (and outside `dispatch`) the execution roots its
+  own tree, exactly as over loopback. A nested `dispatch` without
+  `parent` binds `nothing` for its own extent, so inner pollers stay
+  detached rather than inheriting the outer job's tree. The explicit
+  one-liner `parent=dispatch_parent(__req__)` stays valid everywhere and
+  remains the portable spelling where the ambient bind does not reach — a
+  spawned route body on Julia 1.10 crosses a task boundary the task-local
+  bind does not.
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
@@ -7611,7 +7637,7 @@ function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
-    CONTEXT[].service.router(req)
+    _with_dispatch_parent(() -> CONTEXT[].service.router(req), parent)
 end
 
 # Recording shims. Implementation is held in mutable `Ref`s so the

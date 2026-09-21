@@ -86,6 +86,14 @@ function __init__()
     HTMXObjects._progress_attach_impl[] =
         (parent, node) -> Treebars.add_child!(parent, node)
 
+    # Ambient dispatch-parent protocol (companion of Treebars `b4c2182`):
+    # route bodies nesting a bare `polling_fetchindex` resolve the caller
+    # node through `parent=:auto`. Guarded so the extension still loads
+    # against Treebars generations that predate the protocol — the base
+    # seam's passthrough stays installed and nothing binds.
+    isdefined(Treebars, :with_dispatch_parent) &&
+        (HTMXObjects._with_dispatch_parent_impl[] = Treebars.with_dispatch_parent)
+
     HTMXObjects._operation_polling_impl[] =
         (render_result, started, ip, keys, call_kwargs, transport) -> begin
             render_operation_result = value ->
