@@ -34,7 +34,7 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
-export reflect, select_routes, precompile_routes!, prewarm_routes!
+export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -1917,6 +1917,7 @@ function htmx(args...;
     compose              = true,
     overlay              = true,
     extra_head          = (),
+    treebars_assets     = true,
 )
     cdn = []
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
@@ -1943,6 +1944,11 @@ function htmx(args...;
             htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
+            # Poller quietness by default: the Treebars stylesheet + script
+            # ride every shell while the extension is loaded (no-op without
+            # Treebars), ahead of `extra_head` so apps can still override.
+            # A manual install alongside stays harmless but redundant.
+            (_live_refresh_page_assets(treebars_assets))...,
             extra_head...,
         ),
         body(args...),
@@ -3269,11 +3275,26 @@ the caller too.
 
 When a request crosses the grace period, HTMXObjects retains that exact
 operation behind an independently generated OS-random bearer token. Possession
-authorizes polling that operation; route, typed-argument, and provider scope/key
-checks constrain where the token is valid. Successful terminal rendering
-removes it, while a bounded process-local registry expires abandoned or failed
-operations. Fresh request roots can therefore follow in-flight work without
-making DynamicObjects caches global.
+authorizes polling that operation only while its bindings still match: the
+routed root/leaf types, route, typed args, and provider scope/key are checked
+before the retained operation is resumed. A poll that cannot resume — an
+unknown token (process restart wiped the registry), an expired entry
+(TTL/LRU), arguments that drifted since creation, or a missing token — heals
+by re-executing a fresh operation with the poll request's current args
+instead of failing. The token is a resumption hint: a healed request computes
+exactly what a fresh GET of the same URL would, so healing grants no
+authority a direct request lacks, and a token bound to one operation never
+exposes another — a mismatch resumes nothing and heals only the requesting
+route. Successful terminal rendering removes the entry, while a bounded
+process-local registry expires abandoned or failed operations. Fresh request
+roots can therefore follow in-flight work without making DynamicObjects
+caches global.
+
+A resolved `:auto` poll answers with the bare result fragment — no poller
+wrapper, no kept progress tree — so an ordinary fragment never carries
+inspection chrome and never depends on Treebars page assets to look terminal.
+`keep_progress` still governs hand-shaped `polling_fetchindex` pollers (which
+keep their frozen tree) and the direct-page replacement flow.
 """
 struct OperationPolicy
     mode::Symbol
@@ -4799,9 +4820,21 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     semantics = get(descriptor, :semantics, nothing)
     semantics === nothing && return :blocking
     get(semantics, :pending, false) || return :blocking
+    # `pending` is a capability (a Pending handle CAN exist), and `:auto`
+    # deliberately polls on it alone: an ordinary route over slow work polls
+    # with no annotation (a881161). No explicit-intent gate belongs here — the
+    # transport underneath (heal-on-unknown-token, chrome-free terminal) is
+    # what makes the marker-free default safe, not narrowing who may poll.
     is_htmx(req) && return :polling
     page_shell && !wants_markdown(req) && !wants_errors(req) ?
         :page_load : :blocking
+end
+
+function _operation_declared_fresh(descriptor)
+    descriptor === nothing && return false
+    semantics = get(descriptor, :semantics, nothing)
+    semantics === nothing && return false
+    get(semantics, :fresh, false)
 end
 
 _operation_poll_marker(value::AbstractString) = value == "1"
@@ -5089,33 +5122,249 @@ const _operation_polling_impl = Ref{Any}(
 
 _operation_polling(args...) = _operation_polling_impl[](args...)
 
-# `fetch` is DO's two-phase selector, threaded through the IP call form (and
-# through `execute_materialization`, which forwards its kwargs to that same call
-# form — so the governed lease is preserved either way). `Base.fetch` takes DO's
-# `:inline` branch: compute on THIS task and return the value. `identity` takes
-# the `:spawn` branch: kick the compute off and hand back a `Pending`. Only the
-# latter makes polling transport real — see `_execute_operation`.
+# Extension seam: `htmx()` page shells carry the Treebars stylesheet + script
+# so pollers render quietly and terminalize with no per-app wiring. Without
+# Treebars the Ref stays `nothing` and shells are unchanged.
+const _polling_page_assets_impl = Ref{Any}(nothing)
+
+function _polling_page_assets()
+    impl = _polling_page_assets_impl[]
+    isnothing(impl) && return ()
+    impl()
+end
+
+# Extension seam: hang a route execution's progress subtree under a
+# caller-supplied node. `dispatch(; parent=...)` threads the node down to
+# `_execute_materialization`, which attaches through this Ref. Without the
+# Treebars extension the attach no-ops — but a caller holding a real node
+# necessarily has Treebars loaded, so the extension is present and the seam
+# installed. Same precompile-safe Ref pattern as the recording bridge above.
+const _progress_attach_impl = Ref{Any}((parent, node) -> nothing)
+
+_progress_attach(parent, node) = _progress_attach_impl[](parent, node)
+
+# Ambient dispatch-parent seam: `dispatch` binds the caller node for the
+# dynamic extent of the in-process request, and Treebars' `parent=:auto`
+# default reads it — so a route body that nests a bare `polling_fetchindex`
+# hangs its compute under the dispatch caller with zero per-site edits
+# (companion of Treebars `b4c2182`). Same precompile-safe Ref pattern as the
+# recording bridge above; the extension swaps the Ref at `__init__`. The
+# default is a no-op passthrough, so the seam is inert without the
+# extension. The bind is UNCONDITIONAL (even `parent === nothing`) so a
+# nested parentless `dispatch` shadows an outer scope and the inner route's
+# own execution — detached, on a fresh request without the key — agrees
+# with its nested pollers.
+const _with_dispatch_parent_impl = Ref{Any}((f, node) -> f())
+
+_with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
+
+# `fetch` is DO's two-phase selector for memoized IPs, threaded through the IP
+# call form (and through `execute_materialization`, which forwards its kwargs to
+# that same call form — so the governed lease is preserved either way).
+# `Base.fetch` takes DO's `:inline` branch: compute on THIS task and return the
+# value. `identity` takes the `:spawn` branch: kick the compute off and hand back
+# a `Pending`. A declaration-site `@fresh` IP has no two-phase selector; its
+# descriptor lets us keep this framework-only keyword out of the authored call.
+# Only the spawned branch makes polling transport real — see
+# `_execute_operation`.
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
-        fetch=Base.fetch)
+        fetch=Base.fetch, parent_progress=nothing, declared_fresh::Bool=false)
     context = get(target, :context, nothing)
-    if get(target, :governed, false) && context isa OperationContext &&
-            isdefined(DynamicObjects, :execute_materialization)
+    governed = get(target, :governed, false) && context isa OperationContext &&
+        isdefined(DynamicObjects, :execute_materialization)
+    started = if governed
         framework_context = (;
             scope=context.scope,
             key=context.key,
             retention=get(target, :retention, nothing),
         )
-        return Base.invokelatest(
-            getproperty(DynamicObjects, :execute_materialization),
-            framework_context, target.root, target.leaf, name,
-            verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+        executor = getproperty(DynamicObjects, :execute_materialization)
+        if declared_fresh
+            # A declaration-site `@fresh` IP computes directly and therefore
+            # has no two-phase `fetch` selector to consume. Its descriptor is
+            # what selected blocking transport under `:auto`; keep the
+            # framework-only keyword out of the route's authored kwargs.
+            Base.invokelatest(
+                executor, framework_context, target.root, target.leaf, name,
+                verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+        else
+            Base.invokelatest(
+                executor, framework_context, target.root, target.leaf, name,
+                verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+        end
+    else
+        prop = getproperty(target.leaf, name)
+        if parent_progress !== nothing && fetch === Base.fetch
+            # DO's own parenthesized call: a cached IP attaches its shared
+            # substatus under the caller node (relabeling cache hits); an
+            # uncached `@fresh` IP opens a per-call substatus under it
+            # instead of defaulting to the leaf's own `__status__` root.
+            # Restricted to the inline branch: the `ProgressNode`
+            # `fetchindex!` overload always blocks, so using it for a
+            # spawned (`fetch = identity`) polling execution would silently
+            # degrade polling to blocking.
+            if declared_fresh
+                DynamicObjects.maybefetchindex!(
+                    parent_progress, prop, verb_inst, idx_vals...;
+                    NamedTuple(kw_pairs)...)
+            else
+                DynamicObjects.maybefetchindex!(
+                    parent_progress, prop, verb_inst, idx_vals...;
+                    fetch, NamedTuple(kw_pairs)...)
+            end
+        elseif declared_fresh
+            prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+        else
+            prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+        end
     end
-    prop = getproperty(target.leaf, name)
-    prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
+    if parent_progress !== nothing && (governed || fetch !== Base.fetch)
+        _attach_parent_progress!(parent_progress, target.leaf, name,
+                                 verb_inst, idx_vals, kw_pairs)
+    end
+    started
+end
+
+# Best-effort post-hoc attach for executions that cannot thread the caller
+# node through the IP call itself: scoped-root (governed) executions, which
+# must run inside `execute_materialization`'s lease, and spawned
+# (`fetch = identity`) polling executions, whose `Pending` handle DO's
+# parenthesized `fetchindex!` would block on. Re-reads the execution's
+# shared substatus — present even while in flight — and hangs it under the
+# caller's node via the Treebars extension seam. A `nothing` node means the
+# execution produced no substatus (an uncached `@fresh` route): warn rather
+# than silently returning a response whose compute escaped the caller's tree.
+function _attach_parent_progress!(parent, leaf, name::Symbol,
+        verb_inst::Verb, idx_vals, kw_pairs)
+    prop = getproperty(leaf, name)
+    node = DynamicObjects.getstatus(prop, verb_inst, idx_vals...;
+                                    NamedTuple(kw_pairs)...)
+    if node === nothing
+        @warn "dispatch: parent progress supplied but the route execution produced no attachable progress node — its compute runs outside the caller's tree" route = name verb = _verb_symbol(verb_inst)
+        return nothing
+    end
+    _progress_attach(parent, node)
+    nothing
+end
+
+# A healed poll points the live poller at its FRESH token: the poll request
+# already carries `__htmxo_poll=1` and a stale `__htmxo_operation=<old>`, so
+# reusing the request URL unchanged would re-present the dead token on every
+# follow-up poll and heal forever without converging. Splice the new token
+# into that parameter; a tokenless poll URL gains both markers.
+const _OPERATION_TOKEN_PARAM = r"[?&]__htmxo_operation=[^&]*"
+
+function _operation_heal_poll_url(req::HTTP.Request, token::AbstractString,
+        prefix::AbstractString="")
+    target = _operation_request_url(req, prefix)
+    if occursin(_OPERATION_TOKEN_PARAM, target)
+        return replace(target, _OPERATION_TOKEN_PARAM =>
+            matched -> string(first(matched)) * "__htmxo_operation=$(token)")
+    end
+    marked = _operation_poll_request(req) ? target :
+        _operation_marker_url(target, "__htmxo_poll")
+    _operation_marker_url(marked, "__htmxo_operation", token)
+end
+
+# Extension seam: when a poll finds its operation already resolved, answer the
+# terminal WITHOUT the Treebars wrapper/kept-progress — an auto-poll terminal
+# is an ordinary fragment, not an inspection surface. The probe never waits:
+# it follows ready Pending handles (a route may finish by returning another
+# Pending) and answers `ready=false` for anything unresolved — including a
+# FAILED handle, which must flow to the normal failure render (`safely` +
+# failure article + open tree), never to a bare value terminal. Without
+# Treebars there is no poller, so the core default answers bare; the extension
+# answers a trigger-less `.treebar-poller-inner` carrying the
+# `.treebar-terminal-content` marker — the inner class is what the live
+# poller's hx-select matches in every select generation (a client-held poller
+# can predate the deployed Treebars, so the marker alone is not matchable),
+# and the marker keys the client finalizer that retires the transport.
+function _operation_ready_terminal_fallback(render_result, started)
+    value = started
+    while value isa DynamicObjects.Pending
+        isready(value) || return (ready=false, value=nothing)
+        try
+            value = fetch(value)
+        catch
+            return (ready=false, value=nothing)
+        end
+    end
+    (ready=true, value=render_result(value))
+end
+
+const _operation_ready_terminal_impl =
+    Ref{Any}(_operation_ready_terminal_fallback)
+
+_operation_ready_terminal(render_result, started) =
+    _operation_ready_terminal_impl[](render_result, started)
+
+function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
+        name, verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
+    page_load_id = _operation_page_load_id(req)
+    replace_page_load = !policy.keep_progress && !isnothing(page_load_id)
+    if !replace_page_load
+        probe = _operation_ready_terminal(
+            value -> _finish_operation_poll(token, value), entry.started)
+        probe.ready && return _operation_page_runtime(req, probe.value)
+    end
+    transport = (
+        poll_url=_operation_request_url(req, prefix),
+        label=_operation_poll_label(descriptor, name),
+        poll_interval=policy.poll_interval,
+        keep_progress=policy.keep_progress,
+        page_load_id,
+        replace_page_load,
+        error_obj=entry.error_obj,
+        req=entry.request,
+        grace_period=0.0,
+        retain=() -> nothing,
+        cleanup=() -> _delete_operation_poll!(token),
+    )
+    _operation_page_runtime(req, _operation_polling(
+        value -> _finish_operation_poll(token, value),
+        entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
+end
+
+function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
+        name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
+        call_kwargs; parent_progress=nothing)
+    started = _execute_materialization(target, name, verb_inst, idx_vals,
+                                       kw_pairs; fetch=identity,
+                                       parent_progress=parent_progress,
+                                       declared_fresh=
+                                           _operation_declared_fresh(descriptor))
+    token = _new_operation_poll_token()
+    now = _operation_poll_now()
+    signature = _operation_poll_signature(
+        target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+    entry = _OperationPollEntry(
+        token, signature, prop, keys, call_kwargs, started,
+        target.leaf, req, now, now)
+    page_load_id = _operation_page_load_id(req)
+    replace_page_load = !policy.keep_progress && !isnothing(page_load_id)
+    if !replace_page_load
+        probe = _operation_ready_terminal(
+            value -> _finish_operation_poll(token, value), started)
+        probe.ready && return _operation_page_runtime(req, probe.value)
+    end
+    transport = (poll_url=_operation_heal_poll_url(req, token, prefix),
+                 label=_operation_poll_label(descriptor, name),
+                 poll_interval=policy.poll_interval,
+                 keep_progress=policy.keep_progress,
+                 page_load_id,
+                 replace_page_load,
+                 error_obj=target.leaf, req=req,
+                 grace_period=0.0,
+                 retain=() -> _retain_operation_poll!(entry),
+                 cleanup=() -> _delete_operation_poll!(token))
+    _operation_page_runtime(req, _operation_polling(
+        value -> _finish_operation_poll(token, value),
+        started, prop, keys, call_kwargs, transport))
 end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
-        verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false)
+        verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false,
+        parent_progress=nothing)
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell)
     context = get(target, :context, nothing)
@@ -5129,31 +5378,22 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
 
     if mode === :polling && _operation_poll_request(req)
         token = _operation_poll_token(req)
-        isnothing(token) && throw(ArgumentError(
-            "polling operation token is missing or ambiguous"))
         signature = _operation_poll_signature(
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
-        entry = _lookup_operation_poll(token, signature)
-        entry isa _OperationPollEntry || throw(ArgumentError(
-            "polling operation is expired or does not match this route, its arguments, or its scope"))
-        page_load_id = _operation_page_load_id(req)
-        transport = (
-            poll_url=_operation_request_url(req, prefix),
-            label=_operation_poll_label(descriptor, name),
-            poll_interval=policy.poll_interval,
-            keep_progress=policy.keep_progress,
-            page_load_id,
-            replace_page_load=!policy.keep_progress &&
-                              !isnothing(page_load_id),
-            error_obj=entry.error_obj,
-            req=entry.request,
-            grace_period=0.0,
-            retain=() -> nothing,
-            cleanup=() -> _delete_operation_poll!(token),
-        )
-        return _operation_page_runtime(req, _operation_polling(
-            value -> _finish_operation_poll(token, value),
-            entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
+        entry = isnothing(token) ? nothing :
+            _lookup_operation_poll(token, signature)
+        if entry isa _OperationPollEntry
+            return _execute_operation_resume(policy, descriptor, target, name,
+                verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
+        end
+        # Heal: no resumable operation — the token is unknown (a restart
+        # wiped the registry), expired (TTL/LRU), bound to different args
+        # (hx-vals drift), or missing/ambiguous. Re-execute fresh with the
+        # poll request's current args; that computes what a fresh GET would,
+        # so the poll recovers instead of failing.
+        return _execute_operation_heal(policy, descriptor, target, name,
+            verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
+            call_kwargs; parent_progress=parent_progress)
     end
 
     # Decide the transport BEFORE starting the work, and start it the way that
@@ -5165,7 +5405,10 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     started = _execute_materialization(target, name, verb_inst, idx_vals,
                                        kw_pairs;
                                        fetch=mode === :polling ? identity :
-                                             Base.fetch)
+                                             Base.fetch,
+                                       parent_progress=parent_progress,
+                                       declared_fresh=
+                                           _operation_declared_fresh(descriptor))
     if mode === :polling
         token = _new_operation_poll_token()
         now = _operation_poll_now()
@@ -5189,6 +5432,15 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             value -> _finish_operation_poll(token, value),
             started, prop, keys, call_kwargs, transport))
     end
+    if _operation_poll_request(req)
+        # A poll-marked request that landed on `:blocking` (the descriptor
+        # lost `pending` across a Revise re-eval between poller-emit and
+        # poll) still answers a LIVE poller: wrap terminal-compatible so the
+        # poller's hx-select matches and the transport retires instead of
+        # sticking. Unresolved falls through bare — the poller retries.
+        probe = _operation_ready_terminal(_resolve_operation_value, started)
+        probe.ready && return _operation_page_runtime(req, probe.value)
+    end
     started
 end
 
@@ -5197,7 +5449,8 @@ end
 # method validates/coerces them, then the verb-keyed DO property is invoked.
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
-        operation_policy::OperationPolicy=OperationPolicy())
+        operation_policy::OperationPolicy=OperationPolicy(),
+        parent_progress=nothing)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
@@ -5211,7 +5464,8 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
     page_shell = _operation_has_page_shell(target) &&
                  _operation_rich_page_request(req)
     value = _execute_operation(operation_policy, descriptor, target, name,
-                               verb_inst, idx_vals, kw_pairs, req; page_shell)
+                               verb_inst, idx_vals, kw_pairs, req; page_shell,
+                               parent_progress=parent_progress)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -5277,8 +5531,13 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                       _chain_steps(root, chain, req, root_segs)
             target = merge(root_target, (; leaf, objects, chain,
                                            root_segs, request=req))
+            # In-process callers (`dispatch`) thread a Treebars progress
+            # node through the request context; real HTTP requests never
+            # carry this key (context is server-side, not client-controlled).
+            parent_progress = dispatch_parent(req)
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
-                                       operation_policy)
+                                       operation_policy,
+                                       parent_progress=parent_progress)
             val = operation.value
 
             # The request target is the authoritative external route. Rebuilding
@@ -5645,6 +5904,56 @@ function _page_navigation_declaration(obj)
 end
 
 """
+    _page_navigation_depth(obj) -> Int
+
+How many [`navigation`](@ref) descendant levels a page wrapper asked for, read
+from the same DynamicObjects signature that [`_page_navigation_declaration`](@ref)
+reads. `__page__(content; navigation=nothing, navigation_depth=2) = …` asks for
+two levels — the wrapper's own children carry non-empty `children` — while a
+wrapper that declares no `navigation_depth` (including a `; kwargs...` slurp,
+which declares nothing by name) gets the historic `depth=1`: its descendants
+list one level and every `children` field on those descendants is empty.
+
+The declared DEFAULT is evaluated in the wrapper's defining module, so a
+computed depth (`navigation_depth = parse(Int, ENV["RAIL_DEPTH"])`) works the
+same way it would inside the wrapper body. A depth that is not an `Integer` or
+is negative throws instead of falling back to `1`: a misspelled depth that
+silently rendered one level is precisely the failure the `?__chrome__=` override
+refuses to tolerate. The value only matters when navigation is actually threaded
+— a wrapper that declares `navigation_depth` but no `navigation` keyword never
+receives navigation, so the depth is simply never consulted for it.
+"""
+function _page_navigation_depth(obj)
+    T = typeof(obj)
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return 1
+    for prop in (:__page__, :page)
+        hasproperty(obj, prop) || continue
+        info = Base.invokelatest(DynamicObjects.metafirst, T, prop)
+        info === nothing && continue
+        sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(T))
+        sig === nothing && return 1
+        isempty(get(sig, :positional, ())) && isempty(get(sig, :kwargs, ())) && return 1
+        for kw in get(sig, :kwargs, ())
+            get(kw, :name, nothing) === :navigation_depth || continue
+            default = get(kw, :default, nothing)
+            (default isa Integer && default >= 0) && return Int(default)
+            value = try
+                Base.invokelatest(Core.eval, parentmodule(T), default)
+            catch
+                nothing
+            end
+            value isa Integer && value >= 0 && return Int(value)
+            throw(ArgumentError(
+                "`$prop(…; navigation_depth=$(repr(default)))` on $(nameof(T)) " *
+                "does not evaluate to a nonnegative Integer — navigation depth " *
+                "must be 0, 1, 2, …"))
+        end
+        return 1
+    end
+    1
+end
+
+"""
     _wrapper_accepts_navigation(wrapper) -> Bool
 
 Ask a page-wrapper VALUE whether it takes a `navigation` keyword, without
@@ -5665,7 +5974,7 @@ function _wrapper_accepts_navigation(wrapper)
 end
 
 """
-    _apply_page(obj, wrapper, content; depth=1) -> wrapped content
+    _apply_page(obj, wrapper, content; depth=nothing) -> wrapped content
 
 Apply one page wrapper, threading [`navigation`](@ref) metadata into it when it
 asked for it. Called once per page-bearing object in the chain, so a recursively
@@ -5673,16 +5982,23 @@ nested `__page__` receives the navigation of ITS OWN node — an outer shell see
 the root's sections, an inner one sees its own — rather than one shared record
 computed at the leaf.
 
+How many descendant levels that navigation carries is the WRAPPER's own
+declaration: `__page__(content; navigation=nothing, navigation_depth=2)` asks
+for two levels, and a wrapper that declares no `navigation_depth` gets the
+historic one level. `depth` overrides the declaration for callers that already
+know the answer.
+
 Only reached on the full-page branch of the response pipeline: HTMX fragment and
 `?plain` markdown requests never apply page wrappers at all, so they keep
 stripping chrome exactly as before.
 """
-function _apply_page(obj, wrapper, content; depth::Integer=1)
+function _apply_page(obj, wrapper, content; depth=nothing)
     declared = _page_navigation_declaration(obj)
     wants = declared === :yes ||
             (declared === :unknown && _wrapper_accepts_navigation(wrapper))
     wants || return wrapper(content)
-    wrapper(content; navigation=navigation(obj; depth))
+    wrapper(content; navigation=navigation(obj; depth=isnothing(depth) ?
+                                                   _page_navigation_depth(obj) : depth))
 end
 
 """
@@ -7237,6 +7553,148 @@ function _drive_record_path(router, path::AbstractString, headers)
         return
     end
     handler(req)
+end
+
+# --- In-process dispatch ---------------------------------------------------
+#
+# `dispatch` is the public sibling of `_drive_record_path`: where recording
+# drives fixed GET header-sets for their save side effects, `dispatch`
+# answers one (method, url) with the handler's `HTTP.Response` — the same
+# status, body, and headers (including `X-HTMXO-Error-Id` on failures) a
+# loopback request would see, with no listener, no socket, and no
+# serialization round-trip.
+
+_dispatch_method(::Verb{V}) where {V} = String(V)
+_dispatch_method(m::Symbol) = uppercase(String(m))
+_dispatch_method(m::AbstractString) = uppercase(String(m))
+_dispatch_method(other) = throw(ArgumentError(
+    "dispatch takes the method as a Verb (Verb{:GET}()), a Symbol (:GET), " *
+    "or a String (\"GET\"); got $(repr(other))"))
+
+# Origin-form request target: absolute URLs keep their path + query (the
+# origin is meaningless in-process), fragments strip (never sent to a
+# server), and a missing leading slash is added.
+function _dispatch_target(url::AbstractString)
+    s = strip(String(url))
+    isempty(s) && throw(ArgumentError(
+        "dispatch requires a request target, got an empty URL"))
+    i = findfirst("://", s)
+    if i !== nothing
+        j = findnext('/', s, last(i) + 1)
+        s = j === nothing ? "/" : String(s[j:end])
+    end
+    s = String(first(split(s, '#'; limit=2)))
+    isempty(s) ? "/" : (startswith(s, "/") ? s : "/" * s)
+end
+
+_dispatch_headers(::Nothing) = Pair{String,String}[]
+_dispatch_headers(h::AbstractVector) = Pair{String,String}[
+    p isa Pair ? string(p.first) => string(p.second) : throw(ArgumentError(
+        "dispatch headers must be pairs, got $(repr(p))")) for p in h]
+_dispatch_headers(h::AbstractDict) =
+    Pair{String,String}[string(k) => string(v) for (k, v) in h]
+_dispatch_headers(h::NamedTuple) =
+    Pair{String,String}[string(k) => string(v) for (k, v) in pairs(h)]
+
+_dispatch_body(::Nothing) = UInt8[]
+_dispatch_body(b::Vector{UInt8}) = b
+_dispatch_body(b::AbstractVector{UInt8}) = Vector{UInt8}(b)
+_dispatch_body(b::AbstractString) = Vector{UInt8}(codeunits(b))
+_dispatch_body(other) = throw(ArgumentError(
+    "dispatch takes the body as a String or a Vector{UInt8}; " *
+    "got $(repr(typeof(other)))"))
+
+"""
+    dispatch_parent(req::HTTP.Request)
+
+The caller progress node a `dispatch(...; parent=node)` call stashed on this
+request, or `nothing` for a plain loopback/browser request (which carries no
+key) and for a `dispatch` without `parent`.
+
+`dispatch` parents the route's own execution automatically, and (with
+Treebars' ambient dispatch-parent protocol, `b4c2182` and later) also binds
+the caller so a bare `Treebars.polling_fetchindex` — no `parent=` — hangs
+its compute under it. `parent=:auto` reads this request leg FIRST, so the
+one-liner is optional in-dispatch; it stays the portable spelling, because
+it survives the spawned-task boundary on Julia 1.10 that the task-local
+ambient bind does not, and it is the only form on older Treebars. Inside
+any route body (`__req__` is the live request):
+
+```julia
+polling_fetchindex(ip, key; sync=wants_markdown(__req__),
+                   parent=dispatch_parent(__req__)) do rv
+    ...
+end
+```
+
+Outside `dispatch` the accessor returns `nothing`, which is
+`polling_fetchindex`'s default — so the kwarg is a no-op on ordinary
+requests and the same route body serves both paths.
+"""
+dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, nothing)
+
+"""
+    dispatch(method, url; headers=[], body=UInt8[], parent=nothing) -> HTTP.Response
+
+Run one request against the registered route tree in-process and return the
+handler's `HTTP.Response` — no listener, no socket, no serialization
+round-trip. `route!` must have registered the app first (exactly as for
+`record!`); the request resolves through the live router, so `:index`
+collapse, verb dispatch, path/query/body extraction, the response pipeline
+(`Accept` negotiation, `?plain`/`?error` shapes, `__page__` wrap), and the
+error pipeline (log file + `X-HTMXO-Error-Id` header) all behave exactly as
+for a loopback request.
+
+- `method` — a `Verb` (`Verb{:GET}()`), `Symbol` (`:GET`), or `String`
+  (`"GET"`, case-insensitive).
+- `url` — an app-relative target (`"/plot/x?plain=1"`). Absolute URLs are
+  accepted and their origin stripped; fragments strip.
+- `headers` — request headers as a `Vector` of pairs, a `Dict`, or a
+  `NamedTuple` (`["Accept" => "text/markdown"]`).
+- `body` — request body as a `String` or `Vector{UInt8}` (for
+  `POST`/`PUT`/`PATCH` routes).
+- `parent` — an optional Treebars progress node. The route's compute hangs
+  under it instead of rooting a fresh `__status__` tree, so a caller
+  assembling a larger job (a PDF export fetching embeds, a batch warmup)
+  sees the inner compute nested in its own tree. It is also the explicit
+  form of dispatch parenting: `dispatch` binds `parent` as the ambient
+  dispatch parent for the extent of the request (Treebars'
+  `with_dispatch_parent`, companion of Treebars `b4c2182`), so a route
+  body that nests a bare `polling_fetchindex` — no `parent=` — hangs its
+  compute under the caller automatically. On Treebars generations without
+  the ambient protocol (and outside `dispatch`) the execution roots its
+  own tree, exactly as over loopback. A nested `dispatch` without
+  `parent` binds `nothing` for its own extent, so inner pollers stay
+  detached rather than inheriting the outer job's tree. The explicit
+  one-liner `parent=dispatch_parent(__req__)` stays valid everywhere and
+  remains the portable spelling where the ambient bind does not reach — a
+  spawned route body on Julia 1.10 crosses a task boundary the task-local
+  bind does not.
+
+Unmatched targets return the router's own 404/405 responses rather than
+throwing, so `(resp.status, String(resp.body))` is the complete fetch
+contract — the same shape `HTTP.get(...; status_exception=false)` yields.
+
+Serve-time Oxygen middleware (access log, metrics, docs) does not run:
+`dispatch` resolves at the router, beneath the middleware stack. Routes
+mounted under `/docs` therefore answer here even when Oxygen's docs
+middleware would intercept them over the wire (see `_warn_docs_prefix`).
+`:page_load` responses start no compute, so there is nothing to parent;
+polling-mode responses attach their in-flight operation node.
+
+```julia
+route!(MyApp())
+resp = dispatch(:GET, "/figure/qoi"; headers=["Accept" => "text/markdown"])
+resp.status == 200 || error("embed failed: \$(resp.status)")
+markdown = String(resp.body)
+```
+"""
+function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
+        parent=nothing)
+    req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
+                       _dispatch_headers(headers), _dispatch_body(body))
+    parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
+    _with_dispatch_parent(() -> CONTEXT[].service.router(req), parent)
 end
 
 # Recording shims. Implementation is held in mutable `Ref`s so the
@@ -10097,6 +10555,182 @@ show_when_script() = h.script(Raw(raw"""
   document.body.addEventListener('htmx:afterSettle', function(e) { initShowWhen(e.detail.elt); });
 })();
 """))
+
+"""
+    live_refresh_script()
+
+Return a `<script>` that keeps a *live/periodic-refresh* fragment stable across
+re-fetches. A fragment that self-polls on a periodic trigger (`hx-trigger`
+contains `every`) over a slow `:auto` operation would otherwise flip-flop its
+settled content to poller chrome on every re-fetch (grace miss → poller swapped
+over the live content), then back. This script intercepts that: on a re-fetch of
+an **already-settled** live element it keeps the content in place, diverts the
+interim poller into a dedicated, unobtrusive progress reporter ("behind the
+hairline"), and swaps the terminal result into the target only once it resolves.
+First loads are untouched, so `:auto` progress chrome still shows the first time.
+
+Automatic — no consumer wiring. Detection uses the same Treebars markers the
+poller/terminal already carry (`treebar-poller` vs `treebar-terminal-content`).
+Include once per page; the `htmx()` shell installs it alongside the Treebars
+assets.
+"""
+live_refresh_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoLiveRefresh) return;
+  window.__htmxoLiveRefresh = true;
+  var SETTLED = 'data-htmxo-live-settled';
+  var BUSY = 'data-htmxo-live-busy';
+
+  // The reporter lives "behind the hairline": a subtle, muted strip below a
+  // 1px divider, so an ongoing refresh reads as quiet background progress, not
+  // as content being torn down.
+  var st = document.createElement('style');
+  st.textContent =
+    '.htmxo-live-reporter{margin-top:.35rem;padding-top:.3rem;' +
+    'border-top:1px solid color-mix(in srgb, currentColor 22%, transparent);' +
+    'opacity:.6;font-size:.82em}.htmxo-live-reporter[hidden]{display:none}';
+  (document.head || document.documentElement).appendChild(st);
+
+  // A live element self-polls on a periodic trigger and swaps its own region.
+  // It re-fetches the ROUTE url (never a `__htmxo_poll` url) and is not part of
+  // poller chrome — that distinguishes it from a Treebars poller-inner, which
+  // also carries an `every` trigger (its 200ms self-poll).
+  function isLive(el) {
+    if (!el || !el.getAttribute) return false;
+    if ((el.getAttribute('hx-trigger') || '').indexOf('every') === -1) return false;
+    if ((el.getAttribute('hx-get') || '').indexOf('__htmxo_poll') !== -1) return false;
+    if (el.closest && (el.closest('.treebar-poller') || el.closest('.htmxo-live-reporter'))) return false;
+    return true;
+  }
+  // Parse a response fragment's first element. Classifying by the actual
+  // top-level class is required: a running poller's `hx-select` attribute value
+  // literally contains the string `treebar-terminal-content`, so a substring
+  // test misfires.
+  function firstEl(s) {
+    if (typeof s !== 'string') return null;
+    var t = document.createElement('template');
+    t.innerHTML = s;
+    return t.content.firstElementChild;
+  }
+  // A running Treebars poller (chrome present, not yet terminal).
+  function isPoller(s) {
+    var el = firstEl(s);
+    if (!el || el.classList.contains('treebar-terminal-content')) return false;
+    return el.classList.contains('treebar-poller') ||
+           el.classList.contains('treebar-poller-inner') ||
+           !!el.querySelector('.treebar-poller-inner');
+  }
+  // The resolved terminal result.
+  function isTerminal(s) {
+    var el = firstEl(s);
+    return !!(el && (el.classList.contains('treebar-terminal-content') ||
+                     el.querySelector('.treebar-terminal-content')));
+  }
+  // The unobtrusive progress reporter that sits beside a live element.
+  function reporterFor(el) {
+    var rep = el.__htmxoReporter;
+    if (rep && rep.isConnected) return rep;
+    rep = document.createElement('div');
+    rep.className = 'htmxo-live-reporter';
+    rep.hidden = true;
+    if (el.parentNode) el.parentNode.insertBefore(rep, el.nextSibling);
+    el.__htmxoReporter = rep;
+    rep.__htmxoLiveTarget = el;
+    return rep;
+  }
+  // Stamp any settled live element in a freshly swapped subtree, and give it a
+  // reporter. A live element only ever appears carrying terminal content, so
+  // "swapped in" == "settled".
+  function stampSettled(root) {
+    // A live element settles only on a real fragment swap that delivered its
+    // result — never the initial page load (whose settle covers the whole body
+    // and would settle a live element before it has shown any result, diverting
+    // its first load too). Walk up from the swapped node to the live element it
+    // belongs to (skipping poller chrome), and stamp any live descendants.
+    if (!root || root === document.body || root === document.documentElement ||
+        root.nodeType === 9 || !root.querySelectorAll) return;
+    var found = [];
+    var el = root;
+    while (el && el.getAttribute) { if (isLive(el)) { found.push(el); break; } el = el.parentElement; }
+    root.querySelectorAll('[hx-trigger*="every"]').forEach(function(e) { if (isLive(e)) found.push(e); });
+    found.forEach(function(el) {
+      el.setAttribute(SETTLED, '1');
+      reporterFor(el);
+    });
+  }
+  document.addEventListener('htmx:afterSettle', function(evt) {
+    stampSettled(evt.detail && evt.detail.elt);
+  });
+
+  document.addEventListener('htmx:beforeSwap', function(evt) {
+    var d = evt.detail; if (!d) return;
+    var target = d.target;
+    var resp = d.serverResponse;
+
+    // (A) Re-fetch of a settled live element that came back a poller:
+    //     keep the content, divert the poller into the reporter.
+    if (target && isLive(target) && target.hasAttribute(SETTLED) && isPoller(resp)) {
+      d.shouldSwap = false;
+      if (target.hasAttribute(BUSY)) {
+        // A prior refresh is still polling in the reporter — drop this re-fire.
+        // But if that reporter has stalled/errored (no live poller left), recover
+        // so a transient failure cannot pause refreshes for good.
+        var r = target.__htmxoReporter;
+        if (r && r.querySelector && r.querySelector('.treebar-poller-inner[hx-trigger]')) return;
+        target.removeAttribute(BUSY);
+      }
+      target.setAttribute(BUSY, '1');
+      var rep = reporterFor(target);
+      rep.__htmxoLiveTarget = target;
+      rep.hidden = false;
+      rep.innerHTML = resp;
+      if (window.htmx && window.htmx.process) window.htmx.process(rep);
+      return;
+    }
+
+    // (B) The diverted poll loop resolved (terminal reached the reporter):
+    //     move the result to the live target, clear + hide the reporter.
+    var rep2 = target && target.closest ? target.closest('.htmxo-live-reporter') : null;
+    if (rep2 && rep2.__htmxoLiveTarget && isTerminal(resp)) {
+      d.shouldSwap = false;
+      var live = rep2.__htmxoLiveTarget;
+      var tmp = document.createElement('template');
+      tmp.innerHTML = resp;
+      var term = tmp.content.querySelector('.treebar-terminal-content');
+      // The result content the route rendered, applied to the live target with
+      // the target's OWN swap style — so `outerHTML` replaces the element while
+      // `innerHTML`/`morph:innerHTML` reconciles its children.
+      var content = term ? term.innerHTML : null;
+      if (content != null) {
+        var swap = live.getAttribute('hx-swap') || 'outerHTML';
+        if (window.htmx && window.htmx.swap) {
+          window.htmx.swap(live, content, { swapStyle: swap });
+        } else if (swap.indexOf('outerHTML') !== -1) {
+          live.outerHTML = content;
+        } else {
+          live.innerHTML = content;
+        }
+      }
+      rep2.innerHTML = '';
+      rep2.hidden = true;
+      var still = live.id ? document.getElementById(live.id) : live;
+      if (still && still.removeAttribute) still.removeAttribute(BUSY);
+      return;
+    }
+  });
+})();
+"""))
+
+# The live-refresh interception rides alongside the Treebars poll assets, but
+# ONLY when they are actually present: without the Treebars extension there are
+# no pollers to intercept, and the shell must stay byte-for-byte poller-free
+# (the `treebars_assets=false` opt-out and every ext-absent shell are unchanged,
+# so `htmx page shells auto-install Treebars assets` still holds).
+function _live_refresh_page_assets(treebars_assets::Bool)
+    treebars_assets || return ()
+    assets = _polling_page_assets()
+    isempty(assets) ? assets : (assets..., live_refresh_script())
+end
 
 # --- Theme ---
 

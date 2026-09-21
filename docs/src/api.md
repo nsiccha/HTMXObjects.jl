@@ -750,15 +750,16 @@ otherwise it stays direct:
 |-----------|---------------------|
 | The verb is `GET` | The poller issues GET refreshes, so mutations stay direct |
 | The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
-| The descriptor advertises `semantics.pending` | True for any ordinary computed route body; false for a fixed field or a `@fresh` one |
+| The descriptor advertises `semantics.pending` | A Pending handle can exist; false for a fixed field or a `@fresh` one |
 
 For an HTMX request, those conditions enter the polling transport directly.
 For a browser navigation that accepts `text/html` and has a `__page__` wrapper,
-`:auto` returns the composed page shell immediately. The route region carries
-`hx-trigger="load"` and requests the same operation; that fragment request then
-enters the ordinary grace/poll transport and replaces the region with progress
-and, finally, the terminal fragment. Markdown/error requests, API/curl requests,
-and routes without page chrome keep their direct response.
+`:auto` returns the composed page shell immediately. The
+route region carries `hx-trigger="load"` and requests the same operation; that
+fragment request then enters the ordinary grace/poll transport and replaces the
+region with progress and, finally, the terminal fragment. Markdown/error
+requests, API/curl requests, and routes without page chrome keep
+their direct response.
 
 Both the load URL and every capability-poll URL preserve the request-time
 external prefix (`X-Forwarded-Prefix`), so the sequence remains under a
@@ -771,14 +772,55 @@ poller and returns its value directly. `polling_fetchindex` therefore remains
 useful only for what the policy does not cover — a non-GET operation, a declared
 final response, or a poller you want to shape by hand.
 
+A hand-shaped poller under the default `:auto` policy must own the route's
+transport by itself. Mark its wrapper route `@fresh @get`: `@fresh` makes that
+route's descriptor non-pending, so the app-wide outer transport stays blocking,
+while the route body re-runs on each inner poll to inspect the indexed
+property's current state. The indexed property itself remains memoized and
+coalesces the long-running work.
+
+```julia
+@fresh @get stage(name::Symbol) = polling_fetchindex(
+    compute_steps, name;
+    poll_url=query_url(__self__/"stage/$name"),
+    label="Preparing $name",
+) do result
+    h.div(result)
+end
+```
+
+Without the wrapper's `@fresh`, both transports are active: a slow inner
+re-poll can cross the outer grace period and temporarily replace the shaped
+Treebars fragment with HTMXObjects' generic interim poller. That presents as a
+visible flip-flop between the two fragments. `OperationPolicy(:blocking)` also
+avoids the conflict, but it applies to every route under the root type rather
+than to this route alone.
+
 Every emitted poller carries an independently generated, OS-random bearer
-token. Keep it confidential: possession authorizes polling that one operation.
-HTMXObjects also binds the token to the original route, typed arguments, and
-`RootProvider` scope/key, so a poll request reaches the exact in-flight property
-even though the default provider constructs a fresh root per request.
-Concurrent identical operations receive distinct, non-enumerable tokens.
-Successful terminal rendering removes the retained operation immediately; a
-bounded process-local registry expires abandoned or failed pollers.
+token. Keep it confidential. HTMXObjects binds the token to the original route,
+typed arguments, and `RootProvider` scope/key, so a poll request reaches the
+exact in-flight property even though the default provider constructs a fresh
+root per request. Concurrent identical operations receive distinct,
+non-enumerable tokens. A poll that cannot resume its operation — an unknown
+token after a process restart, an expired entry, drifted arguments, or a
+missing token — heals by re-executing a fresh operation with the poll
+request's current args instead of failing: the token is a resumption hint,
+and a healed request computes exactly what a fresh GET would. Successful
+terminal rendering removes the retained operation immediately; a bounded
+process-local registry expires abandoned or failed pollers.
+
+A resolved `:auto` poll answers with the bare result fragment — no poller
+wrapper, no kept progress tree — so an ordinary fragment never carries
+inspection chrome. `keep_progress` still governs hand-shaped
+`polling_fetchindex` pollers, which keep their frozen tree for post-hoc
+inspection.
+
+Every `htmx()` page shell carries the Treebars stylesheet + script while the
+Treebars extension is loaded, so pollers render quietly and terminalize with
+no per-app wiring — ahead of `extra_head`, so apps can still override.
+`treebars_assets=false` opts a shell out (the escape hatch for strict script
+policies); a manual `extra_head` install alongside stays harmless but
+redundant.
 
 The progress tree is property-scoped. In generated DynamicObjects bodies,
 source-visible `object.property` reads and `object.indexed(args...)` calls carry
@@ -965,3 +1007,55 @@ symbols, and `Regex`es over paths. Zero-match entries throw an
 `ArgumentError`, so a stale warm list fails loudly instead of warming
 nothing. `{param}` templates are concretized with boring type samples for
 requests — pass concrete URLs for an exact warm of id-lookup routes.
+
+## In-process dispatch
+
+`dispatch` runs one request against the registered route tree in-process
+and returns the handler's `HTTP.Response` — the same status, body, and
+headers a loopback request would see, with no listener, no socket, and no
+serialization round-trip. `route!` must have registered the app first
+(exactly as for `record!`):
+
+```julia
+route!(MyApp())
+resp = dispatch(:GET, "/figure/qoi"; headers=["Accept" => "text/markdown"])
+resp.status == 200 || error("embed failed: $(resp.status)")
+markdown = String(resp.body)
+```
+
+| Argument | Shape |
+|----------|-------|
+| `method` | A `Verb` (`Verb{:GET}()`), `Symbol` (`:GET`), or `String` (`"GET"`, case-insensitive) |
+| `url` | An app-relative target (`"/plot/x?plain=1"`); absolute URLs keep path + query, fragments strip |
+| `headers` | A `Vector` of pairs, a `Dict`, or a `NamedTuple` |
+| `body` | A `String` or `Vector{UInt8}` (for `POST`/`PUT`/`PATCH` routes) |
+| `parent` | An optional Treebars progress node the route's compute hangs under |
+
+The request resolves through the live router, so `:index` collapse, verb
+dispatch, path/query/body extraction (including repeated-key vectors), the
+response pipeline (`Accept` negotiation, `?plain`/`?error` shapes,
+`__page__` wrap), and the error pipeline (per-error log file plus the
+`X-HTMXO-Error-Id` header) all behave exactly as over loopback.
+Unmatched targets return the router's own 404/405 responses rather than
+throwing, so `(resp.status, String(resp.body))` is the complete fetch
+contract — the same shape `HTTP.get(...; status_exception=false)` yields.
+
+`parent` exists for callers assembling a larger job in-process — a PDF
+export fetching embeds, a batch warmup: the route's compute nests under
+the caller's node instead of rooting a fresh `__status__` tree. There is
+no ambient parent: without it the execution roots its own tree, exactly
+as over loopback. Scoped-root (governed) and polling-mode executions
+attach best-effort after the fact; when no progress node exists to
+attach (an uncached `@fresh` route), `dispatch` warns rather than
+returning a silently unparented response.
+
+`dispatch_parent(req)` reads that node back inside a route body (`__req__`
+is the live request): `parent=dispatch_parent(__req__)` on a nested
+`polling_fetchindex` hangs the nested compute under the dispatch caller,
+which does not happen automatically — a hand-rolled poller roots its own
+tree otherwise. Route bodies that run no nested polling need nothing: the
+route's own execution already parents automatically. Off `dispatch` the
+accessor returns `nothing`, so the kwarg is a no-op on ordinary requests.
+
+Serve-time Oxygen middleware (access log, metrics, docs) does not run:
+`dispatch` resolves at the router, beneath the middleware stack.

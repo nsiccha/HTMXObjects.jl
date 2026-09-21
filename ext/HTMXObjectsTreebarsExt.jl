@@ -27,6 +27,31 @@ function _grace_fetch(render_result, started, grace_period)
     (ready=true, value=render_result(rv))
 end
 
+function _operation_ready_terminal(render_result, started)
+    value = started
+    while value isa HTMXObjects.DynamicObjects.Pending
+        isready(value) || return (ready=false, value=nothing)
+        try
+            value = fetch(value)
+        catch
+            # A failed operation is not a value-terminal: answer unresolved
+            # so the normal path renders it (`safely` + failure article +
+            # open tree).
+            return (ready=false, value=nothing)
+        end
+    end
+    terminal = render_result(value)
+    # Dual-class terminal: the trigger-less `.treebar-poller-inner` is the
+    # shape every deployed poller hx-select matches — the live select has no
+    # `.treebar-terminal-content` branch, so the bare marker swapped an EMPTY
+    # fragment — while `.treebar-terminal-content` keys the client finalizer
+    # that terminalizes the wrapper once Treebars ships it. One node, not
+    # nested: the top-level-only select excludes a nested match, and the
+    # finalizer reads the class off the swapped node itself.
+    (ready=true, value=HTMXObjects.h.div(terminal;
+        class="treebar-poller-inner treebar-terminal-content"))
+end
+
 function _operation_render_result(render_result, value, transport)
     rendered = render_result(value)
     transport.replace_page_load || return rendered
@@ -58,6 +83,17 @@ function __init__()
     HTMXObjects._recording_polling_impl[] =
         (args...; kwargs...) -> Treebars.polling_fetchindex(args...; kwargs...)
 
+    HTMXObjects._progress_attach_impl[] =
+        (parent, node) -> Treebars.add_child!(parent, node)
+
+    # Ambient dispatch-parent protocol (companion of Treebars `b4c2182`):
+    # route bodies nesting a bare `polling_fetchindex` resolve the caller
+    # node through `parent=:auto`. Guarded so the extension still loads
+    # against Treebars generations that predate the protocol — the base
+    # seam's passthrough stays installed and nothing binds.
+    isdefined(Treebars, :with_dispatch_parent) &&
+        (HTMXObjects._with_dispatch_parent_impl[] = Treebars.with_dispatch_parent)
+
     HTMXObjects._operation_polling_impl[] =
         (render_result, started, ip, keys, call_kwargs, transport) -> begin
             render_operation_result = value ->
@@ -88,6 +124,10 @@ function __init__()
                 rethrow()
             end
         end
+
+    HTMXObjects._operation_ready_terminal_impl[] = _operation_ready_terminal
+    HTMXObjects._polling_page_assets_impl[] =
+        () -> (Treebars.htmx_treebar_styles(), Treebars.htmx_treebar_script())
 end
 
 end # module

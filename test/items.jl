@@ -20,7 +20,9 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticRequiredParamApp, IndexedSemanticAutoApp,
     ZeroConfigSemanticApp, ZeroConfigSemanticChild, ZeroConfigSemanticHost,
     MountedSemanticOps, MountedSemanticRoot,
-    PolicyApp, MediaRangeApp, SlowPolicyApp, SlowPagePolicyApp, SlowRecordApp,
+    PolicyApp, FreshPolicyApp, MediaRangeApp, SlowPolicyApp,
+    SlowInstrumentedPolicyApp,
+    SlowPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
@@ -35,6 +37,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     ArchitectureLeaf, ArchitectureRoot, ArchitectureExplorerHost,
     ARCHITECTURE_TARGET, ARCHITECTURE_COMPUTES,
     NavChainChild, NavChainRoot, NavSlurpRoot,
+    NavDepthGreat, NavDepthGrandchild, NavDepthChild, NavDepthRoot,
+    NavDepth1Child, NavDepth1Root, NavDepthBadChild, NavDepthBadRoot,
     SwapView, SwapSection, SwapRoot,
     NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
@@ -42,7 +46,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     DomainNode, DomainChild, StageChild, DomainRoot, DomainParamRoot,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
     EditorMountRoot, RawBodyApp,
-    OpenAPIWidgets, OpenAPIRoot
+    OpenAPIWidgets, OpenAPIRoot,
+    DispatchProbeApp, DPARENT_SEEN, DAMBIENT_SEEN, DNESTED_SEEN
 
 @htmx struct TestApp
     title = "Test"
@@ -459,6 +464,13 @@ end
     @ws stream(; count::Int=1) = "ws:$(count)"
 end
 
+# A declaration-site fresh route is the per-route opt-out used when the route
+# renders its own `polling_fetchindex` transport. Its body must execute without
+# receiving HTMXObjects' reserved two-phase `fetch` keyword.
+@htmx struct FreshPolicyApp
+    @fresh @get html(; count::Int=1) = h.p("fresh:$(count)")
+end
+
 # A route returning a raw 206 byte-range response with a `Vector{UInt8}` body.
 # The body type is load-bearing: Oxygen 1.10's metrics middleware reads every
 # non-200 body via `String(response.body)`, which steals a Vector buffer and
@@ -479,6 +491,15 @@ end
 # distinguish a genuine non-blocking start from a blocking one.
 @htmx struct SlowPolicyApp
     @get slow(; count::Int=1) = (sleep(3.0); h.p("slow:$(count)"))
+end
+
+# Instrumented counterpart to SlowPolicyApp: the same slow body plus an instant
+# route. `:auto` polls pending-capable routes with no annotation, so both this
+# fixture and the plain one above poll — the markers shape the progress tree,
+# never the transport decision.
+@htmx struct SlowInstrumentedPolicyApp
+    @get @progress instant(; count::Int=1) = h.p("instant:$(count)")
+    @get @progress slow(; count::Int=1) = (sleep(3.0); h.p("slow:$(count)"))
 end
 
 const slow_page_gate = Ref{Base.Event}(Base.Event())
@@ -733,6 +754,66 @@ end
     @get index() = "slurproot"
 end
 
+# A wrapper may ask for MORE than one navigation level: the framework reads the
+# declared `navigation_depth` default and threads navigation at that depth, so
+# a rail can render grandchildren without calling `navigation` itself.
+@htmx struct NavDepthGreat
+    @get index() = "great-body"
+end
+
+@htmx struct NavDepthGrandchild
+    @include great = NavDepthGreat()
+    @get index() = "grandchild-body"
+end
+
+@htmx struct NavDepthChild
+    @include grandchild = NavDepthGrandchild()
+    __page__(content; navigation=nothing, navigation_depth=2) =
+        h.section(h.span("DEPTH2:" * string(length(navigation.descendants)) * ":" *
+                         string(isempty(navigation.descendants) ? -1 :
+                                length(navigation.descendants[1].children))),
+                  content)
+    @get index() = "child-body"
+end
+
+@htmx struct NavDepthRoot
+    @include child = NavDepthChild()
+    __page__(content; navigation=nothing) = h.div(content)
+    @get index() = "root-body"
+end
+
+# One level is still the contract when nothing is declared: the threaded
+# navigation lists children whose `children` are always empty.
+@htmx struct NavDepth1Child
+    @include grandchild = NavDepthGrandchild()
+    __page__(content; navigation=nothing) =
+        h.section(h.span("DEPTH1:" * string(length(navigation.descendants)) * ":" *
+                         string(isempty(navigation.descendants) ? -1 :
+                                length(navigation.descendants[1].children))),
+                  content)
+    @get index() = "child-body"
+end
+
+@htmx struct NavDepth1Root
+    @include child = NavDepth1Child()
+    __page__(content; navigation=nothing) = h.div(content)
+    @get index() = "root-body"
+end
+
+# A depth that is not a nonnegative Integer refuses loudly instead of
+# silently rendering one level.
+@htmx struct NavDepthBadChild
+    @include grandchild = NavDepthGrandchild()
+    __page__(content; navigation=nothing, navigation_depth="two") = content
+    @get index() = "child-body"
+end
+
+@htmx struct NavDepthBadRoot
+    @include child = NavDepthBadChild()
+    __page__(content; navigation=nothing) = h.div(content)
+    @get index() = "root-body"
+end
+
 # --- Resource fixtures ------------------------------------------------------
 
 struct NoteDraft
@@ -930,6 +1011,74 @@ end
 @htmx struct BoolPropRoot
     paginate::Bool = false
     @get index() = string("paginate=", paginate)
+end
+
+# Fixture for in-process `dispatch` (snag `in-process-route-ccc2f1cc`):
+# distinct route names keep its paths off every other fixture's on the
+# shared test router. `dplot` carries a docstring: `render_text` inlines
+# undocumented nodes, so only a documented route lets the parenting test
+# distinguish attach from miss.
+const DPARENT_SEEN = Ref{Any}(nothing)
+
+# Ambient dispatch-parent probes (todo `0ienez7`, companion of Treebars
+# `b4c2182`): a slow IP whose compute route bodies nest through a BARE
+# `polling_fetchindex` (no `parent=` — the request rides along as
+# `req=__req__`, the shape the one-liner already uses). The 0.5 s compute
+# lets a concurrent monitor observe the attach mid-flight; `dispatch`
+# itself blocks until the body completes, so the monitor, not a gate,
+# is what makes the attach observable.
+import Treebars
+using HTMXObjects: DynamicObjects
+
+DynamicObjects.@dynamicstruct struct _AmbientSlowIP
+    __status__ = Treebars.initialize_progress!(:state; description="ambient-ip")
+    index(key::String) = begin
+        sleep(0.5)
+        "computed:$key"
+    end
+end
+const _DAMBIENT_IP_INSTANCE = _AmbientSlowIP()
+const _DAMBIENT_IP = getproperty(_DAMBIENT_IP_INSTANCE, :index)
+
+const DAMBIENT_SEEN = Ref{Any}(:unset)
+const DNESTED_SEEN = Ref{Any}(:unset)
+
+@htmx struct DispatchProbeApp
+    @param tag::String = "untagged"
+    "Dispatch probe plot."
+    @get dplot(name::String; smooth::Int=1) = h.div("plot:$name:$tag:smooth=$smooth")
+    @get dmulti(; ids::Vector{Int}=Int[]) = h.p(join(ids, ","))
+    @post dsubmit(; label::String="none") = h.p("submitted:$label")
+    @get dboom() = error("boom-dispatch-probe")
+    # `dispatch_parent` probe (snag `consume-landed-t-ea068eff`): records
+    # the accessor's value so the test can assert identity with the node
+    # the `dispatch` caller passed (or `nothing` off `dispatch`).
+    @get dparent() = (DPARENT_SEEN[] = dispatch_parent(__req__);
+                      h.div("ok"))
+    # Ambient dispatch-parent probes: `dambient` nests the bare slow-IP
+    # poller; `ddetached` is the explicit-`nothing` control; `dshadow`
+    # records what the request carries, then nests an in-process `dispatch`
+    # WITHOUT `parent`; `dinner` records the same and runs the bare poller.
+    @get dambient(key::String) = Treebars.polling_fetchindex(
+        _DAMBIENT_IP, key; sync=true, req=__req__) do rv
+        h.div("ambient:$rv")
+    end
+    @get ddetached(key::String) = Treebars.polling_fetchindex(
+        _DAMBIENT_IP, "detached-$key"; sync=true, req=__req__, parent=nothing) do rv
+        h.div("detached:$rv")
+    end
+    @get dshadow(key::String) = begin
+        DAMBIENT_SEEN[] = dispatch_parent(__req__)
+        r = dispatch(:GET, "/dinner/$key"; headers=["Accept" => "text/markdown"])
+        h.div("shadow:$(r.status)")
+    end
+    @get dinner(key::String) = begin
+        DNESTED_SEEN[] = dispatch_parent(__req__)
+        Treebars.polling_fetchindex(
+            _DAMBIENT_IP, "shadow-$key"; sync=true, req=__req__) do rv
+            h.div("inner:$rv")
+        end
+    end
 end
 
 end # @testmodule HTMXOTestFixtures
@@ -1909,14 +2058,15 @@ end
 
 @testitem "semantic operation execution policy and direct responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _clear_operation_polls!, _operation_execution_mode,
-        _operation_polling_impl, _property_descriptor, _run_operation,
-        _resolve_operation_value
+        _operation_polling_impl, _operation_ready_terminal_impl,
+        _property_descriptor, _run_operation, _resolve_operation_value
     import HTMXObjects.DynamicObjects
 
     # `:auto` is the default so an ordinary route gets the live progress tree
     # with no `route!(…; operation_policy=…)` registration. It stays conditional
     # (GET + HTMX + a pending-capable descriptor), which the `plain` vs `hx`
-    # cases below pin — nothing that was direct becomes a poller by default.
+    # vs `marked` cases below pin — nothing that was direct becomes a poller
+    # by default, and no marker is required to poll.
     @test OperationPolicy().mode === :auto
     @test OperationPolicy(:blocking).mode === :blocking
     @test OperationPolicy(:polling; poll_interval="350ms", keep_progress=false) ==
@@ -1926,12 +2076,67 @@ end
     html_descriptor = _property_descriptor(PolicyApp, :html)
     raw_descriptor = _property_descriptor(PolicyApp, :raw)
     response_descriptor = _property_descriptor(PolicyApp, :response)
+    fresh_descriptor = _property_descriptor(FreshPolicyApp, :html)
+    marked_descriptor =
+        _property_descriptor(SlowInstrumentedPolicyApp, :instant)
+    @test marked_descriptor.semantics.pending
+    @test marked_descriptor.semantics.progress_mode === :instrumented
+    @test html_descriptor.semantics.pending
+    @test fresh_descriptor.semantics.fresh
+    @test !fresh_descriptor.semantics.pending
+    @test html_descriptor.semantics.progress_mode === :automatic
     plain = HTTP.Request("GET", "/html?count=2")
     hx = HTTP.Request("GET", "/html?count=2", ["HX-Request" => "true"])
+    marked_hx = HTTP.Request(
+        "GET", "/instant?count=2", ["HX-Request" => "true"])
     @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
                                     plain, Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:auto), html_descriptor,
                                     hx, Verb{:GET}()) === :polling
+    @test _operation_execution_mode(OperationPolicy(:auto), marked_descriptor,
+                                    plain, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:auto), marked_descriptor,
+                                    marked_hx, Verb{:GET}()) === :polling
+    @test _operation_execution_mode(OperationPolicy(:auto), fresh_descriptor,
+                                    hx, Verb{:GET}()) === :blocking
+
+    # `@fresh` is both a cache-policy declaration and the supported per-route
+    # opt-out for a hand-shaped poller under app-wide `:auto`. The blocking
+    # executor must not leak its private `fetch` selector into the route body.
+    fresh_app = FreshPolicyApp()
+    fresh_target = (context=nothing, root=fresh_app, leaf=fresh_app)
+    fresh_result = _run_operation(
+        fresh_target, FreshPolicyApp, :html, Verb{:GET}(), hx, 0, 0;
+        operation_policy=OperationPolicy(:auto))
+    @test repr("text/html", fresh_result.value) == "<p>fresh:2</p>"
+
+    # The governed executor forwards its kwargs through DynamicObjects'
+    # materialization lease, so pin the same reserved-keyword boundary there.
+    governed_context = OperationContext(
+        hx, "", "/html", :http, :request, nothing)
+    governed_target = (context=governed_context, root=fresh_app,
+                       leaf=fresh_app, governed=true, retention=nothing)
+    governed_result = _run_operation(
+        governed_target, FreshPolicyApp, :html, Verb{:GET}(), hx, 0, 0;
+        operation_policy=OperationPolicy(:auto))
+    @test repr("text/html", governed_result.value) == "<p>fresh:2</p>"
+    # The pending gate, cell by cell: the `pending` capability alone selects
+    # polling — `progress_mode` is descriptive (it shapes the progress tree),
+    # never a transport gate — and a descriptor that predates the field polls
+    # like any other pending-capable one.
+    function pending_mode(pending, progress_mode)
+        descriptor = (; output=(; type=Nothing),
+            semantics=(; pending, progress_mode))
+        _operation_execution_mode(OperationPolicy(:auto), descriptor,
+                                  marked_hx, Verb{:GET}())
+    end
+    @test pending_mode(true, :automatic) === :polling
+    @test pending_mode(true, :forwarded) === :polling
+    @test pending_mode(true, :instrumented) === :polling
+    @test pending_mode(false, :instrumented) === :blocking
+    legacy = (; output=(; type=Nothing), semantics=(; pending=true))
+    @test _operation_execution_mode(OperationPolicy(:auto), legacy,
+                                    marked_hx, Verb{:GET}()) === :polling
     @test _operation_execution_mode(OperationPolicy(:polling), raw_descriptor,
                                     hx, Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:polling), response_descriptor,
@@ -1965,38 +2170,120 @@ end
 
     app = PolicyApp()
     target = (context=nothing, root=app, leaf=app)
+    marked_app = SlowInstrumentedPolicyApp()
+    marked_target = (context=nothing, root=marked_app, leaf=marked_app)
     polls = NamedTuple[]
     old_polling = _operation_polling_impl[]
+    old_terminal = _operation_ready_terminal_impl[]
     _operation_polling_impl[] =
         (render_result, _started, ip, keys, call_kwargs, transport) -> begin
             push!(polls, (; keys, call_kwargs, transport))
             transport.retain()
             h.aside("polling")
         end
+    # Pin the ready-terminal probe to miss: routing (not terminal shape) is
+    # under test here, and the instant fixture would otherwise resolve before
+    # its follow-up poll on a fast machine. The probe itself is pinned
+    # separately against the real extension.
+    _operation_ready_terminal_impl[] =
+        (_render_result, _started) -> (ready=false, value=nothing)
     try
-        operation = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
-                                   hx, 0, 0;
-                                   operation_policy=OperationPolicy(:auto))
-        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        # A plain `:auto` route polls like a marked one — the marker-free
+        # default (a881161): no annotation buys non-blocking transport.
+        plain_operation = _run_operation(target, PolicyApp, :html,
+                                         Verb{:GET}(), hx, 0, 0;
+                                         operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", plain_operation.value) == "<aside>polling</aside>"
         @test length(polls) == 1
         @test only(polls).call_kwargs == (count=2,)
-        poll_url = only(polls).transport.poll_url
-        @test startswith(poll_url,
+        plain_poll_url = only(polls).transport.poll_url
+        @test startswith(plain_poll_url,
             "/html?count=2&__htmxo_poll=1&__htmxo_operation=")
         @test only(polls).transport.label == Long(:html)
-        @test only(polls).transport.grace_period == 0.1
+
+        operation = _run_operation(marked_target,
+                                   SlowInstrumentedPolicyApp, :instant,
+                                   Verb{:GET}(), marked_hx, 0, 0;
+                                   operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        @test length(polls) == 2
+        @test polls[2].call_kwargs == (count=2,)
+        poll_url = polls[2].transport.poll_url
+        @test startswith(poll_url,
+            "/instant?count=2&__htmxo_poll=1&__htmxo_operation=")
+        @test polls[2].transport.label == Long(:instant)
+        @test polls[2].transport.grace_period == 0.1
 
         poll_request = HTTP.Request(
             "GET", poll_url, ["HX-Request" => "true"])
-        polled = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
-                                poll_request, 0, 0;
+        polled = _run_operation(marked_target,
+                                SlowInstrumentedPolicyApp, :instant,
+                                Verb{:GET}(), poll_request, 0, 0;
                                 operation_policy=OperationPolicy(:auto))
         @test repr("text/html", polled.value) == "<aside>polling</aside>"
-        @test length(polls) == 2
+        @test length(polls) == 3
         @test last(polls).call_kwargs == (count=2,)
         @test last(polls).transport.poll_url == poll_url
-        @test last(polls).transport.label == Long(:html)
+        @test last(polls).transport.label == Long(:instant)
         @test last(polls).transport.grace_period == 0.0
+
+        # Heal: a poll the registry cannot resume re-executes fresh with the
+        # poll request's current args instead of failing — drifted args, a
+        # wiped registry (promotion restart), and a missing token alike. Each
+        # heal mints a FRESH token (its poll URL carries it); the follow-up on
+        # that fresh token then resumes (its URL stays put), which is what
+        # keeps a heal from re-healing forever.
+        drifted_request = HTTP.Request(
+            "GET", replace(poll_url, "count=2" => "count=3"),
+            ["HX-Request" => "true"])
+        drifted = _run_operation(marked_target,
+                                 SlowInstrumentedPolicyApp, :instant,
+                                 Verb{:GET}(), drifted_request, 0, 0;
+                                 operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", drifted.value) == "<aside>polling</aside>"
+        healed_url = last(polls).transport.poll_url
+        @test healed_url != poll_url
+        @test startswith(healed_url,
+            "/instant?count=3&__htmxo_poll=1&__htmxo_operation=")
+        @test last(polls).call_kwargs == (count=3,)
+
+        healed_followup = HTTP.Request(
+            "GET", healed_url, ["HX-Request" => "true"])
+        resumed = _run_operation(marked_target,
+                                 SlowInstrumentedPolicyApp, :instant,
+                                 Verb{:GET}(), healed_followup, 0, 0;
+                                 operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", resumed.value) == "<aside>polling</aside>"
+        @test last(polls).transport.poll_url == healed_url
+
+        # The mismatch healed the requesting route without disturbing the
+        # original operation: its own token still resumes.
+        original = _run_operation(marked_target,
+                                  SlowInstrumentedPolicyApp, :instant,
+                                  Verb{:GET}(), poll_request, 0, 0;
+                                  operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", original.value) == "<aside>polling</aside>"
+        @test last(polls).transport.poll_url == poll_url
+
+        _clear_operation_polls!()
+        wiped = _run_operation(marked_target,
+                               SlowInstrumentedPolicyApp, :instant,
+                               Verb{:GET}(), poll_request, 0, 0;
+                               operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", wiped.value) == "<aside>polling</aside>"
+        @test last(polls).transport.poll_url != poll_url
+        @test startswith(last(polls).transport.poll_url,
+            "/instant?count=2&__htmxo_poll=1&__htmxo_operation=")
+
+        tokenless = HTTP.Request(
+            "GET", "/instant?count=2&__htmxo_poll=1", ["HX-Request" => "true"])
+        missing = _run_operation(marked_target,
+                                 SlowInstrumentedPolicyApp, :instant,
+                                 Verb{:GET}(), tokenless, 0, 0;
+                                 operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", missing.value) == "<aside>polling</aside>"
+        @test startswith(last(polls).transport.poll_url,
+            "/instant?count=2&__htmxo_poll=1&__htmxo_operation=")
 
         raw = _run_operation(target, PolicyApp, :raw, Verb{:GET}(),
                              HTTP.Request("GET", "/raw?count=3"), 0, 0;
@@ -2015,7 +2302,7 @@ end
                             HTTP.Request("GET", "/stream?count=5"), 0, 0;
                             operation_policy=OperationPolicy(:polling))
         @test ws.value(nothing) == "ws:5"
-        @test length(polls) == 2
+        @test length(polls) == 8
 
         route!(app; operation_policy=:polling)
         raw_req = HTTP.Request("GET", "/raw?count=6", ["HX-Request" => "true"])
@@ -2034,9 +2321,10 @@ end
         @test final_response.status == 202
         @test HTTP.header(final_response, "Content-Type") == "application/json"
         @test String(final_response.body) == "{\"count\":7}"
-        @test length(polls) == 2
+        @test length(polls) == 8
     finally
         _operation_polling_impl[] = old_polling
+        _operation_ready_terminal_impl[] = old_terminal
         _clear_operation_polls!()
     end
 
@@ -2048,8 +2336,9 @@ end
         (render_result, started, _ip, _keys, _call_kwargs, _transport) ->
             h.div(string(render_result(started)))
     try
-        resolved = _run_operation(target, PolicyApp, :html, Verb{:GET}(),
-                                  hx, 0, 0;
+        resolved = _run_operation(marked_target,
+                                  SlowInstrumentedPolicyApp, :instant,
+                                  Verb{:GET}(), marked_hx, 0, 0;
                                   operation_policy=OperationPolicy(:auto))
         html = repr("text/html", resolved.value)
         @test !contains(html, "Pending")
@@ -2318,14 +2607,18 @@ end
 # *reached* — which a fully-blocking start also satisfies, because the wrapper
 # still runs, just over an already-finished value. So those tests pass whether
 # or not the transport does anything, and the regression they miss is total:
-# `:auto`/`:polling` degrading to `:blocking` for every route. Pin the actual
-# contract — what reaches the seam is an in-flight handle, not a finished value.
+# The polling transport starts the operation without blocking the request,
+# whatever selected it. Pin the actual contract — what reaches the seam is an
+# in-flight handle, not a finished value — once through forced `:polling` and
+# once through `:auto` on an instrumented route.
 @testitem "polling transport starts the operation without blocking" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_polling_impl, _run_operation
     import HTMXObjects.DynamicObjects
 
     app = SlowPolicyApp()
     target = (context=nothing, root=app, leaf=app)
+    marked_app = SlowInstrumentedPolicyApp()
+    marked_target = (context=nothing, root=marked_app, leaf=marked_app)
     starts = Any[]
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
@@ -2338,16 +2631,35 @@ end
         # for seconds, which would swamp the wall-clock assertion below.
         warm = HTTP.Request("GET", "/slow?count=0", ["HX-Request" => "true"])
         _run_operation(target, SlowPolicyApp, :slow, Verb{:GET}(), warm, 0, 0;
-                       operation_policy=OperationPolicy(:auto))
+                       operation_policy=OperationPolicy(:polling))
         @test only(starts) isa DynamicObjects.Pending
 
         empty!(starts)
         hx = HTTP.Request("GET", "/slow?count=1", ["HX-Request" => "true"])
         elapsed = @elapsed _run_operation(target, SlowPolicyApp, :slow,
                                           Verb{:GET}(), hx, 0, 0;
-                                          operation_policy=OperationPolicy(:auto))
+                                          operation_policy=OperationPolicy(:polling))
         # The 3s body must NOT have run to completion on the request task.
         @test elapsed < 1.0
+        @test only(starts) isa DynamicObjects.Pending
+
+        # `:auto` keeps the same non-blocking start for an instrumented route.
+        empty!(starts)
+        marked_warm = HTTP.Request(
+            "GET", "/slow?count=10", ["HX-Request" => "true"])
+        _run_operation(marked_target, SlowInstrumentedPolicyApp, :slow,
+                       Verb{:GET}(), marked_warm, 0, 0;
+                       operation_policy=OperationPolicy(:auto))
+        @test only(starts) isa DynamicObjects.Pending
+
+        empty!(starts)
+        marked_hx = HTTP.Request(
+            "GET", "/slow?count=11", ["HX-Request" => "true"])
+        marked_elapsed = @elapsed _run_operation(
+            marked_target, SlowInstrumentedPolicyApp, :slow,
+            Verb{:GET}(), marked_hx, 0, 0;
+            operation_policy=OperationPolicy(:auto))
+        @test marked_elapsed < 1.0
         @test only(starts) isa DynamicObjects.Pending
 
         # `:blocking` is unchanged: the value is fully computed, never a handle.
@@ -2370,7 +2682,8 @@ end
 # nothing gets `:auto` or `:blocking` — which is exactly the question a
 # consumer cannot answer from the code either. Pin it from the registry AND
 # through a real route registration, so a future change to `route!`'s kwarg
-# default cannot silently put long routes back on the request task.
+# default cannot silently put long routes back on the request task — marked
+# or not.
 @testitem "zero-config apps default to :auto" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_policies, _operation_polling_impl,
         _run_operation
@@ -2379,12 +2692,17 @@ end
     @test OperationPolicy().mode === :auto
 
     # `route!` with no `operation_policy` at all — the SbPMX `__init__` shape.
-    route!(SlowPolicyApp())
-    policy = _operation_policies[SlowPolicyApp]
+    route!(SlowInstrumentedPolicyApp())
+    policy = _operation_policies[SlowInstrumentedPolicyApp]
     @test policy.mode === :auto
+    route!(SlowPolicyApp())
+    plain_policy = _operation_policies[SlowPolicyApp]
+    @test plain_policy.mode === :auto
 
-    app = SlowPolicyApp()
+    app = SlowInstrumentedPolicyApp()
     target = (context=nothing, root=app, leaf=app)
+    plain_app = SlowPolicyApp()
+    plain_target = (context=nothing, root=plain_app, leaf=plain_app)
     starts = Any[]
     old_polling = _operation_polling_impl[]
     _operation_polling_impl[] =
@@ -2396,15 +2714,35 @@ end
         # Warm on its own key: a cold `_run_operation` compiles for seconds,
         # which would swamp the wall-clock assertion below.
         warm = HTTP.Request("GET", "/slow?count=100", ["HX-Request" => "true"])
-        _run_operation(target, SlowPolicyApp, :slow, Verb{:GET}(), warm, 0, 0;
+        _run_operation(target, SlowInstrumentedPolicyApp, :slow,
+                       Verb{:GET}(), warm, 0, 0;
                        operation_policy=policy)
         empty!(starts)
 
         hx = HTTP.Request("GET", "/slow?count=101", ["HX-Request" => "true"])
-        elapsed = @elapsed _run_operation(target, SlowPolicyApp, :slow,
-                                          Verb{:GET}(), hx, 0, 0;
+        elapsed = @elapsed _run_operation(target, SlowInstrumentedPolicyApp,
+                                          :slow, Verb{:GET}(), hx, 0, 0;
                                           operation_policy=policy)
         @test elapsed < 1.0
+        @test only(starts) isa DynamicObjects.Pending
+
+        # The marker-free default (a881161): an UNMARKED long route stays off
+        # the request task too — no annotation required.
+        empty!(starts)
+        plain_warm = HTTP.Request(
+            "GET", "/slow?count=102", ["HX-Request" => "true"])
+        _run_operation(plain_target, SlowPolicyApp, :slow,
+                       Verb{:GET}(), plain_warm, 0, 0;
+                       operation_policy=plain_policy)
+        empty!(starts)
+
+        plain_hx = HTTP.Request(
+            "GET", "/slow?count=103", ["HX-Request" => "true"])
+        plain_elapsed = @elapsed _run_operation(plain_target, SlowPolicyApp,
+                                                :slow, Verb{:GET}(), plain_hx,
+                                                0, 0;
+                                                operation_policy=plain_policy)
+        @test plain_elapsed < 1.0
         @test only(starts) isa DynamicObjects.Pending
     finally
         _operation_polling_impl[] = old_polling
@@ -4086,6 +4424,29 @@ end
     @test !contains(String(drive("/child", ["Accept" => "text/markdown"]).body), "OUTER:")
 end
 
+@testitem "a page wrapper declares how deep its threaded navigation goes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path) = begin
+        req = HTTP.Request("GET", path, ["Host" => "x"], UInt8[])
+        String(first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req).body)
+    end
+
+    # depth=2 on the child wrapper: descendants[1] is the grandchild and its
+    # `children` carry the great-grandchild — unreachable at the default depth.
+    route!(NavDepthRoot())
+    body = drive("/child")
+    @test contains(body, "DEPTH2:1:1")
+
+    # The default is still one level: the grandchild's children are empty.
+    route!(NavDepth1Root())
+    @test contains(drive("/child"), "DEPTH1:1:0")
+
+    # A non-Integer depth refuses loudly — a misspelled depth that silently
+    # rendered one level is the failure mode the `?__chrome__=` override already
+    # refuses to tolerate.
+    route!(NavDepthBadRoot())
+    @test_throws ArgumentError drive("/child")
+end
+
 @testitem "a partial swap carries the chrome below the swap target" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
@@ -5453,28 +5814,57 @@ end # @testmodule HTMXOPollIdentityFixtures
                         pollint=0.01) === :ok
         @test length(_operation_poll_snapshot()) == 2
 
-        # A token is a capability, not the identity by itself. Route arguments
-        # and provider scope/key are checked before the retained IP is exposed.
+        # A token is a resumption hint, not a capability by itself. Route
+        # arguments and provider scope/key are checked before the retained IP
+        # is resumed — and a poll that cannot resume heals by re-executing
+        # fresh with the poll request's current args instead of failing.
         wrong_arg = replace(first_url, "/poll_identity/7?" => "/poll_identity/8?")
-        @test contains(drive(wrong_arg), "aria-invalid=\"true\"")
-        @test contains(drive(first_url; session="session-b"),
-                       "aria-invalid=\"true\"")
-        @test length(_operation_poll_snapshot()) == 2
+        healed_arg_body = drive(wrong_arg)
+        @test running(healed_arg_body)
+        healed_arg_url = poll_url(healed_arg_body)
+        @test poll_token(healed_arg_url) != first_token
+        @test startswith(healed_arg_url, "/poll_identity/8?")
+        healed_session_body = drive(first_url; session="session-b")
+        @test running(healed_session_body)
+        healed_session_url = poll_url(healed_session_body)
+        @test poll_token(healed_session_url) != first_token
+        # The heals spawn asynchronously: the poller returns before the fresh
+        # computes start, so wait for the spawns like the initial pair above.
+        @test timedwait(() -> poll_identity_count() == 4, 10.0;
+                        pollint=0.01) === :ok
+        @test length(_operation_poll_snapshot()) == 4
+        # The mismatches healed their own routes; the original operation is
+        # untouched and still resumes on its own token.
+        @test running(drive(first_url))
 
         release_poll_identity!(1)
         first_done = settle(first_url)
         @test !running(first_done)
         @test contains(first_done, "poll:7:1")
-        @test length(_operation_poll_snapshot()) == 1
+        @test length(_operation_poll_snapshot()) == 3
         @test running(drive(second_url))
 
         release_poll_identity!(2)
         second_done = settle(second_url)
         @test !running(second_done)
         @test contains(second_done, "poll:7:2")
+        @test length(_operation_poll_snapshot()) == 2
+
+        # The heals converge: each settles on its own fresh token, computing
+        # with the CURRENT args (id=8, not the creation id=7).
+        release_poll_identity!(3)
+        healed_arg_done = settle(healed_arg_url)
+        @test !running(healed_arg_done)
+        @test contains(healed_arg_done, "poll:8:3")
+        @test length(_operation_poll_snapshot()) == 1
+        release_poll_identity!(4)
+        healed_session_done = settle(healed_session_url; session="session-b")
+        @test !running(healed_session_done)
+        @test contains(healed_session_done, "poll:7:4")
         @test isempty(_operation_poll_snapshot())
 
-        # An abandoned operation expires even if its producer is still alive.
+        # An abandoned operation expires even if its producer is still alive —
+        # and a poll past that expiry heals instead of failing.
         reset_poll_identity!()
         abandoned = drive("/poll_identity/9")
         abandoned_url = poll_url(abandoned)
@@ -5482,10 +5872,18 @@ end # @testmodule HTMXOPollIdentityFixtures
                         pollint=0.01) === :ok
         future = _operation_poll_now() + _OPERATION_POLL_TTL + 1
         @test isempty(_operation_poll_snapshot(; now=future))
-        expired = drive(abandoned_url)
-        @test !running(expired)
-        @test contains(expired, "aria-invalid=\"true\"")
+        expired_body = drive(abandoned_url)
+        @test running(expired_body)
+        expired_url = poll_url(expired_body)
+        @test poll_token(expired_url) != poll_token(abandoned_url)
+        @test timedwait(() -> poll_identity_count() == 2, 10.0;
+                        pollint=0.01) === :ok
         release_poll_identity!(1)
+        release_poll_identity!(2)
+        expired_done = settle(expired_url)
+        @test !running(expired_done)
+        @test contains(expired_done, "poll:9:2")
+        @test isempty(_operation_poll_snapshot())
 
         # Capacity is an LRU bound, independent of TTL cleanup.
         _clear_operation_polls!()
@@ -5512,6 +5910,137 @@ end # @testmodule HTMXOPollIdentityFixtures
         end
         _clear_operation_polls!()
     end
+end
+
+# A poll that finds its operation already resolved answers the terminal
+# WITHOUT the Treebars wrapper/kept-progress: an auto-poll terminal is an
+# ordinary fragment, not an inspection surface. The probe never waits — it
+# follows ready Pending chains and answers unresolved for anything else,
+# including failures (which keep the normal `safely` + article + open-tree
+# render). Pin both halves: the extension shape (result + dual-class swap
+# node, no chrome) and the core fallback (bare value, no Treebars at all).
+@testitem "ready-terminal probe answers resolved polls chrome-free" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _operation_ready_terminal_fallback
+    import HTMXObjects.DynamicObjects
+
+    extension = Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt)
+    @test extension !== nothing
+    render = value -> h.p("done:$value")
+
+    cache = DynamicObjects.ThreadsafeDict()
+    value = Base.get!(cache, :fast; fetch=identity) do _status
+        7
+    end
+    @test value isa DynamicObjects.Pending
+    @test timedwait(() -> isready(value), 5.0; pollint=0.001) === :ok
+
+    terminal = extension._operation_ready_terminal(render, value)
+    @test terminal.ready
+    terminal_html = repr("text/html", terminal.value)
+    @test contains(terminal_html, "done:7")
+    # The terminal answers BOTH swap contracts on ONE node: the trigger-less
+    # `.treebar-poller-inner` is what every deployed poller hx-select matches
+    # (the live select has no terminal-content branch, so the bare marker
+    # swapped EMPTY), while `.treebar-terminal-content` keys the client
+    # finalizer. The wrapper, kept tree, transport, and Pause are all gone.
+    @test startswith(terminal_html,
+        "<div class=\"treebar-poller-inner treebar-terminal-content\">")
+    @test length(findall("treebar-terminal", terminal_html)) == 1
+    @test length(findall("treebar-poller-inner", terminal_html)) == 1
+    @test contains(terminal_html, "treebar-terminal-content")
+    @test !contains(terminal_html, "<details")
+    @test !contains(terminal_html, "treebar-pause")
+    @test !contains(terminal_html, "hx-trigger")
+
+    bare = _operation_ready_terminal_fallback(render, value)
+    @test bare.ready
+    bare_html = repr("text/html", bare.value)
+    @test bare_html == "<p>done:7</p>"
+
+    # A route may finish by returning another Pending: the probe follows the
+    # ready chain instead of rendering the inner handle.
+    inner_cache = DynamicObjects.ThreadsafeDict()
+    outer_cache = DynamicObjects.ThreadsafeDict()
+    inner = Base.get!(inner_cache, :inner; fetch=identity) do _status
+        8
+    end
+    outer = Base.get!(outer_cache, :outer; fetch=identity) do _status
+        inner
+    end
+    @test timedwait(() -> isready(inner) && isready(outer), 5.0;
+                    pollint=0.001) === :ok
+    nested = extension._operation_ready_terminal(render, outer)
+    @test nested.ready
+    @test contains(repr("text/html", nested.value), "done:8")
+
+    # Unresolved stays unresolved — the poller keeps polling.
+    gate = Base.Event()
+    gated = Base.get!(cache, :gated; fetch=identity) do _status
+        wait(gate)
+        9
+    end
+    try
+        @test !extension._operation_ready_terminal(render, gated).ready
+        @test !_operation_ready_terminal_fallback(render, gated).ready
+    finally
+        notify(gate)
+    end
+    @test timedwait(() -> isready(gated), 5.0; pollint=0.001) === :ok
+    @test extension._operation_ready_terminal(render, gated).ready
+
+    # Failed stays unresolved too: a failure is not a value-terminal, and the
+    # normal path renders it with the error article and open tree. A failed
+    # compute never lands a value, so `isready` stays false — wait for the
+    # delivery by fetching (bounded, in a task), which rethrows.
+    failed = Base.get!(cache, :bad; fetch=identity) do _status
+        error("probe failure fixture")
+    end
+    fetch_task = @async try
+        fetch(failed)
+        :value
+    catch
+        :threw
+    end
+    @test timedwait(() -> istaskdone(fetch_task), 5.0; pollint=0.001) === :ok
+    @test fetch(fetch_task) === :threw
+    @test !extension._operation_ready_terminal(render, failed).ready
+    @test !_operation_ready_terminal_fallback(render, failed).ready
+end
+
+# `htmx()` shells carry the Treebars stylesheet + script while the extension
+# is loaded, so pollers render quietly and terminalize with no per-app wiring
+# (a manual `extra_head` install alongside stays harmless but redundant). The
+# flag opts a shell out; without Treebars the seam is empty and shells are
+# unchanged.
+@testitem "htmx page shells auto-install Treebars assets" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _polling_page_assets, _polling_page_assets_impl
+
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    shell = repr("text/html", htmx(h.p("body")))
+    @test contains(shell, ".treebar-poller")
+    @test contains(shell, "terminalizePoller")
+
+    opted_out = repr("text/html", htmx(h.p("body"); treebars_assets=false))
+    @test !contains(opted_out, ".treebar-poller")
+    @test !contains(opted_out, "terminalizePoller")
+
+    titled = repr("text/html",
+        htmx(h.p("body"); extra_head=(h.title("App"),)))
+    @test first(findfirst(".treebar-poller", titled)) <
+        first(findfirst("<title>App</title>", titled))
+
+    old_assets = _polling_page_assets_impl[]
+    _polling_page_assets_impl[] = nothing
+    try
+        @test isempty(_polling_page_assets())
+        bare = repr("text/html", htmx(h.p("body")))
+        @test !contains(bare, ".treebar-poller")
+        @test !contains(bare, "terminalizePoller")
+    finally
+        _polling_page_assets_impl[] = old_assets
+    end
+    @test !isempty(_polling_page_assets())
 end
 
 @testitem "automatic polling renders a documented operation label once" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -5843,6 +6372,261 @@ end
         # The Type form resolves shorthands against the inventory.
         typed = prewarm_routes!(WarmupLiveApp, base, [:submit]; include_post=true)
         @test length(typed) == 1 && typed[1].status == 200
+    finally
+        terminate()
+    end
+end
+
+@testitem "dispatch serves registered routes in-process" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: Verb
+    route!(DispatchProbeApp())
+
+    # Markdown negotiation via header and via ?plain; path, @param, and
+    # query-kwarg extraction all flow through the real pipeline.
+    md = dispatch(:GET, "/dplot/q?tag=t1&smooth=3"; headers=["Accept" => "text/markdown"])
+    @test md.status == 200
+    @test contains(String(md.body), "plot:q:t1:smooth=3")
+    plain = dispatch("get", "/dplot/p?plain=1")
+    @test plain.status == 200
+    @test contains(String(plain.body), "plot:p:untagged:smooth=1")
+    html = dispatch(Verb{:GET}(), "/dplot/h")
+    @test html.status == 200
+    @test contains(String(html.body), "<div>plot:h:untagged:smooth=1</div>")
+
+    # Repeated query keys bind a Vector; POST bodies bind from urlencoded form.
+    multi = dispatch(:GET, "/dmulti?ids=1&ids=2")
+    @test multi.status == 200
+    @test contains(String(multi.body), "1,2")
+    posted = dispatch(:POST, "/dsubmit";
+                      headers=Dict("Content-Type" => "application/x-www-form-urlencoded"),
+                      body="label=hi")
+    @test posted.status == 200
+    @test contains(String(posted.body), "submitted:hi")
+
+    # Header/body spellings: NamedTuple headers, absolute URL origin strip.
+    nt = dispatch(:GET, "/dplot/n"; headers=(Accept="text/markdown",))
+    @test nt.status == 200 && contains(String(nt.body), "plot:n:")
+    abs_url = dispatch(:GET, "http://127.0.0.1:1/dplot/a?tag=t9#frag")
+    @test abs_url.status == 200 && contains(String(abs_url.body), "plot:a:t9:")
+
+    # Misses return the router's own responses; they never throw.
+    @test dispatch(:GET, "/dispatch-missing").status == 404
+    @test dispatch(:POST, "/dplot/x").status == 405
+
+    # Malformed calls fail loudly at construction, before touching the router.
+    @test_throws ArgumentError dispatch(:GET, "   ")
+    @test_throws ArgumentError dispatch([:GET], "/dplot/x")
+    @test_throws ArgumentError dispatch(:POST, "/dsubmit"; body=42)
+    @test_throws ArgumentError dispatch(:GET, "/dplot/x"; headers=["Accept"])
+
+    # Error parity: 500 + error-log uid header + log file on disk.
+    err = dispatch(:GET, "/dboom"; headers=["Accept" => "text/markdown"])
+    @test err.status == 500
+    uid = HTTP.header(err, "X-HTMXO-Error-Id", "")
+    @test !isempty(uid)
+    @test isfile(joinpath(HTMXObjects.ERROR_DIR[], "$uid.log"))
+    @test contains(String(err.body), uid)
+end
+
+@testitem "dispatch parents progress under caller node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import Treebars
+    import HTMXObjects: Verb, _attach_parent_progress!, _clear_operation_polls!
+    route!(DispatchProbeApp())
+
+    # The inner compute hangs under the caller's node instead of rooting
+    # its own tree: the documented route description renders nested.
+    Treebars.with_progress(:state; description="pdf-assembly") do parent
+        resp = dispatch(:GET, "/dplot/emb?tag=t2";
+                        headers=["Accept" => "text/markdown"], parent=parent)
+        @test resp.status == 200
+        @test contains(Treebars.render_text(parent), "Dispatch probe plot.")
+    end
+
+    # Control: without a parent the caller's tree stays bare.
+    Treebars.with_progress(:state; description="control") do parent
+        resp = dispatch(:GET, "/dplot/ctl"; headers=["Accept" => "text/markdown"])
+        @test resp.status == 200
+        @test !contains(Treebars.render_text(parent), "Dispatch probe plot.")
+    end
+
+    # Spawned (polling-mode) executions attach their operation node too.
+    route!(DispatchProbeApp(); operation_policy=OperationPolicy(:polling))
+    try
+        Treebars.with_progress(:state; description="poll-parent") do parent
+            resp = dispatch(:GET, "/dplot/pol"; parent=parent)
+            @test resp.status == 200
+            @test contains(Treebars.render_text(parent), "Dispatch probe plot.")
+        end
+    finally
+        _clear_operation_polls!()
+    end
+
+    # No attachable node (a key never computed — the uncached-`@fresh`
+    # shape): warn rather than silently returning an unparented response.
+    app = DispatchProbeApp()
+    Treebars.with_progress(:state; description="warn-parent") do parent
+        @test_logs (:warn, r"no attachable progress node") _attach_parent_progress!(
+            parent, app, :dplot, Verb{:GET}(), ["never-computed-xyz"], [])
+    end
+end
+
+@testitem "dispatch_parent exposes the dispatch caller node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import Treebars
+    route!(DispatchProbeApp())
+
+    # The accessor hands the route body the exact node the `dispatch`
+    # caller passed — the value a nested `polling_fetchindex` forwards
+    # as `parent=` (snag `consume-landed-t-ea068eff`).
+    Treebars.with_progress(:state; description="accessor") do parent
+        resp = dispatch(:GET, "/dparent"; parent=parent)
+        @test resp.status == 200
+        @test DPARENT_SEEN[] === parent
+    end
+
+    # Off `dispatch` (and on a parentless `dispatch`) there is no key,
+    # so the accessor is `nothing` — the poller's default, a no-op.
+    resp = dispatch(:GET, "/dparent")
+    @test resp.status == 200
+    @test DPARENT_SEEN[] === nothing
+end
+
+@testitem "dispatch binds the ambient dispatch parent for nested pollers" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import Treebars
+    route!(DispatchProbeApp())
+
+    # Core seam contract, independent of the loaded Treebars generation:
+    # dispatch ALWAYS routes the request through the seam, even parentless
+    # (the unconditional bind is what lets a nested parentless dispatch
+    # shadow an outer scope).
+    seen = Ref{Any}(:unset)
+    old = HTMXObjects._with_dispatch_parent_impl[]
+    HTMXObjects._with_dispatch_parent_impl[] = (f, node) -> (seen[] = node; f())
+    try
+        dispatch(:GET, "/dplot/seam")
+        @test seen[] === nothing
+        node = Treebars.initialize_progress!(:state; description="seam-node")
+        dispatch(:GET, "/dplot/seam2"; parent=node)
+        @test seen[] === node
+    finally
+        HTMXObjects._with_dispatch_parent_impl[] = old
+    end
+
+    # The extension swaps the passthrough for Treebars' binder — on the
+    # generations that have it (the CI pin predates the protocol, so this
+    # half is exercised by the overlay run, not every suite run).
+    if isdefined(Treebars, :with_dispatch_parent)
+        @test HTMXObjects._with_dispatch_parent_impl[] === Treebars.with_dispatch_parent
+    end
+
+    if !isdefined(Treebars, :current_dispatch_parent)
+        @info "ambient dispatch-parent full-loop probe skipped: loaded Treebars predates current_dispatch_parent"
+    else
+        Treebars.with_progress(:state; description="ambient") do parent
+            # The installed seam binds Treebars' ambient reader for the
+            # dispatch extent (same-task resolution — what a Julia 1.11+
+            # spawned body inherits through ScopedValues).
+            @test Treebars.current_dispatch_parent() === nothing
+            marker = Treebars.initialize_progress!(:state; description="marker")
+            @test HTMXObjects._with_dispatch_parent_impl[](
+                () -> Treebars.current_dispatch_parent(), marker) === marker
+            @test Treebars.current_dispatch_parent() === nothing
+        end
+
+        # Full-loop probe: the route body nests a BARE `polling_fetchindex`
+        # (no `parent=`; the request rides along as `req=__req__`, the
+        # spelling the one-liner already uses). Mid-flight — inside the
+        # IP's 0.5 s compute, which the fetchindex callback entry precedes —
+        # its live substatus must hang under the dispatch caller: one child
+        # more than the explicit-`parent=nothing` control, whose route
+        # otherwise behaves identically. `dispatch` blocks until the body
+        # completes, so both legs run under a concurrent monitor.
+        warm = dispatch(:GET, "/dambient/warm";
+                        headers=["Accept" => "text/markdown"])
+        @test warm.status == 200
+
+        Treebars.with_progress(:state; description="ambient") do parent
+            Treebars.with_progress(:state; description="detached") do control
+                r1 = Ref{Any}(nothing)
+                t1 = @async r1[] = dispatch(:GET, "/dambient/probe";
+                                            headers=["Accept" => "text/markdown"],
+                                            parent=parent)
+                sleep(0.25)                      # inside the 0.5 s compute
+                attached = length(parent.children)
+                r2 = Ref{Any}(nothing)
+                t2 = @async r2[] = dispatch(:GET, "/ddetached/probe";
+                                            headers=["Accept" => "text/markdown"],
+                                            parent=control)
+                sleep(0.25)                      # inside its 0.5 s compute
+                detached = length(control.children)
+                wait(t1)
+                wait(t2)
+                @test r1[].status == 200
+                @test r2[].status == 200
+                @test attached == detached + 1
+            end
+        end
+
+        # The probe compute's value: cached now, so a plain dispatch serves
+        # it directly.
+        value = dispatch(:GET, "/dambient/probe";
+                         headers=["Accept" => "text/markdown"])
+        @test value.status == 200
+        @test contains(String(value.body), "ambient:computed:probe")
+
+        # Nothing-shadow through the request leg: the OUTER dispatch stashes
+        # `parent` on its request and the outer route body reads it; the
+        # nested parentless `dispatch` runs on a FRESH request with no stash,
+        # so the inner route and its bare poller stay detached from the
+        # outer job's tree.
+        warmshadow = dispatch(:GET, "/dshadow/warm")
+        @test warmshadow.status == 200
+        @test DAMBIENT_SEEN[] === nothing
+        @test DNESTED_SEEN[] === nothing
+
+        Treebars.with_progress(:state; description="outer") do outer
+            resp = dispatch(:GET, "/dshadow/probe"; parent=outer)
+            @test resp.status == 200
+            @test DAMBIENT_SEEN[] === outer
+            @test DNESTED_SEEN[] === nothing
+        end
+    end
+end
+
+@testitem "dispatch matches loopback bytes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+    route!(DispatchProbeApp())
+    port = 8137
+    serve(; port, async=true)
+    base = "http://127.0.0.1:$port"
+    try
+        cases = [
+            (:GET, "/dplot/q?tag=t1&smooth=3", ["Accept" => "text/markdown"], nothing),
+            (:GET, "/dplot/h", [], nothing),
+            (:POST, "/dsubmit", ["Content-Type" => "application/x-www-form-urlencoded"], "label=hi"),
+            (:GET, "/dispatch-missing", [], nothing),
+        ]
+        for (m, url, hdrs, body) in cases
+            # Compile in-process first so the loopback leg never races JIT.
+            compiled = body === nothing ? dispatch(m, url; headers=hdrs) :
+                dispatch(m, url; headers=hdrs, body=body)
+            loop = m === :GET ?
+                HTTP.get(base * url; headers=hdrs, status_exception=false, retry=false) :
+                HTTP.post(base * url; headers=hdrs, body=something(body, ""),
+                          status_exception=false, retry=false)
+            @test loop.status == compiled.status
+            # Content compare, not wrapper compare: HTTP 1.x normalizes
+            # response bodies to bytes at construction while HTTP 2.x keeps
+            # the handler's String (and uses EmptyBody for empty), so a raw
+            # `==` on `.body` fails cross-version on identical bytes.
+            @test String(loop.body) == String(compiled.body)
+        end
+        # Error parity: same status, and each leg records its own uid-bearing log.
+        el = HTTP.get(base * "/dboom"; headers=["Accept" => "text/markdown"],
+                      status_exception=false, retry=false)
+        ed = dispatch(:GET, "/dboom"; headers=["Accept" => "text/markdown"])
+        @test el.status == 500 && ed.status == 500
+        ul = HTTP.header(el, "X-HTMXO-Error-Id", "")
+        ud = HTTP.header(ed, "X-HTMXO-Error-Id", "")
+        @test !isempty(ul) && !isempty(ud) && ul != ud
     finally
         terminate()
     end
