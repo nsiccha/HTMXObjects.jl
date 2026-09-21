@@ -1948,7 +1948,7 @@ function htmx(args...;
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
             # A manual install alongside stays harmless but redundant.
-            (treebars_assets ? _polling_page_assets() : ())...,
+            (_live_refresh_page_assets(treebars_assets))...,
             extra_head...,
         ),
         body(args...),
@@ -10396,6 +10396,182 @@ show_when_script() = h.script(Raw(raw"""
   document.body.addEventListener('htmx:afterSettle', function(e) { initShowWhen(e.detail.elt); });
 })();
 """))
+
+"""
+    live_refresh_script()
+
+Return a `<script>` that keeps a *live/periodic-refresh* fragment stable across
+re-fetches. A fragment that self-polls on a periodic trigger (`hx-trigger`
+contains `every`) over a slow `:auto` operation would otherwise flip-flop its
+settled content to poller chrome on every re-fetch (grace miss → poller swapped
+over the live content), then back. This script intercepts that: on a re-fetch of
+an **already-settled** live element it keeps the content in place, diverts the
+interim poller into a dedicated, unobtrusive progress reporter ("behind the
+hairline"), and swaps the terminal result into the target only once it resolves.
+First loads are untouched, so `:auto` progress chrome still shows the first time.
+
+Automatic — no consumer wiring. Detection uses the same Treebars markers the
+poller/terminal already carry (`treebar-poller` vs `treebar-terminal-content`).
+Include once per page; the `htmx()` shell installs it alongside the Treebars
+assets.
+"""
+live_refresh_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoLiveRefresh) return;
+  window.__htmxoLiveRefresh = true;
+  var SETTLED = 'data-htmxo-live-settled';
+  var BUSY = 'data-htmxo-live-busy';
+
+  // The reporter lives "behind the hairline": a subtle, muted strip below a
+  // 1px divider, so an ongoing refresh reads as quiet background progress, not
+  // as content being torn down.
+  var st = document.createElement('style');
+  st.textContent =
+    '.htmxo-live-reporter{margin-top:.35rem;padding-top:.3rem;' +
+    'border-top:1px solid color-mix(in srgb, currentColor 22%, transparent);' +
+    'opacity:.6;font-size:.82em}.htmxo-live-reporter[hidden]{display:none}';
+  (document.head || document.documentElement).appendChild(st);
+
+  // A live element self-polls on a periodic trigger and swaps its own region.
+  // It re-fetches the ROUTE url (never a `__htmxo_poll` url) and is not part of
+  // poller chrome — that distinguishes it from a Treebars poller-inner, which
+  // also carries an `every` trigger (its 200ms self-poll).
+  function isLive(el) {
+    if (!el || !el.getAttribute) return false;
+    if ((el.getAttribute('hx-trigger') || '').indexOf('every') === -1) return false;
+    if ((el.getAttribute('hx-get') || '').indexOf('__htmxo_poll') !== -1) return false;
+    if (el.closest && (el.closest('.treebar-poller') || el.closest('.htmxo-live-reporter'))) return false;
+    return true;
+  }
+  // Parse a response fragment's first element. Classifying by the actual
+  // top-level class is required: a running poller's `hx-select` attribute value
+  // literally contains the string `treebar-terminal-content`, so a substring
+  // test misfires.
+  function firstEl(s) {
+    if (typeof s !== 'string') return null;
+    var t = document.createElement('template');
+    t.innerHTML = s;
+    return t.content.firstElementChild;
+  }
+  // A running Treebars poller (chrome present, not yet terminal).
+  function isPoller(s) {
+    var el = firstEl(s);
+    if (!el || el.classList.contains('treebar-terminal-content')) return false;
+    return el.classList.contains('treebar-poller') ||
+           el.classList.contains('treebar-poller-inner') ||
+           !!el.querySelector('.treebar-poller-inner');
+  }
+  // The resolved terminal result.
+  function isTerminal(s) {
+    var el = firstEl(s);
+    return !!(el && (el.classList.contains('treebar-terminal-content') ||
+                     el.querySelector('.treebar-terminal-content')));
+  }
+  // The unobtrusive progress reporter that sits beside a live element.
+  function reporterFor(el) {
+    var rep = el.__htmxoReporter;
+    if (rep && rep.isConnected) return rep;
+    rep = document.createElement('div');
+    rep.className = 'htmxo-live-reporter';
+    rep.hidden = true;
+    if (el.parentNode) el.parentNode.insertBefore(rep, el.nextSibling);
+    el.__htmxoReporter = rep;
+    rep.__htmxoLiveTarget = el;
+    return rep;
+  }
+  // Stamp any settled live element in a freshly swapped subtree, and give it a
+  // reporter. A live element only ever appears carrying terminal content, so
+  // "swapped in" == "settled".
+  function stampSettled(root) {
+    // A live element settles only on a real fragment swap that delivered its
+    // result — never the initial page load (whose settle covers the whole body
+    // and would settle a live element before it has shown any result, diverting
+    // its first load too). Walk up from the swapped node to the live element it
+    // belongs to (skipping poller chrome), and stamp any live descendants.
+    if (!root || root === document.body || root === document.documentElement ||
+        root.nodeType === 9 || !root.querySelectorAll) return;
+    var found = [];
+    var el = root;
+    while (el && el.getAttribute) { if (isLive(el)) { found.push(el); break; } el = el.parentElement; }
+    root.querySelectorAll('[hx-trigger*="every"]').forEach(function(e) { if (isLive(e)) found.push(e); });
+    found.forEach(function(el) {
+      el.setAttribute(SETTLED, '1');
+      reporterFor(el);
+    });
+  }
+  document.addEventListener('htmx:afterSettle', function(evt) {
+    stampSettled(evt.detail && evt.detail.elt);
+  });
+
+  document.addEventListener('htmx:beforeSwap', function(evt) {
+    var d = evt.detail; if (!d) return;
+    var target = d.target;
+    var resp = d.serverResponse;
+
+    // (A) Re-fetch of a settled live element that came back a poller:
+    //     keep the content, divert the poller into the reporter.
+    if (target && isLive(target) && target.hasAttribute(SETTLED) && isPoller(resp)) {
+      d.shouldSwap = false;
+      if (target.hasAttribute(BUSY)) {
+        // A prior refresh is still polling in the reporter — drop this re-fire.
+        // But if that reporter has stalled/errored (no live poller left), recover
+        // so a transient failure cannot pause refreshes for good.
+        var r = target.__htmxoReporter;
+        if (r && r.querySelector && r.querySelector('.treebar-poller-inner[hx-trigger]')) return;
+        target.removeAttribute(BUSY);
+      }
+      target.setAttribute(BUSY, '1');
+      var rep = reporterFor(target);
+      rep.__htmxoLiveTarget = target;
+      rep.hidden = false;
+      rep.innerHTML = resp;
+      if (window.htmx && window.htmx.process) window.htmx.process(rep);
+      return;
+    }
+
+    // (B) The diverted poll loop resolved (terminal reached the reporter):
+    //     move the result to the live target, clear + hide the reporter.
+    var rep2 = target && target.closest ? target.closest('.htmxo-live-reporter') : null;
+    if (rep2 && rep2.__htmxoLiveTarget && isTerminal(resp)) {
+      d.shouldSwap = false;
+      var live = rep2.__htmxoLiveTarget;
+      var tmp = document.createElement('template');
+      tmp.innerHTML = resp;
+      var term = tmp.content.querySelector('.treebar-terminal-content');
+      // The result content the route rendered, applied to the live target with
+      // the target's OWN swap style — so `outerHTML` replaces the element while
+      // `innerHTML`/`morph:innerHTML` reconciles its children.
+      var content = term ? term.innerHTML : null;
+      if (content != null) {
+        var swap = live.getAttribute('hx-swap') || 'outerHTML';
+        if (window.htmx && window.htmx.swap) {
+          window.htmx.swap(live, content, { swapStyle: swap });
+        } else if (swap.indexOf('outerHTML') !== -1) {
+          live.outerHTML = content;
+        } else {
+          live.innerHTML = content;
+        }
+      }
+      rep2.innerHTML = '';
+      rep2.hidden = true;
+      var still = live.id ? document.getElementById(live.id) : live;
+      if (still && still.removeAttribute) still.removeAttribute(BUSY);
+      return;
+    }
+  });
+})();
+"""))
+
+# The live-refresh interception rides alongside the Treebars poll assets, but
+# ONLY when they are actually present: without the Treebars extension there are
+# no pollers to intercept, and the shell must stay byte-for-byte poller-free
+# (the `treebars_assets=false` opt-out and every ext-absent shell are unchanged,
+# so `htmx page shells auto-install Treebars assets` still holds).
+function _live_refresh_page_assets(treebars_assets::Bool)
+    treebars_assets || return ()
+    assets = _polling_page_assets()
+    isempty(assets) ? assets : (assets..., live_refresh_script())
+end
 
 # --- Theme ---
 
