@@ -47,7 +47,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
     EditorMountRoot, RawBodyApp,
     OpenAPIWidgets, OpenAPIRoot,
-    DispatchProbeApp, DPARENT_SEEN
+    DispatchProbeApp, DPARENT_SEEN, DAMBIENT_SEEN, DNESTED_SEEN
 
 @htmx struct TestApp
     title = "Test"
@@ -1019,6 +1019,30 @@ end
 # undocumented nodes, so only a documented route lets the parenting test
 # distinguish attach from miss.
 const DPARENT_SEEN = Ref{Any}(nothing)
+
+# Ambient dispatch-parent probes (todo `0ienez7`, companion of Treebars
+# `b4c2182`): a slow IP whose compute route bodies nest through a BARE
+# `polling_fetchindex` (no `parent=` — the request rides along as
+# `req=__req__`, the shape the one-liner already uses). The 0.5 s compute
+# lets a concurrent monitor observe the attach mid-flight; `dispatch`
+# itself blocks until the body completes, so the monitor, not a gate,
+# is what makes the attach observable.
+import Treebars
+using HTMXObjects: DynamicObjects
+
+DynamicObjects.@dynamicstruct struct _AmbientSlowIP
+    __status__ = Treebars.initialize_progress!(:state; description="ambient-ip")
+    index(key::String) = begin
+        sleep(0.5)
+        "computed:$key"
+    end
+end
+const _DAMBIENT_IP_INSTANCE = _AmbientSlowIP()
+const _DAMBIENT_IP = getproperty(_DAMBIENT_IP_INSTANCE, :index)
+
+const DAMBIENT_SEEN = Ref{Any}(:unset)
+const DNESTED_SEEN = Ref{Any}(:unset)
+
 @htmx struct DispatchProbeApp
     @param tag::String = "untagged"
     "Dispatch probe plot."
@@ -1031,6 +1055,30 @@ const DPARENT_SEEN = Ref{Any}(nothing)
     # the `dispatch` caller passed (or `nothing` off `dispatch`).
     @get dparent() = (DPARENT_SEEN[] = dispatch_parent(__req__);
                       h.div("ok"))
+    # Ambient dispatch-parent probes: `dambient` nests the bare slow-IP
+    # poller; `ddetached` is the explicit-`nothing` control; `dshadow`
+    # records what the request carries, then nests an in-process `dispatch`
+    # WITHOUT `parent`; `dinner` records the same and runs the bare poller.
+    @get dambient(key::String) = Treebars.polling_fetchindex(
+        _DAMBIENT_IP, key; sync=true, req=__req__) do rv
+        h.div("ambient:$rv")
+    end
+    @get ddetached(key::String) = Treebars.polling_fetchindex(
+        _DAMBIENT_IP, "detached-$key"; sync=true, req=__req__, parent=nothing) do rv
+        h.div("detached:$rv")
+    end
+    @get dshadow(key::String) = begin
+        DAMBIENT_SEEN[] = dispatch_parent(__req__)
+        r = dispatch(:GET, "/dinner/$key"; headers=["Accept" => "text/markdown"])
+        h.div("shadow:$(r.status)")
+    end
+    @get dinner(key::String) = begin
+        DNESTED_SEEN[] = dispatch_parent(__req__)
+        Treebars.polling_fetchindex(
+            _DAMBIENT_IP, "shadow-$key"; sync=true, req=__req__) do rv
+            h.div("inner:$rv")
+        end
+    end
 end
 
 end # @testmodule HTMXOTestFixtures
@@ -6423,6 +6471,108 @@ end
     resp = dispatch(:GET, "/dparent")
     @test resp.status == 200
     @test DPARENT_SEEN[] === nothing
+end
+
+@testitem "dispatch binds the ambient dispatch parent for nested pollers" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import Treebars
+    route!(DispatchProbeApp())
+
+    # Core seam contract, independent of the loaded Treebars generation:
+    # dispatch ALWAYS routes the request through the seam, even parentless
+    # (the unconditional bind is what lets a nested parentless dispatch
+    # shadow an outer scope).
+    seen = Ref{Any}(:unset)
+    old = HTMXObjects._with_dispatch_parent_impl[]
+    HTMXObjects._with_dispatch_parent_impl[] = (f, node) -> (seen[] = node; f())
+    try
+        dispatch(:GET, "/dplot/seam")
+        @test seen[] === nothing
+        node = Treebars.initialize_progress!(:state; description="seam-node")
+        dispatch(:GET, "/dplot/seam2"; parent=node)
+        @test seen[] === node
+    finally
+        HTMXObjects._with_dispatch_parent_impl[] = old
+    end
+
+    # The extension swaps the passthrough for Treebars' binder — on the
+    # generations that have it (the CI pin predates the protocol, so this
+    # half is exercised by the overlay run, not every suite run).
+    if isdefined(Treebars, :with_dispatch_parent)
+        @test HTMXObjects._with_dispatch_parent_impl[] === Treebars.with_dispatch_parent
+    end
+
+    if !isdefined(Treebars, :current_dispatch_parent)
+        @info "ambient dispatch-parent full-loop probe skipped: loaded Treebars predates current_dispatch_parent"
+    else
+        Treebars.with_progress(:state; description="ambient") do parent
+            # The installed seam binds Treebars' ambient reader for the
+            # dispatch extent (same-task resolution — what a Julia 1.11+
+            # spawned body inherits through ScopedValues).
+            @test Treebars.current_dispatch_parent() === nothing
+            marker = Treebars.initialize_progress!(:state; description="marker")
+            @test HTMXObjects._with_dispatch_parent_impl[](
+                () -> Treebars.current_dispatch_parent(), marker) === marker
+            @test Treebars.current_dispatch_parent() === nothing
+        end
+
+        # Full-loop probe: the route body nests a BARE `polling_fetchindex`
+        # (no `parent=`; the request rides along as `req=__req__`, the
+        # spelling the one-liner already uses). Mid-flight — inside the
+        # IP's 0.5 s compute, which the fetchindex callback entry precedes —
+        # its live substatus must hang under the dispatch caller: one child
+        # more than the explicit-`parent=nothing` control, whose route
+        # otherwise behaves identically. `dispatch` blocks until the body
+        # completes, so both legs run under a concurrent monitor.
+        warm = dispatch(:GET, "/dambient/warm";
+                        headers=["Accept" => "text/markdown"])
+        @test warm.status == 200
+
+        Treebars.with_progress(:state; description="ambient") do parent
+            Treebars.with_progress(:state; description="detached") do control
+                r1 = Ref{Any}(nothing)
+                t1 = @async r1[] = dispatch(:GET, "/dambient/probe";
+                                            headers=["Accept" => "text/markdown"],
+                                            parent=parent)
+                sleep(0.25)                      # inside the 0.5 s compute
+                attached = length(parent.children)
+                r2 = Ref{Any}(nothing)
+                t2 = @async r2[] = dispatch(:GET, "/ddetached/probe";
+                                            headers=["Accept" => "text/markdown"],
+                                            parent=control)
+                sleep(0.25)                      # inside its 0.5 s compute
+                detached = length(control.children)
+                wait(t1)
+                wait(t2)
+                @test r1[].status == 200
+                @test r2[].status == 200
+                @test attached == detached + 1
+            end
+        end
+
+        # The probe compute's value: cached now, so a plain dispatch serves
+        # it directly.
+        value = dispatch(:GET, "/dambient/probe";
+                         headers=["Accept" => "text/markdown"])
+        @test value.status == 200
+        @test contains(String(value.body), "ambient:computed:probe")
+
+        # Nothing-shadow through the request leg: the OUTER dispatch stashes
+        # `parent` on its request and the outer route body reads it; the
+        # nested parentless `dispatch` runs on a FRESH request with no stash,
+        # so the inner route and its bare poller stay detached from the
+        # outer job's tree.
+        warmshadow = dispatch(:GET, "/dshadow/warm")
+        @test warmshadow.status == 200
+        @test DAMBIENT_SEEN[] === nothing
+        @test DNESTED_SEEN[] === nothing
+
+        Treebars.with_progress(:state; description="outer") do outer
+            resp = dispatch(:GET, "/dshadow/probe"; parent=outer)
+            @test resp.status == 200
+            @test DAMBIENT_SEEN[] === outer
+            @test DNESTED_SEEN[] === nothing
+        end
+    end
 end
 
 @testitem "dispatch matches loopback bytes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
