@@ -5727,8 +5727,8 @@ end
 # ordinary fragment, not an inspection surface. The probe never waits — it
 # follows ready Pending chains and answers unresolved for anything else,
 # including failures (which keep the normal `safely` + article + open-tree
-# render). Pin both halves: the extension shape (result + swap marker, no
-# chrome) and the core fallback (bare value, no Treebars at all).
+# render). Pin both halves: the extension shape (result + dual-class swap
+# node, no chrome) and the core fallback (bare value, no Treebars at all).
 @testitem "ready-terminal probe answers resolved polls chrome-free" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _operation_ready_terminal_fallback
     import HTMXObjects.DynamicObjects
@@ -5748,10 +5748,15 @@ end
     @test terminal.ready
     terminal_html = repr("text/html", terminal.value)
     @test contains(terminal_html, "done:7")
-    # The swap marker is the ONLY Treebars class: the live poller's hx-select
-    # still matches, while the wrapper, kept tree, transport, and Pause are
-    # all gone.
+    # The terminal answers BOTH swap contracts on ONE node: the trigger-less
+    # `.treebar-poller-inner` is what every deployed poller hx-select matches
+    # (the live select has no terminal-content branch, so the bare marker
+    # swapped EMPTY), while `.treebar-terminal-content` keys the client
+    # finalizer. The wrapper, kept tree, transport, and Pause are all gone.
+    @test startswith(terminal_html,
+        "<div class=\"treebar-poller-inner treebar-terminal-content\">")
     @test length(findall("treebar-terminal", terminal_html)) == 1
+    @test length(findall("treebar-poller-inner", terminal_html)) == 1
     @test contains(terminal_html, "treebar-terminal-content")
     @test !contains(terminal_html, "<details")
     @test !contains(terminal_html, "treebar-pause")
