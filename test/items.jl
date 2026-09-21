@@ -37,6 +37,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     ArchitectureLeaf, ArchitectureRoot, ArchitectureExplorerHost,
     ARCHITECTURE_TARGET, ARCHITECTURE_COMPUTES,
     NavChainChild, NavChainRoot, NavSlurpRoot,
+    NavDepthGreat, NavDepthGrandchild, NavDepthChild, NavDepthRoot,
+    NavDepth1Child, NavDepth1Root, NavDepthBadChild, NavDepthBadRoot,
     SwapView, SwapSection, SwapRoot,
     NoteDraft, InertCollection, NOTE_STORE, _reset_note_store!, ResourceApp,
     MockPage, BluntPage, ValuePageLeaf, ValuePageRoot, BluntPageRoot,
@@ -750,6 +752,66 @@ end
     __page__(content; kwargs...) =
         h.div(h.nav(haskey(kwargs, :navigation) ? "SLURP-GOT-NAV" : "SLURP-NONE"), content)
     @get index() = "slurproot"
+end
+
+# A wrapper may ask for MORE than one navigation level: the framework reads the
+# declared `navigation_depth` default and threads navigation at that depth, so
+# a rail can render grandchildren without calling `navigation` itself.
+@htmx struct NavDepthGreat
+    @get index() = "great-body"
+end
+
+@htmx struct NavDepthGrandchild
+    @include great = NavDepthGreat()
+    @get index() = "grandchild-body"
+end
+
+@htmx struct NavDepthChild
+    @include grandchild = NavDepthGrandchild()
+    __page__(content; navigation=nothing, navigation_depth=2) =
+        h.section(h.span("DEPTH2:" * string(length(navigation.descendants)) * ":" *
+                         string(isempty(navigation.descendants) ? -1 :
+                                length(navigation.descendants[1].children))),
+                  content)
+    @get index() = "child-body"
+end
+
+@htmx struct NavDepthRoot
+    @include child = NavDepthChild()
+    __page__(content; navigation=nothing) = h.div(content)
+    @get index() = "root-body"
+end
+
+# One level is still the contract when nothing is declared: the threaded
+# navigation lists children whose `children` are always empty.
+@htmx struct NavDepth1Child
+    @include grandchild = NavDepthGrandchild()
+    __page__(content; navigation=nothing) =
+        h.section(h.span("DEPTH1:" * string(length(navigation.descendants)) * ":" *
+                         string(isempty(navigation.descendants) ? -1 :
+                                length(navigation.descendants[1].children))),
+                  content)
+    @get index() = "child-body"
+end
+
+@htmx struct NavDepth1Root
+    @include child = NavDepth1Child()
+    __page__(content; navigation=nothing) = h.div(content)
+    @get index() = "root-body"
+end
+
+# A depth that is not a nonnegative Integer refuses loudly instead of
+# silently rendering one level.
+@htmx struct NavDepthBadChild
+    @include grandchild = NavDepthGrandchild()
+    __page__(content; navigation=nothing, navigation_depth="two") = content
+    @get index() = "child-body"
+end
+
+@htmx struct NavDepthBadRoot
+    @include child = NavDepthBadChild()
+    __page__(content; navigation=nothing) = h.div(content)
+    @get index() = "root-body"
 end
 
 # --- Resource fixtures ------------------------------------------------------
@@ -4295,6 +4357,29 @@ end
     @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "OUTER:")
     @test !contains(String(drive("/child", ["HX-Request" => "true"]).body), "INNER:")
     @test !contains(String(drive("/child", ["Accept" => "text/markdown"]).body), "OUTER:")
+end
+
+@testitem "a page wrapper declares how deep its threaded navigation goes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    drive(path) = begin
+        req = HTTP.Request("GET", path, ["Host" => "x"], UInt8[])
+        String(first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req).body)
+    end
+
+    # depth=2 on the child wrapper: descendants[1] is the grandchild and its
+    # `children` carry the great-grandchild — unreachable at the default depth.
+    route!(NavDepthRoot())
+    body = drive("/child")
+    @test contains(body, "DEPTH2:1:1")
+
+    # The default is still one level: the grandchild's children are empty.
+    route!(NavDepth1Root())
+    @test contains(drive("/child"), "DEPTH1:1:0")
+
+    # A non-Integer depth refuses loudly — a misspelled depth that silently
+    # rendered one level is the failure mode the `?__chrome__=` override already
+    # refuses to tolerate.
+    route!(NavDepthBadRoot())
+    @test_throws ArgumentError drive("/child")
 end
 
 @testitem "a partial swap carries the chrome below the swap target" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

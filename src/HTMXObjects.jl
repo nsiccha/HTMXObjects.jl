@@ -5889,6 +5889,56 @@ function _page_navigation_declaration(obj)
 end
 
 """
+    _page_navigation_depth(obj) -> Int
+
+How many [`navigation`](@ref) descendant levels a page wrapper asked for, read
+from the same DynamicObjects signature that [`_page_navigation_declaration`](@ref)
+reads. `__page__(content; navigation=nothing, navigation_depth=2) = …` asks for
+two levels — the wrapper's own children carry non-empty `children` — while a
+wrapper that declares no `navigation_depth` (including a `; kwargs...` slurp,
+which declares nothing by name) gets the historic `depth=1`: its descendants
+list one level and every `children` field on those descendants is empty.
+
+The declared DEFAULT is evaluated in the wrapper's defining module, so a
+computed depth (`navigation_depth = parse(Int, ENV["RAIL_DEPTH"])`) works the
+same way it would inside the wrapper body. A depth that is not an `Integer` or
+is negative throws instead of falling back to `1`: a misspelled depth that
+silently rendered one level is precisely the failure the `?__chrome__=` override
+refuses to tolerate. The value only matters when navigation is actually threaded
+— a wrapper that declares `navigation_depth` but no `navigation` keyword never
+receives navigation, so the depth is simply never consulted for it.
+"""
+function _page_navigation_depth(obj)
+    T = typeof(obj)
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return 1
+    for prop in (:__page__, :page)
+        hasproperty(obj, prop) || continue
+        info = Base.invokelatest(DynamicObjects.metafirst, T, prop)
+        info === nothing && continue
+        sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(T))
+        sig === nothing && return 1
+        isempty(get(sig, :positional, ())) && isempty(get(sig, :kwargs, ())) && return 1
+        for kw in get(sig, :kwargs, ())
+            get(kw, :name, nothing) === :navigation_depth || continue
+            default = get(kw, :default, nothing)
+            (default isa Integer && default >= 0) && return Int(default)
+            value = try
+                Base.invokelatest(Core.eval, parentmodule(T), default)
+            catch
+                nothing
+            end
+            value isa Integer && value >= 0 && return Int(value)
+            throw(ArgumentError(
+                "`$prop(…; navigation_depth=$(repr(default)))` on $(nameof(T)) " *
+                "does not evaluate to a nonnegative Integer — navigation depth " *
+                "must be 0, 1, 2, …"))
+        end
+        return 1
+    end
+    1
+end
+
+"""
     _wrapper_accepts_navigation(wrapper) -> Bool
 
 Ask a page-wrapper VALUE whether it takes a `navigation` keyword, without
@@ -5909,7 +5959,7 @@ function _wrapper_accepts_navigation(wrapper)
 end
 
 """
-    _apply_page(obj, wrapper, content; depth=1) -> wrapped content
+    _apply_page(obj, wrapper, content; depth=nothing) -> wrapped content
 
 Apply one page wrapper, threading [`navigation`](@ref) metadata into it when it
 asked for it. Called once per page-bearing object in the chain, so a recursively
@@ -5917,16 +5967,23 @@ nested `__page__` receives the navigation of ITS OWN node — an outer shell see
 the root's sections, an inner one sees its own — rather than one shared record
 computed at the leaf.
 
+How many descendant levels that navigation carries is the WRAPPER's own
+declaration: `__page__(content; navigation=nothing, navigation_depth=2)` asks
+for two levels, and a wrapper that declares no `navigation_depth` gets the
+historic one level. `depth` overrides the declaration for callers that already
+know the answer.
+
 Only reached on the full-page branch of the response pipeline: HTMX fragment and
 `?plain` markdown requests never apply page wrappers at all, so they keep
 stripping chrome exactly as before.
 """
-function _apply_page(obj, wrapper, content; depth::Integer=1)
+function _apply_page(obj, wrapper, content; depth=nothing)
     declared = _page_navigation_declaration(obj)
     wants = declared === :yes ||
             (declared === :unknown && _wrapper_accepts_navigation(wrapper))
     wants || return wrapper(content)
-    wrapper(content; navigation=navigation(obj; depth))
+    wrapper(content; navigation=navigation(obj; depth=isnothing(depth) ?
+                                                   _page_navigation_depth(obj) : depth))
 end
 
 """
