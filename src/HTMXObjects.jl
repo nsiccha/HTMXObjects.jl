@@ -5231,8 +5231,11 @@ end
 # FAILED handle, which must flow to the normal failure render (`safely` +
 # failure article + open tree), never to a bare value terminal. Without
 # Treebars there is no poller, so the core default answers bare; the extension
-# keeps the `.treebar-terminal-content` marker so the live poller's hx-select
-# still matches and the swap retires the transport.
+# answers a trigger-less `.treebar-poller-inner` carrying the
+# `.treebar-terminal-content` marker — the inner class is what the live
+# poller's hx-select matches in every select generation (a client-held poller
+# can predate the deployed Treebars, so the marker alone is not matchable),
+# and the marker keys the client finalizer that retires the transport.
 function _operation_ready_terminal_fallback(render_result, started)
     value = started
     while value isa DynamicObjects.Pending

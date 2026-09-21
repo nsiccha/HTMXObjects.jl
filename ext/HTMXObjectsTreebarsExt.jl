@@ -41,8 +41,15 @@ function _operation_ready_terminal(render_result, started)
         end
     end
     terminal = render_result(value)
-    (ready=true,
-        value=HTMXObjects.h.div(terminal; class="treebar-terminal-content"))
+    # Dual-class terminal: the trigger-less `.treebar-poller-inner` is the
+    # shape every deployed poller hx-select matches — the live select has no
+    # `.treebar-terminal-content` branch, so the bare marker swapped an EMPTY
+    # fragment — while `.treebar-terminal-content` keys the client finalizer
+    # that terminalizes the wrapper once Treebars ships it. One node, not
+    # nested: the top-level-only select excludes a nested match, and the
+    # finalizer reads the class off the swapped node itself.
+    (ready=true, value=HTMXObjects.h.div(terminal;
+        class="treebar-poller-inner treebar-terminal-content"))
 end
 
 function _operation_render_result(render_result, value, transport)
