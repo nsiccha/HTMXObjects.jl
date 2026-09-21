@@ -34,7 +34,7 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
-export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch
+export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -5519,7 +5519,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             # In-process callers (`dispatch`) thread a Treebars progress
             # node through the request context; real HTTP requests never
             # carry this key (context is server-side, not client-controlled).
-            parent_progress = get(req.context, :htmxo_parent_progress, nothing)
+            parent_progress = dispatch_parent(req)
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy,
                                        parent_progress=parent_progress)
@@ -7533,6 +7533,32 @@ _dispatch_body(other) = throw(ArgumentError(
     "got $(repr(typeof(other)))"))
 
 """
+    dispatch_parent(req::HTTP.Request)
+
+The caller progress node a `dispatch(...; parent=node)` call stashed on this
+request, or `nothing` for a plain loopback/browser request (which carries no
+key) and for a `dispatch` without `parent`.
+
+`dispatch` parents the route's own execution automatically, but a route body
+that runs nested compute through a hand-rolled
+`Treebars.polling_fetchindex` must forward the node itself — that call roots
+its own tree otherwise. The one-liner, inside any route body (`__req__` is
+the live request):
+
+```julia
+polling_fetchindex(ip, key; sync=wants_markdown(__req__),
+                   parent=dispatch_parent(__req__)) do rv
+    ...
+end
+```
+
+Outside `dispatch` the accessor returns `nothing`, which is
+`polling_fetchindex`'s default — so the kwarg is a no-op on ordinary
+requests and the same route body serves both paths.
+"""
+dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, nothing)
+
+"""
     dispatch(method, url; headers=[], body=UInt8[], parent=nothing) -> HTTP.Response
 
 Run one request against the registered route tree in-process and return the
@@ -7557,7 +7583,10 @@ for a loopback request.
   assembling a larger job (a PDF export fetching embeds, a batch warmup)
   sees the inner compute nested in its own tree. There is no ambient
   parent: without this argument the execution roots its own tree, exactly
-  as over loopback.
+  as over loopback. A route body that runs nested compute through a
+  hand-rolled `polling_fetchindex` must forward the node itself with
+  `parent=dispatch_parent(__req__)` — that call roots its own tree
+  otherwise.
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
