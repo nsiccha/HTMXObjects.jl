@@ -1130,6 +1130,23 @@ end
     @test to_response(orig) === orig
 end
 
+@testitem "post_form/get_form children render before the submit button" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    html(node) = sprint(show, MIME"text/html"(), node)
+    before(s, a, b) = first(findfirst(a, s)) < first(findfirst(b, s))
+    form = post_form("/submit", h.div("FIELD-ONE"), h.div("FIELD-TWO"); label="Go")
+    s = html(form)
+    @test before(s, "FIELD-ONE", "Go</button>")
+    @test before(s, "FIELD-TWO", "Go</button>")
+    # The returned form is complete: calling it again appends AFTER the button
+    # (generic Node call semantics), it does not insert before it.
+    curried = post_form("/submit"; label="Go")(h.div("FIELD-ONE"))
+    c = html(curried)
+    @test before(c, "Go</button>", "FIELD-ONE")
+    g = html(get_form("/q", h.div("Q"); label="Go"))
+    @test contains(g, "hx-get=\"/q\"")
+    @test before(g, "<div>Q</div>", "Go</button>")
+end
+
 @testitem "HTMX request header inspection" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     htmx_req = HTTP.Request("GET", "/",
         ["HX-Request" => "true", "HX-Target" => "#result",
