@@ -6296,7 +6296,11 @@ end
                 HTTP.post(base * url; headers=hdrs, body=something(body, ""),
                           status_exception=false, retry=false)
             @test loop.status == compiled.status
-            @test loop.body == compiled.body
+            # Content compare, not wrapper compare: HTTP 1.x normalizes
+            # response bodies to bytes at construction while HTTP 2.x keeps
+            # the handler's String (and uses EmptyBody for empty), so a raw
+            # `==` on `.body` fails cross-version on identical bytes.
+            @test String(loop.body) == String(compiled.body)
         end
         # Error parity: same status, and each leg records its own uid-bearing log.
         el = HTTP.get(base * "/dboom"; headers=["Accept" => "text/markdown"],
