@@ -11028,7 +11028,9 @@ vitepress_proxy_config(; prefix::AbstractString="/live-htmxo",
 `<style>` block with HTMXO's small utility-class set. Replaces inline
 `style="..."` on common patterns: visibility, cursor, flex/grid layout,
 spacing, typography, and theme-aware text colors. All classes are scoped
-under `@layer htmxo` so host stylesheets always win on conflict.
+under `@layer htmxo` so host stylesheets always win on conflict. The one
+exception is the generic in-flight `.htmx-request` rule, intentionally
+unlayered so `cursor: progress` beats Pico's unlayered button cursor.
 
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
@@ -11041,23 +11043,6 @@ htmxo_utility_styles() = h.style(Raw("""
 /* === Generic behavior conventions === */
 /* Any element triggering an htmx action is clickable. */
 [hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }
-
-/* While its request is in flight, htmx itself adds `htmx-request` to the
-   triggering element (core `requestClass` — no HTMXObjects JS needed), so
-   this rule fires on every page carrying this block, including hand-built
-   shells that skip `request_feedback()`. `cursor: progress` plus a subtle
-   dim, in plain literals so it holds without `htmxo_theme()`. Pollers
-   (`hx-trigger` containing `every`) are background work, not user-triggered
-   feedback, so they keep their resting style — the same exclusion the
-   `request_feedback` script applies. */
-[hx-get]:not([hx-trigger*="every"]).htmx-request,
-[hx-post]:not([hx-trigger*="every"]).htmx-request,
-[hx-put]:not([hx-trigger*="every"]).htmx-request,
-[hx-patch]:not([hx-trigger*="every"]).htmx-request,
-[hx-delete]:not([hx-trigger*="every"]).htmx-request {
-    cursor: progress;
-    opacity: 0.7;
-}
 
 /* Rich generated option cards keep valid sibling DOM (radio + label +
    semantic article). The associated label covers only rich cards, making the
@@ -11285,6 +11270,29 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
     color: var(--htmxo-muted, currentColor);
 }
 .htmxo-back-link:hover { text-decoration: underline; }
+}
+
+/* While its request is in flight, htmx itself adds `htmx-request` to the
+   triggering element (core `requestClass` — no HTMXObjects JS needed), so
+   this rule fires on every page carrying this block, including hand-built
+   shells that skip `request_feedback()`. `cursor: progress` plus a subtle
+   dim, in plain literals so it holds without `htmxo_theme()`. Pollers
+   (`hx-trigger` containing `every`) are background work, not user-triggered
+   feedback, so they keep their resting style — the same exclusion the
+   `request_feedback` script applies.
+   INTENTIONALLY UNLAYERED: Pico styles `<button>` (and other controls)
+   unlayered, and an unlayered declaration beats every layered one
+   regardless of specificity — inside `@layer htmxo` the cursor would never
+   apply on buttons (the opacity would, Pico sets none). The resting `[hx-*]`
+   rule above stays layered: at rest it agrees with Pico's `pointer`, so
+   there is nothing to beat. */
+[hx-get]:not([hx-trigger*="every"]).htmx-request,
+[hx-post]:not([hx-trigger*="every"]).htmx-request,
+[hx-put]:not([hx-trigger*="every"]).htmx-request,
+[hx-patch]:not([hx-trigger*="every"]).htmx-request,
+[hx-delete]:not([hx-trigger*="every"]).htmx-request {
+    cursor: progress;
+    opacity: 0.7;
 }
 """))
 
