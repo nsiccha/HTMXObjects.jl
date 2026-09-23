@@ -6741,9 +6741,9 @@ end
 # (snag `auto-poller-node-11e7c2a6`). The same summary feeds the semantic
 # operation title.
 @testitem "auto poller labels documented routes with the docstring summary" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _docstring_summary, _operation_poll_label,
-        _operation_polling_impl, _property_descriptor, _run_operation,
-        _semantic_operation_title
+    import HTMXObjects: _docstring_summary, _docstring_single_line,
+        _operation_poll_label, _operation_polling_impl, _property_descriptor,
+        _run_operation, _semantic_operation_title
 
     @htmx struct DocumentedPollApp
         """Rollup with waiting rows and a padded parked tail.
@@ -6776,6 +6776,18 @@ end
         "Rollup with waiting rows and a padded parked tail."
     @test _operation_poll_label((; description=""), :rollup) == Long(:rollup)
     @test _operation_poll_label(NamedTuple(), :rollup) == Long(:rollup)
+
+    # Single-line docstrings keep the one-copy `label=nothing` promotion: the
+    # summary would duplicate the root verbatim (CI on the landed merge caught
+    # exactly this — "renders a documented operation label once" went 2 == 1).
+    @test _operation_poll_label(
+        (; description="Transpiling prepared example"), :index) === nothing
+    @test _operation_poll_label(
+        (; description="Slow page\n"), :slow) === nothing
+    @test _docstring_single_line("one") === true
+    @test _docstring_single_line("one\n") === true
+    @test _docstring_single_line("one\n\ntwo") === false
+    @test _docstring_single_line("") === false
 
     # Real descriptors: the docstring reaches the descriptor whole (control),
     # and the transported label is its summary.
