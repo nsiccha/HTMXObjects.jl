@@ -30,6 +30,7 @@ julia = "1"
 TestItemRunner = "1"
 
 [extras]
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
@@ -40,4 +41,4 @@ url = "https://github.com/nsiccha/Treebars.jl"
 rev = "42be351bdbdcbf22572da5c8cf896fcc39047126"
 
 [targets]
-test = ["Sockets", "Test", "TestItemRunner", "Treebars"]
+test = ["Logging", "Sockets", "Test", "TestItemRunner", "Treebars"]
