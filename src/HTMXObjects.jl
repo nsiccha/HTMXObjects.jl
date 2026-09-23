@@ -5175,12 +5175,29 @@ function _docstring_summary(description)
     isempty(value) ? nothing : value
 end
 
+# True when the docstring carries exactly one non-empty line (trailing
+# newlines don't count): those routes keep the historical one-copy
+# `label=nothing` promotion, so a concise docstring renders once, verbatim.
+function _docstring_single_line(description::AbstractString)
+    seen = false
+    for line in split(description, '\n')
+        isempty(strip(line)) && continue
+        seen && return false
+        seen = true
+    end
+    seen
+end
+
 # A documented route labels its auto poller with its docstring summary, which
 # Treebars renders as the concise outer header above the live progress tree.
-# An undocumented route falls back to the humanized property name.
+# A single-line docstring keeps the one-copy `label=nothing` promotion instead
+# — the summary would duplicate the root verbatim — and an undocumented route
+# falls back to the humanized property name.
 function _operation_poll_label(descriptor, name)
-    summary = _docstring_summary(get(descriptor, :description, ""))
-    summary === nothing ? Long(name) : summary
+    description = get(descriptor, :description, "")
+    summary = _docstring_summary(description)
+    summary === nothing && return Long(name)
+    _docstring_single_line(description) ? nothing : summary
 end
 
 # Extension seam: core degrades polling requests to the historical blocking
