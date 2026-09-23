@@ -5182,29 +5182,18 @@ function _docstring_summary(description)
     isempty(value) ? nothing : value
 end
 
-# True when the docstring carries exactly one non-empty line (trailing
-# newlines don't count): those routes keep the historical one-copy
-# `label=nothing` promotion, so a concise docstring renders once, verbatim.
-function _docstring_single_line(description::AbstractString)
-    seen = false
-    for line in split(description, '\n')
-        isempty(strip(line)) && continue
-        seen && return false
-        seen = true
-    end
-    seen
-end
-
-# A documented route labels its auto poller with its docstring summary, which
-# Treebars renders as the concise outer header above the live progress tree.
-# A single-line docstring keeps the one-copy `label=nothing` promotion instead
-# — the summary would duplicate the root verbatim — and an undocumented route
-# falls back to the humanized property name.
+# A documented route's progress root already carries its docstring summary —
+# DynamicObjects summarizes the substatus node at the source — and Treebars'
+# `label=nothing` path promotes that root into the poller header, so the
+# operation renders once, with neither a badge label nor an interim header
+# repeating it. Passing the summary as the label instead renders it three
+# times (badge, interim header, root: snag `multi-line-docst-8388ba6a`). An
+# undocumented route — or a docstring with no usable summary line — falls back
+# to the humanized property name, which Treebars renders as the badge label
+# and interim header above the structural root.
 function _operation_poll_label(descriptor, name)
-    description = get(descriptor, :description, "")
-    summary = _docstring_summary(description)
-    summary === nothing && return Long(name)
-    _docstring_single_line(description) ? nothing : summary
+    summary = _docstring_summary(get(descriptor, :description, ""))
+    summary === nothing ? Long(name) : nothing
 end
 
 # Extension seam: core degrades polling requests to the historical blocking
