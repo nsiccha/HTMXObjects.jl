@@ -5148,6 +5148,19 @@ end
 _resolve_operation_value(value) =
     value isa DynamicObjects.Pending ? fetch(value) : value
 
+# First non-empty line of a route docstring, verbatim. The shared core behind
+# the OpenAPI `summary`, the auto poller header, and the semantic operation
+# title: one rule for what "the docstring's first line" means, with each
+# surface a thin wrapper (the poller/title wrapper additionally sheds a
+# heading sigil; OpenAPI keeps the line verbatim).
+function _docstring_first_line(doc::AbstractString)
+    for line in split(doc, '\n')
+        stripped = strip(line)
+        isempty(stripped) || return stripped
+    end
+    nothing
+end
+
 # A route docstring's first line is the human label for operation surfaces:
 # the auto poller's header and the semantic operation title. The full
 # docstring — `# Arguments` API reference and all — is curl documentation,
@@ -5156,11 +5169,10 @@ _resolve_operation_value(value) =
 # line falls back to the humanized property name.
 function _docstring_summary(description)
     description isa AbstractString || return nothing
-    for line in split(description, '\n')
-        value = strip(replace(strip(line), r"^#{1,6}\s+" => ""))
-        isempty(value) || return value
-    end
-    nothing
+    line = _docstring_first_line(description)
+    line === nothing && return nothing
+    value = strip(replace(line, r"^#{1,6}\s+" => ""))
+    isempty(value) ? nothing : value
 end
 
 # A documented route labels its auto poller with its docstring summary, which
