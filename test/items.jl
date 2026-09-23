@@ -6766,3 +6766,115 @@ end
         terminate()
     end
 end
+
+# A documented route's auto-poller header shows its docstring SUMMARY, never the
+# full docstring: `# Arguments` is curl documentation, not a status line
+# (snag `auto-poller-node-11e7c2a6`). The same summary feeds the semantic
+# operation title.
+@testitem "auto poller labels documented routes with the docstring summary" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _docstring_summary, _operation_poll_label,
+        _operation_polling_impl, _property_descriptor, _run_operation,
+        _semantic_operation_title
+
+    @htmx struct DocumentedPollApp
+        """Rollup with waiting rows and a padded parked tail.
+
+        # Arguments
+        - `show`: `active` (default) or `all`.
+        """
+        @get rollup(; show="active") = h.p("rollup:$show")
+        """# Titled route
+
+        Body text here.
+        """
+        @get titled() = h.p("titled")
+        @get bare_route() = h.p("bare")
+    end
+
+    # Unit: the summary is the first usable line, never the arguments section.
+    doc = "Rollup with waiting rows and a padded parked tail.\n\n# Arguments\n- `show`: `active` (default) or `all`.\n"
+    @test _docstring_summary(doc) ==
+        "Rollup with waiting rows and a padded parked tail."
+    @test _docstring_summary("\n\n  First after blanks.\n\n# Arguments\n") ==
+        "First after blanks."
+    @test _docstring_summary("# Titled route\n\nBody") == "Titled route"
+    @test _docstring_summary("## Deep") == "Deep"
+    @test _docstring_summary("#1 priority") == "#1 priority"
+    @test _docstring_summary("") === nothing
+    @test _docstring_summary("   \n  ") === nothing
+    @test _docstring_summary(nothing) === nothing
+    @test _operation_poll_label((; description=doc), :rollup) ==
+        "Rollup with waiting rows and a padded parked tail."
+    @test _operation_poll_label((; description=""), :rollup) == Long(:rollup)
+    @test _operation_poll_label(NamedTuple(), :rollup) == Long(:rollup)
+
+    # Real descriptors: the docstring reaches the descriptor whole (control),
+    # and the transported label is its summary.
+    rollup_descriptor = _property_descriptor(DocumentedPollApp, :rollup, :GET)
+    @test contains(rollup_descriptor.description, "# Arguments")
+    @test _operation_poll_label(rollup_descriptor, :rollup) ==
+        "Rollup with waiting rows and a padded parked tail."
+    titled_descriptor = _property_descriptor(DocumentedPollApp, :titled, :GET)
+    @test _operation_poll_label(titled_descriptor, :titled) == "Titled route"
+    bare_descriptor =
+        _property_descriptor(DocumentedPollApp, :bare_route, :GET)
+    @test _operation_poll_label(bare_descriptor, :bare_route) ==
+        Long(:bare_route)
+
+    # Transport: an `:auto` HTMX request carries the summary to the poller.
+    app = DocumentedPollApp()
+    target = (context=nothing, root=app, leaf=app)
+    seen = Ref{Any}()
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _started, _ip, _keys, _call_kwargs, transport) -> begin
+            seen[] = transport
+            h.aside("polling")
+        end
+    try
+        hx = HTTP.Request("GET", "/rollup?show=all", ["HX-Request" => "true"])
+        operation = _run_operation(target, DocumentedPollApp, :rollup,
+                                   Verb{:GET}(), hx, 0, 0;
+                                   operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", operation.value) == "<aside>polling</aside>"
+        @test seen[].label ==
+            "Rollup with waiting rows and a padded parked tail."
+        @test !contains(seen[].label, "# Arguments")
+    finally
+        _operation_polling_impl[] = old_polling
+    end
+
+    # The semantic operation title shares the summary (one helper, one rule).
+    @test _semantic_operation_title((; name=:rollup, doc)) ==
+        "Rollup with waiting rows and a padded parked tail."
+    @test _semantic_operation_title(
+        (; name=:titled, doc="# Titled route\n\nBody")) == "Titled route"
+    @test _semantic_operation_title((; name=:bare_route, doc=nothing)) ==
+        Long(:bare_route)
+end
+
+# End to end: the live auto-poller header of a slow documented route is the
+# concise summary — the full docstring stays out of the status line.
+@testitem "auto poller header shows the docstring summary while running" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    @htmx struct SlowDocumentedPollApp
+        """Slow rollup with waiting rows and a padded parked tail.
+
+        # Arguments
+        - `show`: `active` (default) or `all`.
+        """
+        @get slow_rollup(; show="active") = (sleep(0.5); h.p("slow:$show"))
+    end
+
+    route!(SlowDocumentedPollApp())
+    router = HTMXObjects.CONTEXT[].service.router
+    req = HTTP.Request(
+        "GET", "/slow_rollup?show=all", ["HX-Request" => "true"])
+    handler = first(HTTP.Handlers.gethandler(router, req))
+    html = String(handler(req).body)
+    @test contains(html, "treebar-poller-inner")
+    header = match(r"<header>.*?</header>"s, html)
+    @test header !== nothing
+    @test header.match == "<header>Slow rollup with waiting rows and a padded parked tail. — running...</header>"
+end

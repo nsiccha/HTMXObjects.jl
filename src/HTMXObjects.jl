@@ -5148,13 +5148,39 @@ end
 _resolve_operation_value(value) =
     value isa DynamicObjects.Pending ? fetch(value) : value
 
-# A documented DO property already renders its description on its progress
-# root. Treebars' `label=nothing` path promotes that root into the poller header,
-# so the operation appears once. An undocumented property's root is structural
-# and needs the humanized property name as the outer fallback.
+# First non-empty line of a route docstring, verbatim. The shared core behind
+# the OpenAPI `summary`, the auto poller header, and the semantic operation
+# title: one rule for what "the docstring's first line" means, with each
+# surface a thin wrapper (the poller/title wrapper additionally sheds a
+# heading sigil; OpenAPI keeps the line verbatim).
+function _docstring_first_line(doc::AbstractString)
+    for line in split(doc, '\n')
+        stripped = strip(line)
+        isempty(stripped) || return stripped
+    end
+    nothing
+end
+
+# A route docstring's first line is the human label for operation surfaces:
+# the auto poller's header and the semantic operation title. The full
+# docstring — `# Arguments` API reference and all — is curl documentation,
+# not a status line, so it must never reach a header verbatim. A heading-led
+# docstring (`# Title`) sheds its `#` sigil; anything without a usable first
+# line falls back to the humanized property name.
+function _docstring_summary(description)
+    description isa AbstractString || return nothing
+    line = _docstring_first_line(description)
+    line === nothing && return nothing
+    value = strip(replace(line, r"^#{1,6}\s+" => ""))
+    isempty(value) ? nothing : value
+end
+
+# A documented route labels its auto poller with its docstring summary, which
+# Treebars renders as the concise outer header above the live progress tree.
+# An undocumented route falls back to the humanized property name.
 function _operation_poll_label(descriptor, name)
-    description = get(descriptor, :description, "")
-    description isa AbstractString && !isempty(description) ? nothing : Long(name)
+    summary = _docstring_summary(get(descriptor, :description, ""))
+    summary === nothing ? Long(name) : summary
 end
 
 # Extension seam: core degrades polling requests to the historical blocking
@@ -10313,14 +10339,8 @@ function _semantic_route_mount(mounts, route)
 end
 
 function _semantic_operation_title(route)
-    description = get(route, :doc, nothing)
-    if description isa AbstractString
-        for line in split(description, '\n')
-            value = strip(line)
-            isempty(value) || return value
-        end
-    end
-    Long(route.name)
+    summary = _docstring_summary(get(route, :doc, nothing))
+    summary === nothing ? Long(route.name) : summary
 end
 
 function _semantic_operation_slug(route)

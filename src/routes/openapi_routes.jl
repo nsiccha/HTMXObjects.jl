@@ -78,12 +78,11 @@ function _openapi_parameter(param, location::AbstractString)
 end
 
 # First non-empty line of a route docstring — the OpenAPI `summary`.
+# Thin wrapper over the shared `_docstring_first_line` core: OpenAPI keeps
+# the line verbatim (no heading shed), exactly as before.
 function _openapi_summary(doc::AbstractString)
-    for line in split(doc, '\n')
-        stripped = strip(line)
-        isempty(stripped) || return String(stripped)
-    end
-    nothing
+    line = _docstring_first_line(doc)
+    line === nothing ? nothing : String(line)
 end
 
 # A route docstring minus its `# Arguments` section (those lines already

@@ -815,6 +815,13 @@ inspection chrome. `keep_progress` still governs hand-shaped
 `polling_fetchindex` pollers, which keep their frozen tree for post-hoc
 inspection.
 
+The auto poller's header shows the route docstring's **first line** — the same
+summary that titles the route's semantic operation card. Write it as a one-line
+human summary; everything below it (the `# Arguments` reference included)
+stays API documentation for curl callers and never reaches the status line. A
+docstring that opens with a markdown heading sheds its `#` sigil; an
+undocumented route falls back to its humanized property name.
+
 Every `htmx()` page shell carries the Treebars stylesheet + script while the
 Treebars extension is loaded, so pollers render quietly and terminalize with
 no per-app wiring — ahead of `extra_head`, so apps can still override.
