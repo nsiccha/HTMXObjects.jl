@@ -11025,6 +11025,23 @@ htmxo_utility_styles() = h.style(Raw("""
 /* Any element triggering an htmx action is clickable. */
 [hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }
 
+/* While its request is in flight, htmx itself adds `htmx-request` to the
+   triggering element (core `requestClass` — no HTMXObjects JS needed), so
+   this rule fires on every page carrying this block, including hand-built
+   shells that skip `request_feedback()`. `cursor: progress` plus a subtle
+   dim, in plain literals so it holds without `htmxo_theme()`. Pollers
+   (`hx-trigger` containing `every`) are background work, not user-triggered
+   feedback, so they keep their resting style — the same exclusion the
+   `request_feedback` script applies. */
+[hx-get]:not([hx-trigger*="every"]).htmx-request,
+[hx-post]:not([hx-trigger*="every"]).htmx-request,
+[hx-put]:not([hx-trigger*="every"]).htmx-request,
+[hx-patch]:not([hx-trigger*="every"]).htmx-request,
+[hx-delete]:not([hx-trigger*="every"]).htmx-request {
+    cursor: progress;
+    opacity: 0.7;
+}
+
 /* Rich generated option cards keep valid sibling DOM (radio + label +
    semantic article). The associated label covers only rich cards, making the
    whole presentational surface a native selection target without JavaScript;
@@ -11262,6 +11279,8 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 CSS for automatic HTMX request feedback: pulsating border while in-flight,
 brief color flash on success/failure. Themed via `--htmxo-accent`,
 `--htmxo-success`, `--htmxo-error` (see [`htmxo_theme`](@ref)).
+Under `prefers-reduced-motion` the pulse/fade animations are disabled while
+the static outline remains.
 """
 request_feedback_style() = h.style(Raw("""
 @layer htmxo {
@@ -11291,6 +11310,13 @@ request_feedback_style() = h.style(Raw("""
 @keyframes htmx-fade-error {
     0% { outline-color: var(--htmxo-error); }
     100% { outline-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .htmx-request-active,
+    .htmx-request-success,
+    .htmx-request-error {
+        animation: none;
+    }
 }
 }
 """))
