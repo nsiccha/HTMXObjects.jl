@@ -5362,6 +5362,35 @@ end
     # whole declaration).
     @test contains(css, "opacity: 0.7")
 
+    # Placement pin: the in-flight rule must sit OUTSIDE `@layer htmxo`
+    # while the resting rule stays inside it. Pico styles `<button>`
+    # unlayered, and an unlayered declaration beats every layered one
+    # regardless of specificity — inside the layer the in-flight cursor
+    # never applies on buttons (the opacity does, Pico sets none).
+    layer_start = findfirst("@layer htmxo {", css)
+    @test !isnothing(layer_start)
+    layer_close = let depth = 0, found = 0
+        for i in eachindex(css)
+            i < first(layer_start) && continue
+            if css[i] == '{'
+                depth += 1
+            elseif css[i] == '}'
+                depth -= 1
+                if depth == 0
+                    found = i
+                    break
+                end
+            end
+        end
+        found
+    end
+    @test layer_close > 0
+    inflight_at = findfirst("[hx-get]:not([hx-trigger", css)
+    @test !isnothing(inflight_at) && first(inflight_at) > layer_close
+    resting_at = findfirst("[hx-get], [hx-post]", css)
+    @test !isnothing(resting_at) && first(resting_at) < layer_close
+    @test count(==('{'), css) == count(==('}'), css)
+
     # The `request_feedback` pulse honors reduced-motion: the animation
     # stops, the static outline stays.
     feedback_css = repr("text/html", HTMXObjects.request_feedback_style())
