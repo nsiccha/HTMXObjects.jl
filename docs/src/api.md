@@ -812,9 +812,19 @@ process-local registry expires abandoned or failed pollers.
 A resolved `:auto` poll answers the result fragment in a select-matching
 terminal node — no kept progress tree, no inspection chrome — and the
 `htmx()` shell unwraps that node on swap, so the caller's target ends with
-the bare result fragment. `keep_progress` still governs hand-shaped
-`polling_fetchindex` pollers, which keep their frozen tree for post-hoc
-inspection.
+the bare result fragment. `keep_progress` does not change that: it governs
+hand-shaped `polling_fetchindex` pollers (which keep their frozen tree for
+post-hoc inspection), the direct-page replacement flow, and what a failed
+`:auto` operation renders (the recorded error beside its open tree, rather
+than a bare route-boundary article). To keep the finished tree below a
+resolved `:auto` result, register the app with
+`OperationPolicy(:auto; keep_terminal_tree=true)`: polled operations then
+resolve through Treebars' done terminal — the result with the frozen tree
+in a collapsed `<details>` — instead of the bare node. Operations that
+finish within the grace budget still answer inline bare either way: no
+poll, no tree. The kept tree is not bare-safe, so a route whose fragment
+must be the direct children of a structural element keeps the default and
+declares itself `@fresh @get`.
 
 While loading, the interim poller swaps into the request's target and
 transiently displaces its children. A first paint into a structural element

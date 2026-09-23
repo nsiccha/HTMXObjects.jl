@@ -3258,7 +3258,8 @@ struct RootProvider{F,K}
 end
 
 """
-    OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true)
+    OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true,
+        keep_terminal_tree=false)
 
 Select route execution transport. `:auto` — **the default, applied to every app
 whether or not it declares a policy** — polls pending-capable HTMX requests.
@@ -3277,8 +3278,9 @@ refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
 [`record!`](@ref) forces `:blocking` for its static-export pass.
 
 You never have to write `OperationPolicy` to get non-blocking long routes —
-`route!(app)` alone already does. Reach for it to tune (`poll_interval`,
-`keep_progress`) or to opt out (`:blocking`).
+`route!(app)` alone already does. Reach for it to tune (`poll_interval`),
+to keep finished progress trees (`keep_terminal_tree=true`), or to opt out
+(`:blocking`).
 
 Nested progress follows source-visible DynamicObjects property reads and
 indexed-property calls in generated route/property bodies. Their lowering
@@ -3307,18 +3309,27 @@ caches global.
 A resolved `:auto` poll answers the result fragment in a select-matching
 terminal node — no kept progress tree, no inspection chrome — and the
 `htmx()` shell unwraps that node on swap, so the caller's target ends with
-the bare result fragment. `keep_progress` still governs hand-shaped
-`polling_fetchindex` pollers (which keep their frozen tree) and the
-direct-page replacement flow. While loading, the interim poller swaps into
+the bare result fragment. `keep_progress` does not change that: it governs
+hand-shaped `polling_fetchindex` pollers (which keep their frozen tree),
+the direct-page replacement flow, and what a failed `:auto` operation
+renders (the recorded error beside its open tree, rather than a bare
+route-boundary article). To keep the finished tree below a resolved `:auto`
+result, set `keep_terminal_tree=true`: polled operations then resolve
+through Treebars' done terminal — the result with the frozen tree in a
+collapsed `<details>` — instead of the bare node. Operations that finish
+within the grace budget still answer inline bare either way: no poll, no
+tree. While loading, the interim poller swaps into
 the target and transiently displaces its children; a route whose fragment
 must be the direct children of a structural element (`details`/`summary`,
 `table`/`tr`, `select`/`option`, …) and cannot tolerate that transient
-should declare itself `@fresh @get` instead.
+should declare itself `@fresh @get` instead — likewise any route that must
+stay bare under a tree-keeping policy, since a kept tree is not bare-safe.
 """
 struct OperationPolicy
     mode::Symbol
     poll_interval::String
     keep_progress::Bool
+    keep_terminal_tree::Bool
 end
 
 # One default, spelled once: `route!`'s kwarg default and every
@@ -3326,11 +3337,16 @@ end
 # mode from here, so "what does an app that declares nothing get?" has a single
 # answer in the source as well as in the docs.
 function OperationPolicy(mode::Symbol=:auto; poll_interval="200ms",
-        keep_progress::Bool=true)
+        keep_progress::Bool=true, keep_terminal_tree::Bool=false)
     mode in (:blocking, :polling, :auto) || throw(ArgumentError(
         "operation-policy mode must be :blocking, :polling, or :auto (got $(repr(mode)))"))
-    OperationPolicy(mode, string(poll_interval), keep_progress)
+    OperationPolicy(mode, string(poll_interval), keep_progress,
+        keep_terminal_tree)
 end
+
+# Back-compat: the pre-`keep_terminal_tree` positional shape keeps working.
+OperationPolicy(mode::Symbol, poll_interval, keep_progress::Bool) =
+    OperationPolicy(mode, string(poll_interval), keep_progress, false)
 
 function RootProvider(factory; scope::Symbol=:request, key=nothing)
     scope in (:request, :session, :job) ||
@@ -5391,15 +5407,36 @@ const _operation_ready_terminal_impl =
 _operation_ready_terminal(render_result, started) =
     _operation_ready_terminal_impl[](render_result, started)
 
+# Effective tree retention for the Treebars transport. `keep_progress` keeps
+# failure trees and hand-shaped terminals; `keep_terminal_tree` additionally
+# keeps `:auto`/`:polling` success terminals. The flag wins outright: with
+# `keep_terminal_tree=true`, `keep_progress=false` changes nothing — trees
+# are kept, and direct pages terminalize in place instead of OOB-replacing.
+_operation_treebars_keep(policy::OperationPolicy) =
+    policy.keep_progress || policy.keep_terminal_tree
+
+# Pre-probe shared by resume and heal: answer the bare marked terminal when
+# the operation already resolved — unless the response must carry a tree.
+# Direct-page OOB replacement renders its own terminal shape, and
+# `keep_terminal_tree` resolutions render Treebars' done terminal, so both
+# skip the probe and let the Treebars call below decide.
+function _operation_ready_probe(policy::OperationPolicy, render_result,
+        started; replace_page_load::Bool)
+    if replace_page_load || policy.keep_terminal_tree
+        return (ready=false, value=nothing)
+    end
+    _operation_ready_terminal(render_result, started)
+end
+
 function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
     page_load_id = _operation_page_load_id(req)
-    replace_page_load = !policy.keep_progress && !isnothing(page_load_id)
-    if !replace_page_load
-        probe = _operation_ready_terminal(
-            value -> _finish_operation_poll(token, value), entry.started)
-        probe.ready && return _operation_page_runtime(req, probe.value)
-    end
+    replace_page_load =
+        !_operation_treebars_keep(policy) && !isnothing(page_load_id)
+    probe = _operation_ready_probe(policy,
+        value -> _finish_operation_poll(token, value), entry.started;
+        replace_page_load)
+    probe.ready && return _operation_page_runtime(req, probe.value)
     # A follow-up poll already carries its marker; an attach promotes its
     # marker-free URL to one for the live poller that the attach response
     # establishes.
@@ -5409,7 +5446,9 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
                  _operation_marker_url(request_url, "__htmxo_poll"),
         label=_operation_poll_label(descriptor, name),
         poll_interval=policy.poll_interval,
-        keep_progress=policy.keep_progress,
+        keep_progress=_operation_treebars_keep(policy),
+        keep_terminal_tree=policy.keep_terminal_tree,
+        settle_bare=false,
         page_load_id,
         replace_page_load,
         error_obj=entry.error_obj,
@@ -5439,16 +5478,18 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         token, signature, prop, keys, call_kwargs, started,
         target.leaf, req, now, now)
     page_load_id = _operation_page_load_id(req)
-    replace_page_load = !policy.keep_progress && !isnothing(page_load_id)
-    if !replace_page_load
-        probe = _operation_ready_terminal(
-            value -> _finish_operation_poll(token, value), started)
-        probe.ready && return _operation_page_runtime(req, probe.value)
-    end
+    replace_page_load =
+        !_operation_treebars_keep(policy) && !isnothing(page_load_id)
+    probe = _operation_ready_probe(policy,
+        value -> _finish_operation_poll(token, value), started;
+        replace_page_load)
+    probe.ready && return _operation_page_runtime(req, probe.value)
     transport = (poll_url=_operation_heal_poll_url(req, token, prefix),
                  label=_operation_poll_label(descriptor, name),
                  poll_interval=policy.poll_interval,
-                 keep_progress=policy.keep_progress,
+                 keep_progress=_operation_treebars_keep(policy),
+                 keep_terminal_tree=policy.keep_terminal_tree,
+                 settle_bare=false,
                  page_load_id,
                  replace_page_load,
                  error_obj=target.leaf, req=req,
@@ -5496,7 +5537,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             target.leaf, req, now, now)
         _retain_operation_poll!(entry)
         return _operation_page_load(
-            req, prefix; replace_terminal=!policy.keep_progress,
+            req, prefix; replace_terminal=!_operation_treebars_keep(policy),
             poll_token=token)
     end
 
@@ -5546,7 +5587,9 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         transport = (poll_url=_operation_poll_url(req, token, prefix),
                      label=_operation_poll_label(descriptor, name),
                      poll_interval=policy.poll_interval,
-                     keep_progress=policy.keep_progress,
+                     keep_progress=_operation_treebars_keep(policy),
+                     keep_terminal_tree=policy.keep_terminal_tree,
+                     settle_bare=true,
                      page_load_id,
                      replace_page_load=false,
                      error_obj=target.leaf, req=req,
@@ -7597,8 +7640,13 @@ Oxygen router. Returns `app`.
   polling, or HTMX-aware automatic execution. **Defaults to
   `OperationPolicy(:auto)`**, so an app that declares nothing already serves
   long routes without blocking the request task. Pass one only to tune
-  (`poll_interval`, `keep_progress`) or to opt out — `:blocking` for a route
-  surface that must answer inline, `:polling` to force a tree.
+  (`poll_interval`), to keep finished progress trees
+  (`keep_terminal_tree=true`), or to opt out — `:blocking` for a route
+  surface that must answer inline, `:polling` to force the polling
+  transport. (`keep_progress` tunes hand-shaped `polling_fetchindex`
+  pollers, the direct-page replacement flow, and `:auto` failure rendering
+  — not `:auto` success terminals, which are bare unless
+  `keep_terminal_tree` is set.)
 
 `route!` stores its registration settings per type in internal registries so the
 `_reroute!` hook emitted by `@htmx` can re-register routes on Revise reloads —
@@ -10944,9 +10992,10 @@ the route rendered — a wrapper `div` cannot be a direct child of a structural
 element (`details`/`summary`, `table`/`tr`, `select`/`option`, `dl`, `ul`/`li`).
 
 Only marked nodes unwrap: hand-shaped `polling_fetchindex` terminals (frozen
-tree kept for inspection) and the direct-page OOB terminal carry no marker
-and are untouched, and terminals diverted into `.htmxo-live-reporter` stay
-owned by `live_refresh_script()`. The swapped-in bare content carries no
+tree kept for inspection), `:auto` terminals under `keep_terminal_tree=true`
+(the same kept-tree shape, by design), and the direct-page OOB terminal
+carry no marker and are untouched, and terminals diverted into
+`.htmxo-live-reporter` stay owned by `live_refresh_script()`. The swapped-in bare content carries no
 marker, so the follow-up swap cannot re-trigger. Runs in either listener
 order against Treebars' `terminalizePoller` (the wrapper may already be
 renamed to `.treebar-terminal` when this fires).

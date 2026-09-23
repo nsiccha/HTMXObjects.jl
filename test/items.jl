@@ -6360,6 +6360,208 @@ end
     @test !_operation_ready_terminal_fallback(render, failed).ready
 end
 
+# A poll that crosses the completion boundary INSIDE the Treebars call — its
+# fetch re-reads the cache after the grace check — must still settle to
+# `:auto`'s bare terminal, not Treebars' done terminal with its kept tree.
+# The fake IP below answers a canned (value, status), so the boundary is
+# deterministic: `started` (what the settle re-probes) and the IP (what
+# Treebars fetches) are independent handles.
+@testitem "auto terminal settle closes the completion race" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects.DynamicObjects
+    import Treebars
+
+    extension = Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt)
+    @test extension !== nothing
+
+    struct FakeSettleIP
+        value::Any
+        status::Any
+    end
+    function DynamicObjects.fetchindex(cb::Function, ip::FakeSettleIP,
+            keys...; kwargs...)
+        cb(ip.value, ip.status)
+    end
+
+    node = Treebars.initialize_progress!(:state; description="settle-probe")
+    Treebars.finalize_progress!(node)
+    fake = FakeSettleIP(7, node)
+    render = value -> h.p("done:$value")
+
+    cache = DynamicObjects.ThreadsafeDict()
+    resolved = Base.get!(cache, :settle_resolved; fetch=identity) do _status
+        7
+    end
+    @test timedwait(() -> isready(resolved), 5.0; pollint=0.001) === :ok
+    gate = Base.Event()
+    running = Base.get!(cache, :settle_running; fetch=identity) do _status
+        wait(gate)
+        9
+    end
+    @test !isready(running)
+
+    polling = HTMXObjects._operation_polling_impl[]
+    drive(started; keep_progress=true, keep_terminal_tree=false,
+            settle_bare=false, replace_page_load=false,
+            page_load_id=nothing) = polling(render, started, fake, (),
+        NamedTuple(),
+        (poll_url="/poll?__htmxo_poll=1", label=nothing,
+         poll_interval="200ms", keep_progress, keep_terminal_tree,
+         settle_bare, page_load_id, replace_page_load, error_obj=nothing,
+         req=nothing, grace_period=0.0, retain=() -> nothing,
+         cleanup=() -> nothing))
+    try
+        # Resolved inside the Treebars call: resume settles to the marked
+        # bare terminal, not Treebars' done terminal with its kept tree.
+        settled = drive(resolved)
+        settled_html = repr("text/html", settled)
+        @test contains(settled_html, "done:7")
+        @test contains(settled_html, "data-htmxo-auto-terminal")
+        @test !contains(settled_html, "treebar-frozen")
+        @test !contains(settled_html, "<details")
+
+        # An initial request has no live poller: the same boundary settles
+        # to the bare value, exactly what the grace fast path gives.
+        bare = drive(resolved; settle_bare=true)
+        @test repr("text/html", bare) == "<p>done:7</p>"
+
+        # Still running: Treebars' answer passes through untouched — the
+        # re-probe only upgrades genuine completions.
+        live = drive(running)
+        live_html = repr("text/html", live)
+        @test contains(live_html, "done:7")
+        @test contains(live_html, "treebar-frozen")
+        @test !contains(live_html, "data-htmxo-auto-terminal")
+
+        # `keep_terminal_tree` keeps the finished tree: no settle, Treebars'
+        # done terminal (result + collapsed frozen tree) answers instead.
+        kept = drive(resolved; keep_terminal_tree=true)
+        kept_html = repr("text/html", kept)
+        @test contains(kept_html, "done:7")
+        @test contains(kept_html, "treebar-frozen")
+        @test !contains(kept_html, "data-htmxo-auto-terminal")
+
+        # Direct-page OOB replacement renders its own terminal shape: the
+        # settle stays out even when the operation already resolved.
+        oob = drive(resolved; replace_page_load=true,
+            page_load_id="htmxo-operation-load-deadbeef")
+        oob_html = repr("text/html", oob)
+        @test contains(oob_html, "htmxo-operation-terminal")
+        @test !contains(oob_html, "data-htmxo-auto-terminal")
+    finally
+        notify(gate)
+    end
+end
+
+# The pre-probe is shared by resume and heal, so one matrix pins both: it
+# answers the bare terminal for resolved operations, misses running and
+# failed ones (Treebars renders those), and stands down for direct-page OOB
+# replacement and for `keep_terminal_tree` (Treebars' done terminal keeps
+# the tree there instead).
+@testitem "operation pre-probe honors the terminal-tree flag" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _OperationPollEntry, _execute_operation_resume,
+        _operation_polling_impl, _operation_ready_probe,
+        _operation_treebars_keep
+    import HTMXObjects.DynamicObjects
+
+    # Effective Treebars retention: the flag wins outright.
+    @test _operation_treebars_keep(OperationPolicy(:auto)) === true
+    @test _operation_treebars_keep(
+        OperationPolicy(:auto; keep_progress=false)) === false
+    @test _operation_treebars_keep(
+        OperationPolicy(:auto; keep_terminal_tree=true)) === true
+    @test _operation_treebars_keep(OperationPolicy(
+        :auto; keep_progress=false, keep_terminal_tree=true)) === true
+
+    # Constructor shapes: kwarg default, 4-arg positional, 3-arg back-compat.
+    @test OperationPolicy().keep_terminal_tree === false
+    @test OperationPolicy(
+        :polling; poll_interval="350ms", keep_progress=false) ==
+          OperationPolicy(:polling, "350ms", false)
+    @test OperationPolicy(:auto, "200ms", true, true) ==
+          OperationPolicy(:auto; keep_terminal_tree=true)
+
+    cache = DynamicObjects.ThreadsafeDict()
+    resolved = Base.get!(cache, :flag_resolved; fetch=identity) do _status
+        7
+    end
+    @test timedwait(() -> isready(resolved), 5.0; pollint=0.001) === :ok
+    gate = Base.Event()
+    running = Base.get!(cache, :flag_running; fetch=identity) do _status
+        wait(gate)
+        9
+    end
+    failed = Base.get!(cache, :flag_failed; fetch=identity) do _status
+        error("flag failure fixture")
+    end
+    fetch_task = @async try
+        fetch(failed)
+        :value
+    catch
+        :threw
+    end
+    @test timedwait(() -> istaskdone(fetch_task), 5.0; pollint=0.001) === :ok
+    @test fetch(fetch_task) === :threw
+
+    render = value -> h.p("done:$value")
+    @test _operation_ready_probe(OperationPolicy(:auto), render, resolved;
+        replace_page_load=false).ready
+    @test !_operation_ready_probe(OperationPolicy(:auto), render, running;
+        replace_page_load=false).ready
+    @test !_operation_ready_probe(OperationPolicy(:auto), render, failed;
+        replace_page_load=false).ready
+    @test !_operation_ready_probe(OperationPolicy(:auto), render, resolved;
+        replace_page_load=true).ready
+    @test !_operation_ready_probe(
+        OperationPolicy(:auto; keep_terminal_tree=true), render, resolved;
+        replace_page_load=false).ready
+
+    # Through the resume path with the Treebars seam stubbed: the flag skips
+    # the probe and takes the Treebars branch; failures pass through to it.
+    req = HTTP.Request("GET",
+        "/html?count=2&__htmxo_poll=1&__htmxo_operation=tok",
+        ["HX-Request" => "true"], UInt8[])
+    descriptor = (description="",)
+    mkentry(started) = _OperationPollEntry("tok", :sig, nothing, (),
+        NamedTuple(), started, nothing, req, 0.0, 0.0)
+    sentinel = h.aside("stub-poller")
+    calls = Ref(0)
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _started, _ip, _keys, _kwargs, _transport) -> begin
+            calls[] += 1
+            sentinel
+        end
+    try
+        plain = OperationPolicy(:auto)
+        keep = OperationPolicy(:auto; keep_terminal_tree=true)
+
+        answered = _execute_operation_resume(plain, descriptor, nothing,
+            :html, nothing, (), (), req, "", "tok", mkentry(resolved))
+        @test calls[] == 0
+        answered_html = repr("text/html", answered)
+        @test contains(answered_html, "data-htmxo-auto-terminal")
+        @test contains(answered_html, ">7</div>")
+
+        kept = _execute_operation_resume(keep, descriptor, nothing,
+            :html, nothing, (), (), req, "", "tok", mkentry(resolved))
+        @test calls[] == 1
+        @test kept === sentinel
+
+        miss = _execute_operation_resume(plain, descriptor, nothing,
+            :html, nothing, (), (), req, "", "tok", mkentry(failed))
+        @test calls[] == 2
+        @test miss === sentinel
+
+        live = _execute_operation_resume(plain, descriptor, nothing,
+            :html, nothing, (), (), req, "", "tok", mkentry(running))
+        @test calls[] == 3
+        @test live === sentinel
+    finally
+        _operation_polling_impl[] = old_polling
+        notify(gate)
+    end
+end
+
 # `htmx()` shells carry the Treebars stylesheet + script while the extension
 # is loaded, so pollers render quietly and terminalize with no per-app wiring
 # (a manual `extra_head` install alongside stays harmless but redundant). The
