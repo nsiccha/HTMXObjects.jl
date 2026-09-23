@@ -257,7 +257,7 @@ end
 # `SwaggerRoutes` is the human companion to `OpenAPIRoutes`: a mountable
 # bundle serving a version-pinned Swagger UI initialized against the app's
 # OpenAPI document. Mounted at `/docs` it answers the standard address —
-# which requires `serve(docs=false)` (see `_warn_docs_prefix`): with
+# which requires `serve(docs=false)` (see `_check_docs_prefix_routes`): with
 # Oxygen's built-in docs enabled, its `DocsMiddleware` intercepts every
 # `/docs*` request before the main router and serves Oxygen's own
 # (for `@htmx` apps, empty) Swagger instead.

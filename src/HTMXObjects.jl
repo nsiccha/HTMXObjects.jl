@@ -144,6 +144,7 @@ concurrency, plus extra spawn overhead per request, plus a startup `@warn`).
 function serve(; parallel=false, kwargs...)
     async = Base.get(kwargs, :async, false)
     kwargs = _with_access_timing(kwargs)
+    _check_docs_prefix_routes(kwargs)
     serve_kwargs = if parallel === :interactive
         if Threads.nthreads(:interactive) <= 1
             @warn "Only 1 interactive thread available. Launch julia with e.g. \"julia -t 8,4\" to add more interactive threads for request handling."
@@ -3162,6 +3163,14 @@ const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tupl
 const _record_bases = Dict{DataType, String}()
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
+# Routes whose path collides with Oxygen's docs prefix, recorded at
+# registration and reported at `serve` — registration cannot see serve's
+# `docs=` kwarg, so reporting there is an error-level false positive for
+# apps that (correctly) serve with `docs=false` (snag
+# `docs-prefix-rout-665a2140`). Keyed by walk-root type: each
+# `_register_routes(T)` walk rebuilds exactly T's entries, so a Revise
+# re-registration neither leaves stale entries nor drops a sibling root's.
+const _docs_prefix_routes = Dict{DataType, Set{Tuple{Symbol,String}}}()
 
 """
     OperationContext
@@ -5680,9 +5689,31 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     end)
 end
 
-function _warn_docs_prefix(path, name)
+# Record a route whose path starts with Oxygen's docs prefix instead of
+# reporting it: registration runs at `route!`/Revise time, before serve's
+# `docs=` kwarg is known (see `_docs_prefix_routes`). `OwnerT` is the
+# walk-root type (`_register_routes`' `T`, threaded through
+# `_register_included_routes` as `ParentT`), so each walk rebuilds its own
+# entries (reset in `_register_routes`) without touching sibling roots'.
+function _record_docs_prefix(OwnerT::DataType, path, name)
     startswith(lstrip(path, '/'), "docs") &&
-        @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — with Oxygen's built-in docs enabled, its DocsMiddleware serves Oxygen's own (for @htmx apps, empty) Swagger for every \"/docs*\" request and this route never fires. Either pass `docs=false` to `serve` (also disables Oxygen's Swagger and its /docs/metrics dashboard UI; metrics collection is unaffected) or mount the route outside \"/docs\"."
+        push!(get!(Set{Tuple{Symbol,String}}, _docs_prefix_routes, OwnerT),
+              (name, path))
+    nothing
+end
+
+# Emit the deferred /docs-prefix collision errors collected by
+# `_record_docs_prefix` — but only when Oxygen's docs are actually enabled.
+# `serve` passes `docs` straight through to `Oxygen.Core.serve`, whose
+# default is `true` (both 1.10 and 1.11), so an absent key means enabled.
+function _check_docs_prefix_routes(kwargs)
+    Base.get(kwargs, :docs, true) === false && return nothing
+    for OwnerT in sort!(collect(keys(_docs_prefix_routes)); by=string)
+        for (name, path) in sort!(collect(_docs_prefix_routes[OwnerT]); by=last)
+            @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — with Oxygen's built-in docs enabled, its DocsMiddleware serves Oxygen's own (for @htmx apps, empty) Swagger for every \"/docs*\" request and this route never fires. Either pass `docs=false` to `serve` (also disables Oxygen's Swagger and its /docs/metrics dashboard UI; metrics collection is unaffected) or mount the route outside \"/docs\"."
+        end
+    end
+    nothing
 end
 
 # Build the URL path for a route property. `prefix` is the enclosing mount
@@ -5792,7 +5823,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
 
     param_strs, n_params, default_positions = _route_param_shape(positional_indices)
     path = _route_path(prefix, name, param_strs)
-    _warn_docs_prefix(path, name)
+    _record_docs_prefix(OwnerT, path, name)
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
@@ -5907,6 +5938,9 @@ end
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
         parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
         operation_policy=get(_operation_policies, T, OperationPolicy()))
+    # Rebuild this walk's /docs-prefix entries from scratch (see
+    # `_docs_prefix_routes`): a renamed route must not haunt the next serve.
+    _docs_prefix_routes[T] = Set{Tuple{Symbol,String}}()
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _walk_route_meta(T,
         (name, info, nested_type) -> begin
@@ -7794,7 +7828,7 @@ contract — the same shape `HTTP.get(...; status_exception=false)` yields.
 Serve-time Oxygen middleware (access log, metrics, docs) does not run:
 `dispatch` resolves at the router, beneath the middleware stack. Routes
 mounted under `/docs` therefore answer here even when Oxygen's docs
-middleware would intercept them over the wire (see `_warn_docs_prefix`).
+middleware would intercept them over the wire (see `_check_docs_prefix_routes`).
 `:page_load` responses start no compute, so there is nothing to parent;
 polling-mode responses attach their in-flight operation node.
 

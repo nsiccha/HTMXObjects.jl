@@ -4921,6 +4921,69 @@ end
     @test SwaggerRoutes().swagger_version == "5.7.2"
 end
 
+@testitem "/docs-prefix check defers to serve and respects docs=false" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    using Logging
+
+    @htmx struct DocsPrefixChild
+        @get index() = h.h1("fixture docs page")
+    end
+    @htmx struct DocsPrefixApp
+        @include docs = DocsPrefixChild()
+    end
+
+    is_docs_error(l) =
+        l.level >= Logging.Error && occursin("starts with", string(l.message))
+
+    reg_logs = TestLogger()
+    with_logger(reg_logs) do
+        route!(DocsPrefixApp())
+        route!(DocsPrefixApp())
+    end
+    try
+        # Registration records the collision instead of reporting it: serve's
+        # `docs=` kwarg is not known yet (snag docs-prefix-rout-665a2140).
+        # Re-registration rebuilds (not appends) this type's entries.
+        @test isempty(filter(is_docs_error, reg_logs.logs))
+        @test HTMXObjects._docs_prefix_routes[DocsPrefixApp] ==
+            Set([(:index, "/docs")])
+
+        # The documented remedy stays silent: with Oxygen's docs off, the
+        # app's own route answers /docs.
+        serve_logs = TestLogger()
+        with_logger(serve_logs) do
+            serve(; port=8135, async=true, docs=false)
+        end
+        try
+            r = HTTP.get("http://127.0.0.1:8135/docs"; retry=false, readtimeout=20)
+            @test r.status == 200
+            @test contains(String(r.body), "fixture docs page")
+        finally
+            terminate()
+        end
+        @test isempty(filter(is_docs_error, serve_logs.logs))
+
+        # ...but with Oxygen's docs enabled the collision still errors.
+        # (`>= 1`: earlier items may have registered their own /docs routes
+        # into the shared process registry; this type's exact entry is
+        # asserted above.)
+        enabled_logs = TestLogger()
+        with_logger(enabled_logs) do
+            serve(; port=8136, async=true)
+        end
+        try
+            HTTP.get("http://127.0.0.1:8136/docs"; retry=false, readtimeout=20,
+                     status_exception=false)
+        finally
+            terminate()
+        end
+        @test count(is_docs_error, enabled_logs.logs) >= 1
+        @test any(l -> occursin("maps to path \"/docs\"", string(l.message)),
+                  enabled_logs.logs)
+    finally
+        delete!(HTMXObjects._docs_prefix_routes, DocsPrefixApp)
+    end
+end
+
 @testitem "application architecture composes declarations, routes, contributions and observations" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     ARCHITECTURE_COMPUTES[] = 0
 
