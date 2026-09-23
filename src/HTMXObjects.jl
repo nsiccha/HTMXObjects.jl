@@ -8295,7 +8295,7 @@ caption_style() = h.style(Raw("""
 figure.captioned { margin: 0 0 1rem 0; }
 figcaption.caption { margin-bottom: 0.5rem; }
 .caption-header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
-.caption-actions { display: inline-flex; gap: 0.25rem; flex-shrink: 0; }
+.caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .caption-action { padding: 0.1rem 0.5rem; font-size: 0.85em; margin: 0; }
 .caption-long { margin-top: 0.25rem; }
 .caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
@@ -8628,7 +8628,8 @@ end
     render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
-as an `h.table` HTML node.
+as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
+so a wide table scrolls inside its own wrapper instead of widening the page.
 
 # Keyword arguments
 - `id`: tbody element id (auto-generated if `nothing`)
@@ -8677,6 +8678,11 @@ Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
 `render_table`'s value-to-content callback can't carry. `render_table`
 itself delegates to this after materialising rows from a Tables.jl source.
+
+The `<table>` is emitted inside a `<div class="table-wrap">` scroll container
+(`overflow-x: auto`, defined in the `htmx()`-auto-included
+[`htmxo_utility_styles`](@ref)), so a wide table scrolls inside its own
+wrapper instead of widening the page.
 
 # Arguments
 - `headers`: `Vector` of header entries. Each entry is either:
@@ -8764,6 +8770,11 @@ function sortable_table(headers, rows;
         h.tbody(rows...; id),
     )
 
+    # Scroll container: a table wider than its column scrolls inside its own
+    # wrapper instead of widening the page. `table-wrap` is the class
+    # `downloadTableCsv` already seeks, so CSV download keeps working.
+    table_wrap = h.div(; class="table-wrap")(table_node)
+
     fname = something(download_filename, id * ".csv")
     download_btn = download ?
         h.button("⬇ CSV"; type="button", class="outline caption-action",
@@ -8773,7 +8784,7 @@ function sortable_table(headers, rows;
     if !isnothing(caption)
         actions = download ? (download_btn,) : ()
         fig_id = startswith(id, "tbl-") ? id : "tbl-$id"
-        with_caption(caption, table_node; actions, id=fig_id)
+        with_caption(caption, table_wrap; actions, id=fig_id)
     elseif download
         h.figure(; class="captioned")(
             h.figcaption(; class="caption")(
@@ -8781,10 +8792,10 @@ function sortable_table(headers, rows;
                     h.span(""),
                     h.span(; class="caption-actions")(download_btn))
             ),
-            table_node,
+            table_wrap,
         )
     else
-        table_node
+        table_wrap
     end
 end
 
@@ -11433,6 +11444,10 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 .u-scroll-y-lg { max-height: 400px; overflow: auto; }
 .u-card { background: var(--pico-card-background-color, transparent); padding: 1rem; border-radius: 0.5rem; }
 .u-code-block { background: var(--pico-code-background-color, #f6f8fa); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; }
+/* Wide-table scroll container emitted by `sortable_table` (which covers
+   `render_table` and `master_detail_table` too): a table wider than its
+   column scrolls inside this wrapper instead of widening the page. */
+.table-wrap { overflow-x: auto; }
 /* Status banner — colored left-border callout. State via data-status. */
 .htmxo-status-banner { padding: 0.5rem 1rem; margin-bottom: 0.5rem; min-width: 0; overflow: hidden; background: var(--pico-card-background-color, transparent); border-left: 4px solid var(--htmxo-border); }
 .htmxo-status-banner[data-status="success"] { border-left-color: var(--htmxo-success); }

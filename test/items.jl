@@ -3359,6 +3359,30 @@ end
     @test contains(html_kw, "class=\"custom htmxo-sortable-table\"")
 end
 
+@testitem "table overflow containment" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    rows = [h.tr(h.td("a"), h.td("1"))]
+    # All three sortable_table shapes wrap the <table> in a .table-wrap
+    # scroll container: bare, download-only figure, and captioned figure.
+    for node in (sortable_table(["Name", "Score"], rows),
+                 sortable_table(["Name", "Score"], rows; download=true),
+                 sortable_table(["Name", "Score"], rows;
+                                caption=CaptionSpec(; title="T")))
+        html = repr("text/html", node)
+        iwrap = findfirst("table-wrap", html)
+        itable = findfirst("<table", html)
+        @test !isnothing(iwrap) && !isnothing(itable) && first(iwrap) < first(itable)
+    end
+    # render_table delegates, so it inherits the wrapper.
+    @test contains(repr("text/html", render_table((name=["a"], score=[1]))), "table-wrap")
+    # The wrapper's rule lives in the htmx()-auto-included utility styles:
+    # containment for free, no per-page include needed.
+    @test contains(repr("text/html", htmxo_utility_styles()), ".table-wrap { overflow-x: auto; }")
+    # The caption action row wraps instead of overflowing its column.
+    cap_css = repr("text/html", caption_style())
+    @test contains(cap_css, ".caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }")
+    @test !contains(cap_css, "flex-shrink")
+end
+
 @testitem "sortable_table_js" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     node = sortable_table_js()
     html = repr("text/html", node)
