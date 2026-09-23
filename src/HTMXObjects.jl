@@ -1948,7 +1948,7 @@ function htmx(args...;
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
             # A manual install alongside stays harmless but redundant.
-            (_live_refresh_page_assets(treebars_assets))...,
+            (_operation_page_assets(treebars_assets))...,
             extra_head...,
         ),
         body(args...),
@@ -3293,11 +3293,16 @@ process-local registry expires abandoned or failed operations. Fresh request
 roots can therefore follow in-flight work without making DynamicObjects
 caches global.
 
-A resolved `:auto` poll answers with the bare result fragment — no poller
-wrapper, no kept progress tree — so an ordinary fragment never carries
-inspection chrome and never depends on Treebars page assets to look terminal.
-`keep_progress` still governs hand-shaped `polling_fetchindex` pollers (which
-keep their frozen tree) and the direct-page replacement flow.
+A resolved `:auto` poll answers the result fragment in a select-matching
+terminal node — no kept progress tree, no inspection chrome — and the
+`htmx()` shell unwraps that node on swap, so the caller's target ends with
+the bare result fragment. `keep_progress` still governs hand-shaped
+`polling_fetchindex` pollers (which keep their frozen tree) and the
+direct-page replacement flow. While loading, the interim poller swaps into
+the target and transiently displaces its children; a route whose fragment
+must be the direct children of a structural element (`details`/`summary`,
+`table`/`tr`, `select`/`option`, …) and cannot tolerate that transient
+should declare itself `@fresh @get` instead.
 """
 struct OperationPolicy
     mode::Symbol
@@ -10835,15 +10840,84 @@ live_refresh_script() = h.script(Raw(raw"""
 })();
 """))
 
-# The live-refresh interception rides alongside the Treebars poll assets, but
-# ONLY when they are actually present: without the Treebars extension there are
-# no pollers to intercept, and the shell must stay byte-for-byte poller-free
-# (the `treebars_assets=false` opt-out and every ext-absent shell are unchanged,
-# so `htmx page shells auto-install Treebars assets` still holds).
-function _live_refresh_page_assets(treebars_assets::Bool)
+"""
+    auto_terminal_script()
+
+Unwrap a resolved `:auto` poll to the bare route fragment.
+
+A resolved `:auto` poll answers a select-matching
+`div.treebar-poller-inner.treebar-terminal-content` carrying
+`data-htmxo-auto-terminal` (the response keeps that shape so every deployed
+poller `hx-select` generation still matches it). On `htmx:afterSwap` this
+script replaces the live `.treebar-poller` / `.treebar-terminal` wrapper with
+the marked node's bare content, so the caller's target ends with exactly what
+the route rendered — a wrapper `div` cannot be a direct child of a structural
+element (`details`/`summary`, `table`/`tr`, `select`/`option`, `dl`, `ul`/`li`).
+
+Only marked nodes unwrap: hand-shaped `polling_fetchindex` terminals (frozen
+tree kept for inspection) and the direct-page OOB terminal carry no marker
+and are untouched, and terminals diverted into `.htmxo-live-reporter` stay
+owned by `live_refresh_script()`. The swapped-in bare content carries no
+marker, so the follow-up swap cannot re-trigger. Runs in either listener
+order against Treebars' `terminalizePoller` (the wrapper may already be
+renamed to `.treebar-terminal` when this fires).
+
+Automatic — no consumer wiring. Include once per page; the `htmx()` shell
+installs it alongside the Treebars assets.
+"""
+auto_terminal_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoAutoTerminal) return;
+  window.__htmxoAutoTerminal = true;
+  function marked(el) {
+    return !!(el && el.getAttribute && el.classList &&
+                el.classList.contains('treebar-terminal-content') &&
+                el.hasAttribute('data-htmxo-auto-terminal'));
+  }
+  function unwrapOne(el) {
+    if (!marked(el)) return;
+    // Live-refresh owns reporter-diverted terminals (its beforeSwap already
+    // took over the swap, so afterSwap never fires for them — this is belt
+    // and braces).
+    if (el.closest && el.closest('.htmxo-live-reporter')) return;
+    var p = el.parentElement;
+    if (!p || !p.classList ||
+        (!p.classList.contains('treebar-poller') &&
+         !p.classList.contains('treebar-terminal'))) return;
+    var content = el.innerHTML;
+    if (window.htmx && window.htmx.swap) {
+      window.htmx.swap(p, content, { swapStyle: 'outerHTML' });
+    } else {
+      p.outerHTML = content;
+    }
+  }
+  document.addEventListener('htmx:afterSwap', function(evt) {
+    var d = (evt && evt.detail) || {};
+    unwrapOne(d.elt);
+    if (evt.target && evt.target !== d.elt) unwrapOne(evt.target);
+    // A marked node swapped in as part of a larger fragment (never the
+    // direct swap node): catch it by scan. Naturally idempotent — an
+    // unwrapped node is gone, and bare content carries no marker.
+    var root = d.target;
+    if (root && root.querySelectorAll) {
+      root.querySelectorAll('[data-htmxo-auto-terminal]').forEach(unwrapOne);
+    }
+  });
+})();
+"""))
+
+# The live-refresh interception and the `:auto` terminal unwrap ride alongside
+# the Treebars poll assets, but ONLY when they are actually present: without
+# the Treebars extension there are no pollers to intercept or unwrap (the core
+# fallback answers bare already), and the shell must stay byte-for-byte
+# poller-free (the `treebars_assets=false` opt-out and every ext-absent shell
+# are unchanged, so `htmx page shells auto-install Treebars assets` still
+# holds).
+function _operation_page_assets(treebars_assets::Bool)
     treebars_assets || return ()
     assets = _polling_page_assets()
-    isempty(assets) ? assets : (assets..., live_refresh_script())
+    isempty(assets) ? assets :
+        (assets..., live_refresh_script(), auto_terminal_script())
 end
 
 # --- Theme ---

@@ -809,11 +809,23 @@ and a healed request computes exactly what a fresh GET would. Successful
 terminal rendering removes the retained operation immediately; a bounded
 process-local registry expires abandoned or failed pollers.
 
-A resolved `:auto` poll answers with the bare result fragment — no poller
-wrapper, no kept progress tree — so an ordinary fragment never carries
-inspection chrome. `keep_progress` still governs hand-shaped
+A resolved `:auto` poll answers the result fragment in a select-matching
+terminal node — no kept progress tree, no inspection chrome — and the
+`htmx()` shell unwraps that node on swap, so the caller's target ends with
+the bare result fragment. `keep_progress` still governs hand-shaped
 `polling_fetchindex` pollers, which keep their frozen tree for post-hoc
 inspection.
+
+While loading, the interim poller swaps into the request's target and
+transiently displaces its children. A first paint into a structural element
+(`details` whose first child must be the `<summary>`, `table`/`tr`, `dl`,
+`select`/`option`, `ul`/`li`) therefore shows the poller — not the shell
+children — until the operation resolves; a fragment that self-polls on a
+periodic trigger keeps its settled content while a re-fetch runs (the
+interim diverts into the progress reporter beside it) instead. A route
+whose fragment must be the direct children of such an
+element and cannot tolerate the transient should declare itself
+`@fresh @get` (blocking transport, no poller at all).
 
 The auto poller's header shows the route docstring's **first line** — the same
 summary that titles the route's semantic operation card. Write it as a one-line

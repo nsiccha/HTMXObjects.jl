@@ -48,8 +48,17 @@ function _operation_ready_terminal(render_result, started)
     # that terminalizes the wrapper once Treebars ships it. One node, not
     # nested: the top-level-only select excludes a nested match, and the
     # finalizer reads the class off the swapped node itself.
+    # `data-htmxo-auto-terminal` marks this node as an `:auto` terminal for
+    # `auto_terminal_script` (core): on `htmx:afterSwap` the shell replaces
+    # the live poller wrapper with the node's bare content, so the caller's
+    # target ends with exactly the route fragment — a wrapper div cannot be
+    # a direct child of a structural element (`details`/`summary`,
+    # `table`/`tr`, `select`/`option`, …). The response shape is unchanged,
+    # so shells without the script keep the wrapper (status quo) and every
+    # select generation still matches.
     (ready=true, value=HTMXObjects.h.div(terminal;
-        class="treebar-poller-inner treebar-terminal-content"))
+        class="treebar-poller-inner treebar-terminal-content",
+        data_htmxo_auto_terminal=""))
 end
 
 function _operation_render_result(render_result, value, transport)
