@@ -3610,6 +3610,129 @@ end
     end
 end
 
+@testitem "master/detail rows call the shared runtime" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: master_detail_toggle_js
+
+    # Per-row handlers are short calls; the bodies ship once per page.
+    @test master_detail_toggle_js("k") ==
+        "var show=htmxoMdToggle(this,event,'k');if(show==null)return;"
+    @test master_detail_toggle_js("k"; lazy_slot_id="detail-slot-k") ==
+        "var show=htmxoMdToggle(this,event,'k',1);if(show==null)return;"
+    @test master_detail_toggle_js("k"; lazy_slot_id="elsewhere") ==
+        "var show=htmxoMdToggle(this,event,'k','elsewhere');if(show==null)return;"
+
+    html = repr("text/html", h.div(master_detail_pair("thing", (h.td("thing"),), nothing, 1;
+                                                      detail_url="/detail")...))
+    @test contains(html, "onclick=\"var show=htmxoMdToggle(this,event,&#39;thing&#39;,1);if(show==null)return;\"")
+    @test contains(html, "hx-on--before-request=\"htmxoMdBefore(this)\"")
+    @test contains(html, "hx-on--after-request=\"htmxoMdAfter(this,event)\"")
+    @test contains(html, "hx-on-click=\"htmxoMdRetry(this)\"")
+    # No handler body is inlined per row any more.
+    @test !contains(html, "dataset")
+    @test !contains(html, "closest(")
+
+    runtime = repr("text/html", master_detail_js())
+    for fn in ("function htmxoMdToggle", "function htmxoMdBefore",
+               "function htmxoMdAfter", "function htmxoMdRetry")
+        @test contains(runtime, fn)
+        # Every page shape that renders master/detail rows defines the runtime.
+        @test contains(repr("text/html", htmx(h.p("body"))), fn)
+        @test contains(repr("text/html", sortable_table_js()), fn)
+    end
+    @test contains(runtime, "htmx.trigger(s, 'htmxo-md-load')")
+    @test contains(runtime, "a,button,input,textarea,select,form")
+end
+
+@testitem "master/detail shared runtime keeps toggle and extension semantics" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: master_detail_toggle_js, master_detail_safe_key
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        detail_requests = Ref(0)
+        # A caller extension concatenated onto the lazy toggle, exactly as the
+        # KB For-You panel does: it must see `show` and must not run for a
+        # click on an interactive descendant.
+        safe = master_detail_safe_key("a:b")
+        ext = "document.body.dataset.ext=(document.body.dataset.ext||'')+(show?'o':'c');"
+        onclick = master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") * ext
+        rows = Any[
+            master_detail_pair("a:b", (h.td(h.button(id="inner-btn")("x")),), nothing, 1;
+                               master_attrs=(onclick=onclick,), detail_url="/detail")...,
+            master_detail_pair("eager", (h.td("eager"),), h.p("body"), 1)...,
+        ]
+        driver = h.script(Raw("""
+            window.addEventListener('load', function() {
+                var row = document.getElementById('row-$safe');
+                var slot = document.getElementById('detail-slot-$safe');
+                setTimeout(function() {
+                    document.getElementById('inner-btn').click();   // ignored
+                    row.click();                                     // open + load
+                    row.click();                                     // close (in flight)
+                    row.click();                                     // open, coalesced
+                    document.getElementById('row-eager').click();    // open
+                    document.getElementById('row-eager').click();    // close
+                    var timer = setInterval(function() {
+                        if (slot.dataset.loaded === '1') {
+                            document.body.dataset.done = '1';
+                            clearInterval(timer);
+                        }
+                    }, 25);
+                }, 50);
+            });
+            """))
+        # Hand-built head: only `sortable_table_js()`, no `htmx()` shell —
+        # the documented table companion must carry the runtime on its own.
+        page = "<!DOCTYPE html>" * repr("text/html", h.html(
+            h.head(h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"),
+                   sortable_table_js()),
+            h.body(sortable_table(["Thing"], rows; id="t"), driver)))
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif path == "/detail"
+                detail_requests[] += 1
+                HTTP.Response(200, ["Content-Type" => "text/html"], "<p id=\"detail-loaded\">loaded</p>")
+            else
+                HTTP.Response(404)
+            end
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            @test contains(dom, "data-done=\"1\"")
+            # Button click skipped; three row clicks → open, close, open.
+            @test contains(dom, "data-ext=\"oco\"")
+            @test contains(dom, "id=\"detail-loaded\"")
+            @test detail_requests[] == 1
+            m = match(r"<tr[^>]*id=\"row-a--b\"[^>]*>", dom)
+            @test !isnothing(m) && contains(m.match, "aria-expanded=\"true\"")
+            d = match(r"<tr[^>]*id=\"detail-a--b\"[^>]*>", dom)
+            @test !isnothing(d) && !contains(d.match, "hidden")
+            e = match(r"<tr[^>]*id=\"row-eager\"[^>]*>", dom)
+            @test !isnothing(e) && contains(e.match, "aria-expanded=\"false\"")
+            ed = match(r"<tr[^>]*id=\"detail-eager\"[^>]*>", dom)
+            @test !isnothing(ed) && contains(ed.match, "hidden")
+        finally
+            close(server)
+        end
+    end
+end
+
 """
 Documents repeated query/form value conversion: untyped or vector-typed
 parameters retain repeated values, while a vector cannot silently collapse
@@ -6865,14 +6988,16 @@ end
     end
 end
 
-# A documented route's auto-poller header shows its docstring SUMMARY, never the
-# full docstring: `# Arguments` is curl documentation, not a status line
-# (snag `auto-poller-node-11e7c2a6`). The same summary feeds the semantic
-# operation title.
+# A documented route's auto poller carries no separate header label: the
+# progress root already shows the docstring SUMMARY — `# Arguments` is curl
+# documentation, not a status line (snag `auto-poller-node-11e7c2a6`) — and
+# passing the summary as the label would render it three times (badge,
+# interim header, root: snag `multi-line-docst-8388ba6a`). The same summary
+# feeds the semantic operation title.
 @testitem "auto poller labels documented routes with the docstring summary" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
-    import HTMXObjects: _docstring_summary, _docstring_single_line,
-        _operation_poll_label, _operation_polling_impl, _property_descriptor,
-        _run_operation, _semantic_operation_title
+    import HTMXObjects: _docstring_summary, _operation_poll_label,
+        _operation_polling_impl, _property_descriptor, _run_operation,
+        _semantic_operation_title
 
     @htmx struct DocumentedPollApp
         """Rollup with waiting rows and a padded parked tail.
@@ -6901,37 +7026,33 @@ end
     @test _docstring_summary("") === nothing
     @test _docstring_summary("   \n  ") === nothing
     @test _docstring_summary(nothing) === nothing
-    @test _operation_poll_label((; description=doc), :rollup) ==
-        "Rollup with waiting rows and a padded parked tail."
-    @test _operation_poll_label((; description=""), :rollup) == Long(:rollup)
-    @test _operation_poll_label(NamedTuple(), :rollup) == Long(:rollup)
-
-    # Single-line docstrings keep the one-copy `label=nothing` promotion: the
-    # summary would duplicate the root verbatim (CI on the landed merge caught
-    # exactly this — "renders a documented operation label once" went 2 == 1).
+    # Every documented route — single-line or multi-line — takes the one-copy
+    # `label=nothing` promotion: the root already shows the summary, so a
+    # separate label would repeat it (snag `multi-line-docst-8388ba6a`).
+    @test _operation_poll_label((; description=doc), :rollup) === nothing
     @test _operation_poll_label(
         (; description="Transpiling prepared example"), :index) === nothing
     @test _operation_poll_label(
         (; description="Slow page\n"), :slow) === nothing
-    @test _docstring_single_line("one") === true
-    @test _docstring_single_line("one\n") === true
-    @test _docstring_single_line("one\n\ntwo") === false
-    @test _docstring_single_line("") === false
+    @test _operation_poll_label((; description=""), :rollup) == Long(:rollup)
+    @test _operation_poll_label((; description="   \n  "), :rollup) ==
+        Long(:rollup)
+    @test _operation_poll_label(NamedTuple(), :rollup) == Long(:rollup)
 
     # Real descriptors: the docstring reaches the descriptor whole (control),
-    # and the transported label is its summary.
+    # and the transported label is `nothing` — the root carries the summary.
     rollup_descriptor = _property_descriptor(DocumentedPollApp, :rollup, :GET)
     @test contains(rollup_descriptor.description, "# Arguments")
-    @test _operation_poll_label(rollup_descriptor, :rollup) ==
-        "Rollup with waiting rows and a padded parked tail."
+    @test _operation_poll_label(rollup_descriptor, :rollup) === nothing
     titled_descriptor = _property_descriptor(DocumentedPollApp, :titled, :GET)
-    @test _operation_poll_label(titled_descriptor, :titled) == "Titled route"
+    @test _operation_poll_label(titled_descriptor, :titled) === nothing
     bare_descriptor =
         _property_descriptor(DocumentedPollApp, :bare_route, :GET)
     @test _operation_poll_label(bare_descriptor, :bare_route) ==
         Long(:bare_route)
 
-    # Transport: an `:auto` HTMX request carries the summary to the poller.
+    # Transport: an `:auto` HTMX request carries `label=nothing` to the
+    # poller — the summary rides on the progress root, not the transport.
     app = DocumentedPollApp()
     target = (context=nothing, root=app, leaf=app)
     seen = Ref{Any}()
@@ -6947,9 +7068,7 @@ end
                                    Verb{:GET}(), hx, 0, 0;
                                    operation_policy=OperationPolicy(:auto))
         @test repr("text/html", operation.value) == "<aside>polling</aside>"
-        @test seen[].label ==
-            "Rollup with waiting rows and a padded parked tail."
-        @test !contains(seen[].label, "# Arguments")
+        @test seen[].label === nothing
     finally
         _operation_polling_impl[] = old_polling
     end
@@ -6963,10 +7082,17 @@ end
         Long(:bare_route)
 end
 
-# End to end: the live auto-poller header of a slow documented route is the
-# concise summary — the full docstring stays out of the status line.
+# End to end: a slow documented route's live auto poller shows its docstring
+# summary ONCE — the progress root carries it, so there is no badge label or
+# interim header repeating it — and the full docstring stays out of the status
+# line (snag `multi-line-docst-8388ba6a`).
 @testitem "auto poller header shows the docstring summary while running" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_operation_polls!
     @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    # The leaf blocks on this until the test releases it, so the initial
+    # fragment and the follow-up poll both observe the operation in flight.
+    const slow_multiline_gate = Ref(Base.Event())
 
     @htmx struct SlowDocumentedPollApp
         """Slow rollup with waiting rows and a padded parked tail.
@@ -6974,17 +7100,38 @@ end
         # Arguments
         - `show`: `active` (default) or `all`.
         """
-        @get slow_rollup(; show="active") = (sleep(0.5); h.p("slow:$show"))
+        @get slow_rollup(; show="active") =
+            (wait(slow_multiline_gate[]); h.p("slow:$show"))
     end
 
     route!(SlowDocumentedPollApp())
     router = HTMXObjects.CONTEXT[].service.router
-    req = HTTP.Request(
-        "GET", "/slow_rollup?show=all", ["HX-Request" => "true"])
-    handler = first(HTTP.Handlers.gethandler(router, req))
-    html = String(handler(req).body)
-    @test contains(html, "treebar-poller-inner")
-    header = match(r"<header>.*?</header>"s, html)
-    @test header !== nothing
-    @test header.match == "<header>Slow rollup with waiting rows and a padded parked tail. — running...</header>"
+    function get_body(target)
+        req = HTTP.Request("GET", target, ["HX-Request" => "true"])
+        String(first(HTTP.Handlers.gethandler(router, req))(req).body)
+    end
+    try
+        html = get_body("/slow_rollup?show=all")
+        @test contains(html, "treebar-poller-inner")
+        @test contains(html, "treebar-header")
+        # No badge label, no interim header: the root carries the one copy.
+        @test !contains(html, "treebar-badge-label")
+        @test !contains(html, "— running")
+        @test length(findall(
+            "Slow rollup with waiting rows and a padded parked tail.",
+            html)) == 1
+        @test !contains(html, "# Arguments")
+
+        poll_match = match(r"hx-get=\"([^\"]+)\"", html)
+        @test !isnothing(poll_match)
+        poll_url = replace(only(poll_match.captures), "&amp;" => "&")
+        polled = get_body(poll_url)
+        @test length(findall(
+            "Slow rollup with waiting rows and a padded parked tail.",
+            polled)) == 1
+        @test !contains(polled, "# Arguments")
+    finally
+        notify(slow_multiline_gate[])
+        _clear_operation_polls!()
+    end
 end

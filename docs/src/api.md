@@ -827,12 +827,15 @@ whose fragment must be the direct children of such an
 element and cannot tolerate the transient should declare itself
 `@fresh @get` (blocking transport, no poller at all).
 
-The auto poller's header shows the route docstring's **first line** — the same
-summary that titles the route's semantic operation card. Write it as a one-line
-human summary; everything below it (the `# Arguments` reference included)
-stays API documentation for curl callers and never reaches the status line. A
-docstring that opens with a markdown heading sheds its `#` sigil; an
-undocumented route falls back to its humanized property name.
+A documented route's auto poller carries no separate header label: the route
+docstring's **first line** — the same summary that titles the route's semantic
+operation card — renders **once**, as the live progress tree's own root. The
+poller's badge label and interim header stay empty, so a long docstring never
+repeats above the tree. Write that first line as a one-line human summary;
+everything below it (the `# Arguments` reference included) stays API
+documentation for curl callers and never reaches the status line. A docstring
+that opens with a markdown heading sheds its `#` sigil; an undocumented route
+falls back to its humanized property name for the badge and header.
 
 Every `htmx()` page shell carries the Treebars stylesheet + script while the
 Treebars extension is loaded, so pollers render quietly and terminalize with
@@ -878,6 +881,7 @@ See the [Components catalog](components.md) for the full list with examples.
 |--------|---------|
 | `render_table(rows; …)`   | Sortable HTML table with optional CSV download              |
 | `sortable_table_js`, `download_table_js` | Companion scripts for `render_table`         |
+| `master_detail_js` | Shared runtime for `master_detail_table`/`master_detail_pair` rows; auto-included by `htmx`, also carried by `sortable_table_js` |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 
 ## Formatting

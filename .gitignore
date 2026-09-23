@@ -4,3 +4,7 @@ CLAUDE.md
 # Auto-generated HTMXObjects recording outputs — not committed to main
 docs/src/public/live-*/
 docs/public/examples/
+
+# DynamicObjects disk-cache dirs (test/cache, examples/cache, web/app/cache) —
+# runtime state, never committed
+cache/
