@@ -6078,8 +6078,11 @@ end
     # (the live select has no terminal-content branch, so the bare marker
     # swapped EMPTY), while `.treebar-terminal-content` keys the client
     # finalizer. The wrapper, kept tree, transport, and Pause are all gone.
+    # `data-htmxo-auto-terminal` marks the node for the shell's
+    # `auto_terminal_script` unwrap, so the caller's target ends with the
+    # bare fragment (a wrapper div cannot parent structural children).
     @test startswith(terminal_html,
-        "<div class=\"treebar-poller-inner treebar-terminal-content\">")
+        "<div class=\"treebar-poller-inner treebar-terminal-content\" data-htmxo-auto-terminal=\"\">")
     @test length(findall("treebar-terminal", terminal_html)) == 1
     @test length(findall("treebar-poller-inner", terminal_html)) == 1
     @test contains(terminal_html, "treebar-terminal-content")
@@ -6155,10 +6158,12 @@ end
     shell = repr("text/html", htmx(h.p("body")))
     @test contains(shell, ".treebar-poller")
     @test contains(shell, "terminalizePoller")
+    @test contains(shell, "__htmxoAutoTerminal")
 
     opted_out = repr("text/html", htmx(h.p("body"); treebars_assets=false))
     @test !contains(opted_out, ".treebar-poller")
     @test !contains(opted_out, "terminalizePoller")
+    @test !contains(opted_out, "__htmxoAutoTerminal")
 
     titled = repr("text/html",
         htmx(h.p("body"); extra_head=(h.title("App"),)))
@@ -6172,6 +6177,7 @@ end
         bare = repr("text/html", htmx(h.p("body")))
         @test !contains(bare, ".treebar-poller")
         @test !contains(bare, "terminalizePoller")
+        @test !contains(bare, "__htmxoAutoTerminal")
     finally
         _polling_page_assets_impl[] = old_assets
     end
