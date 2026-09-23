@@ -5338,6 +5338,37 @@ end
     @test contains(repr("text/html", SemanticMetric("dose", 5; unit="mg")), ">5 mg<")
 end
 
+@testitem "hx triggers show generic in-flight state while pollers stay quiet" setup=[HTMXOTestImports] tags=[:unit] begin
+    # The reporting measurement, inverted. htmx adds `htmx-request` to the
+    # triggering element for the whole request (core `requestClass` — no
+    # HTMXObjects JS involved), but nothing keyed off it, so a click on a
+    # plain [hx-get]/[hx-post] control read as "did nothing" until the swap
+    # landed. The utility block now carries the in-flight counterpart of
+    # its generic cursor:pointer rule.
+    css = repr("text/html", HTMXObjects.htmxo_utility_styles())
+
+    # The resting rule still stands beneath the in-flight one.
+    @test contains(css, "[hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }")
+
+    # All five verbs carry the in-flight rule, each excluding background
+    # pollers (`hx-trigger` containing `every`) — the same exclusion the
+    # `request_feedback` script applies, so a polling region never dims.
+    for verb in ("get", "post", "put", "patch", "delete")
+        @test contains(css, "[hx-$(verb)]:not([hx-trigger*=\"every\"]).htmx-request")
+    end
+    @test contains(css, "cursor: progress")
+    # Plain literals, no theme variables: the rule must hold on hand-built
+    # shells that skip `htmxo_theme()` (a failed var() would invalidate the
+    # whole declaration).
+    @test contains(css, "opacity: 0.7")
+
+    # The `request_feedback` pulse honors reduced-motion: the animation
+    # stops, the static outline stays.
+    feedback_css = repr("text/html", HTMXObjects.request_feedback_style())
+    @test contains(feedback_css, "prefers-reduced-motion")
+    @test contains(feedback_css, "animation: none")
+end
+
 @testitem "semantic anchors become ids and are absent when unset" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     @test contains(repr("text/html", SemanticCard("T", "x"; anchor="c1")), "id=\"c1\"")
     @test contains(repr("text/html", SemanticSection("T", "x"; anchor="s1")), "id=\"s1\"")
