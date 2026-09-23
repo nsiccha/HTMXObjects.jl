@@ -22,7 +22,7 @@ export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, CaptionSpec, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
@@ -1944,6 +1944,8 @@ function htmx(args...;
             htmxo_utility_styles(),
             tabset_styles(),
             editor_styles(),
+            # Master/detail rows carry only a call into this shared runtime.
+            master_detail_js(),
             # Poller quietness by default: the Treebars stylesheet + script
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
@@ -8319,7 +8321,8 @@ end
 
 Return an `h.script(...)` node containing the `sortTable` and `htmxoSortState`
 JavaScript functions for click-to-sort table headers. Include this once per
-page (e.g. in `extra_head`).
+page (e.g. in `extra_head`). It also carries the master/detail row runtime
+(see [`master_detail_js`](@ref)).
 
 The JS finds the `<tbody>` relative to the clicked header (no hardcoded ID),
 so multiple sortable tables can coexist on the same page. Numeric values are
@@ -8353,7 +8356,7 @@ so the server-rendered header agrees with the server-rendered row order.
 See [`sortable_table`](@ref).
 """
 function sortable_table_js()
-    h.script(Raw(raw"""
+    h.script(Raw(string(raw"""
 function sortTable(col, th) {
     // Accept sortTable(th): with a single <th> element, derive the column
     // index from its position in the header row. Lets a hand-built RICH header
@@ -8455,7 +8458,11 @@ function htmxoSortState(target) {
         sort_dir: th.dataset.sortDir,
     };
 }
-"""))
+""",
+    # The master/detail runtime rides along: every master/detail table needs
+    # this script anyway, so a hand-built `<head>` that follows the table docs
+    # keeps working rows (see `master_detail_js`).
+    _md_runtime_js())))
 end
 
 """
@@ -8731,6 +8738,69 @@ _md_lazy_event() = "htmxo-md-load"
 _md_lazy_trigger(; also_load::Bool=false) =
     also_load ? "$(_md_lazy_event()) consume, load" : "$(_md_lazy_event()) consume"
 
+# The master/detail client runtime: the toggle and the lazy slot's
+# latch/retry handlers, defined ONCE per page. Every row `master_detail_pair`
+# renders carries only a short call into it (ids as arguments), so a table
+# re-rendered on a timer does not re-ship the same logic per row — the KB
+# For-You panel paid ~1.2 KB of identical inline JS per row per 15 s refresh
+# (snag `cut-the-kb-for-y-a1c73f46`). Each function body is the former inline
+# handler verbatim, with `this` passed in as the first argument.
+#
+# `htmxoMdToggle(row, event, key, slot)` returns `undefined` exactly where the
+# inline toggle used to `return` early (an interactive-descendant click, a
+# missing detail row) and otherwise the `show` boolean — so the per-row call
+# can re-establish the documented `show` local and early-return contract that
+# caller extensions concatenated onto `master_detail_toggle_js` rely on.
+# `slot` is `1` for the conventional `detail-slot-<key>` id, else an id string.
+_md_runtime_js() = """
+function htmxoMdToggle(row, event, key, slot) {
+    if (event.target.closest('a,button,input,textarea,select,form')) return;
+    var d = document.getElementById('detail-' + key); if (!d) return;
+    var show = d.hidden; d.hidden = !show;
+    row.setAttribute('aria-expanded', show);
+    if (show && slot) {
+        var s = document.getElementById(slot === 1 ? 'detail-slot-' + key : slot);
+        if (s && s.dataset.loaded !== '1' && s.dataset.loading !== '1') {
+            s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
+        }
+    }
+    return show;
+}
+function htmxoMdBefore(s) {
+    s.dataset.loading = '1'; delete s.dataset.failed;
+    var p = s.querySelector('[data-status]'); if (p) p.textContent = 'Loading…';
+}
+function htmxoMdAfter(s, event) {
+    delete s.dataset.loading;
+    if (event.detail.successful) { s.dataset.loaded = '1'; delete s.dataset.failed; }
+    else {
+        s.dataset.loaded = '0'; s.dataset.failed = '1';
+        var p = s.querySelector('[data-status]'); if (p) p.textContent = 'Failed to load — click to retry';
+    }
+}
+function htmxoMdRetry(s) {
+    if (s.dataset.failed === '1' && !s.dataset.loading) {
+        s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
+    }
+}
+"""
+
+"""
+    master_detail_js()
+
+Return an `h.script(...)` node defining the master/detail client runtime
+(`htmxoMdToggle`, `htmxoMdBefore`, `htmxoMdAfter`, `htmxoMdRetry`) that every
+row built by [`master_detail_pair`](@ref) / [`master_detail_table`](@ref) and
+every [`master_detail_toggle_js`](@ref) snippet calls into.
+
+Auto-included by [`htmx`](@ref) (so `pico_page` too) and carried by
+[`sortable_table_js`](@ref), the documented companion of every master/detail
+table. Include it yourself only when you build your own `<head>` without
+either; a page lacking it throws `ReferenceError: htmxoMdToggle is not
+defined` on the first row click. Including it more than once is harmless.
+"""
+master_detail_js() = h.script(Raw(_md_runtime_js()))
+
 """
     master_detail_toggle_js(safe_key; lazy_slot_id=nothing) -> String
 
@@ -8740,6 +8810,11 @@ pair. The snippet ignores clicks on interactive descendants (`a`,
 `#detail-<safe_key>` row's `hidden` attribute, and mirrors the open state
 to `aria-expanded` on the master. `safe_key` MUST already be CSS-safe
 (see [`master_detail_safe_key`](@ref)).
+
+The snippet is a short call into the page's master/detail runtime
+([`master_detail_js`](@ref), auto-included by [`htmx`](@ref) and carried by
+[`sortable_table_js`](@ref)), so a row costs ~100 bytes instead of re-shipping
+the handler body.
 
 Exposed for callers that need to extend the toggle (e.g. lazy-load a
 fragment into a slot on open, empty it on close) — concatenate the
@@ -8758,18 +8833,13 @@ idempotent). This is the seam [`master_detail_pair`](@ref) drives for its
 freshly-focused open slot) — the trigger is the explicit expand event.
 """
 function master_detail_toggle_js(safe_key; lazy_slot_id=nothing)
-    base = string(
-        "if(event.target.closest('a,button,input,textarea,select,form'))return;",
-        "var d=document.getElementById('detail-", safe_key, "');if(!d)return;",
-        "var show=d.hidden;d.hidden=!show;",
-        "this.setAttribute('aria-expanded',show);",
-    )
-    isnothing(lazy_slot_id) && return base
-    string(base,
-        "if(show){var s=document.getElementById('", lazy_slot_id, "');",
-        "if(s&&s.dataset.loaded!=='1'&&s.dataset.loading!=='1')",
-        "{s.dataset.loading='1';htmx.trigger(s,'", _md_lazy_event(), "');}}",
-    )
+    # The conventional slot id (the one `master_detail_pair` renders) travels
+    # as `1` so the key is not spelled out twice per row.
+    slot = isnothing(lazy_slot_id) ? "" :
+        lazy_slot_id == "detail-slot-$safe_key" ? ",1" : ",'$lazy_slot_id'"
+    # `show==null` is the runtime's early-return signal; returning here keeps
+    # any concatenated extension from running on those clicks, as before.
+    "var show=htmxoMdToggle(this,event,'$safe_key'$slot);if(show==null)return;"
 end
 
 # The lazy detail slot — the proven single-flight + click-to-retry shape,
@@ -8781,28 +8851,22 @@ end
 # `load` so that one slot fetches on render; collapsed slots never do.
 function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
     ph = isnothing(placeholder) ? h.small(data_status="muted")("Loading…") : placeholder
-    ev = _md_lazy_event()
     h.div(id="detail-slot-$safe",
           class="htmxo-md-detail-slot",
           data_loaded="0",
           hx_get=string(url),
           hx_trigger=_md_lazy_trigger(; also_load),
           hx_target="this", hx_swap="innerHTML",
-          hx_on__before_request="this.dataset.loading='1';delete this.dataset.failed;" *
-                                "var p=this.querySelector('[data-status]');" *
-                                "if(p)p.textContent='Loading…'",
-          hx_on__after_request="delete this.dataset.loading;" *
-                               "if(event.detail.successful){this.dataset.loaded='1';delete this.dataset.failed;}" *
-                               "else{this.dataset.loaded='0';this.dataset.failed='1';" *
-                               "var p=this.querySelector('[data-status]');" *
-                               "if(p)p.textContent='Failed to load — click to retry';}",
+          # Latch/retry bodies live once per page in `master_detail_js()`;
+          # each slot carries only the call.
+          hx_on__before_request="htmxoMdBefore(this)",
+          hx_on__after_request="htmxoMdAfter(this,event)",
           # SINGLE underscore: `hx_on_click` → `hx-on-click`, the DOM `click`
           # event. The DOUBLE-underscore spelling used by the two handlers
           # above is htmx's `htmx:` shorthand (`hx-on--after-request` =
           # `htmx:after-request`), so `hx_on__click` would bind a
           # non-existent `htmx:click` and the retry would never fire.
-          hx_on_click="if(this.dataset.failed==='1'&&!this.dataset.loading){" *
-                      "this.dataset.loading='1';htmx.trigger(this,'$ev');}")(
+          hx_on_click="htmxoMdRetry(this)")(
         ph)
 end
 
@@ -8988,7 +9052,9 @@ or custom onclick needed. Without it, detail bodies are eager.
 
 Include [`sortable_table_js`](@ref) on the page (which also brings in
 the master/detail hover + detail-cell reset rules via
-[`sortable_table_styles`](@ref)).
+[`sortable_table_styles`](@ref)). The rows' click and lazy-load handlers are
+short calls into the page's master/detail runtime ([`master_detail_js`](@ref)),
+which [`htmx`](@ref) auto-includes and `sortable_table_js` also carries.
 """
 function master_detail_table(headers, items;
                              key, master, detail=nothing,
