@@ -5148,13 +5148,27 @@ end
 _resolve_operation_value(value) =
     value isa DynamicObjects.Pending ? fetch(value) : value
 
-# A documented DO property already renders its description on its progress
-# root. Treebars' `label=nothing` path promotes that root into the poller header,
-# so the operation appears once. An undocumented property's root is structural
-# and needs the humanized property name as the outer fallback.
+# A route docstring's first line is the human label for operation surfaces:
+# the auto poller's header and the semantic operation title. The full
+# docstring — `# Arguments` API reference and all — is curl documentation,
+# not a status line, so it must never reach a header verbatim. A heading-led
+# docstring (`# Title`) sheds its `#` sigil; anything without a usable first
+# line falls back to the humanized property name.
+function _docstring_summary(description)
+    description isa AbstractString || return nothing
+    for line in split(description, '\n')
+        value = strip(replace(strip(line), r"^#{1,6}\s+" => ""))
+        isempty(value) || return value
+    end
+    nothing
+end
+
+# A documented route labels its auto poller with its docstring summary, which
+# Treebars renders as the concise outer header above the live progress tree.
+# An undocumented route falls back to the humanized property name.
 function _operation_poll_label(descriptor, name)
-    description = get(descriptor, :description, "")
-    description isa AbstractString && !isempty(description) ? nothing : Long(name)
+    summary = _docstring_summary(get(descriptor, :description, ""))
+    summary === nothing ? Long(name) : summary
 end
 
 # Extension seam: core degrades polling requests to the historical blocking
@@ -10313,14 +10327,8 @@ function _semantic_route_mount(mounts, route)
 end
 
 function _semantic_operation_title(route)
-    description = get(route, :doc, nothing)
-    if description isa AbstractString
-        for line in split(description, '\n')
-            value = strip(line)
-            isempty(value) || return value
-        end
-    end
-    Long(route.name)
+    summary = _docstring_summary(get(route, :doc, nothing))
+    summary === nothing ? Long(route.name) : summary
 end
 
 function _semantic_operation_slug(route)
