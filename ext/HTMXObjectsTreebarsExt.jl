@@ -123,7 +123,7 @@ function __init__()
                 req=transport.req,
             )
             kwargs = merge(call_kwargs, treebars_transport)
-            try
+            responded = try
                 Treebars.polling_fetchindex(
                     render_operation_result, ip, keys...; kwargs...)
             catch
@@ -132,6 +132,31 @@ function __init__()
                 transport.cleanup()
                 rethrow()
             end
+            # Completion-boundary settle: the operation may have resolved
+            # inside the Treebars call above — its fetch re-reads the cache
+            # after this closure's grace check. Without this re-probe that
+            # poll renders Treebars' done terminal, kept tree and all,
+            # instead of `:auto`'s bare terminal, so "resolved polls answer
+            # bare" would hold only outside a microsecond race. Re-probing is
+            # race-free in the other direction: a still-running operation
+            # keeps its running poller and settles on a later poll, and a
+            # failed one never probes ready, so Treebars' failure rendering
+            # (recorded error + open tree) passes through untouched. Skipped
+            # for direct-page OOB replacement (which renders its own terminal
+            # shape) and for `keep_terminal_tree` (whose resolutions render
+            # Treebars' done terminal by design). An initial request has no
+            # live poller, so it settles to the bare value — the same answer
+            # the grace fast path would have given — while resume/heal settle
+            # to the marked terminal their live poller selects.
+            if !transport.replace_page_load && !transport.keep_terminal_tree
+                settled = transport.settle_bare ?
+                    HTMXObjects._operation_ready_terminal_fallback(
+                        render_operation_result, started) :
+                    HTMXObjects._operation_ready_terminal(
+                        render_operation_result, started)
+                settled.ready && return settled.value
+            end
+            responded
         end
 
     HTMXObjects._operation_ready_terminal_impl[] = _operation_ready_terminal
