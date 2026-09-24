@@ -48,7 +48,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
     EditorMountRoot, RawBodyApp,
     OpenAPIWidgets, OpenAPIRoot,
-    DispatchProbeApp, DPARENT_SEEN, DAMBIENT_SEEN, DNESTED_SEEN
+    DispatchProbeApp, DPARENT_SEEN, DAMBIENT_SEEN, DNESTED_SEEN,
+    LiveThreadApp, LIVE_THREAD, reset_live_thread!
 
 @htmx struct TestApp
     title = "Test"
@@ -1147,6 +1148,44 @@ const DNESTED_SEEN = Ref{Any}(:unset)
             h.div("inner:$rv")
         end
     end
+end
+
+# `live_thread` fixture: messages 1..n keyed by index, the newest `final_lag`
+# kept live, pages of 10. State is module-level (not a memoized property), so
+# every `@fresh` route sees the current list.
+const LIVE_THREAD = (messages=String[], version=Ref(0))
+function reset_live_thread!(n=30)
+    empty!(LIVE_THREAD.messages)
+    append!(LIVE_THREAD.messages, ["message $i" for i in 1:n])
+    LIVE_THREAD.version[] += 1
+    nothing
+end
+_lt_item(i) = string(i) => h.p(class="lt-msg")(LIVE_THREAD.messages[i])
+_lt_cursor(lo) = lo > 1 ? string(lo) : nothing
+_lt_version() = string(LIVE_THREAD.version[])
+
+@htmx struct LiveThreadApp
+    __page__(content) = htmx(content; htmx_version=nothing, hyperscript_version=nothing, overlay=false)
+
+    @fresh @get index() = let n = length(LIVE_THREAD.messages), lo = max(1, n - 9)
+        h.div(
+            h.style(".lt-msg { margin: 0; padding: 20px 8px; } body { margin: 0; }"),
+            live_thread(_lt_item.(lo:n); id="lt", older_url=__self__/"older",
+                        tail_url=__self__/"tail", cursor=_lt_cursor(lo), since=string(n),
+                        version=_lt_version(), poll="200ms", height="300px"),
+            h.script(Raw(get(ENV, "HTMXO_LIVE_THREAD_DRIVER", ""))),
+        )
+    end
+    @fresh @get older(; before::String) = let hi = parse(Int, before) - 1, lo = max(1, hi - 9)
+        live_thread_page(_lt_item.(lo:hi); cursor=_lt_cursor(lo))
+    end
+    @fresh @get tail(; since::String="", v::String="") =
+        v == _lt_version() ? live_thread_unchanged() :
+            let i = parse(Int, since), n = length(LIVE_THREAD.messages)
+                live_thread_tail(_lt_item.(i+1:n); since=string(n), version=_lt_version())
+            end
+    @post append() = (push!(LIVE_THREAD.messages, "message $(length(LIVE_THREAD.messages) + 1)");
+                      LIVE_THREAD.version[] += 1; h.p("ok"))
 end
 
 end # @testmodule HTMXOTestFixtures
@@ -4236,6 +4275,159 @@ end
     # preload: hovering a hidden lazy tab starts its fetch
     lhtml3 = repr("text/html", tabset("A" => h.p("a"), "B" => "/b"; preload=true))
     @test match(r"<a[^>]*hx-get=\"/b\"[^>]*preload=\"mouseover\"", lhtml3) !== nothing
+end
+
+@testitem "live_thread rendering and validation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    node = live_thread(["a" => h.p("one"), "b" => "two"]; older_url="/older", tail_url="/tail",
+                       cursor="a", since="a", version=3, poll="2s", id="chat", empty="nothing yet")
+    html = repr("text/html", node)
+    @test contains(html, "id=\"chat\" class=\"htmxo-thread\" data-htmxo-thread=\"\"")
+    @test contains(html, "data-older-url=\"/older\" data-tail-url=\"/tail\"")
+    @test contains(html, "data-since=\"a\" data-version=\"3\" data-poll=\"2000\"")
+    @test contains(html, "<div class=\"htmxo-thread-older\" data-cursor=\"a\"></div>")
+    @test contains(html, "data-empty=\"nothing yet\"")
+    @test contains(html, "data-key=\"a\"") && contains(html, "<p>one</p>")
+    # the digest follows the content and only the content
+    digest(n) = match(r"data-key=\"a\" data-digest=\"([^\"]+)\"", repr("text/html", n))[1]
+    @test digest(node) == digest(live_thread(["a" => h.p("one")]))
+    @test digest(node) != digest(live_thread(["a" => h.p("one!")]))
+    # no older pages: done, no cursor; `poll=nothing` disables polling
+    plain = repr("text/html", live_thread(["x" => "x"]; poll=nothing))
+    @test contains(plain, "<div class=\"htmxo-thread-older\" data-done=\"true\"></div>")
+    @test contains(plain, "data-poll=\"0\"") && !contains(plain, "data-tail-url")
+    @test contains(repr("text/html", live_thread(["x" => "x"]; focus=:x, height="40vh")),
+                   "data-focus=\"x\" style=\"--htmxo-thread-height: 40vh\"")
+
+    @test repr("text/html", live_thread_page(["p" => "P"]; cursor=7)) ==
+        "<div class=\"htmxo-thread-page\" data-cursor=\"7\"><div class=\"htmxo-thread-item\" data-key=\"p\" data-digest=\"$(HTMXObjects._thread_digest("<div>P</div>"))\">P</div></div>"
+    @test contains(repr("text/html", live_thread_page([])), "data-done=\"true\"")
+    tail = repr("text/html", live_thread_tail(["t" => "T"]; since="t", version="9"))
+    @test contains(tail, "class=\"htmxo-thread-tail\" data-since=\"t\" data-version=\"9\">")
+    reset = repr("text/html", live_thread_tail([]; since="", version="9", reset=true, cursor="c"))
+    @test contains(reset, "data-reset=\"true\" data-cursor=\"c\">")
+    @test contains(repr("text/html", live_thread_tail([]; since="", version="9", reset=true)),
+                   "data-reset=\"true\" data-done=\"true\"")
+    @test live_thread_unchanged().status == 204
+    @test live_thread_refresh() == "{\"htmxo:thread-refresh\":{\"bottom\":true}}"
+    @test live_thread_refresh("#a \"b\""; bottom=false) ==
+        "{\"htmxo:thread-refresh\":{\"bottom\":false,\"target\":\"#a \\\"b\\\"\"}}"
+
+    @test_throws ArgumentError live_thread(["a" => 1, "a" => 2])
+    @test_throws ArgumentError live_thread([1, 2])
+    @test_throws ArgumentError live_thread([]; poll="soon")
+    @test_throws ArgumentError live_thread([]; poll=0)
+    @test HTMXObjects._thread_poll_ms("500ms") == 500
+    @test HTMXObjects._thread_poll_ms("1.5 s") == 1500
+    @test HTMXObjects._thread_poll_ms("1m") == 60_000
+
+    page = repr("text/html", htmx(h.p("x")))
+    @test contains(page, "window.htmxoThread") && contains(page, ".htmxo-thread-scroll")
+    @test !contains(repr("text/html", htmx(h.p("x"); thread=false)), "window.htmxoThread")
+end
+
+@testitem "live_thread routes answer 204 or fragments, never pollers" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    reset_live_thread!(25)
+    route!(LiveThreadApp())
+    router = HTMXObjects.ROUTER
+    function hx(target)
+        req = HTTP.Request("GET", target, ["HX-Request" => "true"])
+        first(HTTP.Handlers.gethandler(router, req))(req)
+    end
+    v = string(LIVE_THREAD.version[])
+    index = String(hx("/").body)
+    @test contains(index, "data-since=\"25\" data-version=\"$v\"")
+    @test contains(index, "data-cursor=\"16\"") && contains(index, "data-key=\"25\"")
+
+    unchanged = hx("/tail?since=25&v=$v")
+    @test unchanged.status == 204
+
+    push!(LIVE_THREAD.messages, "message 26"); LIVE_THREAD.version[] += 1
+    tail = String(hx("/tail?since=24&v=$v").body)
+    @test contains(tail, "htmxo-thread-tail\" data-since=\"26\"")
+    @test contains(tail, "data-key=\"25\"") && contains(tail, "data-key=\"26\"")
+    @test !contains(tail, "data-key=\"24\"") && !contains(tail, "treebar-poller")
+
+    older = String(hx("/older?before=16").body)
+    @test contains(older, "data-cursor=\"6\"") && contains(older, "data-key=\"15\"")
+    @test !contains(older, "data-key=\"16\"")
+    @test contains(String(hx("/older?before=6").body), "data-done=\"true\"")
+end
+
+@testitem "live_thread pages, updates and holds the viewport in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        # Runs inside the page: scroll to the top (an older page loads above,
+        # which without the client's anchoring would push the viewport's first
+        # item down by a page), then read from the middle while a message
+        # arrives. Results land on <body> for `--dump-dom`.
+        driver = raw"""
+        (async function () {
+          const R = document.body.dataset, wait = ms => new Promise(r => setTimeout(r, ms));
+          const until = async f => { for (let i = 0; i < 400 && !f(); i++) await wait(25); return f(); };
+          const root = document.getElementById('lt');
+          await until(() => root.__htmxoThread);
+          const sc = root.querySelector('.htmxo-thread-scroll');
+          const items = () => [...root.querySelectorAll('.htmxo-thread-item')];
+          const dist = () => sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+          const off = el => el.getBoundingClientRect().top - sc.getBoundingClientRect().top;
+          R.bottom = String(dist() <= 2);
+          // (A short box prefetches one older page on its own at startup.)
+          await until(() => !root.__htmxoThread.olderBusy);
+          // Measure in the same task as the scroll: the next older page can
+          // only land after the observer fires, so this is pre-insert.
+          sc.scrollTop = 0;
+          const n0 = items().length, top = items()[0], before = off(top);
+          await until(() => items().length > n0);
+          R.olderPaged = String(items().length > n0 && items()[0].dataset.key === '1');
+          R.olderDrift = String(Math.abs(off(top) - before) <= 1);
+          sc.scrollTop = 200; await wait(50);
+          const marked = items();
+          marked.forEach(e => { e.__m = 1; });
+          const reading = items().find(e => off(e) + e.offsetHeight > 0), at = off(reading);
+          await fetch('append', { method: 'POST' });
+          await until(() => items()[items().length - 1].dataset.key === '31');
+          await wait(50);
+          R.tailDrift = String(Math.abs(off(reading) - at) <= 1);
+          R.pill = root.querySelector('.htmxo-thread-new').textContent;
+          R.untouched = String(marked.every(e => e.__m === 1 && e.isConnected));
+          R.done = 'true';
+        })();
+        """
+        reset_live_thread!(30)
+        withenv("HTMXO_LIVE_THREAD_DRIVER" => driver) do
+            route!(LiveThreadApp())
+            router = HTMXObjects.ROUTER
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            # String host: accepted by both HTTP 1.x and 2.x `serve!`.
+            server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+                handler = first(HTTP.Handlers.gethandler(router, req))
+                handler === HTTP.Handlers.default404 ? HTTP.Response(404) : handler(req)
+            end
+            try
+                dom = mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=800,600 --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`
+                    read(pipeline(cmd; stderr=devnull), String)
+                end
+                @test contains(dom, "data-done=\"true\"")
+                @test contains(dom, "data-bottom=\"true\"")
+                @test contains(dom, "data-older-paged=\"true\"")
+                @test contains(dom, "data-older-drift=\"true\"")
+                @test contains(dom, "data-tail-drift=\"true\"")
+                @test contains(dom, "data-pill=\"↓ 1 new\"")
+                @test contains(dom, "data-untouched=\"true\"")
+            finally
+                close(server)
+            end
+        end
+    end
 end
 
 @testitem "status_badge" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin

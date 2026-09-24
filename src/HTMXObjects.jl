@@ -26,6 +26,7 @@ export wants_markdown, wants_errors, markdown_response, e, filter_errors, render
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -2063,13 +2064,14 @@ Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
     (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, feedback=true, extra_head=())
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, feedback=true, thread=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
 `sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
 loads only alongside the shell's own htmx (an extension must follow htmx).
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
+Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
 
 `preload_version` loads htmx's [`preload` extension](https://htmx.org/extensions/preload/),
 enables it page-wide and adds [`preload_runtime_js`](@ref). It is inert until an
@@ -2091,6 +2093,7 @@ function htmx(args...;
     pico_version        = nothing,
     feedback             = true,
     compose              = true,
+    thread               = true,
     overlay              = true,
     extra_head          = (),
     treebars_assets     = true,
@@ -2121,6 +2124,7 @@ function htmx(args...;
             (isnothing(pico_version) ? () : (pico_bridge(),))...,
             (feedback ? request_feedback() : ())...,
             (compose ? compose_box_assets() : ())...,
+            (thread ? live_thread_assets() : ())...,
             # Thin-hook bootstrap: load the relocated overlay bundle from
             # `KB_ORIGIN/overlay/bar.js` instead of inlining `<style>`+`<script>`.
             # The bar is `position:fixed`, so a deferred async load has no
@@ -13092,6 +13096,8 @@ function compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, 
         h.textarea(value; name, rows, placeholder, class=cls) :
         h.textarea(value; name, rows, placeholder, class=cls, data_draft_key=draft_key)
 end
+
+include("live_thread.jl")
 
 """
     loading_indicator_script()
