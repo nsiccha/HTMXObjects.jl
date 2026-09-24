@@ -7371,3 +7371,190 @@ end
         _clear_operation_polls!()
     end
 end
+
+# --- Server-sent events (`@sse`) ---------------------------------------------
+
+@testitem "SSE frames split data lines and validate fields" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    import HTMXObjects: _sse_frame
+    @test _sse_frame("a") == "data: a\n\n"
+    # Every line becomes its own `data:` line, whatever the line ending.
+    @test _sse_frame("a\nb\r\nc\rd") == "data: a\ndata: b\ndata: c\ndata: d\n\n"
+    # An empty payload still carries a `data:` line, or the browser would not
+    # dispatch the event at all.
+    @test _sse_frame(""; event="close") == "event: close\ndata: \n\n"
+    @test _sse_frame("x"; event="done", id=7, retry=1000) ==
+        "event: done\nid: 7\nretry: 1000\ndata: x\n\n"
+    @test_throws ArgumentError _sse_frame("x"; event="a\nb")
+    @test_throws ArgumentError _sse_frame("x"; id="1\r")
+    @test_throws ArgumentError _sse_frame("x"; retry=0)
+end
+
+@testitem "SSEStream sends rendered frames and reports disconnects" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    struct _GoneIO <: IO end
+    Base.unsafe_write(::_GoneIO, ::Ptr{UInt8}, ::UInt) = throw(Base.IOError("gone", 0))
+
+    buf = IOBuffer()
+    req = HTTP.Request("GET", "/feed", ["Last-Event-ID" => "9"])
+    sse = SSEStream(buf, req)
+    @test isopen(sse)
+    @test HTTP.WebSockets.send(sse, h.p("a\nb"); event="tick", id="1")
+    @test String(take!(buf)) == "event: tick\nid: 1\ndata: <p>a\ndata: b</p>\n\n"
+    @test HTTP.WebSockets.send(sse, "plain")
+    @test String(take!(buf)) == "data: plain\n\n"
+    @test last_event_id(sse) == "9"
+    @test last_event_id(SSEStream(IOBuffer(), HTTP.Request("GET", "/"))) === nothing
+
+    close(sse)
+    @test !isopen(sse)
+    @test HTTP.WebSockets.send(sse, "late") == false
+    @test isempty(take!(buf))
+
+    # A failed write means the client left: `send` answers `false`, the handle
+    # closes, and raw writes keep failing.
+    gone = SSEStream(_GoneIO(), req)
+    @test HTTP.WebSockets.send(gone, "x") == false
+    @test !isopen(gone)
+    @test_throws Base.IOError write(gone, "x")
+end
+
+@testitem "@sse routes register as GET streams outside HTTP-only tooling" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    import HTMXObjects: _prewarm_descriptor, _sse_frame
+
+    @htmx struct SSEToolingApp
+        "A widget feed."
+        @sse feed(id::Int; q::String="") = "feed $id $q"
+        @get page() = h.p("page")
+    end
+    route!(SSEToolingApp())
+
+    route = only(filter(r -> r.name === :feed, reflect(SSEToolingApp)))
+    @test route.verb === :SSE
+    @test route.path == "/feed/{id}"
+    @test [p.name for p in route.params if p.source === :path] == [:id]
+    @test [p.name for p in route.params if p.source === :query] == [:q]
+
+    router = HTMXObjects.CONTEXT[].service.router
+    req = HTTP.Request("GET", "/feed/1")
+    @test first(HTTP.Handlers.gethandler(router, req)) !== HTTP.Handlers.default404
+
+    # OpenAPI, prewarm, and generated forms are HTTP request/response tools.
+    @test collect(keys(openapi(SSEToolingApp).paths)) == ["/page"]
+    skipped = _prewarm_descriptor("http://127.0.0.1:1", route, true, 1.0)
+    @test skipped.status === nothing
+    @test contains(skipped.error, "sse skipped")
+    @test_throws ArgumentError operation_form(SSEToolingApp(), route)
+
+    # In-process dispatch has no connection to stream on.
+    resp = dispatch(:GET, "/feed/1")
+    @test resp.status == 500
+    @test HTTP.header(resp, "X-HTMXO-Error-Id", "") != ""
+end
+
+@testitem "htmx() loads the SSE extension that sse_region needs" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    html = repr("text/html", htmx(h.main()))
+    @test contains(html, "htmx-ext-sse@2.2.4/dist/sse.min.js")
+    @test first(findfirst("htmx.org@", html)) < first(findfirst("htmx-ext-sse@", html))
+    @test !contains(repr("text/html", htmx(h.main(); sse_version=nothing)), "htmx-ext-sse")
+    # An extension must follow htmx itself; without the shell's htmx it stays out.
+    @test !contains(repr("text/html", htmx(h.main(); htmx_version=nothing)), "htmx-ext-sse")
+
+    region = repr("text/html", sse_region("/feed?q=1", h.p("waiting")))
+    @test contains(region, "hx-ext=\"sse\"")
+    @test contains(region, "sse-connect=\"/feed?q=1\"")
+    @test contains(region, "sse-close=\"close\"")
+    @test contains(region, "sse-swap=\"message,done\"")
+    @test contains(region, "<p>waiting</p>")
+    @test contains(repr("text/html", sse_region("/f"; swap="beforeend", events="tick")),
+                   "sse-swap=\"tick\" hx-swap=\"beforeend\"")
+end
+
+@testitem "@sse streams events, final values, and errors end to end" setup=[HTMXOTestImports] tags=[:integration, :server, :sse] begin
+    using Sockets
+    using HTTP.WebSockets: send
+
+    const SSE_FOREVER_EXITED = Ref(false)
+
+    @htmx struct SSEServeApp
+        @sse ticks(; n::Int=2) = begin
+            for i in 1:n
+                send(__sse__, h.p("tick $i\nsecond line"); id=string(i))
+            end
+            h.div("finished $n")
+        end
+        @sse boom() = begin
+            send(__sse__, "before")
+            error("kaboom")
+        end
+        @sse resume() = "resumed after $(something(last_event_id(__sse__), "none"))"
+        @sse quiet() = (sleep(0.4); "late")
+        @sse forever() = begin
+            while isopen(__sse__)
+                send(__sse__, "beat")
+                sleep(0.02)
+            end
+            SSE_FOREVER_EXITED[] = true
+            nothing
+        end
+    end
+
+    # Keep-alive comments (`: …`) can interleave with any stream; the event
+    # sequence is what the assertions below pin down.
+    frames(body) = filter(f -> !isempty(f) && !startswith(f, ":"), split(body, "\n\n"))
+    function stream(path, headers=Pair{String,String}[])
+        r = HTTP.get("http://127.0.0.1:$port$path", headers;
+                     status_exception=false, retry=false, readtimeout=60)
+        r, String(r.body)
+    end
+
+    route!(SSEServeApp())
+    port = 8141
+    heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
+    serve(; port, async=true, docs=false)
+    try
+        r, body = stream("/ticks?n=2")
+        @test r.status == 200
+        @test startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
+        @test HTTP.header(r, "Cache-Control", "") == "no-cache"
+        @test frames(body) == [
+            "id: 1\ndata: <p>tick 1\ndata: second line</p>",
+            "id: 2\ndata: <p>tick 2\ndata: second line</p>",
+            "event: done\ndata: <div>finished 2</div>",
+            "event: close\ndata: ",
+        ]
+
+        # A failing body still ends the stream: the recorded error article is
+        # the final `done` value, and `close` stops the browser reconnecting.
+        r, body = stream("/boom")
+        @test r.status == 200
+        got = frames(body)
+        @test got[1] == "data: before"
+        @test startswith(got[2], "event: done\ndata: <article aria-invalid=\"true\">")
+        @test got[3] == "event: close\ndata: "
+
+        # Arguments are validated before the stream starts: a bad request is
+        # an ordinary error response (which also stops EventSource retries).
+        r, body = stream("/ticks?n=many")
+        @test r.status == 500
+        @test !startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") != ""
+
+        _, body = stream("/resume", ["Last-Event-ID" => "41"])
+        @test frames(body)[1] == "event: done\ndata: resumed after 41"
+
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
+        _, body = stream("/quiet")
+        @test contains(body, ": keepalive\n\n")
+        @test "event: done\ndata: late" in frames(body)
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+
+        # A client that leaves ends an open-ended body at its next write.
+        sock = Sockets.connect("127.0.0.1", port)
+        write(sock, "GET /forever HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        @test contains(String(readavailable(sock)), "text/event-stream")
+        close(sock)
+        @test timedwait(() -> SSE_FOREVER_EXITED[], 10) === :ok
+    finally
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+        terminate()
+    end
+end

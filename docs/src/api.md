@@ -15,7 +15,7 @@ Verb
 |--------|-----|
 | `@htmx struct App … end` | The whole package surface — declares an app, its data, and its routes |
 | `create_app(name)`       | Scaffold a new HTMXObjects app (web/, app/, Project.toml) on disk |
-| `route!(app)`            | Register all `@get`/`@post`/`@put`/`@delete`/`@ws` markers found in the struct on the Oxygen router |
+| `route!(app)`            | Register all `@get`/`@post`/`@put`/`@delete`/`@ws`/`@sse` markers found in the struct on the Oxygen router |
 | `Verb{V}`                | Singleton type threaded into route IPs as the first arg, lets one property host `@get`/`@post`/… simultaneously |
 | `terminate()`, `serve()`, `staticfiles(...)`, `dynamicfiles(...)` | Re-exports from Oxygen for serving |
 
@@ -95,6 +95,58 @@ Fragments are not documents and never carry a doctype.
 htmx
 HTMXObjects.pico_page
 HTMLDocument
+```
+
+## Server-sent events
+
+`@sse` turns a property into a `text/event-stream` endpoint. The body receives
+the stream as `__sse__` and pushes events with `send` — the same
+`HTTP.WebSockets.send` that `@ws` bodies use. Arguments are parsed and
+validated like a `@get`'s *before* the stream starts, so a bad request still
+gets an ordinary error response.
+
+```julia
+using HTTP.WebSockets: send
+
+@htmx struct Jobs
+    @sse progress(; n::Int=10) = begin
+        for i in 1:n
+            send(__sse__, h.p("step $i of $n"))
+            sleep(0.5)
+        end
+        h.p("done")                         # sent as the final `done` event
+    end
+    @get index() = sse_region(query_url(__self__/"progress"; n=5), h.p("waiting…");
+                              swap="beforeend")
+end
+```
+
+- A value the body returns (other than `nothing`) is sent as `event: done`; a
+  thrown error is recorded and its `__error__` rendering is sent as `done`
+  instead. Either way the stream then ends with `event: close`.
+- [`sse_region`](@ref) connects with htmx's SSE extension (loaded by `htmx()`
+  page shells) and closes the source on `close`. Without that marker the
+  browser's `EventSource` would reconnect and run a finished body again.
+- An open-ended feed loops `while isopen(__sse__)`. A client that leaves makes
+  the next write fail: `send` returns `false` and `isopen` turns `false`. A
+  keep-alive comment every 15 s keeps proxies from dropping a quiet stream and
+  notices departed clients.
+- On reconnect the browser sends the `id` of the last event it saw; read it with
+  [`last_event_id`](@ref) to resume instead of replaying.
+- Each open stream holds a connection and a task until it ends. With the default
+  `serve(; parallel=false)`, a body that computes without yielding (no `sleep`,
+  `wait`, or I/O) stalls the whole server, and browsers allow about six
+  HTTP/1.1 connections per host, so many streams on one page starve its
+  other requests.
+- `@sse` routes are GET-only streams: `openapi`, `prewarm_routes!`,
+  `operation_form`, and `semantic_app`'s default renderer skip them or refuse
+  them, and in-process [`dispatch`](@ref) answers with an error because there is
+  no connection to stream on.
+
+```@docs
+SSEStream
+last_event_id
+sse_region
 ```
 
 ## Markdown / agent-readable responses
@@ -648,6 +700,7 @@ request that renders it.
 | Duplicate `(verb, path)` operation identity | `semantic_app` | `semantic_app found duplicate operation identity …` |
 | Detached `@include` child (no `__parent__`) | `operation_form` | `operation_form on <T> cannot resolve …` |
 | `@ws` route with the default renderer | `semantic_app` | `semantic_app has no default control for WebSocket operation …` |
+| `@sse` route with the default renderer | `semantic_app` | `semantic_app has no default control for SSE operation …` |
 
 Because they are ordinary route exceptions, they surface through the standard
 response pipeline: an HTMX request gets **200** with the standard error article
@@ -972,8 +1025,8 @@ JSON-serializable. It reads the stable `reflect(T)` descriptors, so the
 operation `summary` (the rest, minus any `# Arguments` section, becomes
 `description`); path params keep their `{name}` spelling; GET/DELETE params
 become `parameters` entries while POST/PUT/PATCH params become an
-`application/x-www-form-urlencoded` `requestBody`. `@ws` routes are skipped —
-OpenAPI has no WebSocket operation.
+`application/x-www-form-urlencoded` `requestBody`. `@ws` and `@sse` routes are
+skipped — OpenAPI has no WebSocket operation or event-stream response.
 
 ```julia
 @htmx struct MyApp

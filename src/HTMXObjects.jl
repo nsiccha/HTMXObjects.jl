@@ -41,6 +41,7 @@ export ReflectionRoutes, semantic_graph_view, application_descriptor,
 export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
+export SSEStream, last_event_id, sse_region
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
@@ -65,7 +66,7 @@ const CONTEXT :: Ref{ServerContext} = Ref(ServerContext(; mod=@__MODULE__))
     Verb{V}
 
 Singleton type used as the **first positional argument** of every route IP
-emitted by `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`. Routes are pure
+emitted by `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse`. Routes are pure
 sugar over DynamicObjects' indexable properties:
 
     @get foo(x::Int) = body            # source
@@ -538,31 +539,35 @@ function bodyparams(req::HTTP.Request)
     formparams(req)
 end
 
-"""
-    _wrap_ws_bodies!(struct_expr)
+# Streaming route macros and the handle variable their bodies receive.
+const _STREAM_BODY_VARS = Dict(Symbol("@ws") => :__ws__, Symbol("@sse") => :__sse__)
 
-Pre-process the struct body: for any `@ws` property, wrap the RHS in `(__ws__) -> RHS`.
-This lets users write `@ws feed = begin ... __ws__ ... end` and have `__ws__` available
-as the WebSocket variable, while DynamicObjects stores a callable `(__ws__) -> body`.
 """
-function _wrap_ws_bodies!(struct_expr)
+    _wrap_stream_bodies!(struct_expr)
+
+Pre-process the struct body: for any `@ws` / `@sse` property, wrap the RHS in
+`(__ws__) -> RHS` / `(__sse__) -> RHS`. This lets users write
+`@ws feed = begin ... __ws__ ... end` (or `@sse` with `__sse__`) and have the
+connection handle available as a variable, while DynamicObjects stores a
+callable `(handle) -> body`.
+"""
+function _wrap_stream_bodies!(struct_expr)
     body = struct_expr.args[3]
-    for (i, arg) in enumerate(body.args)
+    for arg in body.args
         arg isa Expr || continue
-        # Walk through nested macrocall layers to find @ws
+        # Walk through nested macrocall layers to find @ws / @sse
         expr = arg
-        depth = 0
-        while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@ws")
+        while Meta.isexpr(expr, :macrocall) && !haskey(_STREAM_BODY_VARS, expr.args[1])
             expr = expr.args[end]
-            depth += 1
         end
-        Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@ws") || continue
-        # Found @ws — the inner expression is an assignment: name = rhs
+        Meta.isexpr(expr, :macrocall) || continue
+        var = _STREAM_BODY_VARS[expr.args[1]]
+        # Found the marker — the inner expression is an assignment: name = rhs
         inner = expr.args[end]
         inner isa Expr || continue
         if inner.head == :(=)
             rhs = inner.args[2]
-            inner.args[2] = Expr(:(->), :__ws__, rhs)
+            inner.args[2] = Expr(:(->), var, rhs)
         end
     end
     struct_expr
@@ -660,7 +665,7 @@ _warn_legacy_page_name!(struct_expr) = _warn_legacy_name!(struct_expr, :page, :_
 const _URL_BEARING_ATTRS = (
     :href, :src, :action, :formaction,
     :hx_get, :hx_post, :hx_put, :hx_patch, :hx_delete,
-    :hx_post_url, :hx_target,
+    :hx_post_url, :hx_target, :sse_connect,
 )
 
 # Cheaply detect if an expression is a hardcoded root-absolute URL string —
@@ -1177,10 +1182,10 @@ end
 """
     _inject_verb_in_route_lhs!(struct_expr)
 
-For every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` macrocall in the
+For every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` macrocall in the
 struct body, rewrite the call-form LHS to inject
 `__verb__::HTMXObjects.Verb{V}` as the **first positional argument**, where
-`V` is the verb short symbol (`:GET`, `:POST`, `:WEBSOCKET`, …). After this
+`V` is the verb short symbol (`:GET`, `:POST`, `:WEBSOCKET`, `:SSE`, …). After this
 rewrite, DynamicObjects' `@dynamicstruct` sees:
 
     @get foo(x::Int) = body          # source
@@ -1562,7 +1567,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
 
     _convert_include_to_struct!(struct_expr)
 
-    _wrap_ws_bodies!(struct_expr)
+    _wrap_stream_bodies!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
     reroute && _warn_redundant_req_decl!(struct_expr)
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
@@ -1662,7 +1667,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     block
 end
 
-_route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("@patch"), Symbol("@delete"), Symbol("@ws")])
+_route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("@patch"), Symbol("@delete"), Symbol("@ws"), Symbol("@sse")])
 
 # Extract route property info from the struct body AST at macro expansion time.
 # Returns [(prop_name::Symbol, verb::Symbol, positional_params, kwargs_params), ...]
@@ -1798,12 +1803,12 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
         end
     end
 
-    # Source selection is fixed at codegen time: GET/DELETE/WEBSOCKET pull
+    # Source selection is fixed at codegen time: GET/DELETE/WEBSOCKET/SSE pull
     # from queryparams, the rest from bodyparams (with queryparams fallback).
     # bodyparams routes by Content-Type: urlencoded → formparams (multi-value
     # preserved, repeated `image=a&image=b` → `Vector{String}`), multipart →
     # multipartparams (file fields → `Upload`, text fields → `String`).
-    _is_query_verb = verb_short in (:GET, :DELETE, :WEBSOCKET)
+    _is_query_verb = verb_short in (:GET, :DELETE, :WEBSOCKET, :SSE)
 
     # …and the sources are computed ONLY when the route declares kwargs to bind.
     # A route with no kwargs (`@post stalecheck()`) has nothing to look them up
@@ -1855,10 +1860,11 @@ function _extract_args end
 
 Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
 re-evaluation automatically re-registers routes without a server restart.
-`@ws` property bodies are automatically wrapped in `(__ws__) -> body`. WS routes
-accept the same path-param + kwargs surface as GET — `@ws feed(id::Int; q="") = body`
-mounts at `/feed/{id}` and the handler receives the typed `id` (same `_convert_param`
-path as GET) plus `q` from the upgrade request's query string.
+`@ws` property bodies are automatically wrapped in `(__ws__) -> body`, and `@sse`
+bodies in `(__sse__) -> body` (see [`SSEStream`](@ref)). Both accept the same
+path-param + kwargs surface as GET — `@ws feed(id::Int; q="") = body` mounts at
+`/feed/{id}` and the handler receives the typed `id` (same `_convert_param` path as
+GET) plus `q` from the upgrade request's query string.
 Inline `prop = struct ... end` definitions are processed as nested route structs.
 """
 macro htmx(args...)
@@ -1899,10 +1905,12 @@ Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
     (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
 
 """
-    htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", pico_version=nothing, feedback=true, extra_head=())
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", hyperscript_version="0.9.14", pico_version=nothing, feedback=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
+`sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
+loads only alongside the shell's own htmx (an extension must follow htmx).
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 
 Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
@@ -1912,6 +1920,7 @@ function htmx(args...;
     head = h.head,
     body = h.body,
     htmx_version        = "2.0.8",
+    sse_version         = "2.2.4",
     hyperscript_version = "0.9.14",
     pico_version        = nothing,
     feedback             = true,
@@ -1922,6 +1931,7 @@ function htmx(args...;
 )
     cdn = []
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
+    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js"))
     isnothing(hyperscript_version) || push!(cdn, h.script(src="https://unpkg.com/hyperscript.org@$(hyperscript_version)"))
     isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css"))
     HTMLDocument(h.html(
@@ -3150,6 +3160,7 @@ const _http_verbs = Dict(
     Symbol("@patch") => "PATCH",
     Symbol("@delete") => "DELETE",
     Symbol("@ws") => "WEBSOCKET",
+    Symbol("@sse") => "SSE",
 )
 
 # Store registered types so _reroute! can re-register after Revise updates.
@@ -3177,7 +3188,7 @@ const _docs_prefix_routes = Dict{DataType, Set{Tuple{Symbol,String}}}()
 
 Request-local context passed to a [`RootProvider`](@ref). `scope` and `key`
 describe the provider-selected application lifetime (`:request`, `:session`, or
-`:job`); `transport` is `:http` or `:websocket`. A custom provider owns any
+`:job`); `transport` is `:http`, `:websocket`, or `:sse`. A custom provider owns any
 storage behind session/job keys. The managed [`RootRetention`](@ref) form keeps
 that common in-process storage inside HTMXObjects.
 """
@@ -3274,7 +3285,7 @@ opt-out for a route surface that genuinely must answer inline.
 
 Polling is limited to GET operations because the Treebars poller issues GET
 refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
-`MIMEResponse` outputs always remain direct, as do WebSocket route lambdas, and
+`MIMEResponse` outputs always remain direct, as do WebSocket and SSE route lambdas, and
 [`record!`](@ref) forces `:blocking` for its static-export pass.
 
 You never have to write `OperationPolicy` to get non-blocking long routes —
@@ -3721,7 +3732,7 @@ function _register_handler(method, path, handler)
         end
         handler(req)
     end
-    HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, wrapped)
+    HTTP.register!(CONTEXT[].service.router, get(_TRANSPORT_HTTP_METHODS, method, method), path, wrapped)
 end
 
 # Oxygen validates handler argument names against `{path}` placeholders. Our
@@ -3746,6 +3757,288 @@ function _run_websocket(handler, ws, req)
         err isa HTTP.WebSockets.WebSocketError || rethrow()
     end
     nothing
+end
+
+# Transport pseudo-methods and the HTTP method their routes register under.
+const _TRANSPORT_HTTP_METHODS = Dict("WEBSOCKET" => "GET", "SSE" => "GET")
+
+# --- Server-sent events ------------------------------------------------------
+
+"""
+    SSEStream
+
+The `__sse__` handle inside an `@sse` route body: one live
+`text/event-stream` response. Send events with
+`HTTP.WebSockets.send(__sse__, x; event, id, retry)` — the same `send` that
+`@ws` bodies use — and loop `while isopen(__sse__)` for an open-ended feed.
+
+`send` renders `x` like a route return value (a `Node`, a string, …), splits
+it into `data:` lines, and returns `false` instead of throwing once the client
+has disconnected. `isopen` turns `false` at the first failed write; the
+framework's keep-alive comment (every 15 s) makes sure a quiet feed notices a
+departed client too. Every `write` to the handle is serialized with those
+comments, so a frame written in one call is never split.
+
+When the body returns, a non-`nothing` value is sent as a final
+`event: done` (a thrown error is recorded and its `__error__` rendering sent
+instead), followed by `event: close`, which tells the client the stream is
+over. `close(__sse__)` instead ends the stream without those frames, so the
+browser reconnects (sending [`last_event_id`](@ref)).
+"""
+mutable struct SSEStream <: IO
+    stream::Any
+    request::HTTP.Request
+    lock::ReentrantLock
+    open::Bool
+end
+
+SSEStream(stream, request::HTTP.Request) =
+    SSEStream(stream, request, ReentrantLock(), true)
+
+Base.isopen(sse::SSEStream) = @lock sse.lock sse.open
+
+# Ends the stream from inside the body: later sends return `false` and the
+# framework's closing frames are skipped (the client may then reconnect).
+function Base.close(sse::SSEStream)
+    @lock sse.lock sse.open = false
+    nothing
+end
+
+function Base.unsafe_write(sse::SSEStream, p::Ptr{UInt8}, n::UInt)
+    lock(sse.lock)
+    try
+        sse.open || throw(Base.IOError("SSE client disconnected", 0))
+        try
+            return unsafe_write(sse.stream, p, n)
+        catch
+            # A failed write means the client went away; nothing more can
+            # reach it, so every later write and `isopen` reflects that.
+            sse.open = false
+            rethrow()
+        end
+    finally
+        unlock(sse.lock)
+    end
+end
+
+Base.write(sse::SSEStream, b::UInt8) = write(sse, UInt8[b])
+
+"""
+    last_event_id(sse::SSEStream) -> Union{String,Nothing}
+
+The `Last-Event-ID` the browser sent when reconnecting (the `id` of the last
+event it received), or `nothing` on a first connection. Lets an `@sse` body
+resume a feed instead of replaying it.
+"""
+function last_event_id(sse::SSEStream)
+    value = HTTP.header(sse.request, "Last-Event-ID", "")
+    isempty(value) ? nothing : String(value)
+end
+
+function _sse_field(name, value)
+    s = string(value)
+    (occursin('\n', s) || occursin('\r', s) || occursin('\0', s)) &&
+        throw(ArgumentError("SSE $name must not contain newlines or NUL: $(repr(s))"))
+    s
+end
+
+# One complete `text/event-stream` frame. Every line of `data` becomes its own
+# `data:` line (the browser joins them back with `\n`), so multi-line HTML
+# arrives intact.
+function _sse_frame(data::AbstractString; event=nothing, id=nothing, retry=nothing)
+    io = IOBuffer()
+    event === nothing || print(io, "event: ", _sse_field("event", event), '\n')
+    id === nothing || print(io, "id: ", _sse_field("id", id), '\n')
+    if retry !== nothing
+        retry isa Integer && retry > 0 ||
+            throw(ArgumentError("SSE retry must be a positive integer, got $(repr(retry))"))
+        print(io, "retry: ", retry, '\n')
+    end
+    for line in split(data, r"\r\n|\r|\n")
+        print(io, "data: ", line, '\n')
+    end
+    print(io, '\n')
+    String(take!(io))
+end
+
+_sse_text(body::AbstractString) = String(body)
+_sse_text(body::AbstractVector{UInt8}) = String(copy(body))
+function _sse_text(body)
+    # HTTP 2.x wraps response bodies in explicit body objects.
+    if isdefined(HTTP, :BytesBody) && isa(body, getproperty(HTTP, :BytesBody))
+        return String(Vector{UInt8}(body))
+    elseif isdefined(HTTP, :EmptyBody) && isa(body, getproperty(HTTP, :EmptyBody))
+        return ""
+    end
+    throw(ArgumentError("cannot send a $(typeof(body)) response body as SSE data"))
+end
+
+# Event data is rendered exactly like a route return value.
+_sse_data(x::AbstractString) = String(x)
+_sse_data(::Nothing) = ""
+_sse_data(x) = _sse_text(to_response(x).body)
+
+function HTTP.WebSockets.send(sse::SSEStream, x; event=nothing, id=nothing,
+        retry=nothing)
+    isopen(sse) || return false
+    frame = _sse_frame(_sse_data(x); event, id, retry)
+    try
+        write(sse, frame)
+        true
+    catch err
+        isopen(sse) && rethrow()
+        @debug "SSE client disconnected" exception=(err, catch_backtrace())
+        false
+    end
+end
+
+const _SSE_HEADERS = (
+    "Content-Type" => "text/event-stream",
+    "Cache-Control" => "no-cache",
+    # Stops nginx and similar reverse proxies from buffering the stream.
+    "X-Accel-Buffering" => "no",
+)
+
+# Seconds between keep-alive comments; idle proxies drop silent connections.
+# `0` disables them.
+const _SSE_HEARTBEAT_SECONDS = Ref(15.0)
+
+function _start_sse_heartbeat(sse::SSEStream)
+    interval = _SSE_HEARTBEAT_SECONDS[]
+    interval > 0 || return nothing
+    Timer(interval; interval) do timer
+        try
+            isopen(sse) ? write(sse, ": keepalive\n\n") : close(timer)
+        catch
+            close(timer)
+        end
+    end
+end
+
+# The value an `@sse` body ended with, or the error it failed with (already
+# recorded and rendered through `__error__`).
+struct _SSEFailure
+    rendered::Any
+end
+
+function _sse_failure(err, bt, req, error_obj)
+    uid, path = _record_error(err, bt, req)
+    _SSEFailure(_invoke_error_handler(error_obj, err, uid, path))
+end
+
+function _run_sse_body(body, sse::SSEStream, req, error_obj)
+    try
+        body(sse)
+    catch err
+        bt = catch_backtrace()
+        # A body that dies on a write to a departed client was simply stopped.
+        isopen(sse) || return nothing
+        _sse_failure(err, bt, req, error_obj)
+    end
+end
+
+# End-of-stream frames: a non-`nothing` final value (or the rendered failure)
+# goes out as `event: done`, then `event: close` tells the client the stream
+# is over. Without that marker the browser's EventSource would reconnect and
+# run a finished body again; `sse_region` closes the source on it.
+function _finish_sse_body(sse::SSEStream, final, req, error_obj)
+    isopen(sse) || return nothing
+    final isa _SSEFailure && (final = final.rendered)
+    if final !== nothing
+        try
+            HTTP.WebSockets.send(sse, final; event="done")
+        catch err
+            isopen(sse) || return nothing
+            HTTP.WebSockets.send(sse,
+                _sse_failure(err, catch_backtrace(), req, error_obj).rendered;
+                event="done")
+        end
+    end
+    HTTP.WebSockets.send(sse, ""; event="close")
+    nothing
+end
+
+# HTTP 1's stream handler writes the returned response's head once more after
+# the handler returns. The stream therefore announces `Connection: close`: the
+# body is terminated first, then the request is marked `Connection: close` so
+# the server closes the connection right after that late write, which lands
+# behind a finished response the client has already agreed not to reuse.
+# HTTP 2 terminates the body and then ignores the handler's empty return value.
+_sse_http1() = isdefined(HTTP, :payload)
+
+function _end_sse_response(stream)
+    try
+        HTTP.closewrite(stream)
+    catch err
+        @debug "SSE response already closed" exception=(err, catch_backtrace())
+    end
+    _sse_http1() && HTTP.setheader(stream.message, "Connection" => "close")
+    nothing
+end
+
+function _serve_sse(req::HTTP.Request, body; error_obj=nothing)
+    stream = req.context[:stream]
+    for header in _SSE_HEADERS
+        HTTP.setheader(stream, header)
+    end
+    _sse_http1() && HTTP.setheader(stream, "Connection" => "close")
+    HTTP.startwrite(stream)
+    sse = SSEStream(stream, req)
+    heartbeat = _start_sse_heartbeat(sse)
+    try
+        final = _run_sse_body(body, sse, req, error_obj)
+        _finish_sse_body(sse, final, req, error_obj)
+    finally
+        heartbeat === nothing || close(heartbeat)
+        close(sse)
+        _end_sse_response(stream)
+    end
+    HTTP.Response(200)
+end
+
+# An `@sse` route answers its GET with a live event stream. Argument parsing,
+# validation, and target resolution run in `prepare` BEFORE any byte is sent,
+# so a bad request still gets an ordinary error response (a non-200 status
+# also stops the browser's EventSource from reconnecting). `prepare` returns
+# `(; body, error_obj)`: the `(__sse__) -> …` route value and the object whose
+# `__error__` renders a failure after the stream has started.
+function _register_sse_handler(path, prepare)
+    _register_handler("SSE", path, function(req)
+        haskey(req.context, :stream) || return _route_error_response(req,
+            ArgumentError("`@sse` route $(path) needs a live HTTP connection; " *
+                          "in-process requests cannot consume an event stream"),
+            backtrace())
+        prepared = try
+            prepare(req)
+        catch err
+            return _route_error_response(req, err, catch_backtrace())
+        end
+        _serve_sse(req, prepared.body; error_obj=prepared.error_obj)
+    end)
+end
+
+"""
+    sse_region(url, content...; events="message,done", close="close", swap=nothing)
+
+Client side of an `@sse` route: a `<div hx-ext="sse" sse-connect=url>` that
+opens the stream, wrapping a target that swaps in the named `events`
+(default: plain `send`s and the body's final `done` value). The source closes
+on the framework's `close` event, so a finished stream is not re-run by the
+browser's automatic reconnect. `content` is the target's initial content;
+`swap` sets its `hx-swap` (htmx's default replaces the inner HTML; pass
+`swap="beforeend"` to append a log or feed).
+
+Build `url` from the route struct so mounts keep working, e.g.
+`sse_region(query_url(__self__/"feed"; n=3), h.p("waiting…"))`.
+
+Needs the htmx SSE extension, which [`htmx`](@ref) page shells load by default.
+"""
+function sse_region(url, content...; events="message,done", close="close",
+        swap=nothing)
+    target = isnothing(swap) ? h.div(; sse_swap=events) :
+                               h.div(; sse_swap=events, hx_swap=swap)
+    h.div(; hx_ext="sse", sse_connect=string(url), sse_close=close)(
+        target(content...))
 end
 
 # --- Error handling ---
@@ -5901,6 +6194,22 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                                            req, ws_base, n_params; operation_policy)
                 operation.value(ws)
             end)
+        elseif method == "SSE"
+            # SSE: same typed runner as WS (`@sse feed() = body` is wrapped
+            # to `(__sse__) -> body`), but it runs before the stream starts,
+            # so argument and target errors answer as ordinary responses.
+            sse_base = _base_segments(path, n_params)
+            sse_root_segs = isempty(mount_prefix) ? 0 :
+                            count(==('/'), strip(mount_prefix, '/')) + 1
+            sse_verb = Verb{:SSE}()
+            _register_sse_handler(path, function(req)
+                provider = get(_root_providers, OwnerT, root_provider)
+                target = _operation_target(provider, OwnerT, chain, req,
+                                           mount_prefix, sse_root_segs, :sse)
+                operation = _run_operation(target, RouteT, name, sse_verb,
+                                           req, sse_base, n_params; operation_policy)
+                (; body=operation.value, error_obj=operation.leaf)
+            end)
         elseif isempty(param_strs) && has_kwargs
             # kwargs-only route (no path params): mark static for the recorder
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
@@ -6658,7 +6967,7 @@ end
 
 # Source bucket for request-parsed params by HTTP method — mirrors the
 # query-vs-body split in `_generate_extract_args` / `_kwargs_source`.
-_reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET") ? :query : :body
+_reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET", "SSE") ? :query : :body
 
 # Split a route's call signature into (path_params, kwargs) via DO's
 # `property_signature(info, mod)` — the canonical AST→structured parser
@@ -7137,7 +7446,8 @@ Safety rules:
 - Only `:GET` routes are requested by default. `:POST`/`:PUT`/`:PATCH`/
   `:DELETE` routes are skipped unless `include_post=true` — pass it only for
   routes whose bodies are safe to run twice.
-- `:WEBSOCKET` routes are always skipped (no HTTP-upgrade in prewarm).
+- `:WEBSOCKET` and `:SSE` routes are always skipped (no HTTP-upgrade in
+  prewarm, and an event stream has no end to wait for).
 - `{param}` templates are concretized with boring type samples (`1`,
   `"prewarm"`); an id-lookup route may 404 on them while still warming
   dispatch. For an exact warm, pass concrete URLs.
@@ -7192,6 +7502,10 @@ function _prewarm_descriptor(base::AbstractString, route::NamedTuple,
     if verb === :WEBSOCKET
         return (; verb, path=route.path, name=route.name, url="",
                 status=nothing, error="websocket skipped: prewarm issues HTTP only")
+    end
+    if verb === :SSE
+        return (; verb, path=route.path, name=route.name, url="",
+                status=nothing, error="sse skipped: an event stream never completes")
     end
     if verb !== :GET && !include_post
         return (; verb, path=route.path, name=route.name, url="",
@@ -7634,7 +7948,7 @@ end
     route!(app; prefix="", record_dir=nothing, record_base="",
            root_provider=nothing, operation_policy=OperationPolicy())
 
-Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` route declared on
+Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` route declared on
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) with the
 Oxygen router. Returns `app`.
 
@@ -7646,7 +7960,7 @@ Oxygen router. Returns `app`.
   is set (for deploying to a non-root subpath).
 - `root_provider` — a [`RootProvider`](@ref), including its managed
   [`RootRetention`](@ref) form, or a callable `factory(RootT, context)`, used by
-  both HTTP and WebSocket operations. `nothing` preserves the historic
+  HTTP, WebSocket, and SSE operations. `nothing` preserves the historic
   fresh-root-per-request behavior.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
   polling, or HTMX-aware automatic execution. **Defaults to
@@ -10362,6 +10676,8 @@ function operation_form(obj, route::NamedTuple; values=(;),
         context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
+    route.verb === :SSE && throw(ArgumentError(
+        "operation_form does not submit SSE routes; render `sse_region` instead"))
     route = _semantic_runtime_route(obj, route)
     _check_mounted_include_child(obj, route)
     presentation in (:auto, :cards) || throw(ArgumentError(
@@ -10536,7 +10852,8 @@ _semantic_app_setting(setting, _entry) = setting
 
 function _default_semantic_operation(entry)
     entry.form === nothing && throw(ArgumentError(string(
-        "semantic_app has no default control for WebSocket operation ",
+        "semantic_app has no default control for ",
+        entry.verb === :SSE ? "SSE" : "WebSocket", " operation ",
         "$(entry.verb) $(entry.path); pass `render_operation` and render this ",
         "entry explicitly")))
     h.article(
@@ -10650,8 +10967,8 @@ shared.
 of an operation entry. `submit` may likewise be a value or function. Override
 `render_operation(entry)` for local layout; the entry carries `object`, `route`,
 `name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`. The default
-renderer fails closed for WebSocket routes, whose client transport must be
-rendered explicitly.
+renderer fails closed for WebSocket and SSE routes, whose client transport must
+be rendered explicitly.
 
 The first successful render also promotes the historic request-scoped default
 to a managed provider keyed by the root type and normalized mount prefix. The
@@ -10756,7 +11073,7 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
         base_entry = spec.base_entry
         target_id = base_entry.target_id
         selector = isempty(context_entries) ? nothing : "#$(context_id)"
-        form = base_entry.verb === :WEBSOCKET ? nothing : operation_form(
+        form = base_entry.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
             spec.mounted, spec.local_route;
             values=spec.operation_values,
             target_id="#$(target_id)",
