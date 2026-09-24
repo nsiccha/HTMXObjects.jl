@@ -1274,6 +1274,16 @@ end
     @test_throws ArgumentError RootProvider(identity; scope=:job)
 end
 
+@testitem "@ws bodies end quietly when the client disconnects" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: _run_websocket
+    # What `send` throws once the client has gone away
+    gone = HTTP.WebSockets.WebSocketError(HTTP.WebSockets.CloseFrameBody(1006, "websocket is closed"))
+    @test _run_websocket((ws, req) -> throw(gone), nothing, nothing) === nothing
+    @test _run_websocket((ws, req) -> "done", nothing, nothing) === nothing
+    # Any other failure is still a route error
+    @test_throws ErrorException _run_websocket((ws, req) -> error("route bug"), nothing, nothing)
+end
+
 @testitem "semantic descriptor, generated controls, and domain validation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     descriptor = semantic_descriptor(SemanticApp)
     @test descriptor.type === SemanticApp

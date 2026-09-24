@@ -3732,8 +3732,20 @@ end
 function _register_websocket_handler(path, handler)
     _register_handler("WEBSOCKET", path, function(req)
         HTTP.WebSockets.isupgrade(req) &&
-            HTTP.WebSockets.upgrade(ws -> handler(ws, req), req.context[:stream])
+            HTTP.WebSockets.upgrade(ws -> _run_websocket(handler, ws, req), req.context[:stream])
     end)
+end
+
+# Once the client has gone away (tab closed, element swapped out by HTMX), the
+# `@ws` body's next `send`/`receive` throws a `WebSocketError`. That is how a
+# push loop normally ends, not a route error, so it is not reported as one.
+function _run_websocket(handler, ws, req)
+    try
+        handler(ws, req)
+    catch err
+        err isa HTTP.WebSockets.WebSocketError || rethrow()
+    end
+    nothing
 end
 
 # --- Error handling ---
