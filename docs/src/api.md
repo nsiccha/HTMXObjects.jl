@@ -1203,12 +1203,29 @@ progress tree when DynamicObjects produced no substatus for it (an uncached
 `@fresh` route) or Treebars is not loaded. Work started outside any request is
 only visible when reported through `track_job!`.
 
+#### Queued jobs
+
+By default every operation that goes to the background starts computing at
+once, so many heavy requests all run concurrently on the `:default` pool.
+[`configure_job_queue!`](@ref) bounds that: with `max_running=n`, at most `n`
+background computes run at a time and the rest wait in FIFO order, built on
+DynamicObjects' `Deferred` executor hook. Waiting jobs show on the dashboard and
+on job boards as `:queued`, with their position ("queued · #3"), and start as
+earlier ones finish. A queued compute nobody has polled for `abandon_after`
+seconds is abandoned before it starts and recorded as a failed job ("abandoned");
+the next request for it starts afresh. Blocking executions are not queued.
+
+```julia
+configure_job_queue!(; max_running=2, abandon_after=60)
+```
+
 ```@docs
 RuntimeRoutes
 runtime_dashboard
 runtime_jobs
 jobs_board
 track_job!
+configure_job_queue!
 track_requests
 runtime_snapshot
 runtime_tracker

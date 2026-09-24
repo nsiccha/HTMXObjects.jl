@@ -37,7 +37,8 @@ export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
 export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracker,
     runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
-    clear_runtime_history!, runtime_jobs, track_job!, jobs_board
+    clear_runtime_history!, runtime_jobs, track_job!, jobs_board,
+    configure_job_queue!
 export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
@@ -5805,9 +5806,10 @@ end
 function _start_preload(descriptor, target, name, verb_inst, idx_vals, kw_pairs,
         signature, req::HTTP.Request)
     declared_fresh = _operation_declared_fresh(descriptor)
+    fetch = _operation_background_fetch(req)
     task = Threads.@spawn Base.invokelatest(_execute_materialization,
         target, name, verb_inst, idx_vals, kw_pairs;
-        fetch=identity, declared_fresh)
+        fetch, declared_fresh)
     now = _operation_poll_now()
     _OperationPollEntry("", signature, getproperty(target.leaf, name),
         (verb_inst, idx_vals...), NamedTuple(kw_pairs), task, target.leaf, req,
@@ -5980,7 +5982,9 @@ _with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
 # that same call form — so the governed lease is preserved either way).
 # `Base.fetch` takes DO's `:inline` branch: compute on THIS task and return the
 # value. `identity` takes the `:spawn` branch: kick the compute off and hand back
-# a `Pending`. A declaration-site `@fresh` IP has no two-phase selector; its
+# a `Pending` — and so does a `Deferred(executor)`, which the operation layer
+# passes instead when the job queue is on (`_operation_background_fetch`), so
+# the compute waits its turn. A declaration-site `@fresh` IP has no two-phase selector; its
 # descriptor lets us keep this framework-only keyword out of the authored call.
 # Only the spawned branch makes polling transport real — see
 # `_execute_operation`.
@@ -6175,7 +6179,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
         call_kwargs; parent_progress=nothing, job=nothing)
     started = _execute_materialization(target, name, verb_inst, idx_vals,
-                                       kw_pairs; fetch=identity,
+                                       kw_pairs;
+                                       fetch=_operation_background_fetch(req),
                                        parent_progress=parent_progress,
                                        declared_fresh=
                                            _operation_declared_fresh(descriptor))
@@ -6292,7 +6297,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         # slow operation, but the operation always starts at most once.
         started = isnothing(preloaded) ?
             _execute_materialization(target, name, verb_inst, idx_vals,
-                                     kw_pairs; fetch=identity,
+                                     kw_pairs;
+                                     fetch=_operation_background_fetch(req),
                                      parent_progress=parent_progress,
                                      declared_fresh=
                                          _operation_declared_fresh(descriptor)) :
@@ -6321,7 +6327,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
     # Pending` — could never be reached.
     started = if isnothing(preloaded)
         _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
-                                 fetch=mode === :polling ? identity :
+                                 fetch=mode === :polling ?
+                                       _operation_background_fetch(req) :
                                        Base.fetch,
                                  parent_progress=parent_progress,
                                  declared_fresh=

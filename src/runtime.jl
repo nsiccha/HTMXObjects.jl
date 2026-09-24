@@ -74,7 +74,9 @@ per-phase timings. `scope` is the root-provider scope of the operation that
 started it (`:request`, `:session`, `:job`, or `:none` outside any operation);
 the provider key itself is only kept as a salted in-process digest, used to
 match [`jobs_board`](@ref)'s `mine` filter. `position` is the queue position of
-a `:queued` job (`0` otherwise).
+a `:queued` job (`0` otherwise); a job whose computation waits in the job queue
+([`configure_job_queue!`](@ref)) is listed as `:queued` with its current
+position.
 """
 mutable struct RuntimeJob
     id::Int
@@ -803,6 +805,15 @@ function _runtime_count_poll!(req, handle)
     nothing
 end
 
+# When a client last started, joined or polled the job tracking `key` (`default`
+# when none does yet). Used by the job queue's reaper.
+function _runtime_last_seen(tracker::RuntimeTracker, key, default::UInt64)
+    lock(tracker.lock) do
+        job = get(tracker.running, get(tracker.by_handle, key, 0), nothing)
+        job isa RuntimeJob ? job.last_seen_ns : default
+    end
+end
+
 # A job's progress node when only its source is known: an inline execution
 # still running on its request task, read lazily from DynamicObjects. Called
 # outside the tracker lock.
@@ -813,6 +824,200 @@ function _runtime_lazy_progress(source)
         DynamicObjects.getstatus(prop, keys...; call_kwargs...)
     catch
         nothing
+    end
+end
+
+# --- job queue ---------------------------------------------------------------
+#
+# Opt-in bounded execution for background operations
+# (`configure_job_queue!`). Without it, every operation that goes to the
+# background — the polling transport, a deferred direct-page load, a healed
+# poll, a `@preload` — starts its compute with `Threads.@spawn`, so N heavy
+# computes all run
+# at once on the `:default` pool. With it, the operation layer hands them to
+# DynamicObjects through `Deferred(executor)` instead: at most `max_running` run
+# at a time and the rest wait in FIFO order, listed as `:queued` jobs with their
+# position. A queued compute nobody has started, joined or polled for
+# `abandon_after` seconds is abandoned (`DynamicObjects.abandon!`): its job
+# fails with reason "abandoned", and the next request for it starts afresh.
+
+mutable struct _QueuedCompute
+    compute::Any             # DynamicObjects.DeferredCompute
+    key::Any                 # `_runtime_handle_key` of the compute's Pending
+    tracker::RuntimeTracker
+    enqueued_ns::UInt64
+end
+
+mutable struct _JobQueue
+    lock::ReentrantLock
+    ready::Threads.Condition
+    waiting::Vector{_QueuedCompute}
+    max_running::Int
+    abandon_after::Float64
+    workers::Int
+    reaping::Bool
+end
+
+function _JobQueue()
+    lk = ReentrantLock()
+    _JobQueue(lk, Threads.Condition(lk), _QueuedCompute[], 0, 60.0, 0, false)
+end
+
+const _JOB_QUEUE = _JobQueue()
+
+"""
+    configure_job_queue!(; max_running=nothing, abandon_after=nothing) -> NamedTuple
+
+Bound how many background operations compute at once. Off by default
+(`max_running=0`): every operation that outlives the grace period starts its
+compute immediately. With `max_running=n`, at most `n` such computes run at a
+time and the rest wait in FIFO order; the runtime dashboard and
+[`jobs_board`](@ref)s list them as `:queued` with their queue position ("queued
+· #3"), and they start as earlier ones finish. Concurrent requests for the same
+computation still share it, queued or running.
+
+A queued compute whose job nobody has started, joined or polled for
+`abandon_after` seconds (default 60) is abandoned instead of run — its page is
+gone. Its job is recorded as `:failed` with reason "abandoned", and the next
+request for it starts a fresh compute. `abandon_after=Inf` never abandons.
+Running computes are never interrupted.
+
+Only background computes queue: blocking executions (POST and other mutation
+verbs, `:blocking` policies, `@fresh` routes, …) answer inline as before.
+Needs a DynamicObjects with `Deferred`. Returns the current settings; omitted
+settings are unchanged. Setting `max_running=0` starts everything still queued.
+"""
+function configure_job_queue!(; max_running=nothing, abandon_after=nothing)
+    q = _JOB_QUEUE
+    if max_running !== nothing
+        max_running >= 0 || throw(ArgumentError("max_running must be non-negative"))
+        max_running > 0 && !isdefined(DynamicObjects, :Deferred) && throw(ArgumentError(
+            "configure_job_queue! needs a DynamicObjects with `Deferred`"))
+    end
+    if abandon_after !== nothing
+        abandon_after > 0 || throw(ArgumentError("abandon_after must be positive"))
+    end
+    released = lock(q.lock) do
+        abandon_after === nothing || (q.abandon_after = Float64(abandon_after))
+        max_running === nothing && return _QueuedCompute[]
+        q.max_running = Int(max_running)
+        _job_queue_staff!(q)
+        notify(q.ready)             # surplus workers retire
+        q.max_running == 0 || return _QueuedCompute[]
+        waiting = copy(q.waiting)
+        empty!(q.waiting)
+        waiting
+    end
+    # Queue switched off: nothing may be left waiting for a worker.
+    for item in released
+        errormonitor(Threads.@spawn _job_queue_run(item))
+    end
+    job_queue_settings()
+end
+
+job_queue_settings(q::_JobQueue=_JOB_QUEUE) = lock(q.lock) do
+    (; max_running=q.max_running, abandon_after=q.abandon_after,
+       queued=length(q.waiting))
+end
+
+# The `fetch` selector for a background compute: `identity` spawns it at once,
+# a `Deferred` hands it to the queue.
+function _operation_background_fetch(req)
+    _JOB_QUEUE.max_running > 0 || return identity
+    tracker = _runtime_tracker_of(req)
+    getproperty(DynamicObjects, :Deferred)(d -> _job_queue_enqueue!(_JOB_QUEUE, d, tracker))
+end
+
+_job_queue_key(d) = (objectid(getfield(d, :cache)), getfield(d, :key), UInt(0))
+
+function _job_queue_enqueue!(q::_JobQueue, d, tracker::RuntimeTracker)
+    item = _QueuedCompute(d, _job_queue_key(d), tracker, time_ns())
+    reap = lock(q.lock) do
+        if q.max_running == 0
+            # Switched off since this operation chose its selector.
+            return nothing
+        end
+        push!(q.waiting, item)
+        _job_queue_staff!(q)
+        notify(q.ready; all=false)
+        start_reaper = !q.reaping
+        q.reaping = true
+        start_reaper
+    end
+    reap === nothing && return errormonitor(Threads.@spawn _job_queue_run(item))
+    reap && errormonitor(Threads.@spawn _job_queue_reaper(q))
+    nothing
+end
+
+# Keep `max_running` workers. The caller holds `q.lock`.
+function _job_queue_staff!(q::_JobQueue)
+    while q.workers < q.max_running
+        q.workers += 1
+        # Literal pool symbol: `@spawn` only accepts a computed pool on newer Julia.
+        errormonitor(Threads.@spawn :default _job_queue_worker(q))
+    end
+end
+
+_job_queue_run(item::_QueuedCompute) =
+    getproperty(DynamicObjects, :run!)(item.compute)
+
+function _job_queue_worker(q::_JobQueue)
+    while true
+        item = lock(q.lock) do
+            while q.workers <= q.max_running && isempty(q.waiting)
+                wait(q.ready)
+            end
+            if q.workers > q.max_running
+                q.workers -= 1          # the queue shrank: retire
+                return nothing
+            end
+            popfirst!(q.waiting)
+        end
+        item === nothing && return nothing
+        # `run!` records a compute's failure for its waiters; never rethrows.
+        _job_queue_run(item)
+    end
+end
+
+# Abandon queued computes nobody watches. Runs while anything is queued. The
+# ledger is read without the queue lock held (the ledger never takes it
+# either), so the two locks are never nested.
+function _job_queue_reaper(q::_JobQueue)
+    while true
+        interval = lock(q.lock) do
+            isempty(q.waiting) && (q.reaping = false; return nothing)
+            clamp(q.abandon_after / 4, 0.05, 1.0)
+        end
+        interval === nothing && return nothing
+        sleep(interval)
+        _job_queue_reap!(q)
+    end
+end
+
+function _job_queue_reap!(q::_JobQueue, now_ns::UInt64=time_ns())
+    waiting, limit = lock(q.lock) do
+        copy(q.waiting), q.abandon_after
+    end
+    isfinite(limit) || return 0
+    stale = filter(waiting) do item
+        _runtime_elapsed(_runtime_last_seen(item.tracker, item.key, item.enqueued_ns),
+                         now_ns) >= limit
+    end
+    isempty(stale) && return 0
+    lock(q.lock) do
+        filter!(item -> !any(s -> s === item, stale), q.waiting)
+    end
+    reason = "abandoned: unwatched for $(fmt_time(limit))"
+    for item in stale
+        getproperty(DynamicObjects, :abandon!)(item.compute, reason)
+    end
+    length(stale)
+end
+
+# Queue positions by handle key, 1-based, read under the queue lock alone.
+function _job_queue_positions(q::_JobQueue=_JOB_QUEUE)
+    lock(q.lock) do
+        Dict(item.key => i for (i, item) in enumerate(q.waiting))
     end
 end
 
@@ -827,13 +1032,32 @@ _runtime_request_row(r::RuntimeRequest, now_ns::UInt64) = (;
 
 _runtime_job_active(j::RuntimeJob) = j.state === :queued || j.state === :running
 
-_runtime_job_row(j::RuntimeJob, now_ns::UInt64) = (;
-    id=j.id, label=j.label, route=j.route, target=j.target, state=j.state,
-    started_at=j.started_at,
-    duration=isnan(j.duration) ? _runtime_elapsed(j.started_ns, now_ns) : j.duration,
-    requests=j.requests, polls=j.polls,
-    idle=_runtime_job_active(j) ? _runtime_elapsed(j.last_seen_ns, now_ns) : 0.0,
-    error=j.error, scope=j.scope, position=j.position)
+# A running job whose computation waits in the job queue reads as `:queued`
+# with its position (`queued` maps job ids to positions, see
+# `_runtime_queued_jobs`).
+function _runtime_job_row(j::RuntimeJob, now_ns::UInt64, queued=nothing)
+    position = queued === nothing ? j.position : get(queued, j.id, j.position)
+    state = position > 0 && _runtime_job_active(j) ? :queued : j.state
+    (; id=j.id, label=j.label, route=j.route, target=j.target, state,
+       started_at=j.started_at,
+       duration=isnan(j.duration) ? _runtime_elapsed(j.started_ns, now_ns) : j.duration,
+       requests=j.requests, polls=j.polls,
+       idle=_runtime_job_active(j) ? _runtime_elapsed(j.last_seen_ns, now_ns) : 0.0,
+       error=j.error, scope=j.scope, position)
+end
+
+# Job ids => queue positions for the tracker's jobs whose computation is
+# queued. `positions` is read from the queue first (queue lock alone); this
+# runs under the tracker lock, so the two locks are never nested.
+function _runtime_queued_jobs(tracker::RuntimeTracker, positions)
+    isempty(positions) && return nothing
+    queued = Dict{Int,Int}()
+    for (key, id) in tracker.by_handle
+        position = get(positions, key, 0)
+        position > 0 && (queued[id] = position)
+    end
+    queued
+end
 
 # A queued or running job shows once it is older than the grace period (it was
 # registered at the start of an execution that may still answer inline); the
@@ -900,12 +1124,14 @@ Requests hidden from the history (the dashboard's own, and polls unless
 `record_polls`) are omitted from `inflight` too.
 """
 function runtime_snapshot(tracker::RuntimeTracker=runtime_tracker())
+    positions = _job_queue_positions()
     now_ns = time_ns()
     inflight, history, running, finished = lock(tracker.lock) do
+        queued = _runtime_queued_jobs(tracker, positions)
         (sort!([_runtime_request_row(r, now_ns) for r in values(tracker.inflight) if !r.hidden];
                by=r -> r.started_at),
          [_runtime_request_row(r, now_ns) for r in Iterators.reverse(tracker.history)],
-         sort!([_runtime_job_row(j, now_ns) for j in values(tracker.running)
+         sort!([_runtime_job_row(j, now_ns, queued) for j in values(tracker.running)
                 if _runtime_job_visible(j, now_ns)]; by=j -> j.started_at),
          [_runtime_job_row(j, now_ns) for j in Iterators.reverse(tracker.finished)])
     end
@@ -953,12 +1179,15 @@ function runtime_jobs(tracker::RuntimeTracker=runtime_tracker();
             "job states must be among $(_RUNTIME_JOB_STATES) (got $(repr(state)))"))
     end
     session = mine === nothing ? nothing : _runtime_session_of(mine)
+    positions = _job_queue_positions()
     now_ns = time_ns()
     now = time()
     picked = lock(tracker.lock) do
+        queued = _runtime_queued_jobs(tracker, positions)
         jobs = RuntimeJob[]
         for j in values(tracker.running)
-            j.state in wanted && _runtime_job_visible(j, now_ns) || continue
+            state = queued !== nothing && haskey(queued, j.id) ? :queued : j.state
+            state in wanted && _runtime_job_visible(j, now_ns) || continue
             push!(jobs, j)
         end
         for j in tracker.finished
@@ -968,7 +1197,7 @@ function runtime_jobs(tracker::RuntimeTracker=runtime_tracker();
         end
         session === nothing || filter!(j -> _runtime_same_session(j, session), jobs)
         sort!(jobs; by=j -> j.id)
-        [(j, _runtime_job_row(j, now_ns), j.progress, j.source) for j in jobs]
+        [(j, _runtime_job_row(j, now_ns, queued), j.progress, j.source) for j in jobs]
     end
     rows = NamedTuple[]
     for (j, row, progress, source) in picked

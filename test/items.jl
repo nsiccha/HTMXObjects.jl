@@ -8792,3 +8792,87 @@ end
         end
     end
 end
+
+# `configure_job_queue!` puts background computes behind a bounded FIFO
+# (DynamicObjects' `Deferred`): the rest are queued jobs with a position, move
+# up as earlier ones finish, and are abandoned once nobody watches them.
+@testitem "configure_job_queue! queues background jobs and abandons unwatched ones" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _clear_operation_polls!, _operation_background_fetch
+
+    const queue_gates = Dict(n => Base.Event() for n in 1:4)
+    const queue_tracker = RuntimeTracker()
+
+    @htmx struct QueuedJobsApp
+        "Queued crunch"
+        @get queued_crunch(n::Int) = (wait(queue_gates[n]); h.p("crunched:$n"))
+    end
+    route!(QueuedJobsApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=queue_tracker)
+    drive(target) = app(HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[]))
+    all_states = (:queued, :running, :done, :failed)
+    jobs_for(n) = [r for r in runtime_jobs(queue_tracker; states=all_states)
+                   if r.target == "/queued_crunch/$n"]
+    latest(n) = last(jobs_for(n))
+
+    @test_throws ArgumentError configure_job_queue!(; max_running=-1)
+    @test_throws ArgumentError configure_job_queue!(; abandon_after=0)
+    # Off by default: background computes start at once.
+    @test configure_job_queue!().max_running == 0
+    @test _operation_background_fetch(HTTP.Request("GET", "/")) === identity
+
+    _clear_operation_polls!()
+    try
+        settings = configure_job_queue!(; max_running=1, abandon_after=60)
+        @test settings.max_running == 1 && settings.abandon_after == 60.0
+
+        for n in 1:3
+            @test contains(String(drive("/queued_crunch/$n").body), "treebar-poller-inner")
+        end
+        @test timedwait(() -> length(runtime_jobs(queue_tracker)) == 3, 10.0;
+                        pollint=0.02) === :ok
+        @test latest(1).state === :running
+        @test latest(2).state === :queued && latest(2).position == 1
+        @test latest(3).state === :queued && latest(3).position == 2
+        @test length(runtime_jobs(queue_tracker; states=:queued)) == 2
+        @test length(runtime_jobs(queue_tracker; states=:running)) == 1
+        @test configure_job_queue!().queued == 2
+        snap = runtime_snapshot(queue_tracker)
+        @test count(r -> r.state === :queued, snap.running) == 2
+        board = repr("text/html", jobs_board(; all=true, tracker=queue_tracker))
+        @test contains(board, "1 running · 2 queued")
+        @test contains(board, "queued · #1")
+        @test contains(board, "queued · #2")
+
+        # Finishing the running job starts the next one; the rest move up.
+        notify(queue_gates[1])
+        @test timedwait(() -> latest(2).state === :running, 10.0; pollint=0.02) === :ok
+        @test latest(1).state === :done
+        @test latest(3).state === :queued && latest(3).position == 1
+
+        # Nobody polls job 3: once unwatched for `abandon_after` it is
+        # abandoned, never run, and recorded as failed.
+        configure_job_queue!(; abandon_after=0.2)
+        @test timedwait(() -> latest(3).state === :failed, 10.0; pollint=0.02) === :ok
+        @test contains(latest(3).error, "abandoned")
+        @test configure_job_queue!().queued == 0
+
+        # The next request for it starts afresh, queued behind job 2.
+        configure_job_queue!(; abandon_after=60)
+        drive("/queued_crunch/3")
+        @test timedwait(() -> length(jobs_for(3)) == 2 && latest(3).state === :queued,
+                        10.0; pollint=0.02) === :ok
+        # Switching the queue off starts whatever is still waiting.
+        configure_job_queue!(; max_running=0)
+        @test timedwait(() -> latest(3).state === :running, 10.0; pollint=0.02) === :ok
+        notify(queue_gates[2]); notify(queue_gates[3])
+        @test timedwait(() -> isempty(runtime_jobs(queue_tracker)), 10.0;
+                        pollint=0.02) === :ok
+        @test latest(3).state === :done
+    finally
+        configure_job_queue!(; max_running=0, abandon_after=60)
+        foreach(notify, values(queue_gates))
+        _clear_operation_polls!()
+    end
+end
