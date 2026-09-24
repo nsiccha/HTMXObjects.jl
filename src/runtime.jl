@@ -29,8 +29,8 @@ request is in flight. `kind` is `:page`, `:htmx`, `:poll` (a follow-up
 operation poll), `:websocket` or `:sse`; the last two stay in flight for the
 life of the connection. `route` is the matched route pattern (`"GET /foo/{1}"`),
 `mode` the operation transport HTMXObjects chose (`:blocking`, `:polling`,
-`:page_load`, `:poll` for a follow-up poll, `:none` for non-operation
-requests), and `job` the id of the [`RuntimeJob`](@ref) the request started or
+`:page_load`, `:poll` for a follow-up poll, `:preload` for a speculative
+request to a `@preload` route, `:none` for non-operation requests), and `job` the id of the [`RuntimeJob`](@ref) the request started or
 polled (`0` for none). `target` is the redacted path and query.
 """
 mutable struct RuntimeRequest

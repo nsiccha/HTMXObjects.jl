@@ -24,6 +24,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SlowInstrumentedPolicyApp,
     SlowPagePolicyApp, FastPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
+    PreloadApp, reset_preload!, release_preload!, preload_count,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -622,6 +623,37 @@ end
 @htmx struct SlowRecordApp
     @get index() = h.main(h.p("home"))
     @get slowrec() = (sleep(0.5); h.p("finished"))
+end
+
+# `@preload` fixtures: an unmarked route (a preload must do no work on it), a
+# fast marked route (answered inline, reusable by the browser), a gated slow
+# marked route (answered 204 and joined by the click), and a marked mutation
+# (never speculative, marker or not).
+const preload_gate = Ref{Base.Event}(Base.Event())
+const preload_runs = Dict{Symbol,Int}()
+const preload_runs_lock = ReentrantLock()
+
+function reset_preload!()
+    preload_gate[] = Base.Event()
+    lock(() -> empty!(preload_runs), preload_runs_lock)
+    nothing
+end
+
+release_preload!() = notify(preload_gate[])
+preload_count(name) = lock(() -> get(preload_runs, name, 0), preload_runs_lock)
+
+function preload_work(name, n; gated::Bool=false)
+    lock(() -> (preload_runs[name] = get(preload_runs, name, 0) + 1),
+         preload_runs_lock)
+    gated && wait(preload_gate[])
+    h.p("$(name):$(n)"; id="preload-$(name)")
+end
+
+@htmx struct PreloadApp
+    @get plain(; n::Int=1) = preload_work(:plain, n)
+    @preload @get fast(; n::Int=1) = preload_work(:fast, n)
+    @get @preload slow(; n::Int=1) = preload_work(:slow, n; gated=true)
+    @preload @post submit(; n::Int=1) = preload_work(:submit, n)
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -2597,6 +2629,253 @@ end
 # that finishes within it renders inline in the shell: one response, no blank
 # placeholder, no hx-load refetch. Pins the byte shape against the `:blocking`
 # workaround — for a fast operation the two must agree exactly.
+# A speculative request (htmx's preload extension, `HX-Preloaded: true`) runs
+# nothing on a route that did not opt in with `@preload`, and nothing on a
+# mutation even if it did: the answer is an uncacheable empty 204.
+@testitem "preload requests do no work on unmarked routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops
+
+    reset_preload!()
+    _clear_preloads!()
+    route!(PreloadApp())
+    router = HTMXObjects.CONTEXT[].service.router
+    drive(target, headers; method="GET") = begin
+        request = HTTP.Request(method, target, headers, UInt8[])
+        handler = first(HTTP.Handlers.gethandler(router, request))
+        @test handler !== HTTP.Handlers.default404
+        handler(request)
+    end
+    preload = ["HX-Request" => "true", "HX-Preloaded" => "true",
+               "HTMXO-Client" => "0"^32]
+
+    r = drive("/plain?n=1", preload)
+    @test r.status == 204
+    @test HTTP.header(r, "Cache-Control") == "no-store"
+    @test isempty(r.body)
+    r = drive("/submit", preload; method="POST")
+    @test r.status == 204
+    # Polls, attaches and form refreshes belong to a live transport, never to
+    # a preload — even on a marked route.
+    @test drive("/slow?n=9&__htmxo_poll=1", preload).status == 204
+    @test drive("/slow?n=9&__htmxo_operation=abc", preload).status == 204
+    sleep(0.2)
+    @test preload_count(:plain) == 0
+    @test preload_count(:submit) == 0
+    @test preload_count(:slow) == 0
+    @test isempty(_preload_ops)
+
+    # The same request without the preload marker is served as always.
+    r = drive("/plain?n=1", ["HX-Request" => "true"])
+    @test r.status == 200
+    @test contains(String(r.body), "plain:1")
+    @test preload_count(:plain) == 1
+end
+
+# An operation that finishes within the grace budget answers the preload with
+# the fragment itself, reusable by the browser for `PRELOAD_MAX_AGE` seconds —
+# but only by the page that preloaded it (`Vary: HTMXO-Client`). The server
+# keeps nothing behind: a click that misses the browser cache computes fresh.
+@testitem "fast @preload routes answer a browser-reusable fragment" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops
+
+    reset_preload!()
+    _clear_preloads!()
+    route!(PreloadApp())
+    router = HTMXObjects.CONTEXT[].service.router
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    preload = ["HX-Request" => "true", "HX-Preloaded" => "true",
+               "HTMXO-Client" => "1"^32]
+
+    # Exclude first-call compilation from the grace budget.
+    for n in 100:102
+        drive("/fast?n=$(n)", preload)
+    end
+    sleep(0.2)
+    _clear_preloads!()
+    reset_preload!()
+
+    r = drive("/fast?n=1", preload)
+    @test r.status == 200
+    @test contains(String(r.body), "fast:1")
+    @test HTTP.header(r, "Cache-Control") == "private, max-age=10"
+    @test contains(HTTP.header(r, "Vary"), "HX-Request")
+    @test contains(HTTP.header(r, "Vary"), "HTMXO-Client")
+    @test preload_count(:fast) == 1
+    @test isempty(_preload_ops)
+
+    # The click itself is an ordinary, uncached response.
+    click = drive("/fast?n=1", ["HX-Request" => "true", "HTMXO-Client" => "1"^32])
+    @test click.status == 200
+    @test HTTP.header(click, "Cache-Control", "") == ""
+
+    old = HTMXObjects.PRELOAD_MAX_AGE[]
+    try
+        HTMXObjects.PRELOAD_MAX_AGE[] = 0
+        r = drive("/fast?n=2", preload)
+        @test r.status == 200
+        @test HTTP.header(r, "Cache-Control", "") == ""
+    finally
+        HTMXObjects.PRELOAD_MAX_AGE[] = old
+    end
+end
+
+# A slow operation answers the preload with 204 and keeps running; the click
+# from the same page (same `HTMXO-Client`) joins it instead of recomputing on
+# its fresh root. Another page — or a preload without a client id — never
+# shares it.
+@testitem "slow @preload routes prewarm and the click joins" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops, _clear_operation_polls!
+
+    reset_preload!()
+    _clear_preloads!()
+    _clear_operation_polls!()
+    route!(PreloadApp())
+    router = HTMXObjects.CONTEXT[].service.router
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    a, b = "a"^32, "b"^32
+    preload(client) = ["HX-Request" => "true", "HX-Preloaded" => "true",
+                       "HTMXO-Client" => client]
+    click(client) = ["HX-Request" => "true", "HTMXO-Client" => client]
+
+    try
+        # Exclude first-call compilation from the latency assertion: warm the
+        # preload and join paths on their own args with the gate open.
+        release_preload!()
+        drive("/slow?n=0", preload(a))
+        drive("/slow?n=0", click(a))
+        drive("/slow?n=-1", preload(a))
+        sleep(0.2)
+        _clear_preloads!()
+        _clear_operation_polls!()
+        reset_preload!()
+
+        elapsed = @elapsed r = drive("/slow?n=1", preload(a))
+        @test r.status == 204
+        @test elapsed < 2.0
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        @test length(_preload_ops) == 1
+
+        release_preload!()
+        sleep(0.2)
+        joined = drive("/slow?n=1", click(a))
+        @test joined.status == 200
+        @test contains(String(joined.body), "slow:1")
+        @test preload_count(:slow) == 1
+        @test isempty(_preload_ops)
+
+        # Another page's click starts its own compute; page a's operation
+        # stays claimable by page a alone.
+        release_preload!()
+        reset_preload!()
+        @test drive("/slow?n=2", preload(a)).status == 204
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        drive("/slow?n=2", click(b))
+        @test timedwait(() -> preload_count(:slow) == 2, 5.0; pollint=0.01) === :ok
+        @test length(_preload_ops) == 1
+
+        # Without a client id a slow preload still starts, but keeps nothing
+        # it could hand on.
+        _clear_preloads!()
+        @test drive("/slow?n=3", ["HX-Request" => "true", "HX-Preloaded" => "true"]).status == 204
+        @test timedwait(() -> preload_count(:slow) == 3, 5.0; pollint=0.01) === :ok
+        @test isempty(_preload_ops)
+    finally
+        release_preload!()
+        _clear_preloads!()
+        _clear_operation_polls!()
+    end
+end
+
+# A click that arrives while the preload's operation is still running gets the
+# polling transport for THAT operation: its poller carries a token bound to the
+# preloaded compute, and the finished poll answers its value — one run total.
+@testitem "a click during a running preload polls the preloaded operation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops, _clear_operation_polls!,
+        _operation_polling_impl
+
+    reset_preload!()
+    _clear_preloads!()
+    _clear_operation_polls!()
+    route!(PreloadApp(); operation_policy=OperationPolicy(:auto; keep_progress=false))
+    router = HTMXObjects.CONTEXT[].service.router
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    client = "c"^32
+    hx = ["HX-Request" => "true", "HTMXO-Client" => client]
+
+    transports = Any[]
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _started, _ip, _keys, _call_kwargs, transport) -> begin
+            push!(transports, transport)
+            transport.retain()
+            h.aside("polling")
+        end
+    try
+        @test drive("/slow?n=4", ["HX-Preloaded" => "true"; hx]).status == 204
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        started = drive("/slow?n=4", hx)
+        @test String(started.body) == "<aside>polling</aside>"
+        sleep(0.3)
+        @test preload_count(:slow) == 1
+        @test isempty(_preload_ops)
+        poll_url = only(transports).poll_url
+        @test contains(poll_url, "__htmxo_poll=1")
+        @test contains(poll_url, "__htmxo_operation=")
+
+        release_preload!()
+        sleep(0.3)
+        polled = drive(poll_url, hx)
+        @test contains(String(polled.body), "slow:4")
+        @test preload_count(:slow) == 1
+    finally
+        release_preload!()
+        _operation_polling_impl[] = old_polling
+        _clear_preloads!()
+        _clear_operation_polls!()
+    end
+end
+
+# Under `:blocking` there is no poller to hand over: the click waits for the
+# preloaded compute and answers its value, still without a second run.
+@testitem "blocking routes join a running preload by waiting for it" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops
+
+    reset_preload!()
+    _clear_preloads!()
+    route!(PreloadApp(); operation_policy=OperationPolicy(:blocking))
+    router = HTMXObjects.CONTEXT[].service.router
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    hx = ["HX-Request" => "true", "HTMXO-Client" => "d"^32]
+    try
+        @test drive("/slow?n=5", ["HX-Preloaded" => "true"; hx]).status == 204
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        pending_click = Threads.@spawn drive("/slow?n=5", hx)
+        sleep(0.3)
+        @test !istaskdone(pending_click)
+        release_preload!()
+        clicked = fetch(pending_click)
+        @test clicked.status == 200
+        @test contains(String(clicked.body), "slow:5")
+        @test preload_count(:slow) == 1
+        @test isempty(_preload_ops)
+    finally
+        release_preload!()
+        _clear_preloads!()
+    end
+end
+
 @testitem "fast direct-page operations render inline in a single response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     route!(FastPagePolicyApp())
     router = HTMXObjects.CONTEXT[].service.router
@@ -2911,6 +3190,32 @@ end
     @test contains(html_extra, "body{margin:0}")
 end
 
+@testitem "htmx() loads the preload extension and its runtime" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    html = repr("text/html", htmx(h.main("content")))
+    ext = "https://cdn.jsdelivr.net/npm/htmx-ext-preload@2.1.2/dist/preload.min.js"
+    @test contains(html, ext)
+    # The extension registers itself on load, so it must come after htmx.
+    @test findfirst(ext, html).start > findfirst("htmx.org@2.0.8", html).start
+    @test contains(html, "<html hx-ext=\"preload\">")
+    @test contains(html, "HTMXO-Client")
+    @test contains(repr("text/html", preload_runtime_js()), "htmx:configRequest")
+    # A caller-supplied body keeps its own extensions alongside.
+    html_body = repr("text/html", htmx(h.main(); body=h.body(; hx_ext="morph")))
+    @test contains(html_body, "<body hx-ext=\"morph\">")
+    @test contains(html_body, "<html hx-ext=\"preload\">")
+    for bare in (htmx(h.main(); preload_version=nothing),
+                 htmx(h.main(); htmx_version=nothing))
+        bare_html = repr("text/html", bare)
+        @test !contains(bare_html, "htmx-ext-preload")
+        @test !contains(bare_html, "hx-ext=\"preload\"")
+        @test !contains(bare_html, "HTMXO-Client")
+    end
+    # Request feedback ignores preloads: htmx announces a preload's
+    # beforeRequest but never its afterRequest.
+    @test contains(repr("text/html", request_feedback_script()), "HX-Preloaded")
+    @test contains(repr("text/html", loading_indicator_script()), "HX-Preloaded")
+end
+
 @testitem "htmx() emits a doctype (standards mode)" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # A page without `<!DOCTYPE html>` renders in quirks mode, which some
     # browser libraries refuse to run in at all (KaTeX's `katex.render` throws
@@ -3135,6 +3440,13 @@ end
     @test contains(html2, "hx-get=\"/search\"")
     @test contains(html2, "hx-target=\"#main\"")
     @test contains(html2, "class=\"nav-link\"")
+    @test !contains(html, "preload")
+    # `true` means hover; a bare `preload="true"` would name an event that
+    # never fires.
+    @test contains(repr("text/html", hx_link("/a"; preload=true)), "preload=\"mouseover\"")
+    @test contains(repr("text/html", hx_link("/a"; preload="mousedown")), "preload=\"mousedown\"")
+    @test contains(repr("text/html", hx_link("/a"; preload=:mousedown)), "preload=\"mousedown\"")
+    @test !contains(repr("text/html", hx_link("/a"; preload=false)), "preload")
 end
 
 @testitem "htmx_or helper" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
@@ -3915,18 +4227,35 @@ end
     # tab panels
     @test contains(html, "tab-panel")
     @test contains(html, "tab-panel u-w-full u-hidden")
-    # lazy tabs: string content → hx-get with revealed trigger
-    lazy = tabset("Eager" => h.p("here"), "Lazy" => "/api/lazy")
+    # lazy tabs: a hidden tab's link fetches its panel on the first click only.
+    # Never `revealed`: htmx 2 "reveals" a display:none panel at once, which
+    # loaded every hidden tab with the page.
+    lazy = tabset("Eager" => h.p("here"), "Lazy" => "/api/lazy"; id="ts")
     lhtml = repr("text/html", lazy)
     @test contains(lhtml, "here")           # eager content rendered
     @test !contains(lhtml, "/api/lazy\">")  # URL not rendered as text
-    @test contains(lhtml, "hx-get=\"/api/lazy\"")
-    @test contains(lhtml, "revealed once")
-    # all-lazy
-    lazy2 = tabset("A" => "/a", "B" => "/b")
+    @test !contains(lhtml, "revealed")
+    link = match(r"<a[^>]*hx-get=\"/api/lazy\"[^>]*>", lhtml)
+    @test link !== nothing
+    @test contains(link.match, "hx-target=\"#ts-tab-2\"")
+    @test contains(link.match, "hx-trigger=\"click once\"")
+    @test contains(link.match, "hx-swap=\"innerHTML\"")
+    @test !contains(link.match, "preload")
+    panel = match(r"<div[^>]*id=\"ts-tab-2\"[^>]*>", lhtml)
+    @test panel !== nothing
+    @test contains(panel.match, "u-hidden")
+    @test !contains(panel.match, "hx-get")
+    # all-lazy: the initially active panel loads itself once it is visible
+    lazy2 = tabset("A" => "/a", "B" => "/b"; id="ts2")
     lhtml2 = repr("text/html", lazy2)
-    @test contains(lhtml2, "hx-get=\"/a\"")
+    active = match(r"<div[^>]*id=\"ts2-tab-1\"[^>]*>", lhtml2)
+    @test contains(active.match, "hx-get=\"/a\"")
+    @test contains(active.match, "hx-trigger=\"intersect once\"")
+    @test match(r"<a[^>]*hx-get=\"/a\"", lhtml2) === nothing
     @test contains(lhtml2, "hx-get=\"/b\"")
+    # preload: hovering a hidden lazy tab starts its fetch
+    lhtml3 = repr("text/html", tabset("A" => h.p("a"), "B" => "/b"; preload=true))
+    @test match(r"<a[^>]*hx-get=\"/b\"[^>]*preload=\"mouseover\"", lhtml3) !== nothing
 end
 
 @testitem "status_badge" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
@@ -3971,6 +4300,18 @@ end
     node2 = nav_sidebar(("X" => "/x",))
     html2 = repr("text/html", node2)
     @test contains(html2, "href=\"/x\"")
+    @test !contains(html, "preload")
+
+    # preload on the nav components
+    @test contains(repr("text/html", nav_sidebar(["A" => "/a"]; preload=true)),
+                   "preload=\"mouseover\"")
+    @test contains(repr("text/html", htmx_tabset(["A" => "/a"]; preload="mousedown")),
+                   "preload=\"mousedown\"")
+    @test !contains(repr("text/html", htmx_tabset(["A" => "/a"])), "preload")
+    crumbs = [("Home", "/", "/"), ("Here", nothing, nothing)]
+    @test contains(repr("text/html", htmxo_breadcrumb(crumbs; preload=true)),
+                   "preload=\"mouseover\"")
+    @test !contains(repr("text/html", htmxo_breadcrumb(crumbs)), "preload")
 end
 
 """

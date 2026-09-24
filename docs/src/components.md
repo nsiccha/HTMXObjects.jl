@@ -189,6 +189,11 @@ tabset(
     "Logs"     => h.div("Log content"),
 ; active=1)
 
+# Lazy tabs: a URL is fetched on the tab's first click (the initially active
+# one once it is visible); `preload=true` starts that fetch on hover
+tabset("Overview" => h.div("Overview content"), "Details" => "/tab/details";
+       preload=true)
+
 # HTMX-driven (each tab fetches its content lazily)
 htmx_tabset(
     "Overview" => "/tab/overview",
@@ -201,6 +206,11 @@ Drop `tabset_styles()` once per page to style the active-tab indicator.
 ### `nav_sidebar`
 
 A vertical navigation panel — pass a vector of `("Label", "/url")` pairs (or `Pair`-of-`String`-with-children for nested groups).
+
+`nav_sidebar`, `htmx_tabset`, `tabset`, `htmxo_breadcrumb` and `hx_link` all take
+`preload=true` to start a link's request while the pointer rests on it. Pair it
+with `@preload` on the routes that should do something with that head start —
+see *Preloading* in the [API reference](api.md).
 
 ### `status_badge` — semantic status pill
 
@@ -238,6 +248,7 @@ Drop once per page to enable a centred loading indicator and click-feedback styl
 
 ```julia
 hx_link("/settings"; hx_target="#main", hx_push_url="true")("Settings")
+hx_link("/report/42"; hx_target="#main", preload=true)("Report")  # starts on hover
 ```
 
 ### `htmx_or(full_page_fn, req, fragment)`

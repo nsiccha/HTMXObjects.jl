@@ -923,6 +923,54 @@ OperationContext
 OperationPolicy
 ```
 
+## Preloading — `preload=true` and `@preload`
+
+A click can start before it happens. `htmx()` loads htmx's
+[`preload` extension](https://htmx.org/extensions/preload/), and the navigation
+components take a `preload` keyword — `nav_sidebar`, `htmx_tabset`, `tabset`,
+`htmxo_breadcrumb` and `hx_link`. `preload=true` requests a link's target once
+the pointer has rested on it for 100 ms; any other extension trigger
+(`"mousedown"`, `"preload:init"`, …) passes through as a string.
+
+What a preload *does* is the route's decision:
+
+| Route | The preload (`HX-Preloaded: true`) gets | The click that follows |
+|-------|------------------------------------------|------------------------|
+| unmarked | `204` before a root is built — no work at all | computes as usual |
+| `@preload`, done within ~0.1 s | the fragment, `Cache-Control: private, max-age=10` | is answered by the browser cache |
+| `@preload`, slower | `204`; the operation keeps running | joins that operation — its value when done, otherwise a poller on it |
+
+```julia
+@htmx struct App
+    @preload @get summary(id::Int) = render_summary(load(id))  # cheap: browser-cached
+    @preload @get posterior(id::Int) = fit_model(id)           # heavy: prewarmed and joined
+    @get archive(id::Int) = archive!(id)                        # an action: never speculative
+end
+```
+
+Mark only routes that are safe to run speculatively — reads, not actions. A
+preloaded operation nobody clicks still runs to completion. Mutations are never
+preloaded, marker or not.
+
+Joining is scoped to the page that preloaded. `htmx()` includes
+`preload_runtime_js`, which sends a random per-page `HTMXO-Client` id with the
+page's same-origin GETs; a click joins only an operation preloaded under its own
+id, route and typed arguments — the binding poll tokens use. Browser reuse is
+scoped the same way (`Vary: HX-Request, HTMXO-Client`) and lasts
+`HTMXObjects.PRELOAD_MAX_AGE[]` seconds (`0` keeps only the server-side join).
+Unclaimed operations are dropped after two minutes, and the request-feedback
+styling ignores preloads.
+
+Only `hx-get` elements and boosted links send the client id. A plain
+`<a href preload>` can use the browser-cache path but never joins a slow
+operation. A recorded static site needs no marker: its fragments are plain files
+the browser caches.
+
+```@docs
+HTMXObjects.PRELOAD_MAX_AGE
+preload_runtime_js
+```
+
 ## Forms and inputs
 
 See the [Components catalog](components.md) for the full list with examples.
