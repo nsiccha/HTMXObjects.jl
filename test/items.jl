@@ -8830,9 +8830,9 @@ end
         for n in 1:3
             @test contains(String(drive("/queued_crunch/$n").body), "treebar-poller-inner")
         end
-        @test timedwait(() -> length(runtime_jobs(queue_tracker)) == 3, 10.0;
-                        pollint=0.02) === :ok
-        @test latest(1).state === :running
+        # The first compute leaves the queue as soon as a worker picks it up.
+        @test timedwait(() -> length(runtime_jobs(queue_tracker)) == 3 &&
+                        latest(1).state === :running, 10.0; pollint=0.02) === :ok
         @test latest(2).state === :queued && latest(2).position == 1
         @test latest(3).state === :queued && latest(3).position == 2
         @test length(runtime_jobs(queue_tracker; states=:queued)) == 2
@@ -8845,10 +8845,12 @@ end
         @test contains(board, "queued · #1")
         @test contains(board, "queued · #2")
 
-        # Finishing the running job starts the next one; the rest move up.
+        # Finishing the running job starts the next one; the rest move up. (The
+        # worker starts job 2 before job 1's watcher has necessarily stamped
+        # its outcome, so wait for both.)
         notify(queue_gates[1])
-        @test timedwait(() -> latest(2).state === :running, 10.0; pollint=0.02) === :ok
-        @test latest(1).state === :done
+        @test timedwait(() -> latest(2).state === :running && latest(1).state === :done,
+                        10.0; pollint=0.02) === :ok
         @test latest(3).state === :queued && latest(3).position == 1
 
         # Nobody polls job 3: once unwatched for `abandon_after` it is
