@@ -8304,3 +8304,491 @@ end
         _clear_operation_polls!()
     end
 end
+
+# Every operation execution is a job from its start, whatever transport it
+# takes: it shows once it outlives the grace period (with its progress tree read
+# from DynamicObjects while it runs inline) and is forgotten if it is faster.
+@testitem "blocking operations are runtime jobs too" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    const blocking_gate = Ref(Base.Event())
+    const blocking_tracker = RuntimeTracker()
+
+    @htmx struct BlockingJobApp
+        "Save the upload"
+        @post blocking_save(n::Int) = (wait(blocking_gate[]); h.p("saved:$n"))
+        "Fresh crunch"
+        @fresh @get blocking_fresh() = (wait(blocking_gate[]); h.p("fresh"))
+        "Raw response"
+        @get blocking_raw()::HTTP.Response = (wait(blocking_gate[]); HTTP.Response(200, "raw"))
+        "Plain crunch"
+        @get blocking_plain(n::Int) = (wait(blocking_gate[]); h.p("plain:$n"))
+        "Doomed save"
+        @post blocking_doomed() = (sleep(0.3); error("disk full"))
+        @post blocking_quick() = h.p("quick")
+    end
+    @htmx struct BlockingPolicyJobApp
+        "Policy crunch"
+        @get blocking_policy() = (wait(blocking_gate[]); h.p("policy"))
+    end
+
+    route!(BlockingJobApp())
+    route!(BlockingPolicyJobApp(); operation_policy=OperationPolicy(:blocking))
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=blocking_tracker)
+    drive(target; method="GET", hx=false) = app(HTTP.Request(method, target,
+        hx ? ["HX-Request" => "true"] : Pair{String,String}[], UInt8[]))
+    running() = runtime_jobs(blocking_tracker)
+    labels(rows) = sort!([r.label for r in rows])
+
+    try
+        # Compile the quick route first: a first call's compile time alone can
+        # outlast the grace period.
+        drive("/blocking_quick"; method="POST")
+        clear_runtime_history!(blocking_tracker)
+
+        # POST/@fresh/declared HTTP.Response/plain non-HTMX GET/:blocking
+        # policy: none of them polls, all of them answer inline — and all of
+        # them are jobs while they run.
+        tasks = [
+            Threads.@spawn(drive("/blocking_save/1"; method="POST")),
+            Threads.@spawn(drive("/blocking_fresh"; hx=true)),
+            Threads.@spawn(drive("/blocking_raw"; hx=true)),
+            Threads.@spawn(drive("/blocking_plain/2")),
+            Threads.@spawn(drive("/blocking_policy"; hx=true)),
+        ]
+        @test timedwait(() -> length(running()) == 5, 20.0; pollint=0.02) === :ok
+        rows = running()
+        @test labels(rows) == ["Fresh crunch", "Plain crunch", "Policy crunch",
+                               "Raw response", "Save the upload"]
+        @test all(r -> r.state === :running && r.duration >= 0.1, rows)
+        save = only(r for r in rows if r.label == "Save the upload")
+        @test save.route == "POST /blocking_save/{n}"
+        @test save.target == "/blocking_save/1"
+        @test save.scope === :request
+        # A cached route's tree is read from DynamicObjects while it runs inline.
+        plain = only(r for r in rows if r.label == "Plain crunch")
+        @test plain.progress isa Treebars.ProgressNode
+        # The in-flight request links to its job.
+        inflight = runtime_snapshot(blocking_tracker).inflight
+        @test only(r for r in inflight if r.path == "/blocking_save/1").job == save.id
+        @test length(runtime_snapshot(blocking_tracker).running) == 5
+
+        notify(blocking_gate[])
+        @test all(t -> fetch(t).status == 200, tasks)
+        @test isempty(running())
+        done = runtime_jobs(blocking_tracker; states=(:done, :failed))
+        @test labels(done) == ["Fresh crunch", "Plain crunch", "Policy crunch",
+                               "Raw response", "Save the upload"]
+        @test all(r -> r.state === :done && r.duration >= 0.1, done)
+        @test only(r for r in done if r.label == "Plain crunch").progress isa Treebars.ProgressNode
+        @test only(r for r in runtime_snapshot(blocking_tracker).history
+                   if r.path == "/blocking_plain/2").job > 0
+
+        # A failing slow execution is a failed job with the error's summary.
+        drive("/blocking_doomed"; method="POST", hx=true)
+        failed = only(runtime_jobs(blocking_tracker; states=:failed))
+        @test failed.label == "Doomed save"
+        @test contains(failed.error, "disk full")
+
+        # Faster than the grace period: a request, not a job.
+        before = runtime_snapshot(blocking_tracker).process.total_jobs
+        drive("/blocking_quick"; method="POST")
+        @test runtime_snapshot(blocking_tracker).process.total_jobs == before
+        @test only(r for r in runtime_snapshot(blocking_tracker).history
+                   if r.path == "/blocking_quick").job == 0
+        @test length(runtime_jobs(blocking_tracker; states=(:done, :failed))) == 6
+
+        # `states`, `filter` and `recent` narrow the rows.
+        @test length(runtime_jobs(blocking_tracker; states=(:done,),
+                                  filter=r -> startswith(r.route, "POST"))) == 1
+        @test isempty(runtime_jobs(blocking_tracker; states=(:done, :failed), recent=0))
+        @test_throws ArgumentError runtime_jobs(blocking_tracker; states=(:paused,))
+    finally
+        notify(blocking_gate[])
+    end
+end
+
+# Work HTMXObjects did not start is a job too: a hand-rolled Treebars poller
+# reports its compute through `track_job!`, and apps can call it directly.
+@testitem "hand-rolled pollers and track_job! are runtime jobs" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    using HTMXObjects: DynamicObjects
+
+    const hand_gate = Ref(Base.Event())
+    const hand_tracker = RuntimeTracker()
+
+    DynamicObjects.@dynamicstruct struct HandRolledIP
+        __status__ = Treebars.initialize_progress!(:state; description="hand-rolled")
+        fit(key::String) = (wait(hand_gate[]); "fit:$key")
+    end
+    const hand_ip = getproperty(HandRolledIP(), :fit)
+
+    @htmx struct HandRolledJobApp
+        @fresh @get hand_fit(key::String) = Treebars.polling_fetchindex(
+                hand_ip, key; poll_url="/hand_fit/$key", label="Hand-rolled fit",
+                req=__req__) do rv
+            h.p(rv)
+        end
+    end
+    route!(HandRolledJobApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=hand_tracker)
+    drive(target) = app(HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[]))
+    running() = runtime_jobs(hand_tracker)
+
+    try
+        body = String(drive("/hand_fit/a").body)
+        @test contains(body, "treebar-poller-inner")
+        @test timedwait(() -> length(running()) == 1, 10.0; pollint=0.02) === :ok
+        job = only(running())
+        @test job.label == "Hand-rolled fit"
+        @test job.route == "GET /hand_fit/{key}"
+        @test job.target == "/hand_fit/a"
+        @test job.progress isa Treebars.ProgressNode
+        @test job.polls == 0
+        # The poller's follow-up requests are polls on the same job.
+        drive("/hand_fit/a"); drive("/hand_fit/a")
+        @test only(running()).polls == 2
+        @test all(r -> r.job == job.id, [r for r in runtime_snapshot(hand_tracker).history
+                                         if r.target == "/hand_fit/a"])
+        notify(hand_gate[])
+        @test timedwait(() -> isempty(running()), 10.0; pollint=0.02) === :ok
+        @test only(r for r in runtime_jobs(hand_tracker; states=:done)
+                   if r.label == "Hand-rolled fit").id == job.id
+    finally
+        notify(hand_gate[])
+    end
+
+    # Direct use: a task an app spawned, reported without any request.
+    warm = Threads.@spawn (sleep(0.3); 42)
+    id = track_job!(warm; label="Warm-up", tracker=hand_tracker)
+    @test id > 0
+    @test track_job!(warm; tracker=hand_tracker) == id   # same work: a poll
+    @test timedwait(() -> any(r -> r.id == id,
+        runtime_jobs(hand_tracker; states=:done)), 10.0; pollint=0.02) === :ok
+    warmed = only(r for r in runtime_jobs(hand_tracker; states=:done) if r.id == id)
+    @test warmed.label == "Warm-up"
+    @test warmed.polls == 1
+    @test warmed.scope === :none
+    @test warmed.route == "" && warmed.target == ""
+
+    broken = Threads.@spawn (sleep(0.2); error("warm-up broke"))
+    broken_id = track_job!(broken; label="Broken warm-up", tracker=hand_tracker)
+    @test timedwait(() -> any(r -> r.id == broken_id,
+        runtime_jobs(hand_tracker; states=:failed)), 10.0; pollint=0.02) === :ok
+    @test contains(only(runtime_jobs(hand_tracker; states=:failed)).error, "warm-up broke")
+
+    # Nothing to track, or tracking off: no job, and never an error.
+    @test track_job!(nothing; tracker=hand_tracker) == 0
+    configure_runtime!(hand_tracker; enabled=false)
+    @test track_job!(Threads.@spawn(1); tracker=hand_tracker) == 0
+    configure_runtime!(hand_tracker; enabled=true)
+end
+
+# Per-session boards: `jobs_board(; mine=req)` shows the jobs started under the
+# requesting session's root-provider scope and key, never another session's.
+@testitem "jobs_board(; mine=req) shows only the requesting session's jobs" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+
+    const session_gate = Ref(Base.Event())
+    const session_tracker = RuntimeTracker()
+
+    @htmx struct SessionJobsApp
+        "Session crunch"
+        @get session_crunch(n::Int) = (wait(session_gate[]); h.p("crunched:$n"))
+        @fresh @get my_jobs() = jobs_board(; mine=__req__, poll_url="/my_jobs",
+                                           id="my-jobs")
+    end
+    @htmx struct RequestScopedJobsApp
+        "Request crunch"
+        @get request_crunch() = (wait(session_gate[]); h.p("crunched"))
+        @fresh @get request_jobs() = jobs_board(; mine=__req__, id="request-jobs")
+    end
+    session_key(req) = HTTP.header(req, "X-Session", "anonymous")
+    route!(SessionJobsApp(); root_provider=RootProvider(scope=:session,
+        key=session_key, retention=RootRetention()))
+    route!(RequestScopedJobsApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=session_tracker)
+    drive(target, session="anonymous") = app(HTTP.Request("GET", target,
+        ["HX-Request" => "true", "X-Session" => session], UInt8[]))
+    board(session) = String(drive("/my_jobs", session).body)
+
+    try
+        drive("/session_crunch/1", "alice")
+        drive("/session_crunch/2", "bob")
+        drive("/request_crunch")
+        rows = runtime_jobs(session_tracker)
+        @test length(rows) == 3
+        alice = only(r for r in rows if r.target == "/session_crunch/1")
+        bob = only(r for r in rows if r.target == "/session_crunch/2")
+        request_job = only(r for r in rows if r.target == "/request_crunch")
+        @test alice.scope === :session && bob.scope === :session
+        @test request_job.scope === :request
+        # The provider key never reaches a row, not even as its digest.
+        @test !hasproperty(alice, :session)
+        @test !contains(HTMXObjects._schema_json_encode(runtime_snapshot(session_tracker)),
+                        "alice")
+
+        alice_board = board("alice")
+        @test contains(alice_board, "class=\"treebar-board\" id=\"my-jobs\"")
+        @test contains(alice_board, "data-treebar-key=\"$(alice.id)\"")
+        @test !contains(alice_board, "data-treebar-key=\"$(bob.id)\"")
+        @test !contains(alice_board, "data-treebar-key=\"$(request_job.id)\"")
+        @test contains(alice_board, "hx-get=\"/my_jobs\"")
+        bob_board = board("bob")
+        @test contains(bob_board, "data-treebar-key=\"$(bob.id)\"")
+        @test !contains(bob_board, "data-treebar-key=\"$(alice.id)\"")
+        # A session with no jobs sees an empty board.
+        carol_board = board("carol")
+        @test !contains(carol_board, "treebar-board-item")
+        @test contains(carol_board, "No running jobs.")
+        # Request scope: every request is its own session, so nothing matches.
+        @test !contains(String(drive("/request_jobs").body), "treebar-board-item")
+
+        # The global view is an explicit opt-in.
+        @test_throws ArgumentError jobs_board(; tracker=session_tracker)
+        everyone = repr("text/html", jobs_board(; all=true, tracker=session_tracker))
+        @test all(r -> contains(everyone, "data-treebar-key=\"$(r.id)\""), rows)
+        # The same filter on the data API.
+        alice_req = HTTP.Request("GET", "/", ["X-Session" => "alice"])
+        HTMXObjects._runtime_note_session!(alice_req,
+            OperationContext(alice_req, "", "/", :http, :session, "alice"))
+        @test [r.id for r in runtime_jobs(session_tracker; mine=alice_req)] == [alice.id]
+    finally
+        notify(session_gate[])
+    end
+end
+
+# The dashboard's job lists are Treebars boards that poll their own `@fresh`
+# route; the rest of the dashboard refreshes around them.
+@testitem "RuntimeRoutes serves job boards" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _runtime_new_job!, _jobs_board_fallback
+
+    const board_gate = Ref(Base.Event())
+    const board_tracker = RuntimeTracker()
+
+    @htmx struct RuntimeBoardApp
+        "Board crunch"
+        @get board_crunch(n::Int) = (wait(board_gate[]); h.p("crunched:$n"))
+        "Board doomed"
+        @get board_doomed() = (sleep(0.3); error("board doomed"))
+        @include board_dash = RuntimeRoutes(; tracker=board_tracker)
+    end
+    route!(RuntimeBoardApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=board_tracker)
+    drive(target; hx=true) = app(HTTP.Request("GET", target,
+        hx ? ["HX-Request" => "true"] : Pair{String,String}[], UInt8[]))
+
+    try
+        drive("/board_crunch/1")
+        drive("/board_doomed")
+        @test timedwait(() -> !isempty(runtime_jobs(board_tracker; states=:failed)),
+                        10.0; pollint=0.02) === :ok
+        running = only(runtime_jobs(board_tracker))
+
+        # The running board: a self-polling fragment, keyed by job id.
+        fragment = String(drive("/board_dash/jobs").body)
+        @test contains(fragment, "class=\"treebar-board\" id=\"htmxo-runtime-jobs\"")
+        @test contains(fragment, "data-treebar-key=\"$(running.id)\" data-treebar-state=\"running\"")
+        @test contains(fragment, "Board crunch")
+        @test contains(fragment, "class=\"treebar-board-poll\" hx-get=\"/board_dash/jobs?limit=100&amp;state=running\" hx-trigger=\"every 1s\"")
+        @test contains(fragment, "treebar-board-pause")
+        @test contains(fragment, "<details class=\"treebar-board-tree\">")
+        @test contains(fragment, "<span class=\"treebar-board-meta-key\">job</span> #$(running.id)")
+        # A just-finished job stays listed with its outcome for `recent`
+        # seconds, so the board shows it before it leaves.
+        recent = repr("text/html", jobs_board(; all=true, tracker=board_tracker, recent=600))
+        @test contains(recent, "data-treebar-state=\"failed\"")
+        @test contains(recent, "board doomed")
+        @test !contains(repr("text/html", jobs_board(; all=true, tracker=board_tracker,
+                                                     recent=0)), "board doomed")
+
+        # The finished board: history, newest first, polling at the refresh rate.
+        finished = String(drive("/board_dash/jobs?state=finished&limit=5").body)
+        @test contains(finished, "id=\"htmxo-runtime-finished\"")
+        @test contains(finished, "hx-trigger=\"every 2s\"")
+        @test contains(finished, "Board doomed")
+        @test !contains(finished, "data-treebar-state=\"running\"")
+        bogus = drive("/board_dash/jobs?state=bogus")
+        @test bogus.status >= 400 || contains(String(bogus.body), "aria-invalid")
+
+        # The dashboard embeds both boards outside its refreshing regions and
+        # no longer needs a script to keep trees open.
+        dash = String(drive("/board_dash"; hx=false).body)
+        @test contains(dash, "id=\"htmxo-runtime-jobs\"")
+        @test contains(dash, "id=\"htmxo-runtime-finished\"")
+        @test contains(dash, "id=\"htmxo-runtime-summary\" hx-get=")
+        @test contains(dash, "id=\"htmxo-runtime-panel\" hx-get=")
+        @test contains(dash, "hx-select=\"#htmxo-runtime-panel\"")
+        @test !contains(dash, "data-runtime-details")
+        @test !contains(dash, "hx-get=\"/board_dash/panel?limit=100\" hx-trigger=\"every 2s\" hx-swap=\"outerHTML\"")
+        still = String(drive("/board_dash/panel?live=false").body)
+        @test !contains(still, "hx-trigger")
+        @test !contains(still, "treebar-board-poll")
+        # None of the dashboard's own requests is recorded.
+        @test !any(r -> startswith(r.path, "/board_dash"), runtime_snapshot(board_tracker).history)
+        @test isempty(runtime_jobs(board_tracker; filter=r -> startswith(r.route, "GET /board_dash")))
+
+        # A queued job renders dim, with its queue position.
+        lock(board_tracker.lock) do
+            job = _runtime_new_job!(board_tracker, "Waiting job", nothing, nothing;
+                                    scope=:none, session=UInt(0), now_ns=time_ns() - UInt(10^9))
+            job.started_ns = time_ns() - UInt(10^9)
+            job.state = :queued
+            job.position = 2
+        end
+        queued = String(drive("/board_dash/jobs").body)
+        @test contains(queued, "data-treebar-state=\"queued\"")
+        @test contains(queued, "queued · #2")
+        @test contains(queued, "1 running · 1 queued")
+    finally
+        notify(board_gate[])
+    end
+
+    # Without Treebars, a board is a plain list replaced on each poll.
+    plain = repr("text/html", _jobs_board_fallback(
+        [(; key=1, label="Plain job", state=:running, elapsed_ms=1500, node=nothing,
+            meta=["route" => "GET /x", "position" => 3])];
+        id="plain-jobs", empty="None.", poll_url="/jobs", poll_interval="1s"))
+    @test contains(plain, "<section id=\"plain-jobs\" class=\"htmxo-jobs\" hx-get=\"/jobs\" hx-trigger=\"every 1s\" hx-swap=\"outerHTML\">")
+    @test contains(plain, "<strong>Plain job</strong> — running for")
+    @test contains(plain, "route GET /x")
+    @test contains(repr("text/html", _jobs_board_fallback([]; id="e", empty="None.",
+        poll_url=nothing, poll_interval="1s")), "None.")
+end
+
+# The acceptance run for the dashboard's job board, in headless Chrome: jobs
+# arrive without resetting an expanded tree, a released one shows its outcome
+# and leaves alone, durations tick, and Pause freezes the board. The page's
+# driver starts and releases gated jobs through the test server and writes what
+# it saw into #board-result, which `--dump-dom` returns.
+@testitem "runtime dashboard board updates in place in a real browser" setup=[HTMXOTestImports] tags=[:browser, :integration] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import Treebars
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        const dash_gates = Dict(n => Base.Event() for n in 1:4)
+        const dash_tracker = RuntimeTracker()
+        dash_driver() = h.script(Raw(raw"""
+        window.addEventListener('load', function(){
+          var board = function(){ return document.getElementById('htmxo-runtime-jobs'); };
+          if (!board()) return;
+          var r = {};
+          var item = function(n){
+            var its = board().querySelectorAll('.treebar-board-item');
+            for (var i = 0; i < its.length; i++){
+              var c = its[i].querySelector('code');
+              if (c && c.textContent === '/dash_crunch/' + n) return its[i];
+            }
+            return null;
+          };
+          var dur = function(n){ return item(n).querySelector('.treebar-board-duration').textContent; };
+          var start = function(n){ fetch('/dash_crunch/' + n, {headers: {'HX-Request': 'true'}}); };
+          var release = function(n){ fetch('/__ctl/release/' + n); };
+          var waitFor = function(cond, then){
+            var t = setInterval(function(){ if (cond()){ clearInterval(t); then(); } }, 50);
+          };
+          var done = function(){
+            var out = document.createElement('pre');
+            out.id = 'board-result';
+            out.textContent = Object.keys(r).map(function(k){ return k + '=' + r[k]; }).join(';');
+            document.body.appendChild(out);
+          };
+          start(1);
+          waitFor(function(){ return item(1) && item(1).querySelector('details'); }, function(){
+            item(1)._mark = 1;
+            item(1).querySelector('details').open = true;
+            start(2); start(3);
+            waitFor(function(){ return item(2) && item(3); }, function(){
+              r.three = board().querySelectorAll('.treebar-board-item').length;
+              r.same = item(1)._mark === 1 ? 1 : 0;
+              r.open = item(1).querySelector('details').open ? 1 : 0;
+              r.t0 = dur(1);
+              setTimeout(function(){
+                r.t1 = dur(1);
+                release(2);
+                waitFor(function(){ return item(2) && item(2).dataset.treebarState === 'done'; }, function(){
+                  r.done2 = dur(2);
+                  waitFor(function(){ return !item(2); }, function(){
+                    r.others = item(1) && item(3) ? 1 : 0;
+                    r.kept = item(1)._mark === 1 && item(1).querySelector('details').open ? 1 : 0;
+                    board().querySelector('.treebar-board-pause').click();
+                    setTimeout(function(){
+                      r.p0 = dur(1);
+                      start(4);
+                      setTimeout(function(){
+                        r.p1 = dur(1);
+                        r.paused4 = item(4) ? 1 : 0;
+                        board().querySelector('.treebar-board-pause').click();
+                        waitFor(function(){ return item(4); }, function(){ r.resumed4 = 1; done(); });
+                      }, 2500);
+                    }, 300);
+                  });
+                });
+              }, 450);
+            });
+          });
+        });
+        """))
+        @htmx struct DashboardBrowserApp
+            __page__(content) = htmx(content, dash_driver(); hyperscript_version=nothing,
+                                     feedback=false)
+            "Dashboard crunch"
+            @get dash_crunch(n::Int) = (wait(dash_gates[n]); h.p("crunched:$n"))
+            @include runtime = RuntimeRoutes(; tracker=dash_tracker)
+        end
+        route!(DashboardBrowserApp())
+        router = HTMXObjects.ROUTER
+        app = track_requests(router; tracker=dash_tracker)
+        _clear_operation_polls!()
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if startswith(path, "/__ctl/release/")
+                notify(dash_gates[parse(Int, last(split(path, '/')))])
+                return HTTP.Response(200, "released")
+            end
+            app(req)
+        end
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/runtime"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            m = match(r"<pre id=\"board-result\">([^<]*)</pre>", dom)
+            @test m !== nothing
+            r = Dict(String(first(split(kv, '='; limit=2))) => String(last(split(kv, '='; limit=2)))
+                     for kv in split(m === nothing ? "" : m.captures[1], ';') if occursin('=', kv))
+            @test get(r, "three", "") == "3"            # three gated jobs, three items
+            @test get(r, "same", "") == "1"             # …the first item's wrapper kept
+            @test get(r, "open", "") == "1"             # …with its tree still expanded
+            @test get(r, "t0", "a") != get(r, "t1", "a")  # durations tick
+            @test contains(get(r, "done2", ""), "done")  # the released job shows its outcome
+            @test get(r, "others", "") == "1"           # …and leaves alone
+            @test get(r, "kept", "") == "1"
+            @test get(r, "p0", "a") == get(r, "p1", "b")  # Pause freezes the clocks
+            @test get(r, "paused4", "") == "0"          # …and the list
+            @test get(r, "resumed4", "") == "1"         # Resume catches up
+        finally
+            foreach(notify, values(dash_gates))
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end

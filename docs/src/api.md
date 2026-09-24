@@ -1059,7 +1059,7 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 | `SwaggerRoutes` | Version-pinned Swagger UI viewer for the app's OpenAPI document (opt-in via `@include docs = SwaggerRoutes(; spec_url="/openapi")`) — see [OpenAPI](#openapi) |
 | `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
 | `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
-| `RuntimeRoutes`  | Dev dashboard of in-flight and past requests with timings, and long-running jobs — see [Runtime dashboard](#runtime-dashboard) |
+| `RuntimeRoutes`  | Dev dashboard of in-flight and past requests with timings, and live job boards — see [Runtime dashboard](#runtime-dashboard) |
 | `RecordingRoutes`| Static-recording driver (see Gallery section) |
 
 ### OpenAPI
@@ -1118,20 +1118,27 @@ what it did recently:
 end
 ```
 
-- **Running jobs** — every operation that outlived the `:auto` grace period and
-  continued in the background while its client polled: how long it has been
-  running, how many requests started or joined the same computation, how many
-  polls it answered, when a client last looked at it, and its live progress
-  tree. A job nobody has polled for ten seconds is flagged *unwatched*: its
-  page is gone, but the computation keeps running.
+- **Running jobs** — a live Treebars board of every operation execution that
+  outlived the `:auto` grace period, whether it continued in the background
+  while its client polled or answered inline (POST/PUT/PATCH/DELETE,
+  `OperationPolicy(:blocking)`, `@fresh` routes, declared `HTTP.Response` /
+  `MIMEResponse` outputs, plain GETs without a page shell), plus work reported
+  through `track_job!`: how long it has been running, how many requests
+  started or joined the same computation, how many polls it answered, when a
+  client last looked at it, and its live progress tree. The board polls
+  `GET /runtime/jobs` and updates in place: new jobs appear, an expanded tree
+  stays expanded, a finished job shows its outcome and leaves, and durations
+  tick between polls; its *Pause* freezes it. A job nobody has polled for ten
+  seconds is flagged *unwatched*: its page is gone, but the computation keeps
+  running.
 - **In-flight requests** — with their current age, request kind (page, HTMX,
   poll, WebSocket, SSE — the last two stay in flight for the life of the
   connection), the transport the operation layer chose, the matched route
   pattern and the thread pool handling them.
 - **Route timings** — request count, errors, p50/p95/max and total handling
   time per route over the recorded history.
-- **Recent jobs** and **recent requests** — bounded histories with durations,
-  outcomes and frozen progress trees.
+- **Recent jobs** (a board too, newest first) and **recent requests** —
+  bounded histories with durations, outcomes and frozen progress trees.
 - A process line: thread-pool sizes, running jobs against `:default` threads
   (highlighted when jobs outnumber compute threads and are time-sharing it),
   heap, GC time and free memory.
@@ -1140,15 +1147,21 @@ The view refreshes itself every two seconds (`RuntimeRoutes(; refresh="5s")`
 to change; *Pause* stops it), `GET /runtime/snapshot` serves the same data as
 JSON, and `POST /runtime/clear` forgets the history. The dashboard's routes are
 `@fresh`, so they render inline on the request's own task and never queue
-behind a saturated compute pool; its own requests are left out of the history.
+behind a saturated compute pool; its own requests and executions are left out
+of what it shows.
 
 Recording is independent of the server. Requests are recorded by
 [`track_requests`](@ref), a plain HTTP.jl middleware
 (`handler -> req -> response`) that `serve` installs outside its `middleware` by default
 (`serve(; runtime_tracking=false)` opts out) and that any HTTP.jl server stack
 can compose directly, e.g. `HTTP.serve(track_requests(router), host, port)`.
-Jobs are recorded by HTMXObjects' own operation layer at the point where an
-operation crosses the grace boundary, whatever server delivered the request.
+Jobs are recorded by HTMXObjects' own operation layer, whatever server
+delivered the request: every execution is registered when it starts and shown
+once it outlives the grace period, and one that crosses it as a poller is
+handed to a watcher that stamps its outcome. A hand-rolled
+`Treebars.polling_fetchindex` poller reports its compute through
+[`track_job!`](@ref) by itself; call `track_job!` directly for other work you
+start — an app's `Threads.@spawn`, a warm-up task.
 Both ledgers are bounded (`configure_runtime!(; history_limit,
 job_history_limit)`), process-local, and hold no headers, cookies or bodies;
 request targets are stored with operation/page-load tokens and
@@ -1158,9 +1171,44 @@ job rather than stored as requests (`record_polls=true` keeps them).
 Like `TestRoutes`, this is a development surface: mount it only where
 developers can reach it.
 
+#### Job boards on app pages
+
+The same data drives per-user boards. [`runtime_jobs`](@ref) returns the jobs
+as plain rows with their progress nodes; [`jobs_board`](@ref) renders them as a
+live board (a Treebars board when Treebars is loaded, else a plain list) that
+polls a route of your choice:
+
+```julia
+@htmx struct MyApp
+    "Your running jobs"
+    @fresh @get my_jobs() = jobs_board(; mine=__req__,
+                                       poll_url=query_url(__self__ / "my_jobs"))
+end
+```
+
+`mine=req` shows only the jobs started under the requesting session: jobs
+record the scope of the [`RootProvider`](@ref) that served them and a salted,
+in-process digest of its key (never the key itself), and a board matches
+requests with the same `:session`/`:job` scope and key. Other sessions' jobs
+never show unless the caller opts into the global view with `all=true`, as the
+developer dashboard does. With the default `:request`-scoped provider every
+request is its own session, so per-session boards need a session-scoped
+provider. Serve the board from an `@fresh` route so it never queues behind the
+work it shows.
+
+Known limits: the ledgers are process-local and in memory, so they are empty
+after a restart and per process in a multi-process deployment; an operation
+that finishes within the grace period is a request, not a job; and a job has no
+progress tree when DynamicObjects produced no substatus for it (an uncached
+`@fresh` route) or Treebars is not loaded. Work started outside any request is
+only visible when reported through `track_job!`.
+
 ```@docs
 RuntimeRoutes
 runtime_dashboard
+runtime_jobs
+jobs_board
+track_job!
 track_requests
 runtime_snapshot
 runtime_tracker

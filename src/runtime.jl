@@ -5,15 +5,24 @@
 # - requests: every request that passes through `track_requests` — in flight
 #   (with a ticking age) and a bounded history of finished ones with their
 #   handling time, status, matched route and execution mode;
-# - jobs: every operation that crossed the `:auto` grace boundary and became a
-#   poller (or a deferred direct-page load) — running, and a bounded history of
-#   finished ones with wall time, outcome and the frozen progress tree.
+# - jobs: every operation execution that outlives the `:auto` grace period —
+#   polled, deferred direct-page loads and blocking/inline ones alike — plus
+#   work reported through `track_job!` (hand-rolled Treebars pollers, app
+#   tasks): queued/running, and a bounded history of finished ones with wall
+#   time, outcome and the frozen progress tree.
 #
 # Neither ledger depends on the server. `track_requests` is a plain HTTP.jl
 # middleware (`handler -> req -> response`), so any server that composes
 # HTTP.jl handlers can install it; `serve` puts it in its own request pipeline.
-# Jobs are recorded by HTMXObjects' own operation layer (`_retain_operation!`),
-# not by the server.
+# Jobs are recorded by HTMXObjects' own operation layer (`_execute_operation`
+# registers every execution at start, `_retain_operation!` hands polled ones
+# to a watcher), not by the server.
+#
+# Known limits: the ledgers are process-local and in memory — empty after a
+# restart, and per process in a multi-process deployment. An operation that
+# finishes within the grace period is a request, not a job. A job has no
+# progress tree when DynamicObjects produced no substatus for it (an uncached
+# `@fresh` route) or Treebars is not loaded.
 #
 # The ledgers are bounded and hold no request headers, cookies or bodies, and
 # request targets are redacted before storage: HTMXObjects' operation and
@@ -54,13 +63,18 @@ end
 """
     RuntimeJob
 
-One long-running operation: a route execution that outlived the `:auto` grace
-period and continued in the background while clients polled it. `state` is
-`:running`, `:done` or `:failed`; `duration` is `NaN` while running. `requests`
-counts the requests that started or joined the same computation, `polls` the
-follow-up polls it answered. `progress` is the operation's progress node
-(a Treebars tree when Treebars is loaded), kept after completion so history
-shows per-phase timings.
+One job: a route execution that outlived the `:auto` grace period (whether it
+continued in the background while clients polled it or answered inline), or
+work reported through [`track_job!`](@ref). `state` is `:queued`, `:running`,
+`:done` or `:failed`; `duration` is `NaN` until it finishes. `requests` counts
+the requests that started or joined the same computation, `polls` the
+follow-up requests it answered. `progress` is the job's progress node (a
+Treebars tree when Treebars is loaded), kept after completion so history shows
+per-phase timings. `scope` is the root-provider scope of the operation that
+started it (`:request`, `:session`, `:job`, or `:none` outside any operation);
+the provider key itself is only kept as a salted in-process digest, used to
+match [`jobs_board`](@ref)'s `mine` filter. `position` is the queue position of
+a `:queued` job (`0` otherwise).
 """
 mutable struct RuntimeJob
     id::Int
@@ -77,6 +91,12 @@ mutable struct RuntimeJob
     last_seen_ns::UInt64
     handle::Any
     progress::Any
+    scope::Symbol
+    session::UInt
+    position::Int
+    hidden::Bool
+    watched::Bool
+    source::Any
 end
 
 """
@@ -379,10 +399,14 @@ _runtime_note_route!(req, method, path) =
     _runtime_hide_request!(req)
 
 Exclude a request from the history — used by the dashboard's own routes so
-watching the server does not bury what it is watching.
+watching the server does not bury what it is watching. The job the request
+started, if any, is hidden with it.
 """
-_runtime_hide_request!(req) =
-    _runtime_annotate!(record -> (record.hidden = true), req)
+_runtime_hide_request!(req) = _runtime_annotate!(req) do record
+    record.hidden = true
+    job = get(_runtime_tracker_of(req).running, record.job, nothing)
+    job isa RuntimeJob && (job.hidden = true)
+end
 
 _runtime_note_mode!(req, mode::Symbol) =
     _runtime_annotate!(record -> (record.mode = mode), req)
@@ -394,7 +418,52 @@ _runtime_note_error!(req, err, uid) = _runtime_annotate!(req) do record
     record.error = string(_runtime_error_summary(err), " [error ", uid, "]")
 end
 
+# --- sessions --------------------------------------------------------------
+
+# Which session a job belongs to, for `jobs_board(; mine=req)`: the scope of
+# the root provider that served the operation, and a digest of its key. The
+# key itself (often a session cookie value) is never stored; the digest is
+# salted per process and never leaves it — it is not part of any row.
+const _RUNTIME_SESSION_KEY = :htmxo_runtime_session
+const _RUNTIME_SESSION_SALT = Ref{UInt}(0)
+const _RUNTIME_NO_SESSION = (:none, UInt(0))
+
+function _runtime_session_salt()
+    salt = _RUNTIME_SESSION_SALT[]
+    salt == 0 || return salt
+    _RUNTIME_SESSION_SALT[] = rand(Random.RandomDevice(), UInt)
+end
+
+# A `:request`-scoped operation has no session beyond its own request, so it
+# never matches `mine`.
+function _runtime_session(context)
+    context isa OperationContext || return _RUNTIME_NO_SESSION
+    context.scope === :request && return (:request, UInt(0))
+    (context.scope, hash((context.scope, context.key), _runtime_session_salt()))
+end
+
+# Called where the operation layer builds a request's `OperationContext`,
+# before any route code runs: the request then carries its session identity
+# to `track_job!` and `jobs_board(; mine=req)`.
+_runtime_note_session!(req::HTTP.Request, context) = _runtime_guarded("session") do
+    req.context[_RUNTIME_SESSION_KEY] = _runtime_session(context)
+end
+_runtime_note_session!(_, _) = nothing
+
+_runtime_session_of(req::HTTP.Request) =
+    get(req.context, _RUNTIME_SESSION_KEY, _RUNTIME_NO_SESSION)::Tuple{Symbol,UInt}
+_runtime_session_of(context::OperationContext) = _runtime_session(context)
+_runtime_session_of(_) = _RUNTIME_NO_SESSION
+
+_runtime_same_session(j::RuntimeJob, (scope, session)) =
+    session != 0 && j.scope === scope && j.session == session
+
 # --- jobs ------------------------------------------------------------------
+
+# An operation is a job once it outlives the `:auto` grace period (see
+# `_operation_grace_period`): every execution is registered at start, shown once
+# it is older than this, and forgotten if it finishes sooner.
+const _RUNTIME_JOB_GRACE = 0.1
 
 # Identity of the computation behind a handle. Two requests that join the same
 # in-flight DynamicObjects compute (a retained root, or a second poll-heal of a
@@ -411,13 +480,130 @@ function _runtime_handle_key(handle)
     end
 end
 
+_runtime_link_request!(tracker::RuntimeTracker, record, job::RuntimeJob) =
+    record isa RuntimeRequest && haskey(tracker.inflight, record.id) &&
+        (record.job = job.id)
+
+# Create and register a job. The caller holds `tracker.lock`.
+function _runtime_new_job!(tracker::RuntimeTracker, label, record, req;
+        scope::Symbol, session::UInt, handle=nothing, progress=nothing,
+        source=nothing, now_ns::UInt64=time_ns())
+    tracker.next_job += 1
+    tracker.total_jobs += 1
+    started_at, started_ns = record isa RuntimeRequest ?
+        (record.started_at, record.started_ns) : (time(), now_ns)
+    target = record isa RuntimeRequest ? record.target :
+             req isa HTTP.Request ? _runtime_redact_target(req.target) : ""
+    route = record isa RuntimeRequest ? record.route : ""
+    hidden = record isa RuntimeRequest && record.hidden
+    job = RuntimeJob(tracker.next_job, string(label), route, target, :running,
+        started_at, started_ns, NaN, "", 1, 0, now_ns, handle, progress,
+        scope, session, 0, hidden, false, source)
+    tracker.running[job.id] = job
+    _runtime_link_request!(tracker, record, job)
+    job
+end
+
+"""
+    _runtime_operation_started!(req, descriptor, name, context, prop, keys, call_kwargs)
+
+Register one operation execution as a job at its start — every transport
+(`:blocking`, `:polling`, `:page_load`), so inline work is visible too. The job
+shows once it outlives the grace period; `_runtime_operation_finished!` ends it
+when the execution returns, unless the execution was retained as a poller, in
+which case `_retain_operation!` hands it to a watcher. `source` lets the
+dashboard read an inline execution's progress node lazily while it runs.
+WebSocket and SSE routes are skipped: their body runs after the operation, for
+the life of the connection.
+"""
+function _runtime_operation_started!(req, descriptor, name::Symbol, context,
+        prop, keys, call_kwargs; leaf=nothing)
+    req isa HTTP.Request || return nothing
+    context isa OperationContext && context.transport !== :http && return nothing
+    _runtime_untracked(leaf) && return nothing
+    tracker = _runtime_tracker_of(req)
+    tracker.enabled || return nothing
+    label = _runtime_operation_label(descriptor, name)
+    scope, session = _runtime_session(context)
+    record = _runtime_record(req)
+    lock(tracker.lock) do
+        _runtime_new_job!(tracker, label, record, req; scope, session,
+                          source=(prop, keys, call_kwargs))
+    end
+end
+
+"""
+    _runtime_operation_finished!(req, job, err)
+
+End a job registered by `_runtime_operation_started!` when its execution
+returns (`err === nothing`) or throws. A job retained as a poller belongs to
+its watcher and one merged into an already-tracked computation is gone; both
+are left alone. An execution that finished within the grace period was a
+request, not a job, and is forgotten.
+"""
+function _runtime_operation_finished!(req, job, err)
+    job isa RuntimeJob || return nothing
+    tracker = _runtime_tracker_of(req)
+    finished_ns = time_ns()
+    # Take the tree into the history while DynamicObjects can still resolve it
+    # (not for a quick execution: it is about to be forgotten).
+    quick = _runtime_elapsed(job.started_ns, finished_ns) < _RUNTIME_JOB_GRACE
+    node = job.watched || quick ? nothing : _runtime_lazy_progress(job.source)
+    record = _runtime_record(req)
+    lock(tracker.lock) do
+        (job.watched || get(tracker.running, job.id, nothing) !== job) && return nothing
+        delete!(tracker.running, job.id)
+        job.duration = _runtime_elapsed(job.started_ns, finished_ns)
+        job.state = err === nothing ? :done : :failed
+        err === nothing || (job.error = _runtime_error_summary(err))
+        job.source = nothing
+        job.progress === nothing && (job.progress = node)
+        hidden = job.hidden || (record isa RuntimeRequest && record.hidden)
+        if hidden || job.duration < _RUNTIME_JOB_GRACE
+            tracker.total_jobs -= 1
+            record isa RuntimeRequest && record.job == job.id && (record.job = 0)
+            return nothing
+        end
+        if tracker.job_history_limit > 0
+            push!(tracker.finished, job)
+            _runtime_trim!(tracker.finished, tracker.job_history_limit)
+        end
+    end
+    nothing
+end
+
+# Routes whose executions are never jobs: the runtime dashboard's own, which
+# must not show up in what they display (its first, compile-bound requests
+# would otherwise outlive the grace period before the body can hide itself).
+_runtime_untracked(_) = false
+
+# Run `f` as an operation execution: registered at start, ended on return or
+# throw. Tracking is guarded: a ledger failure never affects the operation.
+function _with_runtime_job(f, req, descriptor, name, context, prop, keys,
+        call_kwargs; leaf=nothing)
+    job = _runtime_guarded("job start") do
+        _runtime_operation_started!(req, descriptor, name, context, prop, keys,
+                                    call_kwargs; leaf)
+    end
+    value = try
+        f(job)
+    catch err
+        _runtime_guarded(() -> _runtime_operation_finished!(req, job, err), "job finish")
+        rethrow()
+    end
+    _runtime_guarded(() -> _runtime_operation_finished!(req, job, nothing), "job finish")
+    value
+end
+
 """
     _retain_operation!(entry, descriptor, name)
 
 Retain a polling operation (see `_retain_operation_poll!`) and record it as a
 long-running job. Every path where an operation crosses the grace boundary —
 the polling transport, a deferred direct-page load, a healed poll — retains
-through here.
+through here. The job registered when the execution started (`entry.job`) is
+handed to a watcher, or merged into the job already tracking the same
+computation.
 """
 function _retain_operation!(entry::_OperationPollEntry, descriptor, name::Symbol)
     _retain_operation_poll!(entry)
@@ -448,40 +634,104 @@ function _runtime_job_started!(tracker::RuntimeTracker, entry, label)
     catch
         nothing
     end
+    own = entry.job
     job, fresh = lock(tracker.lock) do
-        existing = get(tracker.by_handle, key, 0)
-        job = get(tracker.running, existing, nothing)
-        if job isa RuntimeJob
-            job.requests += 1
-            job.last_seen_ns = now_ns
-            job.progress === nothing && (job.progress = progress)
-            fresh = false
-        else
-            tracker.next_job += 1
-            tracker.total_jobs += 1
-            started_at, started_ns = record isa RuntimeRequest ?
-                (record.started_at, record.started_ns) : (time(), now_ns)
-            target = record isa RuntimeRequest ? record.target :
-                     _runtime_redact_target(req.target)
-            route = record isa RuntimeRequest ? record.route : ""
-            job = RuntimeJob(tracker.next_job, string(label),
-                route, target, :running, started_at, started_ns, NaN, "", 1, 0,
-                now_ns, handle, progress)
-            tracker.running[job.id] = job
-            tracker.by_handle[key] = job.id
-            fresh = true
+        mine = own isa RuntimeJob && !own.watched &&
+               get(tracker.running, own.id, nothing) === own ? own : nothing
+        existing = get(tracker.running, get(tracker.by_handle, key, 0), nothing)
+        if existing isa RuntimeJob && existing !== mine
+            # This execution joined a computation that is already a job.
+            existing.requests += 1
+            existing.last_seen_ns = now_ns
+            existing.progress === nothing && (existing.progress = progress)
+            if mine !== nothing
+                delete!(tracker.running, mine.id)
+                tracker.total_jobs -= 1
+            end
+            _runtime_link_request!(tracker, record, existing)
+            return existing, false
         end
-        if record isa RuntimeRequest && haskey(tracker.inflight, record.id)
-            record.job = job.id
-        end
-        job, fresh
+        scope, session = _runtime_session_of(req)
+        job = mine === nothing ?
+            _runtime_new_job!(tracker, label, record, req; scope, session, now_ns) : mine
+        job.handle = handle
+        job.watched = true
+        job.last_seen_ns = now_ns
+        progress === nothing || (job.progress = progress)
+        tracker.by_handle[key] = job.id
+        _runtime_link_request!(tracker, record, job)
+        job, true
     end
     fresh && _runtime_watch_job!(tracker, job, key, handle)
     nothing
 end
 
-# One lightweight watcher per job: wait for the computation (following nested
-# `Pending`s — a route may finish by returning another one), then stamp the
+"""
+    track_job!(handle; label=nothing, progress=nothing, req=nothing, tracker=nothing) -> Int
+
+Record work that HTMXObjects' operation layer did not start as a job, so it
+shows on the runtime dashboard and on [`jobs_board`](@ref)s: a compute behind a
+hand-rolled `Treebars.polling_fetchindex` poller (which calls this itself), an
+app's `Threads.@spawn`, a warm-up task. `handle` is the in-flight work — a
+DynamicObjects `Pending`, a `Task`, or anything `fetch` waits on — and a watcher
+stamps its outcome (`:done`, or `:failed` with the error's summary) when it
+resolves. `progress` is its progress node (a Treebars tree), `label` its name
+(default `"Job"`).
+
+Pass the request the work belongs to as `req`: the job then records that
+request's route and redacted target, joins its session for
+`jobs_board(; mine=req)`, and lands in the tracker that recorded the request
+(else `tracker`, else [`runtime_tracker`](@ref)). Calling `track_job!` again for
+the same in-flight computation — a follow-up poll — counts a poll on the
+existing job instead of adding one. Returns the job id (`0` when not tracked).
+Tracking never throws: a ledger failure is logged once and ignored.
+"""
+function track_job!(handle; label=nothing, progress=nothing, req=nothing,
+        tracker=nothing)
+    t = tracker isa RuntimeTracker ? tracker : _runtime_tracker_of(req)
+    id = _runtime_guarded("track_job!") do
+        _runtime_track_job!(t, handle, label, progress, req)
+    end
+    something(id, 0)
+end
+
+function _runtime_track_job!(tracker::RuntimeTracker, handle, label, progress, req)
+    tracker.enabled || return 0
+    handle === nothing && return 0
+    key = _runtime_handle_key(handle)
+    record = _runtime_record(req)
+    scope, session = _runtime_session_of(req)
+    now_ns = time_ns()
+    job, fresh = lock(tracker.lock) do
+        existing = get(tracker.running, get(tracker.by_handle, key, 0), nothing)
+        if existing isa RuntimeJob
+            existing.polls += 1
+            existing.last_seen_ns = now_ns
+            existing.progress === nothing && (existing.progress = progress)
+            _runtime_link_request!(tracker, record, existing)
+            return existing, false
+        end
+        job = _runtime_new_job!(tracker, something(label, "Job"), record, req;
+                                scope, session, handle, progress, now_ns)
+        job.watched = true
+        tracker.by_handle[key] = job.id
+        job, true
+    end
+    fresh && _runtime_watch_job!(tracker, job, key, handle)
+    job.id
+end
+
+# Wait for a job's work, following nested `Pending`s (a route may finish by
+# returning another one) and tasks. Anything else is waited on once.
+function _runtime_await(handle)
+    value = handle isa Union{DynamicObjects.Pending,Task} ? handle : fetch(handle)
+    while value isa Union{DynamicObjects.Pending,Task}
+        value = fetch(value)
+    end
+    nothing
+end
+
+# One lightweight watcher per job: wait for the computation, then stamp the
 # outcome. It runs on the interactive pool when there is one, so a saturated
 # `:default` pool — the situation the dashboard exists to diagnose — does not
 # delay the finish timestamp. The watcher never renders or retains the value.
@@ -490,12 +740,10 @@ function _runtime_watch_job!(tracker::RuntimeTracker, job::RuntimeJob, key, hand
         state = :done
         failure = ""
         try
-            value = handle
-            while value isa DynamicObjects.Pending
-                value = fetch(value)
-            end
+            _runtime_await(handle)
         catch err
             state = :failed
+            err isa TaskFailedException && (err = err.task.exception)
             failure = _runtime_error_summary(err)
         end
         _runtime_job_finish!(tracker, job, key, state, failure)
@@ -513,11 +761,13 @@ function _runtime_job_finish!(tracker::RuntimeTracker, job::RuntimeJob, key,
     lock(tracker.lock) do
         job.state = state
         job.error = failure
+        job.position = 0
         job.duration = _runtime_elapsed(job.started_ns, finished_ns)
         job.handle = nothing
+        job.source = nothing
         delete!(tracker.running, job.id)
         get(tracker.by_handle, key, 0) == job.id && delete!(tracker.by_handle, key)
-        if tracker.job_history_limit > 0
+        if !job.hidden && tracker.job_history_limit > 0
             push!(tracker.finished, job)
             _runtime_trim!(tracker.finished, tracker.job_history_limit)
         end
@@ -553,6 +803,19 @@ function _runtime_count_poll!(req, handle)
     nothing
 end
 
+# A job's progress node when only its source is known: an inline execution
+# still running on its request task, read lazily from DynamicObjects. Called
+# outside the tracker lock.
+function _runtime_lazy_progress(source)
+    source === nothing && return nothing
+    prop, keys, call_kwargs = source
+    try
+        DynamicObjects.getstatus(prop, keys...; call_kwargs...)
+    catch
+        nothing
+    end
+end
+
 # --- snapshots -------------------------------------------------------------
 
 _runtime_request_row(r::RuntimeRequest, now_ns::UInt64) = (;
@@ -562,13 +825,21 @@ _runtime_request_row(r::RuntimeRequest, now_ns::UInt64) = (;
     duration=isnan(r.duration) ? _runtime_elapsed(r.started_ns, now_ns) : r.duration,
     running=isnan(r.duration), status=r.status, error=r.error)
 
+_runtime_job_active(j::RuntimeJob) = j.state === :queued || j.state === :running
+
 _runtime_job_row(j::RuntimeJob, now_ns::UInt64) = (;
     id=j.id, label=j.label, route=j.route, target=j.target, state=j.state,
     started_at=j.started_at,
     duration=isnan(j.duration) ? _runtime_elapsed(j.started_ns, now_ns) : j.duration,
     requests=j.requests, polls=j.polls,
-    idle=j.state === :running ? _runtime_elapsed(j.last_seen_ns, now_ns) : 0.0,
-    error=j.error)
+    idle=_runtime_job_active(j) ? _runtime_elapsed(j.last_seen_ns, now_ns) : 0.0,
+    error=j.error, scope=j.scope, position=j.position)
+
+# A queued or running job shows once it is older than the grace period (it was
+# registered at the start of an execution that may still answer inline); the
+# dashboard's own work never shows.
+_runtime_job_visible(j::RuntimeJob, now_ns::UInt64) = !j.hidden &&
+    (!_runtime_job_active(j) || _runtime_elapsed(j.started_ns, now_ns) >= _RUNTIME_JOB_GRACE)
 
 function _runtime_quantile(sorted::AbstractVector{Float64}, p::Real)
     isempty(sorted) && return NaN
@@ -615,9 +886,11 @@ A consistent copy of the tracker's state as plain data:
 - `inflight` — requests still being handled, oldest first, with their
   current age as `duration`;
 - `history` — finished requests, newest first;
-- `running` / `finished` — long-running jobs (finished newest first); a running
-  job's `idle` is the time since a request last started, joined or polled it,
-  so a large `idle` means nobody is watching it any more;
+- `running` / `finished` — jobs, oldest running first, newest finished first
+  (queued jobs are listed with the running ones); a running job's `idle` is the
+  time since a request last started, joined or polled it, so a large `idle`
+  means nobody is watching it any more. Progress nodes are not included — see
+  [`runtime_jobs`](@ref);
 - `routes` — per-route count, error count (5xx, or a route error rendered as
   an HTMX fragment), p50/p95/max and total handling time over the request
   history, busiest first;
@@ -632,8 +905,8 @@ function runtime_snapshot(tracker::RuntimeTracker=runtime_tracker())
         (sort!([_runtime_request_row(r, now_ns) for r in values(tracker.inflight) if !r.hidden];
                by=r -> r.started_at),
          [_runtime_request_row(r, now_ns) for r in Iterators.reverse(tracker.history)],
-         sort!([_runtime_job_row(j, now_ns) for j in values(tracker.running)];
-               by=j -> j.started_at),
+         sort!([_runtime_job_row(j, now_ns) for j in values(tracker.running)
+                if _runtime_job_visible(j, now_ns)]; by=j -> j.started_at),
          [_runtime_job_row(j, now_ns) for j in Iterators.reverse(tracker.finished)])
     end
     (; inflight, history, running, finished,
@@ -641,20 +914,74 @@ function runtime_snapshot(tracker::RuntimeTracker=runtime_tracker())
        process=_runtime_process_row(tracker, length(running)))
 end
 
-# Progress trees for the dashboard, looked up by job id under the lock and
-# rendered outside it.
-function _runtime_job_progress(tracker::RuntimeTracker, id::Int)
-    lock(tracker.lock) do
-        job = get(tracker.running, id, nothing)
-        job isa RuntimeJob && return job.progress
-        idx = findfirst(j -> j.id == id, tracker.finished)
-        idx === nothing ? nothing : tracker.finished[idx].progress
+const _RUNTIME_JOB_STATES = (:queued, :running, :done, :failed)
+
+"""
+    runtime_jobs(tracker=runtime_tracker(); states=(:queued, :running),
+                 filter=nothing, mine=nothing, recent=Inf) -> Vector{NamedTuple}
+
+The tracker's jobs in `states` (any of `:queued`, `:running`, `:done`,
+`:failed`) as plain rows, oldest first, each with its progress node:
+
+`(; id, label, route, target, state, started_at, duration, requests, polls,
+idle, error, scope, position, progress)`
+
+— `duration` is the time so far for a queued/running job and the wall time of
+a finished one, `idle` the time since a request last started, joined or polled
+a running job, `position` a queued job's queue position, and `progress` its
+progress node (a Treebars tree, or `nothing`). The jobs are selected under the
+tracker lock; progress nodes are handed out as they are, for rendering outside
+it. A running inline execution's node is read from DynamicObjects on demand.
+
+- `filter(row) -> Bool` keeps only matching rows.
+- `mine` — a request (or `OperationContext`): only jobs started under the same
+  root-provider session, i.e. by an operation whose `:session`/`:job` scope and
+  key match. With the default `:request`-scoped provider every request is its
+  own session, so nothing matches. `nothing` (the default) is the global view.
+- `recent` — finished jobs are included only if they finished within the last
+  `recent` seconds.
+
+Running jobs are listed once they outlive the `:auto` grace period (100 ms);
+shorter executions are requests, not jobs. The ledger is process-local and in
+memory: empty after a restart, and per process in a multi-process deployment.
+"""
+function runtime_jobs(tracker::RuntimeTracker=runtime_tracker();
+        states=(:queued, :running), filter=nothing, mine=nothing, recent::Real=Inf)
+    wanted = states isa Symbol ? (states,) : Tuple(Symbol.(states))
+    for state in wanted
+        state in _RUNTIME_JOB_STATES || throw(ArgumentError(
+            "job states must be among $(_RUNTIME_JOB_STATES) (got $(repr(state)))"))
     end
+    session = mine === nothing ? nothing : _runtime_session_of(mine)
+    now_ns = time_ns()
+    now = time()
+    picked = lock(tracker.lock) do
+        jobs = RuntimeJob[]
+        for j in values(tracker.running)
+            j.state in wanted && _runtime_job_visible(j, now_ns) || continue
+            push!(jobs, j)
+        end
+        for j in tracker.finished
+            j.state in wanted && !j.hidden || continue
+            now - (j.started_at + j.duration) <= recent || continue
+            push!(jobs, j)
+        end
+        session === nothing || filter!(j -> _runtime_same_session(j, session), jobs)
+        sort!(jobs; by=j -> j.id)
+        [(j, _runtime_job_row(j, now_ns), j.progress, j.source) for j in jobs]
+    end
+    rows = NamedTuple[]
+    for (j, row, progress, source) in picked
+        node = progress === nothing ? _runtime_lazy_progress(source) : progress
+        push!(rows, merge(row, (; progress=node)))
+    end
+    # Keep a lazily read node: DynamicObjects keeps it after the compute, but
+    # the job drops its source when it finishes.
+    lock(tracker.lock) do
+        for ((j, _, progress, _), row) in zip(picked, rows)
+            progress === nothing && j.progress === nothing && (j.progress = row.progress)
+        end
+    end
+    filter === nothing ? rows : Base.filter(filter, rows)
 end
 
-# Extension seam: the Treebars extension renders a progress node as its HTML
-# tree. Without Treebars there is no tree to show.
-const _runtime_progress_render_impl = Ref{Any}(node -> nothing)
-
-_runtime_progress_render(node) = node === nothing ? nothing :
-    _runtime_progress_render_impl[](node)

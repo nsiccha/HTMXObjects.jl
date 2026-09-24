@@ -37,7 +37,7 @@ export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
 export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracker,
     runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
-    clear_runtime_history!
+    clear_runtime_history!, runtime_jobs, track_job!, jobs_board
 export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
@@ -4987,6 +4987,7 @@ function _operation_target(provider::RootProvider, RootT, chain::Vector,
         req::HTTP.Request, root_prefix::AbstractString, root_segs::Int,
         transport::Symbol)
     context = _operation_context(provider, req, root_prefix, transport)
+    _runtime_note_session!(req, context)
     root = _provide_root(provider, RootT, context)
     objects = isempty(chain) ? Any[root] : _chain_steps(root, chain, req, root_segs)
     leaf = last(objects)
@@ -5548,7 +5549,15 @@ mutable struct _OperationPollEntry
     request::HTTP.Request
     created_at::Float64
     touched_at::Float64
+    # The runtime job registered when this execution started (see
+    # `_runtime_operation_started!`); retaining hands it to a watcher.
+    job::Any
 end
+
+_OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
+        error_obj, request, created_at, touched_at) =
+    _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
+        error_obj, request, created_at, touched_at, nothing)
 
 const _operation_polls = Dict{String,_OperationPollEntry}()
 
@@ -6164,7 +6173,7 @@ end
 
 function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-        call_kwargs; parent_progress=nothing)
+        call_kwargs; parent_progress=nothing, job=nothing)
     started = _execute_materialization(target, name, verb_inst, idx_vals,
                                        kw_pairs; fetch=identity,
                                        parent_progress=parent_progress,
@@ -6176,7 +6185,7 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
     entry = _OperationPollEntry(
         token, signature, prop, keys, call_kwargs, started,
-        target.leaf, req, now, now)
+        target.leaf, req, now, now, job)
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
@@ -6234,6 +6243,45 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         end
     end
 
+    if mode === :polling &&
+            (_operation_poll_request(req) || _operation_attach_request(req))
+        token = _operation_poll_token(req)
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = isnothing(token) ? nothing :
+            _lookup_operation_poll(token, signature)
+        if entry isa _OperationPollEntry
+            # A resumed poll joins its operation's existing job.
+            return _execute_operation_resume(policy, descriptor, target, name,
+                verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
+        end
+        # Heal: no resumable operation — the token is unknown (a restart
+        # wiped the registry), expired (TTL/LRU), bound to different args
+        # (hx-vals drift), or missing/ambiguous. Re-execute fresh with the
+        # poll request's current args; that computes what a fresh GET would,
+        # so the poll recovers instead of failing.
+        return _with_runtime_job(req, descriptor, name, context, prop, keys,
+                                 call_kwargs; leaf=target.leaf) do job
+            _execute_operation_heal(policy, descriptor, target, name,
+                verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
+                call_kwargs; parent_progress=parent_progress, job)
+        end
+    end
+
+    # Every fresh execution — blocking ones included — is a runtime job from
+    # its start; the ledger shows it once it outlives the grace period.
+    _with_runtime_job(req, descriptor, name, context, prop, keys,
+                      call_kwargs; leaf=target.leaf) do job
+        _execute_operation_fresh(policy, descriptor, target, name, verb_inst,
+            idx_vals, kw_pairs, req, mode, prefix, prop, keys, call_kwargs, job;
+            parent_progress, preloaded, error_obj)
+    end
+end
+
+function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
+        name, verb_inst, idx_vals, kw_pairs, req, mode::Symbol, prefix, prop,
+        keys, call_kwargs, job; parent_progress=nothing, preloaded=nothing,
+        error_obj=target.leaf)
     if mode === :page_load
         # A direct rich-page visit spends the same grace budget an HTMX request
         # would: a fast operation renders inline in the shell — one response,
@@ -6258,32 +6306,11 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
-            error_obj, req, now, now)
+            error_obj, req, now, now, job)
         _retain_operation!(entry, descriptor, name)
         return _operation_page_load(
             req, prefix; replace_terminal=!_operation_treebars_keep(policy),
             poll_token=token)
-    end
-
-    if mode === :polling &&
-            (_operation_poll_request(req) || _operation_attach_request(req))
-        token = _operation_poll_token(req)
-        signature = _operation_poll_signature(
-            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
-        entry = isnothing(token) ? nothing :
-            _lookup_operation_poll(token, signature)
-        if entry isa _OperationPollEntry
-            return _execute_operation_resume(policy, descriptor, target, name,
-                verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
-        end
-        # Heal: no resumable operation — the token is unknown (a restart
-        # wiped the registry), expired (TTL/LRU), bound to different args
-        # (hx-vals drift), or missing/ambiguous. Re-execute fresh with the
-        # poll request's current args; that computes what a fresh GET would,
-        # so the poll recovers instead of failing.
-        return _execute_operation_heal(policy, descriptor, target, name,
-            verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-            call_kwargs; parent_progress=parent_progress)
     end
 
     # Decide the transport BEFORE starting the work, and start it the way that
@@ -6311,7 +6338,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
-            error_obj, req, now, now)
+            error_obj, req, now, now, job)
         page_load_id = _operation_page_load_id(req)
         transport = (poll_url=_operation_poll_url(req, token, prefix),
                      label=_operation_poll_label(descriptor, name),
@@ -14283,6 +14310,7 @@ function __init__()
     # Per-process error log dir for caught route exceptions.
     ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
     _clear_operation_polls!()
+    _RUNTIME_SESSION_SALT[] = rand(Random.RandomDevice(), UInt)
     isassigned(_managed_root_release_handler) ||
         (_managed_root_release_handler[] = nothing)
 end

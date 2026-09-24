@@ -10,7 +10,7 @@ Property-based web pages using [DynamicObjects.jl](https://github.com/nsiccha/Dy
 - **`@htmx` struct**: define web-facing objects with derived, indexed, and cached properties
 - **Route markers**: `@get`, `@post`, and other decorators for mapping properties to HTTP endpoints
 - **Static site recording**: capture rendered pages for static deployment
-- **Runtime dashboard**: `RuntimeRoutes` shows in-flight and past requests with their timings, and long-running jobs with their progress (server-agnostic HTTP.jl middleware)
+- **Runtime dashboard**: `RuntimeRoutes` shows in-flight and past requests with their timings, and running jobs as a live board with their progress (server-agnostic HTTP.jl middleware); `jobs_board(; mine=req)` gives app pages a per-session "your running jobs" board
 
 ## Installation
 
