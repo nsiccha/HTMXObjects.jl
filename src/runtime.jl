@@ -9,11 +9,11 @@
 #   poller (or a deferred direct-page load) — running, and a bounded history of
 #   finished ones with wall time, outcome and the frozen progress tree.
 #
-# Neither ledger depends on Oxygen. `track_requests` is a plain HTTP.jl
+# Neither ledger depends on the server. `track_requests` is a plain HTTP.jl
 # middleware (`handler -> req -> response`), so any server that composes
-# HTTP.jl handlers can install it; `serve` currently hands it to Oxygen's
-# middleware chain only because Oxygen is today's server. Jobs are recorded by
-# HTMXObjects' own operation layer (`_retain_operation!`), not by the server.
+# HTTP.jl handlers can install it; `serve` puts it in its own request pipeline.
+# Jobs are recorded by HTMXObjects' own operation layer (`_retain_operation!`),
+# not by the server.
 #
 # The ledgers are bounded and hold no request headers, cookies or bodies, and
 # request targets are redacted before storage: HTMXObjects' operation and
@@ -291,8 +291,14 @@ function track_requests(handler; tracker::RuntimeTracker=runtime_tracker())
                      record.kind === :websocket ? 101 : 200
             return response
         catch err
-            failure = something(_runtime_guarded(
-                () -> _runtime_error_summary(err), "error summary"), "")
+            # A `@ws` route unwinds with `_WebSocketClosed` once its session
+            # ends: the upgrade succeeded, it did not fail.
+            if err isa _WebSocketClosed
+                status = 101
+            else
+                failure = something(_runtime_guarded(
+                    () -> _runtime_error_summary(err), "error summary"), "")
+            end
             rethrow()
         finally
             _runtime_guarded("request finish") do
@@ -652,16 +658,3 @@ const _runtime_progress_render_impl = Ref{Any}(node -> nothing)
 
 _runtime_progress_render(node) = node === nothing ? nothing :
     _runtime_progress_render_impl[](node)
-
-"""
-    _with_runtime_tracking(kwargs, tracker=runtime_tracker())
-
-Prepend [`track_requests`](@ref) to `serve`'s middleware list, outermost, so it
-sees every request the router and serializer produce a response for.
-"""
-function _with_runtime_tracking(kwargs, tracker::RuntimeTracker=runtime_tracker())
-    kw = Dict{Symbol,Any}(kwargs)
-    middleware = handler -> track_requests(handler; tracker)
-    kw[:middleware] = Any[middleware, Base.get(kw, :middleware, [])...]
-    kw
-end

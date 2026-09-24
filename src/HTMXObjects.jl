@@ -57,13 +57,16 @@ import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
 
-import Oxygen
-import Oxygen: formdata
-using Oxygen.Core: ServerContext, register, Nullable
-
 import LibGit2
+import Sockets
 
-const CONTEXT :: Ref{ServerContext} = Ref(ServerContext(; mod=@__MODULE__))
+"""
+    ROUTER
+
+The process-global `HTTP.Router` every `@htmx` route registers on. [`serve`](@ref)
+listens with it; [`dispatch`](@ref) and [`record!`](@ref) call it in-process.
+"""
+const ROUTER = HTTP.Router()
 
 """
     Verb{V}
@@ -119,28 +122,30 @@ _option_wire_string(value) = string(option_wire_value(value))
 
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
-          runtime_tracking=true, kwargs...)
+          middleware=[], access_log=<timed default>, runtime_tracking=true, kwargs...)
 
-Start the HTTP server. Passes all keyword arguments through to `Oxygen.Core.serve`.
-When `async=false` (the default), blocks until interrupted and calls [`terminate`](@ref) on exit.
+Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
+`async=false` (the default), blocks until interrupted and calls
+[`terminate`](@ref) on exit; `async=true` returns the running `HTTP.Server`.
 
-`runtime_tracking=true` (the default) installs [`track_requests`](@ref) as the
-outermost middleware, recording in-flight and finished requests with their
-handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref) dev
-dashboard. Pass `false` to skip it. Long-running operations are recorded as
-jobs either way.
-
-Two defaults differ from Oxygen's: the access log also reports per-request
-handling time (override with `access_log`/`middleware`), and `metrics`
-defaults to `false` — Oxygen 1.10's metrics middleware reads every non-200
-response body into a `String`, which steals a `Vector{UInt8}` body buffer, so
-a 206 media response would go out with headers but zero body bytes and hang
-the client. Pass `metrics=true` to re-enable collection and the
-`/docs/metrics` dashboard.
+- `middleware` — request middleware (`handler -> (req -> response)`), applied
+  outermost first.
+- `access_log` — an `(io, req) -> nothing` formatter written once per request
+  (`req.context[:response]` holds the response), or `nothing` to disable the
+  log. The default line is `time - ip:port - "GET /path HTTP/1.1" 200 12.3ms`.
+- `runtime_tracking=true` (the default) installs [`track_requests`](@ref)
+  outside `middleware`, recording in-flight and finished requests with their
+  handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref)
+  dev dashboard. Pass `false` to skip it. Long-running operations are recorded
+  as jobs either way.
+- `revise` — `:lazy` applies pending Revise revisions before each request;
+  `:eager` also applies them in the background as soon as a file changes. Both
+  need `using Revise` before the app is loaded.
+- Remaining keyword arguments are passed to `HTTP.listen!`.
 
 `parallel` controls request concurrency:
 - `false` — single-threaded (default)
-- `true` — multi-threaded on the `:default` threadpool (Oxygen's `serveparallel`)
+- `true` — multi-threaded on the `:default` threadpool
 - `:interactive` — multi-threaded on the `:interactive` threadpool, leaving `:default`
   free for heavy computation. Launch julia with e.g. `julia -t 8,4` for 8 computation
   threads and 4 request-handling threads.
@@ -152,42 +157,197 @@ with `auto`. To size both pools equally, compute shell-side:
 `parallel=:interactive` is strictly worse than `parallel=false` (same effective
 concurrency, plus extra spawn overhead per request, plus a startup `@warn`).
 """
-function serve(; parallel=false, runtime_tracking::Bool=true, kwargs...)
-    async = Base.get(kwargs, :async, false)
-    kwargs = _with_access_timing(kwargs)
-    runtime_tracking && (kwargs = _with_runtime_tracking(kwargs))
-    _check_docs_prefix_routes(kwargs)
-    serve_kwargs = if parallel === :interactive
+function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
+        revise=nothing, middleware=[], access_log=_timed_access_log,
+        runtime_tracking::Bool=true, kwargs...)
+    kwargs = _drop_oxygen_kwargs(kwargs)
+    revise in (nothing, :none, :lazy, :eager) ||
+        throw(ArgumentError("`revise` must be nothing, :lazy or :eager, got $(repr(revise))"))
+    Revise = revise in (:lazy, :eager) ? _revise_module() : nothing
+    revise in (:lazy, :eager) && Revise === nothing &&
+        error("`serve(; revise=$(repr(revise)))` needs Revise: run `using Revise` before loading the app.")
+
+    tracker = runtime_tracking ? runtime_tracker() : nothing
+    handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker))
+    if parallel === :interactive
         if Threads.nthreads(:interactive) <= 1
             @warn "Only 1 interactive thread available. Launch julia with e.g. \"julia -t 8,4\" to add more interactive threads for request handling."
         end
-        (; handler=_interactive_stream_handler, parallel=false, kwargs...)
-    else
-        (; parallel, kwargs...)
+        handle = _spawning_stream_handler(handle, :interactive)
+    elseif parallel === true
+        if Threads.nthreads() <= 1
+            @warn "`parallel=true` with only 1 thread available. Launch julia with e.g. \"julia -t auto\" to handle requests on several threads."
+        end
+        handle = _spawning_stream_handler(handle, :default)
     end
+
+    server = HTTP.listen!(handle, host, port; kwargs...)
+    _SERVER[] = server
+    revise === :eager && (_EAGER_REVISE_STOP[] = _start_eager_revise(Revise))
+    @info "Serving on http://$host:$port"
+    async && return server
     try
-        return Oxygen.Core.serve(CONTEXT[]; serve_kwargs...)
+        wait(server)
+    catch err
+        err isa InterruptException ||
+            @error "Server stopped" exception=(err, catch_backtrace())
     finally
-        if !async
-            terminate()
+        terminate()
+    end
+    return server
+end
+
+# The server started by `serve`, and the stop flag of its `revise=:eager` task.
+const _SERVER = Ref{Any}(nothing)
+const _EAGER_REVISE_STOP = Ref{Any}(nothing)
+
+"""Stop the HTTP server started by [`serve`](@ref)."""
+function terminate()
+    stop = _EAGER_REVISE_STOP[]
+    stop === nothing || (stop[] = true)
+    _EAGER_REVISE_STOP[] = nothing
+    server = _SERVER[]
+    _SERVER[] = nothing
+    server !== nothing && isopen(server) && close(server)
+    return nothing
+end
+
+# `serve` keywords that only configured Oxygen, which HTMXObjects no longer
+# uses. Warn and drop them rather than fail an existing launch script.
+const _OXYGEN_SERVE_KWARGS = (:docs, :metrics, :show_banner, :serialize,
+    :catch_errors, :show_errors, :docs_path, :schema_path, :external_url,
+    :prefix, :context, :handler)
+
+function _drop_oxygen_kwargs(kwargs)
+    dropped = [k for k in keys(kwargs) if k in _OXYGEN_SERVE_KWARGS]
+    isempty(dropped) && return kwargs
+    @warn "Ignoring `serve` keyword(s) $(join(dropped, ", ")): they configured Oxygen, which HTMXObjects no longer uses."
+    return (; (k => v for (k, v) in pairs(kwargs) if !(k in _OXYGEN_SERVE_KWARGS))...)
+end
+
+# The request pipeline, outermost first: access log → runtime `tracker` →
+# Revise → caller `middleware` → fallback → `ROUTER`.
+function _request_pipeline(middleware, access_log, Revise, tracker=nothing)
+    app = _fallback_middleware(ROUTER)
+    for m in reverse(middleware)
+        app = m(app)
+    end
+    Revise === nothing || (app = _revise_middleware(app, Revise))
+    tracker === nothing || (app = track_requests(app; tracker))
+    access_log === nothing || (app = _access_log_middleware(app, access_log))
+    return app
+end
+
+# Thrown by a `@ws` route once its upgraded session ends. The connection now
+# belongs to the finished WebSocket, so no HTTP response may be written: the
+# exception unwinds the request pipeline and `_stream_handler` swallows it.
+struct _WebSocketClosed <: Exception end
+
+# Innermost middleware. `@htmx` routes always return an `HTTP.Response`; this
+# coerces anything else a hand-registered handler returns, and turns an
+# escaped exception into a logged 500 instead of a dropped connection.
+function _fallback_middleware(handler)
+    function (req::HTTP.Request)
+        try
+            response = handler(req)
+            return response isa HTTP.Response ? response : to_response(response)
+        catch err
+            err isa _WebSocketClosed && rethrow()
+            @error "Unhandled error serving $(req.method) $(req.target)" exception=(err, catch_backtrace())
+            body = "500: Internal Server Error"
+            return HTTP.Response(500, ["Content-Type" => "text/plain; charset=utf-8",
+                                       "Content-Length" => string(sizeof(body))], body)
         end
     end
 end
 
-# --- Access-log request timing ---------------------------------------------
-# `serve` installs, by default, a middleware that stamps each request's start
-# time plus a custom access-log line that appends the elapsed handling time.
-# The dependency-provided log format has no duration token and records no
-# request-start, so the two pieces are required together. A caller can override
-# either by passing their own `middleware` / `access_log` to `serve` — both are
-# respected.
+# `revise=:lazy`/`:eager`: apply pending revisions before handling a request,
+# then call into the newest world so the revised methods run.
+function _revise_middleware(handler, Revise)
+    function (req::HTTP.Request)
+        isempty(Revise.revision_queue) || Revise.revise()
+        return Base.invokelatest(handler, req)
+    end
+end
 
-# Oxygen 1.11 moved access logging out of HTTP.jl and exposes its vendored
-# `oxygen_logfmt`; Oxygen 1.10 still delegates to HTTP 1.x's formatter. Calling
-# HTTP 1.x's `@logfmt_str` from this module is not hygienic on Windows: its
-# expansion contains an unqualified `dateformat"..."` macro, which is resolved
-# in the caller and breaks a fresh HTMXObjects precompile. Keep the small
-# Oxygen-compatible HTTP 1.x format local instead.
+# `revise=:eager`: revise as soon as Revise sees a file change instead of on the
+# next request. Returns the flag `terminate` sets to stop the task.
+function _start_eager_revise(Revise)
+    stop = Ref(false)
+    errormonitor(@async while true
+        wait(Revise.revision_event)
+        reset(Revise.revision_event)
+        stop[] && break
+        Revise.revise()
+    end)
+    return stop
+end
+
+# Stream-level entry point: exposes the raw stream to the request pipeline (a
+# WebSocket upgrade needs it) and hands off to HTTP.jl's request adapter.
+function _stream_handler(app)
+    function (stream::HTTP.Stream)
+        handle = HTTP.streamhandler(function (req::HTTP.Request)
+            req.context[:stream] = stream
+            return app(req)
+        end)
+        try
+            handle(stream)
+        catch err
+            err isa _WebSocketClosed || rethrow()
+        end
+        return nothing
+    end
+end
+
+# `parallel=true`/`:interactive`: handle each request on a task spawned on `pool`.
+_spawning_stream_handler(handle, pool::Symbol) =
+    stream -> wait(Threads.@spawn pool handle(stream))
+
+# --- Access log ------------------------------------------------------------
+
+function _access_log_middleware(handler, format)
+    function (req::HTTP.Request)
+        req.context[:t0] = time()
+        response = nothing
+        try
+            response = handler(req)
+            return response
+        catch err
+            err isa _WebSocketClosed && (response = HTTP.Response(101))
+            rethrow()
+        finally
+            req.context[:response] = something(response, HTTP.Response(500))
+            try
+                @info sprint(format, req) _group=:access
+            catch err
+                @warn "`access_log` formatter failed" exception=(err, catch_backtrace())
+            end
+        end
+    end
+end
+
+"""
+    _timed_access_log(io, req)
+
+Default `access_log` formatter: `time - ip:port - "METHOD target HTTP/x.y" status`
+followed by the request's handling time with SI units (e.g. ` 78.9ms`,
+` 1.23s`, ` 5.0min`).
+"""
+function _timed_access_log(io::IO, req::HTTP.Request)
+    response = Base.get(req.context, :response, nothing)
+    print(io,
+        _access_log_timestamp(), " - ",
+        _peer_string(Base.get(req.context, :stream, nothing)), " - \"",
+        req.method, " ", req.target, " HTTP/", _http_version(req), "\" ",
+        response === nothing ? "-" : response.status,
+    )
+    t0 = Base.get(req.context, :t0, nothing)
+    t0 === nothing || print(io, " ", fmt_time(time() - t0))
+end
+
+# Same split as HTTP.jl's `$time_iso8601` log variable: Windows' C runtime
+# `strftime` does not support `%F`/`%T`/`%z`, so format without a zone there.
 const _ACCESS_LOG_WINDOWS_DATEFORMAT = Dates.DateFormat("yyyy-mm-dd\\THH:MM:SS")
 
 function _access_log_timestamp(windows::Bool=Sys.iswindows())
@@ -197,121 +357,100 @@ function _access_log_timestamp(windows::Bool=Sys.iswindows())
     return Libc.strftime("%FT%T%z", time())
 end
 
-function _http1_oxygen_logfmt(io::IO, http)
-    message = http.message
-    print(io,
-        _access_log_timestamp(), " - ",
-        http.stream.peerip, ":", http.stream.peerport, " - \"",
-        message.method, " ", message.target, " HTTP/",
-        message.version.major, ".", message.version.minor, "\" ",
-        message.response.status,
-    )
-end
+# HTTP 1.x requests carry a `version`; HTTP 2.x replaced it with `proto_major`/`proto_minor`.
+_http_version(req::HTTP.Request) = hasproperty(req, :version) ?
+    "$(req.version.major).$(req.version.minor)" :
+    "$(req.proto_major).$(req.proto_minor)"
 
-const _ACCESS_LOG_BASE_FORMATTER = if isdefined(Oxygen, :oxygen_logfmt)
-    getproperty(Oxygen, :oxygen_logfmt)
-else
-    _http1_oxygen_logfmt
-end
-
-_select_access_log_base_formatter() = _ACCESS_LOG_BASE_FORMATTER
-_access_log_base(io::IO, http) = _ACCESS_LOG_BASE_FORMATTER(io, http)
-
-_access_log_request(http::HTTP.Request) = http
-_access_log_request(http) = http.message
-
-"""
-    _timing_middleware(handler)
-
-Oxygen middleware that stamps `req.context[:t0]` with the request-start time so
-[`_timed_access_log`](@ref) can report the elapsed handling time.
-"""
-function _timing_middleware(handler)
-    function (req::HTTP.Request)
-        req.context[:t0] = time()
-        return handler(req)
-    end
-end
-
-"""
-    _timed_access_log(io, http)
-
-Custom `access_log` writer: Oxygen's standard access-log line followed by the
-request's elapsed handling time, formatted with SI units (e.g. ` 78.9ms`,
-` 1.23s`, ` 5.0min`). The duration is omitted for requests that never passed
-through [`_timing_middleware`](@ref) (e.g. connections rejected before routing).
-"""
-function _timed_access_log(io::IO, http)
-    _access_log_base(io, http)
-    t0 = Base.get(_access_log_request(http).context, :t0, nothing)
-    t0 === nothing || print(io, " ", fmt_time(time() - t0))
-end
-
-# Prepend the timing middleware to any caller-supplied `middleware`, install
-# the timed access-log writer unless the caller passed their own `access_log`,
-# and default `metrics` to `false` (default-only-if-absent throughout, matching
-# Oxygen's own convention for `access_log`).
-#
-# The `metrics=false` default is load-bearing: Oxygen 1.10's MetricsMiddleware
-# records every non-200 response via `text(response)` (`String(response.body)`),
-# and `String(::Vector{UInt8})` *steals* the vector's buffer — the served
-# response keeps its `Content-Length` but goes out with zero body bytes, so a
-# 206 media response hangs the client until timeout (snag
-# `206-response-bod-9c3f8c18`). 200s are recorded without reading the body, so
-# only the status gates the corruption. Pass `metrics=true` explicitly to
-# re-enable collection and the `/docs/metrics` dashboard.
-function _with_access_timing(kwargs)
-    kw = Dict{Symbol,Any}(kwargs)
-    kw[:middleware] = Any[_timing_middleware, Base.get(kw, :middleware, [])...]
-    haskey(kw, :access_log) || (kw[:access_log] = _timed_access_log)
-    haskey(kw, :metrics) || (kw[:metrics] = false)
-    return kw
-end
-
-"""
-    _interactive_stream_handler(middleware::Function)
-
-Like Oxygen's `stream_handler` + `parallel_stream_handler`, but spawns each
-request on the `:interactive` threadpool instead of `:default`.
-"""
-function _interactive_stream_handler(middleware::Function)
-    base_handler = Oxygen.Core.stream_handler(middleware)
-    function (stream::HTTP.Stream)
-        task = Threads.@spawn :interactive begin
-            handle = @async base_handler(stream)
-            wait(handle)
+# Client address of a server stream as `"ip:port"`, or `"-"`. HTTP 2.x exposes
+# it through `HTTP.peeraddr`, HTTP 1.x through `Sockets.getpeername`.
+function _peer_string(stream)
+    stream === nothing && return "-"
+    try
+        if isdefined(HTTP, :peeraddr)
+            addr = getproperty(HTTP, :peeraddr)(stream)
+            return addr === nothing ? "-" : string(addr)
         end
-        wait(task)
+        ip, port = Sockets.getpeername(stream)
+        return "$ip:$(Int(port))"
+    catch
+        return "-"
     end
 end
 
-"""Stop the HTTP server started by [`serve`](@ref)."""
-terminate() = Oxygen.Core.terminate(CONTEXT[])
+# --- Static files ----------------------------------------------------------
 
 """
     staticfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
 
-Serve static files from `folder` at the URL prefix `mountdir`.
+Serve every file under `folder` at `/<mountdir>/<relative path>`; an
+`index.html` also answers at its directory's path. Files are read once, when
+mounted. `headers` are added to every response, and `loadfile(path)` replaces
+`read(path)`.
 """
-staticfiles(
-    folder::String,
-    mountdir::String="static";
-    headers::Vector=[],
-    loadfile::Nullable{Function}=nothing
-) = Oxygen.Core.staticfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
+staticfiles(folder::AbstractString, mountdir::AbstractString="static";
+        headers::Vector=[], loadfile=nothing) =
+    _mount_files(folder, mountdir) do path
+        body = _load_file(path, loadfile)
+        _ -> _file_response(path, body, headers)
+    end
 
 """
     dynamicfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
 
-Serve dynamic files from `folder` at the URL prefix `mountdir`.
-Files are re-read from disk on each request (no caching).
+Like [`staticfiles`](@ref), but re-reads each file from disk on every request.
 """
-dynamicfiles(
-    folder::String,
-    mountdir::String="static";
-    headers::Vector=[],
-    loadfile::Nullable{Function}=nothing
-) = Oxygen.Core.dynamicfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
+dynamicfiles(folder::AbstractString, mountdir::AbstractString="static";
+        headers::Vector=[], loadfile=nothing) =
+    _mount_files(folder, mountdir) do path
+        _ -> _file_response(path, _load_file(path, loadfile), headers)
+    end
+
+function _mount_files(handler_for, folder, mountdir)
+    prefix = strip(mountdir, '/')
+    for (dir, _, files) in walkdir(folder), file in files
+        path = joinpath(dir, file)
+        rel = join(splitpath(relpath(path, folder)), "/")
+        route = isempty(prefix) ? "/$rel" : "/$prefix/$rel"
+        handler = handler_for(path)
+        HTTP.register!(ROUTER, "GET", route, handler)
+        if file == "index.html"
+            dir_route = String(chopsuffix(route, "/index.html"))
+            HTTP.register!(ROUTER, "GET", isempty(dir_route) ? "/" : dir_route, handler)
+        end
+    end
+    return nothing
+end
+
+_load_file(path, loadfile) = loadfile === nothing ? read(path) : loadfile(path)
+
+# A fresh response per request: HTTP.jl mutates the response it writes, and a
+# middleware reading `String(body)` would steal a shared byte buffer.
+function _file_response(path, body, headers)
+    bytes = body isa AbstractString ? Vector{UInt8}(body) : copy(body)
+    response = HTTP.Response(200, headers; body=bytes)
+    HTTP.setheader(response, "Content-Type" => _static_content_type(path))
+    HTTP.setheader(response, "Content-Length" => string(length(bytes)))
+    return response
+end
+
+const _STATIC_CONTENT_TYPES = Dict(
+    "html" => "text/html; charset=utf-8", "htm" => "text/html; charset=utf-8",
+    "css" => "text/css; charset=utf-8", "js" => "text/javascript; charset=utf-8",
+    "mjs" => "text/javascript; charset=utf-8", "json" => "application/json; charset=utf-8",
+    "map" => "application/json; charset=utf-8", "txt" => "text/plain; charset=utf-8",
+    "md" => "text/markdown; charset=utf-8", "csv" => "text/csv; charset=utf-8",
+    "xml" => "application/xml", "svg" => "image/svg+xml", "png" => "image/png",
+    "jpg" => "image/jpeg", "jpeg" => "image/jpeg", "gif" => "image/gif",
+    "webp" => "image/webp", "avif" => "image/avif", "ico" => "image/x-icon",
+    "woff" => "font/woff", "woff2" => "font/woff2", "ttf" => "font/ttf",
+    "otf" => "font/otf", "pdf" => "application/pdf", "wasm" => "application/wasm",
+    "mp4" => "video/mp4", "webm" => "video/webm", "mp3" => "audio/mpeg",
+    "wav" => "audio/wav", "ogg" => "audio/ogg",
+)
+
+_static_content_type(path) = Base.get(_STATIC_CONTENT_TYPES,
+    lowercase(lstrip(last(splitext(path)), '.')), "application/octet-stream")
 
 # Append a new value to an existing query-parameter slot. String slot becomes
 # a 2-element vector; vector slot grows in place.
@@ -432,7 +571,7 @@ queryparams(req::HTTP.Request) = _parse_form_encoded(HTTP.URI(req.target).query)
 Parse a urlencoded request body into a multi-value-preserving Dict. The
 `formparams` analogue of `queryparams` — repeated body fields (`image=a&image=b`)
 become a `Vector{String}` instead of collapsing to the last value, which is
-what `Oxygen.formdata` (a thin wrapper over `URIs.queryparams`) does. Used by
+what [`formdata`](@ref) (a thin wrapper over `HTTP.queryparams`) does. Used by
 the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
 receives every posted value.
 
@@ -487,6 +626,14 @@ function formparams(req::HTTP.Request)
     # compatibility helper above always hands it a detached copy.
     _parse_form_encoded(String(_request_body_bytes(req)))
 end
+
+"""
+    formdata(req::HTTP.Request) -> Dict{String, String}
+
+Parse a urlencoded request body into a `Dict`; a repeated field keeps only its
+last value. See [`formparams`](@ref) for the multi-value form.
+"""
+formdata(req::HTTP.Request) = HTTP.queryparams(String(_request_body_bytes(req)))
 
 """
     Upload
@@ -1080,8 +1227,8 @@ end
 
 # Map a route-macro symbol to the verb short symbol used in `Verb{V}` and
 # `_http_verbs`. `Symbol("@get")` → `:GET`; `Symbol("@ws")` → `:WEBSOCKET`
-# (the special case — the macro name `@ws` is shorter than the HTTP-method
-# label "WEBSOCKET" Oxygen expects).
+# (the special case — the macro name `@ws` is shorter than the
+# "WEBSOCKET" label `_register_handler` maps to a GET upgrade route).
 function _verb_short(verb::Symbol)
     verb === Symbol("@ws") && return :WEBSOCKET
     s = String(verb)
@@ -3173,7 +3320,7 @@ end
     route!(obj; prefix="", record_dir=nothing)
 
 Register all `@get`/`@post`/`@put`/`@patch`/`@delete`-marked properties of `obj`
-as Oxygen routes. The type is stored in `_registered_types` so that `_reroute!`
+on [`ROUTER`](@ref). The type is stored in `_registered_types` so that `_reroute!`
 (called automatically by the `@htmx` macro) can re-register routes when Revise
 updates the struct.
 
@@ -3218,14 +3365,6 @@ const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tupl
 const _record_bases = Dict{DataType, String}()
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
-# Routes whose path collides with Oxygen's docs prefix, recorded at
-# registration and reported at `serve` — registration cannot see serve's
-# `docs=` kwarg, so reporting there is an error-level false positive for
-# apps that (correctly) serve with `docs=false` (snag
-# `docs-prefix-rout-665a2140`). Keyed by walk-root type: each
-# `_register_routes(T)` walk rebuilds exactly T's entries, so a Revise
-# re-registration neither leaves stale entries nor drops a sibling root's.
-const _docs_prefix_routes = Dict{DataType, Set{Tuple{Symbol,String}}}()
 
 """
     OperationContext
@@ -3761,9 +3900,8 @@ function _extract_header(req, name, T, default=_NO_DEFAULT)
     _resolve_extracted(v_or_sentinel, default, name)
 end
 
-# Register a route handler directly on the HTTP router, bypassing Oxygen's
-# argument-name validation. We extract path params ourselves via positional URL segment indexing.
-# Wraps the handler so that pending Revise errors are surfaced as the
+# Register a route handler on `ROUTER`. We extract path params ourselves via
+# positional URL segment indexing. Wraps the handler so that pending Revise errors are surfaced as the
 # framework's standard error article (see `_check_revise_errors!`) — this is
 # the single chokepoint for all HTTP route registrations, so the check
 # applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
@@ -3777,18 +3915,29 @@ function _register_handler(method, path, handler)
         end
         handler(req)
     end
-    HTTP.register!(CONTEXT[].service.router, get(_TRANSPORT_HTTP_METHODS, method, method), path, wrapped)
+    HTTP.register!(ROUTER, get(_TRANSPORT_HTTP_METHODS, method, method), path, wrapped)
 end
 
-# Oxygen validates handler argument names against `{path}` placeholders. Our
-# emitted runner intentionally extracts every argument from the request so it
-# can apply one typed validation path to HTTP and WebSocket operations. Register
-# the GET upgrade directly, as Oxygen ultimately does, and keep it behind the
-# same Revise-error chokepoint as every other emitted route.
+# A WebSocket route is a GET route that upgrades the connection, behind the same
+# Revise-error chokepoint as every other emitted route. `serve` puts the raw
+# stream in `req.context[:stream]`; once the session ends, `_WebSocketClosed`
+# tells the pipeline not to write an HTTP response on the upgraded connection.
 function _register_websocket_handler(path, handler)
     _register_handler("WEBSOCKET", path, function(req)
-        HTTP.WebSockets.isupgrade(req) &&
-            HTTP.WebSockets.upgrade(ws -> _run_websocket(handler, ws, req), req.context[:stream])
+        stream = get(req.context, :stream, nothing)
+        if !HTTP.WebSockets.isupgrade(req) || stream === nothing
+            # Explicit length: HTTP 1.x never chunks a response carrying `Upgrade`.
+            body = "426: WebSocket upgrade required"
+            return HTTP.Response(426,
+                ["Upgrade" => "websocket", "Content-Type" => "text/plain; charset=utf-8",
+                 "Content-Length" => string(sizeof(body))], body)
+        end
+        try
+            HTTP.WebSockets.upgrade(ws -> _run_websocket(handler, ws, req), stream)
+        catch err
+            @error "WebSocket session on $(req.target) failed" exception=(err, catch_backtrace())
+        end
+        throw(_WebSocketClosed())
     end)
 end
 
@@ -4107,8 +4256,8 @@ _error_uid() = string(hash(time_ns()); base=16)
 _revise_module() = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), "Revise"), nothing)
 
 # If Revise is loaded and has unresolved revision errors queued, append them
-# to `io`. Oxygen's `revise=:lazy` mode already logs these to the console on
-# each request; duplicating them into the per-error log lets a stale-code
+# to `io`. `serve(; revise=:lazy)` already has Revise log these to the console
+# on each request; duplicating them into the per-error log lets a stale-code
 # failure be diagnosed from the recorded file alone.
 _qe_file(key::Tuple) = length(key) >= 2 ? key[2] : key
 _qe_file(key) = key
@@ -4372,7 +4521,7 @@ function _record_error(err, bt, req)
         println(io)
         # PropertyComputationError's 2-arg showerror already prints the cause's
         # filtered backtrace; passing `bt` would make Julia's default 3-arg
-        # fallback append the outer Oxygen/HTTP trace a second time.
+        # fallback append the outer HTTP trace a second time.
         # Inner-only guard: if `showerror` itself throws (e.g. a user
         # exception with a broken `Base.show` overload), we still want the
         # file to close with the header + a marker noting what failed, and
@@ -5339,7 +5488,7 @@ end
 _operation_rich_page_request(req::HTTP.Request) =
     contains(lowercase(HTTP.header(req, "Accept", "")), "text/html")
 
-# `:auto` spends a small part of Oxygen's existing request task waiting on the
+# `:auto` spends a small part of the existing request task waiting on the
 # DO Pending handle. The extension returns a fast value directly; only a
 # timeout becomes a Treebars poller. Keep this outside OperationPolicy's struct
 # shape so the public type remains Revise-safe on Julia 1.10.
@@ -6318,33 +6467,6 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     end)
 end
 
-# Record a route whose path starts with Oxygen's docs prefix instead of
-# reporting it: registration runs at `route!`/Revise time, before serve's
-# `docs=` kwarg is known (see `_docs_prefix_routes`). `OwnerT` is the
-# walk-root type (`_register_routes`' `T`, threaded through
-# `_register_included_routes` as `ParentT`), so each walk rebuilds its own
-# entries (reset in `_register_routes`) without touching sibling roots'.
-function _record_docs_prefix(OwnerT::DataType, path, name)
-    startswith(lstrip(path, '/'), "docs") &&
-        push!(get!(Set{Tuple{Symbol,String}}, _docs_prefix_routes, OwnerT),
-              (name, path))
-    nothing
-end
-
-# Emit the deferred /docs-prefix collision errors collected by
-# `_record_docs_prefix` — but only when Oxygen's docs are actually enabled.
-# `serve` passes `docs` straight through to `Oxygen.Core.serve`, whose
-# default is `true` (both 1.10 and 1.11), so an absent key means enabled.
-function _check_docs_prefix_routes(kwargs)
-    Base.get(kwargs, :docs, true) === false && return nothing
-    for OwnerT in sort!(collect(keys(_docs_prefix_routes)); by=string)
-        for (name, path) in sort!(collect(_docs_prefix_routes[OwnerT]); by=last)
-            @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — with Oxygen's built-in docs enabled, its DocsMiddleware serves Oxygen's own (for @htmx apps, empty) Swagger for every \"/docs*\" request and this route never fires. Either pass `docs=false` to `serve` (also disables Oxygen's Swagger and its /docs/metrics dashboard UI; metrics collection is unaffected) or mount the route outside \"/docs\"."
-        end
-    end
-    nothing
-end
-
 # Build the URL path for a route property. `prefix` is the enclosing mount
 # path without leading slash (`""` for root, `"examples"` for an @include,
 # `"app/examples"` for a nested @include). `:index` collapses its name
@@ -6452,7 +6574,6 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
 
     param_strs, n_params, default_positions = _route_param_shape(positional_indices)
     path = _route_path(prefix, name, param_strs)
-    _record_docs_prefix(OwnerT, path, name)
     preload = Symbol("@preload") in info.macros
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
@@ -6584,9 +6705,6 @@ end
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
         parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
         operation_policy=get(_operation_policies, T, OperationPolicy()))
-    # Rebuild this walk's /docs-prefix entries from scratch (see
-    # `_docs_prefix_routes`): a renamed route must not haunt the next serve.
-    _docs_prefix_routes[T] = Set{Tuple{Symbol,String}}()
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _walk_route_meta(T,
         (name, info, nested_type) -> begin
@@ -8231,8 +8349,8 @@ end
            root_provider=nothing, operation_policy=OperationPolicy())
 
 Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` route declared on
-`app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) with the
-Oxygen router. Returns `app`.
+`app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) on
+[`ROUTER`](@ref). Returns `app`.
 
 - `prefix` — mount the entire app under a URL prefix (e.g. `prefix="api"` puts
   the root route at `/api/`). Default: root (`""`).
@@ -8285,7 +8403,7 @@ end
 Drive each path through the in-process route handler with one or more
 header sets, writing recordings under `record_dir`. No subprocess, no
 HTTP listener — looks each path up via `HTTP.Handlers.gethandler` on
-`CONTEXT[].service.router` and invokes the handler with a manufactured
+[`ROUTER`](@ref) and invokes the handler with a manufactured
 `HTTP.Request`. The handler's existing save logic in `_resolve_response`
 writes the appropriate file shape.
 
@@ -8330,7 +8448,7 @@ function record!(app;
         route!(app; record_dir, record_base,
                operation_policy=OperationPolicy(:blocking))
         isdir(record_dir) || mkpath(record_dir)
-        router = CONTEXT[].service.router
+        router = ROUTER
         for path in paths
             session.source[] = String(path)
             full     && _drive_record_path(router, String(path), Pair{String,String}[])
@@ -8481,10 +8599,8 @@ Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
 contract — the same shape `HTTP.get(...; status_exception=false)` yields.
 
-Serve-time Oxygen middleware (access log, metrics, docs) does not run:
-`dispatch` resolves at the router, beneath the middleware stack. Routes
-mounted under `/docs` therefore answer here even when Oxygen's docs
-middleware would intercept them over the wire (see `_check_docs_prefix_routes`).
+Serve-time middleware (the access log, Revise, `serve`'s `middleware`) does
+not run: `dispatch` resolves at the router, beneath the middleware stack.
 `:page_load` responses start no compute, so there is nothing to parent;
 polling-mode responses attach their in-flight operation node.
 
@@ -8500,7 +8616,7 @@ function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
-    _with_dispatch_parent(() -> CONTEXT[].service.router(req), parent)
+    _with_dispatch_parent(() -> ROUTER(req), parent)
 end
 
 # Recording shims. Implementation is held in mutable `Ref`s so the

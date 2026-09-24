@@ -2,7 +2,7 @@
 
 Property-based web apps for Julia. Built on
 [DynamicObjects.jl](https://github.com/nsiccha/DynamicObjects.jl),
-[Oxygen.jl](https://github.com/OxygenFramework/Oxygen.jl), and
+[HTTP.jl](https://github.com/JuliaWeb/HTTP.jl), and
 [HTMX.jl](https://github.com/nsiccha/HTMX.jl).
 
 | Page | What it covers |
@@ -124,7 +124,7 @@ const APPDATA = AppData()
 - **No standalone top-level functions** in the web module. If a function uses
   app state, make it a derived property on the owning `@dynamicstruct`. If it
   is genuinely stateless, inline it or put it in the underlying package.
-- **No module-level `Dict{K,V}()`.** Oxygen serves requests concurrently. Use
+- **No module-level `Dict{K,V}()`.** The server handles requests concurrently. Use
   a `@dynamicstruct` with `cache_type=:parallel` or a `ThreadsafeDict` field.
 - **No module-level mutable state.** Mutate through property accessors on
   `AppData` so Revise can hot-reload the definition without losing data.
@@ -818,7 +818,7 @@ Every route handler is wrapped in try/catch. On exception, HTMXObjects:
 
 ```julia
 @htmx struct AppRoutes
-    # Opt out — let exceptions propagate to Oxygen's 500 handler:
+    # Opt out — let exceptions propagate to `serve`'s 500 fallback:
     # __error__ = rethrow
 
     # Custom rendering:
@@ -1016,17 +1016,30 @@ See `HTMXObjects/web/src/git_editor_demo.jl` for a worked example.
 ## `serve` and threading
 
 ```julia
-serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing, kwargs...)
+serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
+      middleware=[], access_log=<timed default>, runtime_tracking=true, kwargs...)
 ```
 
+`serve` runs an HTTP.jl server directly on `HTMXObjects.ROUTER`, the router
+`route!` registers on; extra keyword arguments go to `HTTP.listen!`.
+
 - `parallel=false` → single-threaded (default).
-- `parallel=true` → Oxygen's default thread pool.
+- `parallel=true` → the `:default` thread pool.
 - `parallel=:interactive` → `:interactive` threadpool, leaving `:default`
   free for heavy computation. Launch Julia with e.g. `julia -t 8,4` for 8
   computation threads + 4 request-handling threads.
-- `revise=:lazy` is the usual dev setting.
-- Unless `access_log` is supplied explicitly, each access-log line keeps
-  Oxygen's standard fields and appends the request duration.
+- `revise=:lazy` is the usual dev setting (needs `using Revise` first);
+  `:eager` also revises in the background as soon as a file changes.
+- `middleware` wraps the request handler (`handler -> (req -> response)`),
+  outermost first.
+- The default access-log line is
+  `time - ip:port - "GET /path HTTP/1.1" 200 12.3ms`. Pass an
+  `(io, req) -> nothing` formatter as `access_log` to change it (the response
+  is in `req.context[:response]`), or `access_log=nothing` to turn it off.
+- `runtime_tracking=true` records requests for the `RuntimeRoutes` dev
+  dashboard (`false` skips it).
+- `staticfiles(folder, "static")` / `dynamicfiles(folder, "static")` mount a
+  folder's files as `GET` routes (read once vs. on every request).
 
 ## What belongs where — summary
 
@@ -1052,7 +1065,7 @@ serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing
 
 The web module should contain only `APPDATA`, struct definitions, and
 `__init__`. No top-level functions, no module-level `const` besides
-`APPDATA`, no custom Oxygen route handlers.
+`APPDATA`, no hand-registered route handlers.
 
 ## Anti-patterns (observed in the wild)
 
@@ -1061,7 +1074,7 @@ The web module should contain only `APPDATA`, struct definitions, and
 - `__page__(...)` inside a route body (double layout). Return bare content.
 - `is_htmx(__req__) ? fragment : full` dual-path. The pipeline does this.
 - `if wants_markdown(__req__) ... else ... end` branches. Ditto.
-- Plain `Dict{K,V}()` at module top level. Oxygen is concurrent.
+- Plain `Dict{K,V}()` at module top level. The server is concurrent.
 - `const FOO = ...` besides `APPDATA`.
 - Standalone `function foo(...) ... end` at module top level. Promote to a
   property on the owning struct. Plain `function` blocks inside a
@@ -1071,7 +1084,7 @@ The web module should contain only `APPDATA`, struct definitions, and
   all tracking.
 - `@enum X A B C` for form-driven data. Julia's `@enum` has no `parse`
   method. Use `String` or `Symbol`.
-- Custom Oxygen route handlers alongside `route!`. Extend `route!` instead.
+- Hand-registered `HTTP.register!` handlers alongside `route!`. Extend `route!` instead.
 
 ## Further reading
 

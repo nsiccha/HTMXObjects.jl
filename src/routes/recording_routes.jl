@@ -22,7 +22,7 @@
         app = app_type()
         route!(app; record_dir, record_base)
         try
-            router = CONTEXT[].service.router
+            router = ROUTER
             for (p, phase) in zip(paths, phases)
                 _recording_run_phase(phase) do _
                     _drive_record_path(router, p, Pair{String,String}[])
