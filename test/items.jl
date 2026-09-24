@@ -1306,6 +1306,16 @@ end
     @test_throws ArgumentError RootProvider(identity; scope=:job)
 end
 
+@testitem "@ws bodies end quietly when the client disconnects" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: _run_websocket
+    # What `send` throws once the client has gone away
+    gone = HTTP.WebSockets.WebSocketError(HTTP.WebSockets.CloseFrameBody(1006, "websocket is closed"))
+    @test _run_websocket((ws, req) -> throw(gone), nothing, nothing) === nothing
+    @test _run_websocket((ws, req) -> "done", nothing, nothing) === nothing
+    # Any other failure is still a route error
+    @test_throws ErrorException _run_websocket((ws, req) -> error("route bug"), nothing, nothing)
+end
+
 @testitem "semantic descriptor, generated controls, and domain validation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     descriptor = semantic_descriptor(SemanticApp)
     @test descriptor.type === SemanticApp
@@ -7699,6 +7709,415 @@ end
         @test !contains(polled, "# Arguments")
     finally
         notify(slow_multiline_gate[])
+        _clear_operation_polls!()
+    end
+end
+
+# --- Server-sent events (`@sse`) ---------------------------------------------
+
+@testitem "SSE frames split data lines and validate fields" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    import HTMXObjects: _sse_frame
+    @test _sse_frame("a") == "data: a\n\n"
+    # Every line becomes its own `data:` line, whatever the line ending.
+    @test _sse_frame("a\nb\r\nc\rd") == "data: a\ndata: b\ndata: c\ndata: d\n\n"
+    # An empty payload still carries a `data:` line, or the browser would not
+    # dispatch the event at all.
+    @test _sse_frame(""; event="close") == "event: close\ndata: \n\n"
+    @test _sse_frame("x"; event="done", id=7, retry=1000) ==
+        "event: done\nid: 7\nretry: 1000\ndata: x\n\n"
+    @test_throws ArgumentError _sse_frame("x"; event="a\nb")
+    @test_throws ArgumentError _sse_frame("x"; id="1\r")
+    @test_throws ArgumentError _sse_frame("x"; retry=0)
+end
+
+@testitem "SSEStream sends rendered frames and reports disconnects" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    struct _GoneIO <: IO end
+    Base.unsafe_write(::_GoneIO, ::Ptr{UInt8}, ::UInt) = throw(Base.IOError("gone", 0))
+
+    buf = IOBuffer()
+    req = HTTP.Request("GET", "/feed", ["Last-Event-ID" => "9"])
+    sse = SSEStream(buf, req)
+    @test isopen(sse)
+    @test HTTP.WebSockets.send(sse, h.p("a\nb"); event="tick", id="1")
+    @test String(take!(buf)) == "event: tick\nid: 1\ndata: <p>a\ndata: b</p>\n\n"
+    @test HTTP.WebSockets.send(sse, "plain")
+    @test String(take!(buf)) == "data: plain\n\n"
+    @test last_event_id(sse) == "9"
+    @test last_event_id(SSEStream(IOBuffer(), HTTP.Request("GET", "/"))) === nothing
+
+    close(sse)
+    @test !isopen(sse)
+    @test HTTP.WebSockets.send(sse, "late") == false
+    @test isempty(take!(buf))
+
+    # A failed write means the client left: `send` answers `false`, the handle
+    # closes, and raw writes keep failing.
+    gone = SSEStream(_GoneIO(), req)
+    @test HTTP.WebSockets.send(gone, "x") == false
+    @test !isopen(gone)
+    @test_throws Base.IOError write(gone, "x")
+end
+
+@testitem "@sse routes register as GET streams outside HTTP-only tooling" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    import HTMXObjects: _prewarm_descriptor, _sse_frame
+
+    @htmx struct SSEToolingApp
+        "A widget feed."
+        @sse feed(id::Int; q::String="") = "feed $id $q"
+        @get page() = h.p("page")
+    end
+    route!(SSEToolingApp())
+
+    route = only(filter(r -> r.name === :feed, reflect(SSEToolingApp)))
+    @test route.verb === :SSE
+    @test route.path == "/feed/{id}"
+    @test [p.name for p in route.params if p.source === :path] == [:id]
+    @test [p.name for p in route.params if p.source === :query] == [:q]
+
+    router = HTMXObjects.CONTEXT[].service.router
+    req = HTTP.Request("GET", "/feed/1")
+    @test first(HTTP.Handlers.gethandler(router, req)) !== HTTP.Handlers.default404
+
+    # OpenAPI, prewarm, and generated forms are HTTP request/response tools.
+    @test collect(keys(openapi(SSEToolingApp).paths)) == ["/page"]
+    skipped = _prewarm_descriptor("http://127.0.0.1:1", route, true, 1.0)
+    @test skipped.status === nothing
+    @test contains(skipped.error, "sse skipped")
+    @test_throws ArgumentError operation_form(SSEToolingApp(), route)
+
+    # In-process dispatch has no connection to stream on.
+    resp = dispatch(:GET, "/feed/1")
+    @test resp.status == 500
+    @test HTTP.header(resp, "X-HTMXO-Error-Id", "") != ""
+end
+
+@testitem "htmx() loads the SSE extension that sse_region needs" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    html = repr("text/html", htmx(h.main()))
+    @test contains(html, "htmx-ext-sse@2.2.4/dist/sse.min.js")
+    @test first(findfirst("htmx.org@", html)) < first(findfirst("htmx-ext-sse@", html))
+    @test !contains(repr("text/html", htmx(h.main(); sse_version=nothing)), "htmx-ext-sse")
+    # An extension must follow htmx itself; without the shell's htmx it stays out.
+    @test !contains(repr("text/html", htmx(h.main(); htmx_version=nothing)), "htmx-ext-sse")
+
+    region = repr("text/html", sse_region("/feed?q=1", h.p("waiting")))
+    @test contains(region, "hx-ext=\"sse\"")
+    @test contains(region, "sse-connect=\"/feed?q=1\"")
+    @test contains(region, "sse-close=\"close\"")
+    @test contains(region, "sse-swap=\"message,done\"")
+    @test contains(region, "<p>waiting</p>")
+    @test contains(repr("text/html", sse_region("/f"; swap="beforeend", events="tick")),
+                   "sse-swap=\"tick\" hx-swap=\"beforeend\"")
+end
+
+@testitem "@sse streams events, final values, and errors end to end" setup=[HTMXOTestImports] tags=[:integration, :server, :sse] begin
+    using Sockets
+    using HTTP.WebSockets: send
+
+    const SSE_FOREVER_EXITED = Ref(false)
+
+    @htmx struct SSEServeApp
+        @sse ticks(; n::Int=2) = begin
+            for i in 1:n
+                send(__sse__, h.p("tick $i\nsecond line"); id=string(i))
+            end
+            h.div("finished $n")
+        end
+        @sse boom() = begin
+            send(__sse__, "before")
+            error("kaboom")
+        end
+        @sse resume() = "resumed after $(something(last_event_id(__sse__), "none"))"
+        @sse quiet() = (sleep(0.4); "late")
+        @sse forever() = begin
+            while isopen(__sse__)
+                send(__sse__, "beat")
+                sleep(0.02)
+            end
+            SSE_FOREVER_EXITED[] = true
+            nothing
+        end
+    end
+
+    # Keep-alive comments (`: …`) can interleave with any stream; the event
+    # sequence is what the assertions below pin down.
+    frames(body) = filter(f -> !isempty(f) && !startswith(f, ":"), split(body, "\n\n"))
+    function stream(path, headers=Pair{String,String}[])
+        r = HTTP.get("http://127.0.0.1:$port$path", headers;
+                     status_exception=false, retry=false, readtimeout=60)
+        r, String(r.body)
+    end
+
+    route!(SSEServeApp())
+    port = 8141
+    heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
+    serve(; port, async=true, docs=false)
+    try
+        r, body = stream("/ticks?n=2")
+        @test r.status == 200
+        @test startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
+        @test HTTP.header(r, "Cache-Control", "") == "no-cache"
+        @test frames(body) == [
+            "id: 1\ndata: <p>tick 1\ndata: second line</p>",
+            "id: 2\ndata: <p>tick 2\ndata: second line</p>",
+            "event: done\ndata: <div>finished 2</div>",
+            "event: close\ndata: ",
+        ]
+
+        # A failing body still ends the stream: the recorded error article is
+        # the final `done` value, and `close` stops the browser reconnecting.
+        r, body = stream("/boom")
+        @test r.status == 200
+        got = frames(body)
+        @test got[1] == "data: before"
+        @test startswith(got[2], "event: done\ndata: <article aria-invalid=\"true\">")
+        @test got[3] == "event: close\ndata: "
+
+        # Arguments are validated before the stream starts: a bad request is
+        # an ordinary error response (which also stops EventSource retries).
+        r, body = stream("/ticks?n=many")
+        @test r.status == 500
+        @test !startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") != ""
+
+        _, body = stream("/resume", ["Last-Event-ID" => "41"])
+        @test frames(body)[1] == "event: done\ndata: resumed after 41"
+
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
+        _, body = stream("/quiet")
+        @test contains(body, ": keepalive\n\n")
+        @test "event: done\ndata: late" in frames(body)
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+
+        # A client that leaves ends an open-ended body at its next write.
+        sock = Sockets.connect("127.0.0.1", port)
+        write(sock, "GET /forever HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        @test contains(String(readavailable(sock)), "text/event-stream")
+        close(sock)
+        @test timedwait(() -> SSE_FOREVER_EXITED[], 10) === :ok
+    finally
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+        terminate()
+    end
+end
+
+# The runtime ledger is server-agnostic: `track_requests` wraps any
+# `HTTP.Request -> HTTP.Response` handler, so these drive it with plain
+# functions and never start a server.
+@testitem "track_requests records in-flight and finished requests" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: _with_runtime_tracking, _runtime_redact_target
+
+    tracker = RuntimeTracker(; history_limit=3)
+    gate = Base.Event()
+    entered = Base.Event()
+    handler = function (req)
+        if req.target == "/slow"
+            notify(entered)
+            wait(gate)
+        end
+        req.target == "/boom" && error("handler exploded")
+        HTTP.Response(req.target == "/missing" ? 404 : 200, "ok")
+    end
+    app = track_requests(handler; tracker)
+
+    # In flight: visible with a growing age, absent from the history.
+    slow = Threads.@spawn app(HTTP.Request("GET", "/slow"))
+    wait(entered)
+    live = runtime_snapshot(tracker)
+    @test [r.target for r in live.inflight] == ["/slow"]
+    @test only(live.inflight).running
+    @test isempty(live.history)
+    notify(gate)
+    @test fetch(slow).status == 200
+
+    # Finished: status, kind and handling time; a throwing handler still
+    # leaves a 500 record behind and the exception propagates unchanged.
+    app(HTTP.Request("GET", "/missing", ["HX-Request" => "true"]))
+    @test_throws ErrorException app(HTTP.Request("GET", "/boom"))
+    snap = runtime_snapshot(tracker)
+    @test isempty(snap.inflight)
+    @test [r.target for r in snap.history] == ["/boom", "/missing", "/slow"]
+    boom, missing, slow_row = snap.history
+    @test boom.status == 500
+    @test contains(boom.error, "handler exploded")
+    @test missing.status == 404 && missing.kind === :htmx
+    @test HTMXObjects._runtime_request_kind(HTTP.Request("GET", "/feed",
+        ["Accept" => "text/event-stream"])) === :sse
+    @test slow_row.status == 200 && slow_row.kind === :page
+    @test slow_row.duration > 0 && !slow_row.running
+    @test all(r -> r.mode === :none && r.route == "" && r.job == 0, snap.history)
+
+    # Bounded history, oldest dropped first.
+    app(HTTP.Request("GET", "/fourth"))
+    @test [r.target for r in runtime_snapshot(tracker).history] ==
+          ["/fourth", "/boom", "/missing"]
+    configure_runtime!(tracker; history_limit=1)
+    @test [r.target for r in runtime_snapshot(tracker).history] == ["/fourth"]
+
+    # Per-route stats group by method + path when no route pattern matched.
+    configure_runtime!(tracker; history_limit=10)
+    app(HTTP.Request("GET", "/fourth"))
+    stats = runtime_snapshot(tracker).routes
+    @test only(stats).route == "GET /fourth"
+    @test only(stats).count == 2
+    @test only(stats).errors == 0
+
+    # Operation and page-load tokens are bearer capabilities: their values,
+    # and credential-looking parameters, never reach the ledger.
+    @test _runtime_redact_target(
+        "/r?__htmxo_operation=abc&x=1&api_key=k&__htmxo_poll=1&Session_Id=s") ==
+        "/r?__htmxo_operation=…&x=1&api_key=…&__htmxo_poll=1&Session_Id=…"
+    @test _runtime_redact_target("/plain") == "/plain"
+    app(HTTP.Request("GET", "/fourth?__htmxo_page_load=secret&page=2"))
+    newest = first(runtime_snapshot(tracker).history)
+    @test newest.target == "/fourth?__htmxo_page_load=…&page=2"
+    @test newest.path == "/fourth"
+
+    # Follow-up polls are counted on their job, not kept in the history,
+    # unless the tracker asks for them.
+    app(HTTP.Request("GET", "/fourth?__htmxo_poll=1"))
+    @test first(runtime_snapshot(tracker).history).target != "/fourth?__htmxo_poll=1"
+    configure_runtime!(tracker; record_polls=true)
+    app(HTTP.Request("GET", "/fourth?__htmxo_poll=1"))
+    @test first(runtime_snapshot(tracker).history).kind === :poll
+
+    # Disabled trackers pass requests straight through.
+    configure_runtime!(tracker; enabled=false)
+    before = runtime_snapshot(tracker).process.total_requests
+    @test app(HTTP.Request("GET", "/fourth")).status == 200
+    @test runtime_snapshot(tracker).process.total_requests == before
+
+    clear_runtime_history!(tracker)
+    @test isempty(runtime_snapshot(tracker).history)
+
+    # A ledger failure is logged and swallowed: bookkeeping never takes a
+    # request down with it.
+    @test (@test_logs (:warn, r"runtime tracking failed") match_mode=:any HTMXObjects._runtime_guarded(
+        () -> error("ledger broke"), "probe")) === nothing
+
+    # `serve` installs the tracker outermost, ahead of the timing middleware
+    # and any caller middleware.
+    existing(handler) = handler
+    kw = _with_runtime_tracking(pairs((; middleware=[existing])), tracker)
+    @test length(kw[:middleware]) == 2
+    @test kw[:middleware][2] === existing
+    wrapped = kw[:middleware][1](req -> HTTP.Response(204))
+    configure_runtime!(tracker; enabled=true)
+    @test wrapped(HTTP.Request("GET", "/via-serve")).status == 204
+    @test first(runtime_snapshot(tracker).history).target == "/via-serve"
+end
+
+@testitem "runtime jobs follow long-running operations" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _clear_operation_polls!
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    const runtime_job_gate = Ref(Base.Event())
+    const runtime_fail_gate = Ref(Base.Event())
+    const runtime_job_tracker = RuntimeTracker()
+
+    @htmx struct RuntimeJobApp
+        "Crunch the numbers"
+        @get runtime_crunch(n::Int) = (wait(runtime_job_gate[]); h.p("crunched:$n"))
+        @get runtime_doomed() = (wait(runtime_fail_gate[]); error("doomed job"))
+        @get runtime_quick() = h.p("quick")
+        @include runtime_dash = RuntimeRoutes(; tracker=runtime_job_tracker)
+    end
+
+    route!(RuntimeJobApp())
+    router = HTMXObjects.CONTEXT[].service.router
+    app = track_requests(router; tracker=runtime_job_tracker)
+    function drive(target; hx=true, method="GET")
+        headers = hx ? ["HX-Request" => "true"] : Pair{String,String}[]
+        app(HTTP.Request(method, target, headers, UInt8[]))
+    end
+    poll_url(body) = replace(only(match(
+        r"hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\"", body).captures), "&amp;" => "&")
+    snapshot() = runtime_snapshot(runtime_job_tracker)
+
+    _clear_operation_polls!()
+    try
+        # A route that outlives the grace period becomes one running job,
+        # linked to the request that started it.
+        started = drive("/runtime_crunch/7")
+        @test started.status == 200
+        body = String(started.body)
+        snap = snapshot()
+        job = only(snap.running)
+        @test job.label == "Crunch the numbers"
+        @test job.state === :running
+        @test job.route == "GET /runtime_crunch/{n}"
+        @test job.target == "/runtime_crunch/7"
+        @test job.requests == 1 && job.polls == 0
+        request = only(r for r in snap.history if r.path == "/runtime_crunch/7")
+        @test request.job == job.id
+        @test request.mode === :polling
+        @test request.route == "GET /runtime_crunch/{n}"
+
+        # Follow-up polls count against the job and stay out of the history.
+        url = poll_url(body)
+        @test contains(url, "__htmxo_operation=")
+        drive(url); drive(url)
+        snap = snapshot()
+        @test only(snap.running).polls == 2
+        @test count(r -> r.path == "/runtime_crunch/7", snap.history) == 1
+        @test !any(r -> contains(r.target, only(match(
+            r"__htmxo_operation=([^&]+)", url).captures)), snap.history)
+
+        # The dashboard shows the running job, hides its own requests, and
+        # renders inline (it is `@fresh`: never queued behind the jobs).
+        dash = drive("/runtime_dash"; hx=false)
+        @test dash.status == 200
+        html = String(dash.body)
+        @test contains(html, "Running jobs")
+        @test contains(html, "Crunch the numbers")
+        @test contains(html, "hx-trigger=\"every 2s\"")
+        @test contains(html, "/runtime_dash/panel")
+        @test !contains(html, "__htmxo_operation=" * only(match(
+            r"__htmxo_operation=([^&]+)", url).captures))
+        paused = String(drive("/runtime_dash/panel?live=false").body)
+        @test contains(paused, "Resume")
+        @test !contains(paused, "hx-trigger")
+        json = drive("/runtime_dash/snapshot")
+        @test HTTP.header(json, "Content-Type") == "application/json"
+        @test contains(String(json.body), "\"label\":\"Crunch the numbers\"")
+        @test !any(r -> startswith(r.path, "/runtime_dash"), snapshot().history)
+
+        # Releasing the work finishes the job with its wall time.
+        notify(runtime_job_gate[])
+        @test timedwait(() -> isempty(snapshot().running), 10.0;
+                        pollint=0.01) === :ok
+        done = only(snapshot().finished)
+        @test done.state === :done
+        @test done.duration > 0
+        @test done.polls == 2
+        @test isempty(done.error)
+
+        # A failing job is recorded as failed with the error's summary.
+        String(drive("/runtime_doomed").body)
+        @test length(snapshot().running) == 1
+        notify(runtime_fail_gate[])
+        @test timedwait(() -> isempty(snapshot().running), 10.0;
+                        pollint=0.01) === :ok
+        failed = first(snapshot().finished)
+        @test failed.state === :failed
+        @test contains(failed.error, "doomed job")
+        failed_html = String(drive("/runtime_dash/panel").body)
+        @test contains(failed_html, "doomed job")
+
+        # Every tracked HTMXObjects request carries its route pattern and
+        # the transport the operation layer chose.
+        drive("/runtime_quick")
+        quick = first(r for r in snapshot().history if r.path == "/runtime_quick")
+        @test quick.route == "GET /runtime_quick"
+        @test quick.mode === :polling
+
+        # Clearing forgets finished work only.
+        drive("/runtime_dash/clear"; method="POST")
+        @test isempty(snapshot().history)
+        @test isempty(snapshot().finished)
+    finally
+        notify(runtime_job_gate[])
+        notify(runtime_fail_gate[])
         _clear_operation_polls!()
     end
 end

@@ -9,8 +9,9 @@
 # `reflect` stays the stable seam — this file only READS its descriptors,
 # so the `reflect(T)` output contract is unchanged.
 
-# Verbs with an OpenAPI operation. `:WEBSOCKET` is deliberately absent —
-# OpenAPI has no WebSocket operation, so `@ws` routes are skipped (see
+# Verbs with an OpenAPI operation. `:WEBSOCKET` and `:SSE` are deliberately
+# absent — OpenAPI has no WebSocket operation and cannot describe an open-ended
+# event stream as one response, so `@ws`/`@sse` routes are skipped (see
 # `openapi`). Everything else mirrors `_reflect_kw_source`'s transport view.
 const _OPENAPI_METHODS = Dict(
     :GET => "get",
@@ -183,7 +184,8 @@ doc = openapi(MyApp; title="My API", version="2.0.0")
   `AbstractFloat` → `number`, `Bool` → `boolean`, strings/`Symbol`/`Char`/
   enums → `string`, arrays → `array`, dates → `string` + `format`);
   unresolvable types degrade to `string`.
-- `@ws` routes are skipped: OpenAPI has no WebSocket operation.
+- `@ws` and `@sse` routes are skipped: OpenAPI has no WebSocket operation or
+  event-stream response.
 - Each `servers` entry is a URL string or an `(url=…, description=…)` record;
   the key is omitted when no servers are given.
 """

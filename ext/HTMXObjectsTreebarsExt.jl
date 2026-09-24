@@ -159,6 +159,10 @@ function __init__()
             responded
         end
 
+    # Runtime dashboard: a job's progress node renders as its Treebars tree.
+    HTMXObjects._runtime_progress_render_impl[] =
+        node -> node isa Treebars.ProgressNode ? Treebars.htmx_render(node) : nothing
+
     HTMXObjects._operation_ready_terminal_impl[] = _operation_ready_terminal
     HTMXObjects._polling_page_assets_impl[] =
         () -> (Treebars.htmx_treebar_styles(), Treebars.htmx_treebar_script())

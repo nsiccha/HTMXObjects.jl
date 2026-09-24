@@ -139,8 +139,8 @@ Fresh instance per request. The framework wires in `__req__`, `__prefix__`,
 and falls `__appdata__` through from the parent. Everything else is user
 code. A `@htmx` struct is a `@dynamicstruct` plus:
 
-- Route markers (`@get`, `@post`, `@put`, `@patch`, `@delete`, `@ws`) turn
-  properties into HTTP endpoints.
+- Route markers (`@get`, `@post`, `@put`, `@patch`, `@delete`, `@ws`, `@sse`)
+  turn properties into HTTP endpoints.
 - `@include` composes sub-structs under a path segment.
 - `@param` declares request-derived typed properties shared across routes.
 - A `_reroute!` hook fires on Revise re-evaluation so routes re-register
@@ -279,6 +279,7 @@ point).
     @get  range(a, b=1)   = ...                        # GET /range/{a}/{b} AND /range/{a}
     @delete remove(id)    = drop!(id)                  # DELETE /remove/{id}
     @ws     feed()        = (__ws__) -> ...            # WebSocket at /feed
+    @sse    events()      = (__sse__) -> ...           # server-sent events at /events
 end
 ```
 
@@ -491,6 +492,7 @@ handler injects them — but route bodies may reference them.
 | `__self__`      | `@dynamicstruct`                     | The current struct instance.                          |
 | `__req__`       | `route!` handler (per request)       | The inbound `HTTP.Request`.                           |
 | `__ws__`        | `@ws` body wrapper                   | The WebSocket handle inside `@ws` bodies.             |
+| `__sse__`       | `@sse` body wrapper                  | The [`SSEStream`](@ref) inside `@sse` bodies.         |
 | `__parent__`    | `@include` desugar                   | Parent struct instance in a sub-struct.               |
 | `__prefix__`    | `route!` + `@include`                | Current mount path.                                   |
 | `__route__`     | `route!` handler (per request)       | The per-request URL (query string stripped). Use for `hx_get=__route__` / `href=__route__` instead of recomputing. |
