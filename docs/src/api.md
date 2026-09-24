@@ -1014,6 +1014,7 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 | `SwaggerRoutes` | Version-pinned Swagger UI viewer for the app's OpenAPI document (opt-in via `@include docs = SwaggerRoutes(; spec_url="/openapi")`) — see [OpenAPI](#openapi) |
 | `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
 | `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
+| `RuntimeRoutes`  | Dev dashboard of in-flight and past requests with timings, and long-running jobs — see [Runtime dashboard](#runtime-dashboard) |
 | `RecordingRoutes`| Static-recording driver (see Gallery section) |
 
 ### OpenAPI
@@ -1066,6 +1067,70 @@ dashboard UI; metrics *collection* is on a separate flag and is unaffected.
 openapi
 OpenAPIRoutes
 SwaggerRoutes
+```
+
+### Runtime dashboard
+
+`RuntimeRoutes` is a development view of what the server is doing right now and
+what it did recently:
+
+```julia
+@htmx struct MyApp
+    @include runtime = RuntimeRoutes()        # → GET /runtime
+end
+```
+
+- **Running jobs** — every operation that outlived the `:auto` grace period and
+  continued in the background while its client polled: how long it has been
+  running, how many requests started or joined the same computation, how many
+  polls it answered, when a client last looked at it, and its live progress
+  tree. A job nobody has polled for ten seconds is flagged *unwatched*: its
+  page is gone, but the computation keeps running.
+- **In-flight requests** — with their current age, request kind (page, HTMX,
+  poll, WebSocket, SSE — the last two stay in flight for the life of the
+  connection), the transport the operation layer chose, the matched route
+  pattern and the thread pool handling them.
+- **Route timings** — request count, errors, p50/p95/max and total handling
+  time per route over the recorded history.
+- **Recent jobs** and **recent requests** — bounded histories with durations,
+  outcomes and frozen progress trees.
+- A process line: thread-pool sizes, running jobs against `:default` threads
+  (highlighted when jobs outnumber compute threads and are time-sharing it),
+  heap, GC time and free memory.
+
+The view refreshes itself every two seconds (`RuntimeRoutes(; refresh="5s")`
+to change; *Pause* stops it), `GET /runtime/snapshot` serves the same data as
+JSON, and `POST /runtime/clear` forgets the history. The dashboard's routes are
+`@fresh`, so they render inline on the request's own task and never queue
+behind a saturated compute pool; its own requests are left out of the history.
+
+Recording is independent of Oxygen. Requests are recorded by
+[`track_requests`](@ref), a plain HTTP.jl middleware
+(`handler -> req -> response`) that `serve` installs outermost by default
+(`serve(; runtime_tracking=false)` opts out) and that any HTTP.jl server stack
+can compose directly, e.g. `HTTP.serve(track_requests(router), host, port)`.
+Jobs are recorded by HTMXObjects' own operation layer at the point where an
+operation crosses the grace boundary, whatever server delivered the request.
+Both ledgers are bounded (`configure_runtime!(; history_limit,
+job_history_limit)`), process-local, and hold no headers, cookies or bodies;
+request targets are stored with operation/page-load tokens and
+credential-looking query values redacted. Follow-up polls are counted on their
+job rather than stored as requests (`record_polls=true` keeps them).
+
+Like `TestRoutes`, this is a development surface: mount it only where
+developers can reach it.
+
+```@docs
+RuntimeRoutes
+runtime_dashboard
+track_requests
+runtime_snapshot
+runtime_tracker
+RuntimeTracker
+RuntimeRequest
+RuntimeJob
+configure_runtime!
+clear_runtime_history!
 ```
 
 ## Route inventory, selection, and warming

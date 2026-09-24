@@ -34,6 +34,9 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
+export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracker,
+    runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
+    clear_runtime_history!
 export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
@@ -115,10 +118,17 @@ option_wire_value(value) =
 _option_wire_string(value) = string(option_wire_value(value))
 
 """
-    serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing, kwargs...)
+    serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
+          runtime_tracking=true, kwargs...)
 
 Start the HTTP server. Passes all keyword arguments through to `Oxygen.Core.serve`.
 When `async=false` (the default), blocks until interrupted and calls [`terminate`](@ref) on exit.
+
+`runtime_tracking=true` (the default) installs [`track_requests`](@ref) as the
+outermost middleware, recording in-flight and finished requests with their
+handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref) dev
+dashboard. Pass `false` to skip it. Long-running operations are recorded as
+jobs either way.
 
 Two defaults differ from Oxygen's: the access log also reports per-request
 handling time (override with `access_log`/`middleware`), and `metrics`
@@ -142,9 +152,10 @@ with `auto`. To size both pools equally, compute shell-side:
 `parallel=:interactive` is strictly worse than `parallel=false` (same effective
 concurrency, plus extra spawn overhead per request, plus a startup `@warn`).
 """
-function serve(; parallel=false, kwargs...)
+function serve(; parallel=false, runtime_tracking::Bool=true, kwargs...)
     async = Base.get(kwargs, :async, false)
     kwargs = _with_access_timing(kwargs)
+    runtime_tracking && (kwargs = _with_runtime_tracking(kwargs))
     _check_docs_prefix_routes(kwargs)
     serve_kwargs = if parallel === :interactive
         if Threads.nthreads(:interactive) <= 1
@@ -3725,6 +3736,7 @@ end
 # applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
 function _register_handler(method, path, handler)
     wrapped = function(req)
+        _runtime_note_route!(req, method, path)
         try
             _check_revise_errors!()
         catch err
@@ -4494,6 +4506,7 @@ end
 
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
     uid, path = _record_error(err, bt, req)
+    _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _passthrough_response(err_val)
     isnothing(direct) || return _stamp_error_id(direct, uid)
@@ -5735,6 +5748,7 @@ end
 
 function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
+    _runtime_job_polled!(req, entry.started)
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
@@ -5799,7 +5813,7 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  replace_page_load,
                  error_obj=target.leaf, req=req,
                  grace_period=0.0,
-                 retain=() -> _retain_operation_poll!(entry),
+                 retain=() -> _retain_operation!(entry, descriptor, name),
                  cleanup=() -> _delete_operation_poll!(token))
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -5811,6 +5825,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         parent_progress=nothing)
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell)
+    _runtime_note_mode!(req, mode)
     context = get(target, :context, nothing)
     prefix = context isa OperationContext ? context.prefix : ""
     prop = getproperty(target.leaf, name)
@@ -5840,7 +5855,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
             target.leaf, req, now, now)
-        _retain_operation_poll!(entry)
+        _retain_operation!(entry, descriptor, name)
         return _operation_page_load(
             req, prefix; replace_terminal=!_operation_treebars_keep(policy),
             poll_token=token)
@@ -5899,7 +5914,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                      replace_page_load=false,
                      error_obj=target.leaf, req=req,
                      grace_period=_operation_grace_period(policy, req),
-                     retain=() -> _retain_operation_poll!(entry),
+                     retain=() -> _retain_operation!(entry, descriptor, name),
                      cleanup=() -> _delete_operation_poll!(token))
         return _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
@@ -9567,6 +9582,10 @@ include("routes/reflection_routes.jl")
 include("routes/resource_routes.jl")
 
 include("routes/shared_ops_routes.jl")
+
+include("runtime.jl")
+
+include("routes/runtime_routes.jl")
 
 _hidden_input(k, v) =
     [h.input(; type="hidden", name=string(k), value=_option_wire_string(v))]

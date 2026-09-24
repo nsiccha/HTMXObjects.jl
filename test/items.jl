@@ -7558,3 +7558,225 @@ end
         terminate()
     end
 end
+
+# The runtime ledger is server-agnostic: `track_requests` wraps any
+# `HTTP.Request -> HTTP.Response` handler, so these drive it with plain
+# functions and never start a server.
+@testitem "track_requests records in-flight and finished requests" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: _with_runtime_tracking, _runtime_redact_target
+
+    tracker = RuntimeTracker(; history_limit=3)
+    gate = Base.Event()
+    entered = Base.Event()
+    handler = function (req)
+        if req.target == "/slow"
+            notify(entered)
+            wait(gate)
+        end
+        req.target == "/boom" && error("handler exploded")
+        HTTP.Response(req.target == "/missing" ? 404 : 200, "ok")
+    end
+    app = track_requests(handler; tracker)
+
+    # In flight: visible with a growing age, absent from the history.
+    slow = Threads.@spawn app(HTTP.Request("GET", "/slow"))
+    wait(entered)
+    live = runtime_snapshot(tracker)
+    @test [r.target for r in live.inflight] == ["/slow"]
+    @test only(live.inflight).running
+    @test isempty(live.history)
+    notify(gate)
+    @test fetch(slow).status == 200
+
+    # Finished: status, kind and handling time; a throwing handler still
+    # leaves a 500 record behind and the exception propagates unchanged.
+    app(HTTP.Request("GET", "/missing", ["HX-Request" => "true"]))
+    @test_throws ErrorException app(HTTP.Request("GET", "/boom"))
+    snap = runtime_snapshot(tracker)
+    @test isempty(snap.inflight)
+    @test [r.target for r in snap.history] == ["/boom", "/missing", "/slow"]
+    boom, missing, slow_row = snap.history
+    @test boom.status == 500
+    @test contains(boom.error, "handler exploded")
+    @test missing.status == 404 && missing.kind === :htmx
+    @test HTMXObjects._runtime_request_kind(HTTP.Request("GET", "/feed",
+        ["Accept" => "text/event-stream"])) === :sse
+    @test slow_row.status == 200 && slow_row.kind === :page
+    @test slow_row.duration > 0 && !slow_row.running
+    @test all(r -> r.mode === :none && r.route == "" && r.job == 0, snap.history)
+
+    # Bounded history, oldest dropped first.
+    app(HTTP.Request("GET", "/fourth"))
+    @test [r.target for r in runtime_snapshot(tracker).history] ==
+          ["/fourth", "/boom", "/missing"]
+    configure_runtime!(tracker; history_limit=1)
+    @test [r.target for r in runtime_snapshot(tracker).history] == ["/fourth"]
+
+    # Per-route stats group by method + path when no route pattern matched.
+    configure_runtime!(tracker; history_limit=10)
+    app(HTTP.Request("GET", "/fourth"))
+    stats = runtime_snapshot(tracker).routes
+    @test only(stats).route == "GET /fourth"
+    @test only(stats).count == 2
+    @test only(stats).errors == 0
+
+    # Operation and page-load tokens are bearer capabilities: their values,
+    # and credential-looking parameters, never reach the ledger.
+    @test _runtime_redact_target(
+        "/r?__htmxo_operation=abc&x=1&api_key=k&__htmxo_poll=1&Session_Id=s") ==
+        "/r?__htmxo_operation=…&x=1&api_key=…&__htmxo_poll=1&Session_Id=…"
+    @test _runtime_redact_target("/plain") == "/plain"
+    app(HTTP.Request("GET", "/fourth?__htmxo_page_load=secret&page=2"))
+    newest = first(runtime_snapshot(tracker).history)
+    @test newest.target == "/fourth?__htmxo_page_load=…&page=2"
+    @test newest.path == "/fourth"
+
+    # Follow-up polls are counted on their job, not kept in the history,
+    # unless the tracker asks for them.
+    app(HTTP.Request("GET", "/fourth?__htmxo_poll=1"))
+    @test first(runtime_snapshot(tracker).history).target != "/fourth?__htmxo_poll=1"
+    configure_runtime!(tracker; record_polls=true)
+    app(HTTP.Request("GET", "/fourth?__htmxo_poll=1"))
+    @test first(runtime_snapshot(tracker).history).kind === :poll
+
+    # Disabled trackers pass requests straight through.
+    configure_runtime!(tracker; enabled=false)
+    before = runtime_snapshot(tracker).process.total_requests
+    @test app(HTTP.Request("GET", "/fourth")).status == 200
+    @test runtime_snapshot(tracker).process.total_requests == before
+
+    clear_runtime_history!(tracker)
+    @test isempty(runtime_snapshot(tracker).history)
+
+    # A ledger failure is logged and swallowed: bookkeeping never takes a
+    # request down with it.
+    @test (@test_logs (:warn, r"runtime tracking failed") match_mode=:any HTMXObjects._runtime_guarded(
+        () -> error("ledger broke"), "probe")) === nothing
+
+    # `serve` installs the tracker outermost, ahead of the timing middleware
+    # and any caller middleware.
+    existing(handler) = handler
+    kw = _with_runtime_tracking(pairs((; middleware=[existing])), tracker)
+    @test length(kw[:middleware]) == 2
+    @test kw[:middleware][2] === existing
+    wrapped = kw[:middleware][1](req -> HTTP.Response(204))
+    configure_runtime!(tracker; enabled=true)
+    @test wrapped(HTTP.Request("GET", "/via-serve")).status == 204
+    @test first(runtime_snapshot(tracker).history).target == "/via-serve"
+end
+
+@testitem "runtime jobs follow long-running operations" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _clear_operation_polls!
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    const runtime_job_gate = Ref(Base.Event())
+    const runtime_fail_gate = Ref(Base.Event())
+    const runtime_job_tracker = RuntimeTracker()
+
+    @htmx struct RuntimeJobApp
+        "Crunch the numbers"
+        @get runtime_crunch(n::Int) = (wait(runtime_job_gate[]); h.p("crunched:$n"))
+        @get runtime_doomed() = (wait(runtime_fail_gate[]); error("doomed job"))
+        @get runtime_quick() = h.p("quick")
+        @include runtime_dash = RuntimeRoutes(; tracker=runtime_job_tracker)
+    end
+
+    route!(RuntimeJobApp())
+    router = HTMXObjects.CONTEXT[].service.router
+    app = track_requests(router; tracker=runtime_job_tracker)
+    function drive(target; hx=true, method="GET")
+        headers = hx ? ["HX-Request" => "true"] : Pair{String,String}[]
+        app(HTTP.Request(method, target, headers, UInt8[]))
+    end
+    poll_url(body) = replace(only(match(
+        r"hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\"", body).captures), "&amp;" => "&")
+    snapshot() = runtime_snapshot(runtime_job_tracker)
+
+    _clear_operation_polls!()
+    try
+        # A route that outlives the grace period becomes one running job,
+        # linked to the request that started it.
+        started = drive("/runtime_crunch/7")
+        @test started.status == 200
+        body = String(started.body)
+        snap = snapshot()
+        job = only(snap.running)
+        @test job.label == "Crunch the numbers"
+        @test job.state === :running
+        @test job.route == "GET /runtime_crunch/{n}"
+        @test job.target == "/runtime_crunch/7"
+        @test job.requests == 1 && job.polls == 0
+        request = only(r for r in snap.history if r.path == "/runtime_crunch/7")
+        @test request.job == job.id
+        @test request.mode === :polling
+        @test request.route == "GET /runtime_crunch/{n}"
+
+        # Follow-up polls count against the job and stay out of the history.
+        url = poll_url(body)
+        @test contains(url, "__htmxo_operation=")
+        drive(url); drive(url)
+        snap = snapshot()
+        @test only(snap.running).polls == 2
+        @test count(r -> r.path == "/runtime_crunch/7", snap.history) == 1
+        @test !any(r -> contains(r.target, only(match(
+            r"__htmxo_operation=([^&]+)", url).captures)), snap.history)
+
+        # The dashboard shows the running job, hides its own requests, and
+        # renders inline (it is `@fresh`: never queued behind the jobs).
+        dash = drive("/runtime_dash"; hx=false)
+        @test dash.status == 200
+        html = String(dash.body)
+        @test contains(html, "Running jobs")
+        @test contains(html, "Crunch the numbers")
+        @test contains(html, "hx-trigger=\"every 2s\"")
+        @test contains(html, "/runtime_dash/panel")
+        @test !contains(html, "__htmxo_operation=" * only(match(
+            r"__htmxo_operation=([^&]+)", url).captures))
+        paused = String(drive("/runtime_dash/panel?live=false").body)
+        @test contains(paused, "Resume")
+        @test !contains(paused, "hx-trigger")
+        json = drive("/runtime_dash/snapshot")
+        @test HTTP.header(json, "Content-Type") == "application/json"
+        @test contains(String(json.body), "\"label\":\"Crunch the numbers\"")
+        @test !any(r -> startswith(r.path, "/runtime_dash"), snapshot().history)
+
+        # Releasing the work finishes the job with its wall time.
+        notify(runtime_job_gate[])
+        @test timedwait(() -> isempty(snapshot().running), 10.0;
+                        pollint=0.01) === :ok
+        done = only(snapshot().finished)
+        @test done.state === :done
+        @test done.duration > 0
+        @test done.polls == 2
+        @test isempty(done.error)
+
+        # A failing job is recorded as failed with the error's summary.
+        String(drive("/runtime_doomed").body)
+        @test length(snapshot().running) == 1
+        notify(runtime_fail_gate[])
+        @test timedwait(() -> isempty(snapshot().running), 10.0;
+                        pollint=0.01) === :ok
+        failed = first(snapshot().finished)
+        @test failed.state === :failed
+        @test contains(failed.error, "doomed job")
+        failed_html = String(drive("/runtime_dash/panel").body)
+        @test contains(failed_html, "doomed job")
+
+        # Every tracked HTMXObjects request carries its route pattern and
+        # the transport the operation layer chose.
+        drive("/runtime_quick")
+        quick = first(r for r in snapshot().history if r.path == "/runtime_quick")
+        @test quick.route == "GET /runtime_quick"
+        @test quick.mode === :polling
+
+        # Clearing forgets finished work only.
+        drive("/runtime_dash/clear"; method="POST")
+        @test isempty(snapshot().history)
+        @test isempty(snapshot().finished)
+    finally
+        notify(runtime_job_gate[])
+        notify(runtime_fail_gate[])
+        _clear_operation_polls!()
+    end
+end
