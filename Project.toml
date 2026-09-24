@@ -10,8 +10,8 @@ HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 LibGit2 = "76f85450-5226-5b5a-8eaa-529ad045b433"
 Markdown = "d6f4376e-aef5-505a-96c1-9c027394607a"
-Oxygen = "df9a0d86-3283-4920-82dc-4555fc0d1d8b"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
 
 [weakdeps]
@@ -24,14 +24,13 @@ HTMXObjectsTreebarsExt = "Treebars"
 Dates = "1"
 DynamicObjects = "0.4.4, 0.5"
 HTMX = "1"
-HTTP = "1, 2"
-Oxygen = "1.10"
+HTTP = "1.8, 2.4"
+Sockets = "1"
 julia = "1"
 TestItemRunner = "1"
 
 [extras]
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
-Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
@@ -41,4 +40,4 @@ url = "https://github.com/nsiccha/Treebars.jl"
 rev = "42be351bdbdcbf22572da5c8cf896fcc39047126"
 
 [targets]
-test = ["Logging", "Sockets", "Test", "TestItemRunner", "Treebars"]
+test = ["Logging", "Test", "TestItemRunner", "Treebars"]

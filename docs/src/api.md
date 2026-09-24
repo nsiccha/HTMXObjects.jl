@@ -15,9 +15,10 @@ Verb
 |--------|-----|
 | `@htmx struct App … end` | The whole package surface — declares an app, its data, and its routes |
 | `create_app(name)`       | Scaffold a new HTMXObjects app (web/, app/, Project.toml) on disk |
-| `route!(app)`            | Register all `@get`/`@post`/`@put`/`@delete`/`@ws`/`@sse` markers found in the struct on the Oxygen router |
+| `route!(app)`            | Register all `@get`/`@post`/`@put`/`@delete`/`@ws`/`@sse` markers found in the struct on `HTMXObjects.ROUTER` (an `HTTP.Router`) |
 | `Verb{V}`                | Singleton type threaded into route IPs as the first arg, lets one property host `@get`/`@post`/… simultaneously |
-| `terminate()`, `serve()`, `staticfiles(...)`, `dynamicfiles(...)` | Re-exports from Oxygen for serving |
+| `serve()`, `terminate()` | Start / stop an HTTP.jl server on `HTMXObjects.ROUTER` |
+| `staticfiles(...)`, `dynamicfiles(...)` | Mount a folder's files as `GET` routes (read once / on every request) |
 
 ## DynamicObjects re-exports
 
@@ -62,11 +63,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
-response — and it passes through the response pipeline unchanged. `serve`
-defaults `metrics` to `false` so Oxygen 1.10's metrics middleware (which reads
-every non-200 body into a `String`, stealing a `Vector{UInt8}` buffer and
-sending zero body bytes) stays out of that path; pass `metrics=true` to
-re-enable collection and the `/docs/metrics` dashboard.
+response — and it passes through the response pipeline unchanged.
 
 ## The page shell
 
@@ -1104,13 +1101,6 @@ end
 choice. Viewer assets load from a pinned CDN release (`swagger_version`,
 `cdn_base` re-points air-gapped deployments at a local mirror).
 
-Mounting at `/docs` requires `serve(docs=false)`: with Oxygen's built-in
-docs enabled, its middleware answers every `/docs*` request with Oxygen's
-own Swagger — which is empty for `@htmx` apps (they register directly on
-the router, never into Oxygen's autodoc registry), so the mounted viewer
-would never fire. The same switch also disables Oxygen's `/docs/metrics`
-dashboard UI; metrics *collection* is on a separate flag and is unaffected.
-
 ```@docs
 openapi
 OpenAPIRoutes
@@ -1152,9 +1142,9 @@ JSON, and `POST /runtime/clear` forgets the history. The dashboard's routes are
 `@fresh`, so they render inline on the request's own task and never queue
 behind a saturated compute pool; its own requests are left out of the history.
 
-Recording is independent of Oxygen. Requests are recorded by
+Recording is independent of the server. Requests are recorded by
 [`track_requests`](@ref), a plain HTTP.jl middleware
-(`handler -> req -> response`) that `serve` installs outermost by default
+(`handler -> req -> response`) that `serve` installs outside its `middleware` by default
 (`serve(; runtime_tracking=false)` opts out) and that any HTTP.jl server stack
 can compose directly, e.g. `HTTP.serve(track_requests(router), host, port)`.
 Jobs are recorded by HTMXObjects' own operation layer at the point where an
@@ -1256,5 +1246,5 @@ tree otherwise. Route bodies that run no nested polling need nothing: the
 route's own execution already parents automatically. Off `dispatch` the
 accessor returns `nothing`, so the kwarg is a no-op on ordinary requests.
 
-Serve-time Oxygen middleware (access log, metrics, docs) does not run:
-`dispatch` resolves at the router, beneath the middleware stack.
+Serve-time middleware (the access log, Revise, `serve`'s `middleware`) does
+not run: `dispatch` resolves at the router, beneath the middleware stack.

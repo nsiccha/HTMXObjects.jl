@@ -473,9 +473,10 @@ end
 end
 
 # A route returning a raw 206 byte-range response with a `Vector{UInt8}` body.
-# The body type is load-bearing: Oxygen 1.10's metrics middleware reads every
-# non-200 body via `String(response.body)`, which steals a Vector buffer and
-# serves headers with zero body bytes (snag `206-response-bod-9c3f8c18`).
+# The body type is load-bearing: any serve-time layer reading the body via
+# `String(response.body)` steals the Vector buffer and serves headers with zero
+# body bytes, as Oxygen 1.10's metrics middleware once did (snag
+# `206-response-bod-9c3f8c18`).
 @htmx struct MediaRangeApp
     @get ping() = h.p("pong")
     @get media(key::String, file::String) = HTTP.Response(
@@ -1278,7 +1279,7 @@ end
 
     route!(ProviderApp("registered"); root_provider=provider)
     req = HTTP.Request("GET", "/nested/show?count=7", ["X-Session" => "session-a"])
-    handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))
+    handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))
     resp = handler(req)
     @test resp.status == 200
     @test contains(String(resp.body), "session-a:7:/nested/show")
@@ -1288,7 +1289,7 @@ end
 
     bad_req = HTTP.Request("GET", "/nested/show?count=not-an-int",
                            ["X-Session" => "session-a"])
-    bad_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, bad_req))
+    bad_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, bad_req))
     @test bad_handler(bad_req).status == 500
 
     ws_req = HTTP.Request("GET", "/nested/stream/4?suffix=ok", ["X-Session" => "session-b"])
@@ -1383,19 +1384,19 @@ end
                                            __route__=context.route)
     end)
     good = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=fast&count=2")
-    good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, good))
+    good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, good))
     good_response = good_handler(good)
     @test good_response.status == 200
     @test contains(String(good_response.body), "n1:north:fast:2")
 
     disabled = HTTP.Request("GET", "/run?dataset=n2&cohort=north&mode=fast&count=2")
-    disabled_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, disabled))
+    disabled_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, disabled))
     disabled_response = disabled_handler(disabled)
     @test disabled_response.status == 400
     @test contains(String(disabled_response.body), "Bad Request")
 
     tampered = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=turbo&count=2")
-    tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, tampered))
+    tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, tampered))
     tampered_response = tampered_handler(tampered)
     @test tampered_response.status == 400
 end
@@ -1510,7 +1511,7 @@ end
     @test forwarded.key == "/p/sbpmx"
 
     fit = HTTP.Request("GET", "/models/fit?study=alpha&model=full")
-    fit_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, fit))
+    fit_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, fit))
     fit_response = fit_handler(fit)
     @test fit_response.status == 200
     @test contains(String(fit_response.body), "fit:alpha:full")
@@ -1519,7 +1520,7 @@ end
         ["Content-Type" => "application/x-www-form-urlencoded"],
         "study=alpha&draws=20")
     predict_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, predict))
+        HTMXObjects.ROUTER, predict))
     predict_response = predict_handler(predict)
     @test predict_response.status == 200
     @test contains(String(predict_response.body), "predict:alpha:20")
@@ -1607,7 +1608,7 @@ end
     route!(app)
     fit = HTTP.Request("GET", "/workspace/fit?model=two")
     fit_response = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, fit))(fit)
+        HTMXObjects.ROUTER, fit))(fit)
     @test fit_response.status == 200
     @test contains(String(fit_response.body), "fit:two")
 
@@ -1617,7 +1618,7 @@ end
         "model=two",
     )
     predict_response = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, predict))(predict)
+        HTMXObjects.ROUTER, predict))(predict)
     @test predict_response.status == 200
     @test contains(String(predict_response.body), "predict:two")
 end
@@ -1652,7 +1653,7 @@ end
         "study=south&dose=100",
     )
     handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, request))
+        HTMXObjects.ROUTER, request))
     response = handler(request)
     @test response.status == 200
     @test contains(String(response.body),
@@ -1691,7 +1692,7 @@ end
         "study=south&dose=100",
     )
     mounted_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, mounted_request))
+        HTMXObjects.ROUTER, mounted_request))
     mounted_response = mounted_handler(mounted_request)
     @test mounted_response.status == 200
     @test contains(String(mounted_response.body),
@@ -1711,7 +1712,7 @@ end
 
     route!(root)
     call(req) = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, req))(req)
+        HTMXObjects.ROUTER, req))(req)
 
     # EVERY request, not only the first. Rendering `semantic_app` installs the
     # managed job-scoped provider, so from the second request on the graph is
@@ -1813,7 +1814,7 @@ end
         ["HX-Request" => "true"],
     )
     refresh_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, refresh))
+        HTMXObjects.ROUTER, refresh))
     refreshed = refresh_handler(refresh)
     refreshed_html = String(refreshed.body)
     @test refreshed.status == 200
@@ -1833,7 +1834,7 @@ end
     good = HTTP.Request(
         "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=b1")
     good_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, good))
+        HTMXObjects.ROUTER, good))
     good_response = good_handler(good)
     @test good_response.status == 200
     @test contains(String(good_response.body), "fit-17:beta:b1")
@@ -1841,7 +1842,7 @@ end
     forged = HTTP.Request(
         "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=a1")
     forged_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, forged))
+        HTMXObjects.ROUTER, forged))
     forged_response = forged_handler(forged)
     @test forged_response.status == 400
 
@@ -1850,7 +1851,7 @@ end
         ["HX-Request" => "true"],
     )
     raw_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, raw))
+        HTMXObjects.ROUTER, raw))
     raw_response = raw_handler(raw)
     @test raw_response.status == 200
     @test HTTP.header(raw_response, "Content-Type") == "text/plain"
@@ -1871,7 +1872,7 @@ end
     structured_req = HTTP.Request("GET", "/models/structured?fit_key=external-fit&value=alt",
                                   ["HX-Request" => "true"])
     structured_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, structured_req))
+        HTMXObjects.ROUTER, structured_req))
     structured_response = structured_handler(structured_req)
     @test structured_response.status == 200
     @test contains(String(structured_response.body), "structured:alt")
@@ -1893,7 +1894,7 @@ end
     job_key(req) = HTTP.header(req, "X-Job", "default")
     hit(target; job="job-a") = begin
         req = HTTP.Request("GET", target, ["X-Job" => job])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     @test !ismutabletype(JobScopedApp)
@@ -2384,7 +2385,7 @@ end
         route!(app; operation_policy=:polling)
         raw_req = HTTP.Request("GET", "/raw?count=6", ["HX-Request" => "true"])
         raw_handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, raw_req))
+            HTMXObjects.ROUTER, raw_req))
         raw_response = raw_handler(raw_req)
         @test raw_response.status == 200
         @test HTTP.header(raw_response, "Content-Type") == "text/plain"
@@ -2393,7 +2394,7 @@ end
         response_req = HTTP.Request("GET", "/response?count=7",
                                     ["HX-Request" => "true"])
         response_handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, response_req))
+            HTMXObjects.ROUTER, response_req))
         final_response = response_handler(response_req)
         @test final_response.status == 202
         @test HTTP.header(final_response, "Content-Type") == "application/json"
@@ -2512,7 +2513,7 @@ end
     )
     route!(SlowPagePolicyApp(); root_provider=provider,
            operation_policy=OperationPolicy(:auto; keep_progress=false))
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
 
     drive(target, headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
@@ -2638,7 +2639,7 @@ end
     reset_preload!()
     _clear_preloads!()
     route!(PreloadApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     drive(target, headers; method="GET") = begin
         request = HTTP.Request(method, target, headers, UInt8[])
         handler = first(HTTP.Handlers.gethandler(router, request))
@@ -2681,7 +2682,7 @@ end
     reset_preload!()
     _clear_preloads!()
     route!(PreloadApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     drive(target, headers) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
         first(HTTP.Handlers.gethandler(router, request))(request)
@@ -2733,7 +2734,7 @@ end
     _clear_preloads!()
     _clear_operation_polls!()
     route!(PreloadApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     drive(target, headers) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
         first(HTTP.Handlers.gethandler(router, request))(request)
@@ -2803,7 +2804,7 @@ end
     _clear_preloads!()
     _clear_operation_polls!()
     route!(PreloadApp(); operation_policy=OperationPolicy(:auto; keep_progress=false))
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     drive(target, headers) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
         first(HTTP.Handlers.gethandler(router, request))(request)
@@ -2852,7 +2853,7 @@ end
     reset_preload!()
     _clear_preloads!()
     route!(PreloadApp(); operation_policy=OperationPolicy(:blocking))
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     drive(target, headers) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
         first(HTTP.Handlers.gethandler(router, request))(request)
@@ -2878,7 +2879,7 @@ end
 
 @testitem "fast direct-page operations render inline in a single response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     route!(FastPagePolicyApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
 
     drive(target, headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
@@ -2923,7 +2924,7 @@ end
         )
         route!(SlowPagePolicyApp(); root_provider=provider,
                operation_policy=OperationPolicy(:auto; keep_progress=false))
-        router = HTMXObjects.CONTEXT[].service.router
+        router = HTMXObjects.ROUTER
         prefix = "/p/SbPMX"
         forwarded_targets = String[]
         released = Ref(false)
@@ -3268,7 +3269,7 @@ end
 """
 Starts a real HTTP server and verifies that live responses are recorded at the
 same route-shaped paths used by static output. Tagged `integration`/`server`
-because it binds a port and mutates Oxygen's process-global route context.
+because it binds a port and mutates the process-global `HTMXObjects.ROUTER`.
 """
 @testitem "recording - end-to-end" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
     mktempdir() do dir
@@ -3320,74 +3321,53 @@ end
     end
 end
 
-@testitem "access-log timing supports both Oxygen dependency worlds" setup=[HTMXOTestImports] tags=[:unit] begin
-    formatter = HTMXObjects._select_access_log_base_formatter()
-    @test formatter isa Function
-
-    request = HTTP.Request("GET", "/timed")
-    request.context[:t0] = time() - 0.01
-    if isdefined(HTMXObjects.Oxygen, :oxygen_logfmt)
-        request.context[:ip] = "127.0.0.1"
-        request.context[:response] = HTTP.Response(204)
-        access_event = request
-        @test formatter === getproperty(HTMXObjects.Oxygen, :oxygen_logfmt)
-    else
-        request.response = HTTP.Response(204)
-        access_event = (;
-            message=request,
-            stream=(; peerip="127.0.0.1", peerport=8080),
-            nwritten=0,
-        )
-        @test formatter === HTMXObjects._http1_oxygen_logfmt
-    end
+@testitem "serve request pipeline: access log, middleware order, fallback" setup=[HTMXOTestImports] tags=[:unit] begin
+    using Logging
 
     windows_timestamp = HTMXObjects._access_log_timestamp(true)
     @test occursin(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", windows_timestamp)
 
-    http1_event = (;
-        message=(;
-            method="GET",
-            target="/compat",
-            version=(; major=1, minor=1),
-            response=(; status=201),
-        ),
-        stream=(; peerip="127.0.0.2", peerport=8081),
-    )
-    http1_io = IOBuffer()
-    HTMXObjects._http1_oxygen_logfmt(http1_io, http1_event)
-    http1_line = String(take!(http1_io))
-    @test contains(http1_line, "127.0.0.2:8081")
-    @test contains(http1_line, "\"GET /compat HTTP/1.1\" 201")
-
+    # Default line. An in-process request has no stream, so the peer is "-".
+    request = HTTP.Request("GET", "/timed")
+    request.context[:t0] = time() - 0.01
+    request.context[:response] = HTTP.Response(204)
     io = IOBuffer()
-    HTMXObjects._timed_access_log(io, access_event)
+    HTMXObjects._timed_access_log(io, request)
     line = String(take!(io))
-    @test contains(line, "127.0.0.1")
-    @test contains(line, "\"GET /timed HTTP/1.1\" 204")
+    @test contains(line, " - - \"GET /timed HTTP/1.1\" 204 ")
     @test occursin(r" [0-9.]+(μs|ms|s|min)$", line)
 
-    request_only = HTTP.Request("GET", "/")
-    @test HTMXObjects._access_log_request(request_only) === request_only
-    @test HTMXObjects._access_log_request((; message=request_only)) === request_only
+    # Caller middleware runs outermost-first inside the access log; the
+    # fallback coerces a non-Response value and turns an exception into a 500.
+    order = String[]
+    tag(name) = handler -> req -> (push!(order, name); handler(req))
+    HTTP.register!(HTMXObjects.ROUTER, "GET", "/pipeline-raw", req -> "raw body")
+    HTTP.register!(HTMXObjects.ROUTER, "GET", "/pipeline-boom", req -> error("boom"))
+    capture(io, req) = print(io, req.target, " ", req.context[:response].status)
+    app = HTMXObjects._request_pipeline([tag("a"), tag("b")], capture, nothing)
+    logger = TestLogger()
+    raw, boom = with_logger(logger) do
+        app(HTTP.Request("GET", "/pipeline-raw")), app(HTTP.Request("GET", "/pipeline-boom"))
+    end
+    @test order == ["a", "b", "a", "b"]
+    @test raw.status == 200
+    @test String(raw.body) == "raw body"
+    @test boom.status == 500
+    messages = [string(l.message) for l in logger.logs]
+    @test "/pipeline-raw 200" in messages
+    @test "/pipeline-boom 500" in messages
+    @test any(l -> l.level == Logging.Error && contains(string(l.message), "/pipeline-boom"),
+              logger.logs)
 
-    defaults = HTMXObjects._with_access_timing((;))
-    @test defaults[:access_log] === HTMXObjects._timed_access_log
-    @test first(defaults[:middleware]) === HTMXObjects._timing_middleware
-    @test defaults[:metrics] === false
-
-    custom_log(io, event) = nothing
-    existing_middleware(handler) = handler
-    custom = HTMXObjects._with_access_timing(pairs((;
-        access_log=custom_log,
-        middleware=[existing_middleware],
-        metrics=true,
-    )))
-    @test custom[:access_log] === custom_log
-    @test custom[:middleware] == Any[
-        HTMXObjects._timing_middleware,
-        existing_middleware,
-    ]
-    @test custom[:metrics] === true
+    # Keywords that only configured Oxygen are dropped with a warning.
+    kept = with_logger(logger) do
+        HTMXObjects._drop_oxygen_kwargs(pairs((; docs=false, metrics=true, readtimeout=5)))
+    end
+    @test kept == (; readtimeout=5)
+    @test any(l -> contains(string(l.message), "Ignoring `serve` keyword(s) docs, metrics"),
+              logger.logs)
+    untouched = pairs((; readtimeout=5))
+    @test HTMXObjects._drop_oxygen_kwargs(untouched) === untouched
 end
 
 @testitem "record! preserves indexed include paths and rejects collisions" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
@@ -4183,14 +4163,14 @@ end
     route!(app)
     submitted = HTTP.Request("GET", "/run?flag=false")
     submitted_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, submitted))
+        HTMXObjects.ROUTER, submitted))
     submitted_response = submitted_handler(submitted)
     @test submitted_response.status == 200
     @test String(submitted_response.body) == "false"
 
     tampered = HTTP.Request("GET", "/run?flag=on")
     tampered_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, tampered))
+        HTMXObjects.ROUTER, tampered))
     tampered_response = tampered_handler(tampered)
     @test tampered_response.status == 400
     @test contains(String(tampered_response.body), "Bad Request")
@@ -4599,7 +4579,7 @@ transport actually *delivers*, not merely that it engages.
 """
 @testitem "web-included test routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :test_ui] begin
     route!(TestUIHost())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
 
     function drive(target)
         request = HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[])
@@ -4964,7 +4944,7 @@ end
 @testitem "navigation is threaded through page wrappers only when asked for" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     # `__page__(content; navigation=nothing)` receives it.
@@ -4996,7 +4976,7 @@ end
 @testitem "recursively nested page wrappers each receive their own node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(NavChainRoot())
@@ -5029,7 +5009,7 @@ end
 @testitem "a page wrapper declares how deep its threaded navigation goes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, ["Host" => "x"], UInt8[])
-        String(first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req).body)
+        String(first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req).body)
     end
 
     # depth=2 on the child wrapper: descendants[1] is the grandchild and its
@@ -5052,7 +5032,7 @@ end
 @testitem "a partial swap carries the chrome below the swap target" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
     swap(path, from) = String(drive(path, ["HX-Request" => "true",
                                            "HX-Current-URL" => from]).body)
@@ -5162,7 +5142,7 @@ end
 @testitem "ReflectionRoutes serves a human-readable graph without disturbing /schema" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(NavRoot())
@@ -5249,7 +5229,7 @@ end
 @testitem "OpenAPIRoutes serves the OpenAPI document as JSON" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(OpenAPIRoot())
@@ -5273,7 +5253,7 @@ end
 @testitem "SwaggerRoutes serves a pinned viewer against the OpenAPI document" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(OpenAPIRoot())
@@ -5296,67 +5276,75 @@ end
     @test SwaggerRoutes().swagger_version == "5.7.2"
 end
 
-@testitem "/docs-prefix check defers to serve and respects docs=false" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "serve answers /docs, WebSocket and static-file routes" setup=[HTMXOTestImports] tags=[:integration, :server] begin
     using Logging
 
-    @htmx struct DocsPrefixChild
+    @htmx struct ServeDocsChild
         @get index() = h.h1("fixture docs page")
     end
-    @htmx struct DocsPrefixApp
-        @include docs = DocsPrefixChild()
+    @htmx struct ServeApp
+        @include docs = ServeDocsChild()
+        @ws echo(; suffix::String="") = for msg in __ws__
+            HTTP.WebSockets.send(__ws__, String(msg) * suffix)
+        end
     end
+    route!(ServeApp())
+    dir = mktempdir()
+    write(joinpath(dir, "site.css"), "body{}")
+    mkpath(joinpath(dir, "sub"))
+    write(joinpath(dir, "sub", "index.html"), "<p>index</p>")
+    staticfiles(dir, "serve-static")
+    dynamicfiles(dir, "/serve-dynamic")
 
-    is_docs_error(l) =
-        l.level >= Logging.Error && occursin("starts with", string(l.message))
-
-    reg_logs = TestLogger()
-    with_logger(reg_logs) do
-        route!(DocsPrefixApp())
-        route!(DocsPrefixApp())
+    port = 8135
+    base = "http://127.0.0.1:$port"
+    logger = TestLogger()
+    with_logger(logger) do
+        # `docs` only configured Oxygen: warned about and ignored.
+        serve(; port, async=true, docs=false)
     end
     try
-        # Registration records the collision instead of reporting it: serve's
-        # `docs=` kwarg is not known yet (snag docs-prefix-rout-665a2140).
-        # Re-registration rebuilds (not appends) this type's entries.
-        @test isempty(filter(is_docs_error, reg_logs.logs))
-        @test HTMXObjects._docs_prefix_routes[DocsPrefixApp] ==
-            Set([(:index, "/docs")])
+        # Nothing sits in front of the router, so a `/docs` mount answers.
+        r = HTTP.get("$base/docs"; retry=false, readtimeout=20)
+        @test r.status == 200
+        @test contains(String(r.body), "fixture docs page")
 
-        # The documented remedy stays silent: with Oxygen's docs off, the
-        # app's own route answers /docs.
-        serve_logs = TestLogger()
-        with_logger(serve_logs) do
-            serve(; port=8135, async=true, docs=false)
-        end
-        try
-            r = HTTP.get("http://127.0.0.1:8135/docs"; retry=false, readtimeout=20)
-            @test r.status == 200
-            @test contains(String(r.body), "fixture docs page")
-        finally
-            terminate()
-        end
-        @test isempty(filter(is_docs_error, serve_logs.logs))
+        r = HTTP.get("$base/serve-static/site.css"; retry=false, readtimeout=20)
+        @test String(r.body) == "body{}"
+        @test HTTP.header(r, "Content-Type") == "text/css; charset=utf-8"
+        r = HTTP.get("$base/serve-static/sub"; retry=false, readtimeout=20)
+        @test String(r.body) == "<p>index</p>"
+        write(joinpath(dir, "site.css"), "body{color:red}")
+        r = HTTP.get("$base/serve-dynamic/site.css"; retry=false, readtimeout=20)
+        @test String(r.body) == "body{color:red}"
+        r = HTTP.get("$base/serve-static/site.css"; retry=false, readtimeout=20)
+        @test String(r.body) == "body{}"
 
-        # ...but with Oxygen's docs enabled the collision still errors.
-        # (`>= 1`: earlier items may have registered their own /docs routes
-        # into the shared process registry; this type's exact entry is
-        # asserted above.)
-        enabled_logs = TestLogger()
-        with_logger(enabled_logs) do
-            serve(; port=8136, async=true)
+        # A plain GET on a WebSocket route is told to upgrade (and must not
+        # hang the client: HTTP 1.x never chunks a response carrying `Upgrade`).
+        r = HTTP.get("$base/echo"; retry=false, readtimeout=20, status_exception=false)
+        @test r.status == 426
+        received = String[]
+        HTTP.WebSockets.open("ws://127.0.0.1:$port/echo?suffix=!") do ws
+            HTTP.WebSockets.send(ws, "ping")
+            push!(received, String(HTTP.WebSockets.receive(ws)))
         end
-        try
-            HTTP.get("http://127.0.0.1:8136/docs"; retry=false, readtimeout=20,
-                     status_exception=false)
-        finally
-            terminate()
-        end
-        @test count(is_docs_error, enabled_logs.logs) >= 1
-        @test any(l -> occursin("maps to path \"/docs\"", string(l.message)),
-                  enabled_logs.logs)
+        @test received == ["ping!"]
+        # The server keeps serving after the upgraded connection closes.
+        @test HTTP.get("$base/docs"; retry=false, readtimeout=20).status == 200
     finally
-        delete!(HTMXObjects._docs_prefix_routes, DocsPrefixApp)
+        terminate()
     end
+    @test HTMXObjects._SERVER[] === nothing
+    # The runtime ledger records the finished session as an upgrade, not as a
+    # failed request.
+    @test any(r -> r.kind === :websocket && startswith(r.target, "/echo") &&
+                   r.status == 101 && isempty(r.error),
+              runtime_snapshot().history)
+    messages = [string(l.message) for l in logger.logs]
+    @test any(m -> contains(m, "Ignoring `serve` keyword(s) docs"), messages)
+    @test any(m -> occursin(r"127\.0\.0\.1:\d+ - \"GET /docs HTTP/1\.1\" 200 ", m), messages)
+    @test any(m -> occursin(r"\"GET /echo\?suffix=! HTTP/1\.1\" 101 ", m), messages)
 end
 
 @testitem "application architecture composes declarations, routes, contributions and observations" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -5456,7 +5444,7 @@ end
 
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
     route!(ArchitectureExplorerHost())
 
@@ -5481,7 +5469,7 @@ end
     drive(verb, path, body="") = begin
         req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
                            Vector{UInt8}(body))
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     _reset_note_store!()
@@ -5549,7 +5537,7 @@ end
     drive(verb, path, body="") = begin
         req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
                            Vector{UInt8}(body))
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     # The item half addresses the same store the collection half writes to.
@@ -5565,7 +5553,7 @@ end
 @testitem "a callable page-wrapper VALUE receives navigation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     # `__page__ = MockPage(...)` declares no signature of its own — the value is
@@ -5600,7 +5588,7 @@ end
 
     route!(IndexedMountRoot())
     req = HTTP.Request("GET", "/item/abc", Pair{String,String}[], UInt8[])
-    response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    response = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     @test response.status == 200
     @test contains(String(response.body), "abc")
 end
@@ -5621,7 +5609,7 @@ end
 
     route!(SingleRouteIncludeRoot())
     req = HTTP.Request("DELETE", "/flags/abc", Pair{String,String}[], UInt8[])
-    response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    response = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     @test response.status == 200
     @test contains(String(response.body), "deleted abc")
 end
@@ -5629,7 +5617,7 @@ end
 @testitem "an indexed mount selects the domain candidate, not its label" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(DomainRoot())
@@ -6042,7 +6030,7 @@ end
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(SemanticCardPageApp())
@@ -6092,7 +6080,7 @@ end
 @testitem "a node-valued @param resolves through its live option domain" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(DomainParamRoot())
@@ -6284,7 +6272,7 @@ end
 @testitem "native operation navigation rebuilds the selected page shell" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     app = SemanticNodeParamApp(; __prefix__="/model")
@@ -6475,7 +6463,7 @@ end # @testmodule HTMXOPollIdentityFixtures
         request = HTTP.Request("GET", target,
             ["HX-Request" => "true", "X-Session" => session], UInt8[])
         handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, request))
+            HTMXObjects.ROUTER, request))
         @test handler !== HTTP.Handlers.default404
         response = handler(request)
         @test response.status == 200
@@ -7093,7 +7081,7 @@ end
 @testitem "EditorRoutes serves its own mount point" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers)
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(EditorMountRoot())
@@ -7682,7 +7670,7 @@ end
     end
 
     route!(SlowDocumentedPollApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     function get_body(target)
         req = HTTP.Request("GET", target, ["HX-Request" => "true"])
         String(first(HTTP.Handlers.gethandler(router, req))(req).body)
@@ -7774,7 +7762,7 @@ end
     @test [p.name for p in route.params if p.source === :path] == [:id]
     @test [p.name for p in route.params if p.source === :query] == [:q]
 
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     req = HTTP.Request("GET", "/feed/1")
     @test first(HTTP.Handlers.gethandler(router, req)) !== HTTP.Handlers.default404
 
@@ -7850,7 +7838,7 @@ end
     route!(SSEServeApp())
     port = 8141
     heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
-    serve(; port, async=true, docs=false)
+    serve(; port, async=true)
     try
         r, body = stream("/ticks?n=2")
         @test r.status == 200
@@ -7904,7 +7892,7 @@ end
 # `HTTP.Request -> HTTP.Response` handler, so these drive it with plain
 # functions and never start a server.
 @testitem "track_requests records in-flight and finished requests" setup=[HTMXOTestImports] tags=[:unit] begin
-    import HTMXObjects: _with_runtime_tracking, _runtime_redact_target
+    import HTMXObjects: _request_pipeline, _runtime_redact_target
 
     tracker = RuntimeTracker(; history_limit=3)
     gate = Base.Event()
@@ -7994,15 +7982,18 @@ end
     @test (@test_logs (:warn, r"runtime tracking failed") match_mode=:any HTMXObjects._runtime_guarded(
         () -> error("ledger broke"), "probe")) === nothing
 
-    # `serve` installs the tracker outermost, ahead of the timing middleware
-    # and any caller middleware.
-    existing(handler) = handler
-    kw = _with_runtime_tracking(pairs((; middleware=[existing])), tracker)
-    @test length(kw[:middleware]) == 2
-    @test kw[:middleware][2] === existing
-    wrapped = kw[:middleware][1](req -> HTTP.Response(204))
+    # `serve`'s pipeline installs the tracker outside any caller middleware,
+    # which therefore already sees the live request record.
+    HTTP.register!(HTMXObjects.ROUTER, "GET", "/via-serve", req -> HTTP.Response(204))
+    tracked_before_caller = Ref(false)
+    existing(handler) = function (req)
+        tracked_before_caller[] = haskey(req.context, HTMXObjects._RUNTIME_REQUEST_KEY)
+        handler(req)
+    end
+    wrapped = _request_pipeline([existing], nothing, nothing, tracker)
     configure_runtime!(tracker; enabled=true)
     @test wrapped(HTTP.Request("GET", "/via-serve")).status == 204
+    @test tracked_before_caller[]
     @test first(runtime_snapshot(tracker).history).target == "/via-serve"
 end
 
@@ -8024,7 +8015,7 @@ end
     end
 
     route!(RuntimeJobApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     app = track_requests(router; tracker=runtime_job_tracker)
     function drive(target; hx=true, method="GET")
         headers = hx ? ["HX-Request" => "true"] : Pair{String,String}[]
