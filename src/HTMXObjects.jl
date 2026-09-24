@@ -25,7 +25,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -1899,11 +1899,18 @@ Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
     (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
 
 """
-    htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", pico_version=nothing, feedback=true, extra_head=())
+    htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, feedback=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
+
+`preload_version` loads htmx's [`preload` extension](https://htmx.org/extensions/preload/),
+enables it page-wide and adds [`preload_runtime_js`](@ref). It is inert until an
+element carries a `preload` attribute — see the `preload` keyword of
+[`nav_sidebar`](@ref), [`htmx_tabset`](@ref), [`tabset`](@ref),
+[`htmxo_breadcrumb`](@ref) and [`hx_link`](@ref) — and speculative requests do
+work only on routes marked `@preload`.
 
 Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
 `<!DOCTYPE html>` preamble, so the page renders in standards mode.
@@ -1913,6 +1920,7 @@ function htmx(args...;
     body = h.body,
     htmx_version        = "2.0.8",
     hyperscript_version = "0.9.14",
+    preload_version     = "2.1.2",
     pico_version        = nothing,
     feedback             = true,
     compose              = true,
@@ -1922,9 +1930,17 @@ function htmx(args...;
 )
     cdn = []
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
+    # The extension registers itself on load, so it must follow htmx.
+    preload = !isnothing(htmx_version) && !isnothing(preload_version)
+    preload && push!(cdn,
+        h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js"),
+        preload_runtime_js())
     isnothing(hyperscript_version) || push!(cdn, h.script(src="https://unpkg.com/hyperscript.org@$(hyperscript_version)"))
     isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css"))
-    HTMLDocument(h.html(
+    # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
+    # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
+    html = preload ? h.html(; hx_ext="preload") : h.html
+    HTMLDocument(html(
         head(
             h.meta(charset="utf-8"),
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
@@ -3053,13 +3069,30 @@ end
 
 # --- Convenience helpers ---
 
+# The `preload` keyword shared by the navigation components: `nothing`/`false`
+# adds nothing, `true` preloads on hover, and a string or symbol passes through
+# as the extension's trigger (`"mousedown"`, `"preload:init"`, …). Normalized
+# because a bare `preload=true` would render `preload="true"`, which the
+# extension reads as an event name that never fires.
+_preload_attrs(::Nothing) = (;)
+_preload_attrs(preload::Bool) = preload ? (preload="mouseover",) : (;)
+_preload_attrs(preload::Union{AbstractString,Symbol}) = (preload=String(preload),)
+
 """
-    hx_link(url; kwargs...)
+    hx_link(url; preload=nothing, kwargs...)
 
 Create an `h.a` with both `href` and `hx-get` set to `url`. Extra kwargs
 (`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`.
+
+`preload=true` fetches the link's target when the pointer rests on it (a string
+such as `"mousedown"` picks another trigger of htmx's
+[`preload` extension](https://htmx.org/extensions/preload/), which [`htmx`](@ref)
+loads). The route decides what a preload does: a route marked `@preload`
+starts its operation so the click finds it done or running; any other route
+answers without doing work.
 """
-hx_link(url; kwargs...) = h.a(; href=url, hx_get=url, kwargs...)
+hx_link(url; preload=nothing, kwargs...) =
+    h.a(; href=url, hx_get=url, _preload_attrs(preload)..., kwargs...)
 
 """
     htmx_or(full_page_fn, req, fragment)
@@ -5180,6 +5213,201 @@ end
 _resolve_operation_value(value) =
     value isa DynamicObjects.Pending ? fetch(value) : value
 
+# Speculative preloads (`@preload`). htmx's `preload` extension issues the GET
+# a link WOULD issue — early, on hover or mousedown — marked `HX-Preloaded:
+# true`, and discards the response: the click that follows is an ordinary
+# request, faster only if something already did its work. Two rules follow
+# for a server whose GETs are computations:
+#
+# - A route that did not opt in does no speculative work. It answers a
+#   preload with an empty `204` before a root is even constructed, so a
+#   `preload` attribute on an operation-like GET (`SemanticAction`) or a slow
+#   route costs one cheap round trip, never a computation.
+# - A `@preload` route starts its operation. One that finishes within the
+#   grace budget answers the fragment with a short private `Cache-Control`
+#   varied on `HX-Request` and the page's `HTMXO-Client` id, so the click is
+#   served from the browser cache — and only on the page that preloaded it.
+#   A slower operation answers `204` and keeps running: the click, carrying
+#   the same client id, joins it instead of recomputing on its fresh root.
+#
+# Joining reuses the poll-token trust model. The client id is a per-page-load
+# random bearer that `preload_runtime_js` sends only to the page's own origin;
+# an entry is also bound to the operation signature (root/leaf types, route,
+# typed args, provider scope/key), so an id can only ever claim the exact
+# operation a fresh GET of the same URL on that page would have computed.
+# Entries live in their own bounded registry — a burst of hovers must never
+# evict a live poller's operation — and are consumed by the join.
+
+"""
+    PRELOAD_MAX_AGE
+
+Seconds (`Ref{Int}`, default `10`) the browser may reuse a `@preload` route's
+preloaded fragment. Only preload responses that finished within the grace budget
+carry it, and they vary on the page's client id, so the reuse is confined to the
+page that preloaded. Set `HTMXObjects.PRELOAD_MAX_AGE[] = 0` to disable browser
+reuse and keep only the server-side join.
+"""
+const PRELOAD_MAX_AGE = Ref(10)
+
+const _PRELOAD_GRACE = 0.1
+const _PRELOAD_LIMIT = 64
+const _PRELOAD_TTL = 120.0
+const _preload_lock = ReentrantLock()
+const _preload_ops = Dict{Any,_OperationPollEntry}()
+
+struct _PreloadSkipped end
+const _PRELOAD_SKIPPED = _PreloadSkipped()
+
+_preload_request(req::HTTP.Request) = HTTP.header(req, "HX-Preloaded", "") == "true"
+
+function _preload_client(req::HTTP.Request)
+    id = HTTP.header(req, "HTMXO-Client", "")
+    occursin(r"^[0-9a-f]{32}$", id) ? String(id) : nothing
+end
+
+# Only a route's first GET is speculative: polls, attaches and form refreshes
+# belong to a transport the page already runs.
+_preloadable_request(req::HTTP.Request, verb_inst) =
+    _verb_symbol(verb_inst) === :GET && !_operation_poll_request(req) &&
+        isnothing(_operation_poll_token(req)) && !_operation_form_request(req)
+
+_preload_skipped_response() = HTTP.Response(204, ["Cache-Control" => "no-store"])
+
+function _prune_preloads!(now::Real=_operation_poll_now())
+    expired = [key for (key, entry) in _preload_ops
+               if now - entry.created_at >= _PRELOAD_TTL]
+    foreach(key -> delete!(_preload_ops, key), expired)
+    nothing
+end
+
+function _retain_preload!(key, entry::_OperationPollEntry;
+        now::Real=_operation_poll_now())
+    lock(_preload_lock)
+    try
+        _prune_preloads!(now)
+        while length(_preload_ops) >= _PRELOAD_LIMIT
+            oldest = argmin(k -> _preload_ops[k].created_at, collect(keys(_preload_ops)))
+            delete!(_preload_ops, oldest)
+        end
+        _preload_ops[key] = entry
+    finally
+        unlock(_preload_lock)
+    end
+    entry
+end
+
+function _lookup_preload(key; take::Bool=false, now::Real=_operation_poll_now())
+    lock(_preload_lock)
+    try
+        _prune_preloads!(now)
+        entry = get(_preload_ops, key, nothing)
+        take && !isnothing(entry) && delete!(_preload_ops, key)
+        entry
+    finally
+        unlock(_preload_lock)
+    end
+end
+
+function _clear_preloads!()
+    lock(_preload_lock)
+    try
+        empty!(_preload_ops)
+    finally
+        unlock(_preload_lock)
+    end
+    nothing
+end
+
+# Start a preload's materialization off the request task. The spawn yields the
+# same `started` a `:polling` start would — a DO `Pending` for a cached route,
+# the value itself for a `@fresh` one, which computes inside the spawn — so a
+# join can hand it to whichever transport the click resolves to.
+function _start_preload(descriptor, target, name, verb_inst, idx_vals, kw_pairs,
+        signature, req::HTTP.Request)
+    declared_fresh = _operation_declared_fresh(descriptor)
+    task = Threads.@spawn Base.invokelatest(_execute_materialization,
+        target, name, verb_inst, idx_vals, kw_pairs;
+        fetch=identity, declared_fresh)
+    now = _operation_poll_now()
+    _OperationPollEntry("", signature, getproperty(target.leaf, name),
+        (verb_inst, idx_vals...), NamedTuple(kw_pairs), task, target.leaf, req,
+        now, now)
+end
+
+# `(ready, value)` for a preload entry within `grace` seconds: the spawn must
+# have returned and any DO handle it returned must have resolved. A failure is
+# never ready — the preload answers `204` and the click, joining, renders it
+# through its own transport exactly as a request without a preload would.
+function _preload_ready(entry::_OperationPollEntry, grace::Real)
+    task = entry.started::Task
+    started_at = time_ns()
+    timedwait(() -> istaskdone(task), grace; pollint=0.005) === :ok ||
+        return (ready=false, value=nothing)
+    istaskfailed(task) && return (ready=false, value=nothing)
+    remaining = max(grace - (time_ns() - started_at) / 1.0e9, 0.0)
+    try
+        _operation_grace_fetch(_resolve_operation_value, fetch(task), remaining)
+    catch
+        (ready=false, value=nothing)
+    end
+end
+
+function _execute_preload(descriptor, target, name, verb_inst, idx_vals,
+        kw_pairs, req::HTTP.Request)
+    _preloadable_request(req, verb_inst) || return _PRELOAD_SKIPPED
+    signature = _operation_poll_signature(
+        target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+    client = _preload_client(req)
+    key = (client, signature)
+    entry = isnothing(client) ? nothing : _lookup_preload(key)
+    if !(entry isa _OperationPollEntry)
+        entry = _start_preload(descriptor, target, name, verb_inst, idx_vals,
+                               kw_pairs, signature, req)
+        isnothing(client) || _retain_preload!(key, entry)
+    end
+    ready = _preload_ready(entry, _PRELOAD_GRACE)
+    ready.ready || return _PRELOAD_SKIPPED
+    # The browser now holds the fragment; a server-side join after its
+    # max-age would serve older data than a fresh GET, so drop the entry.
+    isnothing(client) || _lookup_preload(key; take=true)
+    req.context[:htmxo_preload] = :ready
+    ready.value
+end
+
+# Hand a preloaded operation to the click that follows its preload — same page
+# (`HTMXO-Client`), same route, same typed args — consuming the entry. Returns
+# the entry with `started` resolved to what the preload's materialization
+# returned, or `nothing` when there is nothing to join; a failed start also
+# yields `nothing`, so the click computes fresh and reports the error itself.
+function _take_preload(req::HTTP.Request, signature)
+    client = _preload_client(req)
+    isnothing(client) && return nothing
+    entry = _lookup_preload((client, signature); take=true)
+    entry isa _OperationPollEntry || return nothing
+    started = try
+        fetch(entry.started)
+    catch
+        return nothing
+    end
+    entry.started = started
+    entry
+end
+
+# A preload response that finished in time becomes reusable by the browser,
+# unless the route already chose its own caching.
+function _stamp_preload(req::HTTP.Request, resp::HTTP.Response)
+    get(req.context, :htmxo_preload, nothing) === :ready || return resp
+    (resp.status == 200 && PRELOAD_MAX_AGE[] > 0) || return resp
+    isempty(HTTP.header(resp, "Cache-Control", "")) || return resp
+    vary = HTTP.header(resp, "Vary", "")
+    hdrs = Pair{String,String}[String(k) => String(v) for (k, v) in resp.headers
+                               if lowercase(String(k)) != "vary"]
+    push!(hdrs, "Cache-Control" => "private, max-age=$(PRELOAD_MAX_AGE[])")
+    push!(hdrs, "Vary" => (isempty(vary) ? "" : vary * ", ") *
+                          "HX-Request, HTMXO-Client")
+    HTTP.Response(resp.status, hdrs; body=resp.body)
+end
+
 # First non-empty line of a route docstring, verbatim. The shared core behind
 # the OpenAPI `summary`, the auto poller header, and the semantic operation
 # title: one rule for what "the docstring's first line" means, with each
@@ -5503,7 +5731,11 @@ end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false,
-        parent_progress=nothing)
+        parent_progress=nothing, preload::Bool=false)
+    if preload && _preload_request(req)
+        return _execute_preload(descriptor, target, name, verb_inst, idx_vals,
+                                kw_pairs, req)
+    end
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell)
     context = get(target, :context, nothing)
@@ -5511,6 +5743,22 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     prop = getproperty(target.leaf, name)
     keys = (verb_inst, idx_vals...)
     call_kwargs = NamedTuple(kw_pairs)
+    error_obj = target.leaf
+
+    # A click following a `@preload` of the same route and args on the same
+    # page joins that operation: its `started` stands in for a fresh start,
+    # and its IP/keys stand in for this root's, because the polling transport
+    # re-reads progress through the IP whose cache actually holds the compute.
+    preloaded = nothing
+    if preload && _preloadable_request(req, verb_inst)
+        preloaded = _take_preload(req, _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs))
+        if !isnothing(preloaded)
+            prop, keys, call_kwargs = preloaded.prop, preloaded.keys,
+                                      preloaded.call_kwargs
+            error_obj = preloaded.error_obj
+        end
+    end
 
     if mode === :page_load
         # A direct rich-page visit spends the same grace budget an HTMX request
@@ -5520,11 +5768,13 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         # load-triggered refetch joins the in-flight operation instead of
         # starting a second compute. The shell therefore never waits for a
         # slow operation, but the operation always starts at most once.
-        started = _execute_materialization(target, name, verb_inst, idx_vals,
-                                           kw_pairs; fetch=identity,
-                                           parent_progress=parent_progress,
-                                           declared_fresh=
-                                               _operation_declared_fresh(descriptor))
+        started = isnothing(preloaded) ?
+            _execute_materialization(target, name, verb_inst, idx_vals,
+                                     kw_pairs; fetch=identity,
+                                     parent_progress=parent_progress,
+                                     declared_fresh=
+                                         _operation_declared_fresh(descriptor)) :
+            preloaded.started
         fast = _operation_grace_fetch(_resolve_operation_value, started,
                                       _operation_grace_period(policy, req))
         fast.ready && return fast.value
@@ -5534,7 +5784,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
-            target.leaf, req, now, now)
+            error_obj, req, now, now)
         _retain_operation_poll!(entry)
         return _operation_page_load(
             req, prefix; replace_terminal=!_operation_treebars_keep(policy),
@@ -5568,13 +5818,18 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     # `:polling`/`:auto` would behave exactly like `:blocking` and the
     # extension's grace-period fast path — written against `started isa
     # Pending` — could never be reached.
-    started = _execute_materialization(target, name, verb_inst, idx_vals,
-                                       kw_pairs;
-                                       fetch=mode === :polling ? identity :
-                                             Base.fetch,
-                                       parent_progress=parent_progress,
-                                       declared_fresh=
-                                           _operation_declared_fresh(descriptor))
+    started = if isnothing(preloaded)
+        _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
+                                 fetch=mode === :polling ? identity :
+                                       Base.fetch,
+                                 parent_progress=parent_progress,
+                                 declared_fresh=
+                                     _operation_declared_fresh(descriptor))
+    else
+        # A blocking transport answers the value, as a blocking start would.
+        mode === :polling ? preloaded.started :
+            _resolve_operation_value(preloaded.started)
+    end
     if mode === :polling
         token = _new_operation_poll_token()
         now = _operation_poll_now()
@@ -5582,7 +5837,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
-            target.leaf, req, now, now)
+            error_obj, req, now, now)
         page_load_id = _operation_page_load_id(req)
         transport = (poll_url=_operation_poll_url(req, token, prefix),
                      label=_operation_poll_label(descriptor, name),
@@ -5592,7 +5847,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                      settle_bare=true,
                      page_load_id,
                      replace_page_load=false,
-                     error_obj=target.leaf, req=req,
+                     error_obj=error_obj, req=req,
                      grace_period=_operation_grace_period(policy, req),
                      retain=() -> _retain_operation_poll!(entry),
                      cleanup=() -> _delete_operation_poll!(token))
@@ -5618,7 +5873,7 @@ end
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
         operation_policy::OperationPolicy=OperationPolicy(),
-        parent_progress=nothing)
+        parent_progress=nothing, preload::Bool=false)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
@@ -5633,7 +5888,7 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
                  _operation_rich_page_request(req)
     value = _execute_operation(operation_policy, descriptor, target, name,
                                verb_inst, idx_vals, kw_pairs, req; page_shell,
-                               parent_progress=parent_progress)
+                               parent_progress=parent_progress, preload)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -5661,7 +5916,8 @@ but retain a transport-specific `ws` signature and response lifecycle.
 """
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         path, n_params, record_dir; root_prefix="", record_base::String="",
-        root_provider=RootProvider(), operation_policy=OperationPolicy())
+        root_provider=RootProvider(), operation_policy=OperationPolicy(),
+        preload::Bool=false)
     base = _base_segments(path, n_params)
     is_included = !isempty(chain)
     # Number of URL segments consumed by the root prefix (e.g. "/foo/bar" → 2)
@@ -5671,6 +5927,12 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     # `Symbol(method)` is the verb short symbol used in `Verb{V}`.
     verb_inst = Verb{Symbol(method)}()
     _register_handler(method, path, function(req)
+        # A speculative request does no work unless the route opted in with
+        # `@preload` — decided before a root is constructed.
+        if _preload_request(req) &&
+                !(preload && _preloadable_request(req, verb_inst))
+            return _preload_skipped_response()
+        end
         local context, root, leaf, root_target
         try
             provider = get(_root_providers, RootT, root_provider)
@@ -5705,8 +5967,10 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             parent_progress = dispatch_parent(req)
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy,
-                                       parent_progress=parent_progress)
+                                       parent_progress=parent_progress,
+                                       preload)
             val = operation.value
+            val === _PRELOAD_SKIPPED && return _preload_skipped_response()
 
             # The request target is the authoritative external route. Rebuilding
             # it from `chain` loses indexed mount values because chain entries
@@ -5716,10 +5980,11 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
-                return _resolve_response_nested(page_chain, req, val;
-                                                root, record_dir, save_path, record_base)
+                return _stamp_preload(req, _resolve_response_nested(page_chain, req, val;
+                                                root, record_dir, save_path, record_base))
             else
-                return _resolve_response(leaf, req, val; record_dir, save_path, record_base)
+                return _stamp_preload(req, _resolve_response(leaf, req, val;
+                                                record_dir, save_path, record_base))
             end
         catch err
             err isa _RecordDestinationCollision && rethrow()
@@ -5867,6 +6132,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
     param_strs, n_params, default_positions = _route_param_shape(positional_indices)
     path = _route_path(prefix, name, param_strs)
     _record_docs_prefix(OwnerT, path, name)
+    preload = Symbol("@preload") in info.macros
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
@@ -5894,17 +6160,17 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy)
+                                    operation_policy, preload)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy)
+                                    operation_policy, preload)
         else
             # Register the full route (all params explicit)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy)
+                                    operation_policy, preload)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -5915,7 +6181,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
                                         length(short_params), record_dir;
                                         root_prefix=mount_prefix, record_base, root_provider,
-                                        operation_policy)
+                                        operation_policy, preload)
             end
         end
     end
@@ -11598,12 +11864,19 @@ document.addEventListener('DOMContentLoaded', function() {
     function isPollingRelated(elt) {
         return isPolling(elt) || (elt.querySelector && !!elt.querySelector('[hx-trigger*="every"]'));
     }
+    // htmx dispatches a preload's beforeRequest before the preload extension
+    // cancels it, and no afterRequest follows: marking it would leave the
+    // hovered element pulsing for good.
+    function isPreload(e) {
+        var config = e.detail.requestConfig;
+        return !!(config && config.headers && config.headers['HX-Preloaded'] === 'true');
+    }
     function clearFeedback(el) {
         el.classList.remove('htmx-request-active', 'htmx-request-success', 'htmx-request-error');
     }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
         var elt = e.detail.elt;
-        if (isPolling(elt)) return;
+        if (isPolling(elt) || isPreload(e)) return;
         var t = getTarget(e);
         clearFeedback(t);
         t.classList.add('htmx-request-active');
@@ -11651,6 +11924,33 @@ Combined style + script nodes for automatic HTMX request feedback.
 Included by default in `htmx()`.
 """
 request_feedback() = (request_feedback_style(), request_feedback_script())
+
+"""
+    preload_runtime_js()
+
+The page side of `@preload` routes, included by [`htmx`](@ref) whenever it loads
+the `preload` extension. It draws one random id per page load and sends it as the
+`HTMXO-Client` header on the page's same-origin GET requests, so a click can join
+the operation its own preload already started (see [`PRELOAD_MAX_AGE`](@ref) and
+the `@preload` route marker). Include it next to the extension when building a
+`<head>` by hand.
+"""
+preload_runtime_js() = h.script(Raw("""
+(function() {
+    if (window.htmxoPreloadClient) return;
+    var bytes = new Uint8Array(16), id = '';
+    crypto.getRandomValues(bytes);
+    for (var i = 0; i < bytes.length; i++) id += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+    window.htmxoPreloadClient = id;
+    document.addEventListener('htmx:configRequest', function(e) {
+        var d = e.detail;
+        if (d.verb !== 'get') return;
+        try { if (new URL(d.path, location.href).origin !== location.origin) return; }
+        catch (_) { return; }
+        d.headers['HTMXO-Client'] = id;
+    });
+})();
+"""))
 
 """
     overlay_bar_style()
@@ -12339,6 +12639,8 @@ requests. Pico CSS renders a spinner automatically for `aria-busy` elements.
 """
 loading_indicator_script() = h.script(Raw("""
 document.body.addEventListener('htmx:beforeRequest', function(e) {
+    var config = e.detail.requestConfig;
+    if (config && config.headers && config.headers['HX-Preloaded'] === 'true') return;
     e.detail.elt.setAttribute('aria-busy', 'true');
 });
 document.body.addEventListener('htmx:afterRequest', function(e) {
@@ -12399,26 +12701,46 @@ tabset_styles() = h.style(Raw("""
 }
 """))
 
-function _tabset_panel(content::AbstractString, i, active)
-    # String content = URL → lazy load via hx-get on first reveal
+_tabset_panel_id(id, i) = "$id-tab-$i"
+
+# String content = URL → lazy. The initially active panel loads itself once it
+# is actually visible; every other panel is filled by its tab's first click
+# (see `_tabset_lazy_link_attrs`). Deliberately not `revealed`: htmx 2 measures
+# a `display:none` panel as a zero-size box at the viewport origin, "reveals" it
+# at once, and every hidden tab would load with the page.
+function _tabset_panel(content::AbstractString, i, active, id)
     h.div(;
+        id=_tabset_panel_id(id, i),
         class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
-        hx_get=content,
-        hx_trigger="revealed once",
-        hx_swap="innerHTML",
+        (i == active ?
+            (hx_get=content, hx_trigger="intersect once", hx_swap="innerHTML") :
+            (;))...,
     )
 end
-function _tabset_panel(content, i, active)
+function _tabset_panel(content, i, active, id)
     # Non-string content = eager render
     h.div(content;
+        id=_tabset_panel_id(id, i),
         class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
     )
 end
 
+# A lazy tab that starts hidden fetches its panel from the tab link itself, on
+# the first click only — which is also what lets `preload` warm it on hover.
+_tabset_lazy_link_attrs(content::AbstractString, i, active, id, preload) =
+    i == active ? (;) : (;
+        hx_get=content,
+        hx_target="#" * _tabset_panel_id(id, i),
+        hx_swap="innerHTML",
+        hx_trigger="click once",
+        _preload_attrs(preload)...,
+    )
+_tabset_lazy_link_attrs(content, i, active, id, preload) = (;)
+
 """
-    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))")
+    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))", preload=nothing)
 
 Client-side tabs using Pico CSS nav + hyperscript.
 
@@ -12426,15 +12748,19 @@ Eager (content rendered immediately):
 
     tabset("Tab 1" => content1, "Tab 2" => content2; active=1)
 
-Lazy (content is a URL string, fetched via HTMX on first tab click):
+Lazy (content is a URL string, fetched via HTMX on first tab click; the
+initially active tab loads once it is visible):
 
     tabset("Tab 1" => "/api/tab1", "Tab 2" => "/api/tab2")
 
 Mixed (eager + lazy):
 
     tabset("Summary" => render_summary(), "Details" => "/api/details")
+
+`preload=true` starts fetching a lazy tab while the pointer rests on it (see
+[`hx_link`](@ref) for the other values and what the route does with it).
 """
-tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id, class="tabset")(
+tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing) = h.div(; id, class="tabset")(
     h.nav(
         h.ul([
             h.li(h.a(label;
@@ -12451,30 +12777,34 @@ tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id,
                     remove .u-hidden from <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
                 ",
                 data_panel="tab-$i",
+                _tabset_lazy_link_attrs(content, i, active, id, preload)...,
             ))
-            for (i, (label, _)) in enumerate(tabs)
+            for (i, (label, content)) in enumerate(tabs)
         ]...)
     ),
-    [_tabset_panel(content, i, active) for (i, (_, content)) in enumerate(tabs)]...
+    [_tabset_panel(content, i, active, id) for (i, (_, content)) in enumerate(tabs)]...
 )
 
 """
-    htmx_tabset(items; active=nothing, target="#content", ...)
+    htmx_tabset(items; active=nothing, target="#content", preload=nothing, ...)
 
 HTMX-driven tab row: each tab click fetches content from the server.
 `items` is a collection of `"Label" => url` pairs.
 `tab_attrs(label)` returns extra per-tab named-tuple attributes (e.g. hx_include).
+`preload=true` starts fetching a tab while the pointer rests on it (see
+[`hx_link`](@ref)).
 """
 function htmx_tabset(items; active=nothing, target="#content",
                      active_class="primary", inactive_class="secondary",
                      btn_class="outline btn-xs",
-                     tab_attrs=Returns(NamedTuple()))
+                     tab_attrs=Returns(NamedTuple()), preload=nothing)
     h.div(; class="tab-row")(
         [h.a(label; role="button",
             class=((active == label ? active_class : inactive_class) * " " * btn_class),
             hx_get=url,
             hx_target=target, hx_swap="outerHTML",
             _="on click remove .$active_class from <a/> in closest <.tab-row/> then add .$inactive_class to <a/> in closest <.tab-row/> then remove .$inactive_class from me then add .$active_class to me",
+            _preload_attrs(preload)...,
             tab_attrs(label)...)
          for (label, url) in items]...
     )
@@ -12512,14 +12842,16 @@ end
 # --- Nav sidebar ---
 
 """
-    nav_sidebar(items::Vector{<:Pair}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
+    nav_sidebar(items::Vector{<:Pair}; prefix="", target="#content", active_class="contrast", inactive_class="secondary", preload=nothing)
 
 Render a Pico CSS sidebar `<aside>` with HTMX-enabled navigation links.
 Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active styling.
+`preload=true` starts fetching a page while the pointer rests on its link (see
+[`hx_link`](@ref)).
 
     nav_sidebar(["Overview" => "/overview", "Settings" => "/settings"]; prefix="/app")
 """
-function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
+function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary", preload=nothing)
     h.aside(
         h.nav(
             h.ul(
@@ -12530,6 +12862,7 @@ function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; 
                     hx_push_url=prefix * path,
                     _="on click remove .$active_class from <a/> in closest <nav/> then add .$inactive_class to <a/> in closest <nav/> then remove .$inactive_class from me then add .$active_class to me",
                     class=inactive_class,
+                    _preload_attrs(preload)...,
                 )) for (label, path) in items]...
             )
         )
@@ -12537,12 +12870,14 @@ function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; 
 end
 
 """
-    htmxo_breadcrumb(items; target="#content")
+    htmxo_breadcrumb(items; target="#content", preload=nothing)
 
 Render a Pico-styled breadcrumb `<nav>`. Each `item` is a tuple
 `(label, frag_url, push_url)`. When `frag_url` is `nothing`, the segment
 renders as plain text (the current page). Otherwise it's an `<a>` that issues
 `hx-get=frag_url` into `target` and updates the URL bar via `hx-push-url=push_url`.
+`preload=true` starts fetching a segment while the pointer rests on it (see
+[`hx_link`](@ref)).
 
 ```
 htmxo_breadcrumb([
@@ -12552,7 +12887,7 @@ htmxo_breadcrumb([
 ])
 ```
 """
-function htmxo_breadcrumb(items; target="#content")
+function htmxo_breadcrumb(items; target="#content", preload=nothing)
     parts = []
     for (label, frag_url, push_url) in items
         if isnothing(frag_url)
@@ -12560,7 +12895,7 @@ function htmxo_breadcrumb(items; target="#content")
         else
             push!(parts, h.a(label;
                 hx_get=frag_url, hx_target=target, hx_swap="innerHTML",
-                hx_push_url=push_url))
+                hx_push_url=push_url, _preload_attrs(preload)...))
         end
     end
     h.nav(parts...; class="htmxo-breadcrumb", aria_label="breadcrumb")
