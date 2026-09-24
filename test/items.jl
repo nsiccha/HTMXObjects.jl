@@ -8367,9 +8367,12 @@ end
         @test save.route == "POST /blocking_save/{n}"
         @test save.target == "/blocking_save/1"
         @test save.scope === :request
-        # A cached route's tree is read from DynamicObjects while it runs inline.
-        plain = only(r for r in rows if r.label == "Plain crunch")
-        @test plain.progress isa Treebars.ProgressNode
+        # A cached route's tree is read from DynamicObjects while it runs
+        # inline — once DynamicObjects has registered it, which can lag the
+        # job becoming visible on a slow runner.
+        plain_row() = only(r for r in running() if r.label == "Plain crunch")
+        @test timedwait(() -> plain_row().progress isa Treebars.ProgressNode, 10.0;
+                        pollint=0.02) === :ok
         # The in-flight request links to its job.
         inflight = runtime_snapshot(blocking_tracker).inflight
         @test only(r for r in inflight if r.path == "/blocking_save/1").job == save.id
