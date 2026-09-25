@@ -3,13 +3,14 @@
 [![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://nsiccha.github.io/HTMXObjects.jl/dev/)
 [![CI](https://github.com/nsiccha/HTMXObjects.jl/actions/workflows/test.yml/badge.svg)](https://github.com/nsiccha/HTMXObjects.jl/actions/workflows/test.yml)
 
-Property-based web pages using [DynamicObjects.jl](https://github.com/nsiccha/DynamicObjects.jl), [HTMX.jl](https://github.com/nsiccha/HTMX.jl), and [Oxygen.jl](https://github.com/OxygenFramework/Oxygen.jl).
+Property-based web pages using [DynamicObjects.jl](https://github.com/nsiccha/DynamicObjects.jl), [HTMX.jl](https://github.com/nsiccha/HTMX.jl), and [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl).
 
 ## Features
 
 - **`@htmx` struct**: define web-facing objects with derived, indexed, and cached properties
 - **Route markers**: `@get`, `@post`, and other decorators for mapping properties to HTTP endpoints
 - **Static site recording**: capture rendered pages for static deployment
+- **Runtime dashboard**: `RuntimeRoutes` shows in-flight and past requests with their timings, and running jobs as a live board with their progress (server-agnostic HTTP.jl middleware); `jobs_board(; mine=req)` gives app pages a per-session "your running jobs" board
 
 ## Installation
 
@@ -22,4 +23,4 @@ Pkg.add(url="https://github.com/nsiccha/HTMXObjects.jl")
 
 - [HTMX.jl](https://github.com/nsiccha/HTMX.jl) -- hyperscript HTML generation with HTMX support
 - [DynamicObjects.jl](https://github.com/nsiccha/DynamicObjects.jl) -- lazy/cached property system
-- [Oxygen.jl](https://github.com/OxygenFramework/Oxygen.jl) -- HTTP server framework
+- [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) -- HTTP server and router

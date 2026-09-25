@@ -15,9 +15,10 @@ Verb
 |--------|-----|
 | `@htmx struct App … end` | The whole package surface — declares an app, its data, and its routes |
 | `create_app(name)`       | Scaffold a new HTMXObjects app (web/, app/, Project.toml) on disk |
-| `route!(app)`            | Register all `@get`/`@post`/`@put`/`@delete`/`@ws` markers found in the struct on the Oxygen router |
+| `route!(app)`            | Register all `@get`/`@post`/`@put`/`@delete`/`@ws`/`@sse` markers found in the struct on `HTMXObjects.ROUTER` (an `HTTP.Router`) |
 | `Verb{V}`                | Singleton type threaded into route IPs as the first arg, lets one property host `@get`/`@post`/… simultaneously |
-| `terminate()`, `serve()`, `staticfiles(...)`, `dynamicfiles(...)` | Re-exports from Oxygen for serving |
+| `serve()`, `terminate()` | Start / stop an HTTP.jl server on `HTMXObjects.ROUTER` |
+| `staticfiles(...)`, `dynamicfiles(...)` | Mount a folder's files as `GET` routes (read once / on every request) |
 
 ## DynamicObjects re-exports
 
@@ -62,11 +63,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
-response — and it passes through the response pipeline unchanged. `serve`
-defaults `metrics` to `false` so Oxygen 1.10's metrics middleware (which reads
-every non-200 body into a `String`, stealing a `Vector{UInt8}` buffer and
-sending zero body bytes) stays out of that path; pass `metrics=true` to
-re-enable collection and the `/docs/metrics` dashboard.
+response — and it passes through the response pipeline unchanged.
 
 ## The page shell
 
@@ -95,6 +92,58 @@ Fragments are not documents and never carry a doctype.
 htmx
 HTMXObjects.pico_page
 HTMLDocument
+```
+
+## Server-sent events
+
+`@sse` turns a property into a `text/event-stream` endpoint. The body receives
+the stream as `__sse__` and pushes events with `send` — the same
+`HTTP.WebSockets.send` that `@ws` bodies use. Arguments are parsed and
+validated like a `@get`'s *before* the stream starts, so a bad request still
+gets an ordinary error response.
+
+```julia
+using HTTP.WebSockets: send
+
+@htmx struct Jobs
+    @sse progress(; n::Int=10) = begin
+        for i in 1:n
+            send(__sse__, h.p("step $i of $n"))
+            sleep(0.5)
+        end
+        h.p("done")                         # sent as the final `done` event
+    end
+    @get index() = sse_region(query_url(__self__/"progress"; n=5), h.p("waiting…");
+                              swap="beforeend")
+end
+```
+
+- A value the body returns (other than `nothing`) is sent as `event: done`; a
+  thrown error is recorded and its `__error__` rendering is sent as `done`
+  instead. Either way the stream then ends with `event: close`.
+- [`sse_region`](@ref) connects with htmx's SSE extension (loaded by `htmx()`
+  page shells) and closes the source on `close`. Without that marker the
+  browser's `EventSource` would reconnect and run a finished body again.
+- An open-ended feed loops `while isopen(__sse__)`. A client that leaves makes
+  the next write fail: `send` returns `false` and `isopen` turns `false`. A
+  keep-alive comment every 15 s keeps proxies from dropping a quiet stream and
+  notices departed clients.
+- On reconnect the browser sends the `id` of the last event it saw; read it with
+  [`last_event_id`](@ref) to resume instead of replaying.
+- Each open stream holds a connection and a task until it ends. With the default
+  `serve(; parallel=false)`, a body that computes without yielding (no `sleep`,
+  `wait`, or I/O) stalls the whole server, and browsers allow about six
+  HTTP/1.1 connections per host, so many streams on one page starve its
+  other requests.
+- `@sse` routes are GET-only streams: `openapi`, `prewarm_routes!`,
+  `operation_form`, and `semantic_app`'s default renderer skip them or refuse
+  them, and in-process [`dispatch`](@ref) answers with an error because there is
+  no connection to stream on.
+
+```@docs
+SSEStream
+last_event_id
+sse_region
 ```
 
 ## Markdown / agent-readable responses
@@ -648,6 +697,7 @@ request that renders it.
 | Duplicate `(verb, path)` operation identity | `semantic_app` | `semantic_app found duplicate operation identity …` |
 | Detached `@include` child (no `__parent__`) | `operation_form` | `operation_form on <T> cannot resolve …` |
 | `@ws` route with the default renderer | `semantic_app` | `semantic_app has no default control for WebSocket operation …` |
+| `@sse` route with the default renderer | `semantic_app` | `semantic_app has no default control for SSE operation …` |
 
 Because they are ordinary route exceptions, they surface through the standard
 response pipeline: an HTMX request gets **200** with the standard error article
@@ -870,6 +920,54 @@ OperationContext
 OperationPolicy
 ```
 
+## Preloading — `preload=true` and `@preload`
+
+A click can start before it happens. `htmx()` loads htmx's
+[`preload` extension](https://htmx.org/extensions/preload/), and the navigation
+components take a `preload` keyword — `nav_sidebar`, `htmx_tabset`, `tabset`,
+`htmxo_breadcrumb` and `hx_link`. `preload=true` requests a link's target once
+the pointer has rested on it for 100 ms; any other extension trigger
+(`"mousedown"`, `"preload:init"`, …) passes through as a string.
+
+What a preload *does* is the route's decision:
+
+| Route | The preload (`HX-Preloaded: true`) gets | The click that follows |
+|-------|------------------------------------------|------------------------|
+| unmarked | `204` before a root is built — no work at all | computes as usual |
+| `@preload`, done within ~0.1 s | the fragment, `Cache-Control: private, max-age=10` | is answered by the browser cache |
+| `@preload`, slower | `204`; the operation keeps running | joins that operation — its value when done, otherwise a poller on it |
+
+```julia
+@htmx struct App
+    @preload @get summary(id::Int) = render_summary(load(id))  # cheap: browser-cached
+    @preload @get posterior(id::Int) = fit_model(id)           # heavy: prewarmed and joined
+    @get archive(id::Int) = archive!(id)                        # an action: never speculative
+end
+```
+
+Mark only routes that are safe to run speculatively — reads, not actions. A
+preloaded operation nobody clicks still runs to completion. Mutations are never
+preloaded, marker or not.
+
+Joining is scoped to the page that preloaded. `htmx()` includes
+`preload_runtime_js`, which sends a random per-page `HTMXO-Client` id with the
+page's same-origin GETs; a click joins only an operation preloaded under its own
+id, route and typed arguments — the binding poll tokens use. Browser reuse is
+scoped the same way (`Vary: HX-Request, HTMXO-Client`) and lasts
+`HTMXObjects.PRELOAD_MAX_AGE[]` seconds (`0` keeps only the server-side join).
+Unclaimed operations are dropped after two minutes, and the request-feedback
+styling ignores preloads.
+
+Only `hx-get` elements and boosted links send the client id. A plain
+`<a href preload>` can use the browser-cache path but never joins a slow
+operation. A recorded static site needs no marker: its fragments are plain files
+the browser caches.
+
+```@docs
+HTMXObjects.PRELOAD_MAX_AGE
+preload_runtime_js
+```
+
 ## Forms and inputs
 
 See the [Components catalog](components.md) for the full list with examples.
@@ -961,6 +1059,7 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 | `SwaggerRoutes` | Version-pinned Swagger UI viewer for the app's OpenAPI document (opt-in via `@include docs = SwaggerRoutes(; spec_url="/openapi")`) — see [OpenAPI](#openapi) |
 | `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
 | `SharedOpsRoutes`| Common HTMX ops (refresh, clear cache, …) reusable across apps |
+| `RuntimeRoutes`  | Dev dashboard of in-flight and past requests with timings, and live job boards — see [Runtime dashboard](#runtime-dashboard) |
 | `RecordingRoutes`| Static-recording driver (see Gallery section) |
 
 ### OpenAPI
@@ -972,8 +1071,8 @@ JSON-serializable. It reads the stable `reflect(T)` descriptors, so the
 operation `summary` (the rest, minus any `# Arguments` section, becomes
 `description`); path params keep their `{name}` spelling; GET/DELETE params
 become `parameters` entries while POST/PUT/PATCH params become an
-`application/x-www-form-urlencoded` `requestBody`. `@ws` routes are skipped —
-OpenAPI has no WebSocket operation.
+`application/x-www-form-urlencoded` `requestBody`. `@ws` and `@sse` routes are
+skipped — OpenAPI has no WebSocket operation or event-stream response.
 
 ```julia
 @htmx struct MyApp
@@ -1002,17 +1101,139 @@ end
 choice. Viewer assets load from a pinned CDN release (`swagger_version`,
 `cdn_base` re-points air-gapped deployments at a local mirror).
 
-Mounting at `/docs` requires `serve(docs=false)`: with Oxygen's built-in
-docs enabled, its middleware answers every `/docs*` request with Oxygen's
-own Swagger — which is empty for `@htmx` apps (they register directly on
-the router, never into Oxygen's autodoc registry), so the mounted viewer
-would never fire. The same switch also disables Oxygen's `/docs/metrics`
-dashboard UI; metrics *collection* is on a separate flag and is unaffected.
-
 ```@docs
 openapi
 OpenAPIRoutes
 SwaggerRoutes
+```
+
+### Runtime dashboard
+
+`RuntimeRoutes` is a development view of what the server is doing right now and
+what it did recently:
+
+```julia
+@htmx struct MyApp
+    @include runtime = RuntimeRoutes()        # → GET /runtime
+end
+```
+
+- **Running jobs** — a live Treebars board of every operation execution that
+  outlived the `:auto` grace period, whether it continued in the background
+  while its client polled or answered inline (POST/PUT/PATCH/DELETE,
+  `OperationPolicy(:blocking)`, `@fresh` routes, declared `HTTP.Response` /
+  `MIMEResponse` outputs, plain GETs without a page shell), plus work reported
+  through `track_job!`: how long it has been running, how many requests
+  started or joined the same computation, how many polls it answered, when a
+  client last looked at it, and its live progress tree. The board polls
+  `GET /runtime/jobs` and updates in place: new jobs appear, an expanded tree
+  stays expanded, a finished job shows its outcome and leaves, and durations
+  tick between polls; its *Pause* freezes it. A job nobody has polled for ten
+  seconds is flagged *unwatched*: its page is gone, but the computation keeps
+  running.
+- **In-flight requests** — with their current age, request kind (page, HTMX,
+  poll, WebSocket, SSE — the last two stay in flight for the life of the
+  connection), the transport the operation layer chose, the matched route
+  pattern and the thread pool handling them.
+- **Route timings** — request count, errors, p50/p95/max and total handling
+  time per route over the recorded history.
+- **Recent jobs** (a board too, newest first) and **recent requests** —
+  bounded histories with durations, outcomes and frozen progress trees.
+- A process line: thread-pool sizes, running jobs against `:default` threads
+  (highlighted when jobs outnumber compute threads and are time-sharing it),
+  heap, GC time and free memory.
+
+The view refreshes itself every two seconds (`RuntimeRoutes(; refresh="5s")`
+to change; *Pause* stops it), `GET /runtime/snapshot` serves the same data as
+JSON, and `POST /runtime/clear` forgets the history. The dashboard's routes are
+`@fresh`, so they render inline on the request's own task and never queue
+behind a saturated compute pool; its own requests and executions are left out
+of what it shows.
+
+Recording is independent of the server. Requests are recorded by
+[`track_requests`](@ref), a plain HTTP.jl middleware
+(`handler -> req -> response`) that `serve` installs outside its `middleware` by default
+(`serve(; runtime_tracking=false)` opts out) and that any HTTP.jl server stack
+can compose directly, e.g. `HTTP.serve(track_requests(router), host, port)`.
+Jobs are recorded by HTMXObjects' own operation layer, whatever server
+delivered the request: every execution is registered when it starts and shown
+once it outlives the grace period, and one that crosses it as a poller is
+handed to a watcher that stamps its outcome. A hand-rolled
+`Treebars.polling_fetchindex` poller reports its compute through
+[`track_job!`](@ref) by itself; call `track_job!` directly for other work you
+start — an app's `Threads.@spawn`, a warm-up task.
+Both ledgers are bounded (`configure_runtime!(; history_limit,
+job_history_limit)`), process-local, and hold no headers, cookies or bodies;
+request targets are stored with operation/page-load tokens and
+credential-looking query values redacted. Follow-up polls are counted on their
+job rather than stored as requests (`record_polls=true` keeps them).
+
+Like `TestRoutes`, this is a development surface: mount it only where
+developers can reach it.
+
+#### Job boards on app pages
+
+The same data drives per-user boards. [`runtime_jobs`](@ref) returns the jobs
+as plain rows with their progress nodes; [`jobs_board`](@ref) renders them as a
+live board (a Treebars board when Treebars is loaded, else a plain list) that
+polls a route of your choice:
+
+```julia
+@htmx struct MyApp
+    "Your running jobs"
+    @fresh @get my_jobs() = jobs_board(; mine=__req__,
+                                       poll_url=query_url(__self__ / "my_jobs"))
+end
+```
+
+`mine=req` shows only the jobs started under the requesting session: jobs
+record the scope of the [`RootProvider`](@ref) that served them and a salted,
+in-process digest of its key (never the key itself), and a board matches
+requests with the same `:session`/`:job` scope and key. Other sessions' jobs
+never show unless the caller opts into the global view with `all=true`, as the
+developer dashboard does. With the default `:request`-scoped provider every
+request is its own session, so per-session boards need a session-scoped
+provider. Serve the board from an `@fresh` route so it never queues behind the
+work it shows.
+
+Known limits: the ledgers are process-local and in memory, so they are empty
+after a restart and per process in a multi-process deployment; an operation
+that finishes within the grace period is a request, not a job; and a job has no
+progress tree when DynamicObjects produced no substatus for it (an uncached
+`@fresh` route) or Treebars is not loaded. Work started outside any request is
+only visible when reported through `track_job!`.
+
+#### Queued jobs
+
+By default every operation that goes to the background starts computing at
+once, so many heavy requests all run concurrently on the `:default` pool.
+[`configure_job_queue!`](@ref) bounds that: with `max_running=n`, at most `n`
+background computes run at a time and the rest wait in FIFO order, built on
+DynamicObjects' `Deferred` executor hook. Waiting jobs show on the dashboard and
+on job boards as `:queued`, with their position ("queued · #3"), and start as
+earlier ones finish. A queued compute nobody has polled for `abandon_after`
+seconds is abandoned before it starts and recorded as a failed job ("abandoned");
+the next request for it starts afresh. Blocking executions are not queued.
+
+```julia
+configure_job_queue!(; max_running=2, abandon_after=60)
+```
+
+```@docs
+RuntimeRoutes
+runtime_dashboard
+runtime_jobs
+jobs_board
+track_job!
+configure_job_queue!
+track_requests
+runtime_snapshot
+runtime_tracker
+RuntimeTracker
+RuntimeRequest
+RuntimeJob
+configure_runtime!
+clear_runtime_history!
 ```
 
 ## Route inventory, selection, and warming
@@ -1090,5 +1311,5 @@ tree otherwise. Route bodies that run no nested polling need nothing: the
 route's own execution already parents automatically. Off `dispatch` the
 accessor returns `nothing`, so the kwarg is a no-op on ordinary requests.
 
-Serve-time Oxygen middleware (access log, metrics, docs) does not run:
-`dispatch` resolves at the router, beneath the middleware stack.
+Serve-time middleware (the access log, Revise, `serve`'s `middleware`) does
+not run: `dispatch` resolves at the router, beneath the middleware stack.

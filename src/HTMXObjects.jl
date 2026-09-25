@@ -25,7 +25,8 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, render_caption, with_caption, caption_style
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -34,6 +35,10 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
+export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracker,
+    runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
+    clear_runtime_history!, runtime_jobs, track_job!, jobs_board,
+    configure_job_queue!
 export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
@@ -41,6 +46,7 @@ export ReflectionRoutes, semantic_graph_view, application_descriptor,
 export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
+export SSEStream, last_event_id, sse_region
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
@@ -53,19 +59,22 @@ import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
 
-import Oxygen
-import Oxygen: formdata
-using Oxygen.Core: ServerContext, register, Nullable
-
 import LibGit2
+import Sockets
 
-const CONTEXT :: Ref{ServerContext} = Ref(ServerContext(; mod=@__MODULE__))
+"""
+    ROUTER
+
+The process-global `HTTP.Router` every `@htmx` route registers on. [`serve`](@ref)
+listens with it; [`dispatch`](@ref) and [`record!`](@ref) call it in-process.
+"""
+const ROUTER = HTTP.Router()
 
 """
     Verb{V}
 
 Singleton type used as the **first positional argument** of every route IP
-emitted by `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`. Routes are pure
+emitted by `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse`. Routes are pure
 sugar over DynamicObjects' indexable properties:
 
     @get foo(x::Int) = body            # source
@@ -114,22 +123,31 @@ option_wire_value(value) =
 _option_wire_string(value) = string(option_wire_value(value))
 
 """
-    serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing, kwargs...)
+    serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
+          middleware=[], access_log=<timed default>, runtime_tracking=true, kwargs...)
 
-Start the HTTP server. Passes all keyword arguments through to `Oxygen.Core.serve`.
-When `async=false` (the default), blocks until interrupted and calls [`terminate`](@ref) on exit.
+Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
+`async=false` (the default), blocks until interrupted and calls
+[`terminate`](@ref) on exit; `async=true` returns the running `HTTP.Server`.
 
-Two defaults differ from Oxygen's: the access log also reports per-request
-handling time (override with `access_log`/`middleware`), and `metrics`
-defaults to `false` — Oxygen 1.10's metrics middleware reads every non-200
-response body into a `String`, which steals a `Vector{UInt8}` body buffer, so
-a 206 media response would go out with headers but zero body bytes and hang
-the client. Pass `metrics=true` to re-enable collection and the
-`/docs/metrics` dashboard.
+- `middleware` — request middleware (`handler -> (req -> response)`), applied
+  outermost first.
+- `access_log` — an `(io, req) -> nothing` formatter written once per request
+  (`req.context[:response]` holds the response), or `nothing` to disable the
+  log. The default line is `time - ip:port - "GET /path HTTP/1.1" 200 12.3ms`.
+- `runtime_tracking=true` (the default) installs [`track_requests`](@ref)
+  outside `middleware`, recording in-flight and finished requests with their
+  handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref)
+  dev dashboard. Pass `false` to skip it. Long-running operations are recorded
+  as jobs either way.
+- `revise` — `:lazy` applies pending Revise revisions before each request;
+  `:eager` also applies them in the background as soon as a file changes. Both
+  need `using Revise` before the app is loaded.
+- Remaining keyword arguments are passed to `HTTP.listen!`.
 
 `parallel` controls request concurrency:
 - `false` — single-threaded (default)
-- `true` — multi-threaded on the `:default` threadpool (Oxygen's `serveparallel`)
+- `true` — multi-threaded on the `:default` threadpool
 - `:interactive` — multi-threaded on the `:interactive` threadpool, leaving `:default`
   free for heavy computation. Launch julia with e.g. `julia -t 8,4` for 8 computation
   threads and 4 request-handling threads.
@@ -141,41 +159,197 @@ with `auto`. To size both pools equally, compute shell-side:
 `parallel=:interactive` is strictly worse than `parallel=false` (same effective
 concurrency, plus extra spawn overhead per request, plus a startup `@warn`).
 """
-function serve(; parallel=false, kwargs...)
-    async = Base.get(kwargs, :async, false)
-    kwargs = _with_access_timing(kwargs)
-    _check_docs_prefix_routes(kwargs)
-    serve_kwargs = if parallel === :interactive
+function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
+        revise=nothing, middleware=[], access_log=_timed_access_log,
+        runtime_tracking::Bool=true, kwargs...)
+    kwargs = _drop_oxygen_kwargs(kwargs)
+    revise in (nothing, :none, :lazy, :eager) ||
+        throw(ArgumentError("`revise` must be nothing, :lazy or :eager, got $(repr(revise))"))
+    Revise = revise in (:lazy, :eager) ? _revise_module() : nothing
+    revise in (:lazy, :eager) && Revise === nothing &&
+        error("`serve(; revise=$(repr(revise)))` needs Revise: run `using Revise` before loading the app.")
+
+    tracker = runtime_tracking ? runtime_tracker() : nothing
+    handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker))
+    if parallel === :interactive
         if Threads.nthreads(:interactive) <= 1
             @warn "Only 1 interactive thread available. Launch julia with e.g. \"julia -t 8,4\" to add more interactive threads for request handling."
         end
-        (; handler=_interactive_stream_handler, parallel=false, kwargs...)
-    else
-        (; parallel, kwargs...)
+        handle = _spawning_stream_handler(handle, :interactive)
+    elseif parallel === true
+        if Threads.nthreads() <= 1
+            @warn "`parallel=true` with only 1 thread available. Launch julia with e.g. \"julia -t auto\" to handle requests on several threads."
+        end
+        handle = _spawning_stream_handler(handle, :default)
     end
+
+    server = HTTP.listen!(handle, host, port; kwargs...)
+    _SERVER[] = server
+    revise === :eager && (_EAGER_REVISE_STOP[] = _start_eager_revise(Revise))
+    @info "Serving on http://$host:$port"
+    async && return server
     try
-        return Oxygen.Core.serve(CONTEXT[]; serve_kwargs...)
+        wait(server)
+    catch err
+        err isa InterruptException ||
+            @error "Server stopped" exception=(err, catch_backtrace())
     finally
-        if !async
-            terminate()
+        terminate()
+    end
+    return server
+end
+
+# The server started by `serve`, and the stop flag of its `revise=:eager` task.
+const _SERVER = Ref{Any}(nothing)
+const _EAGER_REVISE_STOP = Ref{Any}(nothing)
+
+"""Stop the HTTP server started by [`serve`](@ref)."""
+function terminate()
+    stop = _EAGER_REVISE_STOP[]
+    stop === nothing || (stop[] = true)
+    _EAGER_REVISE_STOP[] = nothing
+    server = _SERVER[]
+    _SERVER[] = nothing
+    server !== nothing && isopen(server) && close(server)
+    return nothing
+end
+
+# `serve` keywords that only configured Oxygen, which HTMXObjects no longer
+# uses. Warn and drop them rather than fail an existing launch script.
+const _OXYGEN_SERVE_KWARGS = (:docs, :metrics, :show_banner, :serialize,
+    :catch_errors, :show_errors, :docs_path, :schema_path, :external_url,
+    :prefix, :context, :handler)
+
+function _drop_oxygen_kwargs(kwargs)
+    dropped = [k for k in keys(kwargs) if k in _OXYGEN_SERVE_KWARGS]
+    isempty(dropped) && return kwargs
+    @warn "Ignoring `serve` keyword(s) $(join(dropped, ", ")): they configured Oxygen, which HTMXObjects no longer uses."
+    return (; (k => v for (k, v) in pairs(kwargs) if !(k in _OXYGEN_SERVE_KWARGS))...)
+end
+
+# The request pipeline, outermost first: access log → runtime `tracker` →
+# Revise → caller `middleware` → fallback → `ROUTER`.
+function _request_pipeline(middleware, access_log, Revise, tracker=nothing)
+    app = _fallback_middleware(ROUTER)
+    for m in reverse(middleware)
+        app = m(app)
+    end
+    Revise === nothing || (app = _revise_middleware(app, Revise))
+    tracker === nothing || (app = track_requests(app; tracker))
+    access_log === nothing || (app = _access_log_middleware(app, access_log))
+    return app
+end
+
+# Thrown by a `@ws` route once its upgraded session ends. The connection now
+# belongs to the finished WebSocket, so no HTTP response may be written: the
+# exception unwinds the request pipeline and `_stream_handler` swallows it.
+struct _WebSocketClosed <: Exception end
+
+# Innermost middleware. `@htmx` routes always return an `HTTP.Response`; this
+# coerces anything else a hand-registered handler returns, and turns an
+# escaped exception into a logged 500 instead of a dropped connection.
+function _fallback_middleware(handler)
+    function (req::HTTP.Request)
+        try
+            response = handler(req)
+            return response isa HTTP.Response ? response : to_response(response)
+        catch err
+            err isa _WebSocketClosed && rethrow()
+            @error "Unhandled error serving $(req.method) $(req.target)" exception=(err, catch_backtrace())
+            body = "500: Internal Server Error"
+            return HTTP.Response(500, ["Content-Type" => "text/plain; charset=utf-8",
+                                       "Content-Length" => string(sizeof(body))], body)
         end
     end
 end
 
-# --- Access-log request timing ---------------------------------------------
-# `serve` installs, by default, a middleware that stamps each request's start
-# time plus a custom access-log line that appends the elapsed handling time.
-# The dependency-provided log format has no duration token and records no
-# request-start, so the two pieces are required together. A caller can override
-# either by passing their own `middleware` / `access_log` to `serve` — both are
-# respected.
+# `revise=:lazy`/`:eager`: apply pending revisions before handling a request,
+# then call into the newest world so the revised methods run.
+function _revise_middleware(handler, Revise)
+    function (req::HTTP.Request)
+        isempty(Revise.revision_queue) || Revise.revise()
+        return Base.invokelatest(handler, req)
+    end
+end
 
-# Oxygen 1.11 moved access logging out of HTTP.jl and exposes its vendored
-# `oxygen_logfmt`; Oxygen 1.10 still delegates to HTTP 1.x's formatter. Calling
-# HTTP 1.x's `@logfmt_str` from this module is not hygienic on Windows: its
-# expansion contains an unqualified `dateformat"..."` macro, which is resolved
-# in the caller and breaks a fresh HTMXObjects precompile. Keep the small
-# Oxygen-compatible HTTP 1.x format local instead.
+# `revise=:eager`: revise as soon as Revise sees a file change instead of on the
+# next request. Returns the flag `terminate` sets to stop the task.
+function _start_eager_revise(Revise)
+    stop = Ref(false)
+    errormonitor(@async while true
+        wait(Revise.revision_event)
+        reset(Revise.revision_event)
+        stop[] && break
+        Revise.revise()
+    end)
+    return stop
+end
+
+# Stream-level entry point: exposes the raw stream to the request pipeline (a
+# WebSocket upgrade needs it) and hands off to HTTP.jl's request adapter.
+function _stream_handler(app)
+    function (stream::HTTP.Stream)
+        handle = HTTP.streamhandler(function (req::HTTP.Request)
+            req.context[:stream] = stream
+            return app(req)
+        end)
+        try
+            handle(stream)
+        catch err
+            err isa _WebSocketClosed || rethrow()
+        end
+        return nothing
+    end
+end
+
+# `parallel=true`/`:interactive`: handle each request on a task spawned on `pool`.
+_spawning_stream_handler(handle, pool::Symbol) =
+    stream -> wait(Threads.@spawn pool handle(stream))
+
+# --- Access log ------------------------------------------------------------
+
+function _access_log_middleware(handler, format)
+    function (req::HTTP.Request)
+        req.context[:t0] = time()
+        response = nothing
+        try
+            response = handler(req)
+            return response
+        catch err
+            err isa _WebSocketClosed && (response = HTTP.Response(101))
+            rethrow()
+        finally
+            req.context[:response] = something(response, HTTP.Response(500))
+            try
+                @info sprint(format, req) _group=:access
+            catch err
+                @warn "`access_log` formatter failed" exception=(err, catch_backtrace())
+            end
+        end
+    end
+end
+
+"""
+    _timed_access_log(io, req)
+
+Default `access_log` formatter: `time - ip:port - "METHOD target HTTP/x.y" status`
+followed by the request's handling time with SI units (e.g. ` 78.9ms`,
+` 1.23s`, ` 5.0min`).
+"""
+function _timed_access_log(io::IO, req::HTTP.Request)
+    response = Base.get(req.context, :response, nothing)
+    print(io,
+        _access_log_timestamp(), " - ",
+        _peer_string(Base.get(req.context, :stream, nothing)), " - \"",
+        req.method, " ", req.target, " HTTP/", _http_version(req), "\" ",
+        response === nothing ? "-" : response.status,
+    )
+    t0 = Base.get(req.context, :t0, nothing)
+    t0 === nothing || print(io, " ", fmt_time(time() - t0))
+end
+
+# Same split as HTTP.jl's `$time_iso8601` log variable: Windows' C runtime
+# `strftime` does not support `%F`/`%T`/`%z`, so format without a zone there.
 const _ACCESS_LOG_WINDOWS_DATEFORMAT = Dates.DateFormat("yyyy-mm-dd\\THH:MM:SS")
 
 function _access_log_timestamp(windows::Bool=Sys.iswindows())
@@ -185,121 +359,100 @@ function _access_log_timestamp(windows::Bool=Sys.iswindows())
     return Libc.strftime("%FT%T%z", time())
 end
 
-function _http1_oxygen_logfmt(io::IO, http)
-    message = http.message
-    print(io,
-        _access_log_timestamp(), " - ",
-        http.stream.peerip, ":", http.stream.peerport, " - \"",
-        message.method, " ", message.target, " HTTP/",
-        message.version.major, ".", message.version.minor, "\" ",
-        message.response.status,
-    )
-end
+# HTTP 1.x requests carry a `version`; HTTP 2.x replaced it with `proto_major`/`proto_minor`.
+_http_version(req::HTTP.Request) = hasproperty(req, :version) ?
+    "$(req.version.major).$(req.version.minor)" :
+    "$(req.proto_major).$(req.proto_minor)"
 
-const _ACCESS_LOG_BASE_FORMATTER = if isdefined(Oxygen, :oxygen_logfmt)
-    getproperty(Oxygen, :oxygen_logfmt)
-else
-    _http1_oxygen_logfmt
-end
-
-_select_access_log_base_formatter() = _ACCESS_LOG_BASE_FORMATTER
-_access_log_base(io::IO, http) = _ACCESS_LOG_BASE_FORMATTER(io, http)
-
-_access_log_request(http::HTTP.Request) = http
-_access_log_request(http) = http.message
-
-"""
-    _timing_middleware(handler)
-
-Oxygen middleware that stamps `req.context[:t0]` with the request-start time so
-[`_timed_access_log`](@ref) can report the elapsed handling time.
-"""
-function _timing_middleware(handler)
-    function (req::HTTP.Request)
-        req.context[:t0] = time()
-        return handler(req)
-    end
-end
-
-"""
-    _timed_access_log(io, http)
-
-Custom `access_log` writer: Oxygen's standard access-log line followed by the
-request's elapsed handling time, formatted with SI units (e.g. ` 78.9ms`,
-` 1.23s`, ` 5.0min`). The duration is omitted for requests that never passed
-through [`_timing_middleware`](@ref) (e.g. connections rejected before routing).
-"""
-function _timed_access_log(io::IO, http)
-    _access_log_base(io, http)
-    t0 = Base.get(_access_log_request(http).context, :t0, nothing)
-    t0 === nothing || print(io, " ", fmt_time(time() - t0))
-end
-
-# Prepend the timing middleware to any caller-supplied `middleware`, install
-# the timed access-log writer unless the caller passed their own `access_log`,
-# and default `metrics` to `false` (default-only-if-absent throughout, matching
-# Oxygen's own convention for `access_log`).
-#
-# The `metrics=false` default is load-bearing: Oxygen 1.10's MetricsMiddleware
-# records every non-200 response via `text(response)` (`String(response.body)`),
-# and `String(::Vector{UInt8})` *steals* the vector's buffer — the served
-# response keeps its `Content-Length` but goes out with zero body bytes, so a
-# 206 media response hangs the client until timeout (snag
-# `206-response-bod-9c3f8c18`). 200s are recorded without reading the body, so
-# only the status gates the corruption. Pass `metrics=true` explicitly to
-# re-enable collection and the `/docs/metrics` dashboard.
-function _with_access_timing(kwargs)
-    kw = Dict{Symbol,Any}(kwargs)
-    kw[:middleware] = Any[_timing_middleware, Base.get(kw, :middleware, [])...]
-    haskey(kw, :access_log) || (kw[:access_log] = _timed_access_log)
-    haskey(kw, :metrics) || (kw[:metrics] = false)
-    return kw
-end
-
-"""
-    _interactive_stream_handler(middleware::Function)
-
-Like Oxygen's `stream_handler` + `parallel_stream_handler`, but spawns each
-request on the `:interactive` threadpool instead of `:default`.
-"""
-function _interactive_stream_handler(middleware::Function)
-    base_handler = Oxygen.Core.stream_handler(middleware)
-    function (stream::HTTP.Stream)
-        task = Threads.@spawn :interactive begin
-            handle = @async base_handler(stream)
-            wait(handle)
+# Client address of a server stream as `"ip:port"`, or `"-"`. HTTP 2.x exposes
+# it through `HTTP.peeraddr`, HTTP 1.x through `Sockets.getpeername`.
+function _peer_string(stream)
+    stream === nothing && return "-"
+    try
+        if isdefined(HTTP, :peeraddr)
+            addr = getproperty(HTTP, :peeraddr)(stream)
+            return addr === nothing ? "-" : string(addr)
         end
-        wait(task)
+        ip, port = Sockets.getpeername(stream)
+        return "$ip:$(Int(port))"
+    catch
+        return "-"
     end
 end
 
-"""Stop the HTTP server started by [`serve`](@ref)."""
-terminate() = Oxygen.Core.terminate(CONTEXT[])
+# --- Static files ----------------------------------------------------------
 
 """
     staticfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
 
-Serve static files from `folder` at the URL prefix `mountdir`.
+Serve every file under `folder` at `/<mountdir>/<relative path>`; an
+`index.html` also answers at its directory's path. Files are read once, when
+mounted. `headers` are added to every response, and `loadfile(path)` replaces
+`read(path)`.
 """
-staticfiles(
-    folder::String,
-    mountdir::String="static";
-    headers::Vector=[],
-    loadfile::Nullable{Function}=nothing
-) = Oxygen.Core.staticfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
+staticfiles(folder::AbstractString, mountdir::AbstractString="static";
+        headers::Vector=[], loadfile=nothing) =
+    _mount_files(folder, mountdir) do path
+        body = _load_file(path, loadfile)
+        _ -> _file_response(path, body, headers)
+    end
 
 """
     dynamicfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
 
-Serve dynamic files from `folder` at the URL prefix `mountdir`.
-Files are re-read from disk on each request (no caching).
+Like [`staticfiles`](@ref), but re-reads each file from disk on every request.
 """
-dynamicfiles(
-    folder::String,
-    mountdir::String="static";
-    headers::Vector=[],
-    loadfile::Nullable{Function}=nothing
-) = Oxygen.Core.dynamicfiles(CONTEXT[], CONTEXT[].service.router, folder, mountdir; headers, loadfile)
+dynamicfiles(folder::AbstractString, mountdir::AbstractString="static";
+        headers::Vector=[], loadfile=nothing) =
+    _mount_files(folder, mountdir) do path
+        _ -> _file_response(path, _load_file(path, loadfile), headers)
+    end
+
+function _mount_files(handler_for, folder, mountdir)
+    prefix = strip(mountdir, '/')
+    for (dir, _, files) in walkdir(folder), file in files
+        path = joinpath(dir, file)
+        rel = join(splitpath(relpath(path, folder)), "/")
+        route = isempty(prefix) ? "/$rel" : "/$prefix/$rel"
+        handler = handler_for(path)
+        HTTP.register!(ROUTER, "GET", route, handler)
+        if file == "index.html"
+            dir_route = String(chopsuffix(route, "/index.html"))
+            HTTP.register!(ROUTER, "GET", isempty(dir_route) ? "/" : dir_route, handler)
+        end
+    end
+    return nothing
+end
+
+_load_file(path, loadfile) = loadfile === nothing ? read(path) : loadfile(path)
+
+# A fresh response per request: HTTP.jl mutates the response it writes, and a
+# middleware reading `String(body)` would steal a shared byte buffer.
+function _file_response(path, body, headers)
+    bytes = body isa AbstractString ? Vector{UInt8}(body) : copy(body)
+    response = HTTP.Response(200, headers; body=bytes)
+    HTTP.setheader(response, "Content-Type" => _static_content_type(path))
+    HTTP.setheader(response, "Content-Length" => string(length(bytes)))
+    return response
+end
+
+const _STATIC_CONTENT_TYPES = Dict(
+    "html" => "text/html; charset=utf-8", "htm" => "text/html; charset=utf-8",
+    "css" => "text/css; charset=utf-8", "js" => "text/javascript; charset=utf-8",
+    "mjs" => "text/javascript; charset=utf-8", "json" => "application/json; charset=utf-8",
+    "map" => "application/json; charset=utf-8", "txt" => "text/plain; charset=utf-8",
+    "md" => "text/markdown; charset=utf-8", "csv" => "text/csv; charset=utf-8",
+    "xml" => "application/xml", "svg" => "image/svg+xml", "png" => "image/png",
+    "jpg" => "image/jpeg", "jpeg" => "image/jpeg", "gif" => "image/gif",
+    "webp" => "image/webp", "avif" => "image/avif", "ico" => "image/x-icon",
+    "woff" => "font/woff", "woff2" => "font/woff2", "ttf" => "font/ttf",
+    "otf" => "font/otf", "pdf" => "application/pdf", "wasm" => "application/wasm",
+    "mp4" => "video/mp4", "webm" => "video/webm", "mp3" => "audio/mpeg",
+    "wav" => "audio/wav", "ogg" => "audio/ogg",
+)
+
+_static_content_type(path) = Base.get(_STATIC_CONTENT_TYPES,
+    lowercase(lstrip(last(splitext(path)), '.')), "application/octet-stream")
 
 # Append a new value to an existing query-parameter slot. String slot becomes
 # a 2-element vector; vector slot grows in place.
@@ -420,7 +573,7 @@ queryparams(req::HTTP.Request) = _parse_form_encoded(HTTP.URI(req.target).query)
 Parse a urlencoded request body into a multi-value-preserving Dict. The
 `formparams` analogue of `queryparams` — repeated body fields (`image=a&image=b`)
 become a `Vector{String}` instead of collapsing to the last value, which is
-what `Oxygen.formdata` (a thin wrapper over `URIs.queryparams`) does. Used by
+what [`formdata`](@ref) (a thin wrapper over `HTTP.queryparams`) does. Used by
 the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
 receives every posted value.
 
@@ -475,6 +628,14 @@ function formparams(req::HTTP.Request)
     # compatibility helper above always hands it a detached copy.
     _parse_form_encoded(String(_request_body_bytes(req)))
 end
+
+"""
+    formdata(req::HTTP.Request) -> Dict{String, String}
+
+Parse a urlencoded request body into a `Dict`; a repeated field keeps only its
+last value. See [`formparams`](@ref) for the multi-value form.
+"""
+formdata(req::HTTP.Request) = HTTP.queryparams(String(_request_body_bytes(req)))
 
 """
     Upload
@@ -538,31 +699,35 @@ function bodyparams(req::HTTP.Request)
     formparams(req)
 end
 
-"""
-    _wrap_ws_bodies!(struct_expr)
+# Streaming route macros and the handle variable their bodies receive.
+const _STREAM_BODY_VARS = Dict(Symbol("@ws") => :__ws__, Symbol("@sse") => :__sse__)
 
-Pre-process the struct body: for any `@ws` property, wrap the RHS in `(__ws__) -> RHS`.
-This lets users write `@ws feed = begin ... __ws__ ... end` and have `__ws__` available
-as the WebSocket variable, while DynamicObjects stores a callable `(__ws__) -> body`.
 """
-function _wrap_ws_bodies!(struct_expr)
+    _wrap_stream_bodies!(struct_expr)
+
+Pre-process the struct body: for any `@ws` / `@sse` property, wrap the RHS in
+`(__ws__) -> RHS` / `(__sse__) -> RHS`. This lets users write
+`@ws feed = begin ... __ws__ ... end` (or `@sse` with `__sse__`) and have the
+connection handle available as a variable, while DynamicObjects stores a
+callable `(handle) -> body`.
+"""
+function _wrap_stream_bodies!(struct_expr)
     body = struct_expr.args[3]
-    for (i, arg) in enumerate(body.args)
+    for arg in body.args
         arg isa Expr || continue
-        # Walk through nested macrocall layers to find @ws
+        # Walk through nested macrocall layers to find @ws / @sse
         expr = arg
-        depth = 0
-        while Meta.isexpr(expr, :macrocall) && expr.args[1] != Symbol("@ws")
+        while Meta.isexpr(expr, :macrocall) && !haskey(_STREAM_BODY_VARS, expr.args[1])
             expr = expr.args[end]
-            depth += 1
         end
-        Meta.isexpr(expr, :macrocall) && expr.args[1] == Symbol("@ws") || continue
-        # Found @ws — the inner expression is an assignment: name = rhs
+        Meta.isexpr(expr, :macrocall) || continue
+        var = _STREAM_BODY_VARS[expr.args[1]]
+        # Found the marker — the inner expression is an assignment: name = rhs
         inner = expr.args[end]
         inner isa Expr || continue
         if inner.head == :(=)
             rhs = inner.args[2]
-            inner.args[2] = Expr(:(->), :__ws__, rhs)
+            inner.args[2] = Expr(:(->), var, rhs)
         end
     end
     struct_expr
@@ -660,7 +825,7 @@ _warn_legacy_page_name!(struct_expr) = _warn_legacy_name!(struct_expr, :page, :_
 const _URL_BEARING_ATTRS = (
     :href, :src, :action, :formaction,
     :hx_get, :hx_post, :hx_put, :hx_patch, :hx_delete,
-    :hx_post_url, :hx_target,
+    :hx_post_url, :hx_target, :sse_connect,
 )
 
 # Cheaply detect if an expression is a hardcoded root-absolute URL string —
@@ -1064,8 +1229,8 @@ end
 
 # Map a route-macro symbol to the verb short symbol used in `Verb{V}` and
 # `_http_verbs`. `Symbol("@get")` → `:GET`; `Symbol("@ws")` → `:WEBSOCKET`
-# (the special case — the macro name `@ws` is shorter than the HTTP-method
-# label "WEBSOCKET" Oxygen expects).
+# (the special case — the macro name `@ws` is shorter than the
+# "WEBSOCKET" label `_register_handler` maps to a GET upgrade route).
 function _verb_short(verb::Symbol)
     verb === Symbol("@ws") && return :WEBSOCKET
     s = String(verb)
@@ -1177,10 +1342,10 @@ end
 """
     _inject_verb_in_route_lhs!(struct_expr)
 
-For every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` macrocall in the
+For every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` macrocall in the
 struct body, rewrite the call-form LHS to inject
 `__verb__::HTMXObjects.Verb{V}` as the **first positional argument**, where
-`V` is the verb short symbol (`:GET`, `:POST`, `:WEBSOCKET`, …). After this
+`V` is the verb short symbol (`:GET`, `:POST`, `:WEBSOCKET`, `:SSE`, …). After this
 rewrite, DynamicObjects' `@dynamicstruct` sees:
 
     @get foo(x::Int) = body          # source
@@ -1562,7 +1727,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
 
     _convert_include_to_struct!(struct_expr)
 
-    _wrap_ws_bodies!(struct_expr)
+    _wrap_stream_bodies!(struct_expr)
     _warn_legacy_page_name!(struct_expr)
     reroute && _warn_redundant_req_decl!(struct_expr)
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
@@ -1662,7 +1827,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     block
 end
 
-_route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("@patch"), Symbol("@delete"), Symbol("@ws")])
+_route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("@patch"), Symbol("@delete"), Symbol("@ws"), Symbol("@sse")])
 
 # Extract route property info from the struct body AST at macro expansion time.
 # Returns [(prop_name::Symbol, verb::Symbol, positional_params, kwargs_params), ...]
@@ -1798,12 +1963,12 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
         end
     end
 
-    # Source selection is fixed at codegen time: GET/DELETE/WEBSOCKET pull
+    # Source selection is fixed at codegen time: GET/DELETE/WEBSOCKET/SSE pull
     # from queryparams, the rest from bodyparams (with queryparams fallback).
     # bodyparams routes by Content-Type: urlencoded → formparams (multi-value
     # preserved, repeated `image=a&image=b` → `Vector{String}`), multipart →
     # multipartparams (file fields → `Upload`, text fields → `String`).
-    _is_query_verb = verb_short in (:GET, :DELETE, :WEBSOCKET)
+    _is_query_verb = verb_short in (:GET, :DELETE, :WEBSOCKET, :SSE)
 
     # …and the sources are computed ONLY when the route declares kwargs to bind.
     # A route with no kwargs (`@post stalecheck()`) has nothing to look them up
@@ -1855,10 +2020,11 @@ function _extract_args end
 
 Wraps `@dynamicstruct` and appends a `_reroute!` call so that Revise-triggered
 re-evaluation automatically re-registers routes without a server restart.
-`@ws` property bodies are automatically wrapped in `(__ws__) -> body`. WS routes
-accept the same path-param + kwargs surface as GET — `@ws feed(id::Int; q="") = body`
-mounts at `/feed/{id}` and the handler receives the typed `id` (same `_convert_param`
-path as GET) plus `q` from the upgrade request's query string.
+`@ws` property bodies are automatically wrapped in `(__ws__) -> body`, and `@sse`
+bodies in `(__sse__) -> body` (see [`SSEStream`](@ref)). Both accept the same
+path-param + kwargs surface as GET — `@ws feed(id::Int; q="") = body` mounts at
+`/feed/{id}` and the handler receives the typed `id` (same `_convert_param` path as
+GET) plus `q` from the upgrade request's query string.
 Inline `prop = struct ... end` definitions are processed as nested route structs.
 """
 macro htmx(args...)
@@ -1899,11 +2065,21 @@ Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
     (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
 
 """
-    htmx(body...; htmx_version="2.0.8", hyperscript_version="0.9.14", pico_version=nothing, feedback=true, extra_head=())
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, feedback=true, thread=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
+`sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
+loads only alongside the shell's own htmx (an extension must follow htmx).
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
+Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
+
+`preload_version` loads htmx's [`preload` extension](https://htmx.org/extensions/preload/),
+enables it page-wide and adds [`preload_runtime_js`](@ref). It is inert until an
+element carries a `preload` attribute — see the `preload` keyword of
+[`nav_sidebar`](@ref), [`htmx_tabset`](@ref), [`tabset`](@ref),
+[`htmxo_breadcrumb`](@ref) and [`hx_link`](@ref) — and speculative requests do
+work only on routes marked `@preload`.
 
 Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
 `<!DOCTYPE html>` preamble, so the page renders in standards mode.
@@ -1912,19 +2088,31 @@ function htmx(args...;
     head = h.head,
     body = h.body,
     htmx_version        = "2.0.8",
+    sse_version         = "2.2.4",
     hyperscript_version = "0.9.14",
+    preload_version     = "2.1.2",
     pico_version        = nothing,
     feedback             = true,
     compose              = true,
+    thread               = true,
     overlay              = true,
     extra_head          = (),
     treebars_assets     = true,
 )
     cdn = []
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
+    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js"))
+    # The extension registers itself on load, so it must follow htmx.
+    preload = !isnothing(htmx_version) && !isnothing(preload_version)
+    preload && push!(cdn,
+        h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js"),
+        preload_runtime_js())
     isnothing(hyperscript_version) || push!(cdn, h.script(src="https://unpkg.com/hyperscript.org@$(hyperscript_version)"))
     isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css"))
-    HTMLDocument(h.html(
+    # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
+    # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
+    html = preload ? h.html(; hx_ext="preload") : h.html
+    HTMLDocument(html(
         head(
             h.meta(charset="utf-8"),
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
@@ -1937,6 +2125,7 @@ function htmx(args...;
             (isnothing(pico_version) ? () : (pico_bridge(),))...,
             (feedback ? request_feedback() : ())...,
             (compose ? compose_box_assets() : ())...,
+            (thread ? live_thread_assets() : ())...,
             # Thin-hook bootstrap: load the relocated overlay bundle from
             # `KB_ORIGIN/overlay/bar.js` instead of inlining `<style>`+`<script>`.
             # The bar is `position:fixed`, so a deferred async load has no
@@ -3053,13 +3242,30 @@ end
 
 # --- Convenience helpers ---
 
+# The `preload` keyword shared by the navigation components: `nothing`/`false`
+# adds nothing, `true` preloads on hover, and a string or symbol passes through
+# as the extension's trigger (`"mousedown"`, `"preload:init"`, …). Normalized
+# because a bare `preload=true` would render `preload="true"`, which the
+# extension reads as an event name that never fires.
+_preload_attrs(::Nothing) = (;)
+_preload_attrs(preload::Bool) = preload ? (preload="mouseover",) : (;)
+_preload_attrs(preload::Union{AbstractString,Symbol}) = (preload=String(preload),)
+
 """
-    hx_link(url; kwargs...)
+    hx_link(url; preload=nothing, kwargs...)
 
 Create an `h.a` with both `href` and `hx-get` set to `url`. Extra kwargs
 (`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`.
+
+`preload=true` fetches the link's target when the pointer rests on it (a string
+such as `"mousedown"` picks another trigger of htmx's
+[`preload` extension](https://htmx.org/extensions/preload/), which [`htmx`](@ref)
+loads). The route decides what a preload does: a route marked `@preload`
+starts its operation so the click finds it done or running; any other route
+answers without doing work.
 """
-hx_link(url; kwargs...) = h.a(; href=url, hx_get=url, kwargs...)
+hx_link(url; preload=nothing, kwargs...) =
+    h.a(; href=url, hx_get=url, _preload_attrs(preload)..., kwargs...)
 
 """
     htmx_or(full_page_fn, req, fragment)
@@ -3119,7 +3325,7 @@ end
     route!(obj; prefix="", record_dir=nothing)
 
 Register all `@get`/`@post`/`@put`/`@patch`/`@delete`-marked properties of `obj`
-as Oxygen routes. The type is stored in `_registered_types` so that `_reroute!`
+on [`ROUTER`](@ref). The type is stored in `_registered_types` so that `_reroute!`
 (called automatically by the `@htmx` macro) can re-register routes when Revise
 updates the struct.
 
@@ -3150,6 +3356,7 @@ const _http_verbs = Dict(
     Symbol("@patch") => "PATCH",
     Symbol("@delete") => "DELETE",
     Symbol("@ws") => "WEBSOCKET",
+    Symbol("@sse") => "SSE",
 )
 
 # Store registered types so _reroute! can re-register after Revise updates.
@@ -3163,21 +3370,13 @@ const _registered_types = Dict{DataType, NamedTuple{(:prefix, :record_dir), Tupl
 const _record_bases = Dict{DataType, String}()
 # Reverse lookup: included sub-struct type → set of registered parent types
 const _included_type_parents = Dict{DataType, Set{DataType}}()
-# Routes whose path collides with Oxygen's docs prefix, recorded at
-# registration and reported at `serve` — registration cannot see serve's
-# `docs=` kwarg, so reporting there is an error-level false positive for
-# apps that (correctly) serve with `docs=false` (snag
-# `docs-prefix-rout-665a2140`). Keyed by walk-root type: each
-# `_register_routes(T)` walk rebuilds exactly T's entries, so a Revise
-# re-registration neither leaves stale entries nor drops a sibling root's.
-const _docs_prefix_routes = Dict{DataType, Set{Tuple{Symbol,String}}}()
 
 """
     OperationContext
 
 Request-local context passed to a [`RootProvider`](@ref). `scope` and `key`
 describe the provider-selected application lifetime (`:request`, `:session`, or
-`:job`); `transport` is `:http` or `:websocket`. A custom provider owns any
+`:job`); `transport` is `:http`, `:websocket`, or `:sse`. A custom provider owns any
 storage behind session/job keys. The managed [`RootRetention`](@ref) form keeps
 that common in-process storage inside HTMXObjects.
 """
@@ -3274,7 +3473,7 @@ opt-out for a route surface that genuinely must answer inline.
 
 Polling is limited to GET operations because the Treebars poller issues GET
 refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
-`MIMEResponse` outputs always remain direct, as do WebSocket route lambdas, and
+`MIMEResponse` outputs always remain direct, as do WebSocket and SSE route lambdas, and
 [`record!`](@ref) forces `:blocking` for its static-export pass.
 
 You never have to write `OperationPolicy` to get non-blocking long routes —
@@ -3706,14 +3905,14 @@ function _extract_header(req, name, T, default=_NO_DEFAULT)
     _resolve_extracted(v_or_sentinel, default, name)
 end
 
-# Register a route handler directly on the HTTP router, bypassing Oxygen's
-# argument-name validation. We extract path params ourselves via positional URL segment indexing.
-# Wraps the handler so that pending Revise errors are surfaced as the
+# Register a route handler on `ROUTER`. We extract path params ourselves via
+# positional URL segment indexing. Wraps the handler so that pending Revise errors are surfaced as the
 # framework's standard error article (see `_check_revise_errors!`) — this is
 # the single chokepoint for all HTTP route registrations, so the check
 # applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
 function _register_handler(method, path, handler)
     wrapped = function(req)
+        _runtime_note_route!(req, method, path)
         try
             _check_revise_errors!()
         catch err
@@ -3721,19 +3920,324 @@ function _register_handler(method, path, handler)
         end
         handler(req)
     end
-    HTTP.register!(CONTEXT[].service.router, get(Dict("WEBSOCKET" => "GET"), method, method), path, wrapped)
+    HTTP.register!(ROUTER, get(_TRANSPORT_HTTP_METHODS, method, method), path, wrapped)
 end
 
-# Oxygen validates handler argument names against `{path}` placeholders. Our
-# emitted runner intentionally extracts every argument from the request so it
-# can apply one typed validation path to HTTP and WebSocket operations. Register
-# the GET upgrade directly, as Oxygen ultimately does, and keep it behind the
-# same Revise-error chokepoint as every other emitted route.
+# A WebSocket route is a GET route that upgrades the connection, behind the same
+# Revise-error chokepoint as every other emitted route. `serve` puts the raw
+# stream in `req.context[:stream]`; once the session ends, `_WebSocketClosed`
+# tells the pipeline not to write an HTTP response on the upgraded connection.
 function _register_websocket_handler(path, handler)
     _register_handler("WEBSOCKET", path, function(req)
-        HTTP.WebSockets.isupgrade(req) &&
-            HTTP.WebSockets.upgrade(ws -> handler(ws, req), req.context[:stream])
+        stream = get(req.context, :stream, nothing)
+        if !HTTP.WebSockets.isupgrade(req) || stream === nothing
+            # Explicit length: HTTP 1.x never chunks a response carrying `Upgrade`.
+            body = "426: WebSocket upgrade required"
+            return HTTP.Response(426,
+                ["Upgrade" => "websocket", "Content-Type" => "text/plain; charset=utf-8",
+                 "Content-Length" => string(sizeof(body))], body)
+        end
+        try
+            HTTP.WebSockets.upgrade(ws -> _run_websocket(handler, ws, req), stream)
+        catch err
+            @error "WebSocket session on $(req.target) failed" exception=(err, catch_backtrace())
+        end
+        throw(_WebSocketClosed())
     end)
+end
+
+# Once the client has gone away (tab closed, element swapped out by HTMX), the
+# `@ws` body's next `send`/`receive` throws a `WebSocketError`. That is how a
+# push loop normally ends, not a route error, so it is not reported as one.
+function _run_websocket(handler, ws, req)
+    try
+        handler(ws, req)
+    catch err
+        err isa HTTP.WebSockets.WebSocketError || rethrow()
+    end
+    nothing
+end
+
+# Transport pseudo-methods and the HTTP method their routes register under.
+const _TRANSPORT_HTTP_METHODS = Dict("WEBSOCKET" => "GET", "SSE" => "GET")
+
+# --- Server-sent events ------------------------------------------------------
+
+"""
+    SSEStream
+
+The `__sse__` handle inside an `@sse` route body: one live
+`text/event-stream` response. Send events with
+`HTTP.WebSockets.send(__sse__, x; event, id, retry)` — the same `send` that
+`@ws` bodies use — and loop `while isopen(__sse__)` for an open-ended feed.
+
+`send` renders `x` like a route return value (a `Node`, a string, …), splits
+it into `data:` lines, and returns `false` instead of throwing once the client
+has disconnected. `isopen` turns `false` at the first failed write; the
+framework's keep-alive comment (every 15 s) makes sure a quiet feed notices a
+departed client too. Every `write` to the handle is serialized with those
+comments, so a frame written in one call is never split.
+
+When the body returns, a non-`nothing` value is sent as a final
+`event: done` (a thrown error is recorded and its `__error__` rendering sent
+instead), followed by `event: close`, which tells the client the stream is
+over. `close(__sse__)` instead ends the stream without those frames, so the
+browser reconnects (sending [`last_event_id`](@ref)).
+"""
+mutable struct SSEStream <: IO
+    stream::Any
+    request::HTTP.Request
+    lock::ReentrantLock
+    open::Bool
+end
+
+SSEStream(stream, request::HTTP.Request) =
+    SSEStream(stream, request, ReentrantLock(), true)
+
+Base.isopen(sse::SSEStream) = @lock sse.lock sse.open
+
+# Ends the stream from inside the body: later sends return `false` and the
+# framework's closing frames are skipped (the client may then reconnect).
+function Base.close(sse::SSEStream)
+    @lock sse.lock sse.open = false
+    nothing
+end
+
+function Base.unsafe_write(sse::SSEStream, p::Ptr{UInt8}, n::UInt)
+    lock(sse.lock)
+    try
+        sse.open || throw(Base.IOError("SSE client disconnected", 0))
+        try
+            return unsafe_write(sse.stream, p, n)
+        catch
+            # A failed write means the client went away; nothing more can
+            # reach it, so every later write and `isopen` reflects that.
+            sse.open = false
+            rethrow()
+        end
+    finally
+        unlock(sse.lock)
+    end
+end
+
+Base.write(sse::SSEStream, b::UInt8) = write(sse, UInt8[b])
+
+"""
+    last_event_id(sse::SSEStream) -> Union{String,Nothing}
+
+The `Last-Event-ID` the browser sent when reconnecting (the `id` of the last
+event it received), or `nothing` on a first connection. Lets an `@sse` body
+resume a feed instead of replaying it.
+"""
+function last_event_id(sse::SSEStream)
+    value = HTTP.header(sse.request, "Last-Event-ID", "")
+    isempty(value) ? nothing : String(value)
+end
+
+function _sse_field(name, value)
+    s = string(value)
+    (occursin('\n', s) || occursin('\r', s) || occursin('\0', s)) &&
+        throw(ArgumentError("SSE $name must not contain newlines or NUL: $(repr(s))"))
+    s
+end
+
+# One complete `text/event-stream` frame. Every line of `data` becomes its own
+# `data:` line (the browser joins them back with `\n`), so multi-line HTML
+# arrives intact.
+function _sse_frame(data::AbstractString; event=nothing, id=nothing, retry=nothing)
+    io = IOBuffer()
+    event === nothing || print(io, "event: ", _sse_field("event", event), '\n')
+    id === nothing || print(io, "id: ", _sse_field("id", id), '\n')
+    if retry !== nothing
+        retry isa Integer && retry > 0 ||
+            throw(ArgumentError("SSE retry must be a positive integer, got $(repr(retry))"))
+        print(io, "retry: ", retry, '\n')
+    end
+    for line in split(data, r"\r\n|\r|\n")
+        print(io, "data: ", line, '\n')
+    end
+    print(io, '\n')
+    String(take!(io))
+end
+
+_sse_text(body::AbstractString) = String(body)
+_sse_text(body::AbstractVector{UInt8}) = String(copy(body))
+function _sse_text(body)
+    # HTTP 2.x wraps response bodies in explicit body objects.
+    if isdefined(HTTP, :BytesBody) && isa(body, getproperty(HTTP, :BytesBody))
+        return String(Vector{UInt8}(body))
+    elseif isdefined(HTTP, :EmptyBody) && isa(body, getproperty(HTTP, :EmptyBody))
+        return ""
+    end
+    throw(ArgumentError("cannot send a $(typeof(body)) response body as SSE data"))
+end
+
+# Event data is rendered exactly like a route return value.
+_sse_data(x::AbstractString) = String(x)
+_sse_data(::Nothing) = ""
+_sse_data(x) = _sse_text(to_response(x).body)
+
+function HTTP.WebSockets.send(sse::SSEStream, x; event=nothing, id=nothing,
+        retry=nothing)
+    isopen(sse) || return false
+    frame = _sse_frame(_sse_data(x); event, id, retry)
+    try
+        write(sse, frame)
+        true
+    catch err
+        isopen(sse) && rethrow()
+        @debug "SSE client disconnected" exception=(err, catch_backtrace())
+        false
+    end
+end
+
+const _SSE_HEADERS = (
+    "Content-Type" => "text/event-stream",
+    "Cache-Control" => "no-cache",
+    # Stops nginx and similar reverse proxies from buffering the stream.
+    "X-Accel-Buffering" => "no",
+)
+
+# Seconds between keep-alive comments; idle proxies drop silent connections.
+# `0` disables them.
+const _SSE_HEARTBEAT_SECONDS = Ref(15.0)
+
+function _start_sse_heartbeat(sse::SSEStream)
+    interval = _SSE_HEARTBEAT_SECONDS[]
+    interval > 0 || return nothing
+    Timer(interval; interval) do timer
+        try
+            isopen(sse) ? write(sse, ": keepalive\n\n") : close(timer)
+        catch
+            close(timer)
+        end
+    end
+end
+
+# The value an `@sse` body ended with, or the error it failed with (already
+# recorded and rendered through `__error__`).
+struct _SSEFailure
+    rendered::Any
+end
+
+function _sse_failure(err, bt, req, error_obj)
+    uid, path = _record_error(err, bt, req)
+    _SSEFailure(_invoke_error_handler(error_obj, err, uid, path))
+end
+
+function _run_sse_body(body, sse::SSEStream, req, error_obj)
+    try
+        body(sse)
+    catch err
+        bt = catch_backtrace()
+        # A body that dies on a write to a departed client was simply stopped.
+        isopen(sse) || return nothing
+        _sse_failure(err, bt, req, error_obj)
+    end
+end
+
+# End-of-stream frames: a non-`nothing` final value (or the rendered failure)
+# goes out as `event: done`, then `event: close` tells the client the stream
+# is over. Without that marker the browser's EventSource would reconnect and
+# run a finished body again; `sse_region` closes the source on it.
+function _finish_sse_body(sse::SSEStream, final, req, error_obj)
+    isopen(sse) || return nothing
+    final isa _SSEFailure && (final = final.rendered)
+    if final !== nothing
+        try
+            HTTP.WebSockets.send(sse, final; event="done")
+        catch err
+            isopen(sse) || return nothing
+            HTTP.WebSockets.send(sse,
+                _sse_failure(err, catch_backtrace(), req, error_obj).rendered;
+                event="done")
+        end
+    end
+    HTTP.WebSockets.send(sse, ""; event="close")
+    nothing
+end
+
+# HTTP 1's stream handler writes the returned response's head once more after
+# the handler returns. The stream therefore announces `Connection: close`: the
+# body is terminated first, then the request is marked `Connection: close` so
+# the server closes the connection right after that late write, which lands
+# behind a finished response the client has already agreed not to reuse.
+# HTTP 2 terminates the body and then ignores the handler's empty return value.
+_sse_http1() = isdefined(HTTP, :payload)
+
+function _end_sse_response(stream)
+    try
+        HTTP.closewrite(stream)
+    catch err
+        @debug "SSE response already closed" exception=(err, catch_backtrace())
+    end
+    _sse_http1() && HTTP.setheader(stream.message, "Connection" => "close")
+    nothing
+end
+
+function _serve_sse(req::HTTP.Request, body; error_obj=nothing)
+    stream = req.context[:stream]
+    for header in _SSE_HEADERS
+        HTTP.setheader(stream, header)
+    end
+    _sse_http1() && HTTP.setheader(stream, "Connection" => "close")
+    HTTP.startwrite(stream)
+    sse = SSEStream(stream, req)
+    heartbeat = _start_sse_heartbeat(sse)
+    try
+        final = _run_sse_body(body, sse, req, error_obj)
+        _finish_sse_body(sse, final, req, error_obj)
+    finally
+        heartbeat === nothing || close(heartbeat)
+        close(sse)
+        _end_sse_response(stream)
+    end
+    HTTP.Response(200)
+end
+
+# An `@sse` route answers its GET with a live event stream. Argument parsing,
+# validation, and target resolution run in `prepare` BEFORE any byte is sent,
+# so a bad request still gets an ordinary error response (a non-200 status
+# also stops the browser's EventSource from reconnecting). `prepare` returns
+# `(; body, error_obj)`: the `(__sse__) -> …` route value and the object whose
+# `__error__` renders a failure after the stream has started.
+function _register_sse_handler(path, prepare)
+    _register_handler("SSE", path, function(req)
+        haskey(req.context, :stream) || return _route_error_response(req,
+            ArgumentError("`@sse` route $(path) needs a live HTTP connection; " *
+                          "in-process requests cannot consume an event stream"),
+            backtrace())
+        prepared = try
+            prepare(req)
+        catch err
+            return _route_error_response(req, err, catch_backtrace())
+        end
+        _serve_sse(req, prepared.body; error_obj=prepared.error_obj)
+    end)
+end
+
+"""
+    sse_region(url, content...; events="message,done", close="close", swap=nothing)
+
+Client side of an `@sse` route: a `<div hx-ext="sse" sse-connect=url>` that
+opens the stream, wrapping a target that swaps in the named `events`
+(default: plain `send`s and the body's final `done` value). The source closes
+on the framework's `close` event, so a finished stream is not re-run by the
+browser's automatic reconnect. `content` is the target's initial content;
+`swap` sets its `hx-swap` (htmx's default replaces the inner HTML; pass
+`swap="beforeend"` to append a log or feed).
+
+Build `url` from the route struct so mounts keep working, e.g.
+`sse_region(query_url(__self__/"feed"; n=3), h.p("waiting…"))`.
+
+Needs the htmx SSE extension, which [`htmx`](@ref) page shells load by default.
+"""
+function sse_region(url, content...; events="message,done", close="close",
+        swap=nothing)
+    target = isnothing(swap) ? h.div(; sse_swap=events) :
+                               h.div(; sse_swap=events, hx_swap=swap)
+    h.div(; hx_ext="sse", sse_connect=string(url), sse_close=close)(
+        target(content...))
 end
 
 # --- Error handling ---
@@ -3757,8 +4261,8 @@ _error_uid() = string(hash(time_ns()); base=16)
 _revise_module() = get(Base.loaded_modules, Base.PkgId(Base.UUID(_REVISE_UUID), "Revise"), nothing)
 
 # If Revise is loaded and has unresolved revision errors queued, append them
-# to `io`. Oxygen's `revise=:lazy` mode already logs these to the console on
-# each request; duplicating them into the per-error log lets a stale-code
+# to `io`. `serve(; revise=:lazy)` already has Revise log these to the console
+# on each request; duplicating them into the per-error log lets a stale-code
 # failure be diagnosed from the recorded file alone.
 _qe_file(key::Tuple) = length(key) >= 2 ? key[2] : key
 _qe_file(key) = key
@@ -4022,7 +4526,7 @@ function _record_error(err, bt, req)
         println(io)
         # PropertyComputationError's 2-arg showerror already prints the cause's
         # filtered backtrace; passing `bt` would make Julia's default 3-arg
-        # fallback append the outer Oxygen/HTTP trace a second time.
+        # fallback append the outer HTTP trace a second time.
         # Inner-only guard: if `showerror` itself throws (e.g. a user
         # exception with a broken `Base.show` overload), we still want the
         # file to close with the header + a marker noting what failed, and
@@ -4189,6 +4693,7 @@ end
 
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
     uid, path = _record_error(err, bt, req)
+    _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _passthrough_response(err_val)
     isnothing(direct) || return _stamp_error_id(direct, uid)
@@ -4483,6 +4988,7 @@ function _operation_target(provider::RootProvider, RootT, chain::Vector,
         req::HTTP.Request, root_prefix::AbstractString, root_segs::Int,
         transport::Symbol)
     context = _operation_context(provider, req, root_prefix, transport)
+    _runtime_note_session!(req, context)
     root = _provide_root(provider, RootT, context)
     objects = isempty(chain) ? Any[root] : _chain_steps(root, chain, req, root_segs)
     leaf = last(objects)
@@ -5019,7 +5525,7 @@ end
 _operation_rich_page_request(req::HTTP.Request) =
     contains(lowercase(HTTP.header(req, "Accept", "")), "text/html")
 
-# `:auto` spends a small part of Oxygen's existing request task waiting on the
+# `:auto` spends a small part of the existing request task waiting on the
 # DO Pending handle. The extension returns a fast value directly; only a
 # timeout becomes a Treebars poller. Keep this outside OperationPolicy's struct
 # shape so the public type remains Revise-safe on Julia 1.10.
@@ -5075,7 +5581,15 @@ mutable struct _OperationPollEntry
     request::HTTP.Request
     created_at::Float64
     touched_at::Float64
+    # The runtime job registered when this execution started (see
+    # `_runtime_operation_started!`); retaining hands it to a watcher.
+    job::Any
 end
+
+_OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
+        error_obj, request, created_at, touched_at) =
+    _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
+        error_obj, request, created_at, touched_at, nothing)
 
 const _operation_polls = Dict{String,_OperationPollEntry}()
 
@@ -5211,6 +5725,202 @@ end
 _resolve_operation_value(value) =
     value isa DynamicObjects.Pending ? fetch(value) : value
 
+# Speculative preloads (`@preload`). htmx's `preload` extension issues the GET
+# a link WOULD issue — early, on hover or mousedown — marked `HX-Preloaded:
+# true`, and discards the response: the click that follows is an ordinary
+# request, faster only if something already did its work. Two rules follow
+# for a server whose GETs are computations:
+#
+# - A route that did not opt in does no speculative work. It answers a
+#   preload with an empty `204` before a root is even constructed, so a
+#   `preload` attribute on an operation-like GET (`SemanticAction`) or a slow
+#   route costs one cheap round trip, never a computation.
+# - A `@preload` route starts its operation. One that finishes within the
+#   grace budget answers the fragment with a short private `Cache-Control`
+#   varied on `HX-Request` and the page's `HTMXO-Client` id, so the click is
+#   served from the browser cache — and only on the page that preloaded it.
+#   A slower operation answers `204` and keeps running: the click, carrying
+#   the same client id, joins it instead of recomputing on its fresh root.
+#
+# Joining reuses the poll-token trust model. The client id is a per-page-load
+# random bearer that `preload_runtime_js` sends only to the page's own origin;
+# an entry is also bound to the operation signature (root/leaf types, route,
+# typed args, provider scope/key), so an id can only ever claim the exact
+# operation a fresh GET of the same URL on that page would have computed.
+# Entries live in their own bounded registry — a burst of hovers must never
+# evict a live poller's operation — and are consumed by the join.
+
+"""
+    PRELOAD_MAX_AGE
+
+Seconds (`Ref{Int}`, default `10`) the browser may reuse a `@preload` route's
+preloaded fragment. Only preload responses that finished within the grace budget
+carry it, and they vary on the page's client id, so the reuse is confined to the
+page that preloaded. Set `HTMXObjects.PRELOAD_MAX_AGE[] = 0` to disable browser
+reuse and keep only the server-side join.
+"""
+const PRELOAD_MAX_AGE = Ref(10)
+
+const _PRELOAD_GRACE = 0.1
+const _PRELOAD_LIMIT = 64
+const _PRELOAD_TTL = 120.0
+const _preload_lock = ReentrantLock()
+const _preload_ops = Dict{Any,_OperationPollEntry}()
+
+struct _PreloadSkipped end
+const _PRELOAD_SKIPPED = _PreloadSkipped()
+
+_preload_request(req::HTTP.Request) = HTTP.header(req, "HX-Preloaded", "") == "true"
+
+function _preload_client(req::HTTP.Request)
+    id = HTTP.header(req, "HTMXO-Client", "")
+    occursin(r"^[0-9a-f]{32}$", id) ? String(id) : nothing
+end
+
+# Only a route's first GET is speculative: polls, attaches and form refreshes
+# belong to a transport the page already runs.
+_preloadable_request(req::HTTP.Request, verb_inst) =
+    _verb_symbol(verb_inst) === :GET && !_operation_poll_request(req) &&
+        isnothing(_operation_poll_token(req)) && !_operation_form_request(req)
+
+_preload_skipped_response() = HTTP.Response(204, ["Cache-Control" => "no-store"])
+
+function _prune_preloads!(now::Real=_operation_poll_now())
+    expired = [key for (key, entry) in _preload_ops
+               if now - entry.created_at >= _PRELOAD_TTL]
+    foreach(key -> delete!(_preload_ops, key), expired)
+    nothing
+end
+
+function _retain_preload!(key, entry::_OperationPollEntry;
+        now::Real=_operation_poll_now())
+    lock(_preload_lock)
+    try
+        _prune_preloads!(now)
+        while length(_preload_ops) >= _PRELOAD_LIMIT
+            oldest = argmin(k -> _preload_ops[k].created_at, collect(keys(_preload_ops)))
+            delete!(_preload_ops, oldest)
+        end
+        _preload_ops[key] = entry
+    finally
+        unlock(_preload_lock)
+    end
+    entry
+end
+
+function _lookup_preload(key; take::Bool=false, now::Real=_operation_poll_now())
+    lock(_preload_lock)
+    try
+        _prune_preloads!(now)
+        entry = get(_preload_ops, key, nothing)
+        take && !isnothing(entry) && delete!(_preload_ops, key)
+        entry
+    finally
+        unlock(_preload_lock)
+    end
+end
+
+function _clear_preloads!()
+    lock(_preload_lock)
+    try
+        empty!(_preload_ops)
+    finally
+        unlock(_preload_lock)
+    end
+    nothing
+end
+
+# Start a preload's materialization off the request task. The spawn yields the
+# same `started` a `:polling` start would — a DO `Pending` for a cached route,
+# the value itself for a `@fresh` one, which computes inside the spawn — so a
+# join can hand it to whichever transport the click resolves to.
+function _start_preload(descriptor, target, name, verb_inst, idx_vals, kw_pairs,
+        signature, req::HTTP.Request)
+    declared_fresh = _operation_declared_fresh(descriptor)
+    fetch = _operation_background_fetch(req)
+    task = Threads.@spawn Base.invokelatest(_execute_materialization,
+        target, name, verb_inst, idx_vals, kw_pairs;
+        fetch, declared_fresh)
+    now = _operation_poll_now()
+    _OperationPollEntry("", signature, getproperty(target.leaf, name),
+        (verb_inst, idx_vals...), NamedTuple(kw_pairs), task, target.leaf, req,
+        now, now)
+end
+
+# `(ready, value)` for a preload entry within `grace` seconds: the spawn must
+# have returned and any DO handle it returned must have resolved. A failure is
+# never ready — the preload answers `204` and the click, joining, renders it
+# through its own transport exactly as a request without a preload would.
+function _preload_ready(entry::_OperationPollEntry, grace::Real)
+    task = entry.started::Task
+    started_at = time_ns()
+    timedwait(() -> istaskdone(task), grace; pollint=0.005) === :ok ||
+        return (ready=false, value=nothing)
+    istaskfailed(task) && return (ready=false, value=nothing)
+    remaining = max(grace - (time_ns() - started_at) / 1.0e9, 0.0)
+    try
+        _operation_grace_fetch(_resolve_operation_value, fetch(task), remaining)
+    catch
+        (ready=false, value=nothing)
+    end
+end
+
+function _execute_preload(descriptor, target, name, verb_inst, idx_vals,
+        kw_pairs, req::HTTP.Request)
+    _preloadable_request(req, verb_inst) || return _PRELOAD_SKIPPED
+    signature = _operation_poll_signature(
+        target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+    client = _preload_client(req)
+    key = (client, signature)
+    entry = isnothing(client) ? nothing : _lookup_preload(key)
+    if !(entry isa _OperationPollEntry)
+        entry = _start_preload(descriptor, target, name, verb_inst, idx_vals,
+                               kw_pairs, signature, req)
+        isnothing(client) || _retain_preload!(key, entry)
+    end
+    ready = _preload_ready(entry, _PRELOAD_GRACE)
+    ready.ready || return _PRELOAD_SKIPPED
+    # The browser now holds the fragment; a server-side join after its
+    # max-age would serve older data than a fresh GET, so drop the entry.
+    isnothing(client) || _lookup_preload(key; take=true)
+    req.context[:htmxo_preload] = :ready
+    ready.value
+end
+
+# Hand a preloaded operation to the click that follows its preload — same page
+# (`HTMXO-Client`), same route, same typed args — consuming the entry. Returns
+# the entry with `started` resolved to what the preload's materialization
+# returned, or `nothing` when there is nothing to join; a failed start also
+# yields `nothing`, so the click computes fresh and reports the error itself.
+function _take_preload(req::HTTP.Request, signature)
+    client = _preload_client(req)
+    isnothing(client) && return nothing
+    entry = _lookup_preload((client, signature); take=true)
+    entry isa _OperationPollEntry || return nothing
+    started = try
+        fetch(entry.started)
+    catch
+        return nothing
+    end
+    entry.started = started
+    entry
+end
+
+# A preload response that finished in time becomes reusable by the browser,
+# unless the route already chose its own caching.
+function _stamp_preload(req::HTTP.Request, resp::HTTP.Response)
+    get(req.context, :htmxo_preload, nothing) === :ready || return resp
+    (resp.status == 200 && PRELOAD_MAX_AGE[] > 0) || return resp
+    isempty(HTTP.header(resp, "Cache-Control", "")) || return resp
+    vary = HTTP.header(resp, "Vary", "")
+    hdrs = Pair{String,String}[String(k) => String(v) for (k, v) in resp.headers
+                               if lowercase(String(k)) != "vary"]
+    push!(hdrs, "Cache-Control" => "private, max-age=$(PRELOAD_MAX_AGE[])")
+    push!(hdrs, "Vary" => (isempty(vary) ? "" : vary * ", ") *
+                          "HX-Request, HTMXO-Client")
+    HTTP.Response(resp.status, hdrs; body=resp.body)
+end
+
 # First non-empty line of a route docstring, verbatim. The shared core behind
 # the OpenAPI `summary`, the auto poller header, and the semantic operation
 # title: one rule for what "the docstring's first line" means, with each
@@ -5303,7 +6013,9 @@ _with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
 # that same call form — so the governed lease is preserved either way).
 # `Base.fetch` takes DO's `:inline` branch: compute on THIS task and return the
 # value. `identity` takes the `:spawn` branch: kick the compute off and hand back
-# a `Pending`. A declaration-site `@fresh` IP has no two-phase selector; its
+# a `Pending` — and so does a `Deferred(executor)`, which the operation layer
+# passes instead when the job queue is on (`_operation_background_fetch`), so
+# the compute waits its turn. A declaration-site `@fresh` IP has no two-phase selector; its
 # descriptor lets us keep this framework-only keyword out of the authored call.
 # Only the spawned branch makes polling transport real — see
 # `_execute_operation`.
@@ -5461,6 +6173,7 @@ end
 
 function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
+    _runtime_job_polled!(req, entry.started)
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
@@ -5495,9 +6208,10 @@ end
 
 function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-        call_kwargs; parent_progress=nothing)
+        call_kwargs; parent_progress=nothing, job=nothing)
     started = _execute_materialization(target, name, verb_inst, idx_vals,
-                                       kw_pairs; fetch=identity,
+                                       kw_pairs;
+                                       fetch=_operation_background_fetch(req),
                                        parent_progress=parent_progress,
                                        declared_fresh=
                                            _operation_declared_fresh(descriptor))
@@ -5507,7 +6221,7 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
     entry = _OperationPollEntry(
         token, signature, prop, keys, call_kwargs, started,
-        target.leaf, req, now, now)
+        target.leaf, req, now, now, job)
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
@@ -5525,7 +6239,7 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  replace_page_load,
                  error_obj=target.leaf, req=req,
                  grace_period=0.0,
-                 retain=() -> _retain_operation_poll!(entry),
+                 retain=() -> _retain_operation!(entry, descriptor, name),
                  cleanup=() -> _delete_operation_poll!(token))
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -5534,42 +6248,35 @@ end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false,
-        parent_progress=nothing)
+        parent_progress=nothing, preload::Bool=false)
+    if preload && _preload_request(req)
+        _runtime_note_mode!(req, :preload)
+        return _execute_preload(descriptor, target, name, verb_inst, idx_vals,
+                                kw_pairs, req)
+    end
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell)
+    _runtime_note_mode!(req, mode)
     context = get(target, :context, nothing)
     prefix = context isa OperationContext ? context.prefix : ""
     prop = getproperty(target.leaf, name)
     keys = (verb_inst, idx_vals...)
     call_kwargs = NamedTuple(kw_pairs)
+    error_obj = target.leaf
 
-    if mode === :page_load
-        # A direct rich-page visit spends the same grace budget an HTMX request
-        # would: a fast operation renders inline in the shell — one response,
-        # no blank placeholder, no refetch. Only a timeout defers, and the
-        # deferred placeholder carries this request's poll token so the
-        # load-triggered refetch joins the in-flight operation instead of
-        # starting a second compute. The shell therefore never waits for a
-        # slow operation, but the operation always starts at most once.
-        started = _execute_materialization(target, name, verb_inst, idx_vals,
-                                           kw_pairs; fetch=identity,
-                                           parent_progress=parent_progress,
-                                           declared_fresh=
-                                               _operation_declared_fresh(descriptor))
-        fast = _operation_grace_fetch(_resolve_operation_value, started,
-                                      _operation_grace_period(policy, req))
-        fast.ready && return fast.value
-        token = _new_operation_poll_token()
-        now = _operation_poll_now()
-        signature = _operation_poll_signature(
-            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
-        entry = _OperationPollEntry(
-            token, signature, prop, keys, call_kwargs, started,
-            target.leaf, req, now, now)
-        _retain_operation_poll!(entry)
-        return _operation_page_load(
-            req, prefix; replace_terminal=!_operation_treebars_keep(policy),
-            poll_token=token)
+    # A click following a `@preload` of the same route and args on the same
+    # page joins that operation: its `started` stands in for a fresh start,
+    # and its IP/keys stand in for this root's, because the polling transport
+    # re-reads progress through the IP whose cache actually holds the compute.
+    preloaded = nothing
+    if preload && _preloadable_request(req, verb_inst)
+        preloaded = _take_preload(req, _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs))
+        if !isnothing(preloaded)
+            prop, keys, call_kwargs = preloaded.prop, preloaded.keys,
+                                      preloaded.call_kwargs
+            error_obj = preloaded.error_obj
+        end
     end
 
     if mode === :polling &&
@@ -5580,6 +6287,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         entry = isnothing(token) ? nothing :
             _lookup_operation_poll(token, signature)
         if entry isa _OperationPollEntry
+            # A resumed poll joins its operation's existing job.
             return _execute_operation_resume(policy, descriptor, target, name,
                 verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
         end
@@ -5588,9 +6296,58 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         # (hx-vals drift), or missing/ambiguous. Re-execute fresh with the
         # poll request's current args; that computes what a fresh GET would,
         # so the poll recovers instead of failing.
-        return _execute_operation_heal(policy, descriptor, target, name,
-            verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-            call_kwargs; parent_progress=parent_progress)
+        return _with_runtime_job(req, descriptor, name, context, prop, keys,
+                                 call_kwargs; leaf=target.leaf) do job
+            _execute_operation_heal(policy, descriptor, target, name,
+                verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
+                call_kwargs; parent_progress=parent_progress, job)
+        end
+    end
+
+    # Every fresh execution — blocking ones included — is a runtime job from
+    # its start; the ledger shows it once it outlives the grace period.
+    _with_runtime_job(req, descriptor, name, context, prop, keys,
+                      call_kwargs; leaf=target.leaf) do job
+        _execute_operation_fresh(policy, descriptor, target, name, verb_inst,
+            idx_vals, kw_pairs, req, mode, prefix, prop, keys, call_kwargs, job;
+            parent_progress, preloaded, error_obj)
+    end
+end
+
+function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
+        name, verb_inst, idx_vals, kw_pairs, req, mode::Symbol, prefix, prop,
+        keys, call_kwargs, job; parent_progress=nothing, preloaded=nothing,
+        error_obj=target.leaf)
+    if mode === :page_load
+        # A direct rich-page visit spends the same grace budget an HTMX request
+        # would: a fast operation renders inline in the shell — one response,
+        # no blank placeholder, no refetch. Only a timeout defers, and the
+        # deferred placeholder carries this request's poll token so the
+        # load-triggered refetch joins the in-flight operation instead of
+        # starting a second compute. The shell therefore never waits for a
+        # slow operation, but the operation always starts at most once.
+        started = isnothing(preloaded) ?
+            _execute_materialization(target, name, verb_inst, idx_vals,
+                                     kw_pairs;
+                                     fetch=_operation_background_fetch(req),
+                                     parent_progress=parent_progress,
+                                     declared_fresh=
+                                         _operation_declared_fresh(descriptor)) :
+            preloaded.started
+        fast = _operation_grace_fetch(_resolve_operation_value, started,
+                                      _operation_grace_period(policy, req))
+        fast.ready && return fast.value
+        token = _new_operation_poll_token()
+        now = _operation_poll_now()
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = _OperationPollEntry(
+            token, signature, prop, keys, call_kwargs, started,
+            error_obj, req, now, now, job)
+        _retain_operation!(entry, descriptor, name)
+        return _operation_page_load(
+            req, prefix; replace_terminal=!_operation_treebars_keep(policy),
+            poll_token=token)
     end
 
     # Decide the transport BEFORE starting the work, and start it the way that
@@ -5599,13 +6356,19 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     # `:polling`/`:auto` would behave exactly like `:blocking` and the
     # extension's grace-period fast path — written against `started isa
     # Pending` — could never be reached.
-    started = _execute_materialization(target, name, verb_inst, idx_vals,
-                                       kw_pairs;
-                                       fetch=mode === :polling ? identity :
-                                             Base.fetch,
-                                       parent_progress=parent_progress,
-                                       declared_fresh=
-                                           _operation_declared_fresh(descriptor))
+    started = if isnothing(preloaded)
+        _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
+                                 fetch=mode === :polling ?
+                                       _operation_background_fetch(req) :
+                                       Base.fetch,
+                                 parent_progress=parent_progress,
+                                 declared_fresh=
+                                     _operation_declared_fresh(descriptor))
+    else
+        # A blocking transport answers the value, as a blocking start would.
+        mode === :polling ? preloaded.started :
+            _resolve_operation_value(preloaded.started)
+    end
     if mode === :polling
         token = _new_operation_poll_token()
         now = _operation_poll_now()
@@ -5613,7 +6376,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
             target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
-            target.leaf, req, now, now)
+            error_obj, req, now, now, job)
         page_load_id = _operation_page_load_id(req)
         transport = (poll_url=_operation_poll_url(req, token, prefix),
                      label=_operation_poll_label(descriptor, name),
@@ -5623,9 +6386,9 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                      settle_bare=true,
                      page_load_id,
                      replace_page_load=false,
-                     error_obj=target.leaf, req=req,
+                     error_obj=error_obj, req=req,
                      grace_period=_operation_grace_period(policy, req),
-                     retain=() -> _retain_operation_poll!(entry),
+                     retain=() -> _retain_operation!(entry, descriptor, name),
                      cleanup=() -> _delete_operation_poll!(token))
         return _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
@@ -5649,7 +6412,7 @@ end
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
         operation_policy::OperationPolicy=OperationPolicy(),
-        parent_progress=nothing)
+        parent_progress=nothing, preload::Bool=false)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
@@ -5664,7 +6427,7 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
                  _operation_rich_page_request(req)
     value = _execute_operation(operation_policy, descriptor, target, name,
                                verb_inst, idx_vals, kw_pairs, req; page_shell,
-                               parent_progress=parent_progress)
+                               parent_progress=parent_progress, preload)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -5692,7 +6455,8 @@ but retain a transport-specific `ws` signature and response lifecycle.
 """
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         path, n_params, record_dir; root_prefix="", record_base::String="",
-        root_provider=RootProvider(), operation_policy=OperationPolicy())
+        root_provider=RootProvider(), operation_policy=OperationPolicy(),
+        preload::Bool=false)
     base = _base_segments(path, n_params)
     is_included = !isempty(chain)
     # Number of URL segments consumed by the root prefix (e.g. "/foo/bar" → 2)
@@ -5702,6 +6466,12 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     # `Symbol(method)` is the verb short symbol used in `Verb{V}`.
     verb_inst = Verb{Symbol(method)}()
     _register_handler(method, path, function(req)
+        # A speculative request does no work unless the route opted in with
+        # `@preload` — decided before a root is constructed.
+        if _preload_request(req) &&
+                !(preload && _preloadable_request(req, verb_inst))
+            return _preload_skipped_response()
+        end
         local context, root, leaf, root_target
         try
             provider = get(_root_providers, RootT, root_provider)
@@ -5736,8 +6506,10 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             parent_progress = dispatch_parent(req)
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy,
-                                       parent_progress=parent_progress)
+                                       parent_progress=parent_progress,
+                                       preload)
             val = operation.value
+            val === _PRELOAD_SKIPPED && return _preload_skipped_response()
 
             # The request target is the authoritative external route. Rebuilding
             # it from `chain` loses indexed mount values because chain entries
@@ -5747,10 +6519,11 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
-                return _resolve_response_nested(page_chain, req, val;
-                                                root, record_dir, save_path, record_base)
+                return _stamp_preload(req, _resolve_response_nested(page_chain, req, val;
+                                                root, record_dir, save_path, record_base))
             else
-                return _resolve_response(leaf, req, val; record_dir, save_path, record_base)
+                return _stamp_preload(req, _resolve_response(leaf, req, val;
+                                                record_dir, save_path, record_base))
             end
         catch err
             err isa _RecordDestinationCollision && rethrow()
@@ -5761,33 +6534,6 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             return _route_error_response(req, err, bt; error_obj=leaf, page_chain)
         end
     end)
-end
-
-# Record a route whose path starts with Oxygen's docs prefix instead of
-# reporting it: registration runs at `route!`/Revise time, before serve's
-# `docs=` kwarg is known (see `_docs_prefix_routes`). `OwnerT` is the
-# walk-root type (`_register_routes`' `T`, threaded through
-# `_register_included_routes` as `ParentT`), so each walk rebuilds its own
-# entries (reset in `_register_routes`) without touching sibling roots'.
-function _record_docs_prefix(OwnerT::DataType, path, name)
-    startswith(lstrip(path, '/'), "docs") &&
-        push!(get!(Set{Tuple{Symbol,String}}, _docs_prefix_routes, OwnerT),
-              (name, path))
-    nothing
-end
-
-# Emit the deferred /docs-prefix collision errors collected by
-# `_record_docs_prefix` — but only when Oxygen's docs are actually enabled.
-# `serve` passes `docs` straight through to `Oxygen.Core.serve`, whose
-# default is `true` (both 1.10 and 1.11), so an absent key means enabled.
-function _check_docs_prefix_routes(kwargs)
-    Base.get(kwargs, :docs, true) === false && return nothing
-    for OwnerT in sort!(collect(keys(_docs_prefix_routes)); by=string)
-        for (name, path) in sort!(collect(_docs_prefix_routes[OwnerT]); by=last)
-            @error "Route `$name` maps to path \"$path\" which starts with \"/docs\" — with Oxygen's built-in docs enabled, its DocsMiddleware serves Oxygen's own (for @htmx apps, empty) Swagger for every \"/docs*\" request and this route never fires. Either pass `docs=false` to `serve` (also disables Oxygen's Swagger and its /docs/metrics dashboard UI; metrics collection is unaffected) or mount the route outside \"/docs\"."
-        end
-    end
-    nothing
 end
 
 # Build the URL path for a route property. `prefix` is the enclosing mount
@@ -5897,7 +6643,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
 
     param_strs, n_params, default_positions = _route_param_shape(positional_indices)
     path = _route_path(prefix, name, param_strs)
-    _record_docs_prefix(OwnerT, path, name)
+    preload = Symbol("@preload") in info.macros
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
@@ -5920,22 +6666,38 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                                            req, ws_base, n_params; operation_policy)
                 operation.value(ws)
             end)
+        elseif method == "SSE"
+            # SSE: same typed runner as WS (`@sse feed() = body` is wrapped
+            # to `(__sse__) -> body`), but it runs before the stream starts,
+            # so argument and target errors answer as ordinary responses.
+            sse_base = _base_segments(path, n_params)
+            sse_root_segs = isempty(mount_prefix) ? 0 :
+                            count(==('/'), strip(mount_prefix, '/')) + 1
+            sse_verb = Verb{:SSE}()
+            _register_sse_handler(path, function(req)
+                provider = get(_root_providers, OwnerT, root_provider)
+                target = _operation_target(provider, OwnerT, chain, req,
+                                           mount_prefix, sse_root_segs, :sse)
+                operation = _run_operation(target, RouteT, name, sse_verb,
+                                           req, sse_base, n_params; operation_policy)
+                (; body=operation.value, error_obj=operation.leaf)
+            end)
         elseif isempty(param_strs) && has_kwargs
             # kwargs-only route (no path params): mark static for the recorder
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy)
+                                    operation_policy, preload)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy)
+                                    operation_policy, preload)
         else
             # Register the full route (all params explicit)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy)
+                                    operation_policy, preload)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -5946,7 +6708,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
                                         length(short_params), record_dir;
                                         root_prefix=mount_prefix, record_base, root_provider,
-                                        operation_policy)
+                                        operation_policy, preload)
             end
         end
     end
@@ -6012,9 +6774,6 @@ end
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
         parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
         operation_policy=get(_operation_policies, T, OperationPolicy()))
-    # Rebuild this walk's /docs-prefix entries from scratch (see
-    # `_docs_prefix_routes`): a renamed route must not haunt the next serve.
-    _docs_prefix_routes[T] = Set{Tuple{Symbol,String}}()
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _walk_route_meta(T,
         (name, info, nested_type) -> begin
@@ -6677,7 +7436,7 @@ end
 
 # Source bucket for request-parsed params by HTTP method — mirrors the
 # query-vs-body split in `_generate_extract_args` / `_kwargs_source`.
-_reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET") ? :query : :body
+_reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET", "SSE") ? :query : :body
 
 # Split a route's call signature into (path_params, kwargs) via DO's
 # `property_signature(info, mod)` — the canonical AST→structured parser
@@ -7156,7 +7915,8 @@ Safety rules:
 - Only `:GET` routes are requested by default. `:POST`/`:PUT`/`:PATCH`/
   `:DELETE` routes are skipped unless `include_post=true` — pass it only for
   routes whose bodies are safe to run twice.
-- `:WEBSOCKET` routes are always skipped (no HTTP-upgrade in prewarm).
+- `:WEBSOCKET` and `:SSE` routes are always skipped (no HTTP-upgrade in
+  prewarm, and an event stream has no end to wait for).
 - `{param}` templates are concretized with boring type samples (`1`,
   `"prewarm"`); an id-lookup route may 404 on them while still warming
   dispatch. For an exact warm, pass concrete URLs.
@@ -7211,6 +7971,10 @@ function _prewarm_descriptor(base::AbstractString, route::NamedTuple,
     if verb === :WEBSOCKET
         return (; verb, path=route.path, name=route.name, url="",
                 status=nothing, error="websocket skipped: prewarm issues HTTP only")
+    end
+    if verb === :SSE
+        return (; verb, path=route.path, name=route.name, url="",
+                status=nothing, error="sse skipped: an event stream never completes")
     end
     if verb !== :GET && !include_post
         return (; verb, path=route.path, name=route.name, url="",
@@ -7653,9 +8417,9 @@ end
     route!(app; prefix="", record_dir=nothing, record_base="",
            root_provider=nothing, operation_policy=OperationPolicy())
 
-Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws` route declared on
-`app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) with the
-Oxygen router. Returns `app`.
+Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` route declared on
+`app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) on
+[`ROUTER`](@ref). Returns `app`.
 
 - `prefix` — mount the entire app under a URL prefix (e.g. `prefix="api"` puts
   the root route at `/api/`). Default: root (`""`).
@@ -7665,7 +8429,7 @@ Oxygen router. Returns `app`.
   is set (for deploying to a non-root subpath).
 - `root_provider` — a [`RootProvider`](@ref), including its managed
   [`RootRetention`](@ref) form, or a callable `factory(RootT, context)`, used by
-  both HTTP and WebSocket operations. `nothing` preserves the historic
+  HTTP, WebSocket, and SSE operations. `nothing` preserves the historic
   fresh-root-per-request behavior.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
   polling, or HTMX-aware automatic execution. **Defaults to
@@ -7708,7 +8472,7 @@ end
 Drive each path through the in-process route handler with one or more
 header sets, writing recordings under `record_dir`. No subprocess, no
 HTTP listener — looks each path up via `HTTP.Handlers.gethandler` on
-`CONTEXT[].service.router` and invokes the handler with a manufactured
+[`ROUTER`](@ref) and invokes the handler with a manufactured
 `HTTP.Request`. The handler's existing save logic in `_resolve_response`
 writes the appropriate file shape.
 
@@ -7753,7 +8517,7 @@ function record!(app;
         route!(app; record_dir, record_base,
                operation_policy=OperationPolicy(:blocking))
         isdir(record_dir) || mkpath(record_dir)
-        router = CONTEXT[].service.router
+        router = ROUTER
         for path in paths
             session.source[] = String(path)
             full     && _drive_record_path(router, String(path), Pair{String,String}[])
@@ -7904,10 +8668,8 @@ Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
 contract — the same shape `HTTP.get(...; status_exception=false)` yields.
 
-Serve-time Oxygen middleware (access log, metrics, docs) does not run:
-`dispatch` resolves at the router, beneath the middleware stack. Routes
-mounted under `/docs` therefore answer here even when Oxygen's docs
-middleware would intercept them over the wire (see `_check_docs_prefix_routes`).
+Serve-time middleware (the access log, Revise, `serve`'s `middleware`) does
+not run: `dispatch` resolves at the router, beneath the middleware stack.
 `:page_load` responses start no compute, so there is nothing to parent;
 polling-mode responses attach their in-flight operation node.
 
@@ -7923,7 +8685,7 @@ function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
-    _with_dispatch_parent(() -> CONTEXT[].service.router(req), parent)
+    _with_dispatch_parent(() -> ROUTER(req), parent)
 end
 
 # Recording shims. Implementation is held in mutable `Ref`s so the
@@ -9273,6 +10035,10 @@ include("routes/resource_routes.jl")
 
 include("routes/shared_ops_routes.jl")
 
+include("runtime.jl")
+
+include("routes/runtime_routes.jl")
+
 _hidden_input(k, v) =
     [h.input(; type="hidden", name=string(k), value=_option_wire_string(v))]
 _hidden_input(k, v::AbstractVector) =
@@ -10381,6 +11147,8 @@ function operation_form(obj, route::NamedTuple; values=(;),
         context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
+    route.verb === :SSE && throw(ArgumentError(
+        "operation_form does not submit SSE routes; render `sse_region` instead"))
     route = _semantic_runtime_route(obj, route)
     _check_mounted_include_child(obj, route)
     presentation in (:auto, :cards) || throw(ArgumentError(
@@ -10555,7 +11323,8 @@ _semantic_app_setting(setting, _entry) = setting
 
 function _default_semantic_operation(entry)
     entry.form === nothing && throw(ArgumentError(string(
-        "semantic_app has no default control for WebSocket operation ",
+        "semantic_app has no default control for ",
+        entry.verb === :SSE ? "SSE" : "WebSocket", " operation ",
         "$(entry.verb) $(entry.path); pass `render_operation` and render this ",
         "entry explicitly")))
     h.article(
@@ -10669,8 +11438,8 @@ shared.
 of an operation entry. `submit` may likewise be a value or function. Override
 `render_operation(entry)` for local layout; the entry carries `object`, `route`,
 `name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`. The default
-renderer fails closed for WebSocket routes, whose client transport must be
-rendered explicitly.
+renderer fails closed for WebSocket and SSE routes, whose client transport must
+be rendered explicitly.
 
 The first successful render also promotes the historic request-scoped default
 to a managed provider keyed by the root type and normalized mount prefix. The
@@ -10775,7 +11544,7 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
         base_entry = spec.base_entry
         target_id = base_entry.target_id
         selector = isempty(context_entries) ? nothing : "#$(context_id)"
-        form = base_entry.verb === :WEBSOCKET ? nothing : operation_form(
+        form = base_entry.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
             spec.mounted, spec.local_route;
             values=spec.operation_values,
             target_id="#$(target_id)",
@@ -11629,12 +12398,19 @@ document.addEventListener('DOMContentLoaded', function() {
     function isPollingRelated(elt) {
         return isPolling(elt) || (elt.querySelector && !!elt.querySelector('[hx-trigger*="every"]'));
     }
+    // htmx dispatches a preload's beforeRequest before the preload extension
+    // cancels it, and no afterRequest follows: marking it would leave the
+    // hovered element pulsing for good.
+    function isPreload(e) {
+        var config = e.detail.requestConfig;
+        return !!(config && config.headers && config.headers['HX-Preloaded'] === 'true');
+    }
     function clearFeedback(el) {
         el.classList.remove('htmx-request-active', 'htmx-request-success', 'htmx-request-error');
     }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
         var elt = e.detail.elt;
-        if (isPolling(elt)) return;
+        if (isPolling(elt) || isPreload(e)) return;
         var t = getTarget(e);
         clearFeedback(t);
         t.classList.add('htmx-request-active');
@@ -11682,6 +12458,33 @@ Combined style + script nodes for automatic HTMX request feedback.
 Included by default in `htmx()`.
 """
 request_feedback() = (request_feedback_style(), request_feedback_script())
+
+"""
+    preload_runtime_js()
+
+The page side of `@preload` routes, included by [`htmx`](@ref) whenever it loads
+the `preload` extension. It draws one random id per page load and sends it as the
+`HTMXO-Client` header on the page's same-origin GET requests, so a click can join
+the operation its own preload already started (see [`PRELOAD_MAX_AGE`](@ref) and
+the `@preload` route marker). Include it next to the extension when building a
+`<head>` by hand.
+"""
+preload_runtime_js() = h.script(Raw("""
+(function() {
+    if (window.htmxoPreloadClient) return;
+    var bytes = new Uint8Array(16), id = '';
+    crypto.getRandomValues(bytes);
+    for (var i = 0; i < bytes.length; i++) id += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+    window.htmxoPreloadClient = id;
+    document.addEventListener('htmx:configRequest', function(e) {
+        var d = e.detail;
+        if (d.verb !== 'get') return;
+        try { if (new URL(d.path, location.href).origin !== location.origin) return; }
+        catch (_) { return; }
+        d.headers['HTMXO-Client'] = id;
+    });
+})();
+"""))
 
 """
     overlay_bar_style()
@@ -12359,6 +13162,8 @@ function compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, 
         h.textarea(value; name, rows, placeholder, class=cls, data_draft_key=draft_key)
 end
 
+include("live_thread.jl")
+
 """
     loading_indicator_script()
 
@@ -12370,6 +13175,8 @@ requests. Pico CSS renders a spinner automatically for `aria-busy` elements.
 """
 loading_indicator_script() = h.script(Raw("""
 document.body.addEventListener('htmx:beforeRequest', function(e) {
+    var config = e.detail.requestConfig;
+    if (config && config.headers && config.headers['HX-Preloaded'] === 'true') return;
     e.detail.elt.setAttribute('aria-busy', 'true');
 });
 document.body.addEventListener('htmx:afterRequest', function(e) {
@@ -12430,26 +13237,46 @@ tabset_styles() = h.style(Raw("""
 }
 """))
 
-function _tabset_panel(content::AbstractString, i, active)
-    # String content = URL → lazy load via hx-get on first reveal
+_tabset_panel_id(id, i) = "$id-tab-$i"
+
+# String content = URL → lazy. The initially active panel loads itself once it
+# is actually visible; every other panel is filled by its tab's first click
+# (see `_tabset_lazy_link_attrs`). Deliberately not `revealed`: htmx 2 measures
+# a `display:none` panel as a zero-size box at the viewport origin, "reveals" it
+# at once, and every hidden tab would load with the page.
+function _tabset_panel(content::AbstractString, i, active, id)
     h.div(;
+        id=_tabset_panel_id(id, i),
         class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
-        hx_get=content,
-        hx_trigger="revealed once",
-        hx_swap="innerHTML",
+        (i == active ?
+            (hx_get=content, hx_trigger="intersect once", hx_swap="innerHTML") :
+            (;))...,
     )
 end
-function _tabset_panel(content, i, active)
+function _tabset_panel(content, i, active, id)
     # Non-string content = eager render
     h.div(content;
+        id=_tabset_panel_id(id, i),
         class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
     )
 end
 
+# A lazy tab that starts hidden fetches its panel from the tab link itself, on
+# the first click only — which is also what lets `preload` warm it on hover.
+_tabset_lazy_link_attrs(content::AbstractString, i, active, id, preload) =
+    i == active ? (;) : (;
+        hx_get=content,
+        hx_target="#" * _tabset_panel_id(id, i),
+        hx_swap="innerHTML",
+        hx_trigger="click once",
+        _preload_attrs(preload)...,
+    )
+_tabset_lazy_link_attrs(content, i, active, id, preload) = (;)
+
 """
-    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))")
+    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))", preload=nothing)
 
 Client-side tabs using Pico CSS nav + hyperscript.
 
@@ -12457,15 +13284,19 @@ Eager (content rendered immediately):
 
     tabset("Tab 1" => content1, "Tab 2" => content2; active=1)
 
-Lazy (content is a URL string, fetched via HTMX on first tab click):
+Lazy (content is a URL string, fetched via HTMX on first tab click; the
+initially active tab loads once it is visible):
 
     tabset("Tab 1" => "/api/tab1", "Tab 2" => "/api/tab2")
 
 Mixed (eager + lazy):
 
     tabset("Summary" => render_summary(), "Details" => "/api/details")
+
+`preload=true` starts fetching a lazy tab while the pointer rests on it (see
+[`hx_link`](@ref) for the other values and what the route does with it).
 """
-tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id, class="tabset")(
+tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing) = h.div(; id, class="tabset")(
     h.nav(
         h.ul([
             h.li(h.a(label;
@@ -12482,30 +13313,34 @@ tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))") = h.div(; id,
                     remove .u-hidden from <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
                 ",
                 data_panel="tab-$i",
+                _tabset_lazy_link_attrs(content, i, active, id, preload)...,
             ))
-            for (i, (label, _)) in enumerate(tabs)
+            for (i, (label, content)) in enumerate(tabs)
         ]...)
     ),
-    [_tabset_panel(content, i, active) for (i, (_, content)) in enumerate(tabs)]...
+    [_tabset_panel(content, i, active, id) for (i, (_, content)) in enumerate(tabs)]...
 )
 
 """
-    htmx_tabset(items; active=nothing, target="#content", ...)
+    htmx_tabset(items; active=nothing, target="#content", preload=nothing, ...)
 
 HTMX-driven tab row: each tab click fetches content from the server.
 `items` is a collection of `"Label" => url` pairs.
 `tab_attrs(label)` returns extra per-tab named-tuple attributes (e.g. hx_include).
+`preload=true` starts fetching a tab while the pointer rests on it (see
+[`hx_link`](@ref)).
 """
 function htmx_tabset(items; active=nothing, target="#content",
                      active_class="primary", inactive_class="secondary",
                      btn_class="outline btn-xs",
-                     tab_attrs=Returns(NamedTuple()))
+                     tab_attrs=Returns(NamedTuple()), preload=nothing)
     h.div(; class="tab-row")(
         [h.a(label; role="button",
             class=((active == label ? active_class : inactive_class) * " " * btn_class),
             hx_get=url,
             hx_target=target, hx_swap="outerHTML",
             _="on click remove .$active_class from <a/> in closest <.tab-row/> then add .$inactive_class to <a/> in closest <.tab-row/> then remove .$inactive_class from me then add .$active_class to me",
+            _preload_attrs(preload)...,
             tab_attrs(label)...)
          for (label, url) in items]...
     )
@@ -12543,14 +13378,16 @@ end
 # --- Nav sidebar ---
 
 """
-    nav_sidebar(items::Vector{<:Pair}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
+    nav_sidebar(items::Vector{<:Pair}; prefix="", target="#content", active_class="contrast", inactive_class="secondary", preload=nothing)
 
 Render a Pico CSS sidebar `<aside>` with HTMX-enabled navigation links.
 Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active styling.
+`preload=true` starts fetching a page while the pointer rests on its link (see
+[`hx_link`](@ref)).
 
     nav_sidebar(["Overview" => "/overview", "Settings" => "/settings"]; prefix="/app")
 """
-function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary")
+function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; prefix="", target="#content", active_class="contrast", inactive_class="secondary", preload=nothing)
     h.aside(
         h.nav(
             h.ul(
@@ -12561,6 +13398,7 @@ function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; 
                     hx_push_url=prefix * path,
                     _="on click remove .$active_class from <a/> in closest <nav/> then add .$inactive_class to <a/> in closest <nav/> then remove .$inactive_class from me then add .$active_class to me",
                     class=inactive_class,
+                    _preload_attrs(preload)...,
                 )) for (label, path) in items]...
             )
         )
@@ -12568,12 +13406,14 @@ function nav_sidebar(items::Union{AbstractVector{<:Pair}, Tuple{Vararg{Pair}}}; 
 end
 
 """
-    htmxo_breadcrumb(items; target="#content")
+    htmxo_breadcrumb(items; target="#content", preload=nothing)
 
 Render a Pico-styled breadcrumb `<nav>`. Each `item` is a tuple
 `(label, frag_url, push_url)`. When `frag_url` is `nothing`, the segment
 renders as plain text (the current page). Otherwise it's an `<a>` that issues
 `hx-get=frag_url` into `target` and updates the URL bar via `hx-push-url=push_url`.
+`preload=true` starts fetching a segment while the pointer rests on it (see
+[`hx_link`](@ref)).
 
 ```
 htmxo_breadcrumb([
@@ -12583,7 +13423,7 @@ htmxo_breadcrumb([
 ])
 ```
 """
-function htmxo_breadcrumb(items; target="#content")
+function htmxo_breadcrumb(items; target="#content", preload=nothing)
     parts = []
     for (label, frag_url, push_url) in items
         if isnothing(frag_url)
@@ -12591,7 +13431,7 @@ function htmxo_breadcrumb(items; target="#content")
         else
             push!(parts, h.a(label;
                 hx_get=frag_url, hx_target=target, hx_swap="innerHTML",
-                hx_push_url=push_url))
+                hx_push_url=push_url, _preload_attrs(preload)...))
         end
     end
     h.nav(parts...; class="htmxo-breadcrumb", aria_label="breadcrumb")
@@ -13508,6 +14348,7 @@ function __init__()
     # Per-process error log dir for caught route exceptions.
     ERROR_DIR[] = get(ENV, "HTMXO_ERROR_DIR", joinpath(tempdir(), "htmxo_errors"))
     _clear_operation_polls!()
+    _RUNTIME_SESSION_SALT[] = rand(Random.RandomDevice(), UInt)
     isassigned(_managed_root_release_handler) ||
         (_managed_root_release_handler[] = nothing)
 end

@@ -75,6 +75,18 @@ in sync without a full reload.
 
 [View source](https://github.com/nsiccha/HTMXObjects.jl/blob/main/examples/tabs.jl)
 
+## Chat
+
+An infinitely scrolling, live chat built on [`live_thread`](components.md):
+older messages page in as you scroll up, a 2 s version-gated poll (`204` when
+nothing changed) keeps the tail live, a bot's "typing…" message turns into its
+reply in place, and arrivals while you read history raise a "↓ N new" pill
+instead of moving the page. The "simulate" buttons post incoming messages,
+bursts and edits. It keeps live server state, so it has no static recording —
+run it locally.
+
+[View source](https://github.com/nsiccha/HTMXObjects.jl/blob/main/examples/chat.jl)
+
 ## Embedded examples
 
 Each app below is rendered into the docs via an HTMX placeholder

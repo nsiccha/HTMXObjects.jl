@@ -24,6 +24,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SlowInstrumentedPolicyApp,
     SlowPagePolicyApp, FastPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
+    PreloadApp, reset_preload!, release_preload!, preload_count,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -47,7 +48,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SemanticNodeParamApp, SemanticCardPageApp, BoolPropRoot,
     EditorMountRoot, RawBodyApp,
     OpenAPIWidgets, OpenAPIRoot,
-    DispatchProbeApp, DPARENT_SEEN, DAMBIENT_SEEN, DNESTED_SEEN
+    DispatchProbeApp, DPARENT_SEEN, DAMBIENT_SEEN, DNESTED_SEEN,
+    LiveThreadApp, LIVE_THREAD, reset_live_thread!
 
 @htmx struct TestApp
     title = "Test"
@@ -472,9 +474,10 @@ end
 end
 
 # A route returning a raw 206 byte-range response with a `Vector{UInt8}` body.
-# The body type is load-bearing: Oxygen 1.10's metrics middleware reads every
-# non-200 body via `String(response.body)`, which steals a Vector buffer and
-# serves headers with zero body bytes (snag `206-response-bod-9c3f8c18`).
+# The body type is load-bearing: any serve-time layer reading the body via
+# `String(response.body)` steals the Vector buffer and serves headers with zero
+# body bytes, as Oxygen 1.10's metrics middleware once did (snag
+# `206-response-bod-9c3f8c18`).
 @htmx struct MediaRangeApp
     @get ping() = h.p("pong")
     @get media(key::String, file::String) = HTTP.Response(
@@ -622,6 +625,37 @@ end
 @htmx struct SlowRecordApp
     @get index() = h.main(h.p("home"))
     @get slowrec() = (sleep(0.5); h.p("finished"))
+end
+
+# `@preload` fixtures: an unmarked route (a preload must do no work on it), a
+# fast marked route (answered inline, reusable by the browser), a gated slow
+# marked route (answered 204 and joined by the click), and a marked mutation
+# (never speculative, marker or not).
+const preload_gate = Ref{Base.Event}(Base.Event())
+const preload_runs = Dict{Symbol,Int}()
+const preload_runs_lock = ReentrantLock()
+
+function reset_preload!()
+    preload_gate[] = Base.Event()
+    lock(() -> empty!(preload_runs), preload_runs_lock)
+    nothing
+end
+
+release_preload!() = notify(preload_gate[])
+preload_count(name) = lock(() -> get(preload_runs, name, 0), preload_runs_lock)
+
+function preload_work(name, n; gated::Bool=false)
+    lock(() -> (preload_runs[name] = get(preload_runs, name, 0) + 1),
+         preload_runs_lock)
+    gated && wait(preload_gate[])
+    h.p("$(name):$(n)"; id="preload-$(name)")
+end
+
+@htmx struct PreloadApp
+    @get plain(; n::Int=1) = preload_work(:plain, n)
+    @preload @get fast(; n::Int=1) = preload_work(:fast, n)
+    @get @preload slow(; n::Int=1) = preload_work(:slow, n; gated=true)
+    @preload @post submit(; n::Int=1) = preload_work(:submit, n)
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -1116,6 +1150,44 @@ const DNESTED_SEEN = Ref{Any}(:unset)
     end
 end
 
+# `live_thread` fixture: messages 1..n keyed by index, the newest `final_lag`
+# kept live, pages of 10. State is module-level (not a memoized property), so
+# every `@fresh` route sees the current list.
+const LIVE_THREAD = (messages=String[], version=Ref(0))
+function reset_live_thread!(n=30)
+    empty!(LIVE_THREAD.messages)
+    append!(LIVE_THREAD.messages, ["message $i" for i in 1:n])
+    LIVE_THREAD.version[] += 1
+    nothing
+end
+_lt_item(i) = string(i) => h.p(class="lt-msg")(LIVE_THREAD.messages[i])
+_lt_cursor(lo) = lo > 1 ? string(lo) : nothing
+_lt_version() = string(LIVE_THREAD.version[])
+
+@htmx struct LiveThreadApp
+    __page__(content) = htmx(content; htmx_version=nothing, hyperscript_version=nothing, overlay=false)
+
+    @fresh @get index() = let n = length(LIVE_THREAD.messages), lo = max(1, n - 9)
+        h.div(
+            h.style(".lt-msg { margin: 0; padding: 20px 8px; } body { margin: 0; }"),
+            live_thread(_lt_item.(lo:n); id="lt", older_url=__self__/"older",
+                        tail_url=__self__/"tail", cursor=_lt_cursor(lo), since=string(n),
+                        version=_lt_version(), poll="200ms", height="300px"),
+            h.script(Raw(get(ENV, "HTMXO_LIVE_THREAD_DRIVER", ""))),
+        )
+    end
+    @fresh @get older(; before::String) = let hi = parse(Int, before) - 1, lo = max(1, hi - 9)
+        live_thread_page(_lt_item.(lo:hi); cursor=_lt_cursor(lo))
+    end
+    @fresh @get tail(; since::String="", v::String="") =
+        v == _lt_version() ? live_thread_unchanged() :
+            let i = parse(Int, since), n = length(LIVE_THREAD.messages)
+                live_thread_tail(_lt_item.(i+1:n); since=string(n), version=_lt_version())
+            end
+    @post append() = (push!(LIVE_THREAD.messages, "message $(length(LIVE_THREAD.messages) + 1)");
+                      LIVE_THREAD.version[] += 1; h.p("ok"))
+end
+
 end # @testmodule HTMXOTestFixtures
 
 @testmodule HTMXOBoolRadioFixtures begin
@@ -1246,7 +1318,7 @@ end
 
     route!(ProviderApp("registered"); root_provider=provider)
     req = HTTP.Request("GET", "/nested/show?count=7", ["X-Session" => "session-a"])
-    handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))
+    handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))
     resp = handler(req)
     @test resp.status == 200
     @test contains(String(resp.body), "session-a:7:/nested/show")
@@ -1256,7 +1328,7 @@ end
 
     bad_req = HTTP.Request("GET", "/nested/show?count=not-an-int",
                            ["X-Session" => "session-a"])
-    bad_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, bad_req))
+    bad_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, bad_req))
     @test bad_handler(bad_req).status == 500
 
     ws_req = HTTP.Request("GET", "/nested/stream/4?suffix=ok", ["X-Session" => "session-b"])
@@ -1272,6 +1344,16 @@ end
 
     @test_throws ArgumentError RootProvider(identity; scope=:pod)
     @test_throws ArgumentError RootProvider(identity; scope=:job)
+end
+
+@testitem "@ws bodies end quietly when the client disconnects" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: _run_websocket
+    # What `send` throws once the client has gone away
+    gone = HTTP.WebSockets.WebSocketError(HTTP.WebSockets.CloseFrameBody(1006, "websocket is closed"))
+    @test _run_websocket((ws, req) -> throw(gone), nothing, nothing) === nothing
+    @test _run_websocket((ws, req) -> "done", nothing, nothing) === nothing
+    # Any other failure is still a route error
+    @test_throws ErrorException _run_websocket((ws, req) -> error("route bug"), nothing, nothing)
 end
 
 @testitem "semantic descriptor, generated controls, and domain validation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -1341,19 +1423,19 @@ end
                                            __route__=context.route)
     end)
     good = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=fast&count=2")
-    good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, good))
+    good_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, good))
     good_response = good_handler(good)
     @test good_response.status == 200
     @test contains(String(good_response.body), "n1:north:fast:2")
 
     disabled = HTTP.Request("GET", "/run?dataset=n2&cohort=north&mode=fast&count=2")
-    disabled_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, disabled))
+    disabled_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, disabled))
     disabled_response = disabled_handler(disabled)
     @test disabled_response.status == 400
     @test contains(String(disabled_response.body), "Bad Request")
 
     tampered = HTTP.Request("GET", "/run?dataset=n1&cohort=north&mode=turbo&count=2")
-    tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, tampered))
+    tampered_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, tampered))
     tampered_response = tampered_handler(tampered)
     @test tampered_response.status == 400
 end
@@ -1516,7 +1598,7 @@ end
     @test forwarded.key == "/p/sbpmx"
 
     fit = HTTP.Request("GET", "/models/fit?study=alpha&model=full")
-    fit_handler = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, fit))
+    fit_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, fit))
     fit_response = fit_handler(fit)
     @test fit_response.status == 200
     @test contains(String(fit_response.body), "fit:alpha:full")
@@ -1525,7 +1607,7 @@ end
         ["Content-Type" => "application/x-www-form-urlencoded"],
         "study=alpha&draws=20")
     predict_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, predict))
+        HTMXObjects.ROUTER, predict))
     predict_response = predict_handler(predict)
     @test predict_response.status == 200
     @test contains(String(predict_response.body), "predict:alpha:20")
@@ -1613,7 +1695,7 @@ end
     route!(app)
     fit = HTTP.Request("GET", "/workspace/fit?model=two")
     fit_response = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, fit))(fit)
+        HTMXObjects.ROUTER, fit))(fit)
     @test fit_response.status == 200
     @test contains(String(fit_response.body), "fit:two")
 
@@ -1623,7 +1705,7 @@ end
         "model=two",
     )
     predict_response = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, predict))(predict)
+        HTMXObjects.ROUTER, predict))(predict)
     @test predict_response.status == 200
     @test contains(String(predict_response.body), "predict:two")
 end
@@ -1658,7 +1740,7 @@ end
         "study=south&dose=100",
     )
     handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, request))
+        HTMXObjects.ROUTER, request))
     response = handler(request)
     @test response.status == 200
     @test contains(String(response.body),
@@ -1697,7 +1779,7 @@ end
         "study=south&dose=100",
     )
     mounted_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, mounted_request))
+        HTMXObjects.ROUTER, mounted_request))
     mounted_response = mounted_handler(mounted_request)
     @test mounted_response.status == 200
     @test contains(String(mounted_response.body),
@@ -1717,7 +1799,7 @@ end
 
     route!(root)
     call(req) = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, req))(req)
+        HTMXObjects.ROUTER, req))(req)
 
     # EVERY request, not only the first. Rendering `semantic_app` installs the
     # managed job-scoped provider, so from the second request on the graph is
@@ -1819,7 +1901,7 @@ end
         ["HX-Request" => "true"],
     )
     refresh_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, refresh))
+        HTMXObjects.ROUTER, refresh))
     refreshed = refresh_handler(refresh)
     refreshed_html = String(refreshed.body)
     @test refreshed.status == 200
@@ -1839,7 +1921,7 @@ end
     good = HTTP.Request(
         "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=b1")
     good_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, good))
+        HTMXObjects.ROUTER, good))
     good_response = good_handler(good)
     @test good_response.status == 200
     @test contains(String(good_response.body), "fit-17:beta:b1")
@@ -1847,7 +1929,7 @@ end
     forged = HTTP.Request(
         "GET", "/analysis/analyze?fit_key=fit-17&study=beta&model=a1")
     forged_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, forged))
+        HTMXObjects.ROUTER, forged))
     forged_response = forged_handler(forged)
     @test forged_response.status == 400
 
@@ -1856,7 +1938,7 @@ end
         ["HX-Request" => "true"],
     )
     raw_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, raw))
+        HTMXObjects.ROUTER, raw))
     raw_response = raw_handler(raw)
     @test raw_response.status == 200
     @test HTTP.header(raw_response, "Content-Type") == "text/plain"
@@ -1877,7 +1959,7 @@ end
     structured_req = HTTP.Request("GET", "/models/structured?fit_key=external-fit&value=alt",
                                   ["HX-Request" => "true"])
     structured_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, structured_req))
+        HTMXObjects.ROUTER, structured_req))
     structured_response = structured_handler(structured_req)
     @test structured_response.status == 200
     @test contains(String(structured_response.body), "structured:alt")
@@ -1899,7 +1981,7 @@ end
     job_key(req) = HTTP.header(req, "X-Job", "default")
     hit(target; job="job-a") = begin
         req = HTTP.Request("GET", target, ["X-Job" => job])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     @test !ismutabletype(JobScopedApp)
@@ -2390,7 +2472,7 @@ end
         route!(app; operation_policy=:polling)
         raw_req = HTTP.Request("GET", "/raw?count=6", ["HX-Request" => "true"])
         raw_handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, raw_req))
+            HTMXObjects.ROUTER, raw_req))
         raw_response = raw_handler(raw_req)
         @test raw_response.status == 200
         @test HTTP.header(raw_response, "Content-Type") == "text/plain"
@@ -2399,7 +2481,7 @@ end
         response_req = HTTP.Request("GET", "/response?count=7",
                                     ["HX-Request" => "true"])
         response_handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, response_req))
+            HTMXObjects.ROUTER, response_req))
         final_response = response_handler(response_req)
         @test final_response.status == 202
         @test HTTP.header(final_response, "Content-Type") == "application/json"
@@ -2518,7 +2600,7 @@ end
     )
     route!(SlowPagePolicyApp(); root_provider=provider,
            operation_policy=OperationPolicy(:auto; keep_progress=false))
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
 
     drive(target, headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
@@ -2635,9 +2717,256 @@ end
 # that finishes within it renders inline in the shell: one response, no blank
 # placeholder, no hx-load refetch. Pins the byte shape against the `:blocking`
 # workaround — for a fast operation the two must agree exactly.
+# A speculative request (htmx's preload extension, `HX-Preloaded: true`) runs
+# nothing on a route that did not opt in with `@preload`, and nothing on a
+# mutation even if it did: the answer is an uncacheable empty 204.
+@testitem "preload requests do no work on unmarked routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops
+
+    reset_preload!()
+    _clear_preloads!()
+    route!(PreloadApp())
+    router = HTMXObjects.ROUTER
+    drive(target, headers; method="GET") = begin
+        request = HTTP.Request(method, target, headers, UInt8[])
+        handler = first(HTTP.Handlers.gethandler(router, request))
+        @test handler !== HTTP.Handlers.default404
+        handler(request)
+    end
+    preload = ["HX-Request" => "true", "HX-Preloaded" => "true",
+               "HTMXO-Client" => "0"^32]
+
+    r = drive("/plain?n=1", preload)
+    @test r.status == 204
+    @test HTTP.header(r, "Cache-Control") == "no-store"
+    @test isempty(r.body)
+    r = drive("/submit", preload; method="POST")
+    @test r.status == 204
+    # Polls, attaches and form refreshes belong to a live transport, never to
+    # a preload — even on a marked route.
+    @test drive("/slow?n=9&__htmxo_poll=1", preload).status == 204
+    @test drive("/slow?n=9&__htmxo_operation=abc", preload).status == 204
+    sleep(0.2)
+    @test preload_count(:plain) == 0
+    @test preload_count(:submit) == 0
+    @test preload_count(:slow) == 0
+    @test isempty(_preload_ops)
+
+    # The same request without the preload marker is served as always.
+    r = drive("/plain?n=1", ["HX-Request" => "true"])
+    @test r.status == 200
+    @test contains(String(r.body), "plain:1")
+    @test preload_count(:plain) == 1
+end
+
+# An operation that finishes within the grace budget answers the preload with
+# the fragment itself, reusable by the browser for `PRELOAD_MAX_AGE` seconds —
+# but only by the page that preloaded it (`Vary: HTMXO-Client`). The server
+# keeps nothing behind: a click that misses the browser cache computes fresh.
+@testitem "fast @preload routes answer a browser-reusable fragment" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops
+
+    reset_preload!()
+    _clear_preloads!()
+    route!(PreloadApp())
+    router = HTMXObjects.ROUTER
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    preload = ["HX-Request" => "true", "HX-Preloaded" => "true",
+               "HTMXO-Client" => "1"^32]
+
+    # Exclude first-call compilation from the grace budget.
+    for n in 100:102
+        drive("/fast?n=$(n)", preload)
+    end
+    sleep(0.2)
+    _clear_preloads!()
+    reset_preload!()
+
+    r = drive("/fast?n=1", preload)
+    @test r.status == 200
+    @test contains(String(r.body), "fast:1")
+    @test HTTP.header(r, "Cache-Control") == "private, max-age=10"
+    @test contains(HTTP.header(r, "Vary"), "HX-Request")
+    @test contains(HTTP.header(r, "Vary"), "HTMXO-Client")
+    @test preload_count(:fast) == 1
+    @test isempty(_preload_ops)
+
+    # The click itself is an ordinary, uncached response.
+    click = drive("/fast?n=1", ["HX-Request" => "true", "HTMXO-Client" => "1"^32])
+    @test click.status == 200
+    @test HTTP.header(click, "Cache-Control", "") == ""
+
+    old = HTMXObjects.PRELOAD_MAX_AGE[]
+    try
+        HTMXObjects.PRELOAD_MAX_AGE[] = 0
+        r = drive("/fast?n=2", preload)
+        @test r.status == 200
+        @test HTTP.header(r, "Cache-Control", "") == ""
+    finally
+        HTMXObjects.PRELOAD_MAX_AGE[] = old
+    end
+end
+
+# A slow operation answers the preload with 204 and keeps running; the click
+# from the same page (same `HTMXO-Client`) joins it instead of recomputing on
+# its fresh root. Another page — or a preload without a client id — never
+# shares it.
+@testitem "slow @preload routes prewarm and the click joins" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops, _clear_operation_polls!
+
+    reset_preload!()
+    _clear_preloads!()
+    _clear_operation_polls!()
+    route!(PreloadApp())
+    router = HTMXObjects.ROUTER
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    a, b = "a"^32, "b"^32
+    preload(client) = ["HX-Request" => "true", "HX-Preloaded" => "true",
+                       "HTMXO-Client" => client]
+    click(client) = ["HX-Request" => "true", "HTMXO-Client" => client]
+
+    try
+        # Exclude first-call compilation from the latency assertion: warm the
+        # preload and join paths on their own args with the gate open.
+        release_preload!()
+        drive("/slow?n=0", preload(a))
+        drive("/slow?n=0", click(a))
+        drive("/slow?n=-1", preload(a))
+        sleep(0.2)
+        _clear_preloads!()
+        _clear_operation_polls!()
+        reset_preload!()
+
+        elapsed = @elapsed r = drive("/slow?n=1", preload(a))
+        @test r.status == 204
+        @test elapsed < 2.0
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        @test length(_preload_ops) == 1
+
+        release_preload!()
+        sleep(0.2)
+        joined = drive("/slow?n=1", click(a))
+        @test joined.status == 200
+        @test contains(String(joined.body), "slow:1")
+        @test preload_count(:slow) == 1
+        @test isempty(_preload_ops)
+
+        # Another page's click starts its own compute; page a's operation
+        # stays claimable by page a alone.
+        release_preload!()
+        reset_preload!()
+        @test drive("/slow?n=2", preload(a)).status == 204
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        drive("/slow?n=2", click(b))
+        @test timedwait(() -> preload_count(:slow) == 2, 5.0; pollint=0.01) === :ok
+        @test length(_preload_ops) == 1
+
+        # Without a client id a slow preload still starts, but keeps nothing
+        # it could hand on.
+        _clear_preloads!()
+        @test drive("/slow?n=3", ["HX-Request" => "true", "HX-Preloaded" => "true"]).status == 204
+        @test timedwait(() -> preload_count(:slow) == 3, 5.0; pollint=0.01) === :ok
+        @test isempty(_preload_ops)
+    finally
+        release_preload!()
+        _clear_preloads!()
+        _clear_operation_polls!()
+    end
+end
+
+# A click that arrives while the preload's operation is still running gets the
+# polling transport for THAT operation: its poller carries a token bound to the
+# preloaded compute, and the finished poll answers its value — one run total.
+@testitem "a click during a running preload polls the preloaded operation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops, _clear_operation_polls!,
+        _operation_polling_impl
+
+    reset_preload!()
+    _clear_preloads!()
+    _clear_operation_polls!()
+    route!(PreloadApp(); operation_policy=OperationPolicy(:auto; keep_progress=false))
+    router = HTMXObjects.ROUTER
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    client = "c"^32
+    hx = ["HX-Request" => "true", "HTMXO-Client" => client]
+
+    transports = Any[]
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _started, _ip, _keys, _call_kwargs, transport) -> begin
+            push!(transports, transport)
+            transport.retain()
+            h.aside("polling")
+        end
+    try
+        @test drive("/slow?n=4", ["HX-Preloaded" => "true"; hx]).status == 204
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        started = drive("/slow?n=4", hx)
+        @test String(started.body) == "<aside>polling</aside>"
+        sleep(0.3)
+        @test preload_count(:slow) == 1
+        @test isempty(_preload_ops)
+        poll_url = only(transports).poll_url
+        @test contains(poll_url, "__htmxo_poll=1")
+        @test contains(poll_url, "__htmxo_operation=")
+
+        release_preload!()
+        sleep(0.3)
+        polled = drive(poll_url, hx)
+        @test contains(String(polled.body), "slow:4")
+        @test preload_count(:slow) == 1
+    finally
+        release_preload!()
+        _operation_polling_impl[] = old_polling
+        _clear_preloads!()
+        _clear_operation_polls!()
+    end
+end
+
+# Under `:blocking` there is no poller to hand over: the click waits for the
+# preloaded compute and answers its value, still without a second run.
+@testitem "blocking routes join a running preload by waiting for it" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_preloads!, _preload_ops
+
+    reset_preload!()
+    _clear_preloads!()
+    route!(PreloadApp(); operation_policy=OperationPolicy(:blocking))
+    router = HTMXObjects.ROUTER
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(router, request))(request)
+    end
+    hx = ["HX-Request" => "true", "HTMXO-Client" => "d"^32]
+    try
+        @test drive("/slow?n=5", ["HX-Preloaded" => "true"; hx]).status == 204
+        @test timedwait(() -> preload_count(:slow) == 1, 5.0; pollint=0.01) === :ok
+        pending_click = Threads.@spawn drive("/slow?n=5", hx)
+        sleep(0.3)
+        @test !istaskdone(pending_click)
+        release_preload!()
+        clicked = fetch(pending_click)
+        @test clicked.status == 200
+        @test contains(String(clicked.body), "slow:5")
+        @test preload_count(:slow) == 1
+        @test isempty(_preload_ops)
+    finally
+        release_preload!()
+        _clear_preloads!()
+    end
+end
+
 @testitem "fast direct-page operations render inline in a single response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     route!(FastPagePolicyApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
 
     drive(target, headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", target, headers, UInt8[])
@@ -2682,7 +3011,7 @@ end
         )
         route!(SlowPagePolicyApp(); root_provider=provider,
                operation_policy=OperationPolicy(:auto; keep_progress=false))
-        router = HTMXObjects.CONTEXT[].service.router
+        router = HTMXObjects.ROUTER
         prefix = "/p/SbPMX"
         forwarded_targets = String[]
         released = Ref(false)
@@ -2949,6 +3278,32 @@ end
     @test contains(html_extra, "body{margin:0}")
 end
 
+@testitem "htmx() loads the preload extension and its runtime" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    html = repr("text/html", htmx(h.main("content")))
+    ext = "https://cdn.jsdelivr.net/npm/htmx-ext-preload@2.1.2/dist/preload.min.js"
+    @test contains(html, ext)
+    # The extension registers itself on load, so it must come after htmx.
+    @test findfirst(ext, html).start > findfirst("htmx.org@2.0.8", html).start
+    @test contains(html, "<html hx-ext=\"preload\">")
+    @test contains(html, "HTMXO-Client")
+    @test contains(repr("text/html", preload_runtime_js()), "htmx:configRequest")
+    # A caller-supplied body keeps its own extensions alongside.
+    html_body = repr("text/html", htmx(h.main(); body=h.body(; hx_ext="morph")))
+    @test contains(html_body, "<body hx-ext=\"morph\">")
+    @test contains(html_body, "<html hx-ext=\"preload\">")
+    for bare in (htmx(h.main(); preload_version=nothing),
+                 htmx(h.main(); htmx_version=nothing))
+        bare_html = repr("text/html", bare)
+        @test !contains(bare_html, "htmx-ext-preload")
+        @test !contains(bare_html, "hx-ext=\"preload\"")
+        @test !contains(bare_html, "HTMXO-Client")
+    end
+    # Request feedback ignores preloads: htmx announces a preload's
+    # beforeRequest but never its afterRequest.
+    @test contains(repr("text/html", request_feedback_script()), "HX-Preloaded")
+    @test contains(repr("text/html", loading_indicator_script()), "HX-Preloaded")
+end
+
 @testitem "htmx() emits a doctype (standards mode)" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # A page without `<!DOCTYPE html>` renders in quirks mode, which some
     # browser libraries refuse to run in at all (KaTeX's `katex.render` throws
@@ -3001,7 +3356,7 @@ end
 """
 Starts a real HTTP server and verifies that live responses are recorded at the
 same route-shaped paths used by static output. Tagged `integration`/`server`
-because it binds a port and mutates Oxygen's process-global route context.
+because it binds a port and mutates the process-global `HTMXObjects.ROUTER`.
 """
 @testitem "recording - end-to-end" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
     mktempdir() do dir
@@ -3053,74 +3408,53 @@ end
     end
 end
 
-@testitem "access-log timing supports both Oxygen dependency worlds" setup=[HTMXOTestImports] tags=[:unit] begin
-    formatter = HTMXObjects._select_access_log_base_formatter()
-    @test formatter isa Function
-
-    request = HTTP.Request("GET", "/timed")
-    request.context[:t0] = time() - 0.01
-    if isdefined(HTMXObjects.Oxygen, :oxygen_logfmt)
-        request.context[:ip] = "127.0.0.1"
-        request.context[:response] = HTTP.Response(204)
-        access_event = request
-        @test formatter === getproperty(HTMXObjects.Oxygen, :oxygen_logfmt)
-    else
-        request.response = HTTP.Response(204)
-        access_event = (;
-            message=request,
-            stream=(; peerip="127.0.0.1", peerport=8080),
-            nwritten=0,
-        )
-        @test formatter === HTMXObjects._http1_oxygen_logfmt
-    end
+@testitem "serve request pipeline: access log, middleware order, fallback" setup=[HTMXOTestImports] tags=[:unit] begin
+    using Logging
 
     windows_timestamp = HTMXObjects._access_log_timestamp(true)
     @test occursin(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", windows_timestamp)
 
-    http1_event = (;
-        message=(;
-            method="GET",
-            target="/compat",
-            version=(; major=1, minor=1),
-            response=(; status=201),
-        ),
-        stream=(; peerip="127.0.0.2", peerport=8081),
-    )
-    http1_io = IOBuffer()
-    HTMXObjects._http1_oxygen_logfmt(http1_io, http1_event)
-    http1_line = String(take!(http1_io))
-    @test contains(http1_line, "127.0.0.2:8081")
-    @test contains(http1_line, "\"GET /compat HTTP/1.1\" 201")
-
+    # Default line. An in-process request has no stream, so the peer is "-".
+    request = HTTP.Request("GET", "/timed")
+    request.context[:t0] = time() - 0.01
+    request.context[:response] = HTTP.Response(204)
     io = IOBuffer()
-    HTMXObjects._timed_access_log(io, access_event)
+    HTMXObjects._timed_access_log(io, request)
     line = String(take!(io))
-    @test contains(line, "127.0.0.1")
-    @test contains(line, "\"GET /timed HTTP/1.1\" 204")
+    @test contains(line, " - - \"GET /timed HTTP/1.1\" 204 ")
     @test occursin(r" [0-9.]+(μs|ms|s|min)$", line)
 
-    request_only = HTTP.Request("GET", "/")
-    @test HTMXObjects._access_log_request(request_only) === request_only
-    @test HTMXObjects._access_log_request((; message=request_only)) === request_only
+    # Caller middleware runs outermost-first inside the access log; the
+    # fallback coerces a non-Response value and turns an exception into a 500.
+    order = String[]
+    tag(name) = handler -> req -> (push!(order, name); handler(req))
+    HTTP.register!(HTMXObjects.ROUTER, "GET", "/pipeline-raw", req -> "raw body")
+    HTTP.register!(HTMXObjects.ROUTER, "GET", "/pipeline-boom", req -> error("boom"))
+    capture(io, req) = print(io, req.target, " ", req.context[:response].status)
+    app = HTMXObjects._request_pipeline([tag("a"), tag("b")], capture, nothing)
+    logger = TestLogger()
+    raw, boom = with_logger(logger) do
+        app(HTTP.Request("GET", "/pipeline-raw")), app(HTTP.Request("GET", "/pipeline-boom"))
+    end
+    @test order == ["a", "b", "a", "b"]
+    @test raw.status == 200
+    @test String(raw.body) == "raw body"
+    @test boom.status == 500
+    messages = [string(l.message) for l in logger.logs]
+    @test "/pipeline-raw 200" in messages
+    @test "/pipeline-boom 500" in messages
+    @test any(l -> l.level == Logging.Error && contains(string(l.message), "/pipeline-boom"),
+              logger.logs)
 
-    defaults = HTMXObjects._with_access_timing((;))
-    @test defaults[:access_log] === HTMXObjects._timed_access_log
-    @test first(defaults[:middleware]) === HTMXObjects._timing_middleware
-    @test defaults[:metrics] === false
-
-    custom_log(io, event) = nothing
-    existing_middleware(handler) = handler
-    custom = HTMXObjects._with_access_timing(pairs((;
-        access_log=custom_log,
-        middleware=[existing_middleware],
-        metrics=true,
-    )))
-    @test custom[:access_log] === custom_log
-    @test custom[:middleware] == Any[
-        HTMXObjects._timing_middleware,
-        existing_middleware,
-    ]
-    @test custom[:metrics] === true
+    # Keywords that only configured Oxygen are dropped with a warning.
+    kept = with_logger(logger) do
+        HTMXObjects._drop_oxygen_kwargs(pairs((; docs=false, metrics=true, readtimeout=5)))
+    end
+    @test kept == (; readtimeout=5)
+    @test any(l -> contains(string(l.message), "Ignoring `serve` keyword(s) docs, metrics"),
+              logger.logs)
+    untouched = pairs((; readtimeout=5))
+    @test HTMXObjects._drop_oxygen_kwargs(untouched) === untouched
 end
 
 @testitem "record! preserves indexed include paths and rejects collisions" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
@@ -3173,6 +3507,13 @@ end
     @test contains(html2, "hx-get=\"/search\"")
     @test contains(html2, "hx-target=\"#main\"")
     @test contains(html2, "class=\"nav-link\"")
+    @test !contains(html, "preload")
+    # `true` means hover; a bare `preload="true"` would name an event that
+    # never fires.
+    @test contains(repr("text/html", hx_link("/a"; preload=true)), "preload=\"mouseover\"")
+    @test contains(repr("text/html", hx_link("/a"; preload="mousedown")), "preload=\"mousedown\"")
+    @test contains(repr("text/html", hx_link("/a"; preload=:mousedown)), "preload=\"mousedown\"")
+    @test !contains(repr("text/html", hx_link("/a"; preload=false)), "preload")
 end
 
 @testitem "htmx_or helper" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
@@ -3909,14 +4250,14 @@ end
     route!(app)
     submitted = HTTP.Request("GET", "/run?flag=false")
     submitted_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, submitted))
+        HTMXObjects.ROUTER, submitted))
     submitted_response = submitted_handler(submitted)
     @test submitted_response.status == 200
     @test String(submitted_response.body) == "false"
 
     tampered = HTTP.Request("GET", "/run?flag=on")
     tampered_handler = first(HTTP.Handlers.gethandler(
-        HTMXObjects.CONTEXT[].service.router, tampered))
+        HTMXObjects.ROUTER, tampered))
     tampered_response = tampered_handler(tampered)
     @test tampered_response.status == 400
     @test contains(String(tampered_response.body), "Bad Request")
@@ -3953,18 +4294,188 @@ end
     # tab panels
     @test contains(html, "tab-panel")
     @test contains(html, "tab-panel u-w-full u-hidden")
-    # lazy tabs: string content → hx-get with revealed trigger
-    lazy = tabset("Eager" => h.p("here"), "Lazy" => "/api/lazy")
+    # lazy tabs: a hidden tab's link fetches its panel on the first click only.
+    # Never `revealed`: htmx 2 "reveals" a display:none panel at once, which
+    # loaded every hidden tab with the page.
+    lazy = tabset("Eager" => h.p("here"), "Lazy" => "/api/lazy"; id="ts")
     lhtml = repr("text/html", lazy)
     @test contains(lhtml, "here")           # eager content rendered
     @test !contains(lhtml, "/api/lazy\">")  # URL not rendered as text
-    @test contains(lhtml, "hx-get=\"/api/lazy\"")
-    @test contains(lhtml, "revealed once")
-    # all-lazy
-    lazy2 = tabset("A" => "/a", "B" => "/b")
+    @test !contains(lhtml, "revealed")
+    link = match(r"<a[^>]*hx-get=\"/api/lazy\"[^>]*>", lhtml)
+    @test link !== nothing
+    @test contains(link.match, "hx-target=\"#ts-tab-2\"")
+    @test contains(link.match, "hx-trigger=\"click once\"")
+    @test contains(link.match, "hx-swap=\"innerHTML\"")
+    @test !contains(link.match, "preload")
+    panel = match(r"<div[^>]*id=\"ts-tab-2\"[^>]*>", lhtml)
+    @test panel !== nothing
+    @test contains(panel.match, "u-hidden")
+    @test !contains(panel.match, "hx-get")
+    # all-lazy: the initially active panel loads itself once it is visible
+    lazy2 = tabset("A" => "/a", "B" => "/b"; id="ts2")
     lhtml2 = repr("text/html", lazy2)
-    @test contains(lhtml2, "hx-get=\"/a\"")
+    active = match(r"<div[^>]*id=\"ts2-tab-1\"[^>]*>", lhtml2)
+    @test contains(active.match, "hx-get=\"/a\"")
+    @test contains(active.match, "hx-trigger=\"intersect once\"")
+    @test match(r"<a[^>]*hx-get=\"/a\"", lhtml2) === nothing
     @test contains(lhtml2, "hx-get=\"/b\"")
+    # preload: hovering a hidden lazy tab starts its fetch
+    lhtml3 = repr("text/html", tabset("A" => h.p("a"), "B" => "/b"; preload=true))
+    @test match(r"<a[^>]*hx-get=\"/b\"[^>]*preload=\"mouseover\"", lhtml3) !== nothing
+end
+
+@testitem "live_thread rendering and validation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    node = live_thread(["a" => h.p("one"), "b" => "two"]; older_url="/older", tail_url="/tail",
+                       cursor="a", since="a", version=3, poll="2s", id="chat", empty="nothing yet")
+    html = repr("text/html", node)
+    @test contains(html, "id=\"chat\" class=\"htmxo-thread\" data-htmxo-thread=\"\"")
+    @test contains(html, "data-older-url=\"/older\" data-tail-url=\"/tail\"")
+    @test contains(html, "data-since=\"a\" data-version=\"3\" data-poll=\"2000\"")
+    @test contains(html, "<div class=\"htmxo-thread-older\" data-cursor=\"a\"></div>")
+    @test contains(html, "data-empty=\"nothing yet\"")
+    @test contains(html, "data-key=\"a\"") && contains(html, "<p>one</p>")
+    # the digest follows the content and only the content
+    digest(n) = match(r"data-key=\"a\" data-digest=\"([^\"]+)\"", repr("text/html", n))[1]
+    @test digest(node) == digest(live_thread(["a" => h.p("one")]))
+    @test digest(node) != digest(live_thread(["a" => h.p("one!")]))
+    # no older pages: done, no cursor; `poll=nothing` disables polling
+    plain = repr("text/html", live_thread(["x" => "x"]; poll=nothing))
+    @test contains(plain, "<div class=\"htmxo-thread-older\" data-done=\"true\"></div>")
+    @test contains(plain, "data-poll=\"0\"") && !contains(plain, "data-tail-url")
+    @test contains(repr("text/html", live_thread(["x" => "x"]; focus=:x, height="40vh")),
+                   "data-focus=\"x\" style=\"--htmxo-thread-height: 40vh\"")
+
+    @test repr("text/html", live_thread_page(["p" => "P"]; cursor=7)) ==
+        "<div class=\"htmxo-thread-page\" data-cursor=\"7\"><div class=\"htmxo-thread-item\" data-key=\"p\" data-digest=\"$(HTMXObjects._thread_digest("<div>P</div>"))\">P</div></div>"
+    @test contains(repr("text/html", live_thread_page([])), "data-done=\"true\"")
+    tail = repr("text/html", live_thread_tail(["t" => "T"]; since="t", version="9"))
+    @test contains(tail, "class=\"htmxo-thread-tail\" data-since=\"t\" data-version=\"9\">")
+    reset = repr("text/html", live_thread_tail([]; since="", version="9", reset=true, cursor="c"))
+    @test contains(reset, "data-reset=\"true\" data-cursor=\"c\">")
+    @test contains(repr("text/html", live_thread_tail([]; since="", version="9", reset=true)),
+                   "data-reset=\"true\" data-done=\"true\"")
+    @test live_thread_unchanged().status == 204
+    @test live_thread_refresh() == "{\"htmxo:thread-refresh\":{\"bottom\":true}}"
+    @test live_thread_refresh("#a \"b\""; bottom=false) ==
+        "{\"htmxo:thread-refresh\":{\"bottom\":false,\"target\":\"#a \\\"b\\\"\"}}"
+
+    @test_throws ArgumentError live_thread(["a" => 1, "a" => 2])
+    @test_throws ArgumentError live_thread([1, 2])
+    @test_throws ArgumentError live_thread([]; poll="soon")
+    @test_throws ArgumentError live_thread([]; poll=0)
+    @test HTMXObjects._thread_poll_ms("500ms") == 500
+    @test HTMXObjects._thread_poll_ms("1.5 s") == 1500
+    @test HTMXObjects._thread_poll_ms("1m") == 60_000
+
+    page = repr("text/html", htmx(h.p("x")))
+    @test contains(page, "window.htmxoThread") && contains(page, ".htmxo-thread-scroll")
+    @test !contains(repr("text/html", htmx(h.p("x"); thread=false)), "window.htmxoThread")
+end
+
+@testitem "live_thread routes answer 204 or fragments, never pollers" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    reset_live_thread!(25)
+    route!(LiveThreadApp())
+    router = HTMXObjects.ROUTER
+    function hx(target)
+        req = HTTP.Request("GET", target, ["HX-Request" => "true"])
+        first(HTTP.Handlers.gethandler(router, req))(req)
+    end
+    v = string(LIVE_THREAD.version[])
+    index = String(hx("/").body)
+    @test contains(index, "data-since=\"25\" data-version=\"$v\"")
+    @test contains(index, "data-cursor=\"16\"") && contains(index, "data-key=\"25\"")
+
+    unchanged = hx("/tail?since=25&v=$v")
+    @test unchanged.status == 204
+
+    push!(LIVE_THREAD.messages, "message 26"); LIVE_THREAD.version[] += 1
+    tail = String(hx("/tail?since=24&v=$v").body)
+    @test contains(tail, "htmxo-thread-tail\" data-since=\"26\"")
+    @test contains(tail, "data-key=\"25\"") && contains(tail, "data-key=\"26\"")
+    @test !contains(tail, "data-key=\"24\"") && !contains(tail, "treebar-poller")
+
+    older = String(hx("/older?before=16").body)
+    @test contains(older, "data-cursor=\"6\"") && contains(older, "data-key=\"15\"")
+    @test !contains(older, "data-key=\"16\"")
+    @test contains(String(hx("/older?before=6").body), "data-done=\"true\"")
+end
+
+@testitem "live_thread pages, updates and holds the viewport in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        # Runs inside the page: scroll to the top (an older page loads above,
+        # which without the client's anchoring would push the viewport's first
+        # item down by a page), then read from the middle while a message
+        # arrives. Results land on <body> for `--dump-dom`.
+        driver = raw"""
+        (async function () {
+          const R = document.body.dataset, wait = ms => new Promise(r => setTimeout(r, ms));
+          const until = async f => { for (let i = 0; i < 400 && !f(); i++) await wait(25); return f(); };
+          const root = document.getElementById('lt');
+          await until(() => root.__htmxoThread);
+          const sc = root.querySelector('.htmxo-thread-scroll');
+          const items = () => [...root.querySelectorAll('.htmxo-thread-item')];
+          const dist = () => sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+          const off = el => el.getBoundingClientRect().top - sc.getBoundingClientRect().top;
+          R.bottom = String(dist() <= 2);
+          // (A short box prefetches one older page on its own at startup.)
+          await until(() => !root.__htmxoThread.olderBusy);
+          // Measure in the same task as the scroll: the next older page can
+          // only land after the observer fires, so this is pre-insert.
+          sc.scrollTop = 0;
+          const n0 = items().length, top = items()[0], before = off(top);
+          await until(() => items().length > n0);
+          R.olderPaged = String(items().length > n0 && items()[0].dataset.key === '1');
+          R.olderDrift = String(Math.abs(off(top) - before) <= 1);
+          sc.scrollTop = 200; await wait(50);
+          const marked = items();
+          marked.forEach(e => { e.__m = 1; });
+          const reading = items().find(e => off(e) + e.offsetHeight > 0), at = off(reading);
+          await fetch('append', { method: 'POST' });
+          await until(() => items()[items().length - 1].dataset.key === '31');
+          await wait(50);
+          R.tailDrift = String(Math.abs(off(reading) - at) <= 1);
+          R.pill = root.querySelector('.htmxo-thread-new').textContent;
+          R.untouched = String(marked.every(e => e.__m === 1 && e.isConnected));
+          R.done = 'true';
+        })();
+        """
+        reset_live_thread!(30)
+        withenv("HTMXO_LIVE_THREAD_DRIVER" => driver) do
+            route!(LiveThreadApp())
+            router = HTMXObjects.ROUTER
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            # String host: accepted by both HTTP 1.x and 2.x `serve!`.
+            server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+                handler = first(HTTP.Handlers.gethandler(router, req))
+                handler === HTTP.Handlers.default404 ? HTTP.Response(404) : handler(req)
+            end
+            try
+                dom = mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=800,600 --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`
+                    read(pipeline(cmd; stderr=devnull), String)
+                end
+                @test contains(dom, "data-done=\"true\"")
+                @test contains(dom, "data-bottom=\"true\"")
+                @test contains(dom, "data-older-paged=\"true\"")
+                @test contains(dom, "data-older-drift=\"true\"")
+                @test contains(dom, "data-tail-drift=\"true\"")
+                @test contains(dom, "data-pill=\"↓ 1 new\"")
+                @test contains(dom, "data-untouched=\"true\"")
+            finally
+                close(server)
+            end
+        end
+    end
 end
 
 @testitem "status_badge" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
@@ -4009,6 +4520,18 @@ end
     node2 = nav_sidebar(("X" => "/x",))
     html2 = repr("text/html", node2)
     @test contains(html2, "href=\"/x\"")
+    @test !contains(html, "preload")
+
+    # preload on the nav components
+    @test contains(repr("text/html", nav_sidebar(["A" => "/a"]; preload=true)),
+                   "preload=\"mouseover\"")
+    @test contains(repr("text/html", htmx_tabset(["A" => "/a"]; preload="mousedown")),
+                   "preload=\"mousedown\"")
+    @test !contains(repr("text/html", htmx_tabset(["A" => "/a"])), "preload")
+    crumbs = [("Home", "/", "/"), ("Here", nothing, nothing)]
+    @test contains(repr("text/html", htmxo_breadcrumb(crumbs; preload=true)),
+                   "preload=\"mouseover\"")
+    @test !contains(repr("text/html", htmxo_breadcrumb(crumbs)), "preload")
 end
 
 """
@@ -4337,7 +4860,7 @@ transport actually *delivers*, not merely that it engages.
 """
 @testitem "web-included test routes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :test_ui] begin
     route!(TestUIHost())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
 
     function drive(target)
         request = HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[])
@@ -4806,7 +5329,7 @@ end
 @testitem "navigation is threaded through page wrappers only when asked for" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     # `__page__(content; navigation=nothing)` receives it.
@@ -4838,7 +5361,7 @@ end
 @testitem "recursively nested page wrappers each receive their own node" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(NavChainRoot())
@@ -4871,7 +5394,7 @@ end
 @testitem "a page wrapper declares how deep its threaded navigation goes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, ["Host" => "x"], UInt8[])
-        String(first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req).body)
+        String(first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req).body)
     end
 
     # depth=2 on the child wrapper: descendants[1] is the grandchild and its
@@ -4894,7 +5417,7 @@ end
 @testitem "a partial swap carries the chrome below the swap target" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
     swap(path, from) = String(drive(path, ["HX-Request" => "true",
                                            "HX-Current-URL" => from]).body)
@@ -5004,7 +5527,7 @@ end
 @testitem "ReflectionRoutes serves a human-readable graph without disturbing /schema" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(NavRoot())
@@ -5091,7 +5614,7 @@ end
 @testitem "OpenAPIRoutes serves the OpenAPI document as JSON" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(OpenAPIRoot())
@@ -5115,7 +5638,7 @@ end
 @testitem "SwaggerRoutes serves a pinned viewer against the OpenAPI document" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     drive(path, headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(OpenAPIRoot())
@@ -5138,67 +5661,75 @@ end
     @test SwaggerRoutes().swagger_version == "5.7.2"
 end
 
-@testitem "/docs-prefix check defers to serve and respects docs=false" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "serve answers /docs, WebSocket and static-file routes" setup=[HTMXOTestImports] tags=[:integration, :server] begin
     using Logging
 
-    @htmx struct DocsPrefixChild
+    @htmx struct ServeDocsChild
         @get index() = h.h1("fixture docs page")
     end
-    @htmx struct DocsPrefixApp
-        @include docs = DocsPrefixChild()
+    @htmx struct ServeApp
+        @include docs = ServeDocsChild()
+        @ws echo(; suffix::String="") = for msg in __ws__
+            HTTP.WebSockets.send(__ws__, String(msg) * suffix)
+        end
     end
+    route!(ServeApp())
+    dir = mktempdir()
+    write(joinpath(dir, "site.css"), "body{}")
+    mkpath(joinpath(dir, "sub"))
+    write(joinpath(dir, "sub", "index.html"), "<p>index</p>")
+    staticfiles(dir, "serve-static")
+    dynamicfiles(dir, "/serve-dynamic")
 
-    is_docs_error(l) =
-        l.level >= Logging.Error && occursin("starts with", string(l.message))
-
-    reg_logs = TestLogger()
-    with_logger(reg_logs) do
-        route!(DocsPrefixApp())
-        route!(DocsPrefixApp())
+    port = 8135
+    base = "http://127.0.0.1:$port"
+    logger = TestLogger()
+    with_logger(logger) do
+        # `docs` only configured Oxygen: warned about and ignored.
+        serve(; port, async=true, docs=false)
     end
     try
-        # Registration records the collision instead of reporting it: serve's
-        # `docs=` kwarg is not known yet (snag docs-prefix-rout-665a2140).
-        # Re-registration rebuilds (not appends) this type's entries.
-        @test isempty(filter(is_docs_error, reg_logs.logs))
-        @test HTMXObjects._docs_prefix_routes[DocsPrefixApp] ==
-            Set([(:index, "/docs")])
+        # Nothing sits in front of the router, so a `/docs` mount answers.
+        r = HTTP.get("$base/docs"; retry=false, readtimeout=20)
+        @test r.status == 200
+        @test contains(String(r.body), "fixture docs page")
 
-        # The documented remedy stays silent: with Oxygen's docs off, the
-        # app's own route answers /docs.
-        serve_logs = TestLogger()
-        with_logger(serve_logs) do
-            serve(; port=8135, async=true, docs=false)
-        end
-        try
-            r = HTTP.get("http://127.0.0.1:8135/docs"; retry=false, readtimeout=20)
-            @test r.status == 200
-            @test contains(String(r.body), "fixture docs page")
-        finally
-            terminate()
-        end
-        @test isempty(filter(is_docs_error, serve_logs.logs))
+        r = HTTP.get("$base/serve-static/site.css"; retry=false, readtimeout=20)
+        @test String(r.body) == "body{}"
+        @test HTTP.header(r, "Content-Type") == "text/css; charset=utf-8"
+        r = HTTP.get("$base/serve-static/sub"; retry=false, readtimeout=20)
+        @test String(r.body) == "<p>index</p>"
+        write(joinpath(dir, "site.css"), "body{color:red}")
+        r = HTTP.get("$base/serve-dynamic/site.css"; retry=false, readtimeout=20)
+        @test String(r.body) == "body{color:red}"
+        r = HTTP.get("$base/serve-static/site.css"; retry=false, readtimeout=20)
+        @test String(r.body) == "body{}"
 
-        # ...but with Oxygen's docs enabled the collision still errors.
-        # (`>= 1`: earlier items may have registered their own /docs routes
-        # into the shared process registry; this type's exact entry is
-        # asserted above.)
-        enabled_logs = TestLogger()
-        with_logger(enabled_logs) do
-            serve(; port=8136, async=true)
+        # A plain GET on a WebSocket route is told to upgrade (and must not
+        # hang the client: HTTP 1.x never chunks a response carrying `Upgrade`).
+        r = HTTP.get("$base/echo"; retry=false, readtimeout=20, status_exception=false)
+        @test r.status == 426
+        received = String[]
+        HTTP.WebSockets.open("ws://127.0.0.1:$port/echo?suffix=!") do ws
+            HTTP.WebSockets.send(ws, "ping")
+            push!(received, String(HTTP.WebSockets.receive(ws)))
         end
-        try
-            HTTP.get("http://127.0.0.1:8136/docs"; retry=false, readtimeout=20,
-                     status_exception=false)
-        finally
-            terminate()
-        end
-        @test count(is_docs_error, enabled_logs.logs) >= 1
-        @test any(l -> occursin("maps to path \"/docs\"", string(l.message)),
-                  enabled_logs.logs)
+        @test received == ["ping!"]
+        # The server keeps serving after the upgraded connection closes.
+        @test HTTP.get("$base/docs"; retry=false, readtimeout=20).status == 200
     finally
-        delete!(HTMXObjects._docs_prefix_routes, DocsPrefixApp)
+        terminate()
     end
+    @test HTMXObjects._SERVER[] === nothing
+    # The runtime ledger records the finished session as an upgrade, not as a
+    # failed request.
+    @test any(r -> r.kind === :websocket && startswith(r.target, "/echo") &&
+                   r.status == 101 && isempty(r.error),
+              runtime_snapshot().history)
+    messages = [string(l.message) for l in logger.logs]
+    @test any(m -> contains(m, "Ignoring `serve` keyword(s) docs"), messages)
+    @test any(m -> occursin(r"127\.0\.0\.1:\d+ - \"GET /docs HTTP/1\.1\" 200 ", m), messages)
+    @test any(m -> occursin(r"\"GET /echo\?suffix=! HTTP/1\.1\" 101 ", m), messages)
 end
 
 @testitem "application architecture composes declarations, routes, contributions and observations" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -5298,7 +5829,7 @@ end
 
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
     route!(ArchitectureExplorerHost())
 
@@ -5323,7 +5854,7 @@ end
     drive(verb, path, body="") = begin
         req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
                            Vector{UInt8}(body))
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     _reset_note_store!()
@@ -5391,7 +5922,7 @@ end
     drive(verb, path, body="") = begin
         req = HTTP.Request(verb, path, ["Content-Type" => "application/x-www-form-urlencoded"],
                            Vector{UInt8}(body))
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     # The item half addresses the same store the collection half writes to.
@@ -5407,7 +5938,7 @@ end
 @testitem "a callable page-wrapper VALUE receives navigation" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     # `__page__ = MockPage(...)` declares no signature of its own — the value is
@@ -5442,7 +5973,7 @@ end
 
     route!(IndexedMountRoot())
     req = HTTP.Request("GET", "/item/abc", Pair{String,String}[], UInt8[])
-    response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    response = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     @test response.status == 200
     @test contains(String(response.body), "abc")
 end
@@ -5463,7 +5994,7 @@ end
 
     route!(SingleRouteIncludeRoot())
     req = HTTP.Request("DELETE", "/flags/abc", Pair{String,String}[], UInt8[])
-    response = first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+    response = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     @test response.status == 200
     @test contains(String(response.body), "deleted abc")
 end
@@ -5471,7 +6002,7 @@ end
 @testitem "an indexed mount selects the domain candidate, not its label" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(DomainRoot())
@@ -5884,7 +6415,7 @@ end
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(SemanticCardPageApp())
@@ -5934,7 +6465,7 @@ end
 @testitem "a node-valued @param resolves through its live option domain" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path) = begin
         req = HTTP.Request("GET", path, Pair{String,String}[], UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(DomainParamRoot())
@@ -6126,7 +6657,7 @@ end
 @testitem "native operation navigation rebuilds the selected page shell" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     app = SemanticNodeParamApp(; __prefix__="/model")
@@ -6317,7 +6848,7 @@ end # @testmodule HTMXOPollIdentityFixtures
         request = HTTP.Request("GET", target,
             ["HX-Request" => "true", "X-Session" => session], UInt8[])
         handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, request))
+            HTMXObjects.ROUTER, request))
         @test handler !== HTTP.Handlers.default404
         response = handler(request)
         @test response.status == 200
@@ -6935,7 +7466,7 @@ end
 @testitem "EditorRoutes serves its own mount point" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers)
-        first(HTTP.Handlers.gethandler(HTMXObjects.CONTEXT[].service.router, req))(req)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
     end
 
     route!(EditorMountRoot())
@@ -7524,7 +8055,7 @@ end
     end
 
     route!(SlowDocumentedPollApp())
-    router = HTMXObjects.CONTEXT[].service.router
+    router = HTMXObjects.ROUTER
     function get_body(target)
         req = HTTP.Request("GET", target, ["HX-Request" => "true"])
         String(first(HTTP.Handlers.gethandler(router, req))(req).body)
@@ -7551,6 +8082,995 @@ end
         @test !contains(polled, "# Arguments")
     finally
         notify(slow_multiline_gate[])
+        _clear_operation_polls!()
+    end
+end
+
+# --- Server-sent events (`@sse`) ---------------------------------------------
+
+@testitem "SSE frames split data lines and validate fields" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    import HTMXObjects: _sse_frame
+    @test _sse_frame("a") == "data: a\n\n"
+    # Every line becomes its own `data:` line, whatever the line ending.
+    @test _sse_frame("a\nb\r\nc\rd") == "data: a\ndata: b\ndata: c\ndata: d\n\n"
+    # An empty payload still carries a `data:` line, or the browser would not
+    # dispatch the event at all.
+    @test _sse_frame(""; event="close") == "event: close\ndata: \n\n"
+    @test _sse_frame("x"; event="done", id=7, retry=1000) ==
+        "event: done\nid: 7\nretry: 1000\ndata: x\n\n"
+    @test_throws ArgumentError _sse_frame("x"; event="a\nb")
+    @test_throws ArgumentError _sse_frame("x"; id="1\r")
+    @test_throws ArgumentError _sse_frame("x"; retry=0)
+end
+
+@testitem "SSEStream sends rendered frames and reports disconnects" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    struct _GoneIO <: IO end
+    Base.unsafe_write(::_GoneIO, ::Ptr{UInt8}, ::UInt) = throw(Base.IOError("gone", 0))
+
+    buf = IOBuffer()
+    req = HTTP.Request("GET", "/feed", ["Last-Event-ID" => "9"])
+    sse = SSEStream(buf, req)
+    @test isopen(sse)
+    @test HTTP.WebSockets.send(sse, h.p("a\nb"); event="tick", id="1")
+    @test String(take!(buf)) == "event: tick\nid: 1\ndata: <p>a\ndata: b</p>\n\n"
+    @test HTTP.WebSockets.send(sse, "plain")
+    @test String(take!(buf)) == "data: plain\n\n"
+    @test last_event_id(sse) == "9"
+    @test last_event_id(SSEStream(IOBuffer(), HTTP.Request("GET", "/"))) === nothing
+
+    close(sse)
+    @test !isopen(sse)
+    @test HTTP.WebSockets.send(sse, "late") == false
+    @test isempty(take!(buf))
+
+    # A failed write means the client left: `send` answers `false`, the handle
+    # closes, and raw writes keep failing.
+    gone = SSEStream(_GoneIO(), req)
+    @test HTTP.WebSockets.send(gone, "x") == false
+    @test !isopen(gone)
+    @test_throws Base.IOError write(gone, "x")
+end
+
+@testitem "@sse routes register as GET streams outside HTTP-only tooling" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    import HTMXObjects: _prewarm_descriptor, _sse_frame
+
+    @htmx struct SSEToolingApp
+        "A widget feed."
+        @sse feed(id::Int; q::String="") = "feed $id $q"
+        @get page() = h.p("page")
+    end
+    route!(SSEToolingApp())
+
+    route = only(filter(r -> r.name === :feed, reflect(SSEToolingApp)))
+    @test route.verb === :SSE
+    @test route.path == "/feed/{id}"
+    @test [p.name for p in route.params if p.source === :path] == [:id]
+    @test [p.name for p in route.params if p.source === :query] == [:q]
+
+    router = HTMXObjects.ROUTER
+    req = HTTP.Request("GET", "/feed/1")
+    @test first(HTTP.Handlers.gethandler(router, req)) !== HTTP.Handlers.default404
+
+    # OpenAPI, prewarm, and generated forms are HTTP request/response tools.
+    @test collect(keys(openapi(SSEToolingApp).paths)) == ["/page"]
+    skipped = _prewarm_descriptor("http://127.0.0.1:1", route, true, 1.0)
+    @test skipped.status === nothing
+    @test contains(skipped.error, "sse skipped")
+    @test_throws ArgumentError operation_form(SSEToolingApp(), route)
+
+    # In-process dispatch has no connection to stream on.
+    resp = dispatch(:GET, "/feed/1")
+    @test resp.status == 500
+    @test HTTP.header(resp, "X-HTMXO-Error-Id", "") != ""
+end
+
+@testitem "htmx() loads the SSE extension that sse_region needs" setup=[HTMXOTestImports] tags=[:unit, :sse] begin
+    html = repr("text/html", htmx(h.main()))
+    @test contains(html, "htmx-ext-sse@2.2.4/dist/sse.min.js")
+    @test first(findfirst("htmx.org@", html)) < first(findfirst("htmx-ext-sse@", html))
+    @test !contains(repr("text/html", htmx(h.main(); sse_version=nothing)), "htmx-ext-sse")
+    # An extension must follow htmx itself; without the shell's htmx it stays out.
+    @test !contains(repr("text/html", htmx(h.main(); htmx_version=nothing)), "htmx-ext-sse")
+
+    region = repr("text/html", sse_region("/feed?q=1", h.p("waiting")))
+    @test contains(region, "hx-ext=\"sse\"")
+    @test contains(region, "sse-connect=\"/feed?q=1\"")
+    @test contains(region, "sse-close=\"close\"")
+    @test contains(region, "sse-swap=\"message,done\"")
+    @test contains(region, "<p>waiting</p>")
+    @test contains(repr("text/html", sse_region("/f"; swap="beforeend", events="tick")),
+                   "sse-swap=\"tick\" hx-swap=\"beforeend\"")
+end
+
+@testitem "@sse streams events, final values, and errors end to end" setup=[HTMXOTestImports] tags=[:integration, :server, :sse] begin
+    using Sockets
+    using HTTP.WebSockets: send
+
+    const SSE_FOREVER_EXITED = Ref(false)
+
+    @htmx struct SSEServeApp
+        @sse ticks(; n::Int=2) = begin
+            for i in 1:n
+                send(__sse__, h.p("tick $i\nsecond line"); id=string(i))
+            end
+            h.div("finished $n")
+        end
+        @sse boom() = begin
+            send(__sse__, "before")
+            error("kaboom")
+        end
+        @sse resume() = "resumed after $(something(last_event_id(__sse__), "none"))"
+        @sse quiet() = (sleep(0.4); "late")
+        @sse forever() = begin
+            while isopen(__sse__)
+                send(__sse__, "beat")
+                sleep(0.02)
+            end
+            SSE_FOREVER_EXITED[] = true
+            nothing
+        end
+    end
+
+    # Keep-alive comments (`: …`) can interleave with any stream; the event
+    # sequence is what the assertions below pin down.
+    frames(body) = filter(f -> !isempty(f) && !startswith(f, ":"), split(body, "\n\n"))
+    function stream(path, headers=Pair{String,String}[])
+        r = HTTP.get("http://127.0.0.1:$port$path", headers;
+                     status_exception=false, retry=false, readtimeout=60)
+        r, String(r.body)
+    end
+
+    route!(SSEServeApp())
+    port = 8141
+    heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
+    serve(; port, async=true)
+    try
+        r, body = stream("/ticks?n=2")
+        @test r.status == 200
+        @test startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
+        @test HTTP.header(r, "Cache-Control", "") == "no-cache"
+        @test frames(body) == [
+            "id: 1\ndata: <p>tick 1\ndata: second line</p>",
+            "id: 2\ndata: <p>tick 2\ndata: second line</p>",
+            "event: done\ndata: <div>finished 2</div>",
+            "event: close\ndata: ",
+        ]
+
+        # A failing body still ends the stream: the recorded error article is
+        # the final `done` value, and `close` stops the browser reconnecting.
+        r, body = stream("/boom")
+        @test r.status == 200
+        got = frames(body)
+        @test got[1] == "data: before"
+        @test startswith(got[2], "event: done\ndata: <article aria-invalid=\"true\">")
+        @test got[3] == "event: close\ndata: "
+
+        # Arguments are validated before the stream starts: a bad request is
+        # an ordinary error response (which also stops EventSource retries).
+        r, body = stream("/ticks?n=many")
+        @test r.status == 500
+        @test !startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") != ""
+
+        _, body = stream("/resume", ["Last-Event-ID" => "41"])
+        @test frames(body)[1] == "event: done\ndata: resumed after 41"
+
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
+        _, body = stream("/quiet")
+        @test contains(body, ": keepalive\n\n")
+        @test "event: done\ndata: late" in frames(body)
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+
+        # A client that leaves ends an open-ended body at its next write.
+        sock = Sockets.connect("127.0.0.1", port)
+        write(sock, "GET /forever HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        @test contains(String(readavailable(sock)), "text/event-stream")
+        close(sock)
+        @test timedwait(() -> SSE_FOREVER_EXITED[], 10) === :ok
+    finally
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+        terminate()
+    end
+end
+
+# The runtime ledger is server-agnostic: `track_requests` wraps any
+# `HTTP.Request -> HTTP.Response` handler, so these drive it with plain
+# functions and never start a server.
+@testitem "track_requests records in-flight and finished requests" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: _request_pipeline, _runtime_redact_target
+
+    tracker = RuntimeTracker(; history_limit=3)
+    gate = Base.Event()
+    entered = Base.Event()
+    handler = function (req)
+        if req.target == "/slow"
+            notify(entered)
+            wait(gate)
+        end
+        req.target == "/boom" && error("handler exploded")
+        HTTP.Response(req.target == "/missing" ? 404 : 200, "ok")
+    end
+    app = track_requests(handler; tracker)
+
+    # In flight: visible with a growing age, absent from the history.
+    slow = Threads.@spawn app(HTTP.Request("GET", "/slow"))
+    wait(entered)
+    live = runtime_snapshot(tracker)
+    @test [r.target for r in live.inflight] == ["/slow"]
+    @test only(live.inflight).running
+    @test isempty(live.history)
+    notify(gate)
+    @test fetch(slow).status == 200
+
+    # Finished: status, kind and handling time; a throwing handler still
+    # leaves a 500 record behind and the exception propagates unchanged.
+    app(HTTP.Request("GET", "/missing", ["HX-Request" => "true"]))
+    @test_throws ErrorException app(HTTP.Request("GET", "/boom"))
+    snap = runtime_snapshot(tracker)
+    @test isempty(snap.inflight)
+    @test [r.target for r in snap.history] == ["/boom", "/missing", "/slow"]
+    boom, missing, slow_row = snap.history
+    @test boom.status == 500
+    @test contains(boom.error, "handler exploded")
+    @test missing.status == 404 && missing.kind === :htmx
+    @test HTMXObjects._runtime_request_kind(HTTP.Request("GET", "/feed",
+        ["Accept" => "text/event-stream"])) === :sse
+    @test slow_row.status == 200 && slow_row.kind === :page
+    @test slow_row.duration > 0 && !slow_row.running
+    @test all(r -> r.mode === :none && r.route == "" && r.job == 0, snap.history)
+
+    # Bounded history, oldest dropped first.
+    app(HTTP.Request("GET", "/fourth"))
+    @test [r.target for r in runtime_snapshot(tracker).history] ==
+          ["/fourth", "/boom", "/missing"]
+    configure_runtime!(tracker; history_limit=1)
+    @test [r.target for r in runtime_snapshot(tracker).history] == ["/fourth"]
+
+    # Per-route stats group by method + path when no route pattern matched.
+    configure_runtime!(tracker; history_limit=10)
+    app(HTTP.Request("GET", "/fourth"))
+    stats = runtime_snapshot(tracker).routes
+    @test only(stats).route == "GET /fourth"
+    @test only(stats).count == 2
+    @test only(stats).errors == 0
+
+    # Operation and page-load tokens are bearer capabilities: their values,
+    # and credential-looking parameters, never reach the ledger.
+    @test _runtime_redact_target(
+        "/r?__htmxo_operation=abc&x=1&api_key=k&__htmxo_poll=1&Session_Id=s") ==
+        "/r?__htmxo_operation=…&x=1&api_key=…&__htmxo_poll=1&Session_Id=…"
+    @test _runtime_redact_target("/plain") == "/plain"
+    app(HTTP.Request("GET", "/fourth?__htmxo_page_load=secret&page=2"))
+    newest = first(runtime_snapshot(tracker).history)
+    @test newest.target == "/fourth?__htmxo_page_load=…&page=2"
+    @test newest.path == "/fourth"
+
+    # Follow-up polls are counted on their job, not kept in the history,
+    # unless the tracker asks for them.
+    app(HTTP.Request("GET", "/fourth?__htmxo_poll=1"))
+    @test first(runtime_snapshot(tracker).history).target != "/fourth?__htmxo_poll=1"
+    configure_runtime!(tracker; record_polls=true)
+    app(HTTP.Request("GET", "/fourth?__htmxo_poll=1"))
+    @test first(runtime_snapshot(tracker).history).kind === :poll
+
+    # Disabled trackers pass requests straight through.
+    configure_runtime!(tracker; enabled=false)
+    before = runtime_snapshot(tracker).process.total_requests
+    @test app(HTTP.Request("GET", "/fourth")).status == 200
+    @test runtime_snapshot(tracker).process.total_requests == before
+
+    clear_runtime_history!(tracker)
+    @test isempty(runtime_snapshot(tracker).history)
+
+    # A ledger failure is logged and swallowed: bookkeeping never takes a
+    # request down with it.
+    @test (@test_logs (:warn, r"runtime tracking failed") match_mode=:any HTMXObjects._runtime_guarded(
+        () -> error("ledger broke"), "probe")) === nothing
+
+    # `serve`'s pipeline installs the tracker outside any caller middleware,
+    # which therefore already sees the live request record.
+    HTTP.register!(HTMXObjects.ROUTER, "GET", "/via-serve", req -> HTTP.Response(204))
+    tracked_before_caller = Ref(false)
+    existing(handler) = function (req)
+        tracked_before_caller[] = haskey(req.context, HTMXObjects._RUNTIME_REQUEST_KEY)
+        handler(req)
+    end
+    wrapped = _request_pipeline([existing], nothing, nothing, tracker)
+    configure_runtime!(tracker; enabled=true)
+    @test wrapped(HTTP.Request("GET", "/via-serve")).status == 204
+    @test tracked_before_caller[]
+    @test first(runtime_snapshot(tracker).history).target == "/via-serve"
+end
+
+@testitem "runtime jobs follow long-running operations" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _clear_operation_polls!
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    const runtime_job_gate = Ref(Base.Event())
+    const runtime_fail_gate = Ref(Base.Event())
+    const runtime_job_tracker = RuntimeTracker()
+
+    @htmx struct RuntimeJobApp
+        "Crunch the numbers"
+        @get runtime_crunch(n::Int) = (wait(runtime_job_gate[]); h.p("crunched:$n"))
+        @get runtime_doomed() = (wait(runtime_fail_gate[]); error("doomed job"))
+        @get runtime_quick() = h.p("quick")
+        @include runtime_dash = RuntimeRoutes(; tracker=runtime_job_tracker)
+    end
+
+    route!(RuntimeJobApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=runtime_job_tracker)
+    function drive(target; hx=true, method="GET")
+        headers = hx ? ["HX-Request" => "true"] : Pair{String,String}[]
+        app(HTTP.Request(method, target, headers, UInt8[]))
+    end
+    poll_url(body) = replace(only(match(
+        r"hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\"", body).captures), "&amp;" => "&")
+    snapshot() = runtime_snapshot(runtime_job_tracker)
+
+    _clear_operation_polls!()
+    try
+        # A route that outlives the grace period becomes one running job,
+        # linked to the request that started it.
+        started = drive("/runtime_crunch/7")
+        @test started.status == 200
+        body = String(started.body)
+        snap = snapshot()
+        job = only(snap.running)
+        @test job.label == "Crunch the numbers"
+        @test job.state === :running
+        @test job.route == "GET /runtime_crunch/{n}"
+        @test job.target == "/runtime_crunch/7"
+        @test job.requests == 1 && job.polls == 0
+        request = only(r for r in snap.history if r.path == "/runtime_crunch/7")
+        @test request.job == job.id
+        @test request.mode === :polling
+        @test request.route == "GET /runtime_crunch/{n}"
+
+        # Follow-up polls count against the job and stay out of the history.
+        url = poll_url(body)
+        @test contains(url, "__htmxo_operation=")
+        drive(url); drive(url)
+        snap = snapshot()
+        @test only(snap.running).polls == 2
+        @test count(r -> r.path == "/runtime_crunch/7", snap.history) == 1
+        @test !any(r -> contains(r.target, only(match(
+            r"__htmxo_operation=([^&]+)", url).captures)), snap.history)
+
+        # The dashboard shows the running job, hides its own requests, and
+        # renders inline (it is `@fresh`: never queued behind the jobs).
+        dash = drive("/runtime_dash"; hx=false)
+        @test dash.status == 200
+        html = String(dash.body)
+        @test contains(html, "Running jobs")
+        @test contains(html, "Crunch the numbers")
+        @test contains(html, "hx-trigger=\"every 2s\"")
+        @test contains(html, "/runtime_dash/panel")
+        @test !contains(html, "__htmxo_operation=" * only(match(
+            r"__htmxo_operation=([^&]+)", url).captures))
+        paused = String(drive("/runtime_dash/panel?live=false").body)
+        @test contains(paused, "Resume")
+        @test !contains(paused, "hx-trigger")
+        json = drive("/runtime_dash/snapshot")
+        @test HTTP.header(json, "Content-Type") == "application/json"
+        @test contains(String(json.body), "\"label\":\"Crunch the numbers\"")
+        @test !any(r -> startswith(r.path, "/runtime_dash"), snapshot().history)
+
+        # Releasing the work finishes the job with its wall time.
+        notify(runtime_job_gate[])
+        @test timedwait(() -> isempty(snapshot().running), 10.0;
+                        pollint=0.01) === :ok
+        done = only(snapshot().finished)
+        @test done.state === :done
+        @test done.duration > 0
+        @test done.polls == 2
+        @test isempty(done.error)
+
+        # A failing job is recorded as failed with the error's summary.
+        String(drive("/runtime_doomed").body)
+        @test length(snapshot().running) == 1
+        notify(runtime_fail_gate[])
+        @test timedwait(() -> isempty(snapshot().running), 10.0;
+                        pollint=0.01) === :ok
+        failed = first(snapshot().finished)
+        @test failed.state === :failed
+        @test contains(failed.error, "doomed job")
+        failed_html = String(drive("/runtime_dash/panel").body)
+        @test contains(failed_html, "doomed job")
+
+        # Every tracked HTMXObjects request carries its route pattern and
+        # the transport the operation layer chose.
+        drive("/runtime_quick")
+        quick = first(r for r in snapshot().history if r.path == "/runtime_quick")
+        @test quick.route == "GET /runtime_quick"
+        @test quick.mode === :polling
+
+        # Clearing forgets finished work only.
+        drive("/runtime_dash/clear"; method="POST")
+        @test isempty(snapshot().history)
+        @test isempty(snapshot().finished)
+    finally
+        notify(runtime_job_gate[])
+        notify(runtime_fail_gate[])
+        _clear_operation_polls!()
+    end
+end
+
+# Every operation execution is a job from its start, whatever transport it
+# takes: it shows once it outlives the grace period (with its progress tree read
+# from DynamicObjects while it runs inline) and is forgotten if it is faster.
+@testitem "blocking operations are runtime jobs too" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    const blocking_gate = Ref(Base.Event())
+    const blocking_tracker = RuntimeTracker()
+
+    @htmx struct BlockingJobApp
+        "Save the upload"
+        @post blocking_save(n::Int) = (wait(blocking_gate[]); h.p("saved:$n"))
+        "Fresh crunch"
+        @fresh @get blocking_fresh() = (wait(blocking_gate[]); h.p("fresh"))
+        "Raw response"
+        @get blocking_raw()::HTTP.Response = (wait(blocking_gate[]); HTTP.Response(200, "raw"))
+        "Plain crunch"
+        @get blocking_plain(n::Int) = (wait(blocking_gate[]); h.p("plain:$n"))
+        "Doomed save"
+        @post blocking_doomed() = (sleep(0.3); error("disk full"))
+        @post blocking_quick() = h.p("quick")
+    end
+    @htmx struct BlockingPolicyJobApp
+        "Policy crunch"
+        @get blocking_policy() = (wait(blocking_gate[]); h.p("policy"))
+    end
+
+    route!(BlockingJobApp())
+    route!(BlockingPolicyJobApp(); operation_policy=OperationPolicy(:blocking))
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=blocking_tracker)
+    drive(target; method="GET", hx=false) = app(HTTP.Request(method, target,
+        hx ? ["HX-Request" => "true"] : Pair{String,String}[], UInt8[]))
+    running() = runtime_jobs(blocking_tracker)
+    labels(rows) = sort!([r.label for r in rows])
+
+    try
+        # Compile the quick route first: a first call's compile time alone can
+        # outlast the grace period.
+        drive("/blocking_quick"; method="POST")
+        clear_runtime_history!(blocking_tracker)
+
+        # POST/@fresh/declared HTTP.Response/plain non-HTMX GET/:blocking
+        # policy: none of them polls, all of them answer inline — and all of
+        # them are jobs while they run.
+        tasks = [
+            Threads.@spawn(drive("/blocking_save/1"; method="POST")),
+            Threads.@spawn(drive("/blocking_fresh"; hx=true)),
+            Threads.@spawn(drive("/blocking_raw"; hx=true)),
+            Threads.@spawn(drive("/blocking_plain/2")),
+            Threads.@spawn(drive("/blocking_policy"; hx=true)),
+        ]
+        @test timedwait(() -> length(running()) == 5, 20.0; pollint=0.02) === :ok
+        rows = running()
+        @test labels(rows) == ["Fresh crunch", "Plain crunch", "Policy crunch",
+                               "Raw response", "Save the upload"]
+        @test all(r -> r.state === :running && r.duration >= 0.1, rows)
+        save = only(r for r in rows if r.label == "Save the upload")
+        @test save.route == "POST /blocking_save/{n}"
+        @test save.target == "/blocking_save/1"
+        @test save.scope === :request
+        # A cached route's tree is read from DynamicObjects while it runs
+        # inline — once DynamicObjects has registered it, which can lag the
+        # job becoming visible on a slow runner.
+        plain_row() = only(r for r in running() if r.label == "Plain crunch")
+        @test timedwait(() -> plain_row().progress isa Treebars.ProgressNode, 10.0;
+                        pollint=0.02) === :ok
+        # The in-flight request links to its job.
+        inflight = runtime_snapshot(blocking_tracker).inflight
+        @test only(r for r in inflight if r.path == "/blocking_save/1").job == save.id
+        @test length(runtime_snapshot(blocking_tracker).running) == 5
+
+        notify(blocking_gate[])
+        @test all(t -> fetch(t).status == 200, tasks)
+        @test isempty(running())
+        done = runtime_jobs(blocking_tracker; states=(:done, :failed))
+        @test labels(done) == ["Fresh crunch", "Plain crunch", "Policy crunch",
+                               "Raw response", "Save the upload"]
+        @test all(r -> r.state === :done && r.duration >= 0.1, done)
+        @test only(r for r in done if r.label == "Plain crunch").progress isa Treebars.ProgressNode
+        @test only(r for r in runtime_snapshot(blocking_tracker).history
+                   if r.path == "/blocking_plain/2").job > 0
+
+        # A failing slow execution is a failed job with the error's summary.
+        drive("/blocking_doomed"; method="POST", hx=true)
+        failed = only(runtime_jobs(blocking_tracker; states=:failed))
+        @test failed.label == "Doomed save"
+        @test contains(failed.error, "disk full")
+
+        # Faster than the grace period: a request, not a job.
+        before = runtime_snapshot(blocking_tracker).process.total_jobs
+        drive("/blocking_quick"; method="POST")
+        @test runtime_snapshot(blocking_tracker).process.total_jobs == before
+        @test only(r for r in runtime_snapshot(blocking_tracker).history
+                   if r.path == "/blocking_quick").job == 0
+        @test length(runtime_jobs(blocking_tracker; states=(:done, :failed))) == 6
+
+        # `states`, `filter` and `recent` narrow the rows.
+        @test length(runtime_jobs(blocking_tracker; states=(:done,),
+                                  filter=r -> startswith(r.route, "POST"))) == 1
+        @test isempty(runtime_jobs(blocking_tracker; states=(:done, :failed), recent=0))
+        @test_throws ArgumentError runtime_jobs(blocking_tracker; states=(:paused,))
+    finally
+        notify(blocking_gate[])
+    end
+end
+
+# Work HTMXObjects did not start is a job too: a hand-rolled Treebars poller
+# reports its compute through `track_job!`, and apps can call it directly.
+@testitem "hand-rolled pollers and track_job! are runtime jobs" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    using HTMXObjects: DynamicObjects
+
+    const hand_gate = Ref(Base.Event())
+    const hand_tracker = RuntimeTracker()
+
+    DynamicObjects.@dynamicstruct struct HandRolledIP
+        __status__ = Treebars.initialize_progress!(:state; description="hand-rolled")
+        fit(key::String) = (wait(hand_gate[]); "fit:$key")
+    end
+    const hand_ip = getproperty(HandRolledIP(), :fit)
+
+    @htmx struct HandRolledJobApp
+        @fresh @get hand_fit(key::String) = Treebars.polling_fetchindex(
+                hand_ip, key; poll_url="/hand_fit/$key", label="Hand-rolled fit",
+                req=__req__) do rv
+            h.p(rv)
+        end
+    end
+    route!(HandRolledJobApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=hand_tracker)
+    drive(target) = app(HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[]))
+    running() = runtime_jobs(hand_tracker)
+
+    try
+        body = String(drive("/hand_fit/a").body)
+        @test contains(body, "treebar-poller-inner")
+        @test timedwait(() -> length(running()) == 1, 10.0; pollint=0.02) === :ok
+        job = only(running())
+        @test job.label == "Hand-rolled fit"
+        @test job.route == "GET /hand_fit/{key}"
+        @test job.target == "/hand_fit/a"
+        @test job.progress isa Treebars.ProgressNode
+        @test job.polls == 0
+        # The poller's follow-up requests are polls on the same job.
+        drive("/hand_fit/a"); drive("/hand_fit/a")
+        @test only(running()).polls == 2
+        @test all(r -> r.job == job.id, [r for r in runtime_snapshot(hand_tracker).history
+                                         if r.target == "/hand_fit/a"])
+        notify(hand_gate[])
+        @test timedwait(() -> isempty(running()), 10.0; pollint=0.02) === :ok
+        @test only(r for r in runtime_jobs(hand_tracker; states=:done)
+                   if r.label == "Hand-rolled fit").id == job.id
+    finally
+        notify(hand_gate[])
+    end
+
+    # Direct use: a task an app spawned, reported without any request.
+    warm = Threads.@spawn (sleep(0.3); 42)
+    id = track_job!(warm; label="Warm-up", tracker=hand_tracker)
+    @test id > 0
+    @test track_job!(warm; tracker=hand_tracker) == id   # same work: a poll
+    @test timedwait(() -> any(r -> r.id == id,
+        runtime_jobs(hand_tracker; states=:done)), 10.0; pollint=0.02) === :ok
+    warmed = only(r for r in runtime_jobs(hand_tracker; states=:done) if r.id == id)
+    @test warmed.label == "Warm-up"
+    @test warmed.polls == 1
+    @test warmed.scope === :none
+    @test warmed.route == "" && warmed.target == ""
+
+    broken = Threads.@spawn (sleep(0.2); error("warm-up broke"))
+    broken_id = track_job!(broken; label="Broken warm-up", tracker=hand_tracker)
+    @test timedwait(() -> any(r -> r.id == broken_id,
+        runtime_jobs(hand_tracker; states=:failed)), 10.0; pollint=0.02) === :ok
+    @test contains(only(runtime_jobs(hand_tracker; states=:failed)).error, "warm-up broke")
+
+    # Nothing to track, or tracking off: no job, and never an error.
+    @test track_job!(nothing; tracker=hand_tracker) == 0
+    configure_runtime!(hand_tracker; enabled=false)
+    @test track_job!(Threads.@spawn(1); tracker=hand_tracker) == 0
+    configure_runtime!(hand_tracker; enabled=true)
+end
+
+# Per-session boards: `jobs_board(; mine=req)` shows the jobs started under the
+# requesting session's root-provider scope and key, never another session's.
+@testitem "jobs_board(; mine=req) shows only the requesting session's jobs" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+
+    const session_gate = Ref(Base.Event())
+    const session_tracker = RuntimeTracker()
+
+    @htmx struct SessionJobsApp
+        "Session crunch"
+        @get session_crunch(n::Int) = (wait(session_gate[]); h.p("crunched:$n"))
+        @fresh @get my_jobs() = jobs_board(; mine=__req__, poll_url="/my_jobs",
+                                           id="my-jobs")
+    end
+    @htmx struct RequestScopedJobsApp
+        "Request crunch"
+        @get request_crunch() = (wait(session_gate[]); h.p("crunched"))
+        @fresh @get request_jobs() = jobs_board(; mine=__req__, id="request-jobs")
+    end
+    session_key(req) = HTTP.header(req, "X-Session", "anonymous")
+    route!(SessionJobsApp(); root_provider=RootProvider(scope=:session,
+        key=session_key, retention=RootRetention()))
+    route!(RequestScopedJobsApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=session_tracker)
+    drive(target, session="anonymous") = app(HTTP.Request("GET", target,
+        ["HX-Request" => "true", "X-Session" => session], UInt8[]))
+    board(session) = String(drive("/my_jobs", session).body)
+
+    try
+        drive("/session_crunch/1", "alice")
+        drive("/session_crunch/2", "bob")
+        drive("/request_crunch")
+        rows = runtime_jobs(session_tracker)
+        @test length(rows) == 3
+        alice = only(r for r in rows if r.target == "/session_crunch/1")
+        bob = only(r for r in rows if r.target == "/session_crunch/2")
+        request_job = only(r for r in rows if r.target == "/request_crunch")
+        @test alice.scope === :session && bob.scope === :session
+        @test request_job.scope === :request
+        # The provider key never reaches a row, not even as its digest.
+        @test !hasproperty(alice, :session)
+        @test !contains(HTMXObjects._schema_json_encode(runtime_snapshot(session_tracker)),
+                        "alice")
+
+        alice_board = board("alice")
+        @test contains(alice_board, "class=\"treebar-board\" id=\"my-jobs\"")
+        @test contains(alice_board, "data-treebar-key=\"$(alice.id)\"")
+        @test !contains(alice_board, "data-treebar-key=\"$(bob.id)\"")
+        @test !contains(alice_board, "data-treebar-key=\"$(request_job.id)\"")
+        @test contains(alice_board, "hx-get=\"/my_jobs\"")
+        bob_board = board("bob")
+        @test contains(bob_board, "data-treebar-key=\"$(bob.id)\"")
+        @test !contains(bob_board, "data-treebar-key=\"$(alice.id)\"")
+        # A session with no jobs sees an empty board.
+        carol_board = board("carol")
+        @test !contains(carol_board, "treebar-board-item")
+        @test contains(carol_board, "No running jobs.")
+        # Request scope: every request is its own session, so nothing matches.
+        @test !contains(String(drive("/request_jobs").body), "treebar-board-item")
+
+        # The global view is an explicit opt-in.
+        @test_throws ArgumentError jobs_board(; tracker=session_tracker)
+        everyone = repr("text/html", jobs_board(; all=true, tracker=session_tracker))
+        @test all(r -> contains(everyone, "data-treebar-key=\"$(r.id)\""), rows)
+        # The same filter on the data API.
+        alice_req = HTTP.Request("GET", "/", ["X-Session" => "alice"])
+        HTMXObjects._runtime_note_session!(alice_req,
+            OperationContext(alice_req, "", "/", :http, :session, "alice"))
+        @test [r.id for r in runtime_jobs(session_tracker; mine=alice_req)] == [alice.id]
+    finally
+        notify(session_gate[])
+    end
+end
+
+# The dashboard's job lists are Treebars boards that poll their own `@fresh`
+# route; the rest of the dashboard refreshes around them.
+@testitem "RuntimeRoutes serves job boards" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _runtime_new_job!, _jobs_board_fallback
+
+    const board_gate = Ref(Base.Event())
+    const board_tracker = RuntimeTracker()
+
+    @htmx struct RuntimeBoardApp
+        "Board crunch"
+        @get board_crunch(n::Int) = (wait(board_gate[]); h.p("crunched:$n"))
+        "Board doomed"
+        @get board_doomed() = (sleep(0.3); error("board doomed"))
+        @include board_dash = RuntimeRoutes(; tracker=board_tracker)
+    end
+    route!(RuntimeBoardApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=board_tracker)
+    drive(target; hx=true) = app(HTTP.Request("GET", target,
+        hx ? ["HX-Request" => "true"] : Pair{String,String}[], UInt8[]))
+
+    try
+        drive("/board_crunch/1")
+        drive("/board_doomed")
+        @test timedwait(() -> !isempty(runtime_jobs(board_tracker; states=:failed)),
+                        10.0; pollint=0.02) === :ok
+        running = only(runtime_jobs(board_tracker))
+
+        # The running board: a self-polling fragment, keyed by job id.
+        fragment = String(drive("/board_dash/jobs").body)
+        @test contains(fragment, "class=\"treebar-board\" id=\"htmxo-runtime-jobs\"")
+        @test contains(fragment, "data-treebar-key=\"$(running.id)\" data-treebar-state=\"running\"")
+        @test contains(fragment, "Board crunch")
+        @test contains(fragment, "class=\"treebar-board-poll\" hx-get=\"/board_dash/jobs?limit=100&amp;state=running\" hx-trigger=\"every 1s\"")
+        @test contains(fragment, "treebar-board-pause")
+        @test contains(fragment, "<details class=\"treebar-board-tree\">")
+        @test contains(fragment, "<span class=\"treebar-board-meta-key\">job</span> #$(running.id)")
+        # A just-finished job stays listed with its outcome for `recent`
+        # seconds, so the board shows it before it leaves.
+        recent = repr("text/html", jobs_board(; all=true, tracker=board_tracker, recent=600))
+        @test contains(recent, "data-treebar-state=\"failed\"")
+        @test contains(recent, "board doomed")
+        @test !contains(repr("text/html", jobs_board(; all=true, tracker=board_tracker,
+                                                     recent=0)), "board doomed")
+
+        # The finished board: history, newest first, polling at the refresh rate.
+        finished = String(drive("/board_dash/jobs?state=finished&limit=5").body)
+        @test contains(finished, "id=\"htmxo-runtime-finished\"")
+        @test contains(finished, "hx-trigger=\"every 2s\"")
+        @test contains(finished, "Board doomed")
+        @test !contains(finished, "data-treebar-state=\"running\"")
+        bogus = drive("/board_dash/jobs?state=bogus")
+        @test bogus.status >= 400 || contains(String(bogus.body), "aria-invalid")
+
+        # The dashboard embeds both boards outside its refreshing regions and
+        # no longer needs a script to keep trees open.
+        dash = String(drive("/board_dash"; hx=false).body)
+        @test contains(dash, "id=\"htmxo-runtime-jobs\"")
+        @test contains(dash, "id=\"htmxo-runtime-finished\"")
+        @test contains(dash, "id=\"htmxo-runtime-summary\" hx-get=")
+        @test contains(dash, "id=\"htmxo-runtime-panel\" hx-get=")
+        @test contains(dash, "hx-select=\"#htmxo-runtime-panel\"")
+        @test !contains(dash, "data-runtime-details")
+        @test !contains(dash, "hx-get=\"/board_dash/panel?limit=100\" hx-trigger=\"every 2s\" hx-swap=\"outerHTML\"")
+        still = String(drive("/board_dash/panel?live=false").body)
+        @test !contains(still, "hx-trigger")
+        @test !contains(still, "treebar-board-poll")
+        # None of the dashboard's own requests is recorded.
+        @test !any(r -> startswith(r.path, "/board_dash"), runtime_snapshot(board_tracker).history)
+        @test isempty(runtime_jobs(board_tracker; filter=r -> startswith(r.route, "GET /board_dash")))
+
+        # A queued job renders dim, with its queue position.
+        lock(board_tracker.lock) do
+            job = _runtime_new_job!(board_tracker, "Waiting job", nothing, nothing;
+                                    scope=:none, session=UInt(0), now_ns=time_ns() - UInt(10^9))
+            job.started_ns = time_ns() - UInt(10^9)
+            job.state = :queued
+            job.position = 2
+        end
+        queued = String(drive("/board_dash/jobs").body)
+        @test contains(queued, "data-treebar-state=\"queued\"")
+        @test contains(queued, "queued · #2")
+        @test contains(queued, "1 running · 1 queued")
+    finally
+        notify(board_gate[])
+    end
+
+    # Without Treebars, a board is a plain list replaced on each poll.
+    plain = repr("text/html", _jobs_board_fallback(
+        [(; key=1, label="Plain job", state=:running, elapsed_ms=1500, node=nothing,
+            meta=["route" => "GET /x", "position" => 3])];
+        id="plain-jobs", empty="None.", poll_url="/jobs", poll_interval="1s"))
+    @test contains(plain, "<section id=\"plain-jobs\" class=\"htmxo-jobs\" hx-get=\"/jobs\" hx-trigger=\"every 1s\" hx-swap=\"outerHTML\">")
+    @test contains(plain, "<strong>Plain job</strong> — running for")
+    @test contains(plain, "route GET /x")
+    @test contains(repr("text/html", _jobs_board_fallback([]; id="e", empty="None.",
+        poll_url=nothing, poll_interval="1s")), "None.")
+end
+
+# The acceptance run for the dashboard's job board, in headless Chrome: jobs
+# arrive without resetting an expanded tree, a released one shows its outcome
+# and leaves alone, durations tick, and Pause freezes the board. The page's
+# driver starts and releases gated jobs through the test server and writes what
+# it saw into #board-result, which `--dump-dom` returns.
+@testitem "runtime dashboard board updates in place in a real browser" setup=[HTMXOTestImports] tags=[:browser, :integration] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import Treebars
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        const dash_gates = Dict(n => Base.Event() for n in 1:4)
+        const dash_tracker = RuntimeTracker()
+        dash_driver() = h.script(Raw(raw"""
+        window.addEventListener('load', function(){
+          var board = function(){ return document.getElementById('htmxo-runtime-jobs'); };
+          if (!board()) return;
+          var r = {};
+          var item = function(n){
+            var its = board().querySelectorAll('.treebar-board-item');
+            for (var i = 0; i < its.length; i++){
+              var c = its[i].querySelector('code');
+              if (c && c.textContent === '/dash_crunch/' + n) return its[i];
+            }
+            return null;
+          };
+          var dur = function(n){ return item(n).querySelector('.treebar-board-duration').textContent; };
+          var start = function(n){ fetch('/dash_crunch/' + n, {headers: {'HX-Request': 'true'}}); };
+          var release = function(n){ fetch('/__ctl/release/' + n); };
+          var waitFor = function(cond, then){
+            var t = setInterval(function(){ if (cond()){ clearInterval(t); then(); } }, 50);
+          };
+          var done = function(){
+            var out = document.createElement('pre');
+            out.id = 'board-result';
+            out.textContent = Object.keys(r).map(function(k){ return k + '=' + r[k]; }).join(';');
+            document.body.appendChild(out);
+          };
+          start(1);
+          waitFor(function(){ return item(1) && item(1).querySelector('details'); }, function(){
+            item(1)._mark = 1;
+            item(1).querySelector('details').open = true;
+            start(2); start(3);
+            waitFor(function(){ return item(2) && item(3); }, function(){
+              r.three = board().querySelectorAll('.treebar-board-item').length;
+              r.same = item(1)._mark === 1 ? 1 : 0;
+              r.open = item(1).querySelector('details').open ? 1 : 0;
+              r.t0 = dur(1);
+              setTimeout(function(){
+                r.t1 = dur(1);
+                release(2);
+                waitFor(function(){ return item(2) && item(2).dataset.treebarState === 'done'; }, function(){
+                  r.done2 = dur(2);
+                  waitFor(function(){ return !item(2); }, function(){
+                    r.others = item(1) && item(3) ? 1 : 0;
+                    r.kept = item(1)._mark === 1 && item(1).querySelector('details').open ? 1 : 0;
+                    board().querySelector('.treebar-board-pause').click();
+                    setTimeout(function(){
+                      r.p0 = dur(1);
+                      start(4);
+                      setTimeout(function(){
+                        r.p1 = dur(1);
+                        r.paused4 = item(4) ? 1 : 0;
+                        board().querySelector('.treebar-board-pause').click();
+                        waitFor(function(){ return item(4); }, function(){ r.resumed4 = 1; done(); });
+                      }, 2500);
+                    }, 300);
+                  });
+                });
+              }, 450);
+            });
+          });
+        });
+        """))
+        @htmx struct DashboardBrowserApp
+            __page__(content) = htmx(content, dash_driver(); hyperscript_version=nothing,
+                                     feedback=false)
+            "Dashboard crunch"
+            @get dash_crunch(n::Int) = (wait(dash_gates[n]); h.p("crunched:$n"))
+            @include runtime = RuntimeRoutes(; tracker=dash_tracker)
+        end
+        route!(DashboardBrowserApp())
+        router = HTMXObjects.ROUTER
+        app = track_requests(router; tracker=dash_tracker)
+        _clear_operation_polls!()
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if startswith(path, "/__ctl/release/")
+                notify(dash_gates[parse(Int, last(split(path, '/')))])
+                return HTTP.Response(200, "released")
+            end
+            app(req)
+        end
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/runtime"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            m = match(r"<pre id=\"board-result\">([^<]*)</pre>", dom)
+            @test m !== nothing
+            r = Dict(String(first(split(kv, '='; limit=2))) => String(last(split(kv, '='; limit=2)))
+                     for kv in split(m === nothing ? "" : m.captures[1], ';') if occursin('=', kv))
+            @test get(r, "three", "") == "3"            # three gated jobs, three items
+            @test get(r, "same", "") == "1"             # …the first item's wrapper kept
+            @test get(r, "open", "") == "1"             # …with its tree still expanded
+            @test get(r, "t0", "a") != get(r, "t1", "a")  # durations tick
+            @test contains(get(r, "done2", ""), "done")  # the released job shows its outcome
+            @test get(r, "others", "") == "1"           # …and leaves alone
+            @test get(r, "kept", "") == "1"
+            @test get(r, "p0", "a") == get(r, "p1", "b")  # Pause freezes the clocks
+            @test get(r, "paused4", "") == "0"          # …and the list
+            @test get(r, "resumed4", "") == "1"         # Resume catches up
+        finally
+            foreach(notify, values(dash_gates))
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+# `configure_job_queue!` puts background computes behind a bounded FIFO
+# (DynamicObjects' `Deferred`): the rest are queued jobs with a position, move
+# up as earlier ones finish, and are abandoned once nobody watches them.
+@testitem "configure_job_queue! queues background jobs and abandons unwatched ones" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _clear_operation_polls!, _operation_background_fetch
+
+    const queue_gates = Dict(n => Base.Event() for n in 1:4)
+    const queue_tracker = RuntimeTracker()
+
+    @htmx struct QueuedJobsApp
+        "Queued crunch"
+        @get queued_crunch(n::Int) = (wait(queue_gates[n]); h.p("crunched:$n"))
+    end
+    route!(QueuedJobsApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=queue_tracker)
+    drive(target) = app(HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[]))
+    all_states = (:queued, :running, :done, :failed)
+    jobs_for(n) = [r for r in runtime_jobs(queue_tracker; states=all_states)
+                   if r.target == "/queued_crunch/$n"]
+    latest(n) = last(jobs_for(n))
+
+    @test_throws ArgumentError configure_job_queue!(; max_running=-1)
+    @test_throws ArgumentError configure_job_queue!(; abandon_after=0)
+    # Off by default: background computes start at once.
+    @test configure_job_queue!().max_running == 0
+    @test _operation_background_fetch(HTTP.Request("GET", "/")) === identity
+
+    _clear_operation_polls!()
+    try
+        settings = configure_job_queue!(; max_running=1, abandon_after=60)
+        @test settings.max_running == 1 && settings.abandon_after == 60.0
+
+        for n in 1:3
+            @test contains(String(drive("/queued_crunch/$n").body), "treebar-poller-inner")
+        end
+        # The first compute leaves the queue as soon as a worker picks it up.
+        @test timedwait(() -> length(runtime_jobs(queue_tracker)) == 3 &&
+                        latest(1).state === :running, 10.0; pollint=0.02) === :ok
+        @test latest(2).state === :queued && latest(2).position == 1
+        @test latest(3).state === :queued && latest(3).position == 2
+        @test length(runtime_jobs(queue_tracker; states=:queued)) == 2
+        @test length(runtime_jobs(queue_tracker; states=:running)) == 1
+        @test configure_job_queue!().queued == 2
+        snap = runtime_snapshot(queue_tracker)
+        @test count(r -> r.state === :queued, snap.running) == 2
+        board = repr("text/html", jobs_board(; all=true, tracker=queue_tracker))
+        @test contains(board, "1 running · 2 queued")
+        @test contains(board, "queued · #1")
+        @test contains(board, "queued · #2")
+
+        # Finishing the running job starts the next one; the rest move up. (The
+        # worker starts job 2 before job 1's watcher has necessarily stamped
+        # its outcome, so wait for both.)
+        notify(queue_gates[1])
+        @test timedwait(() -> latest(2).state === :running && latest(1).state === :done,
+                        10.0; pollint=0.02) === :ok
+        @test latest(3).state === :queued && latest(3).position == 1
+
+        # Nobody polls job 3: once unwatched for `abandon_after` it is
+        # abandoned, never run, and recorded as failed.
+        configure_job_queue!(; abandon_after=0.2)
+        @test timedwait(() -> latest(3).state === :failed, 10.0; pollint=0.02) === :ok
+        @test contains(latest(3).error, "abandoned")
+        @test configure_job_queue!().queued == 0
+
+        # The next request for it starts afresh, queued behind job 2.
+        configure_job_queue!(; abandon_after=60)
+        drive("/queued_crunch/3")
+        @test timedwait(() -> length(jobs_for(3)) == 2 && latest(3).state === :queued,
+                        10.0; pollint=0.02) === :ok
+        # Switching the queue off starts whatever is still waiting.
+        configure_job_queue!(; max_running=0)
+        @test timedwait(() -> latest(3).state === :running, 10.0; pollint=0.02) === :ok
+        notify(queue_gates[2]); notify(queue_gates[3])
+        @test timedwait(() -> isempty(runtime_jobs(queue_tracker)), 10.0;
+                        pollint=0.02) === :ok
+        @test latest(3).state === :done
+    finally
+        configure_job_queue!(; max_running=0, abandon_after=60)
+        foreach(notify, values(queue_gates))
         _clear_operation_polls!()
     end
 end

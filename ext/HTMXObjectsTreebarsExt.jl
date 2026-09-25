@@ -121,6 +121,8 @@ function __init__()
                 keep_progress=transport.keep_progress,
                 error_obj=transport.error_obj,
                 req=transport.req,
+                # The operation layer records this job itself (`retain`).
+                track_job=false,
             )
             kwargs = merge(call_kwargs, treebars_transport)
             responded = try
@@ -158,6 +160,13 @@ function __init__()
             end
             responded
         end
+
+    # Job boards (`jobs_board`, the runtime dashboard): a keyed Treebars board,
+    # reconciled in place on the client. Guarded like the dispatch-parent
+    # protocol: an older Treebars keeps `jobs_board`'s plain-list fallback.
+    isdefined(Treebars, :htmx_render_board) &&
+        (HTMXObjects._jobs_board_render_impl[] =
+            (entries; kwargs...) -> Treebars.htmx_render_board(entries; kwargs...))
 
     HTMXObjects._operation_ready_terminal_impl[] = _operation_ready_terminal
     HTMXObjects._polling_page_assets_impl[] =

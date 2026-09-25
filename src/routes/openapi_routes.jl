@@ -9,8 +9,9 @@
 # `reflect` stays the stable seam — this file only READS its descriptors,
 # so the `reflect(T)` output contract is unchanged.
 
-# Verbs with an OpenAPI operation. `:WEBSOCKET` is deliberately absent —
-# OpenAPI has no WebSocket operation, so `@ws` routes are skipped (see
+# Verbs with an OpenAPI operation. `:WEBSOCKET` and `:SSE` are deliberately
+# absent — OpenAPI has no WebSocket operation and cannot describe an open-ended
+# event stream as one response, so `@ws`/`@sse` routes are skipped (see
 # `openapi`). Everything else mirrors `_reflect_kw_source`'s transport view.
 const _OPENAPI_METHODS = Dict(
     :GET => "get",
@@ -183,7 +184,8 @@ doc = openapi(MyApp; title="My API", version="2.0.0")
   `AbstractFloat` → `number`, `Bool` → `boolean`, strings/`Symbol`/`Char`/
   enums → `string`, arrays → `array`, dates → `string` + `format`);
   unresolvable types degrade to `string`.
-- `@ws` routes are skipped: OpenAPI has no WebSocket operation.
+- `@ws` and `@sse` routes are skipped: OpenAPI has no WebSocket operation or
+  event-stream response.
 - Each `servers` entry is a URL string or an `(url=…, description=…)` record;
   the key is omitted when no servers are given.
 """
@@ -256,11 +258,7 @@ end
 #
 # `SwaggerRoutes` is the human companion to `OpenAPIRoutes`: a mountable
 # bundle serving a version-pinned Swagger UI initialized against the app's
-# OpenAPI document. Mounted at `/docs` it answers the standard address —
-# which requires `serve(docs=false)` (see `_check_docs_prefix_routes`): with
-# Oxygen's built-in docs enabled, its `DocsMiddleware` intercepts every
-# `/docs*` request before the main router and serves Oxygen's own
-# (for `@htmx` apps, empty) Swagger instead.
+# OpenAPI document, typically mounted at the standard `/docs` address.
 
 # Pinned Swagger UI release. 5.x reads OpenAPI 3.1; the pin keeps the
 # rendered viewer reproducible. Bumped deliberately, never floating.
@@ -316,10 +314,6 @@ it) running a version-pinned Swagger UI release initialized against
 consumer's choice — point it at wherever the companion `OpenAPIRoutes`
 lives. `cdn_base` re-points air-gapped deployments at a local mirror of the
 pinned release.
-
-Mounting at `/docs` requires `serve(docs=false)`: with Oxygen's built-in
-docs enabled, its middleware serves its own Swagger for every `/docs*`
-request and the mounted route never fires.
 """
 @htmx struct SwaggerRoutes
     title::String = "API docs"

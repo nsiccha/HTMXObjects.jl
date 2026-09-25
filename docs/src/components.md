@@ -189,6 +189,11 @@ tabset(
     "Logs"     => h.div("Log content"),
 ; active=1)
 
+# Lazy tabs: a URL is fetched on the tab's first click (the initially active
+# one once it is visible); `preload=true` starts that fetch on hover
+tabset("Overview" => h.div("Overview content"), "Details" => "/tab/details";
+       preload=true)
+
 # HTMX-driven (each tab fetches its content lazily)
 htmx_tabset(
     "Overview" => "/tab/overview",
@@ -201,6 +206,11 @@ Drop `tabset_styles()` once per page to style the active-tab indicator.
 ### `nav_sidebar`
 
 A vertical navigation panel — pass a vector of `("Label", "/url")` pairs (or `Pair`-of-`String`-with-children for nested groups).
+
+`nav_sidebar`, `htmx_tabset`, `tabset`, `htmxo_breadcrumb` and `hx_link` all take
+`preload=true` to start a link's request while the pointer rests on it. Pair it
+with `@preload` on the routes that should do something with that head start —
+see *Preloading* in the [API reference](api.md).
 
 ### `status_badge` — semantic status pill
 
@@ -226,6 +236,63 @@ lazy("/heavy_panel/42"; tag=h.section, id="heavy")
 
 Renders an empty container with `hx-get=…` + `hx-trigger="load"` so the panel populates once it scrolls into view (or immediately on page load).
 
+### `live_thread` — infinite, live-updating thread
+
+A chat-style list for a growing, partly-mutable sequence (agent transcripts,
+logs, comments): it starts at the newest item, pages older items in as the
+viewer scrolls up, keeps the newest items live, and never re-renders what did
+not change — so polling does not flicker, flash or move the page.
+
+Items are `key => content` pairs, oldest first. Keys are stable and unique; the
+component stores each item's key and a digest of its HTML, and the client
+reconciles by key: identical items are not touched, changed items are morphed in
+place (with [idiomorph](https://github.com/bigskysoftware/idiomorph) when the page
+loads it, keeping `<details>` open state and focused inputs; otherwise replaced),
+new items are inserted, vanished ones removed. The client holds the viewport
+with its own scroll anchoring, sticks to the bottom while the viewer is there,
+and otherwise counts arrivals in a "↓ N new" pill.
+
+The server side is three routes. Declare them `@fresh` — the default `:auto`
+operation policy would answer a slow render with an interim poller, which the
+client reports as an error:
+
+```julia
+@fresh @get index() = live_thread(latest_items();
+    id="chat", older_url=__self__/"older", tail_url=__self__/"tail",
+    cursor=oldest_key(),        # cursor for the page before these; nothing = no older
+    since=last_final_key(),     # newest item that will never change again ("" if none)
+    version=current_version())  # any token that changes whenever the thread does
+
+@fresh @get older(; before::String) =
+    live_thread_page(items_before(before); cursor=oldest_key_or_nothing())
+
+@fresh @get tail(; since::String="", v::String="") =
+    v == current_version() ? live_thread_unchanged() :          # 204: nothing to do
+        live_thread_tail(items_after(since); since=last_final_key(), version=current_version())
+```
+
+- **Older pages** (`GET older_url?before=<cursor>`) return the items before the
+  cursor and the next cursor (`nothing` at the start). Overlapping pages are
+  fine; items the client already holds are skipped.
+- **The tail** (`GET tail_url?since=<since>&v=<version>`) returns every item
+  after the `since` key the client sent. The client reconciles exactly that
+  region, so items there may change, be inserted mid-way, reorder or disappear;
+  everything up to `since` is final and never revisited. Pick `since` as the
+  newest item that can no longer change. When the route cannot honour `since`,
+  answer `live_thread_tail(items; reset=true, cursor=…)`: the client reconciles
+  its whole list (still by key) and restarts older paging.
+- **Refresh now** after the viewer sends something: return
+  `hx_response(…; trigger=live_thread_refresh("#chat"))` from the POST, or call
+  `window.htmxoThread.refresh("#chat", {bottom: true})` from JS. `poll=nothing`
+  makes a thread refresh only on demand (e.g. from a websocket message).
+
+The runtime ships with every `htmx(...)` page (`thread=false` leaves it out;
+`live_thread_assets()` adds it to other pages). New items are processed like an
+htmx swap (scripts run, `hx-*` wired, `htmx:load` fires) and the thread root
+emits `htmxo:thread-updated` after each change. Size the scroll box with
+`height="40vh"` or `--htmxo-thread-height`. A runnable demo is
+[`examples/chat.jl`](examples.md#chat).
+
 ### `loading_indicator_script()` and `request_feedback_*`
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.
@@ -238,6 +305,7 @@ Drop once per page to enable a centred loading indicator and click-feedback styl
 
 ```julia
 hx_link("/settings"; hx_target="#main", hx_push_url="true")("Settings")
+hx_link("/report/42"; hx_target="#main", preload=true)("Report")  # starts on hover
 ```
 
 ### `htmx_or(full_page_fn, req, fragment)`

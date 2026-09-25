@@ -31,15 +31,15 @@ jobs:
         run: |
           git clone -b pre-inference https://github.com/nsiccha/DynamicObjects.jl.git ../DynamicObjects.jl
           git clone -b dev https://github.com/nsiccha/HTMX.jl.git ../HTMX.jl
-          git clone -b perf/step5-typed-slots https://github.com/nsiccha/Treebars.jl.git ../Treebars.jl
-          git -C ../Treebars.jl checkout 42be351bdbdcbf22572da5c8cf896fcc39047126
+          git clone -b dev https://github.com/nsiccha/Treebars.jl.git ../Treebars.jl
+          git -C ../Treebars.jl checkout 8bde866206a9dd477b61af4ac5c054c0192c88be
           julia --project -e '
             using Pkg
             project_path = Base.active_project()
             # actions/checkout materializes CRLF on Windows; normalize before
             # matching the exact source block used on every runner.
             project = replace(read(project_path, String), "\r\n" => "\n")
-            remote_source = "[sources.Treebars]\nurl = \"https://github.com/nsiccha/Treebars.jl\"\nrev = \"42be351bdbdcbf22572da5c8cf896fcc39047126\""
+            remote_source = "[sources.Treebars]\nurl = \"https://github.com/nsiccha/Treebars.jl\"\nrev = \"8bde866206a9dd477b61af4ac5c054c0192c88be\""
             local_source = "[sources.Treebars]\npath = \"../Treebars.jl\""
             @assert occursin(remote_source, project)
             ci_project = replace(project, remote_source => local_source)
