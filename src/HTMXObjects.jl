@@ -5063,16 +5063,46 @@ function _mark_internal_inputs(descriptor)
         for input in inputs]))
 end
 
-function _property_descriptor(T, name::Symbol)
-    isdefined(DynamicObjects, :property_descriptor) || return nothing
-    _mark_internal_inputs(Base.invokelatest(
-        getproperty(DynamicObjects, :property_descriptor), T, name))
+# Per-type descriptor memo. DO rebuilds every descriptor from `meta(T)` source
+# metadata — signature parsing, `Core.eval` of each argument type, per-property
+# dependency closures — so one build of a large route type costs milliseconds,
+# and the request path used to pay it twice per request (snag
+# `per-request-prop-096b23ad`). The result depends only on `T` and on the
+# method table, never on the request, so it is keyed on the world counter: any
+# (re)definition — a Revise edit, a struct redefinition — rebuilds on the next
+# read. The counter is read BEFORE the build, so a definition racing a build
+# stamps the entry stale rather than fresh.
+const _property_descriptors_cache = IdDict{Any,Tuple{UInt,Vector{NamedTuple}}}()
+const _property_descriptors_lock = ReentrantLock()
+
+function _shared_property_descriptors(T)
+    world = Base.get_world_counter()
+    cached = lock(() -> get(_property_descriptors_cache, T, nothing),
+                  _property_descriptors_lock)
+    cached !== nothing && first(cached) == world && return last(cached)
+    descriptors = NamedTuple[_mark_internal_inputs(descriptor) for descriptor in
+        Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)]
+    lock(() -> _property_descriptors_cache[T] = (world, descriptors),
+         _property_descriptors_lock)
+    descriptors
 end
 
+# First-declaration-wins, like DO's `property_descriptor(T, name)`: that method
+# describes `metafirst(T, name)`, the first `meta(T)` entry of that name, and
+# `property_descriptors(T)` is `meta(T)` in declaration order.
+function _property_descriptor(T, name::Symbol)
+    isdefined(DynamicObjects, :property_descriptors) || return nothing
+    for descriptor in _shared_property_descriptors(T)
+        descriptor.name === name && return descriptor
+    end
+    nothing
+end
+
+# A fresh outer vector per call: the result escapes into consumer-facing
+# graphs (`semantic_descriptor`), and must not alias the memo.
 function _property_descriptors(T)
     isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
-    NamedTuple[_mark_internal_inputs(descriptor) for descriptor in
-               Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)]
+    copy(_shared_property_descriptors(T))
 end
 
 # Descriptor for one EXACT declaration. The `(T, name)` method resolves through
@@ -5088,8 +5118,9 @@ function _property_descriptor(T, name::Symbol, info::NamedTuple)
 end
 
 function _property_descriptor(T, name::Symbol, verb::Symbol)
+    isdefined(DynamicObjects, :property_descriptors) || return nothing
     expected = Verb{verb}
-    for descriptor in _property_descriptors(T)
+    for descriptor in _shared_property_descriptors(T)
         descriptor.name === name || continue
         inputs = get(descriptor, :inputs, NamedTuple[])
         # Matches on the injected arg's TYPE, so it must not use

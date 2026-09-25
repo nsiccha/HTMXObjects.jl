@@ -1500,6 +1500,54 @@ end
     @test all(param -> !internal_input(param), stream.params)
 end
 
+@testitem "property descriptors are memoized per type and rebuilt on redefinition" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _property_descriptor, _property_descriptors,
+                        _shared_property_descriptors
+    import HTMXObjects.DynamicObjects
+
+    @htmx struct DescriptorMemoApp
+        "Before the edit."
+        @fresh @get descriptor_memo_probe(; n::Int=1) = string("memo:", n)
+    end
+    route!(DescriptorMemoApp())
+    @test dispatch(:GET, "/descriptor_memo_probe?n=1").status == 200
+
+    # Every request reads the one per-type build instead of rebuilding the
+    # whole type's descriptors from source metadata (snag
+    # `per-request-prop-096b23ad`: 25–40 ms of CPU per tiny fragment).
+    shared = _shared_property_descriptors(DescriptorMemoApp)
+    for n in 2:4
+        response = dispatch(:GET, "/descriptor_memo_probe?n=$n")
+        @test response.status == 200
+        @test contains(String(response.body), "memo:$n")
+    end
+    @test _shared_property_descriptors(DescriptorMemoApp) === shared
+    let probe = only(filter(descriptor -> descriptor.name === :descriptor_memo_probe,
+                            shared))
+        @test _property_descriptor(DescriptorMemoApp, :descriptor_memo_probe, :GET) ==
+              probe
+        @test _property_descriptor(DescriptorMemoApp, :descriptor_memo_probe) == probe
+
+        # The list handed to consumers is a fresh vector, so mutating it cannot
+        # corrupt the memo.
+        listed = _property_descriptors(DescriptorMemoApp)
+        @test listed == shared && listed !== shared
+        push!(listed, probe)
+        @test length(_shared_property_descriptors(DescriptorMemoApp)) == length(shared)
+
+        # A redefinition — what a Revise edit of the struct does to `meta` — moves
+        # the world counter, and the next read describes the new definition.
+        @test startswith(probe.description, "Before the edit.")
+        edited = Pair[name === :descriptor_memo_probe ?
+                          name => merge(info, (; doc="After the edit.")) : name => info
+                      for (name, info) in DynamicObjects.meta(DescriptorMemoApp)]
+        @eval DynamicObjects.meta(::Type{DescriptorMemoApp}) = $edited
+        rebuilt = _property_descriptor(DescriptorMemoApp, :descriptor_memo_probe, :GET)
+        @test rebuilt.description == "After the edit."
+        @test _shared_property_descriptors(DescriptorMemoApp) !== shared
+    end
+end
+
 @testitem "semantic app compiles one mounted graph without an operation registry" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _is_semantic_root_provider, _operation_context,
                         _root_providers
