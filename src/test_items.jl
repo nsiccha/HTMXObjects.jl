@@ -49,6 +49,15 @@ const _TEST_SCAN_SKIP_DIRS = Set((
 ))
 const _TEST_JOB_LIMIT = 20
 const _TEST_LOG_LIMIT = 200_000
+# `Pkg.test` sandbox-setup failures that a direct `--project=test` child can
+# route around. Both are thrown before any test executes: Julia 1.10's
+# `gen_target_project` synthesizes the sandbox without `[sources]`
+# (`check_registered`), and a developed `test/Manifest` collides with the
+# parent subgraph (`sandbox`, "can not merge projects").
+const _TEST_SANDBOX_FAILURE_PATTERNS = (
+    r"can not merge projects",
+    r"expected package .* to be registered",
+)
 
 _test_project(project) = abspath(expanduser(string(project)))
 
@@ -209,13 +218,31 @@ function _test_log_path()
     path
 end
 
-function _test_command(project, selection)
+function _test_child_command(env_dir, script_part, selection)
     args = ["--htmxo-test=" * key for key in selection]
     julia = Base.julia_cmd()
-    expression = "using Pkg; Pkg.test(; test_args=ARGS)"
-    command = `$julia --startup-file=no --history-file=no --project=$project -e $expression -- $args`
+    command = `$julia --startup-file=no --history-file=no --project=$env_dir $script_part $args`
     addenv(command, "JULIA_LOAD_PATH" => _test_load_path(Sys.iswindows()))
 end
+
+function _test_command(project, selection)
+    expression = "using Pkg; Pkg.test(; test_args=ARGS)"
+    _test_child_command(project, `-e $expression --`, selection)
+end
+
+function _test_direct_command(project, selection)
+    test_env = joinpath(_test_project(project), "test")
+    _test_child_command(test_env, `$(joinpath(test_env, "runtests.jl"))`, selection)
+end
+
+function _test_direct_available(project)
+    root = _test_project(project)
+    isfile(joinpath(root, "test", "Project.toml")) &&
+        isfile(joinpath(root, "test", "runtests.jl"))
+end
+
+_test_sandbox_failure(log_text) =
+    any(pattern -> occursin(pattern, log_text), _TEST_SANDBOX_FAILURE_PATTERNS)
 
 _test_load_path(is_windows::Bool) = join(("@", "@stdlib"), is_windows ? ';' : ':')
 
@@ -236,19 +263,31 @@ function _set_job!(store, job; status=job.status, started_at=job.started_at,
     job
 end
 
+function _run_test_child!(store, job, command, mode)
+    open(job.log_path, mode) do io
+        process = run(pipeline(ignorestatus(command); stdout=io, stderr=io); wait=false)
+        _set_job!(store, job; process)
+        wait(process)
+        process.exitcode
+    end
+end
+
 function _execute_test_job!(store, project, job)
     _set_job!(store, job; status=:running, started_at=time())
     try
-        open(job.log_path, "w") do io
-            process = run(pipeline(ignorestatus(_test_command(project, job.selection));
-                stdout=io, stderr=io); wait=false)
-            _set_job!(store, job; process)
-            wait(process)
-            code = process.exitcode
-            _set_job!(store, job;
-                status=code == 0 ? :passed : :failed,
-                finished_at=time(), exitcode=code, process=nothing)
+        code = _run_test_child!(store, job, _test_command(project, job.selection), "w")
+        if code != 0 && _test_direct_available(project) &&
+                _test_sandbox_failure(_read_test_log(job))
+            open(job.log_path, "a") do io
+                println(io, "\nHTMXObjects test runner: `Pkg.test` failed during sandbox " *
+                    "setup, retrying directly with the package's test environment " *
+                    "(`--project=test`) and the same selection.\n")
+            end
+            code = _run_test_child!(store, job, _test_direct_command(project, job.selection), "a")
         end
+        _set_job!(store, job;
+            status=code == 0 ? :passed : :failed,
+            finished_at=time(), exitcode=code, process=nothing)
     catch err
         bt = catch_backtrace()
         detail = sprint(showerror, err, bt)

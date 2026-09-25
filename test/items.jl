@@ -4285,6 +4285,47 @@ end
 end
 
 """
+Pins the direct-run fallback's static contract without spawning a child: the
+sandbox-failure signatures it matches, the `test/` environment shape that
+enables it, and the two child commands sharing selection args and load path.
+"""
+@testitem "test sandbox fallback detection" setup=[HTMXOTestImports] tags=[:unit, :test_ui] begin
+    import HTMXObjects: _test_command, _test_direct_command, _test_direct_available,
+        _test_load_path, _test_sandbox_failure
+
+    @test _test_sandbox_failure("ERROR: can not merge projects")
+    @test _test_sandbox_failure("ERROR: expected package `Bar [942b4d92]` to be registered")
+    @test !_test_sandbox_failure("Test Failed at runtests.jl:3\n  Expression: false")
+    @test !_test_sandbox_failure("ERROR: LoadError: UndefVarError: `foo` not defined")
+    @test !_test_sandbox_failure("")
+
+    mktempdir() do project
+        @test !_test_direct_available(project)
+        mkpath(joinpath(project, "test"))
+        write(joinpath(project, "test", "Project.toml"), "[deps]\n")
+        @test !_test_direct_available(project)
+        write(joinpath(project, "test", "runtests.jl"), "@test true\n")
+        @test _test_direct_available(project)
+
+        selection = ["test/items.jl::pass", "test/items.jl::spaced name"]
+        direct = string(_test_direct_command(project, selection))
+        @test contains(direct, "--project=$(joinpath(project, "test"))")
+        @test contains(direct, joinpath(project, "test", "runtests.jl"))
+        @test contains(direct, "--htmxo-test=test/items.jl::pass")
+        @test contains(direct, "--htmxo-test=test/items.jl::spaced name")
+
+        sandboxed = string(_test_command(project, selection))
+        @test contains(sandboxed, "Pkg.test")
+        @test contains(sandboxed, "--htmxo-test=test/items.jl::pass")
+        @test contains(sandboxed, "--htmxo-test=test/items.jl::spaced name")
+
+        hermetic = "JULIA_LOAD_PATH=$(_test_load_path(Sys.iswindows()))"
+        @test hermetic in _test_direct_command(project, selection).env
+        @test hermetic in _test_command(project, selection).env
+    end
+end
+
+"""
 Mounts `TestRoutes` through the normal `@include` registrar and drives both a
 catalog GET and a rejected selective POST through the in-process HTTP router.
 
@@ -4460,6 +4501,110 @@ and child-process side effects remain explicit rather than mutating host state.
         HTMXObjects._execute_test_job!(error_store, project, error_job)
         @test error_job.status == :error
         @test !isempty(error_job.error)
+
+        test_clear_cache!(project)
+        @test isempty(HTMXObjects._test_job_snapshot(project))
+    end
+end
+
+"""
+Exercises the direct-run fallback as the web UI uses it: a package with a
+standalone developed `test/` environment trips the `Pkg.test` sandbox setup
+on Julia 1.10 ("can not merge projects") and the same selection then runs to
+a genuine result through `--project=test`. The trip/fallback coupling holds
+on every Julia: where the sandbox works, neither marker appears.
+"""
+@testitem "direct test fallback on sandbox failure" setup=[HTMXOTestImports] tags=[:integration, :test_ui] begin
+    mktempdir() do project
+        mkpath(joinpath(project, "src"))
+        mkpath(joinpath(project, "test"))
+        fixture_uuid = "fe05dfe9-3163-4720-8767-13851b0a4c8f"
+        write(joinpath(project, "Project.toml"), """
+        name = "HTMXOFallbackFixture"
+        uuid = "$fixture_uuid"
+        version = "0.1.0"
+        """)
+        write(joinpath(project, "src", "HTMXOFallbackFixture.jl"),
+            "module HTMXOFallbackFixture\nend\n")
+        write(joinpath(project, "test", "Project.toml"), """
+        [deps]
+        HTMXOFallbackFixture = "$fixture_uuid"
+        Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+        """)
+        write(joinpath(project, "test", "items.jl"), """
+        @testitem "pass" tags=[:fixture] begin end
+        @testitem "fail" tags=[:fixture] begin end
+        """)
+        write(joinpath(project, "test", "runtests.jl"), """
+        using Test
+        prefix = "--htmxo-test="
+        selectors = [arg[length(prefix) + 1:end] for arg in ARGS if startswith(arg, prefix)]
+        isempty(selectors) && error("fixture requires an exact selection")
+        for selector in selectors
+            name = split(selector, "::"; limit=2)[2]
+            println("fallback fixture ran ", name)
+            @testset "fixture selection" begin
+                if name == "pass"
+                    @test true
+                elseif name == "fail"
+                    @test false
+                else
+                    error("unknown fixture selection: " * name)
+                end
+            end
+        end
+        """)
+
+        setup_expr = "using Pkg; Pkg.develop(path=$(repr(project))); Pkg.instantiate()"
+        # Explicit load path: the setup child inherits this process's sandbox
+        # `JULIA_LOAD_PATH`, which has no `@stdlib` entry for `using Pkg`.
+        setup_cmd = addenv(addenv(`$(Base.julia_cmd()) --startup-file=no --history-file=no --project=$(joinpath(project, "test")) -e $setup_expr`, "JULIA_LOAD_PATH" => HTMXObjects._test_load_path(Sys.iswindows())), "JULIA_PKG_OFFLINE" => "true")
+        setup_io = IOBuffer()
+        setup_proc = run(pipeline(ignorestatus(setup_cmd); stdout=setup_io, stderr=setup_io))
+        setup_proc.exitcode == 0 ||
+            @info "fallback fixture setup failed" output = String(take!(setup_io))
+        @test setup_proc.exitcode == 0
+        @test isfile(joinpath(project, "test", "Manifest.toml"))
+
+        catalog = discover_test_items(project)
+        @test isempty(catalog.errors)
+        @test length(catalog.items) == 2
+        by_name = Dict(item.name => item for item in catalog.items)
+
+        function await_job(count; timeout=120.0)
+            deadline = time() + timeout
+            while time() < deadline
+                jobs = HTMXObjects._test_job_snapshot(project)
+                if length(jobs) >= count && !(jobs[1].status in (:queued, :running))
+                    return jobs[1]
+                end
+                sleep(0.05)
+            end
+            error("timed out waiting for fallback test job")
+        end
+
+        function tripped_and_fell_back(log_text)
+            tripped = contains(log_text, "can not merge projects") ||
+                contains(log_text, "to be registered")
+            fell_back = contains(log_text, "retrying directly")
+            @test tripped == fell_back
+        end
+
+        test_run!(project, by_name["pass"].id)
+        passing = await_job(1)
+        @test passing.status == :passed
+        @test passing.exitcode == 0
+        pass_log = HTMXObjects._read_test_log(passing)
+        tripped_and_fell_back(pass_log)
+        @test contains(pass_log, "fallback fixture ran pass")
+
+        test_run!(project, by_name["fail"].id)
+        failing = await_job(2)
+        @test failing.status == :failed
+        @test failing.exitcode != 0
+        fail_log = HTMXObjects._read_test_log(failing)
+        tripped_and_fell_back(fail_log)
+        @test contains(fail_log, "Test Failed")
 
         test_clear_cache!(project)
         @test isempty(HTMXObjects._test_job_snapshot(project))

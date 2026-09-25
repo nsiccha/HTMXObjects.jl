@@ -21,6 +21,14 @@ validated against the discovered catalog and launched through an isolated
 `Pkg.test(test_args=...)` child process. The package's `test/runtests.jl`
 maps `--htmxo-test=<relative-file>::<name>` arguments onto a TestItemRunner
 filter.
+
+When the `Pkg.test` sandbox itself fails to set up — Julia 1.10 drops
+`[sources]` from the synthesized sandbox and refuses a developed
+`test/Manifest` with "can not merge projects" — the run automatically falls
+back to executing `test/runtests.jl` directly with the package's own `test`
+environment (`--project=test`) and the same `--htmxo-test=` arguments. The
+fallback needs an instantiated `test/Project.toml` environment; without one
+the original `Pkg.test` error stands.
 """
 @htmx struct TestRoutes
     project = ""
