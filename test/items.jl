@@ -8498,6 +8498,111 @@ end
     end
 end
 
+# The `track_job=false` the operation layer passes to
+# `Treebars.polling_fetchindex` is only understood by Treebars
+# generations carrying the job-tracking hook (`8bde866`, where it
+# arrived together with `htmx_render_board`): older Treebars forwards
+# the unknown kwarg into `fetchindex`, where the route's strict
+# `iscached` rejects it and poisons every later poll (snag
+# track-job-forwar-44464e91). Pin both branches of the guard.
+@testitem "operation Treebars kwargs track jobs only on hook-capable Treebars" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    import Treebars
+
+    extension = Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt)
+    @test extension !== nothing
+
+    call_kwargs = (; n=1)
+    transport = (poll_url="/poll", label=nothing, poll_interval="200ms",
+                 keep_progress=true, error_obj=nothing, req=nothing)
+    hooked = extension._operation_treebars_kwargs(call_kwargs, transport, true)
+    @test hooked[:track_job] === false
+    @test hooked[:n] == 1
+    @test hooked[:poll_url] == "/poll"
+    unhooked = extension._operation_treebars_kwargs(call_kwargs, transport, false)
+    @test !haskey(unhooked, :track_job)
+    @test unhooked[:n] == 1
+    @test unhooked[:poll_url] == "/poll"
+    # The probe agrees with the loaded Treebars generation on both sides
+    # of the hook: it is the board binding, not a version number.
+    @test extension._treebars_tracks_jobs() ==
+        isdefined(Treebars, :htmx_render_board)
+end
+
+# A grace-crossing `:auto` operation must keep answering running
+# pollers until it resolves — through the REAL Treebars extension, on
+# Treebars generations both with and without the job-tracking hook.
+# Before the `track_job` guard, an old Treebars turned the first
+# mid-flight poll terminal: the unknown kwarg leaked into `fetchindex`,
+# the route's strict `iscached` threw, and the recorded failure made
+# every later poll render the failure article (snag
+# track-job-forwar-44464e91). The job assertions pin the other half:
+# the operation registers exactly once however the hook answers.
+@testitem "mid-flight polls stay live until a grace-crossing operation resolves" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
+    import Treebars
+    import HTMXObjects: _clear_operation_polls!
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    const midflight_gate = Ref(Base.Event())
+    const midflight_tracker = RuntimeTracker()
+
+    @htmx struct MidflightApp
+        "Crunch the numbers"
+        @get midflight_slow(; n::Int=0) = (wait(midflight_gate[]); h.p("midflight:$n"))
+    end
+
+    route!(MidflightApp())
+    router = HTMXObjects.ROUTER
+    app = track_requests(router; tracker=midflight_tracker)
+    function drive(target; hx=true, method="GET")
+        headers = hx ? ["HX-Request" => "true"] : Pair{String,String}[]
+        app(HTTP.Request(method, target, headers, UInt8[]))
+    end
+    poll_url(body) = replace(only(match(
+        r"hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\"", body).captures), "&amp;" => "&")
+    snapshot() = runtime_snapshot(midflight_tracker)
+
+    _clear_operation_polls!()
+    try
+        started = drive("/midflight_slow?n=1")
+        @test started.status == 200
+        url = poll_url(String(started.body))
+        # One job from the operation layer's own retain — the Treebars
+        # hook must not register it a second time where it exists.
+        job = only(snapshot().running)
+        @test job.polls == 0
+
+        # Mid-flight polls keep answering running pollers, never the
+        # terminal failure article. The sleep is the tripwire's arm, not
+        # timing slack: without a yield, a single-threaded runner never
+        # schedules the pre-fix duplicate compute before these polls, so
+        # its recorded failure would not exist yet to catch. The gate
+        # keeps the operation itself mid-flight across the sleep.
+        sleep(0.5)
+        first = drive(url)
+        @test first.status == 200
+        first_body = String(first.body)
+        @test contains(first_body, "__htmxo_poll")
+        # Terminal MARKUP — the running poller's own `hx-select` names
+        # `.treebar-terminal-content`, so the bare substring is not the
+        # discriminator; the failure article's `class="treebar-terminal…"`
+        # is.
+        @test !contains(first_body, "class=\"treebar-terminal")
+        second = drive(url)
+        @test contains(String(second.body), "__htmxo_poll")
+        @test only(snapshot().running).polls == 2
+
+        # Releasing the work resolves the operation to its fragment.
+        notify(midflight_gate[])
+        @test timedwait(() -> isempty(snapshot().running), 10.0;
+                        pollint=0.01) === :ok
+        done = drive(url)
+        @test contains(String(done.body), "midflight:1")
+    finally
+        notify(midflight_gate[])
+        _clear_operation_polls!()
+    end
+end
+
 # Every operation execution is a job from its start, whatever transport it
 # takes: it shows once it outlives the grace period (with its progress tree read
 # from DynamicObjects while it runs inline) and is forgotten if it is faster.
