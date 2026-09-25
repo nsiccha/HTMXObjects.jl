@@ -61,6 +61,38 @@ function _operation_ready_terminal(render_result, started)
         data_htmxo_auto_terminal=""))
 end
 
+# `track_job` (the job-ledger hook `polling_fetchindex` reports through)
+# and `htmx_render_board` (keyed boards) arrived in the SAME Treebars
+# commit (`8bde866`), and the board binding is a core stub — present as
+# soon as Treebars loads. So the board binding doubles as the hook
+# probe: only a Treebars that declares the kwarg gets it. Older
+# Treebars forwards unknown kwargs into `fetchindex`, where the
+# route's strict `iscached` rejects `track_job` with a MethodError —
+# recorded under a poisoned cache key, so every later poll of the
+# operation renders the failure article instead (snag
+# track-job-forwar-44464e91). Probe the core binding, never the
+# extension method's kwargs: at `__init__` time Treebars' own
+# extension may not be loaded yet, and its `kwargs...` slurp would
+# accept the probe syntactically anyway.
+_treebars_tracks_jobs() = isdefined(Treebars, :htmx_render_board)
+
+function _operation_treebars_kwargs(call_kwargs, transport,
+        treebars_tracks_jobs::Bool)
+    treebars_transport = (
+        poll_url=transport.poll_url,
+        label=transport.label,
+        poll_interval=transport.poll_interval,
+        keep_progress=transport.keep_progress,
+        error_obj=transport.error_obj,
+        req=transport.req,
+    )
+    kwargs = merge(call_kwargs, treebars_transport)
+    # The operation layer records this job itself (`retain`), so a
+    # hook-capable Treebars must not track it again — but only such a
+    # Treebars understands `track_job` (see `_treebars_tracks_jobs`).
+    treebars_tracks_jobs ? merge(kwargs, (; track_job=false)) : kwargs
+end
+
 function _operation_render_result(render_result, value, transport)
     rendered = render_result(value)
     transport.replace_page_load || return rendered
@@ -114,17 +146,8 @@ function __init__()
             # emit a poller. Fast values and test seams that replace this
             # extension never occupy the bounded operation registry.
             transport.retain()
-            treebars_transport = (
-                poll_url=transport.poll_url,
-                label=transport.label,
-                poll_interval=transport.poll_interval,
-                keep_progress=transport.keep_progress,
-                error_obj=transport.error_obj,
-                req=transport.req,
-                # The operation layer records this job itself (`retain`).
-                track_job=false,
-            )
-            kwargs = merge(call_kwargs, treebars_transport)
+            kwargs = _operation_treebars_kwargs(
+                call_kwargs, transport, _treebars_tracks_jobs())
             responded = try
                 Treebars.polling_fetchindex(
                     render_operation_result, ip, keys...; kwargs...)
