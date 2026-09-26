@@ -25,6 +25,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     SlowPagePolicyApp, FastPagePolicyApp, SlowRecordApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     PreloadApp, reset_preload!, release_preload!, preload_count,
+    LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -656,6 +657,101 @@ end
     @preload @get fast(; n::Int=1) = preload_work(:fast, n)
     @get @preload slow(; n::Int=1) = preload_work(:slow, n; gated=true)
     @preload @post submit(; n::Int=1) = preload_work(:submit, n)
+end
+
+# Live-refresh morph fixtures (snag live-refresh-ter-ca6f5ff9): a
+# self-refreshing aggregate section (periodic trigger, outer swap) over a
+# render that answers fast once, then blocks until its own interim poller
+# has been served. The test server counts INITIAL interims (non-poll
+# requests whose body points at a `__htmxo_poll` URL); each slow render
+# waits for its own count, so slow cycles stay slow with no wall-clock
+# timing. `LiveMorphNoExtApp` serves the same flow with no morph engine on
+# the page: its seed swap is core `outerHTML` and the driver flips the live
+# element to `morph:outerHTML` after the fast settle, isolating the
+# engine-absent fallback in the terminal path.
+const live_morph_interims = Ref(0)
+
+reset_live_morph!() = (live_morph_interims[] = 0; nothing)
+
+const _LIVE_MORPH_EXT =
+    "https://unpkg.com/idiomorph@0.7.3/dist/idiomorph-ext.min.js"
+
+function live_morph_driver(; flip_swap::Bool=false, slow_cycles::Int=1)
+    h.script(Raw("""
+    (function() {
+      var slow = $slow_cycles;
+      var flip = $(flip_swap ? "true" : "false");
+      function fire(n) {
+        var sec = document.getElementById('live-morph');
+        htmx.ajax('GET', 'panel?n=' + n,
+          {target: sec, swap: sec.getAttribute('hx-swap'), source: sec});
+      }
+      function content() {
+        var sec = document.getElementById('live-morph');
+        return sec ? sec.textContent : '';
+      }
+      window.addEventListener('load', function() {
+        fire(1);
+        var phase = 2;
+        var iv = setInterval(function() {
+          var sec = document.getElementById('live-morph');
+          if (!sec) return;
+          if (phase === 2 && sec.hasAttribute('data-htmxo-live-settled')) {
+            if (flip) sec.setAttribute('hx-swap', 'morph:outerHTML');
+            fire(2);
+            phase = 3;
+          } else if (phase === 3 && content().indexOf('rows n=2') !== -1) {
+            if (slow < 2) {
+              clearInterval(iv);
+              document.body.dataset.liveMorphDone = '1';
+            } else {
+              fire(3);
+              phase = 4;
+            }
+          } else if (phase === 4 && content().indexOf('rows n=3') !== -1) {
+            clearInterval(iv);
+            document.body.dataset.liveMorphDone = '1';
+          }
+        }, 50);
+      });
+    })();
+    """))
+end
+
+function live_morph_section(n, swap)
+    h.section("rows n=$n"; id="live-morph", hx_get="panel?n=$n",
+        hx_trigger="every 60s", hx_swap=swap, hx_ext="morph")
+end
+
+function live_morph_panel(n, swap)
+    if n != 1
+        while live_morph_interims[] < n - 1
+            sleep(0.01)
+        end
+    end
+    live_morph_section(n, swap)
+end
+
+function live_morph_shell(content; ext::Bool, flip_swap::Bool, slow_cycles::Int)
+    extra = ext ? (h.script(""; src=_LIVE_MORPH_EXT),
+                   live_morph_driver(; flip_swap, slow_cycles)) :
+                  (live_morph_driver(; flip_swap, slow_cycles),)
+    htmx(content; hyperscript_version=nothing, feedback=false, compose=false,
+         thread=false, overlay=false, extra_head=extra)
+end
+
+@htmx struct LiveMorphApp
+    __page__(content) =
+        live_morph_shell(content; ext=true, flip_swap=false, slow_cycles=2)
+    @get index() = live_morph_section(0, "morph:outerHTML")
+    @get panel(; n::Int=1) = live_morph_panel(n, "morph:outerHTML")
+end
+
+@htmx struct LiveMorphNoExtApp
+    __page__(content) =
+        live_morph_shell(content; ext=false, flip_swap=true, slow_cycles=1)
+    @get index() = live_morph_section(0, "outerHTML")
+    @get panel(; n::Int=1) = live_morph_panel(n, "outerHTML")
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -3077,6 +3173,149 @@ end
                       forwarded_targets)
         finally
             released[] || release_slow_page!()
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "live_refresh terminal swaps through the target's own style" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    html = repr("text/html", HTMXObjects.live_refresh_script())
+    # The diverted terminal must swap through swap-style extensions exactly
+    # like the ajax path: without `contextElement` htmx never consults
+    # extensions and a `morph:outerHTML` terminal silently falls back to
+    # `innerHTML`, nesting the result inside the live target (duplicate
+    # ids, double polling, reporter stranded inside).
+    @test contains(html, "contextElement")
+    # Engine-absent fallback: a `morph:*` terminal keeps the outer/inner
+    # distinction via the core style instead of the innerHTML fallback.
+    @test contains(html, "morph:innerHTML")
+end
+
+@testitem "live-refresh morph:outerHTML terminal morphs in place" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_live_morph!()
+        _clear_operation_polls!()
+        route!(LiveMorphApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            target = String(req.target)
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            resp = handler(req)
+            body = String(resp.body)
+            if startswith(HTTP.URI(target).path, "/panel") &&
+                    !contains(target, "__htmxo_poll") &&
+                    contains(body, "__htmxo_poll")
+                live_morph_interims[] += 1
+            end
+            resp
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            # Driver controls: the fast settle plus both slow divert cycles
+            # ran to completion.
+            @test contains(dom, "data-live-morph-done=\"1\"")
+            @test contains(dom, "rows n=3")
+            # Exactly one live section: the diverted terminals morphed in
+            # place instead of nesting (pre-fix: 2, a duplicate id).
+            @test length(collect(eachmatch(r"id=\"live-morph\"", dom))) == 1
+            # Exactly one reporter, hidden and empty, sitting after the
+            # section as a true sibling — never stranded inside it.
+            @test length(collect(eachmatch(
+                r"<div class=\"htmxo-live-reporter\"", dom))) == 1
+            @test contains(dom, "rows n=3</section>" *
+                "<div class=\"htmxo-live-reporter\" hidden=\"\"></div>")
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "live-refresh morph terminal replaces without the morph engine" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_live_morph!()
+        _clear_operation_polls!()
+        route!(LiveMorphNoExtApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            target = String(req.target)
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            resp = handler(req)
+            body = String(resp.body)
+            if startswith(HTTP.URI(target).path, "/panel") &&
+                    !contains(target, "__htmxo_poll") &&
+                    contains(body, "__htmxo_poll")
+                live_morph_interims[] += 1
+            end
+            resp
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            @test contains(dom, "data-live-morph-done=\"1\"")
+            @test contains(dom, "rows n=2")
+            # No morph engine on the page: the `morph:outerHTML` terminal
+            # keeps replace semantics via core `outerHTML` — one section,
+            # current content, no nesting.
+            @test length(collect(eachmatch(r"id=\"live-morph\"", dom))) == 1
+            # Every reporter is hidden, empty, and outside the section. (A
+            # stale hidden sibling survives the replace — the re-stamp mints
+            # a fresh reporter for the new node — pre-existing outerHTML
+            # behavior, not nesting.)
+            sec = match(r"<section id=\"live-morph\".*?</section>"s, dom)
+            @test !isnothing(sec)
+            @test !contains(sec.match, "htmxo-live-reporter")
+            opens = length(collect(eachmatch(
+                r"<div class=\"htmxo-live-reporter\"", dom)))
+            @test opens >= 1
+            @test length(collect(eachmatch(
+                r"<div class=\"htmxo-live-reporter\" hidden=\"\"></div>",
+                dom))) == opens
+        finally
             close(server)
             _clear_operation_polls!()
         end
