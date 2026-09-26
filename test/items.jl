@@ -26,6 +26,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
     PreloadApp, reset_preload!, release_preload!, preload_count,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
+    LiveEventMorphApp, reset_event_morph!, event_morph_interims,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -752,6 +753,115 @@ end
         live_morph_shell(content; ext=false, flip_swap=true, slow_cycles=1)
     @get index() = live_morph_section(0, "outerHTML")
     @get panel(; n::Int=1) = live_morph_panel(n, "outerHTML")
+end
+
+# Live-refresh event-driven fixtures (snag event-driven-mor-fbd7ee77): a
+# MARKED aggregate section with NO periodic trigger — refreshed from
+# elsewhere, the roster-table shape — over a render that blocks until its
+# own interim poller has been served. The test server counts INITIAL
+# interims (non-poll requests whose body points at a `__htmxo_poll` URL);
+# each slow render waits for its own count, so slow cycles stay slow with no
+# wall-clock timing. Cycle 1 fires from a real button
+# (`hx-get`/`hx-target`/`hx-swap`: the requester-carries-style shape);
+# cycle 2 fires from `htmx.ajax` with an explicit `swap:` option. An
+# UNMARKED control section refreshes the same way and is expected to flash:
+# it proves the harness can see the interim the marker diverts.
+const event_morph_interims = Ref(0)
+
+reset_event_morph!() = (event_morph_interims[] = 0; nothing)
+
+function event_morph_driver()
+    h.script(Raw("""
+    (function() {
+      function sec() { return document.getElementById('event-morph'); }
+      function plainWrap() { return document.getElementById('event-plain-wrap'); }
+      function content(el) { return el ? el.textContent : ''; }
+      window.addEventListener('load', function() {
+        var phase = 1;
+        // Latches, read back through the dumped DOM.
+        var settledAtLoad = false;
+        var held = true;        // marked target kept rows while BUSY, never mounted a poller
+        var plainFlashed = false; // control DID mount an interim (the red control)
+        var iv = setInterval(function() {
+          var s = sec(), pw = plainWrap();
+          if (s && s.hasAttribute('data-htmxo-live-settled')) settledAtLoad = true;
+          // The marked target must never vanish: divert keeps the node and
+          // the morph terminal preserves its id, so any absence is the
+          // eviction this marker exists to prevent.
+          if (!s) held = false;
+          // Sample every tick: while the marked target is mid-refresh it
+          // must hold rows and stay poller-free.
+          if (s && s.hasAttribute('data-htmxo-live-busy')) {
+            if (content(s).indexOf('rows') === -1) held = false;
+            if (s.querySelector('.treebar-poller-inner')) held = false;
+          }
+          // The control morphs its interim in place (no marker, no divert),
+          // so the poller-inner appears inside its stable wrapper. The
+          // wrapper — not the section id, which the interim morph consumes —
+          // is what makes the flash observable.
+          if (pw && pw.querySelector('.treebar-poller-inner')) plainFlashed = true;
+          if (!s || !pw) return;
+          if (phase === 1 && settledAtLoad) {
+            document.getElementById('event-btn').click();
+            phase = 2;
+          } else if (phase === 2 && content(s).indexOf('rows n=1') !== -1) {
+            htmx.ajax('GET', 'panel?n=2', {target: s, swap: 'morph:outerHTML', source: s});
+            phase = 3;
+          } else if (phase === 3 && content(s).indexOf('rows n=2') !== -1) {
+            var c = document.getElementById('event-plain');
+            htmx.ajax('GET', 'control?n=1', {target: c || pw, swap: 'morph:outerHTML', source: c || pw});
+            phase = 4;
+          } else if (phase === 4 && content(pw).indexOf('rows n=1') !== -1) {
+            clearInterval(iv);
+            var b = document.body.dataset;
+            b.evSettledAtLoad = settledAtLoad ? '1' : '0';
+            b.evHeld = held ? '1' : '0';
+            b.evPlainFlashed = plainFlashed ? '1' : '0';
+            b.evDone = '1';
+          }
+        }, 25);
+      });
+    })();
+    """))
+end
+
+function event_morph_section(n)
+    # The marked target carries NO hx-* at all — exactly the roster-table
+    # constraint (an inheritable hx-swap on the wrapper would retarget
+    # nested self-polls). The morph extension rides the page wrapper.
+    h.section("rows n=$n"; id="event-morph", data_htmxo_live="")
+end
+
+function event_plain_section(n)
+    h.section("rows n=$n"; id="event-plain")
+end
+
+function event_morph_panel(n)
+    while event_morph_interims[] < n
+        sleep(0.01)
+    end
+    event_morph_section(n)
+end
+
+function event_plain_panel(n)
+    while event_morph_interims[] < n + 2
+        sleep(0.01)
+    end
+    event_plain_section(n)
+end
+
+@htmx struct LiveEventMorphApp
+    __page__(content) = htmx(content; hyperscript_version=nothing,
+        feedback=false, compose=false, thread=false, overlay=false,
+        extra_head=(h.script(""; src=_LIVE_MORPH_EXT), event_morph_driver()))
+    @get index() = h.div(; hx_ext="morph")(
+        h.button("refresh"; id="event-btn", type="button",
+            hx_get="panel?n=1", hx_target="#event-morph",
+            hx_swap="morph:outerHTML", hx_trigger="click"),
+        event_morph_section(0),
+        h.div(; id="event-plain-wrap")(event_plain_section(0)))
+    @get panel(; n::Int=1) = event_morph_panel(n)
+    @get control(; n::Int=1) = event_plain_panel(n)
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -3315,6 +3425,100 @@ end
             @test length(collect(eachmatch(
                 r"<div class=\"htmxo-live-reporter\" hidden=\"\"></div>",
                 dom))) == opens
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "live_refresh event-driven marker diverts with the request's style" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    html = repr("text/html", HTMXObjects.live_refresh_script())
+    # Opt-in marker for event-driven aggregate targets: presence-only, the
+    # value is ignored.
+    @test contains(html, "data-htmxo-live")
+    # The diverted terminal reuses the requesting element's swap style: an
+    # ajax `swap:` option or `HX-Reswap` header first, then the requester's
+    # `hx-swap` stashed at request start, then the target's own attribute.
+    @test contains(html, "htmx:configRequest")
+    @test contains(html, "__htmxoSwapStyle")
+    @test contains(html, "swapOverride")
+    # Marked aggregates stamp settled once they hold non-poller content —
+    # server-rendered content diverts from the first refresh, empty
+    # placeholders and first-paint pollers stay unstamped until a terminal.
+    @test contains(html, "holdsSettledContent")
+    # A `none` style swaps nothing — there is no flash to prevent, so the
+    # interim is left for htmx to no-op naturally instead of diverting.
+    @test contains(html, "=== 'none'")
+end
+
+@testitem "live-refresh event-driven marker holds content plus progress" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_event_morph!()
+        _clear_operation_polls!()
+        route!(LiveEventMorphApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            target = String(req.target)
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            resp = handler(req)
+            body = String(resp.body)
+            path = HTTP.URI(target).path
+            if (startswith(path, "/panel") || startswith(path, "/control")) &&
+                    !contains(target, "__htmxo_poll") &&
+                    contains(body, "__htmxo_poll")
+                event_morph_interims[] += 1
+            end
+            resp
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            # Driver controls: the marked target settled at load, both event
+            # cycles (button click, then htmx.ajax) held rows without ever
+            # mounting a poller, the unmarked control DID flash (the red
+            # control — the harness sees the interim the marker diverts),
+            # and everything ran to completion.
+            @test contains(dom, "data-ev-done=\"1\"")
+            @test contains(dom, "data-ev-settled-at-load=\"1\"")
+            @test contains(dom, "data-ev-held=\"1\"")
+            @test contains(dom, "data-ev-plain-flashed=\"1\"")
+            @test contains(dom, "rows n=2")
+            # Exactly one marked section: both diverted terminals morphed in
+            # place instead of nesting or evicting.
+            @test length(collect(eachmatch(r"id=\"event-morph\"", dom))) == 1
+            # Exactly one reporter, hidden and empty, sitting after the
+            # marked section as a true sibling — the control (unmarked) mints
+            # none.
+            @test length(collect(eachmatch(
+                r"<div class=\"htmxo-live-reporter\"", dom))) == 1
+            @test contains(dom, "rows n=2</section>" *
+                "<div class=\"htmxo-live-reporter\" hidden=\"\"></div>")
+            # The cycle completed cleanly: no liveness flag left behind. (The
+            # bare name appears in the page's own scripts, so match the
+            # attribute form.)
+            @test !contains(dom, "data-htmxo-live-busy=\"")
         finally
             close(server)
             _clear_operation_polls!()

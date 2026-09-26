@@ -11626,24 +11626,31 @@ show_when_script() = h.script(Raw(raw"""
 """
     live_refresh_script()
 
-Return a `<script>` that keeps a *live/periodic-refresh* fragment stable across
-re-fetches. A fragment that self-polls on a periodic trigger (`hx-trigger`
-contains `every`) over a slow `:auto` operation would otherwise flip-flop its
+Return a `<script>` that keeps a *live-refresh* fragment stable across
+re-fetches. A periodic fragment (one that self-polls on an `hx-trigger`
+containing `every`) over a slow `:auto` operation would otherwise flip-flop its
 settled content to poller chrome on every re-fetch (grace miss → poller swapped
-over the live content), then back. This script intercepts that: on a re-fetch of
-an **already-settled** live element it keeps the content in place, diverts the
-interim poller into a dedicated, unobtrusive progress reporter ("behind the
-hairline"), and swaps the terminal result into the target only once it resolves.
-First loads are untouched, so `:auto` progress chrome still shows the first time.
-The terminal is applied with the target's own `hx-swap` style — `morph:*`
-styles swap through the morph extension (via `contextElement`, exactly like the
-ajax path), so an outer morph replaces in place instead of nesting; without the
-morph engine they fall back to the matching core style.
+over the live content), then back; an event-driven aggregate refreshed from a
+button or event trigger has the same shape (its interim evicts the settled
+content until the terminal restores it). This script intercepts both: on a
+re-fetch of an **already-settled** live element it keeps the content in place,
+diverts the interim poller into a dedicated, unobtrusive progress reporter
+("behind the hairline"), and swaps the terminal result into the target only
+once it resolves. First loads are untouched, so `:auto` progress chrome still
+shows the first time. The terminal is applied with the *request's* swap style —
+`morph:*` styles swap through the morph extension (via `contextElement`,
+exactly like the ajax path), so an outer morph replaces in place instead of
+nesting; without the morph engine they fall back to the matching core style.
 
-Automatic — no consumer wiring. Detection uses the same Treebars markers the
-poller/terminal already carry (`treebar-poller` vs `treebar-terminal-content`).
-Include once per page; the `htmx()` shell installs it alongside the Treebars
-assets.
+Periodic targets are automatic — no consumer wiring. An event-driven target
+opts in by carrying `data-htmxo-live`: once it holds settled (non-poller)
+content it diverts exactly like a periodic target, whatever trigger or
+requesting element the refresh came from. The marker is presence-only (its
+value is ignored) and inert for htmx itself (`data-*` attributes never
+inherit, unlike `hx-swap`, so it is safe on aggregate wrappers). Detection
+uses the same Treebars markers the poller/terminal already carry
+(`treebar-poller` vs `treebar-terminal-content`). Include once per page; the
+`htmx()` shell installs it alongside the Treebars assets.
 """
 live_refresh_script() = h.script(Raw(raw"""
 (function() {
@@ -11651,6 +11658,7 @@ live_refresh_script() = h.script(Raw(raw"""
   window.__htmxoLiveRefresh = true;
   var SETTLED = 'data-htmxo-live-settled';
   var BUSY = 'data-htmxo-live-busy';
+  var MARKER = 'data-htmxo-live';
 
   // The reporter lives "behind the hairline": a subtle, muted strip below a
   // 1px divider, so an ongoing refresh reads as quiet background progress, not
@@ -11662,16 +11670,18 @@ live_refresh_script() = h.script(Raw(raw"""
     'opacity:.6;font-size:.82em}.htmxo-live-reporter[hidden]{display:none}';
   (document.head || document.documentElement).appendChild(st);
 
-  // A live element self-polls on a periodic trigger and swaps its own region.
-  // It re-fetches the ROUTE url (never a `__htmxo_poll` url) and is not part of
-  // poller chrome — that distinguishes it from a Treebars poller-inner, which
-  // also carries an `every` trigger (its 200ms self-poll).
+  // A live element is either a periodic self-poll (an `every` trigger swapping
+  // its own region) or an explicitly marked event-driven aggregate target
+  // (`data-htmxo-live`, refreshed from elsewhere). Both re-fetch a ROUTE url
+  // (never a `__htmxo_poll` url) and are never part of poller chrome — that
+  // distinguishes a live element from a Treebars poller-inner, which also
+  // carries an `every` trigger (its 200ms self-poll).
   function isLive(el) {
     if (!el || !el.getAttribute) return false;
-    if ((el.getAttribute('hx-trigger') || '').indexOf('every') === -1) return false;
-    if ((el.getAttribute('hx-get') || '').indexOf('__htmxo_poll') !== -1) return false;
     if (el.closest && (el.closest('.treebar-poller') || el.closest('.htmxo-live-reporter'))) return false;
-    return true;
+    if ((el.getAttribute('hx-get') || '').indexOf('__htmxo_poll') !== -1) return false;
+    if (el.hasAttribute(MARKER)) return true;
+    return (el.getAttribute('hx-trigger') || '').indexOf('every') !== -1;
   }
   // Parse a response fragment's first element. Classifying by the actual
   // top-level class is required: a running poller's `hx-select` attribute value
@@ -11709,6 +11719,22 @@ live_refresh_script() = h.script(Raw(raw"""
     rep.__htmxoLiveTarget = el;
     return rep;
   }
+  // A marked target holds settled content when it shows something other than
+  // a running poller: a server-rendered aggregate stamps at page load (so its
+  // first event refresh already diverts), while an empty placeholder or a
+  // first-paint poller stays unstamped until a terminal arrives.
+  function holdsSettledContent(el) {
+    if (el.querySelector && el.querySelector('.treebar-poller-inner')) return false;
+    if (el.children && el.children.length > 0) return true;
+    return (el.textContent || '').replace(/\s+/g, '').length > 0;
+  }
+  function stampLiveMarkers() {
+    document.querySelectorAll('[' + MARKER + ']:not([' + SETTLED + '])').forEach(function(el) {
+      if (!isLive(el) || !holdsSettledContent(el)) return;
+      el.setAttribute(SETTLED, '1');
+      reporterFor(el);
+    });
+  }
   // The bare swap style: `hx-swap` modifiers ("outerHTML swap:1s") ride the
   // attribute but are not part of the style, while a `morph:{...}` config
   // keeps its spaces.
@@ -11717,7 +11743,7 @@ live_refresh_script() = h.script(Raw(raw"""
     var i = swap.indexOf(' ');
     return i === -1 ? swap : swap.slice(0, i);
   }
-  // Swap terminal content into the live target with the target's OWN swap
+  // Swap terminal content into the live target with the diverted request's swap
   // style. `htmx.swap` consults swap-style extensions (e.g. `morph`) ONLY
   // through `swapOptions.contextElement` — without it a `morph:*` style
   // silently falls back to htmx's default `innerHTML` swap, nesting the
@@ -11763,6 +11789,54 @@ live_refresh_script() = h.script(Raw(raw"""
   }
   document.addEventListener('htmx:afterSettle', function(evt) {
     stampSettled(evt.detail && evt.detail.elt);
+    // Marked targets re-render with their marker on every terminal, so a
+    // sweep (not a subtree walk) re-stamps them no matter which swap shape
+    // delivered the content — including a morph that consumed the old node.
+    stampLiveMarkers();
+  });
+  // Server-rendered aggregates already hold settled content at page load, so
+  // their FIRST event refresh diverts too — unlike periodic targets, which
+  // must show a terminal before they settle.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', stampLiveMarkers);
+  } else {
+    stampLiveMarkers();
+  }
+
+  // The terminal's swap style lives on the REQUESTING element: htmx resolves
+  // `hx-swap` from the requester (inheriting up its ancestors), and
+  // `htmx.ajax` takes it as an option — while a marked target is a passive
+  // node that must NOT repeat it (`hx-swap` inherits to descendants, so
+  // stamping it on an aggregate wrapper would retarget every nested
+  // self-poll). Remember the requester's style on the target at request
+  // start; `detail.swapOverride` (ajax `swap:` / `HX-Reswap`) is read at
+  // divert time and takes precedence, exactly like the ajax path. Two
+  // overlapping same-target requests with different styles race on this
+  // stash (last start wins); same-target refreshes overwhelmingly share one
+  // style, and the BUSY drop serializes diverts anyway.
+  function closestSwap(elt) {
+    var el = elt;
+    while (el && el.getAttribute) {
+      var v = el.getAttribute('hx-swap');
+      if (v != null) return v;
+      el = el.parentElement;
+    }
+    return null;
+  }
+  document.addEventListener('htmx:configRequest', function(evt) {
+    var d = evt.detail; if (!d || !d.target) return;
+    if (!isLive(d.target)) return;
+    // Request-start stamping: a marked target holding content when a refresh
+    // starts IS settled, however it arrived (server render, earlier swap).
+    // Empty placeholders and first-paint pollers still hold nothing, so
+    // first paints never divert. This also covers any parse-timing gap in
+    // the initial sweep above.
+    if (!d.target.hasAttribute(SETTLED) && d.target.hasAttribute(MARKER) &&
+        holdsSettledContent(d.target)) {
+      d.target.setAttribute(SETTLED, '1');
+      reporterFor(d.target);
+    }
+    d.target.__htmxoSwapStyle = closestSwap(d.elt);
   });
 
   document.addEventListener('htmx:beforeSwap', function(evt) {
@@ -11773,6 +11847,15 @@ live_refresh_script() = h.script(Raw(raw"""
     // (A) Re-fetch of a settled live element that came back a poller:
     //     keep the content, divert the poller into the reporter.
     if (target && isLive(target) && target.hasAttribute(SETTLED) && isPoller(resp)) {
+      // Resolve the diverted terminal's style from THIS request: an ajax
+      // `swap:` option or `HX-Reswap` header first, then the requester's
+      // `hx-swap` stashed at request start, then the target's own attribute
+      // (the periodic self-poll shape), then the legacy default. A `none`
+      // style swaps nothing at all — there is no flash to prevent, so let
+      // htmx no-op naturally instead of diverting.
+      var style = d.swapOverride || target.__htmxoSwapStyle ||
+                  target.getAttribute('hx-swap') || 'outerHTML';
+      if (bareSwapStyle(style) === 'none') return;
       d.shouldSwap = false;
       if (target.hasAttribute(BUSY)) {
         // A prior refresh is still polling in the reporter — drop this re-fire.
@@ -11785,6 +11868,9 @@ live_refresh_script() = h.script(Raw(raw"""
       target.setAttribute(BUSY, '1');
       var rep = reporterFor(target);
       rep.__htmxoLiveTarget = target;
+      // Per-cycle state on the reporter: immune to a later request
+      // re-stashing the target mid-cycle.
+      rep.__htmxoSwapStyle = style;
       rep.hidden = false;
       rep.innerHTML = resp;
       if (window.htmx && window.htmx.process) window.htmx.process(rep);
@@ -11801,12 +11887,13 @@ live_refresh_script() = h.script(Raw(raw"""
       tmp.innerHTML = resp;
       var term = tmp.content.querySelector('.treebar-terminal-content');
       // The result content the route rendered, applied to the live target with
-      // the target's OWN swap style — so `outerHTML`/`morph:outerHTML`
+      // the diverted request's swap style — so `outerHTML`/`morph:outerHTML`
       // replaces the element (in place for morph) while
       // `innerHTML`/`morph:innerHTML` reconciles its children.
       var content = term ? term.innerHTML : null;
       if (content != null) {
-        swapTerminal(live, content, live.getAttribute('hx-swap') || 'outerHTML');
+        swapTerminal(live, content, rep2.__htmxoSwapStyle ||
+                     live.getAttribute('hx-swap') || 'outerHTML');
       }
       rep2.innerHTML = '';
       rep2.hidden = true;
