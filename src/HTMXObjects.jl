@@ -11635,6 +11635,10 @@ an **already-settled** live element it keeps the content in place, diverts the
 interim poller into a dedicated, unobtrusive progress reporter ("behind the
 hairline"), and swaps the terminal result into the target only once it resolves.
 First loads are untouched, so `:auto` progress chrome still shows the first time.
+The terminal is applied with the target's own `hx-swap` style — `morph:*`
+styles swap through the morph extension (via `contextElement`, exactly like the
+ajax path), so an outer morph replaces in place instead of nesting; without the
+morph engine they fall back to the matching core style.
 
 Automatic — no consumer wiring. Detection uses the same Treebars markers the
 poller/terminal already carry (`treebar-poller` vs `treebar-terminal-content`).
@@ -11705,6 +11709,38 @@ live_refresh_script() = h.script(Raw(raw"""
     rep.__htmxoLiveTarget = el;
     return rep;
   }
+  // The bare swap style: `hx-swap` modifiers ("outerHTML swap:1s") ride the
+  // attribute but are not part of the style, while a `morph:{...}` config
+  // keeps its spaces.
+  function bareSwapStyle(swap) {
+    if (swap === 'morph' || swap.indexOf('morph:{') === 0) return swap;
+    var i = swap.indexOf(' ');
+    return i === -1 ? swap : swap.slice(0, i);
+  }
+  // Swap terminal content into the live target with the target's OWN swap
+  // style. `htmx.swap` consults swap-style extensions (e.g. `morph`) ONLY
+  // through `swapOptions.contextElement` — without it a `morph:*` style
+  // silently falls back to htmx's default `innerHTML` swap, nesting the
+  // terminal inside the target (duplicate ids, double polling, and a
+  // reporter stranded inside by the re-stamp). Pass the live target so
+  // extension lookup walks up from it, exactly like the ajax path.
+  function swapTerminal(live, content, swap) {
+    var style = bareSwapStyle(swap);
+    if (window.htmx && window.htmx.swap) {
+      if ((style === 'morph' || style.indexOf('morph:') === 0) &&
+          !(window.Idiomorph && Idiomorph.morph)) {
+        // Morph engine absent (the extension failed to load): keep the
+        // outer/inner distinction with the core style rather than htmx's
+        // silent innerHTML fallback.
+        style = (style === 'morph:innerHTML') ? 'innerHTML' : 'outerHTML';
+      }
+      window.htmx.swap(live, content, { swapStyle: style }, { contextElement: live });
+    } else if (style.indexOf('outerHTML') !== -1) {
+      live.outerHTML = content;
+    } else {
+      live.innerHTML = content;
+    }
+  }
   // Stamp any settled live element in a freshly swapped subtree, and give it a
   // reporter. A live element only ever appears carrying terminal content, so
   // "swapped in" == "settled".
@@ -11765,18 +11801,12 @@ live_refresh_script() = h.script(Raw(raw"""
       tmp.innerHTML = resp;
       var term = tmp.content.querySelector('.treebar-terminal-content');
       // The result content the route rendered, applied to the live target with
-      // the target's OWN swap style — so `outerHTML` replaces the element while
+      // the target's OWN swap style — so `outerHTML`/`morph:outerHTML`
+      // replaces the element (in place for morph) while
       // `innerHTML`/`morph:innerHTML` reconciles its children.
       var content = term ? term.innerHTML : null;
       if (content != null) {
-        var swap = live.getAttribute('hx-swap') || 'outerHTML';
-        if (window.htmx && window.htmx.swap) {
-          window.htmx.swap(live, content, { swapStyle: swap });
-        } else if (swap.indexOf('outerHTML') !== -1) {
-          live.outerHTML = content;
-        } else {
-          live.innerHTML = content;
-        }
+        swapTerminal(live, content, live.getAttribute('hx-swap') || 'outerHTML');
       }
       rep2.innerHTML = '';
       rep2.hidden = true;
