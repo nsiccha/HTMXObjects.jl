@@ -4080,6 +4080,47 @@ end
     @test formparams(body)["ok"] == "1"
 end
 
+@testitem "path params arrive percent-decoded" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    # Snag `htmxo-path-param-79355e13`: the sanctioned builder escapes path
+    # segments (`__self__ / "detail/$(HTTP.escapeuri(name))"`, htmxo-use §6),
+    # so route bodies must receive them decoded.
+    @htmx struct PathDecodeApp
+        @get echo(name::String) = string("got:", name)
+        @get pair(a::String, b::String) = string("got:", a, "|", b)
+        @get num(id::Int) = string("got:", id)
+        @get bare(name) = string("got:", name)
+    end
+    route!(PathDecodeApp())
+    @test contains(String(dispatch(:GET, "/echo/scan%201.pdf").body), "got:scan 1.pdf")
+    @test contains(String(dispatch(:GET, "/pair/a%20b/c%26d").body), "got:a b|c&d")
+    @test contains(String(dispatch(:GET, "/num/42").body), "got:42")
+    @test contains(String(dispatch(:GET, "/bare/x%25y").body), "got:x%y")
+    @test contains(String(dispatch(:GET, "/echo/%C3%A9").body), "got:é")
+    # Lenient like query/form: a bare `%` is a value, not a 500 — and `+`
+    # stays a plus in paths (no form `+`-to-space here).
+    r = dispatch(:GET, "/echo/50%")
+    @test r.status == 200
+    @test contains(String(r.body), "got:50%")
+    @test contains(String(dispatch(:GET, "/echo/a+b").body), "got:a+b")
+end
+
+@testitem "indexed @include keys arrive percent-decoded" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    # Same snag, second chokepoint: indexed mounts resolve through
+    # `_chain_steps` / `_resolve_index_arg`, not `_extract_args`.
+    route!(IndexedMountRoot())
+    r = dispatch(:GET, "/item/a%20b")
+    @test r.status == 200
+    @test String(r.body) == "child a b"
+end
+
+@testitem "operation refresh decodes path values" setup=[HTMXOTestImports] tags=[:unit] begin
+    # Same snag, third chokepoint: `_operation_refresh_values` re-extracts
+    # path segments for semantic form refreshes.
+    route = (params=[(name=:f, type=String, source=:path, required=true, default=nothing)],)
+    req = HTTP.Request("GET", "/op/a%20b")
+    @test HTMXObjects._operation_refresh_values(req, route, 1, 1).values == Dict(:f => "a b")
+end
+
 @testitem "raw POST body never 500s the argument extractor" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # A non-form payload posted to a route that declares a kwarg. Every
     # Content-Type must reach the handler; none may throw out of `_extract_args`
