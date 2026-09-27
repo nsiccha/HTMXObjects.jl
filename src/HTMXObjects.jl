@@ -1931,10 +1931,13 @@ end
 function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_params)
     verb_short = _verb_short(verb)
 
-    # Build positional param conversion statements (by URL segment position)
+    # Build positional param conversion statements (by URL segment position).
+    # Segments arrive percent-encoded; decode each one ONCE here, before
+    # `_convert_param` — never inside it, which also serves already-decoded
+    # query/form values (snag `htmxo-path-param-79355e13`).
     pos_stmts = Expr[]
     for (i, (pname, ptype)) in enumerate(pos_params)
-        segment_expr = :(__parts__[__base_segments__ + $i])
+        segment_expr = :($(_percent_decode_lenient)(__parts__[__base_segments__ + $i]))
         convert_call = ptype === nothing ?
             :($(_convert_param)($segment_expr, nothing)) :
             :($(_convert_param)($segment_expr, $ptype))
@@ -7050,6 +7053,9 @@ end
 
 Turn one URL segment into the value an indexed mount is selected by.
 
+The segment is percent-decoded first, so an encoded value matches its decoded
+wire spelling (snag `htmxo-path-param-79355e13`).
+
 When the parameter has a domain ([`_index_candidates`](@ref)), the segment is
 matched against [`option_wire_value`](@ref) for each candidate and the candidate ITSELF
 is returned — so `/dataset/synthetic_depot` reconstructs the `Dataset` node,
@@ -7064,6 +7070,7 @@ With no domain, the ordinary `_convert_param` parse applies unchanged, which is
 what every scalar mount keeps doing.
 """
 function _resolve_index_arg(parent, param, raw, T)
+    raw = _percent_decode_lenient(raw)
     candidates = _index_candidates(parent, param, T)
     isnothing(candidates) && return _convert_param(raw, T)
     target = String(raw)
@@ -10995,7 +11002,7 @@ function _operation_refresh_values(req, route, base::Int, n_params::Int)
         if param.source === :path
             path_index += 1
             path_index <= n_params || continue
-            value = _convert_param(parts[base + path_index], param.type)
+            value = _convert_param(_percent_decode_lenient(parts[base + path_index]), param.type)
             values[param.name] = value
             push!(idx_vals, value)
         else
