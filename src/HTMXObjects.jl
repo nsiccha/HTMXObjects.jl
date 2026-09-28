@@ -2079,6 +2079,9 @@ client (a `ws-connect` element); it loads only alongside the shell's own
 htmx for the same reason.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
+Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
+it defaults to `false` — the bundle is served only by the KB app, so standalone
+pages omit the fetch.
 
 `preload_version` loads htmx's [`preload` extension](https://htmx.org/extensions/preload/),
 enables it page-wide and adds [`preload_runtime_js`](@ref). It is inert until an
@@ -2102,7 +2105,9 @@ function htmx(args...;
     feedback             = true,
     compose              = true,
     thread               = true,
-    overlay              = true,
+    # Opt-in: the bar bundle is a KB-app-only route (`KB_ORIGIN/overlay/bar.js`),
+    # so standalone pages must not fetch it by default.
+    overlay              = false,
     extra_head          = (),
     treebars_assets     = true,
 )
@@ -13125,7 +13130,7 @@ const KB_ORIGIN = ""
 
 Combined style + script for the framework debug/dev overlay bar (the v1
 feedback spine). Was injected by [`htmx`](@ref) on full-page responses when
-`overlay=true` (the default; pass `overlay=false` to opt out). The bar resolves
+`overlay=true` (opt-in; the default is `false` outside the KB app). The bar resolves
 its own context client-side and talks to the KB root-absolute, mirroring
 [`request_feedback`](@ref)'s zero-server-context model.
 """
