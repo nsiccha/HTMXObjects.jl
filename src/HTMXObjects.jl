@@ -2068,12 +2068,15 @@ Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
     (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, feedback=true, thread=true, extra_head=())
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, feedback=true, thread=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
 `sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
 loads only alongside the shell's own htmx (an extension must follow htmx).
+`ws_version` is htmx's WebSocket extension, which `@ws` routes need on the
+client (a `ws-connect` element); it loads only alongside the shell's own
+htmx for the same reason.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
 
@@ -2092,6 +2095,7 @@ function htmx(args...;
     body = h.body,
     htmx_version        = "2.0.8",
     sse_version         = "2.2.4",
+    ws_version          = "2.0.4",
     hyperscript_version = "0.9.14",
     preload_version     = "2.1.2",
     pico_version        = nothing,
@@ -2105,6 +2109,7 @@ function htmx(args...;
     cdn = []
     isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
     isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js"))
+    isnothing(htmx_version) || isnothing(ws_version) || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-ws@$(ws_version)/dist/ws.min.js"))
     # The extension registers itself on load, so it must follow htmx.
     preload = !isnothing(htmx_version) && !isnothing(preload_version)
     preload && push!(cdn,

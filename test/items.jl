@@ -8666,6 +8666,15 @@ end
                    "sse-swap=\"tick\" hx-swap=\"beforeend\"")
 end
 
+@testitem "htmx() loads the ws extension that @ws routes need" setup=[HTMXOTestImports] tags=[:unit, :ws] begin
+    html = repr("text/html", htmx(h.main()))
+    @test contains(html, "htmx-ext-ws@2.0.4/dist/ws.min.js")
+    @test first(findfirst("htmx.org@", html)) < first(findfirst("htmx-ext-ws@", html))
+    @test !contains(repr("text/html", htmx(h.main(); ws_version=nothing)), "htmx-ext-ws")
+    # An extension must follow htmx itself; without the shell's htmx it stays out.
+    @test !contains(repr("text/html", htmx(h.main(); htmx_version=nothing)), "htmx-ext-ws")
+end
+
 @testitem "@sse streams events, final values, and errors end to end" setup=[HTMXOTestImports] tags=[:integration, :server, :sse] begin
     using Sockets
     using HTTP.WebSockets: send
