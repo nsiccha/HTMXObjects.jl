@@ -88,10 +88,30 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 
 Fragments are not documents and never carry a doctype.
 
+### Offline pages — `assets=:vendor`
+
+By default the shell loads its JS/CSS from a CDN. A standalone app that must
+run fully offline (air-gapped) vendors those files instead: `vendorfiles()`
+mounts the exact pinned releases same-origin at `/vendor/...`, and
+`assets=:vendor` points the shell at them. The bytes are the npm release
+tarballs pinned in `Artifacts.toml` — byte-identical to the CDN files — and
+download lazily on the first `vendorfiles()` call, so CDN users fetch nothing.
+
+```julia
+vendorfiles()                                  # → GET /vendor/htmx.min.js, …
+__page__(content) = htmx(content; assets=:vendor)
+```
+
+Vendor mode serves each library solely at its pinned version (a different
+version errors loudly); `pico_page` needs its pin spelled out, since its
+floating `"2"` default is not the pin. A custom mount pairs with a matching
+prefix: `vendorfiles("static/vendor")` + `assets="/static/vendor"`.
+
 ```@docs
 htmx
 HTMXObjects.pico_page
 HTMLDocument
+vendorfiles
 ```
 
 ## Server-sent events
