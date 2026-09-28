@@ -3747,6 +3747,61 @@ end
     @test contains(repr("text/html", loading_indicator_script()), "HX-Preloaded")
 end
 
+@testitem "htmx() vendor mode serves pinned assets same-origin" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    html = repr("text/html", htmx(h.main(); assets=:vendor, pico_version=HTMXObjects._PICO_VERSION))
+    @test !contains(html, "https://")
+    for f in ("htmx.min.js", "sse.min.js", "ws.min.js", "preload.min.js", "_hyperscript.min.js", "pico.min.css")
+        @test contains(html, "/vendor/$f")
+    end
+    # Extension order survives the mode switch: sse still follows htmx.
+    @test findfirst("/vendor/htmx.min.js", html).start < findfirst("/vendor/sse.min.js", html).start
+    # A custom mount prefix pairs with vendorfiles("static/vendor").
+    custom = repr("text/html", htmx(h.main(); assets="/static/vendor"))
+    @test contains(custom, "/static/vendor/htmx.min.js")
+    @test !contains(custom, "https://")
+    # Skipped libraries stay out in vendor mode too.
+    bare = repr("text/html", htmx(h.main(); assets=:vendor, htmx_version=nothing))
+    @test !contains(bare, "htmx.min.js")
+    @test !contains(bare, "sse.min.js")
+    @test !contains(bare, "ws.min.js")
+    # The default is untouched: still CDN.
+    @test contains(repr("text/html", htmx(h.main())), "https://cdn.jsdelivr.net/npm/htmx.org@")
+end
+
+@testitem "htmx() vendor mode fails loudly on wrong versions and modes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    @test_throws ErrorException htmx(h.main(); assets=:vendor, htmx_version="2.0.7")
+    @test_throws ErrorException htmx(h.main(); assets=:vendor, ws_version="2.0.3")
+    @test_throws ErrorException htmx(h.main(); assets=:bogus)
+    # pico_page's floating "2" is not the vendor pin.
+    @test_throws ErrorException htmx(h.main(); assets=:vendor, pico_version="2")
+    # The error names the pin, so the caller knows what to pass.
+    err = try
+        htmx(h.main(); assets=:vendor, htmx_version="2.0.7")
+        nothing
+    catch e
+        sprint(showerror, e)
+    end
+    @test contains(err, HTMXObjects._HTMX_VERSION)
+    # An unknown mode fails even when no URL is built.
+    @test_throws ErrorException htmx(h.main(); assets=:bogus, htmx_version=nothing,
+        sse_version=nothing, hyperscript_version=nothing, preload_version=nothing)
+end
+
+@testitem "vendorfiles() serves the pinned library bytes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    vendorfiles()
+    for (f, marker) in ("htmx.min.js" => "2.0.8", "sse.min.js" => "sse",
+            "ws.min.js" => "ws", "preload.min.js" => "preload",
+            "_hyperscript.min.js" => "_hyperscript", "pico.min.css" => "Pico")
+        r = dispatch(:GET, "/vendor/$f")
+        @test r.status == 200
+        @test HTTP.header(r, "Content-Type") ==
+            (endswith(f, ".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8")
+        body = String(r.body)
+        @test length(body) > 1000
+        @test contains(body, marker)
+    end
+end
+
 @testitem "htmx() emits a doctype (standards mode)" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # A page without `<!DOCTYPE html>` renders in quirks mode, which some
     # browser libraries refuse to run in at all (KaTeX's `katex.render` throws

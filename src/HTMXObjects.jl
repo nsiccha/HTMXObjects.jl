@@ -10,7 +10,7 @@ export property_descriptor, property_descriptors, static_domain,
     materialization_observation
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
-export terminate, serve, staticfiles, dynamicfiles
+export terminate, serve, staticfiles, dynamicfiles, vendorfiles
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE
@@ -50,6 +50,9 @@ export SSEStream, last_event_id, sse_region
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
+# `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
+# downloads until `vendorfiles()` runs, so CDN users fetch nothing.
+using LazyArtifacts
 import Dates
 import Random
 # Only for `SemanticProse`'s HTML peer, which renders its Markdown source rather
@@ -2067,8 +2070,106 @@ end
 Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
     (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
 
+# --- Vendored head assets ----------------------------------------------------
+#
+# `htmx(...; assets=:vendor)` serves the page shell's JS/CSS from same-origin
+# `/vendor/...` routes instead of the CDN, so a standalone app runs fully
+# offline (air-gapped). The bytes live in the exact npm release tarballs
+# pinned in Artifacts.toml — byte-identical to the CDN files at the pinned
+# versions — and download lazily on the first `vendorfiles()` call.
+#
+# The version constants single-source both surfaces: they are the `htmx()`
+# CDN defaults AND the vendored pins. Bumping one means bumping the matching
+# Artifacts.toml entry in the same commit, after re-verifying byte-identity
+# against the CDN URL with `cmp`.
+const _HTMX_VERSION = "2.0.8"
+const _HTMX_SSE_VERSION = "2.2.4"
+const _HTMX_WS_VERSION = "2.0.4"
+const _HTMX_PRELOAD_VERSION = "2.1.2"
+const _HYPERSCRIPT_VERSION = "0.9.14"
+# Vendor pin only: the CDN surface stays `nothing` (`htmx()`) / floating
+# `"2"` (`pico_page`), so vendor mode serves pico solely at this exact pin.
+const _PICO_VERSION = "2.1.1"
+
+# pkg => (path inside its artifact, served filename, pinned version).
+# The artifact itself resolves through `_vendor_artifact` below — the
+# `artifact"..."` macro needs a literal, so one method per asset.
+const _VENDOR_ASSETS = (
+    htmx=(relpath=joinpath("package", "dist", "htmx.min.js"),
+        file="htmx.min.js", version=_HTMX_VERSION),
+    sse=(relpath=joinpath("package", "dist", "sse.min.js"),
+        file="sse.min.js", version=_HTMX_SSE_VERSION),
+    ws=(relpath=joinpath("package", "dist", "ws.min.js"),
+        file="ws.min.js", version=_HTMX_WS_VERSION),
+    preload=(relpath=joinpath("package", "dist", "preload.min.js"),
+        file="preload.min.js", version=_HTMX_PRELOAD_VERSION),
+    hyperscript=(relpath=joinpath("package", "dist", "_hyperscript.min.js"),
+        file="_hyperscript.min.js", version=_HYPERSCRIPT_VERSION),
+    pico=(relpath=joinpath("package", "css", "pico.min.css"),
+        file="pico.min.css", version=_PICO_VERSION),
+)
+
+_vendor_artifact(::Val{:htmx}) = artifact"htmx"
+_vendor_artifact(::Val{:sse}) = artifact"htmx-ext-sse"
+_vendor_artifact(::Val{:ws}) = artifact"htmx-ext-ws"
+_vendor_artifact(::Val{:preload}) = artifact"htmx-ext-preload"
+_vendor_artifact(::Val{:hyperscript}) = artifact"hyperscript"
+_vendor_artifact(::Val{:pico}) = artifact"pico"
+
+# Single validation point for the `assets` mode, so an unknown mode fails
+# even when every version kwarg is `nothing` and no URL is built.
+function _check_assets_mode(assets)
+    assets === :cdn || assets === :vendor || assets isa AbstractString ||
+        error("htmx: unknown assets mode $(repr(assets)) — use :cdn, :vendor, or a mount-path string.")
+    return nothing
+end
+
+# One head-asset URL for the requested `assets` mode. `:cdn` keeps the
+# passed-through CDN URL untouched; `:vendor` (or a custom mount-prefix
+# string) serves the pinned file same-origin. A non-pinned version under
+# vendor mode is a loud error, never a silent CDN fallback.
+function _head_asset_src(pkg::Symbol, version, cdn_src, assets)
+    assets === :cdn && return cdn_src
+    _check_assets_mode(assets)
+    prefix = assets === :vendor ? "/vendor" : rstrip(assets, '/')
+    spec = _VENDOR_ASSETS[pkg]
+    version == spec.version ||
+        error("htmx(...; assets=:vendor): vendored $pkg is pinned at $(spec.version), got $version — pass the pinned version or stay on assets=:cdn.")
+    return prefix * "/" * spec.file
+end
+
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, feedback=true, thread=true, extra_head=())
+    vendorfiles(mountdir="vendor"; headers=[])
+
+Serve the vendored [`htmx`](@ref) head assets — the exact pins behind
+`assets=:vendor` — at `/<mountdir>/<file>`, next to [`staticfiles`](@ref):
+
+```julia
+vendorfiles()                                  # → GET /vendor/htmx.min.js, …
+__page__(content) = htmx(content; assets=:vendor)
+```
+
+The first call downloads the pinned npm tarballs from Artifacts.toml (one
+3.2 MB fetch, cached in the depot); further calls re-read from disk. Files
+are served with [`staticfiles`](@ref)-style content types. A custom
+`mountdir` (or a second mount elsewhere) pairs with the matching
+`assets="/<mountdir>"` prefix on [`htmx`](@ref)/[`pico_page`](@ref).
+"""
+function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
+    prefix = strip(mountdir, '/')
+    for pkg in keys(_VENDOR_ASSETS)
+        spec = _VENDOR_ASSETS[pkg]
+        path = joinpath(_vendor_artifact(Val(pkg)), spec.relpath)
+        body = read(path)
+        route = isempty(prefix) ? "/$(spec.file)" : "/$prefix/$(spec.file)"
+        handler = _ -> _file_response(path, body, headers)
+        HTTP.register!(ROUTER, "GET", route, handler)
+    end
+    return nothing
+end
+
+"""
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, feedback=true, thread=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -2090,18 +2191,26 @@ element carries a `preload` attribute — see the `preload` keyword of
 [`htmxo_breadcrumb`](@ref) and [`hx_link`](@ref) — and speculative requests do
 work only on routes marked `@preload`.
 
+`assets=:vendor` serves the same files same-origin from `/vendor/...`
+(byte-identical to the CDN files at the pinned versions) instead of the CDN,
+so the page loads fully offline — mount them with [`vendorfiles`](@ref) and
+pass each library at its pinned version (a non-pinned version errors loudly).
+A string mounts elsewhere: `assets="/static/vendor"` pairs with
+`vendorfiles("static/vendor")`.
+
 Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
 `<!DOCTYPE html>` preamble, so the page renders in standards mode.
 """
 function htmx(args...;
     head = h.head,
     body = h.body,
-    htmx_version        = "2.0.8",
-    sse_version         = "2.2.4",
-    ws_version          = "2.0.4",
-    hyperscript_version = "0.9.14",
-    preload_version     = "2.1.2",
+    htmx_version        = _HTMX_VERSION,
+    sse_version         = _HTMX_SSE_VERSION,
+    ws_version          = _HTMX_WS_VERSION,
+    hyperscript_version = _HYPERSCRIPT_VERSION,
+    preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
+    assets              = :cdn,
     feedback             = true,
     compose              = true,
     thread               = true,
@@ -2111,17 +2220,18 @@ function htmx(args...;
     extra_head          = (),
     treebars_assets     = true,
 )
+    _check_assets_mode(assets)
     cdn = []
-    isnothing(htmx_version)        || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js"))
-    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js"))
-    isnothing(htmx_version) || isnothing(ws_version) || push!(cdn, h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-ws@$(ws_version)/dist/ws.min.js"))
+    isnothing(htmx_version)        || push!(cdn, h.script(src=_head_asset_src(:htmx, htmx_version, "https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js", assets)))
+    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, h.script(src=_head_asset_src(:sse, sse_version, "https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js", assets)))
+    isnothing(htmx_version) || isnothing(ws_version) || push!(cdn, h.script(src=_head_asset_src(:ws, ws_version, "https://cdn.jsdelivr.net/npm/htmx-ext-ws@$(ws_version)/dist/ws.min.js", assets)))
     # The extension registers itself on load, so it must follow htmx.
     preload = !isnothing(htmx_version) && !isnothing(preload_version)
     preload && push!(cdn,
-        h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js"),
+        h.script(src=_head_asset_src(:preload, preload_version, "https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js", assets)),
         preload_runtime_js())
-    isnothing(hyperscript_version) || push!(cdn, h.script(src="https://unpkg.com/hyperscript.org@$(hyperscript_version)"))
-    isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css"))
+    isnothing(hyperscript_version) || push!(cdn, h.script(src=_head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets)))
+    isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href=_head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html = preload ? h.html(; hx_ext="preload") : h.html
@@ -2161,7 +2271,7 @@ function htmx(args...;
 end
 
 """
-    pico_page(content; pico_version="2", class="container", extra_head=())
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -2174,9 +2284,13 @@ with
     __page__(content) = pico_page(content)
     # or with extras:
     __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
+
+`assets` forwards to [`htmx`](@ref): `pico_page(content; assets=:vendor,
+pico_version=HTMXObjects._PICO_VERSION)` renders the offline page (vendor
+mode needs pico at its exact pin, not the floating `"2"` default).
 """
-pico_page(content; pico_version="2", class="container", extra_head=()) =
-    htmx(h.main(class=class)(content); pico_version, extra_head)
+pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets)
 
 # --- Route registration and recording ---
 
