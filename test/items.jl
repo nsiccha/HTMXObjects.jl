@@ -9672,3 +9672,27 @@ end
         _clear_operation_polls!()
     end
 end
+
+@testitem "standalone htmx shell omits the KB overlay bundle by default" tags=[:unit] begin
+    using HTMXObjects
+
+    # The bar bundle is a KB-app-only route: a standalone page must not fetch
+    # it by default (snag load-a-standalon-9a910f0f).
+    default_shell = repr("text/html", htmx(h.p("hello")))
+    @test !contains(default_shell, "/overlay/bar.js")
+    @test contains(default_shell, "<!DOCTYPE html>")
+
+    # Explicit opt-in still emits the bootstrap (the KB app's shape).
+    opted_in = repr("text/html", htmx(h.p("hello"); overlay=true))
+    @test contains(opted_in, "/overlay/bar.js")
+
+    # End to end: a dispatched standalone page carries no overlay fetch.
+    @htmx struct OverlayDefaultApp
+        __page__(content) = htmx(content)
+        @get overlay_probe() = h.p("hello")
+    end
+    route!(OverlayDefaultApp())
+    page = dispatch(:GET, "/overlay_probe")
+    @test page.status == 200
+    @test !contains(String(page.body), "/overlay/bar.js")
+end
