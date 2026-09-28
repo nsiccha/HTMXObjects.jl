@@ -9075,6 +9075,8 @@ parameter is visible), and `long` is an optional longer description shown
 behind a `<details>` toggle inside the `<figcaption>`.
 
 `long` may be a `String` or any HTMX `Node` (e.g. `h.div(h.p(...), h.p(...))`).
+In markdown the three tiers join with `" — "` into a single paragraph; a
+blank or absent `long` leaves the compact title/short caption.
 """
 struct CaptionSpec
     title::String
@@ -9126,7 +9128,11 @@ function render_caption(spec::CaptionSpec; actions=())
             h.summary("More"),
             _wrap_long(spec.long),
         )
-    h.figcaption(; class="caption")(header, body)
+    # Markdown-only boundary between the header and the long body: without it
+    # the two tiers concatenate with no separator ("shortlong"). Blank longs
+    # emit no separator so the caption never trails " — ". Invisible in HTML.
+    sep = (isnothing(spec.long) || (spec.long isa AbstractString && isempty(strip(spec.long)))) ? "" : markdown_only(" — ")
+    h.figcaption(; class="caption")(header, sep, body)
 end
 
 _as_children(content) = (content,)
