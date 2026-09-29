@@ -3802,6 +3802,27 @@ end
     end
 end
 
+@testitem "vendor artifacts stay lazy: install selects none, vendor load selects six" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    using Artifacts, TOML
+    toml = joinpath(pkgdir(HTMXObjects), "Artifacts.toml")
+    meta = TOML.parsefile(toml)
+    names = ("htmx", "htmx-ext-sse", "htmx-ext-ws", "htmx-ext-preload", "hyperscript", "pico")
+    # Every table carries the flag: one unflagged entry downloads at install.
+    @test Set(keys(meta)) == Set(names)
+    for n in names
+        @test get(meta[n], "lazy", false) === true
+    end
+    # Ordinary installation (what Pkg resolves) fetches nothing; explicit
+    # vendor loading resolves the same six with identical metadata.
+    @test isempty(Artifacts.select_downloadable_artifacts(toml))
+    explicit = Artifacts.select_downloadable_artifacts(toml; include_lazy=true)
+    @test Set(keys(explicit)) == Set(names)
+    for n in names
+        @test explicit[n]["download"] == meta[n]["download"]
+        @test explicit[n]["git-tree-sha1"] == meta[n]["git-tree-sha1"]
+    end
+end
+
 @testitem "htmx() emits a doctype (standards mode)" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     # A page without `<!DOCTYPE html>` renders in quirks mode, which some
     # browser libraries refuse to run in at all (KaTeX's `katex.render` throws
