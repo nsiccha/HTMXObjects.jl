@@ -3205,7 +3205,7 @@ function render_markdown(ast::CommonMark.Node; rules=nothing, context=nothing,
 end
 
 """
-    decorated_link(label, href, entry; class, attrs) -> Node
+    decorated_link(label, href, entry; class, attrs, base=(;)) -> Node
 
 Render one inline reference that gains metadata once its background batch
 lands — the read-through half of deferred batched decoration. The fetch half
@@ -3222,19 +3222,31 @@ end)
 ```
 
 While `entry` is `nothing` (batch not back — or the key failed and keeps no
-previous value) the link is plain: an anchor with `class` and nothing else,
+previous value) the link is plain: an anchor with `class` and `base` only,
 so first paint never waits. Once known, `attrs(entry)` — a `NamedTuple` of
-extra attributes, or `nothing` for none — merges in (a state colour, a hover
-title). Anything else from `attrs` is an `ArgumentError`.
+extra attributes, or `nothing` for none — merges over `base` (a state colour,
+a hover title). Anything else from `attrs` is an `ArgumentError`.
+
+`base` is a `NamedTuple` of entry-independent attributes — a full-URL hover
+title behind a compact label, `target`/`rel` on an external link — rendered
+both before the entry lands and after. On a key collision the entry's
+attribute wins, so `base` doubles as the unknown-state fallback (a bare-URL
+title that becomes `"<state>: <title>\n<url>"` once known).
 
 Live metadata is point-in-time, so the `?plain` projection carries the stable
 part only: `[label](href)`, decorated or not.
 """
-function decorated_link(label, href, entry; class::AbstractString, attrs::Function)
-    extra = isnothing(entry) ? (;) : attrs(entry)
-    isnothing(extra) && (extra = (;))
-    extra isa NamedTuple || throw(ArgumentError(
-        "decorated_link attrs must return a NamedTuple (or nothing), got $(typeof(extra))"))
+function decorated_link(label, href, entry; class::AbstractString, attrs::Function,
+                        base::NamedTuple=(;))
+    if isnothing(entry)
+        extra = base
+    else
+        known = attrs(entry)
+        isnothing(known) && (known = (;))
+        known isa NamedTuple || throw(ArgumentError(
+            "decorated_link attrs must return a NamedTuple (or nothing), got $(typeof(known))"))
+        extra = merge(base, known)
+    end
     h.a(label; href=string(href), class=String(class), extra...)
 end
 

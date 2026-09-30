@@ -7325,6 +7325,38 @@ end
         "r#1", "/i/1", entry; class="c", attrs=attrs)) == "[r#1](/i/1)"
 end
 
+@testitem "decorated_link base attrs span the unknown/known gap" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    url = "https://github.com/o/r/issues/7"
+    base = (; title=url, target="_blank", rel="noopener")
+    attrs = e -> (; data_state=e.state, title="$(e.state): $(e.title)\n$url")
+
+    # Unknown entry: base renders, so the full URL and target/rel survive first paint.
+    plain = repr("text/html", decorated_link(
+        "o/r#7", url, nothing; class="gh-ref", attrs=attrs, base=base))
+    @test contains(plain, "title=\"$(url)\"")
+    @test contains(plain, "target=\"_blank\"")
+    @test contains(plain, "rel=\"noopener\"")
+    @test !contains(plain, "data-state")
+
+    # Known entry: base persists, and the entry's title wins the collision.
+    entry = (; state="open", title="T")
+    rich = repr("text/html", decorated_link(
+        "o/r#7", url, entry; class="gh-ref", attrs=attrs, base=base))
+    @test contains(rich, "data-state=\"open\"")
+    @test contains(rich, "title=\"open: T\n$(url)\"")
+    @test contains(rich, "target=\"_blank\"")
+
+    # An attrs closure that declines still leaves base standing.
+    declined = repr("text/html", decorated_link(
+        "o/r#7", url, entry; class="gh-ref", attrs=e -> nothing, base=base))
+    @test contains(declined, "title=\"$(url)\"")
+    @test !contains(declined, "data-state")
+
+    # ?plain still carries the stable link alone.
+    @test HTMXObjects.to_markdown_string(decorated_link(
+        "o/r#7", url, entry; class="c", attrs=attrs, base=base)) == "[o/r#7]($(url))"
+end
+
 @testitem "deferred decoration decorates once its batch lands" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     using DynamicObjects
 
