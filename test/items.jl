@@ -7296,6 +7296,100 @@ end
         "<span class=\"custom-code\">hi</span>")
 end
 
+@testitem "decorated_link stays plain until its entry lands" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    attrs = e -> (; data_state=e.state, title=e.title)
+
+    # No entry, no metadata: a plain anchor with the base class.
+    plain = repr("text/html",
+        decorated_link("r#1", "/i/1", nothing; class="app-ref", attrs=attrs))
+    @test contains(plain, "<a href=\"/i/1\" class=\"app-ref\">r#1</a>")
+    @test !contains(plain, "data-state")
+
+    # A known entry merges its attrs in.
+    entry = (; state="open", title="T")
+    rich = repr("text/html",
+        decorated_link("r#1", "/i/1", entry; class="app-ref", attrs=attrs))
+    @test contains(rich, "data-state=\"open\"")
+    @test contains(rich, "title=\"T\"")
+
+    # An attrs closure may decline per entry with nothing.
+    @test !contains(repr("text/html", decorated_link(
+        "r#1", "/i/1", entry; class="app-ref", attrs=e -> nothing)), "data-state")
+
+    # Anything else from attrs is an ArgumentError, not a confusing splat.
+    @test_throws ArgumentError decorated_link(
+        "r", "/u", entry; class="c", attrs=e -> "nope")
+
+    # ?plain carries the stable link alone, decorated or not.
+    @test HTMXObjects.to_markdown_string(decorated_link(
+        "r#1", "/i/1", entry; class="c", attrs=attrs)) == "[r#1](/i/1)"
+end
+
+@testitem "deferred decoration decorates once its batch lands" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    using DynamicObjects
+
+    # Poll `f` until true (DynamicObjects' own background_cache.jl idiom):
+    # errors loudly on timeout instead of asserting a bare false.
+    function _await_landed(f; timeout=15.0)
+        t0 = time()
+        while true
+            f() && return true
+            time() - t0 > timeout &&
+                error("timed out waiting for the decoration batch")
+            sleep(0.005)
+        end
+    end
+
+    calls = Ref(0)
+    cache = BackgroundCache{String,Any}(
+        keys -> begin
+            calls[] += 1
+            Dict(k => (; state="open", title="Title $k") for k in keys)
+        end; batch=50, ttl=600.0, unbuilt=nothing)
+    rule = MarkdownRule(r"(\w+)#(\d+)", (m, ctx) -> begin
+        key = "$(m.captures[1])#$(m.captures[2])"
+        decorated_link(m.match, "/items/$(m.captures[2])", cache[key];
+            class="app-ref", attrs=e -> (; data_state=e.state, title=e.title))
+    end)
+    src = "see repo#12 and repo#34"
+
+    # First paint never waits: misses read unbuilt and kick one drain.
+    @test !contains(
+        repr("text/html", render_markdown(src; rules=[rule])), "data-state")
+
+    # Both refs decorate once the single batch lands.
+    _await_landed() do
+        contains(repr("text/html", render_markdown(src; rules=[rule])),
+            "Title repo#34")
+    end
+    @test calls[] == 1
+    landed = repr("text/html", render_markdown(src; rules=[rule]))
+    @test contains(landed, "data-state=\"open\"")
+    @test contains(landed, "Title repo#12")
+
+    # A failed batch keeps links plain; the next render retries and recovers.
+    tries = Ref(0)
+    flaky = BackgroundCache{String,Any}(
+        keys -> begin
+            tries[] += 1
+            tries[] == 1 && error("boom")
+            Dict(k => (; state="closed", title="Was $k") for k in keys)
+        end; batch=50, ttl=600.0, unbuilt=nothing,
+        backoff_base=0.0, backoff_max=0.01)
+    flaky_rule = MarkdownRule(r"(\w+)#(\d+)", (m, ctx) -> begin
+        key = "$(m.captures[1])#$(m.captures[2])"
+        decorated_link(m.match, "/items/$(m.captures[2])", flaky[key];
+            class="app-ref", attrs=e -> (; data_state=e.state, title=e.title))
+    end)
+    @test !contains(repr("text/html",
+        render_markdown("see w#9"; rules=[flaky_rule])), "data-state")
+    _await_landed() do
+        contains(repr("text/html",
+            render_markdown("see w#9"; rules=[flaky_rule])), "Was w#9")
+    end
+    @test tries[] == 2
+end
+
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
