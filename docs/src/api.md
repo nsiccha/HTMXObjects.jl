@@ -184,6 +184,11 @@ For authoring Markdown that renders to HTML — the reverse direction:
 | `render_markdown(text; rules, context)` | CommonMark (+ GFM tables/strikethrough/task lists) Markdown → `h` node tree, with inline text rules |
 | `MarkdownRule(pattern, build)` | One rule: a `Regex` plus `build(match, context)` producing the replacement node(s) |
 | `MARKDOWN_URL_RULE` | Stock rule linking bare `http(s)://` URLs; the default registry |
+| `MarkdownRenderer` / `DefaultMarkdownRenderer()` | Renderer supertype / the stock renderer; subtype and add `markdown_node` overrides |
+| `markdown_node(renderer, kind, node, rules, context)` | Per-node-kind override point (plus the single-node `markdown_node(renderer, node, ...)` form) |
+| `markdown_children(renderer, node, rules, context)` | Joined-run children render, for override recursion |
+| `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
+| `markdown_parser(; extra_rules)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
 identifiers stay verbatim (the stdlib parser took them as emphasis and deleted
@@ -195,6 +200,14 @@ for pure CommonMark, or a vector of `MarkdownRule`s (composed with
 `MARKDOWN_URL_RULE`) for app references. `context` scopes one value to the
 whole render. Rule-built nodes are ordinary nodes, so the `?plain` projection
 stays faithful (`h.a` → `[text](url)`).
+
+Apps with their own node needs subtype `MarkdownRenderer` and add
+`markdown_node` methods for only the kinds they render differently; every
+other kind falls through to stock, and the walk recurses through the same
+renderer at every depth. `markdown_children` and `markdown_text_run` are the
+recursion helpers for override authors; `parser_rules=` registers extra
+CommonMark parser rules, and `render_markdown(::CommonMark.Node)` renders an
+already-parsed tree.
 
 ## Error handling and tagging
 
@@ -340,6 +353,12 @@ SemanticAlternatives
 MarkdownRule
 MARKDOWN_URL_RULE
 render_markdown
+MarkdownRenderer
+DefaultMarkdownRenderer
+markdown_node
+markdown_children
+markdown_text_run
+markdown_parser
 semantic_card
 internal_input
 ```
