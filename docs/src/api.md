@@ -189,6 +189,7 @@ For authoring Markdown that renders to HTML — the reverse direction:
 | `markdown_children(renderer, node, rules, context)` | Joined-run children render, for override recursion |
 | `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
 | `markdown_parser(; extra_rules)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
+| `decorated_link(label, href, entry; class, attrs)` | Plain anchor while the entry is `nothing`, merged metadata attrs once known |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
 identifiers stay verbatim (the stdlib parser took them as emphasis and deleted
@@ -208,6 +209,15 @@ renderer at every depth. `markdown_children` and `markdown_text_run` are the
 recursion helpers for override authors; `parser_rules=` registers extra
 CommonMark parser rules, and `render_markdown(::CommonMark.Node)` renders an
 already-parsed tree.
+
+Deferred decoration pairs a [`MarkdownRule`](@ref) with a DynamicObjects
+`BackgroundCache` in batch mode: the build function reads `cache[key]` on the
+render path and hands the entry to `decorated_link`, which renders a plain
+anchor while the batch is out and merges `attrs(entry)` (state colour, hover
+title) once it lands. Reads never block and failures keep links plain — the
+cache single-flights the drain, backs off, and logs with the cause — so first
+paint never waits; the next render (a poll cycle, a push refresh) picks the
+metadata up. `?plain` carries `[label](href)` either way.
 
 ## Error handling and tagging
 
@@ -359,6 +369,7 @@ markdown_node
 markdown_children
 markdown_text_run
 markdown_parser
+decorated_link
 semantic_card
 internal_input
 ```
