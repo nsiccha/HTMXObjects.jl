@@ -22,32 +22,33 @@ end
 
 function _push_demo_card(self, key)
     live_fragment(key, _push_demo_body(key);
-        fragment_url=query_url(self/"card"; key=key),
-        events_url=query_url(self/"key_events"; key=key))
+        fragment_url=query_url(self/"card"; key=key))
 end
 
 @htmx struct PushDemoRoutes
     @get index() = begin
         h.div(
             h.h1("Server-Push Refresh Demo"),
-            h.p("Each card subscribes to its key over its own event stream. ",
+            h.p("Both cards share one event stream through a live region. ",
                 "Bumping a key refreshes its data and pushes a refresh: the ",
                 "card re-fetches in place, no reload. The other card stays put."),
-            h.div(_push_demo_card(__self__, _PUSH_DEMO_KEYS[1]),
-                h.button("Bump $(_PUSH_DEMO_KEYS[1])";
-                    hx_post=query_url(__self__/"bump"; key=_PUSH_DEMO_KEYS[1]),
-                    hx_swap="none")),
-            h.div(_push_demo_card(__self__, _PUSH_DEMO_KEYS[2]),
-                h.button("Bump $(_PUSH_DEMO_KEYS[2])";
-                    hx_post=query_url(__self__/"bump"; key=_PUSH_DEMO_KEYS[2]),
-                    hx_swap="none")),
+            live_region(query_url(__self__/"key_events"; key=collect(_PUSH_DEMO_KEYS)),
+                h.div(_push_demo_card(__self__, _PUSH_DEMO_KEYS[1]),
+                    h.button("Bump $(_PUSH_DEMO_KEYS[1])";
+                        hx_post=query_url(__self__/"bump"; key=_PUSH_DEMO_KEYS[1]),
+                        hx_swap="none")),
+                h.div(_push_demo_card(__self__, _PUSH_DEMO_KEYS[2]),
+                    h.button("Bump $(_PUSH_DEMO_KEYS[2])";
+                        hx_post=query_url(__self__/"bump"; key=_PUSH_DEMO_KEYS[2]),
+                        hx_swap="none"))),
             h.p("Append ", h.code("?plain"), " for the stable projection."),
         )
     end
 
     @get card(; key::String="") = _push_demo_card(__self__, key)
 
-    @sse key_events(; key::String="") = serve_key_feed!(__sse__, _PUSH_DEMO_SUBS, key)
+    @sse key_events(; key::Vector{String}=String[]) =
+        serve_key_feed!(__sse__, _PUSH_DEMO_SUBS, key)
 
     # The two-phase refresh an app wires around the push half: drop the
     # settled value and push at once (fragments re-fetch plain and kick the
