@@ -52,6 +52,8 @@ export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
 export SSEStream, last_event_id, sse_region
+export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
+    invalidate_key!, live_fragment
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
@@ -2528,7 +2530,7 @@ SemanticMetric(label, value; unit="") =
 # Declaring the arm inside the struct suppresses the auto-generated pair instead.
 
 """
-    SemanticLink(label, target; external=false)
+    SemanticLink(label, target; external=false, code=false)
 
 A navigation target held as data. Renders as an ordinary anchor in HTML and as
 a real link in Markdown, rather than as a bare stringified URL.
@@ -2537,13 +2539,20 @@ With `external=true` the link leaves the app: it opens in a new tab
 (`target="_blank"`, `rel="noopener"`), carries a trailing `↗` glyph, and keeps
 that marker in the Markdown (`[label ↗](target)`) and plain (`label ↗ (target)`)
 peers.
+
+With `code=true` the label is an identifier — a repo slug, a branch name, a
+SHA — and keeps its code styling: `<a …><code>label</code> ↗</a>` in HTML and
+``[`label` ↗](target)`` in Markdown. The glyph stays OUTSIDE the code span in
+both: it marks the exit, it is not part of the identifier. Plain text has no
+code spans, so that peer is unchanged.
 """
 struct SemanticLink <: SemanticNode
     label::String
     target
     external::Bool
-    SemanticLink(label, target; external=false) =
-        new(String(label), target, Bool(external))
+    code::Bool
+    SemanticLink(label, target; external=false, code=false) =
+        new(String(label), target, Bool(external), Bool(code))
 end
 
 """
@@ -3205,7 +3214,7 @@ function render_markdown(ast::CommonMark.Node; rules=nothing, context=nothing,
 end
 
 """
-    decorated_link(label, href, entry; class, attrs) -> Node
+    decorated_link(label, href, entry; class, attrs, base=(;)) -> Node
 
 Render one inline reference that gains metadata once its background batch
 lands — the read-through half of deferred batched decoration. The fetch half
@@ -3222,19 +3231,31 @@ end)
 ```
 
 While `entry` is `nothing` (batch not back — or the key failed and keeps no
-previous value) the link is plain: an anchor with `class` and nothing else,
+previous value) the link is plain: an anchor with `class` and `base` only,
 so first paint never waits. Once known, `attrs(entry)` — a `NamedTuple` of
-extra attributes, or `nothing` for none — merges in (a state colour, a hover
-title). Anything else from `attrs` is an `ArgumentError`.
+extra attributes, or `nothing` for none — merges over `base` (a state colour,
+a hover title). Anything else from `attrs` is an `ArgumentError`.
+
+`base` is a `NamedTuple` of entry-independent attributes — a full-URL hover
+title behind a compact label, `target`/`rel` on an external link — rendered
+both before the entry lands and after. On a key collision the entry's
+attribute wins, so `base` doubles as the unknown-state fallback (a bare-URL
+title that becomes `"<state>: <title>\n<url>"` once known).
 
 Live metadata is point-in-time, so the `?plain` projection carries the stable
 part only: `[label](href)`, decorated or not.
 """
-function decorated_link(label, href, entry; class::AbstractString, attrs::Function)
-    extra = isnothing(entry) ? (;) : attrs(entry)
-    isnothing(extra) && (extra = (;))
-    extra isa NamedTuple || throw(ArgumentError(
-        "decorated_link attrs must return a NamedTuple (or nothing), got $(typeof(extra))"))
+function decorated_link(label, href, entry; class::AbstractString, attrs::Function,
+                        base::NamedTuple=(;))
+    if isnothing(entry)
+        extra = base
+    else
+        known = attrs(entry)
+        isnothing(known) && (known = (;))
+        known isa NamedTuple || throw(ArgumentError(
+            "decorated_link attrs must return a NamedTuple (or nothing), got $(typeof(known))"))
+        extra = merge(base, known)
+    end
     h.a(label; href=string(href), class=String(class), extra...)
 end
 
@@ -3266,6 +3287,15 @@ _semantic_html_node(metric::SemanticMetric) = h.div(
     h.strong(_semantic_metric_text(metric); class="htmxo-semantic-metric-value");
     class="htmxo-semantic-metric")
 function _semantic_html_node(link::SemanticLink)
+    if link.code
+        label = h.code(link.label)
+        link.external || return h.a(
+            label; href=string(link.target), class="htmxo-semantic-link")
+        # The glyph stays outside the code span: it marks the exit, it is
+        # not part of the identifier — the same split the Markdown peer draws.
+        return h.a(label, " ↗"; href=string(link.target), target="_blank",
+            rel="noopener", class="htmxo-semantic-link")
+    end
     link.external || return h.a(
         link.label; href=string(link.target), class="htmxo-semantic-link")
     # An external link leaves the app: new tab, safe attrs, and a trailing
@@ -3383,6 +3413,18 @@ function _semantic_code_fence(text)
     repeat("`", max(3, longest + 1))
 end
 
+# An inline code span that survives a label containing backticks: the fence
+# run is one longer than the longest run inside, and a label touching the
+# fence gets padded — the inline analogue of `_semantic_code_fence`.
+function _semantic_inline_code(text)
+    longest = maximum((length(match.match) for match in eachmatch(r"`+", text)); init=0)
+    fence = repeat("`", max(1, longest + 1))
+    if startswith(text, "`") || endswith(text, "`")
+        return fence * " " * text * " " * fence
+    end
+    fence * text * fence
+end
+
 function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
     fence = _semantic_code_fence(code.text)
     print(io, fence, code.language, '\n', code.text, '\n', fence)
@@ -3410,8 +3452,12 @@ Base.show(io::IO, ::MIME"text/markdown", prose::SemanticProse) =
 Base.show(io::IO, ::MIME"text/markdown", metric::SemanticMetric) =
     print(io, "**", metric.label, ":** ", _semantic_metric_text(metric))
 
-Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink) = print(
-    io, "[", link.label, link.external ? " ↗" : "", "](", string(link.target), ")")
+# The exit glyph stays outside the code span: it marks the exit, not the
+# identifier — the same split the HTML peer draws with `<code>`.
+function Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink)
+    label = link.code ? _semantic_inline_code(link.label) : link.label
+    print(io, "[", label, link.external ? " ↗" : "", "](", string(link.target), ")")
+end
 
 # An action degrades to an ordinary link. No format but HTML can express "swap
 # this in place", and the target is the honest remainder of the meaning — which
@@ -4918,6 +4964,178 @@ function sse_region(url, content...; events="message,done", close="close",
                                h.div(; sse_swap=events, hx_swap=swap)
     h.div(; hx_ext="sse", sse_connect=string(url), sse_close=close)(
         target(content...))
+end
+
+# --- Server-push refresh of fragments by resource key ------------------------
+
+"""
+    KeySubscriptions()
+
+Thread-safe registry mapping a resource key (e.g. `"gh:owner/repo#12"`) to
+the live [`SSEStream`](@ref)s of the fragments subscribed to it. One
+instance per app (usually a `const`): an `@sse` route body feeds it through
+[`serve_key_feed!`](@ref), and any server code pushes a refresh with
+[`invalidate_key!`](@ref), which re-fetches every subscribed
+[`live_fragment`](@ref) on every open page.
+"""
+struct KeySubscriptions
+    lock::ReentrantLock
+    streams::Dict{String,Vector{SSEStream}}
+end
+
+KeySubscriptions() = KeySubscriptions(ReentrantLock(), Dict{String,Vector{SSEStream}}())
+
+function _push_key(key)
+    k = string(key)
+    isempty(k) && throw(ArgumentError("fragment subscription keys must be non-empty"))
+    k
+end
+
+# The event name travels both as an SSE `event:` field and inside an
+# `hx-trigger="sse:<event>"` attribute, where whitespace and commas would
+# split it into several triggers. One token keeps both sides in agreement.
+function _push_event(event)
+    e = string(event)
+    (isempty(e) || any(c -> c in " ,\t\r\n", e)) &&
+        throw(ArgumentError("fragment refresh event must be one non-empty token, got $(repr(e))"))
+    e
+end
+
+"""
+    subscribe_key!(subs::KeySubscriptions, sse::SSEStream, key) -> String
+
+Register `sse` for push refreshes of `key` (converted with `string`, which
+must be non-empty). Registering the same stream twice is a no-op. Returns
+the key. [`serve_key_feed!`](@ref) calls this for `@sse` route bodies;
+call it directly only for a hand-rolled feed.
+"""
+function subscribe_key!(subs::KeySubscriptions, sse::SSEStream, key)
+    k = _push_key(key)
+    lock(subs.lock) do
+        vec = get!(Vector{SSEStream}, subs.streams, k)
+        any(s -> s === sse, vec) || push!(vec, sse)
+    end
+    k
+end
+
+"""
+    unsubscribe_key!(subs::KeySubscriptions, sse::SSEStream, key) -> Bool
+
+Drop `sse` from `key`'s subscribers, removing the key when its last stream
+leaves. Returns whether the stream was subscribed. Unknown keys and
+foreign streams are a quiet no-op (`false`).
+"""
+function unsubscribe_key!(subs::KeySubscriptions, sse::SSEStream, key)
+    k = string(key)
+    lock(subs.lock) do
+        vec = get(subs.streams, k, nothing)
+        isnothing(vec) && return false
+        before = length(vec)
+        filter!(s -> s !== sse, vec)
+        isempty(vec) && delete!(subs.streams, k)
+        length(vec) != before
+    end
+end
+
+"""
+    serve_key_feed!(sse::SSEStream, subs::KeySubscriptions, key; poll=1.0) -> Nothing
+
+`@sse` route body for one keyed subscription feed: subscribes `sse` to
+`key`, blocks while the client stays connected, and unsubscribes on the
+way out. `poll` is the disconnect-check interval in seconds.
+
+```julia
+@sse key_events(; key::String="") = serve_key_feed!(__sse__, SUBS, key)
+```
+"""
+function serve_key_feed!(sse::SSEStream, subs::KeySubscriptions, key; poll::Real=1.0)
+    poll >= 0 || throw(ArgumentError("serve_key_feed! poll must be non-negative, got $poll"))
+    k = subscribe_key!(subs, sse, key)
+    try
+        while isopen(sse)
+            sleep(poll)
+        end
+    finally
+        unsubscribe_key!(subs, sse, k)
+    end
+    nothing
+end
+
+"""
+    invalidate_key!(subs::KeySubscriptions, key; event="refresh") -> Int
+
+Push a refresh of `key` to every subscribed fragment on every open page:
+each live stream gets one `event` frame carrying the key, which re-fetches
+the fragment through its `hx-trigger="sse:<event>"` (see
+[`live_fragment`](@ref)). Streams whose client is gone are pruned.
+Returns the number of streams notified; a key with no subscribers is a
+quiet no-op (`0`).
+
+This is the push half only: it does not touch whatever cache the fragment
+route reads. Refresh the data first (or kick its background rebuild), then
+invalidate, so the re-fetch renders the new state.
+"""
+function invalidate_key!(subs::KeySubscriptions, key; event::AbstractString="refresh")
+    k = _push_key(key)
+    e = _push_event(event)
+    live = lock(subs.lock) do
+        copy(get(subs.streams, k, SSEStream[]))
+    end
+    notified = 0
+    pruned = false
+    for sse in live
+        if HTTP.WebSockets.send(sse, k; event=e)
+            notified += 1
+        else
+            pruned = true
+        end
+    end
+    if pruned
+        lock(subs.lock) do
+            vec = get(subs.streams, k, nothing)
+            if vec !== nothing
+                # Drop streams the push could not reach; a stream that died
+                # between the push and this lock is dead either way.
+                filter!(isopen, vec)
+                isempty(vec) && delete!(subs.streams, k)
+            end
+        end
+    end
+    notified
+end
+
+"""
+    live_fragment(key, content...; fragment_url, events_url, event="refresh",
+                  swap="outerHTML", id=nothing, class=nothing)
+
+A fragment that re-fetches itself when `key` is invalidated. Renders a
+`<div>` that opens one [`serve_key_feed!`](@ref) stream (`sse-connect` to
+`events_url`, which must carry the key, e.g.
+`query_url(__self__/"key_events"; key=key)`) and re-`GET`s `fragment_url`
+into itself (`hx-swap`, default `"outerHTML"`) whenever the stream sends
+`event`. The fragment route answers with the same `live_fragment` call, so
+the re-fetch is self-similar; the swapped-out element's stream is closed
+by the SSE extension and the fresh element opens a new one.
+
+```julia
+@get issue_card(; key::String="") = live_fragment(key, _issue_body(key);
+    fragment_url=query_url(__self__/"issue_card"; key=key),
+    events_url=query_url(__self__/"key_events"; key=key))
+```
+
+An invalidation that lands between the page render and the stream connect
+is missed: the fragment shows render-time state until the next one. In
+`?plain` the element degrades to its text content; the refresh machinery
+is inert there.
+"""
+function live_fragment(key, content...; fragment_url, events_url,
+        event::AbstractString="refresh", swap::AbstractString="outerHTML",
+        id=nothing, class=nothing)
+    k = _push_key(key)
+    e = _push_event(event)
+    h.div(content...; id, class, hx_ext="sse", sse_connect=string(events_url),
+        hx_get=string(fragment_url), hx_trigger="sse:$e",
+        hx_swap=string(swap), data_key=k)
 end
 
 # --- Error handling ---

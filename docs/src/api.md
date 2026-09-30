@@ -160,10 +160,50 @@ end
   them, and in-process [`dispatch`](@ref) answers with an error because there is
   no connection to stream on.
 
+### Server-push refresh by key
+
+A [`live_fragment`](@ref) subscribes to a resource key such as
+`gh:owner/repo#12`: it opens one keyed event stream and re-`GET`s itself
+whenever the server invalidates that key, so every open page refreshes just
+those fragments with no polling and no client JavaScript. One
+[`KeySubscriptions`](@ref) registry per app holds the live streams; an
+`@sse` route feeds it through [`serve_key_feed!`](@ref), and any server
+code — a poller, a webhook, a POST handler — pushes with
+[`invalidate_key!`](@ref):
+
+```julia
+const SUBS = KeySubscriptions()
+
+@htmx struct Cards
+    @get card(; key::String="") = live_fragment(key, _card_body(key);
+        fragment_url=query_url(__self__/"card"; key=key),
+        events_url=query_url(__self__/"key_events"; key=key))
+    @sse key_events(; key::String="") = serve_key_feed!(__sse__, SUBS, key)
+end
+
+invalidate_key!(SUBS, "gh:owner/repo#12")   # every subscribed card re-fetches
+```
+
+`invalidate_key!` is the push half only: it does not touch the cache the
+fragment route reads. Refresh the data first (or kick its background
+rebuild), then invalidate, so the re-fetch renders the new state. The
+fragment route answers with the same `live_fragment` call, so the re-fetch
+is self-similar — the swapped-out element's stream is closed by the SSE
+extension and the fresh element opens a new one. An invalidation that lands
+between the page render and the stream connect is missed; the fragment
+shows render-time state until the next one. In `?plain` the element
+degrades to its text content.
+
 ```@docs
 SSEStream
 last_event_id
 sse_region
+KeySubscriptions
+subscribe_key!
+unsubscribe_key!
+serve_key_feed!
+invalidate_key!
+live_fragment
 ```
 
 ## Markdown / agent-readable responses
@@ -189,7 +229,7 @@ For authoring Markdown that renders to HTML — the reverse direction:
 | `markdown_children(renderer, node, rules, context)` | Joined-run children render, for override recursion |
 | `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
 | `markdown_parser(; extra_rules)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
-| `decorated_link(label, href, entry; class, attrs)` | Plain anchor while the entry is `nothing`, merged metadata attrs once known |
+| `decorated_link(label, href, entry; class, attrs, base)` | `base` attrs always; `attrs(entry)` merged over them once known |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
 identifiers stay verbatim (the stdlib parser took them as emphasis and deleted
@@ -213,8 +253,9 @@ already-parsed tree.
 Deferred decoration pairs a [`MarkdownRule`](@ref) with a DynamicObjects
 `BackgroundCache` in batch mode: the build function reads `cache[key]` on the
 render path and hands the entry to `decorated_link`, which renders a plain
-anchor while the batch is out and merges `attrs(entry)` (state colour, hover
-title) once it lands. Reads never block and failures keep links plain — the
+anchor with `base` while the batch is out and merges `attrs(entry)` (state
+colour, hover title) over it once it lands. Reads never block and failures
+keep links plain — the
 cache single-flights the drain, backs off, and logs with the cause — so first
 paint never waits; the next render (a poll cycle, a push refresh) picks the
 metadata up. `?plain` carries `[label](href)` either way.
@@ -486,7 +527,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
 | `SemanticStatus(state; detail="")` | A state, not a colour |
 | `SemanticUnavailable(reason)` | A declined computation, and why — not a state |
-| `SemanticLink(label, target; external=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker) |
+| `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
 | `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
 | `SemanticCode(language, text; anchor="")` | Source code, language kept as data |
