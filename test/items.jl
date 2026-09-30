@@ -7390,6 +7390,161 @@ end
     @test tries[] == 2
 end
 
+@testitem "keyed subscriptions push refreshes to live streams only" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    subs = KeySubscriptions()
+    bufa, bufb, bufc = IOBuffer(), IOBuffer(), IOBuffer()
+    sa = SSEStream(bufa, HTTP.Request("GET", "/events"))
+    sb = SSEStream(bufb, HTTP.Request("GET", "/events"))
+    sc = SSEStream(bufc, HTTP.Request("GET", "/events"))
+
+    @test subscribe_key!(subs, sa, "a#1") == "a#1"
+    @test subscribe_key!(subs, sb, "a#1") == "a#1"
+    @test subscribe_key!(subs, sc, "b#2") == "b#2"
+    # The same stream twice is still one subscription.
+    subscribe_key!(subs, sa, "a#1")
+
+    @test invalidate_key!(subs, "a#1") == 2
+    @test String(take!(bufa)) == "event: refresh\ndata: a#1\n\n"
+    @test String(take!(bufb)) == "event: refresh\ndata: a#1\n\n"
+    @test isempty(take!(bufc))
+    @test invalidate_key!(subs, "nobody") == 0
+
+    # A departed client is pruned: once every stream of a key is gone, the
+    # key itself leaves the registry.
+    close(sb)
+    @test invalidate_key!(subs, "a#1") == 1
+    @test String(take!(bufa)) == "event: refresh\ndata: a#1\n\n"
+    @test isempty(take!(bufb))
+    close(sa)
+    @test invalidate_key!(subs, "a#1") == 0
+    @test !haskey(subs.streams, "a#1")
+    @test haskey(subs.streams, "b#2")
+
+    @test unsubscribe_key!(subs, sc, "b#2")
+    @test !unsubscribe_key!(subs, sc, "b#2")
+    @test !unsubscribe_key!(subs, sc, "nobody")
+    @test isempty(subs.streams)
+
+    # Non-string keys ride `string`.
+    other = KeySubscriptions()
+    so = SSEStream(IOBuffer(), HTTP.Request("GET", "/events"))
+    @test subscribe_key!(other, so, :k) == "k"
+    @test invalidate_key!(other, "k") == 1
+
+    @test_throws ArgumentError subscribe_key!(subs, sa, "")
+    @test_throws ArgumentError invalidate_key!(subs, "")
+    @test_throws ArgumentError invalidate_key!(subs, "a#1"; event="two words")
+    @test_throws ArgumentError invalidate_key!(subs, "a#1"; event="")
+end
+
+@testitem "serve_key_feed! unsubscribes when its client leaves" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    subs = KeySubscriptions()
+    sse = SSEStream(IOBuffer(), HTTP.Request("GET", "/events"))
+    task = @async serve_key_feed!(sse, subs, "k#7"; poll=0.005)
+    t0 = time()
+    while !haskey(subs.streams, "k#7")
+        time() - t0 > 15 && error("serve_key_feed! never subscribed")
+        sleep(0.005)
+    end
+    @test invalidate_key!(subs, "k#7") == 1
+    close(sse)
+    @test fetch(task) === nothing
+    @test isempty(subs.streams)
+    @test_throws ArgumentError serve_key_feed!(sse, subs, "")
+    @test_throws ArgumentError serve_key_feed!(sse, subs, "k"; poll=-1)
+end
+
+@testitem "live_fragment subscribes and re-fetches through one div" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    node = live_fragment("gh:o/r#12", h.span("state: open");
+        fragment_url="/card?key=gh%3Ao%2Fr%2312",
+        events_url="/events?key=gh%3Ao%2Fr%2312")
+    html = repr("text/html", node)
+    @test contains(html, "hx-ext=\"sse\"")
+    @test contains(html, "sse-connect=\"/events?key=gh%3Ao%2Fr%2312\"")
+    @test contains(html, "hx-get=\"/card?key=gh%3Ao%2Fr%2312\"")
+    @test contains(html, "hx-trigger=\"sse:refresh\"")
+    @test contains(html, "hx-swap=\"outerHTML\"")
+    @test contains(html, "data-key=\"gh:o/r#12\"")
+    @test contains(html, "<span>state: open</span>")
+    @test !contains(html, "class=")
+    @test !contains(html, " id=")
+
+    custom = repr("text/html", live_fragment("k", "x";
+        fragment_url="/f", events_url="/e", event="tick",
+        swap="innerHTML", id="frag", class="card"))
+    @test contains(custom, "hx-trigger=\"sse:tick\"")
+    @test contains(custom, "hx-swap=\"innerHTML\"")
+    @test contains(custom, "id=\"frag\"")
+    @test contains(custom, "class=\"card\"")
+
+    @test contains(HTMXObjects.to_markdown_string(node), "state: open")
+
+    @test_throws ArgumentError live_fragment("", "x";
+        fragment_url="/f", events_url="/e")
+    @test_throws ArgumentError live_fragment("k", "x";
+        fragment_url="/f", events_url="/e", event="a b")
+end
+
+@testitem "keyed feed pushes refresh frames over a live stream" setup=[HTMXOTestImports] tags=[:integration, :server, :semantic] begin
+    using Sockets
+
+    const PUSH_SUBS = KeySubscriptions()
+
+    @htmx struct KeyFeedApp
+        @sse key_events(; key::String="") =
+            serve_key_feed!(__sse__, PUSH_SUBS, key; poll=0.02)
+        @get card(; key::String="") = live_fragment(key, h.span("body $key");
+            fragment_url="/card?key=$(HTTP.URIs.escapeuri(key))",
+            events_url="/key_events?key=$(HTTP.URIs.escapeuri(key))")
+    end
+
+    route!(KeyFeedApp())
+    port = 8147
+    heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
+    HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
+    serve(; port, async=true)
+    try
+        # The fragment route renders the subscribing div.
+        r = HTTP.get("http://127.0.0.1:$port/card?key=a%231";
+            status_exception=false, retry=false, readtimeout=60)
+        @test r.status == 200
+        card = String(r.body)
+        @test contains(card, "sse-connect=\"/key_events?key=a%231\"")
+        @test contains(card, "hx-trigger=\"sse:refresh\"")
+
+        # A connected client receives the pushed refresh frame.
+        sock = Sockets.connect("127.0.0.1", port)
+        write(sock, "GET /key_events?key=a%231 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        @test contains(String(readavailable(sock)), "text/event-stream")
+        t0 = time()
+        while !haskey(PUSH_SUBS.streams, "a#1")
+            time() - t0 > 15 && error("key feed never subscribed")
+            sleep(0.005)
+        end
+        @test invalidate_key!(PUSH_SUBS, "a#1") == 1
+        t0 = time()
+        got = ""
+        while !contains(got, "event: refresh")
+            time() - t0 > 15 &&
+                error("refresh frame never arrived: $(repr(got))")
+            sleep(0.005)
+            got *= String(readavailable(sock))
+        end
+        @test contains(got, "data: a#1")
+
+        # Leaving unsubscribes the stream.
+        close(sock)
+        t0 = time()
+        while haskey(PUSH_SUBS.streams, "a#1")
+            time() - t0 > 15 && error("key feed never unsubscribed")
+            sleep(0.01)
+        end
+    finally
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+        terminate()
+    end
+end
+
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])
