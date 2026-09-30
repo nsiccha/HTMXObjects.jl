@@ -160,10 +160,50 @@ end
   them, and in-process [`dispatch`](@ref) answers with an error because there is
   no connection to stream on.
 
+### Server-push refresh by key
+
+A [`live_fragment`](@ref) subscribes to a resource key such as
+`gh:owner/repo#12`: it opens one keyed event stream and re-`GET`s itself
+whenever the server invalidates that key, so every open page refreshes just
+those fragments with no polling and no client JavaScript. One
+[`KeySubscriptions`](@ref) registry per app holds the live streams; an
+`@sse` route feeds it through [`serve_key_feed!`](@ref), and any server
+code — a poller, a webhook, a POST handler — pushes with
+[`invalidate_key!`](@ref):
+
+```julia
+const SUBS = KeySubscriptions()
+
+@htmx struct Cards
+    @get card(; key::String="") = live_fragment(key, _card_body(key);
+        fragment_url=query_url(__self__/"card"; key=key),
+        events_url=query_url(__self__/"key_events"; key=key))
+    @sse key_events(; key::String="") = serve_key_feed!(__sse__, SUBS, key)
+end
+
+invalidate_key!(SUBS, "gh:owner/repo#12")   # every subscribed card re-fetches
+```
+
+`invalidate_key!` is the push half only: it does not touch the cache the
+fragment route reads. Refresh the data first (or kick its background
+rebuild), then invalidate, so the re-fetch renders the new state. The
+fragment route answers with the same `live_fragment` call, so the re-fetch
+is self-similar — the swapped-out element's stream is closed by the SSE
+extension and the fresh element opens a new one. An invalidation that lands
+between the page render and the stream connect is missed; the fragment
+shows render-time state until the next one. In `?plain` the element
+degrades to its text content.
+
 ```@docs
 SSEStream
 last_event_id
 sse_region
+KeySubscriptions
+subscribe_key!
+unsubscribe_key!
+serve_key_feed!
+invalidate_key!
+live_fragment
 ```
 
 ## Markdown / agent-readable responses
