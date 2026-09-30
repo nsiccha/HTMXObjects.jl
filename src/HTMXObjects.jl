@@ -2530,7 +2530,7 @@ SemanticMetric(label, value; unit="") =
 # Declaring the arm inside the struct suppresses the auto-generated pair instead.
 
 """
-    SemanticLink(label, target; external=false)
+    SemanticLink(label, target; external=false, code=false)
 
 A navigation target held as data. Renders as an ordinary anchor in HTML and as
 a real link in Markdown, rather than as a bare stringified URL.
@@ -2539,13 +2539,20 @@ With `external=true` the link leaves the app: it opens in a new tab
 (`target="_blank"`, `rel="noopener"`), carries a trailing `↗` glyph, and keeps
 that marker in the Markdown (`[label ↗](target)`) and plain (`label ↗ (target)`)
 peers.
+
+With `code=true` the label is an identifier — a repo slug, a branch name, a
+SHA — and keeps its code styling: `<a …><code>label</code> ↗</a>` in HTML and
+``[`label` ↗](target)`` in Markdown. The glyph stays OUTSIDE the code span in
+both: it marks the exit, it is not part of the identifier. Plain text has no
+code spans, so that peer is unchanged.
 """
 struct SemanticLink <: SemanticNode
     label::String
     target
     external::Bool
-    SemanticLink(label, target; external=false) =
-        new(String(label), target, Bool(external))
+    code::Bool
+    SemanticLink(label, target; external=false, code=false) =
+        new(String(label), target, Bool(external), Bool(code))
 end
 
 """
@@ -3207,7 +3214,7 @@ function render_markdown(ast::CommonMark.Node; rules=nothing, context=nothing,
 end
 
 """
-    decorated_link(label, href, entry; class, attrs) -> Node
+    decorated_link(label, href, entry; class, attrs, base=(;)) -> Node
 
 Render one inline reference that gains metadata once its background batch
 lands — the read-through half of deferred batched decoration. The fetch half
@@ -3224,19 +3231,31 @@ end)
 ```
 
 While `entry` is `nothing` (batch not back — or the key failed and keeps no
-previous value) the link is plain: an anchor with `class` and nothing else,
+previous value) the link is plain: an anchor with `class` and `base` only,
 so first paint never waits. Once known, `attrs(entry)` — a `NamedTuple` of
-extra attributes, or `nothing` for none — merges in (a state colour, a hover
-title). Anything else from `attrs` is an `ArgumentError`.
+extra attributes, or `nothing` for none — merges over `base` (a state colour,
+a hover title). Anything else from `attrs` is an `ArgumentError`.
+
+`base` is a `NamedTuple` of entry-independent attributes — a full-URL hover
+title behind a compact label, `target`/`rel` on an external link — rendered
+both before the entry lands and after. On a key collision the entry's
+attribute wins, so `base` doubles as the unknown-state fallback (a bare-URL
+title that becomes `"<state>: <title>\n<url>"` once known).
 
 Live metadata is point-in-time, so the `?plain` projection carries the stable
 part only: `[label](href)`, decorated or not.
 """
-function decorated_link(label, href, entry; class::AbstractString, attrs::Function)
-    extra = isnothing(entry) ? (;) : attrs(entry)
-    isnothing(extra) && (extra = (;))
-    extra isa NamedTuple || throw(ArgumentError(
-        "decorated_link attrs must return a NamedTuple (or nothing), got $(typeof(extra))"))
+function decorated_link(label, href, entry; class::AbstractString, attrs::Function,
+                        base::NamedTuple=(;))
+    if isnothing(entry)
+        extra = base
+    else
+        known = attrs(entry)
+        isnothing(known) && (known = (;))
+        known isa NamedTuple || throw(ArgumentError(
+            "decorated_link attrs must return a NamedTuple (or nothing), got $(typeof(known))"))
+        extra = merge(base, known)
+    end
     h.a(label; href=string(href), class=String(class), extra...)
 end
 
@@ -3268,6 +3287,15 @@ _semantic_html_node(metric::SemanticMetric) = h.div(
     h.strong(_semantic_metric_text(metric); class="htmxo-semantic-metric-value");
     class="htmxo-semantic-metric")
 function _semantic_html_node(link::SemanticLink)
+    if link.code
+        label = h.code(link.label)
+        link.external || return h.a(
+            label; href=string(link.target), class="htmxo-semantic-link")
+        # The glyph stays outside the code span: it marks the exit, it is
+        # not part of the identifier — the same split the Markdown peer draws.
+        return h.a(label, " ↗"; href=string(link.target), target="_blank",
+            rel="noopener", class="htmxo-semantic-link")
+    end
     link.external || return h.a(
         link.label; href=string(link.target), class="htmxo-semantic-link")
     # An external link leaves the app: new tab, safe attrs, and a trailing
@@ -3385,6 +3413,18 @@ function _semantic_code_fence(text)
     repeat("`", max(3, longest + 1))
 end
 
+# An inline code span that survives a label containing backticks: the fence
+# run is one longer than the longest run inside, and a label touching the
+# fence gets padded — the inline analogue of `_semantic_code_fence`.
+function _semantic_inline_code(text)
+    longest = maximum((length(match.match) for match in eachmatch(r"`+", text)); init=0)
+    fence = repeat("`", max(1, longest + 1))
+    if startswith(text, "`") || endswith(text, "`")
+        return fence * " " * text * " " * fence
+    end
+    fence * text * fence
+end
+
 function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
     fence = _semantic_code_fence(code.text)
     print(io, fence, code.language, '\n', code.text, '\n', fence)
@@ -3412,8 +3452,12 @@ Base.show(io::IO, ::MIME"text/markdown", prose::SemanticProse) =
 Base.show(io::IO, ::MIME"text/markdown", metric::SemanticMetric) =
     print(io, "**", metric.label, ":** ", _semantic_metric_text(metric))
 
-Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink) = print(
-    io, "[", link.label, link.external ? " ↗" : "", "](", string(link.target), ")")
+# The exit glyph stays outside the code span: it marks the exit, not the
+# identifier — the same split the HTML peer draws with `<code>`.
+function Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink)
+    label = link.code ? _semantic_inline_code(link.label) : link.label
+    print(io, "[", label, link.external ? " ↗" : "", "](", string(link.target), ")")
+end
 
 # An action degrades to an ordinary link. No format but HTML can express "swap
 # this in place", and the target is the honest remainder of the meaning — which

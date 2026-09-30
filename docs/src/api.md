@@ -229,7 +229,7 @@ For authoring Markdown that renders to HTML — the reverse direction:
 | `markdown_children(renderer, node, rules, context)` | Joined-run children render, for override recursion |
 | `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
 | `markdown_parser(; extra_rules)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
-| `decorated_link(label, href, entry; class, attrs)` | Plain anchor while the entry is `nothing`, merged metadata attrs once known |
+| `decorated_link(label, href, entry; class, attrs, base)` | `base` attrs always; `attrs(entry)` merged over them once known |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
 identifiers stay verbatim (the stdlib parser took them as emphasis and deleted
@@ -253,8 +253,9 @@ already-parsed tree.
 Deferred decoration pairs a [`MarkdownRule`](@ref) with a DynamicObjects
 `BackgroundCache` in batch mode: the build function reads `cache[key]` on the
 render path and hands the entry to `decorated_link`, which renders a plain
-anchor while the batch is out and merges `attrs(entry)` (state colour, hover
-title) once it lands. Reads never block and failures keep links plain — the
+anchor with `base` while the batch is out and merges `attrs(entry)` (state
+colour, hover title) over it once it lands. Reads never block and failures
+keep links plain — the
 cache single-flights the drain, backs off, and logs with the cause — so first
 paint never waits; the next render (a poll cycle, a push refresh) picks the
 metadata up. `?plain` carries `[label](href)` either way.
@@ -526,7 +527,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
 | `SemanticStatus(state; detail="")` | A state, not a colour |
 | `SemanticUnavailable(reason)` | A declined computation, and why — not a state |
-| `SemanticLink(label, target; external=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker) |
+| `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
 | `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
 | `SemanticCode(language, text; anchor="")` | Source code, language kept as data |
