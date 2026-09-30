@@ -487,7 +487,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
 | `SemanticStatus(state; detail="")` | A state, not a colour |
 | `SemanticUnavailable(reason)` | A declined computation, and why — not a state |
-| `SemanticLink(label, target; external=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker) |
+| `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
 | `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
 | `SemanticCode(language, text; anchor="")` | Source code, language kept as data |

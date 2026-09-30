@@ -7159,6 +7159,42 @@ end
     @test repr("text/plain", internal) == "home (/)"
 end
 
+@testitem "SemanticLink code=true keeps identifier labels as code" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    external = SemanticLink("main", "https://github.com/x/tree/main"; external=true, code=true)
+    html = repr("text/html", external)
+    @test contains(html, "<code>main</code> ↗</a>")
+    @test contains(html, "target=\"_blank\"")
+    @test contains(html, "rel=\"noopener\"")
+    @test contains(html, "htmxo-semantic-link")
+
+    # Markdown keeps the code span; the glyph stays outside it.
+    @test repr("text/markdown", external) == "[`main` ↗](https://github.com/x/tree/main)"
+
+    # Plain text has no code spans: the peer is unchanged.
+    @test repr("text/plain", external) == "main ↗ (https://github.com/x/tree/main)"
+
+    # HXML carries the code styling through the shared HTML node.
+    @test contains(repr("application/vnd.hyperview+xml", external),
+        "<text style=\"code\">main</text>")
+
+    # Internal code links: code styling, no exit marker.
+    internal = SemanticLink("v1.2.3", "/tags"; code=true)
+    internal_html = repr("text/html", internal)
+    @test contains(internal_html, "<code>v1.2.3</code></a>")
+    @test !contains(internal_html, "↗")
+    @test repr("text/markdown", internal) == "[`v1.2.3`](/tags)"
+    @test repr("text/plain", internal) == "v1.2.3 (/tags)"
+
+    # A backtick in the label cannot break the span.
+    tricky = SemanticLink("a`b", "/x"; code=true)
+    @test repr("text/markdown", tricky) == "[``a`b``](/x)"
+
+    # Default is unchanged: plain-text label, no code element.
+    plain = SemanticLink("home", "/")
+    @test !contains(repr("text/html", plain), "<code>")
+    @test repr("text/markdown", plain) == "[home](/)"
+end
+
 @testitem "SemanticAlternatives shows the default, collapses the rest" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     alt = SemanticAlternatives("verbatim-src", "preview" => "rendered-out")
 

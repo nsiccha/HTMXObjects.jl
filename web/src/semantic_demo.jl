@@ -15,6 +15,9 @@ const _SEM_DEMO_BODY = """Load `data_path`, then call `load_data(x_y_z)`."""
                 h.p("External: ",
                     SemanticLink("HTMXObjects.jl", "https://github.com/nsiccha/HTMXObjects.jl";
                         external=true), "."),
+                h.p("Code label: ",
+                    SemanticLink("main", "https://github.com/nsiccha/HTMXObjects.jl/tree/main";
+                        external=true, code=true), "."),
             ),
             h.section(
                 h.h2("Alternatives: verbatim source plus a second view"),
