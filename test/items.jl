@@ -3225,7 +3225,9 @@ end
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
-        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do outer
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do outer
             external_target = String(outer.target)
             path = HTTP.URI(external_target).path
             startswith(path, prefix * "/") || return HTTP.Response(404)
@@ -4459,7 +4461,9 @@ end
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
-        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             path = HTTP.URI(req.target).path
             if path == "/"
                 HTTP.Response(200, ["Content-Type" => "text/html"], page)
@@ -4550,7 +4554,9 @@ end
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
-        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             path = HTTP.URI(req.target).path
             if path == "/"
                 HTTP.Response(200, ["Content-Type" => "text/html"], page)
@@ -4669,7 +4675,9 @@ end
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
-        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             path = HTTP.URI(req.target).path
             if path == "/"
                 HTTP.Response(200, ["Content-Type" => "text/html"], page)
@@ -7952,7 +7960,9 @@ end
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
-        server = HTTP.serve!(Sockets.localhost, port; verbose=false) do req
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             HTTP.URI(req.target).path == "/" || return HTTP.Response(404)
             HTTP.Response(200, ["Content-Type" => "text/html"], page)
         end
@@ -10066,25 +10076,37 @@ end
     drive(target) = app(HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[]))
     running() = runtime_jobs(hand_tracker)
 
+    # Hand-rolled job reporting lives in Treebars' `polling_fetchindex`
+    # (`track_job`, which arrived together with `htmx_render_board`): below
+    # that generation the poller renders but reports no job (snag
+    # full-tag-semanti-d1d3b646).
+    hooked = isdefined(Treebars, :htmx_render_board)
+
     try
         body = String(drive("/hand_fit/a").body)
         @test contains(body, "treebar-poller-inner")
-        @test timedwait(() -> length(running()) == 1, 10.0; pollint=0.02) === :ok
-        job = only(running())
-        @test job.label == "Hand-rolled fit"
-        @test job.route == "GET /hand_fit/{key}"
-        @test job.target == "/hand_fit/a"
-        @test job.progress isa Treebars.ProgressNode
-        @test job.polls == 0
-        # The poller's follow-up requests are polls on the same job.
-        drive("/hand_fit/a"); drive("/hand_fit/a")
-        @test only(running()).polls == 2
-        @test all(r -> r.job == job.id, [r for r in runtime_snapshot(hand_tracker).history
-                                         if r.target == "/hand_fit/a"])
-        notify(hand_gate[])
-        @test timedwait(() -> isempty(running()), 10.0; pollint=0.02) === :ok
-        @test only(r for r in runtime_jobs(hand_tracker; states=:done)
-                   if r.label == "Hand-rolled fit").id == job.id
+        if !hooked
+            # The poller renders; without the hook nothing reports the job.
+            @test isempty(running())
+            notify(hand_gate[])
+        else
+            @test timedwait(() -> length(running()) == 1, 10.0; pollint=0.02) === :ok
+            job = only(running())
+            @test job.label == "Hand-rolled fit"
+            @test job.route == "GET /hand_fit/{key}"
+            @test job.target == "/hand_fit/a"
+            @test job.progress isa Treebars.ProgressNode
+            @test job.polls == 0
+            # The poller's follow-up requests are polls on the same job.
+            drive("/hand_fit/a"); drive("/hand_fit/a")
+            @test only(running()).polls == 2
+            @test all(r -> r.job == job.id, [r for r in runtime_snapshot(hand_tracker).history
+                                             if r.target == "/hand_fit/a"])
+            notify(hand_gate[])
+            @test timedwait(() -> isempty(running()), 10.0; pollint=0.02) === :ok
+            @test only(r for r in runtime_jobs(hand_tracker; states=:done)
+                       if r.label == "Hand-rolled fit").id == job.id
+        end
     finally
         notify(hand_gate[])
     end
@@ -10144,6 +10166,11 @@ end
         ["HX-Request" => "true", "X-Session" => session], UInt8[]))
     board(session) = String(drive("/my_jobs", session).body)
 
+    # Board markup is Treebars' `htmx_render_board` where the loaded
+    # generation has it, else the plain-list fallback (snag
+    # full-tag-semanti-d1d3b646).
+    hooked = isdefined(Treebars, :htmx_render_board)
+
     try
         drive("/session_crunch/1", "alice")
         drive("/session_crunch/2", "bob")
@@ -10161,14 +10188,30 @@ end
                         "alice")
 
         alice_board = board("alice")
-        @test contains(alice_board, "class=\"treebar-board\" id=\"my-jobs\"")
-        @test contains(alice_board, "data-treebar-key=\"$(alice.id)\"")
-        @test !contains(alice_board, "data-treebar-key=\"$(bob.id)\"")
-        @test !contains(alice_board, "data-treebar-key=\"$(request_job.id)\"")
+        if hooked
+            @test contains(alice_board, "class=\"treebar-board\" id=\"my-jobs\"")
+            @test contains(alice_board, "data-treebar-key=\"$(alice.id)\"")
+            @test !contains(alice_board, "data-treebar-key=\"$(bob.id)\"")
+            @test !contains(alice_board, "data-treebar-key=\"$(request_job.id)\"")
+        else
+            # The plain-list fallback: same session filter, `data-htmxo-job`
+            # keys and rendered targets instead of treebar keys.
+            @test contains(alice_board, "<section id=\"my-jobs\" class=\"htmxo-jobs\"")
+            @test contains(alice_board, "data-htmxo-job=\"$(alice.id)\"")
+            @test !contains(alice_board, "data-htmxo-job=\"$(bob.id)\"")
+            @test !contains(alice_board, "data-htmxo-job=\"$(request_job.id)\"")
+            @test contains(alice_board, "<code>/session_crunch/1</code>")
+            @test !contains(alice_board, "<code>/session_crunch/2</code>")
+        end
         @test contains(alice_board, "hx-get=\"/my_jobs\"")
         bob_board = board("bob")
-        @test contains(bob_board, "data-treebar-key=\"$(bob.id)\"")
-        @test !contains(bob_board, "data-treebar-key=\"$(alice.id)\"")
+        if hooked
+            @test contains(bob_board, "data-treebar-key=\"$(bob.id)\"")
+            @test !contains(bob_board, "data-treebar-key=\"$(alice.id)\"")
+        else
+            @test contains(bob_board, "data-htmxo-job=\"$(bob.id)\"")
+            @test !contains(bob_board, "data-htmxo-job=\"$(alice.id)\"")
+        end
         # A session with no jobs sees an empty board.
         carol_board = board("carol")
         @test !contains(carol_board, "treebar-board-item")
@@ -10179,7 +10222,8 @@ end
         # The global view is an explicit opt-in.
         @test_throws ArgumentError jobs_board(; tracker=session_tracker)
         everyone = repr("text/html", jobs_board(; all=true, tracker=session_tracker))
-        @test all(r -> contains(everyone, "data-treebar-key=\"$(r.id)\""), rows)
+        key_attr = hooked ? "data-treebar-key" : "data-htmxo-job"
+        @test all(r -> contains(everyone, "$key_attr=\"$(r.id)\""), rows)
         # The same filter on the data API.
         alice_req = HTTP.Request("GET", "/", ["X-Session" => "alice"])
         HTMXObjects._runtime_note_session!(alice_req,
@@ -10212,6 +10256,11 @@ end
     drive(target; hx=true) = app(HTTP.Request("GET", target,
         hx ? ["HX-Request" => "true"] : Pair{String,String}[], UInt8[]))
 
+    # Board markup is Treebars' `htmx_render_board` where the loaded
+    # generation has it, else the plain-list fallback (snag
+    # full-tag-semanti-d1d3b646).
+    hooked = isdefined(Treebars, :htmx_render_board)
+
     try
         drive("/board_crunch/1")
         drive("/board_doomed")
@@ -10221,17 +10270,25 @@ end
 
         # The running board: a self-polling fragment, keyed by job id.
         fragment = String(drive("/board_dash/jobs").body)
-        @test contains(fragment, "class=\"treebar-board\" id=\"htmxo-runtime-jobs\"")
-        @test contains(fragment, "data-treebar-key=\"$(running.id)\" data-treebar-state=\"running\"")
+        if hooked
+            @test contains(fragment, "class=\"treebar-board\" id=\"htmxo-runtime-jobs\"")
+            @test contains(fragment, "data-treebar-key=\"$(running.id)\" data-treebar-state=\"running\"")
+            @test contains(fragment, "class=\"treebar-board-poll\" hx-get=\"/board_dash/jobs?limit=100&amp;state=running\" hx-trigger=\"every 1s\"")
+            @test contains(fragment, "treebar-board-pause")
+            @test contains(fragment, "<details class=\"treebar-board-tree\">")
+            @test contains(fragment, "<span class=\"treebar-board-meta-key\">job</span> #$(running.id)")
+        else
+            # The plain-list fallback: same jobs and self-poll, no trees.
+            @test contains(fragment, "<section id=\"htmxo-runtime-jobs\" class=\"htmxo-jobs\"")
+            @test contains(fragment, "data-htmxo-job=\"$(running.id)\"")
+            @test contains(fragment, "hx-get=\"/board_dash/jobs?limit=100&amp;state=running\" hx-trigger=\"every 1s\" hx-swap=\"outerHTML\"")
+            @test contains(fragment, "job #$(running.id)")
+        end
         @test contains(fragment, "Board crunch")
-        @test contains(fragment, "class=\"treebar-board-poll\" hx-get=\"/board_dash/jobs?limit=100&amp;state=running\" hx-trigger=\"every 1s\"")
-        @test contains(fragment, "treebar-board-pause")
-        @test contains(fragment, "<details class=\"treebar-board-tree\">")
-        @test contains(fragment, "<span class=\"treebar-board-meta-key\">job</span> #$(running.id)")
         # A just-finished job stays listed with its outcome for `recent`
         # seconds, so the board shows it before it leaves.
         recent = repr("text/html", jobs_board(; all=true, tracker=board_tracker, recent=600))
-        @test contains(recent, "data-treebar-state=\"failed\"")
+        @test contains(recent, hooked ? "data-treebar-state=\"failed\"" : "failed after")
         @test contains(recent, "board doomed")
         @test !contains(repr("text/html", jobs_board(; all=true, tracker=board_tracker,
                                                      recent=0)), "board doomed")
@@ -10271,9 +10328,17 @@ end
             job.position = 2
         end
         queued = String(drive("/board_dash/jobs").body)
-        @test contains(queued, "data-treebar-state=\"queued\"")
-        @test contains(queued, "queued · #2")
-        @test contains(queued, "1 running · 1 queued")
+        if hooked
+            @test contains(queued, "data-treebar-state=\"queued\"")
+            @test contains(queued, "queued · #2")
+            @test contains(queued, "1 running · 1 queued")
+        else
+            # The fallback lists queue positions per item and renders no
+            # running/queued summary line.
+            @test contains(queued, "</strong> — queued")
+            @test contains(queued, "position 2")
+            @test !contains(queued, "running ·")
+        end
     finally
         notify(board_gate[])
     end
@@ -10444,6 +10509,11 @@ end
                    if r.target == "/queued_crunch/$n"]
     latest(n) = last(jobs_for(n))
 
+    # Board markup is Treebars' `htmx_render_board` where the loaded
+    # generation has it, else the plain-list fallback (snag
+    # full-tag-semanti-d1d3b646).
+    hooked = isdefined(Treebars, :htmx_render_board)
+
     @test_throws ArgumentError configure_job_queue!(; max_running=-1)
     @test_throws ArgumentError configure_job_queue!(; abandon_after=0)
     # Off by default: background computes start at once.
@@ -10469,9 +10539,17 @@ end
         snap = runtime_snapshot(queue_tracker)
         @test count(r -> r.state === :queued, snap.running) == 2
         board = repr("text/html", jobs_board(; all=true, tracker=queue_tracker))
-        @test contains(board, "1 running · 2 queued")
-        @test contains(board, "queued · #1")
-        @test contains(board, "queued · #2")
+        if hooked
+            @test contains(board, "1 running · 2 queued")
+            @test contains(board, "queued · #1")
+            @test contains(board, "queued · #2")
+        else
+            # The fallback lists queue positions per item and renders no
+            # running/queued summary line.
+            @test contains(board, "<section id=\"htmxo-jobs\" class=\"htmxo-jobs\"")
+            @test contains(board, "position 1")
+            @test contains(board, "position 2")
+        end
 
         # Finishing the running job starts the next one; the rest move up. (The
         # worker starts job 2 before job 1's watcher has necessarily stamped
