@@ -2,6 +2,7 @@ module HTMXObjectsWeb
 
 using HTMXObjects
 using HTMXObjects.DynamicObjects
+using CommonMark
 using DataFrames
 
 include("demo.jl")

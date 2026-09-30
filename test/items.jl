@@ -7195,6 +7195,107 @@ end
     @test repr("text/markdown", stripped) == "keepme"
 end
 
+@testitem "markdown_node overrides apply at depth, stock falls through" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    using CommonMark
+
+    struct BareRenderer <: MarkdownRenderer end
+    struct CodeRenderer <: MarkdownRenderer end
+    HTMXObjects.markdown_node(::CodeRenderer, ::CommonMark.Code, n, rules, context) =
+        h.span(n.literal; class="custom-code")
+
+    rich = "# T\n\nLoad `data_path`.\n\n- [x] done\n- item `c2`\n\n> quoted `c3`\n\n| a |\n|---|\n| `c4` |\n"
+
+    # A subtype with no overrides renders byte-identically to stock.
+    stock = repr("text/html", render_markdown(rich; rules=MarkdownRule[]))
+    @test repr("text/html",
+        render_markdown(rich; rules=MarkdownRule[], renderer=BareRenderer())) == stock
+
+    # One override applies at every depth; everything else stays stock.
+    ov = repr("text/html",
+        render_markdown(rich; rules=MarkdownRule[], renderer=CodeRenderer()))
+    @test contains(ov, "<span class=\"custom-code\">data_path</span>")
+    @test contains(ov, "<span class=\"custom-code\">c2</span>")
+    @test contains(ov, "<span class=\"custom-code\">c3</span>")
+    @test contains(ov, "<span class=\"custom-code\">c4</span>")
+    @test !contains(ov, "<code>")
+    @test contains(ov, "<h1>T</h1>")
+    @test contains(ov, "☑ ")
+    @test contains(ov, "<thead>")
+end
+
+@testitem "markdown_text_run overrides see runs inside links" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    using CommonMark
+
+    # An override replaces the stock run behavior per branch: in-link runs get
+    # custom mention nodes (never a nested link); plain runs delegate
+    # explicitly to the stock path so rules still apply.
+    struct MentionRenderer <: MarkdownRenderer end
+    function _strong_mentions(s::AbstractString)
+        parts = Any[]
+        pos = firstindex(s)
+        for m in eachmatch(r"@\w+", s)
+            m.offset > pos && push!(parts, s[pos:prevind(s, m.offset)])
+            push!(parts, h.strong(String(m.match)))
+            pos = m.offset + ncodeunits(m.match)
+        end
+        pos <= lastindex(s) && push!(parts, s[pos:end])
+        length(parts) == 1 ? String(parts[1]) : h.span(parts...)
+    end
+    function HTMXObjects.markdown_text_run(::MentionRenderer, s::AbstractString,
+                                           in_link::Bool, rules, context)
+        in_link ? _strong_mentions(s) : markdown_text_run(
+            DefaultMarkdownRenderer(), s, false, rules, context)
+    end
+
+    html = repr("text/html", render_markdown(
+        "[hi @bob](https://x.example) and @ann, see https://y.example/z.";
+        renderer=MentionRenderer()))
+    @test contains(html, "<strong>@bob</strong>")
+    @test contains(html, "@ann")
+    @test !contains(html, "<strong>@ann</strong>")
+    @test count("<a ", html) == 2
+    @test contains(html, "<a href=\"https://y.example/z\">")
+end
+
+@testitem "render_markdown AST entry and parser_rules extend the walk" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    using CommonMark
+
+    struct AtRule end
+    function _parse_at(p::CommonMark.InlineParser, block::CommonMark.Node)
+        m = match(r"^@@(.*?)@@", p)
+        isnothing(m) && return false
+        CommonMark.consume(p, m)
+        child = CommonMark.Node(CommonMark.Code())
+        child.literal = String(m.captures[1])
+        CommonMark.append_child(block, child)
+        return true
+    end
+    CommonMark.inline_rule(::AtRule) = CommonMark.Rule(_parse_at, 0.5, "@")
+
+    # The AST entry renders what the text entry renders.
+    src = "Load `data_path`, see https://s.example/a."
+    via_text = repr("text/html", render_markdown(src))
+    @test repr("text/html", render_markdown(markdown_parser()(src))) == via_text
+
+    # The stock parser carries the GFM trio.
+    @test contains(repr("text/html",
+        render_markdown(markdown_parser()("| a |\n|---|\n| 1 |\n"))), "<thead>")
+
+    # A custom rule parses end to end — and only when registered.
+    @test contains(repr("text/html", render_markdown("say @@hi@@ ok";
+        rules=MarkdownRule[], parser_rules=[AtRule()])), "<code>hi</code>")
+    @test contains(repr("text/html",
+        render_markdown("say @@hi@@ ok"; rules=MarkdownRule[])), "@@hi@@")
+
+    # Overrides apply to parser-rule-produced nodes too.
+    struct CodeRenderer2 <: MarkdownRenderer end
+    HTMXObjects.markdown_node(::CodeRenderer2, ::CommonMark.Code, n, rules, context) =
+        h.span(n.literal; class="custom-code")
+    @test contains(repr("text/html", render_markdown("say @@hi@@ ok";
+        rules=MarkdownRule[], parser_rules=[AtRule()], renderer=CodeRenderer2())),
+        "<span class=\"custom-code\">hi</span>")
+end
+
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])

@@ -45,6 +45,29 @@ _md_demo_case(title, source, rule) = h.section(
     render_markdown(source; rules=isnothing(rule) ? nothing : rule),
 )
 
+# A per-node override for the overrides case: code spans render as marked
+# spans instead of `<code>`. Everything else falls through to stock.
+struct _MD_DEMO_CODE_RENDERER <: MarkdownRenderer end
+HTMXObjects.markdown_node(::_MD_DEMO_CODE_RENDERER, ::CommonMark.Code, n, rules, context) =
+    h.span(n.literal; class="md-demo-code")
+
+# A custom parser rule for the overrides case: `@@text@@` parses into a code
+# node, which the override above then styles.
+struct _MD_DEMO_AT_RULE end
+function _md_demo_parse_at(p::CommonMark.InlineParser, block::CommonMark.Node)
+    m = match(r"^@@(.*?)@@", p)
+    isnothing(m) && return false
+    CommonMark.consume(p, m)
+    child = CommonMark.Node(CommonMark.Code())
+    child.literal = String(m.captures[1])
+    CommonMark.append_child(block, child)
+    return true
+end
+CommonMark.inline_rule(::_MD_DEMO_AT_RULE) =
+    CommonMark.Rule(_md_demo_parse_at, 0.5, "@")
+
+const _MD_DEMO_OVERRIDE_SRC = "Stock `code` and custom @@marked@@ spans."
+
 @htmx struct MarkdownDemoRoutes
     @get index() = begin
         ctx = Dict{String,Any}()
@@ -72,6 +95,14 @@ _md_demo_case(title, source, rule) = h.section(
             h.section(
                 h.h2("As a semantic element"),
                 SemanticProse("Prose with data_path and https://docs.example keeps both."),
+            ),
+            h.section(
+                h.h2("Overrides: custom renderer plus custom parser rule"),
+                h.pre(h.code(_MD_DEMO_OVERRIDE_SRC)),
+                render_markdown(_MD_DEMO_OVERRIDE_SRC;
+                    rules=MarkdownRule[],
+                    renderer=_MD_DEMO_CODE_RENDERER(),
+                    parser_rules=[_MD_DEMO_AT_RULE()]),
             ),
         )
     end

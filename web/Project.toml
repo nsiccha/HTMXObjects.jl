@@ -3,6 +3,7 @@ uuid = "ca25fa2a-5c43-07ab-5d59-00f5b2fdc04e"
 version = "0.1.0"
 
 [deps]
+CommonMark = "a80b9123-70ca-4bc0-993e-6e3bcb318db6"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
 HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
