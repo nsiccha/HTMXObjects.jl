@@ -6958,6 +6958,7 @@ end
                 SemanticMetric("AUC", 12.5; unit="ng·h/mL"),
                 SemanticStatus(:ok; detail="converged")),
             SemanticSection("Detail", SemanticTable((x=[1], y=["a"]))),
+            SemanticProse("path data_path, see https://keep.example/r."),
             h.button("Go"),
         ),
     )
@@ -6967,9 +6968,168 @@ end
     @test contains(markdown, "AUC") && contains(markdown, "ng·h/mL")
     @test contains(markdown, "converged")
     @test contains(markdown, "| x | y |")
+    @test contains(markdown, "data_path")
+    @test contains(markdown, "https://keep.example/r")
     @test !contains(markdown, "<form")
     @test !contains(markdown, "<input")
     @test !contains(markdown, "<button")
+end
+
+@testitem "render_markdown renders CommonMark and links bare URLs by default" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # Intra-word underscores stay verbatim — the stdlib parser deleted them.
+    html = repr("text/html",
+        render_markdown("load data_path and x_y_z."; rules=MarkdownRule[]))
+    @test contains(html, "data_path") && contains(html, "x_y_z")
+    @test !contains(html, "<em>")
+
+    # The default registry links a bare URL even though CommonMark splits the
+    # run at `_` and `&`; sentence punctuation stays outside the link.
+    linked = repr("text/html", render_markdown("see https://x.example/a_b?c=1&d=2."))
+    @test contains(linked, "<a href=\"https://x.example/a_b?c=1&amp;d=2\">")
+    @test contains(linked, "</a>.")
+    @test !contains(linked, ">.</a>")
+
+    # Balanced parens stay in the URL; an unmatched closer does not.
+    paren = repr("text/html",
+        render_markdown("(see https://x.example/a_(b)) and https://y.example/c)."))
+    @test contains(paren, "href=\"https://x.example/a_(b)\"")
+    @test contains(paren, "href=\"https://y.example/c\"")
+
+    # No rules, no linking.
+    plain = repr("text/html",
+        render_markdown("see https://x.example/y."; rules=MarkdownRule[]))
+    @test !contains(plain, "<a")
+    @test contains(plain, "https://x.example/y")
+
+    # Basic inline/block structure survives the walk.
+    rich = repr("text/html",
+        render_markdown("# T\n\n**b** and *i* with `c`."; rules=MarkdownRule[]))
+    @test contains(rich, "<h1>T</h1>")
+    @test contains(rich, "<strong>b</strong>")
+    @test contains(rich, "<em>i</em>")
+    @test contains(rich, "<code>c</code>")
+end
+
+@testitem "render_markdown rules skip links, code spans and fences" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # An author's own link never gains a nested rule link.
+    authored = repr("text/html", render_markdown("[ours](https://ours.example/a_b)"))
+    @test contains(authored, "<a href=\"https://ours.example/a_b\">ours</a>")
+    @test count("<a ", authored) == 1
+
+    # Code spans and fences stay byte-literal under the URL rule.
+    @test contains(repr("text/html", render_markdown("`https://code.example/x`")),
+        "<code>https://code.example/x</code>")
+    fenced = repr("text/html", render_markdown("```\nhttps://fence.example\n```\n"))
+    @test !contains(fenced, "<a")
+    @test contains(fenced, "https://fence.example")
+
+    # ... but the same URL in prose links.
+    mixed = repr("text/html", render_markdown("`lit` and https://prose.example/z."))
+    @test contains(mixed, "<code>lit</code>")
+    @test contains(mixed, "<a href=\"https://prose.example/z\">")
+end
+
+@testitem "render_markdown custom rules compose with earliest-match-wins" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    ticket = MarkdownRule(r"#(\d+)",
+        (m, ctx) -> h.a("#$(m.captures[1])"; href="/t/$(m.captures[1])"))
+
+    # A single rule (not just a vector) is accepted.
+    single = repr("text/html", render_markdown("fix #12"; rules=ticket))
+    @test contains(single, "<a href=\"/t/12\">#12</a>")
+
+    # Context scopes the whole render and accumulates across matches.
+    ctx = Dict{String,Any}()
+    counting = MarkdownRule(r"#(\d+)",
+        (m, ctx) -> (ctx["seen"] = get(ctx, "seen", 0) + 1;
+            h.a("#$(m.captures[1])"; href="/t/$(m.captures[1])")))
+    repr("text/html", render_markdown("#1 and #2"; rules=[counting], context=ctx))
+    @test ctx["seen"] == 2
+
+    # Earliest match wins across rules, regardless of vector order ...
+    first_rule = MarkdownRule(r"a+", (m, ctx) -> "FIRST")
+    second_rule = MarkdownRule(r"b+", (m, ctx) -> "SECOND")
+    ordered = repr("text/html", render_markdown("xxbbaa"; rules=[first_rule, second_rule]))
+    @test contains(ordered, "xxSECONDFIRST")
+
+    # ... and ties go to the earliest rule.
+    one = MarkdownRule(r"a", (m, ctx) -> "1")
+    two = MarkdownRule(r"a", (m, ctx) -> "2")
+    @test contains(repr("text/html", render_markdown("a"; rules=[one, two])), ">1<")
+
+    # `nothing` leaves the text; an overlapping later match still fires.
+    skipper = MarkdownRule(r"ab", (m, ctx) -> nothing)
+    taker = MarkdownRule(r"bc", (m, ctx) -> h.strong("bc"))
+    overlap = repr("text/html", render_markdown("abc"; rules=[skipper, taker]))
+    @test contains(overlap, "a<strong>bc</strong>")
+
+    # A zero-width pattern never fires and never hangs the scan.
+    empty = MarkdownRule(r"x*", (m, ctx) -> "Q")
+    @test contains(repr("text/html", render_markdown("ab"; rules=[empty])), ">ab<")
+end
+
+@testitem "render_markdown blocks honor tight lists, tables, tasks and fences" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # Tight lists carry no `<p>`; loose lists do.
+    tight = repr("text/html", render_markdown("- a\n- b\n"; rules=MarkdownRule[]))
+    @test contains(tight, "<ul><li>a</li><li>b</li></ul>")
+    loose = repr("text/html", render_markdown("- a\n\n- b\n"; rules=MarkdownRule[]))
+    @test contains(loose, "<li><p>a</p></li>")
+    ordered = repr("text/html", render_markdown("1. a\n2. b\n"; rules=MarkdownRule[]))
+    @test contains(ordered, "<ol>")
+
+    # GFM pipe tables with alignment.
+    table = repr("text/html",
+        render_markdown("| a | b |\n|:--|--:|\n| 1 | 2 |\n"; rules=MarkdownRule[]))
+    @test contains(table, "<thead>")
+    @test contains(table, "<th style=\"text-align: left\">a</th>")
+    @test contains(table, "<td style=\"text-align: right\">2</td>")
+
+    # Task glyphs, not form inputs.
+    tasks = repr("text/html",
+        render_markdown("- [x] done\n- [ ] todo\n"; rules=MarkdownRule[]))
+    @test contains(tasks, "☑ ")
+    @test contains(tasks, "☐ ")
+    @test !contains(tasks, "<input")
+
+    # Fences stay literal and keep a language class; strikethrough renders.
+    code = repr("text/html",
+        render_markdown("```julia\nf(x)\n```\n\n~~gone~~"; rules=MarkdownRule[]))
+    @test contains(code, "<code class=\"language-julia\">")
+    @test contains(code, "f(x)")
+    @test contains(code, "<del>gone</del>")
+
+    # Raw HTML never injects: inline stays escaped text, blocks show as source.
+    inline = repr("text/html",
+        render_markdown("a <b>bold</b> c"; rules=MarkdownRule[]))
+    @test contains(inline, "&lt;b&gt;")
+    @test !contains(inline, "<b>bold")
+    block = repr("text/html", render_markdown("<script>alert(1)</script>"))
+    @test contains(block, "&lt;script&gt;")
+    @test !contains(block, "<script>")
+
+    # Link titles and image alts survive.
+    link = repr("text/html",
+        render_markdown("[t](/u \"ti\") ![al](/i.png)"; rules=MarkdownRule[]))
+    @test contains(link, "title=\"ti\"")
+    @test contains(link, "alt=\"al\"")
+end
+
+@testitem "SemanticProse renders CommonMark with URL linking" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    prose = SemanticProse("load data_path, see https://docs.example/a_b.")
+    html = repr("text/html", prose)
+    @test contains(html, "htmxo-semantic-prose")
+    @test contains(html, "data_path")
+    @test !contains(html, "<em>")
+    @test contains(html, "<a href=\"https://docs.example/a_b\">")
+
+    # Markdown, plain and HXML peers are unchanged: source, verbatim.
+    @test repr("text/markdown", SemanticProse("**b**")) == "**b**"
+    @test repr("text/plain", SemanticProse("**b**")) == "**b**"
+    @test !contains(
+        repr("application/vnd.hyperview+xml", SemanticProse("**b**")), "<strong>")
+
+    # Rule-built nodes project back faithfully through the pipeline.
+    faithful = HTMXObjects.to_markdown_string(render_markdown("see https://m.example/y."))
+    @test contains(faithful, "[https://m.example/y](https://m.example/y)")
 end
 
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
