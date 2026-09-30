@@ -15,6 +15,7 @@ include("git_editor_demo.jl")
 include("gallery_demo.jl")
 include("markdown_demo.jl")
 include("semantic_demo.jl")
+include("decoration_demo.jl")
 
 @dynamicstruct struct AppData
     demo = DemoData()
@@ -27,6 +28,7 @@ include("semantic_demo.jl")
     gallery_demo = GalleryDemoData()
     markdown_demo = MarkdownDemoData()
     semantic_demo = SemanticDemoData()
+    decoration_demo = DecorationDemoData()
 end
 
 const APPDATA = AppData()
@@ -51,6 +53,7 @@ const TEST_PROJECT = normpath(joinpath(@__DIR__, "..", ".."))
             h.li(h.a(href=__self__/"gallery_demo")("Gallery primitive demo")),
             h.li(h.a(href=__self__/"markdown_demo")("Markdown renderer demo")),
             h.li(h.a(href=__self__/"semantic_demo")("Semantic links and alternatives demo")),
+            h.li(h.a(href=__self__/"decoration_demo")("Deferred decoration demo")),
             h.li(h.a(href=__self__/"schema")("App schema (JSON)")),
         ),
     )
@@ -65,6 +68,7 @@ const TEST_PROJECT = normpath(joinpath(@__DIR__, "..", ".."))
     @include gallery_demo = GalleryDemoRoutes()
     @include markdown_demo = MarkdownDemoRoutes()
     @include semantic_demo = SemanticDemoRoutes()
+    @include decoration_demo = DecorationDemoRoutes()
     @include tests = TestRoutes(; project=TEST_PROJECT)
     @include schema = SchemaRoutes(; root=AppRoutes)
 end
