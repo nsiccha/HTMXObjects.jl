@@ -194,6 +194,19 @@ allow about six per origin — so the multiplexed shape is the one for
 per-row or per-reference liveness. A lone fragment may still pass
 `events_url` to open its own stream instead.
 
+When the live keys are not known up front — cards rendered many to a
+page, or fragments swapped in later by htmx, a poller, or a modal — pass
+`discover=true` and give the region the feed's base url instead:
+`live_region(query_url(__self__/"key_events"); discover=true)`. The
+[`live_region_script`](@ref) runtime (included by [`htmx`](@ref); a page
+built without the shell includes it itself) gathers the `data-key`s of
+the descendant fragments, opens one stream with `?key=…` for the union,
+and reconnects whenever the set changes. Each reconnect is an ordinary
+fresh [`serve_key_feed!`](@ref) subscription — no server change is
+needed — and a push landing in the handover window re-fetches its
+fragments twice, idempotent. With no fragments present the region holds
+no stream. A fragment belongs to its nearest ancestor discover region.
+
 `invalidate_key!` is the push half only: it does not touch the cache the
 fragment route reads. Refresh the data first (or kick its background
 rebuild), then invalidate, so the re-fetch renders the new state. The
@@ -216,6 +229,7 @@ serve_key_feed!
 invalidate_key!
 live_fragment
 live_region
+live_region_script
 ```
 
 ## Markdown / agent-readable responses

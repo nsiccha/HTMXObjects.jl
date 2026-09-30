@@ -53,7 +53,7 @@ export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
-    invalidate_key!, live_fragment, live_region
+    invalidate_key!, live_fragment, live_region, live_region_script
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
@@ -2264,6 +2264,9 @@ function htmx(args...;
             editor_styles(),
             # Master/detail rows carry only a call into this shared runtime.
             master_detail_js(),
+            # Discover-mode live regions keep one reconnecting stream behind
+            # this runtime; inert on pages without one.
+            live_region_script(),
             # Poller quietness by default: the Treebars stylesheet + script
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
@@ -5190,7 +5193,7 @@ function live_fragment(key, content...; fragment_url, events_url=nothing,
 end
 
 """
-    live_region(events_url, content...; id=nothing, class=nothing)
+    live_region(events_url, content...; id=nothing, class=nothing, discover=false)
 
 One shared [`serve_key_feed!`](@ref) stream for many
 [`live_fragment`](@ref)s. Renders a `<div>` that connects a single event
@@ -5210,13 +5213,232 @@ per-origin connection limit.
     serve_key_feed!(__sse__, SUBS, key)
 ```
 
+With `discover=true`, `events_url` is the feed's BASE url (no keys) and
+the region follows the fragments actually present instead of the keys
+known at render time: the [`live_region_script`](@ref) runtime gathers
+the `data-key`s of descendant fragments — including ones swapped in
+later by htmx, a poller, or a modal — opens one stream with `?key=…` for
+the union, and reconnects whenever the set changes. Each reconnect is an
+ordinary fresh subscription; the previous stream's server task
+unsubscribes when it notices the disconnect (within one `poll`
+interval), so a push landing in that window re-fetches its fragments
+twice — idempotent. With no fragments present the region holds no stream
+rather than opening an empty-key feed. A fragment belongs to its nearest
+ancestor discover region; do not combine a discover region with the
+static `sse-connect` shape (or nest discover regions) over the same
+fragments — both halves would refresh them. Pages built without
+[`htmx`](@ref) must include [`live_region_script`](@ref) themselves.
+
 In `?plain` the element degrades to its children's text content.
 """
-function live_region(events_url, content...; id=nothing, class=nothing)
+function live_region(events_url, content...; id=nothing, class=nothing,
+        discover::Bool=false)
     url = string(events_url)
     isempty(url) && throw(ArgumentError("live_region events_url must be non-empty"))
-    h.div(content...; id, class, hx_ext="sse", sse_connect=url)
+    discover || return h.div(content...; id, class, hx_ext="sse", sse_connect=url)
+    h.div(content...; id, class,
+        data_htmxo_live_discover="", data_htmxo_live_base=url)
 end
+
+"""
+    live_region_script()
+
+Client runtime for [`live_region`](@ref) discover mode (`discover=true`).
+Each `[data-htmxo-live-discover]` region keeps one `EventSource` open on
+its base url with `?key=…` for the union of its descendant
+[`live_fragment`](@ref) `data-key`s — however they reach the DOM (page
+load, htmx swap, poller, modal) — and reconnects when the set changes. A
+reconnect is an ordinary fresh [`serve_key_feed!`](@ref) subscription; the
+previous stream's server task unsubscribes on disconnect. Refreshes
+dispatch through the fragment's own `hx-trigger="sse:<event>"`, the exact
+call the sse extension makes for a static region, so a fragment behaves
+identically under either shape. A fragment belongs to its nearest
+ancestor discover region. Exposes `window.htmxoLiveRegion.init(el)` /
+`.resync()`. Safe to include more than once. Auto-included by [`htmx`](@ref);
+include it yourself only on pages built without the shell.
+"""
+live_region_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoLiveRegion) return;
+  var MARK = 'data-htmxo-live-discover';
+  var BASE = 'data-htmxo-live-base';
+  var DEBOUNCE_MS = 60;
+  var FRAG_SELECTOR = '[data-key][hx-trigger], [data-key][data-hx-trigger]';
+  var live = [];
+
+  // The `sse:NAME` wire names in one hx-trigger value. A fragment rendered
+  // by `live_fragment` carries exactly `sse:<event>-<key>`; the split keeps
+  // multi-trigger values (`sse:a, click`) and trims htmx filters/modifiers
+  // (`sse:e[foo]`, `sse:e consume`), so the runtime reads the wire names the
+  // server rendered instead of reimplementing its key escaping.
+  function sseNames(trigger) {
+    var out = [];
+    if (!trigger) return out;
+    trigger.split(',').forEach(function (part) {
+      var t = part.trim();
+      if (t.slice(0, 4) !== 'sse:') return;
+      var name = t.slice(4).split(/[\s\[]/, 1)[0];
+      if (name) out.push(name);
+    });
+    return out;
+  }
+
+  function triggersOf(el) {
+    return sseNames(el.getAttribute('hx-trigger'))
+      .concat(sseNames(el.getAttribute('data-hx-trigger')));
+  }
+
+  // Fragments owned by `region`: carrying a key plus an sse trigger, with
+  // `region` as their NEAREST discover region (nested regions keep theirs).
+  // Other `data-key` carriers (thread items carry no hx-trigger) select out.
+  function ownFragments(region) {
+    return Array.prototype.filter.call(
+      region.querySelectorAll(FRAG_SELECTOR),
+      function (el) {
+        return el.closest('[' + MARK + ']') === region && triggersOf(el).length > 0;
+      });
+  }
+
+  function feedUrl(base, keys) {
+    var u = new URL(base, window.location.href);
+    u.searchParams.delete('key');   // the runtime owns `key`; other params pass through
+    keys.forEach(function (k) { u.searchParams.append('key', k); });
+    return u.toString();
+  }
+
+  function openSource(url) {
+    // The sse extension's factory when it is loaded, so a consumer override
+    // covers discover streams too; otherwise a plain EventSource.
+    if (window.htmx && htmx.createEventSource) return htmx.createEventSource(url);
+    return new EventSource(url, { withCredentials: true });
+  }
+
+  function closeState(state) {
+    if (state.source) { state.source.close(); state.source = null; }
+  }
+
+  // Reconcile the region's stream with the fragments present: a no-op when
+  // the sorted key set is unchanged, else close + reopen on the new union.
+  function sync(state) {
+    if (!document.contains(state.region)) { teardown(state.region); return; }
+    var byName = new Map();   // wire event name -> fragments to trigger
+    var keys = [];
+    ownFragments(state.region).forEach(function (el) {
+      var key = el.getAttribute('data-key');
+      if (!key) return;
+      if (keys.indexOf(key) < 0) keys.push(key);
+      triggersOf(el).forEach(function (name) {
+        if (!byName.has(name)) byName.set(name, []);
+        byName.get(name).push(el);
+      });
+    });
+    keys.sort();
+    var sig = JSON.stringify(keys);
+    if (sig === state.sig) return;
+    state.sig = sig;
+    closeState(state);
+    if (!keys.length) return;   // no fragments: hold no stream until one arrives
+    var source = openSource(feedUrl(state.base, keys));
+    state.source = source;
+    byName.forEach(function (frags, name) {
+      source.addEventListener(name, function (evt) {
+        frags.forEach(function (f) {
+          if (!document.contains(f)) return;
+          // The static region shape's exact dispatch: the sse extension
+          // turns a wire event into `htmx.trigger(f, 'sse:NAME')`, and htmx
+          // core answers through the fragment's `hx-trigger`.
+          if (window.htmx) {
+            htmx.trigger(f, 'sse:' + name, evt);
+            htmx.trigger(f, 'htmx:sseMessage', evt);
+          } else {
+            f.dispatchEvent(new CustomEvent('sse:' + name, { bubbles: true, detail: evt }));
+          }
+        });
+      });
+    });
+  }
+
+  function schedule(state) {
+    if (state.timer) return;
+    state.timer = setTimeout(function () { state.timer = null; sync(state); }, DEBOUNCE_MS);
+  }
+
+  function init(region) {
+    if (!region || region.nodeType !== 1 || !region.hasAttribute(MARK)) return null;
+    if (region.__htmxoLive) return region.__htmxoLive;
+    var base = region.getAttribute(BASE);
+    if (!base) return null;
+    var state = { region: region, base: base, sig: null, source: null, timer: null, mo: null };
+    region.__htmxoLive = state;
+    live.push(state);
+    state.mo = new MutationObserver(function () { schedule(state); });
+    state.mo.observe(region, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['data-key', 'hx-trigger', 'data-hx-trigger']
+    });
+    sync(state);
+    return state;
+  }
+
+  function teardown(region) {
+    var state = region ? region.__htmxoLive : null;
+    if (!state) return;
+    region.__htmxoLive = null;
+    var i = live.indexOf(state);
+    if (i >= 0) live.splice(i, 1);
+    if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    if (state.mo) { state.mo.disconnect(); state.mo = null; }
+    closeState(state);
+  }
+
+  function scan(node) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.hasAttribute(MARK)) init(node);
+    if (node.querySelectorAll) node.querySelectorAll('[' + MARK + ']').forEach(init);
+  }
+
+  function sweep() {
+    // A region dropped with a removed ancestor carries no observer record
+    // of its own; anything tracked but no longer in the document is dead.
+    live.slice().forEach(function (state) {
+      if (!document.contains(state.region)) teardown(state.region);
+    });
+  }
+
+  window.htmxoLiveRegion = {
+    init: init,
+    resync: function () { live.slice().forEach(sync); }
+  };
+
+  function boot() {
+    scan(document.body);
+    new MutationObserver(function (records) {
+      records.forEach(function (r) {
+        r.addedNodes.forEach(function (n) { scan(n); });
+        r.removedNodes.forEach(function (n) {
+          if (n.nodeType !== 1) return;
+          if (n.hasAttribute(MARK)) teardown(n);
+          n.querySelectorAll('[' + MARK + ']').forEach(teardown);
+        });
+      });
+      sweep();
+    }).observe(document.body, { childList: true, subtree: true });
+    // Swaps land through the region observer too, but only `afterSettle`
+    // runs after htmx has processed (and attached the triggers of) the new
+    // fragments — resync then so the first push cannot miss them.
+    document.body.addEventListener('htmx:afterSettle', function (e) {
+      var t = e.target;
+      if (!t || t.nodeType !== 1) return;
+      scan(t);
+      var r = t.closest('[' + MARK + ']');
+      if (r && r.__htmxoLive) schedule(r.__htmxoLive);
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+"""))
 
 # --- Error handling ---
 

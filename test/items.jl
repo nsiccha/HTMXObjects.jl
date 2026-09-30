@@ -7631,6 +7631,59 @@ end
     @test_throws ArgumentError live_region("")
 end
 
+@testitem "live_region discover mode renders a script-managed region" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    frags = [live_fragment(k, "row $k"; fragment_url="/row?key=$k") for k in ["a#1", "b#2"]]
+    html = repr("text/html", live_region("/key_events", frags...; discover=true))
+    # The runtime owns the connection: the base url carries no keys, and no
+    # static `sse-connect` is emitted for the sse extension to open.
+    @test contains(html, "data-htmxo-live-discover=\"\"")
+    @test contains(html, "data-htmxo-live-base=\"/key_events\"")
+    @test !contains(html, "sse-connect=")
+    # The region div itself opts out of the sse extension (the fragments
+    # keep their own `hx-ext`, which is inert without an `sse-connect`).
+    m = match(r"<div[^>]*>", html)
+    @test !isnothing(m) && !contains(m.match, "hx-ext=")
+    @test count("data-key=\"", html) == 2
+    @test count("hx-trigger=\"sse:refresh-", html) == 2
+
+    custom = repr("text/html", live_region("/e", "x"; id="panel", class="rows", discover=true))
+    @test contains(custom, "id=\"panel\"")
+    @test contains(custom, "class=\"rows\"")
+    @test contains(custom, "data-htmxo-live-discover=\"\"")
+
+    # The default stays the static shape: still one stream, no marker.
+    static = repr("text/html", live_region("/events?key=a", frags...))
+    @test contains(static, "sse-connect=\"/events?key=a\"")
+    @test !contains(static, "data-htmxo-live-discover")
+
+    @test contains(HTMXObjects.to_markdown_string(
+        live_region("/e", live_fragment("k", "body"; fragment_url="/f"); discover=true)), "body")
+
+    @test_throws ArgumentError live_region("", "x"; discover=true)
+end
+
+@testitem "live_region_script ships the discover runtime" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    runtime = repr("text/html", live_region_script())
+    @test startswith(runtime, "<script>")
+    # Identity + idempotency: included twice, initialized once.
+    @test contains(runtime, "window.htmxoLiveRegion")
+    @test contains(runtime, "if (window.htmxoLiveRegion) return;")
+    # Region discovery and key collection.
+    @test contains(runtime, "data-htmxo-live-discover")
+    @test contains(runtime, "data-htmxo-live-base")
+    @test contains(runtime, "MutationObserver")
+    @test contains(runtime, "htmx:afterSettle")
+    # One reconnecting stream per region, keys as repeated params.
+    @test contains(runtime, "EventSource")
+    @test contains(runtime, "searchParams")
+    # Dispatch through the fragment's own sse trigger (the static shape's call).
+    @test contains(runtime, "htmx.trigger(f, 'sse:' + name, evt)")
+    @test contains(runtime, "resync")
+
+    # The shell carries the runtime, so discover regions work out of the box.
+    @test contains(repr("text/html", htmx(h.p("body"))), "htmxoLiveRegion")
+end
+
 @testitem "keyed feed pushes refresh frames over a live stream" setup=[HTMXOTestImports] tags=[:integration, :server, :semantic] begin
     using Sockets
 
@@ -7735,6 +7788,207 @@ end
     finally
         HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
         terminate()
+    end
+end
+
+@testitem "keyed feed accepts a reconnect re-subscription" setup=[HTMXOTestImports] tags=[:integration, :server, :semantic] begin
+    using Sockets
+
+    const RESUB_SUBS = KeySubscriptions()
+
+    @htmx struct ResubApp
+        @sse key_events(; key::Vector{String}=String[]) =
+            serve_key_feed!(__sse__, RESUB_SUBS, key; poll=0.02)
+    end
+
+    route!(ResubApp())
+    socket = listen(Sockets.localhost, 0)
+    port = Int(getsockname(socket)[2])
+    close(socket)
+    heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
+    HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
+    serve(; port, async=true)
+    try
+        open_feed(target) = begin
+            sock = Sockets.connect("127.0.0.1", port)
+            write(sock, "GET $target HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            @test contains(String(readavailable(sock)), "text/event-stream")
+            sock
+        end
+        await(cond, what) = begin
+            t0 = time()
+            while !cond()
+                time() - t0 > 15 && error(what)
+                sleep(0.005)
+            end
+        end
+
+        # The discover runtime's reconnect shape: stream 1 holds {a}; the key
+        # set grows to {a, b}, so stream 2 subscribes the union before
+        # stream 1's server task notices the disconnect.
+        s1 = open_feed("/key_events?key=a%231")
+        await(() -> haskey(RESUB_SUBS.streams, "a#1"), "first feed never subscribed")
+        s2 = open_feed("/key_events?key=a%231&key=b%232")
+        await(() -> haskey(RESUB_SUBS.streams, "b#2"), "reconnect never subscribed")
+
+        # Transient overlap: both streams hear `a` until stream 1 is gone.
+        @test length(RESUB_SUBS.streams["a#1"]) == 2
+        @test invalidate_key!(RESUB_SUBS, "a#1") == 2
+        got1, got2 = "", ""
+        await(() -> (got1 *= String(readavailable(s1)); contains(got1, "event: refresh-a#1")),
+            "first stream missed the overlapped push")
+        await(() -> (got2 *= String(readavailable(s2)); contains(got2, "event: refresh-a#1")),
+            "reconnect missed the overlapped push")
+
+        # Stream 1 leaves; the server prunes it and the reconnect keeps both keys.
+        close(s1)
+        await(() -> length(get(RESUB_SUBS.streams, "a#1", [])) == 1,
+            "dropped stream never unsubscribed")
+        @test invalidate_key!(RESUB_SUBS, "b#2") == 1
+        await(() -> (got2 *= String(readavailable(s2)); contains(got2, "event: refresh-b#2")),
+            "reconnect missed its new key")
+        close(s2)
+        await(() -> isempty(RESUB_SUBS.streams), "reconnect never unsubscribed")
+    finally
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+        terminate()
+    end
+end
+
+@testitem "discover region subscribes a late-swapped fragment" setup=[HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        discover_subs = KeySubscriptions()
+        discover_revs = Dict{String,Int}()
+        discover_feeds = Vector{String}[]
+        discover_card_hits = Dict{String,Int}()
+        discover_beacon = Ref("")
+
+        @htmx struct DiscoverBrowserApp
+            @get index() = begin
+                driver = h.script(Raw("""
+                    window.addEventListener('load', function() {
+                        setTimeout(function() {
+                            var timer = setInterval(function() {
+                                if (!window.htmxoLiveRegion) return;
+                                clearInterval(timer);
+                                document.getElementById('add-card').click();
+                                var t2 = setInterval(function() {
+                                    if (!document.querySelector('[data-key="b#2"]')) return;
+                                    clearInterval(t2);
+                                    fetch('/bump?key=' + encodeURIComponent('b#2')).then(function() {
+                                        var t3 = setInterval(function() {
+                                            var b = document.querySelector('[data-key="b#2"]');
+                                            if (b && b.textContent.indexOf('rev 1') >= 0) {
+                                                clearInterval(t3);
+                                                fetch('/beacon?text=' + encodeURIComponent(b.textContent));
+                                            }
+                                        }, 25);
+                                    });
+                                }, 25);
+                            }, 25);
+                        }, 50);
+                    });
+                    """))
+                # Hand-built head: only the runtime, no `htmx()` shell — the
+                # documented custom-head include must carry discover on its own.
+                HTMLDocument(h.html(
+                    h.head(
+                        h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"),
+                        h.script(src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/dist/sse.min.js"),
+                        live_region_script()),
+                    h.body(
+                        live_region("/events",
+                            live_fragment("a#1", h.span("body a#1 rev 0");
+                                fragment_url="/card?key=a%231");
+                            id="discover-region", discover=true),
+                        h.button("add card"; id="add-card",
+                            hx_get=query_url(__self__/"card"; key="b#2"),
+                            hx_target="#discover-region",
+                            hx_swap="beforeend"),
+                        driver)))
+            end
+            @get card(; key::String="") = begin
+                discover_card_hits[key] = get(discover_card_hits, key, 0) + 1
+                live_fragment(key, h.span("body $key rev $(get(discover_revs, key, 0))");
+                    fragment_url="/card?key=$(HTTP.URIs.escapeuri(key))")
+            end
+            @sse events(; key::Vector{String}=String[]) = begin
+                push!(discover_feeds, sort!(copy(key)))
+                serve_key_feed!(__sse__, discover_subs, key; poll=0.02)
+            end
+            # The bump waits for the subscription, so the push under test
+            # cannot slip into the reconnect gap — the runtime resyncs on a
+            # debounce, and the test would otherwise race it.
+            @get bump(; key::String="") = begin
+                t0 = time()
+                while !haskey(discover_subs.streams, key)
+                    time() - t0 > 10 && error("discover feed never subscribed $key")
+                    sleep(0.02)
+                end
+                discover_revs[key] = get(discover_revs, key, 0) + 1
+                invalidate_key!(discover_subs, key)
+                "bumped $key"
+            end
+            # The driver beacons the refreshed fragment's text back: the
+            # completion signal and the DOM proof in one request.
+            @get beacon(; text::String="") = begin
+                discover_beacon[] = text
+                "ok"
+            end
+        end
+
+        route!(DiscoverBrowserApp())
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
+        serve(; port, async=true)
+        try
+            # Pre-warm the page route so chrome's load stays fast.
+            warm = HTTP.get("http://127.0.0.1:$port/";
+                status_exception=false, retry=false, readtimeout=60)
+            @test warm.status == 200
+            # No `--virtual-time-budget`: virtual time freezes while a
+            # stream is open, so the budget never expires. Wall clock +
+            # driver beacon instead; chrome dies on the beacon or the
+            # deadline below.
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                proc = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    t0 = time()
+                    while isempty(discover_beacon[]) && time() - t0 < 60
+                        sleep(0.1)
+                    end
+                finally
+                    # Chrome may have exited on its own; a dead-process
+                    # kill is a no-op.
+                    if process_running(proc)
+                        try kill(proc) catch _ end
+                    end
+                end
+            end
+            # The late card refreshed to the pushed revision: discovery,
+            # reconnect, and dispatch all fired.
+            @test contains(discover_beacon[], "rev 1")
+            # The runtime opened one stream per key set, not one per card.
+            @test !isempty(discover_feeds) && discover_feeds[1] == ["a#1"]
+            @test any(==(["a#1", "b#2"]), discover_feeds)
+            # The late card rendered once on swap and re-fetched on the push.
+            @test get(discover_card_hits, "b#2", 0) >= 2
+        finally
+            HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+            terminate()
+        end
     end
 end
 
