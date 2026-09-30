@@ -307,7 +307,7 @@ provider lock. Applications construct no executor/store and call no GC.
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
 | `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
-| `SemanticNode` and its fifteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
+| `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
 | `internal_input(input)` | Is this descriptor input framework-injected rather than author-declared? |
 
@@ -336,6 +336,7 @@ SemanticArtifact
 SemanticSection
 SemanticGroup
 SemanticDisclosure
+SemanticAlternatives
 MarkdownRule
 MARKDOWN_URL_RULE
 render_markdown
@@ -455,7 +456,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
 | `SemanticStatus(state; detail="")` | A state, not a colour |
 | `SemanticUnavailable(reason)` | A declined computation, and why — not a state |
-| `SemanticLink(label, target)` | A navigation target |
+| `SemanticLink(label, target; external=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
 | `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
 | `SemanticCode(language, text; anchor="")` | Source code, language kept as data |
@@ -463,6 +464,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticCard(title, children...; anchor="")` | A self-contained titled summary |
 | `SemanticGroup(children...)` | An untitled run of siblings |
 | `SemanticDisclosure(summary, children...)` | Content the reader opens |
+| `SemanticAlternatives(default, ("label" => view)...)` | Several views of one content; the default renders, the rest collapse |
 
 Six of these — `SemanticMetric`, `SemanticStatus`, `SemanticUnavailable`,
 `SemanticLink`, `SemanticAction`, `SemanticArtifact` — are the ones that pay,
@@ -483,7 +485,7 @@ sentence is "there is nothing here, and here is why" — the whole point of the
 vocabulary is that this distinction survives into Markdown and plain text, where
 a mis-chosen element cannot be recovered from.
 
-Three points where a projection is deliberately not a translation of the HTML:
+Four points where a projection is deliberately not a translation of the HTML:
 
 - **`SemanticAction` degrades to a plain link** outside HTML. No other format
   can express "swap this in place", and the target is the honest remainder of
@@ -498,6 +500,10 @@ Three points where a projection is deliberately not a translation of the HTML:
   [`render_markdown`](@ref) (CommonMark plus bare-URL linking), which escapes
   inline markup — so prose cannot smuggle HTML through. Its HXML peer is the
   source as plain text.
+- **`SemanticAlternatives` projects its default view alone** outside HTML.
+  Collapsed views have no text analogue, so Markdown, plain and HXML carry the
+  default — the consent surface — and the alternatives' labels stay in HTML
+  with the collapsed sections they head.
 
 `SemanticTable` is gated by `Tables.istable`, not by a duck-typed
 `propertynames` check: a `NamedTuple` of vectors, a `DataFrame` and a

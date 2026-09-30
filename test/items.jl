@@ -6649,8 +6649,9 @@ end
         SemanticCard("C", SemanticMetric("a", 1)),
         SemanticGroup(SemanticMetric("a", 1)),
         SemanticDisclosure("more", SemanticMetric("a", 1)),
+        SemanticAlternatives("default", "alt" => "other"),
     ]
-    @test length(elements) == 15
+    @test length(elements) == 16
     @test all(e -> e isa SemanticNode, elements)
 
     for element in elements,
@@ -6927,7 +6928,8 @@ end
     @test contains(repr("text/markdown", stripped_section), "keepme")
 
     for container in (SemanticGroup(h.form(h.input()), "keepme"),
-                      SemanticDisclosure("s", h.form(h.input()), "keepme"))
+                      SemanticDisclosure("s", h.form(h.input()), "keepme"),
+                      SemanticAlternatives("keepme", "alt" => h.form(h.input())))
         stripped = strip_chrome(container)
         @test stripped isa typeof(container)
         @test !contains(repr("text/markdown", stripped), "<form")
@@ -6940,7 +6942,7 @@ end
                     SemanticUnavailable("declined"),
                     SemanticLink("l", "/"), SemanticSection("S", "body"),
                     SemanticGroup("body"), SemanticDisclosure("d", "body"),
-                    SemanticProse("p"))
+                    SemanticAlternatives("body"), SemanticProse("p"))
         rescued = Any[]
         HTMXObjects._rescue_semantic!(rescued, h.form(h.div(element)))
         @test length(rescued) == 1
@@ -6959,6 +6961,7 @@ end
                 SemanticStatus(:ok; detail="converged")),
             SemanticSection("Detail", SemanticTable((x=[1], y=["a"]))),
             SemanticProse("path data_path, see https://keep.example/r."),
+            SemanticAlternatives("alt-keep", "other" => "alt-drop"),
             h.button("Go"),
         ),
     )
@@ -6970,6 +6973,8 @@ end
     @test contains(markdown, "| x | y |")
     @test contains(markdown, "data_path")
     @test contains(markdown, "https://keep.example/r")
+    @test contains(markdown, "alt-keep")
+    @test !contains(markdown, "alt-drop")
     @test !contains(markdown, "<form")
     @test !contains(markdown, "<input")
     @test !contains(markdown, "<button")
@@ -7130,6 +7135,64 @@ end
     # Rule-built nodes project back faithfully through the pipeline.
     faithful = HTMXObjects.to_markdown_string(render_markdown("see https://m.example/y."))
     @test contains(faithful, "[https://m.example/y](https://m.example/y)")
+end
+
+@testitem "SemanticLink external leaves the app with safe attrs and a glyph" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    external = SemanticLink("gh", "https://github.com/x"; external=true)
+    html = repr("text/html", external)
+    @test contains(html, "target=\"_blank\"")
+    @test contains(html, "rel=\"noopener\"")
+    @test contains(html, "gh ↗</a>")
+    @test contains(html, "htmxo-semantic-link")
+
+    # The exit marker survives into the text peers.
+    @test repr("text/markdown", external) == "[gh ↗](https://github.com/x)"
+    @test repr("text/plain", external) == "gh ↗ (https://github.com/x)"
+
+    # Internal links are byte-unchanged: no target, no glyph, no rel.
+    internal = SemanticLink("home", "/")
+    internal_html = repr("text/html", internal)
+    @test !contains(internal_html, "target=")
+    @test !contains(internal_html, "rel=")
+    @test !contains(internal_html, "↗")
+    @test repr("text/markdown", internal) == "[home](/)"
+    @test repr("text/plain", internal) == "home (/)"
+end
+
+@testitem "SemanticAlternatives shows the default, collapses the rest" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    alt = SemanticAlternatives("verbatim-src", "preview" => "rendered-out")
+
+    # HTML: default direct, each alternative in a native details/summary —
+    # switching with no client JavaScript.
+    html = repr("text/html", alt)
+    @test contains(html, "htmxo-semantic-alternatives")
+    @test contains(html, "verbatim-src")
+    @test contains(html, "<details")
+    @test contains(html, "<summary>preview</summary>")
+    @test contains(html, "rendered-out")
+
+    # Text and HXML peers are the default view alone.
+    @test repr("text/markdown", alt) == "verbatim-src"
+    @test repr("text/plain", alt) == "verbatim-src"
+    hxml = repr("application/vnd.hyperview+xml", alt)
+    @test contains(hxml, "verbatim-src")
+    @test !contains(hxml, "rendered-out")
+
+    # A single view renders with no details chrome.
+    solo = repr("text/html", SemanticAlternatives("only"))
+    @test contains(solo, "only")
+    @test !contains(solo, "<details")
+
+    # Fail-closed shapes: empty call and bare (unlabelled) later views.
+    @test_throws ArgumentError SemanticAlternatives()
+    @test_throws ArgumentError SemanticAlternatives("a", "bare")
+    @test_throws ArgumentError SemanticAlternatives(["a", "bare"])
+
+    # Chrome stripping recurses: a form alternative drops, the default stays.
+    stripped = HTMXObjects._strip_md_chrome(
+        SemanticAlternatives("keepme", "alt" => h.form(h.input())))
+    @test stripped isa SemanticAlternatives
+    @test repr("text/markdown", stripped) == "keepme"
 end
 
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
