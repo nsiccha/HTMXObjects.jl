@@ -177,6 +177,25 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 
+For authoring Markdown that renders to HTML — the reverse direction:
+
+| Export | Purpose |
+|--------|---------|
+| `render_markdown(text; rules, context)` | CommonMark (+ GFM tables/strikethrough/task lists) Markdown → `h` node tree, with inline text rules |
+| `MarkdownRule(pattern, build)` | One rule: a `Regex` plus `build(match, context)` producing the replacement node(s) |
+| `MARKDOWN_URL_RULE` | Stock rule linking bare `http(s)://` URLs; the default registry |
+
+`render_markdown` parses with CommonMark.jl, so intra-word underscores in
+identifiers stay verbatim (the stdlib parser took them as emphasis and deleted
+them). Rules run on joined text runs — CommonMark splits `https://x/a_b&c`
+into several `Text` nodes, and the joined run is what rules match — outside
+links, code spans and fences only. The default registry (`rules=nothing`) links
+bare URLs with GFM trailing-punctuation trimming; pass `rules=MarkdownRule[]`
+for pure CommonMark, or a vector of `MarkdownRule`s (composed with
+`MARKDOWN_URL_RULE`) for app references. `context` scopes one value to the
+whole render. Rule-built nodes are ordinary nodes, so the `?plain` projection
+stays faithful (`h.a` → `[text](url)`).
+
 ## Error handling and tagging
 
 | Export | Purpose |
@@ -317,6 +336,9 @@ SemanticArtifact
 SemanticSection
 SemanticGroup
 SemanticDisclosure
+MarkdownRule
+MARKDOWN_URL_RULE
+render_markdown
 semantic_card
 internal_input
 ```
@@ -472,9 +494,10 @@ Three points where a projection is deliberately not a translation of the HTML:
   viewport to collapse into, so their correct projection is the label followed
   by the whole body. Wrapping the children in markup instead would force the
   subtree down the HTML→Markdown path and lose every peer projection under it.
-- **`SemanticProse`'s HTML peer renders its Markdown**, through the `Markdown`
-  stdlib, which escapes inline markup — so prose cannot smuggle HTML through.
-  Its HXML peer is the source as plain text.
+- **`SemanticProse`'s HTML peer renders its Markdown**, through
+  [`render_markdown`](@ref) (CommonMark plus bare-URL linking), which escapes
+  inline markup — so prose cannot smuggle HTML through. Its HXML peer is the
+  source as plain text.
 
 `SemanticTable` is gated by `Tables.istable`, not by a duck-typed
 `propertynames` check: a `NamedTuple` of vectors, a `DataFrame` and a

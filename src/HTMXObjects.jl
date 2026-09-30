@@ -18,6 +18,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, semantic_card
+export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
 export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -55,9 +56,7 @@ using DynamicObjects, HTTP, Tables
 using LazyArtifacts
 import Dates
 import Random
-# Only for `SemanticProse`'s HTML peer, which renders its Markdown source rather
-# than showing it. Escapes inline markup, so prose cannot smuggle HTML through.
-import Markdown
+import CommonMark
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
@@ -2464,8 +2463,9 @@ end
     SemanticProse(markdown)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
-are the source itself; the HTML projection renders it through the `Markdown`
-stdlib, which escapes inline markup, so prose cannot smuggle HTML through.
+are the source itself; the HTML projection renders it through
+[`render_markdown`](@ref) (CommonMark plus bare-URL linking), which escapes
+inline markup, so prose cannot smuggle HTML through.
 """
 struct SemanticProse <: SemanticNode
     markdown::String
@@ -2714,12 +2714,370 @@ function _semantic_table_columns(source)
     (names, Any[Tables.getcolumn(columns, name) for name in names])
 end
 
+# --- Markdown renderer with inline text rules -------------------------------
+#
+# `render_markdown` parses with CommonMark.jl (the spec GitHub-Flavored
+# Markdown renders) and walks the AST into `h` nodes. It replaces the stdlib
+# `Markdown` pipeline the prose peer used before, which predates CommonMark
+# and misreads prose — most damagingly, an intra-word underscore in an
+# identifier (`data_path`) is taken as emphasis and the `_` is *deleted*, so
+# the identifier renders italicised and uncopyable. CommonMark forbids
+# intra-word `_` emphasis, so identifiers stay verbatim.
+#
+# The walk generalizes the KB's `src/kb_markdown.jl` (same joined-run and
+# in-link machinery; the KB-only pre-parse linkifiers, LaTeX rule, mentions
+# and decorations stay there) and keeps its three guarantees:
+#
+# - adjacent `Text` children render as ONE run: CommonMark cuts a visually
+#   single run of text at every inline trigger it tried (`_`, `&`, `!`, …),
+#   so a URL such as `https://x/a_b?c=1&d=2` arrives as several `Text` nodes
+#   and matching per node would link a fragment of it;
+# - rules run only on runs OUTSIDE links/images, code spans and fences — an
+#   `<a>` inside an `<a>` is invalid HTML, and the author's link already says
+#   where the text points;
+# - rules that match nothing, or return `nothing`, leave the text alone.
+#
+# Escaping rides on `h`: ordinary `String` children and attributes escape
+# exactly once, so `Text`/`Code`/`CodeBlock` literals pass through unchanged
+# and raw HTML stays visible text instead of injecting live markup.
+
+"""
+    MarkdownRule(pattern, build)
+
+One inline text rule for [`render_markdown`](@ref): `pattern` is matched
+against each joined text run outside links, code and fences, and
+`build(match::RegexMatch, context)` builds the replacement — a node, a
+`String`, or a vector of nodes and strings spliced in place.
+
+`build` returns `nothing` (or an explicitly empty vector) to leave the
+matched text alone; the scan then resumes after the match START, so an
+overlapping later match can still fire. A pattern that matches the empty
+string never fires — the scan steps past it instead of looping on it.
+
+`context` is whatever the caller passed to `render_markdown`: a mutable
+value (usually a `Dict`) lets rules accumulate render-scoped state, for
+example keys a later batched request decorates.
+"""
+struct MarkdownRule
+    pattern::Regex
+    build::Function
+    MarkdownRule(pattern::Regex, build::Function) = new(pattern, build)
+end
+
+# GFM's trailing-punctuation rule for a bare URL: sentence punctuation after
+# a URL belongs to the sentence, and a closing `)`/`]` belongs to the URL
+# only when the URL itself opened it (`(see https://x/a_(b))` keeps one).
+function _md_trim_url_tail(url::AbstractString)
+    u = String(url)
+    while !isempty(u)
+        c = u[end]
+        if c in ('.', ',', ':', ';', '!', '?', '\'', '"', '*', '_', '~')
+            u = u[1:prevind(u, lastindex(u))]
+        elseif (c == ')' && count(==(')'), u) > count(==('('), u)) ||
+               (c == ']' && count(==(']'), u) > count(==('['), u))
+            u = u[1:prevind(u, lastindex(u))]
+        else
+            break
+        end
+    end
+    u
+end
+
+# The `MARKDOWN_URL_RULE` builder: the trimmed URL becomes the link, and any
+# trimmed tail is re-emitted as text (it was part of the match but is not part
+# of the URL).
+function _md_build_url_link(m::RegexMatch, context)
+    matched = String(m.match)
+    url = _md_trim_url_tail(matched)
+    link = h.a(url; href=url)
+    ncodeunits(url) == ncodeunits(matched) && return link
+    Any[link, String(SubString(matched, ncodeunits(url) + 1))]
+end
+
+"""
+    MARKDOWN_URL_RULE
+
+The stock [`MarkdownRule`](@ref): a bare `http(s)://` URL becomes an anchor
+whose label is the URL itself. Trailing sentence punctuation is trimmed off
+the link (GFM's rule) and re-emitted as text.
+
+This is the default [`render_markdown`](@ref) registry, and it composes with
+app registries: `render_markdown(src; rules=[MY_RULE, MARKDOWN_URL_RULE])`.
+"""
+const MARKDOWN_URL_RULE = MarkdownRule(
+    r"(?<![\w/])https?://[^\s<>\"'`]+", _md_build_url_link)
+
+# Splice one rule-builder result into a run's parts: a vector's elements join
+# the run, anything else joins as one child.
+_md_push_rule_out!(parts, out::AbstractVector) = append!(parts, out)
+_md_push_rule_out!(parts, out) = push!(parts, out)
+
+# Run the rule registry over one joined text run. Earliest match across rules
+# wins; ties go to the earliest rule. Returns the run unchanged when nothing
+# fires, so a rule-free render splices plain strings, never empty spans.
+function _md_apply_rules(str::AbstractString, rules, context)
+    s = String(str)
+    isempty(rules) && return s
+    parts = Any[]
+    i = firstindex(s)
+    pos = firstindex(s)
+    while pos <= lastindex(s)
+        found_rule = nothing
+        found_match = nothing
+        for rule in rules
+            m = match(rule.pattern, s, pos)
+            isnothing(m) && continue
+            if isnothing(found_match) || m.offset < found_match.offset
+                found_rule = rule
+                found_match = m
+            end
+        end
+        isnothing(found_match) && break
+        m = found_match
+        if isempty(m.match)
+            pos = m.offset > lastindex(s) ? m.offset + 1 : nextind(s, m.offset)
+            continue
+        end
+        out = found_rule.build(m, context)
+        if isnothing(out) || (out isa AbstractVector && isempty(out))
+            pos = nextind(s, m.offset)
+            continue
+        end
+        m.offset > i && push!(parts, s[i:prevind(s, m.offset)])
+        _md_push_rule_out!(parts, out)
+        i = m.offset + ncodeunits(m.match)
+        pos = i
+    end
+    isempty(parts) && return s
+    i <= lastindex(s) && push!(parts, s[i:end])
+    h.span(parts...)
+end
+
+# Child nodes of a CommonMark AST node, in document order.
+function _md_children(n::CommonMark.Node)
+    out = CommonMark.Node[]
+    c = n.first_child
+    while c !== CommonMark.NULL_NODE
+        push!(out, c)
+        c = c.nxt
+    end
+    out
+end
+
+# True when `n` is, or sits inside, a Link/Image. Text there must never gain
+# a link of its own: an `<a>` inside an `<a>` is invalid HTML, and the
+# author's link already says where the text points.
+function _md_in_link(n::CommonMark.Node)
+    while n !== CommonMark.NULL_NODE
+        n.t isa Union{CommonMark.Link,CommonMark.Image} && return true
+        isdefined(n, :parent) || return false
+        n = n.parent
+    end
+    false
+end
+
+# Rendered children, ready to splat into an `h` parent. Adjacent `Text`
+# children render as ONE run (see the section header); a `Backslash` node is
+# a zero-width escape marker — the escaped char arrives as the following
+# `Text` — so joining skips over it rather than splitting the run. Rules
+# therefore see escape-RESOLVED text and cannot tell `\\#12` from `#12`.
+function _md_kids(n::CommonMark.Node, rules, context)
+    out = Any[]
+    run = IOBuffer()
+    pending = false
+    in_link = _md_in_link(n)
+    for c in _md_children(n)
+        if c.t isa CommonMark.Text
+            print(run, c.literal)
+            pending = true
+            continue
+        elseif c.t isa CommonMark.Backslash
+            continue
+        end
+        if pending
+            push!(out, _md_text_run(String(take!(run)), in_link, rules, context))
+            pending = false
+        end
+        push!(out, _md_to_h(c, rules, context))
+    end
+    pending &&
+        push!(out, _md_text_run(String(take!(run)), in_link, rules, context))
+    out
+end
+
+_md_text_run(s::AbstractString, in_link::Bool, rules, context) =
+    in_link ? String(s) : _md_apply_rules(s, rules, context)
+
+# One AST node → an `h` node (or a bare `String`, for text). Dispatches on
+# the container payload type `n.t` — one method per CommonMark node kind, so
+# an unhandled kind is loud, never silent.
+_md_to_h(n::CommonMark.Node, rules, context) = _md_render(n.t, n, rules, context)
+
+_md_render(::CommonMark.Document, n, rules, context) =
+    h.div(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.Paragraph, n, rules, context) =
+    h.p(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.BlockQuote, n, rules, context) =
+    h.blockquote(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.Item, n, rules, context) =
+    h.li(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.ThematicBreak, n, rules, context) = h.hr()
+_md_render(::CommonMark.Emph, n, rules, context) =
+    h.em(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.Strong, n, rules, context) =
+    h.strong(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.Text, n, rules, context) =
+    _md_text_run(n.literal, _md_in_link(n), rules, context)
+_md_render(::CommonMark.Code, n, rules, context) = h.code(n.literal)
+_md_render(::CommonMark.SoftBreak, n, rules, context) = " "
+_md_render(::CommonMark.LineBreak, n, rules, context) = h.br()
+_md_render(::CommonMark.Backslash, n, rules, context) = ""
+_md_render(::CommonMark.Strikethrough, n, rules, context) =
+    h.del(_md_kids(n, rules, context)...)
+_md_render(t::CommonMark.Heading, n, rules, context) =
+    getproperty(h, Symbol("h", clamp(t.level, 1, 6)))(_md_kids(n, rules, context)...)
+
+# Fenced or indented code block — the content is in `n.literal` and stays
+# byte-literal. The fence's info string (e.g. ```julia) is preserved as a
+# `language-<lang>` class on the `<code>` element, the highlight.js
+# convention, so a client highlighter runs the declared language instead of
+# auto-detect. Untyped fences keep a bare `<pre><code>`.
+function _md_render(t::CommonMark.CodeBlock, n, rules, context)
+    info = strip(String(t.info))
+    lang = isempty(info) ? "" : lowercase(first(split(info)))
+    isempty(lang) ? h.pre(h.code(n.literal)) :
+        h.pre(h.code(n.literal; class="language-$(lang)"))
+end
+
+# Ordered vs bullet list off the parsed list metadata. Honor the TIGHT flag:
+# CommonMark keeps a `Paragraph` node inside EVERY item even in a tight list,
+# so the default `Item` renderer (which wraps each Paragraph in `<p>`) would
+# render every list loose — even one the author wrote tight. In a tight list
+# each item's Paragraph contributes its inline content with NO `<p>`, matching
+# the stock CommonMark HTML writer.
+_md_render(t::CommonMark.List, n, rules, context) =
+    (t.list_data.type === :ordered ? h.ol : h.ul)(
+        (t.list_data.tight ? _md_tight_item(c, rules, context) : _md_to_h(c, rules, context)
+         for c in _md_children(n))...)
+
+# One item in a TIGHT list. A `Paragraph` child contributes its inline content
+# directly (no `<p>` wrapper); any other block child (a nested sublist, a code
+# block) renders normally through `_md_to_h`, which recurses and honors that
+# nested list's OWN tight flag. A `List`'s children are always `Item`s.
+function _md_tight_item(item::CommonMark.Node, rules, context)
+    kids = Any[]
+    item.t isa CommonMark.TaskItem && push!(kids, _md_task_box(item.t))
+    for c in _md_children(item)
+        if c.t isa CommonMark.Paragraph
+            append!(kids, _md_kids(c, rules, context))
+        else
+            push!(kids, _md_to_h(c, rules, context))
+        end
+    end
+    h.li(kids...)
+end
+
+# Task-list items show a static checkbox GLYPH — a form `<input>` would be
+# interactive chrome, dropped from `?plain` — plus the item's content. The
+# class is a styling hook for apps, like the semantic vocabulary's.
+_md_task_box(t::CommonMark.TaskItem) =
+    h.span(t.checked ? "☑ " : "☐ "; class="htmxo-md-task")
+_md_render(t::CommonMark.TaskItem, n, rules, context) =
+    h.li(_md_task_box(t), _md_kids(n, rules, context)...)
+
+# Author links and images render as written; rules never run inside them (see
+# `_md_in_link`). A link/image title rides along only when the author gave
+# one — an empty `title=""` is noise.
+_md_render(t::CommonMark.Link, n, rules, context) =
+    h.a(_md_kids(n, rules, context)...; href=String(t.destination),
+        _md_title_attrs(t.title)...)
+_md_render(t::CommonMark.Image, n, rules, context) =
+    h.img(; src=String(t.destination), alt=_md_plain_text(n),
+        _md_title_attrs(t.title)...)
+_md_title_attrs(title) = isempty(title) ? (;) : (; title=String(title))
+
+# Plain-text flatten of a subtree — for an `<img alt>`, where only text is
+# allowed. Keeps `Text` leaves of the entering walk.
+_md_plain_text(n::CommonMark.Node) =
+    join(c.literal for (c, entering) in n if entering && c.t isa CommonMark.Text)
+
+# GFM pipe tables — node types come from the `TableRule` extension the parser
+# enables. `TableCell.header` distinguishes `<th>` from `<td>`; a set column
+# alignment renders as an inline `text-align`, so it holds with no app CSS.
+_md_render(::CommonMark.Table, n, rules, context) =
+    h.table(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.TableHeader, n, rules, context) =
+    h.thead(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.TableBody, n, rules, context) =
+    h.tbody(_md_kids(n, rules, context)...)
+_md_render(::CommonMark.TableRow, n, rules, context) =
+    h.tr(_md_kids(n, rules, context)...)
+_md_render(t::CommonMark.TableCell, n, rules, context) =
+    (t.header ? h.th : h.td)(_md_kids(n, rules, context)...;
+        _md_cell_align_attrs(t.align)...)
+_md_cell_align_attrs(align::Symbol) =
+    align === :none ? (;) : (; style="text-align: $(String(align))")
+
+# Raw HTML in free text is almost never intentional and must never be
+# injected into the page. A bare `String` child renders escaped, so inline
+# HTML stays visible literal text and block HTML shows as a source block.
+_md_render(::CommonMark.HtmlInline, n, rules, context) = n.literal
+_md_render(::CommonMark.HtmlBlock, n, rules, context) = h.pre(n.literal)
+
+# Loud fallback (dev §1 / §4.5): an unhandled node kind warns and still
+# renders its children, so prose is surfaced, never silently dropped.
+function _md_render(t, n, rules, context)
+    @warn "render_markdown: unhandled CommonMark node kind" kind = typeof(t)
+    h.span(_md_kids(n, rules, context)...)
+end
+
+# Fresh parser per render: `Parser` holds mutable rule state, and the GFM
+# trio (pipe tables, strikethrough, task lists) is what prose uses.
+function _md_parser()
+    parser = CommonMark.Parser()
+    CommonMark.enable!(parser, CommonMark.TableRule())
+    CommonMark.enable!(parser, CommonMark.StrikethroughRule())
+    CommonMark.enable!(parser, CommonMark.TaskListRule())
+    parser
+end
+
+"""
+    render_markdown(text; rules=nothing, context=nothing) -> Node
+
+Parse `text` as Markdown — CommonMark plus the GFM pipe-table,
+strikethrough and task-list extensions — and render it into an `h` node
+tree: a `div` wrapping one node per block.
+
+`rules` is the inline text-rule registry: a [`MarkdownRule`](@ref), or a
+vector of them, matched against each joined text run outside links, code
+and fences (earliest match wins; ties go to the earliest rule). `nothing`
+(the default) renders with [`MARKDOWN_URL_RULE`](@ref), so bare URLs link;
+pass `rules=MarkdownRule[]` for pure CommonMark with no linking.
+
+`context` is passed to every rule `build` call, so one value scopes the
+whole render.
+
+The `?plain` projection stays faithful: rules build ordinary nodes, which
+the tag-dispatched markdown serializer projects back (`h.a` → `[text](url)`,
+emphasis → `*text*`, and so on).
+
+Two deliberate cuts, both documented for the KB's switch-over: a rule sees
+escape-RESOLVED text (a `\\\\` marker is zero-width, so `\\\\#12` and `#12` are
+indistinguishable downstream of the parser), and link destinations are NOT
+scheme-filtered — a `javascript:` author link renders as written, exactly as
+the HTML the parser would emit.
+"""
+function render_markdown(text::AbstractString; rules=nothing, context=nothing)
+    active = isnothing(rules) ? (MARKDOWN_URL_RULE,) :
+        rules isa MarkdownRule ? (rules,) : tuple(rules...)
+    _md_to_h(_md_parser()(String(text)), active, context)
+end
+
 # Prose is authored as Markdown, so the HTML peer RENDERS it rather than showing
-# its source. `Markdown.html` escapes inline markup (`<script>` becomes text),
-# so `Raw` here cannot smuggle HTML in through prose.
+# its source. `render_markdown` builds real nodes (never `Raw` markup), and `h`
+# escapes ordinary text children exactly once, so prose cannot smuggle HTML in.
 _semantic_prose_node(prose::SemanticProse) = h.div(
-    Raw(sprint(io -> Markdown.html(io, Markdown.parse(prose.markdown))));
-    class="htmxo-semantic-prose")
+    render_markdown(prose.markdown); class="htmxo-semantic-prose")
 
 # Delegates to the one table renderer rather than hand-building a second
 # `h.table`. Sorting and download are interactive chrome, not part of a semantic
