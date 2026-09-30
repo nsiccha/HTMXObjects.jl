@@ -22,6 +22,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
 export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
+export decorated_link
 export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
@@ -3201,6 +3202,40 @@ function render_markdown(ast::CommonMark.Node; rules=nothing, context=nothing,
     active = isnothing(rules) ? (MARKDOWN_URL_RULE,) :
         rules isa MarkdownRule ? (rules,) : tuple(rules...)
     markdown_node(renderer, ast, active, context)
+end
+
+"""
+    decorated_link(label, href, entry; class, attrs) -> Node
+
+Render one inline reference that gains metadata once its background batch
+lands — the read-through half of deferred batched decoration. The fetch half
+is a DynamicObjects `BackgroundCache` in batch mode (single-flighted drain,
+TTL, backoff, logged failures); a [`MarkdownRule`](@ref) build function reads
+`cache[key]` on the render path and hands the entry here:
+
+```julia
+MarkdownRule(r"([\\w-]+)#(\\d+)", (m, ctx) -> begin
+    key = "\$(m.captures[1])#\$(m.captures[2])"
+    decorated_link(m.match, "/items/\$(m.captures[2])", CACHE[key];
+        class="app-ref", attrs=e -> (; data_state=e.state, title=e.title))
+end)
+```
+
+While `entry` is `nothing` (batch not back — or the key failed and keeps no
+previous value) the link is plain: an anchor with `class` and nothing else,
+so first paint never waits. Once known, `attrs(entry)` — a `NamedTuple` of
+extra attributes, or `nothing` for none — merges in (a state colour, a hover
+title). Anything else from `attrs` is an `ArgumentError`.
+
+Live metadata is point-in-time, so the `?plain` projection carries the stable
+part only: `[label](href)`, decorated or not.
+"""
+function decorated_link(label, href, entry; class::AbstractString, attrs::Function)
+    extra = isnothing(entry) ? (;) : attrs(entry)
+    isnothing(extra) && (extra = (;))
+    extra isa NamedTuple || throw(ArgumentError(
+        "decorated_link attrs must return a NamedTuple (or nothing), got $(typeof(extra))"))
+    h.a(label; href=string(href), class=String(class), extra...)
 end
 
 # Prose is authored as Markdown, so the HTML peer RENDERS it rather than showing
