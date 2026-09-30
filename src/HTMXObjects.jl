@@ -13147,10 +13147,16 @@ Only marked nodes unwrap: hand-shaped `polling_fetchindex` terminals (frozen
 tree kept for inspection), `:auto` terminals under `keep_terminal_tree=true`
 (the same kept-tree shape, by design), and the direct-page OOB terminal
 carry no marker and are untouched, and terminals diverted into
-`.htmxo-live-reporter` stay owned by `live_refresh_script()`. The swapped-in bare content carries no
-marker, so the follow-up swap cannot re-trigger. Runs in either listener
-order against Treebars' `terminalizePoller` (the wrapper may already be
-renamed to `.treebar-terminal` when this fires).
+`.htmxo-live-reporter` stay owned by `live_refresh_script()`. The unwrap
+moves the marked node's live children out of the wrapper — no second parse,
+cleanup, or swap cycle (scripts ran once, at insert) — then runs htmx's
+own settle step on the moved nodes explicitly (`process` + autofocus +
+`htmx:load`), since htmx initializes swapped content after `afterSwap`
+through tasks that would otherwise only see the detached husk. The moved
+bare content carries no marker, so the scan cannot re-trigger, and a nested
+marked terminal unwraps in the same pass. Runs in either listener order
+against Treebars' `terminalizePoller` (the wrapper may already be renamed
+to `.treebar-terminal` when this fires).
 
 Automatic — no consumer wiring. Include once per page; the `htmx()` shell
 installs it alongside the Treebars assets.
@@ -13174,11 +13180,38 @@ auto_terminal_script() = h.script(Raw(raw"""
     if (!p || !p.classList ||
         (!p.classList.contains('treebar-poller') &&
          !p.classList.contains('treebar-terminal'))) return;
-    var content = el.innerHTML;
-    if (window.htmx && window.htmx.swap) {
-      window.htmx.swap(p, content, { swapStyle: 'outerHTML' });
-    } else {
-      p.outerHTML = content;
+    var gp = p.parentElement;
+    if (!gp) return;
+    // Node-preserving unwrap: the marked node's children are already live
+    // DOM — scripts ran when the completion swap inserted them, and that
+    // same swap already cancelled the poll timer (the terminal node
+    // carries no hx-trigger). Move them out instead of round-tripping
+    // through innerHTML plus a second swap, which re-parsed, re-cleaned,
+    // and re-initialized the whole subtree on every :auto completion
+    // (snag auto-terminal-do-6d1b5bb4).
+    //
+    // htmx initializes swapped content in its settle phase — AFTER
+    // afterSwap — through tasks captured on the inserted top-level nodes,
+    // so those tasks will only ever see the emptied, detached husk. Run
+    // the same per-node step explicitly (process + autofocus + htmx:load,
+    // in settle order); htmx.process is idempotent, so the scan pass over
+    // a nested marked terminal re-processes safely.
+    var moved = [];
+    while (el.firstChild) {
+      moved.push(el.firstChild);
+      gp.insertBefore(el.firstChild, p);
+    }
+    gp.removeChild(p);
+    if (window.htmx) {
+      for (var i = 0; i < moved.length; i++) {
+        var m = moved[i];
+        if (!m || m.nodeType !== 1) continue;
+        if (window.htmx.process) window.htmx.process(m);
+        var af = (m.matches && m.matches('[autofocus]')) ? m :
+          (m.querySelector ? m.querySelector('[autofocus]') : null);
+        if (af && af.focus) af.focus();
+        if (window.htmx.trigger) window.htmx.trigger(m, 'htmx:load');
+      }
     }
   }
   document.addEventListener('htmx:afterSwap', function(evt) {

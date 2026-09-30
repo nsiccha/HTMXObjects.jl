@@ -27,6 +27,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     PreloadApp, reset_preload!, release_preload!, preload_count,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
+    AutoUnwrapApp, reset_auto_unwrap!, auto_unwrap_pings,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -753,6 +754,106 @@ end
         live_morph_shell(content; ext=false, flip_swap=true, slow_cycles=1)
     @get index() = live_morph_section(0, "outerHTML")
     @get panel(; n::Int=1) = live_morph_panel(n, "outerHTML")
+end
+
+# `:auto` terminal-unwrap fixtures (snag auto-terminal-do-6d1b5bb4): a page
+# whose driver swaps a wrapper>marked-terminal structure in through
+# `htmx.ajax` — the same live-DOM preconditions a completion poll leaves (a
+# marked node inside a poller wrapper plus `afterSwap`) with none of the
+# operation timing. The payload carries a script-run counter (the old
+# innerHTML re-parse re-ran it), an `hx-get` button (moved nodes must keep
+# htmx behavior), a nested marked terminal (it must unwrap too), and a
+# reporter-diverted terminal the unwrap must NOT touch.
+const auto_unwrap_pings = Ref(0)
+
+reset_auto_unwrap!() = (auto_unwrap_pings[] = 0; nothing)
+
+function auto_unwrap_driver()
+    h.script(Raw("""
+    (function() {
+      window.addEventListener('load', function() {
+        var t = document.getElementById('unwrap-target');
+        htmx.ajax('GET', 'terminal', {target: t, swap: 'innerHTML'});
+        var phase = 1;
+        // Unbounded phases (the suite norm): under --virtual-time-budget
+        // the virtual clock fast-forwards through real-time waits (route
+        // JIT on first hit), so a try bound would expire while the ajax
+        // is still in flight. A stuck phase leaves its flags absent and
+        // the asserts fail on the dumped DOM.
+        var iv = setInterval(function() {
+          var tgt = document.getElementById('unwrap-target');
+          if (!tgt) return;
+          function strays() {
+            var bad = [];
+            tgt.querySelectorAll('.treebar-poller,.treebar-terminal,.treebar-terminal-content,[data-htmxo-auto-terminal]').forEach(function(n) {
+              if (!n.closest('.htmxo-live-reporter')) bad.push(n);
+            });
+            return bad;
+          }
+          if (document.getElementById('unwrap-done')) document.body.dataset.unwrapSaw = '1';
+          if (phase === 1 && document.getElementById('unwrap-done')) {
+            if (strays().length === 0) {
+              document.body.dataset.unwrapBare = '1';
+              document.getElementById('unwrap-ping').click();
+              document.body.dataset.unwrapClicked = '1';
+              phase = 2;
+            }
+          } else if (phase === 2 && document.getElementById('unwrap-pinged')) {
+            document.body.dataset.unwrapSawPinged = '1';
+            document.body.dataset.unwrapBare = strays().length === 0 ? '1' : '0';
+            document.body.dataset.unwrapReporter =
+              tgt.querySelector('.htmxo-live-reporter .treebar-poller .treebar-terminal-content') ? '1' : '0';
+            document.body.dataset.unwrapPing = '1';
+            document.body.dataset.unwrapDone = '1';
+            clearInterval(iv);
+          }
+        }, 50);
+      });
+    })();
+    """))
+end
+
+function auto_unwrap_terminal()
+    nested = h.div(
+        h.div(h.p("nested bare"; id="unwrap-nested-done");
+            class="treebar-poller-inner treebar-terminal-content",
+            data_htmxo_auto_terminal="");
+        class="treebar-poller")
+    reporter = h.div(
+        h.div(
+            h.div(h.p("reporter kept"; id="unwrap-reporter-kept");
+                class="treebar-poller-inner treebar-terminal-content",
+                data_htmxo_auto_terminal="");
+            class="treebar-poller");
+        class="htmxo-live-reporter")
+    runs_script = h.script(Raw(
+        "window.__unwrapRuns=(window.__unwrapRuns||0)+1;" *
+        "var c=document.getElementById(\"unwrap-runs\");" *
+        "if(c)c.textContent=\"runs:\"+window.__unwrapRuns;"))
+    h.div(
+        h.p("bare:3 rows"; id="unwrap-done"),
+        h.div("row 1"; class="unwrap-row"),
+        h.div("row 2"; class="unwrap-row"),
+        h.div("row 3"; class="unwrap-row"),
+        h.span("runs:0"; id="unwrap-runs"),
+        runs_script,
+        h.button("ping"; id="unwrap-ping", hx_get="ping",
+            hx_target="#unwrap-ping-out", hx_swap="innerHTML"),
+        h.span(""; id="unwrap-ping-out"),
+        nested, reporter;
+        class="treebar-poller-inner treebar-terminal-content",
+        data_htmxo_auto_terminal="")
+end
+
+@htmx struct AutoUnwrapApp
+    __page__(content) = htmx(
+        h.main(content; id="unwrap-shell"),
+        auto_unwrap_driver(); hyperscript_version=nothing, feedback=false,
+        compose=false, overlay=false)
+    @get index() = h.div(; id="unwrap-target")
+    @get terminal() = h.div(auto_unwrap_terminal(); class="treebar-poller")
+    @get ping() = (auto_unwrap_pings[] += 1;
+        h.span("pong"; id="unwrap-pinged"))
 end
 
 # Live-refresh event-driven fixtures (snag event-driven-mor-fbd7ee77): a
@@ -3302,6 +3403,64 @@ end
     # Engine-absent fallback: a `morph:*` terminal keeps the outer/inner
     # distinction via the core style instead of the innerHTML fallback.
     @test contains(html, "morph:innerHTML")
+end
+
+@testitem "auto terminal unwrap keeps bare single-run live content" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_auto_unwrap!()
+        _clear_operation_polls!()
+        route!(AutoUnwrapApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            handler(req)
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            # Driver control: the full flow (swap, unwrap, ping click,
+            # second swap) ran to completion.
+            @test contains(dom, "data-unwrap-done=\"1\"")
+            # Bare end state: outer and nested wrappers gone, exactly the
+            # route fragment left (the reporter-diverted terminal excluded).
+            @test contains(dom, "data-unwrap-bare=\"1\"")
+            @test contains(dom, "id=\"unwrap-nested-done\"")
+            # Single execution: the payload script ran at insert only. The
+            # innerHTML re-parse used to run it a second time (`runs:2`).
+            @test contains(dom, ">runs:1<")
+            # Moved nodes keep htmx behavior: the ping click swapped.
+            @test contains(dom, "data-unwrap-ping=\"1\"")
+            @test contains(dom, "id=\"unwrap-pinged\"")
+            @test auto_unwrap_pings[] == 1
+            # The live-reporter guard held: reporter-diverted terminals
+            # stay wrapped.
+            @test contains(dom, "data-unwrap-reporter=\"1\"")
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
 end
 
 @testitem "live-refresh morph:outerHTML terminal morphs in place" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
@@ -8929,6 +9088,26 @@ end
         _polling_page_assets_impl[] = old_assets
     end
     @test !isempty(_polling_page_assets())
+end
+
+# The `:auto` terminal unwrap moves the marked node's live children out of
+# the wrapper instead of round-tripping through `innerHTML` plus a second
+# `htmx.swap` — which re-parsed, re-cleaned, and re-initialized the whole
+# subtree (and re-ran its scripts) on every completion (snag
+# auto-terminal-do-6d1b5bb4).
+@testitem "auto terminal unwrap moves live nodes, never re-swaps" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    script = repr("text/html", HTMXObjects.auto_terminal_script())
+    @test contains(script, "__htmxoAutoTerminal")
+    @test contains(script, "insertBefore(el.firstChild, p)")
+    @test contains(script, "removeChild(p)")
+    # htmx initializes swapped content in its settle phase — after
+    # `afterSwap` — through tasks captured on the inserted top-level nodes,
+    # which would otherwise only see the detached husk. The unwrap mirrors
+    # that per-node step explicitly.
+    @test contains(script, "htmx.process(m)")
+    @test contains(script, "htmx:load")
+    @test !contains(script, "el.innerHTML")
+    @test !contains(script, "htmx.swap(p, content")
 end
 
 @testitem "automatic polling renders a documented operation label once" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
