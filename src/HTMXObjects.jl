@@ -17,7 +17,8 @@ export route!, record!, to_response, generic_html, save_response, static_transfo
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
-    SemanticSection, SemanticGroup, SemanticDisclosure, semantic_card
+    SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
+    semantic_card
 export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
 export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
@@ -2524,15 +2525,22 @@ SemanticMetric(label, value; unit="") =
 # Declaring the arm inside the struct suppresses the auto-generated pair instead.
 
 """
-    SemanticLink(label, target)
+    SemanticLink(label, target; external=false)
 
 A navigation target held as data. Renders as an ordinary anchor in HTML and as
 a real link in Markdown, rather than as a bare stringified URL.
+
+With `external=true` the link leaves the app: it opens in a new tab
+(`target="_blank"`, `rel="noopener"`), carries a trailing `↗` glyph, and keeps
+that marker in the Markdown (`[label ↗](target)`) and plain (`label ↗ (target)`)
+peers.
 """
 struct SemanticLink <: SemanticNode
     label::String
     target
-    SemanticLink(label, target) = new(String(label), target)
+    external::Bool
+    SemanticLink(label, target; external=false) =
+        new(String(label), target, Bool(external))
 end
 
 """
@@ -2630,6 +2638,33 @@ struct SemanticDisclosure <: SemanticNode
         new(String(summary), Any[children...])
     SemanticDisclosure(summary::AbstractString, children...) =
         new(String(summary), Any[children...])
+end
+
+"""
+    SemanticAlternatives(default, ("label" => view)...)
+
+Several views of the same content — a verbatim source and its rendered
+preview, a summary and its full body. The first view is the DEFAULT: it
+renders directly, and it is the ONLY view in the Markdown, plain and HXML
+peers. Every later view renders collapsed inside a native `<details>` with its
+label as the `<summary>` — view-switching with no client JavaScript.
+
+Later views MUST be `label => view` pairs (the label heads the collapsed
+section); anything else is an `ArgumentError`, as is an empty call. To show a
+literal `Pair` as a view, wrap it (e.g. `Any[pair]`).
+"""
+struct SemanticAlternatives <: SemanticNode
+    views::Vector{Any}
+    function SemanticAlternatives(views::AbstractVector)
+        isempty(views) && throw(ArgumentError(
+            "SemanticAlternatives needs at least one view"))
+        for v in views[2:end]
+            v isa Pair || throw(ArgumentError(
+                "SemanticAlternatives views after the first must be `label => view` pairs, got $(typeof(v))"))
+        end
+        new(Any[views...])
+    end
+    SemanticAlternatives(views...) = SemanticAlternatives(Any[views...])
 end
 
 """
@@ -3100,8 +3135,14 @@ _semantic_html_node(metric::SemanticMetric) = h.div(
     h.span(metric.label; class="htmxo-semantic-metric-label"),
     h.strong(_semantic_metric_text(metric); class="htmxo-semantic-metric-value");
     class="htmxo-semantic-metric")
-_semantic_html_node(link::SemanticLink) = h.a(
-    link.label; href=string(link.target), class="htmxo-semantic-link")
+function _semantic_html_node(link::SemanticLink)
+    link.external || return h.a(
+        link.label; href=string(link.target), class="htmxo-semantic-link")
+    # An external link leaves the app: new tab, safe attrs, and a trailing
+    # glyph marking the exit — the same meaning the text peers carry.
+    h.a(link.label * " ↗"; href=string(link.target), target="_blank",
+        rel="noopener", class="htmxo-semantic-link")
+end
 # An action is an OPERATION, so the HTML peer carries the `hx-*` attributes that
 # make it an in-place swap. `href` stays set so it degrades to a plain link.
 _semantic_html_node(action::SemanticAction) = h.a(
@@ -3122,6 +3163,18 @@ _semantic_html_node(group::SemanticGroup) = h.div(
 _semantic_html_node(disclosure::SemanticDisclosure) = h.details(
     h.summary(disclosure.summary), disclosure.children...;
     class="htmxo-semantic-disclosure")
+
+# The default view renders directly; every later view sits collapsed in a
+# native `<details>` under its label — switching with no client JavaScript.
+# Native elements already render the meaning (Pico styles them), so like the
+# other containers this owes no framework CSS: stacked blocks need no layout.
+function _semantic_html_node(alt::SemanticAlternatives)
+    h.div(
+        first(alt.views),
+        (h.details(h.summary(String(first(v))), last(v);
+            class="htmxo-semantic-alternative") for v in alt.views[2:end])...;
+        class="htmxo-semantic-alternatives")
+end
 
 # HXML is a peer projection. Construct the target node tree explicitly so a
 # semantic child is classified as a view/text node before HTMX's strict HXML
@@ -3149,13 +3202,17 @@ _semantic_hxml_node(disclosure::SemanticDisclosure) = h.details(
     h.summary(disclosure.summary),
     map(_semantic_hxml_child, disclosure.children)...;
     class="htmxo-semantic-disclosure")
+# HXML readers cannot expand a `<details>` either, so like the text peers the
+# HXML peer is the default view alone, classified before serializing.
+_semantic_hxml_node(alt::SemanticAlternatives) =
+    _semantic_hxml_child(first(alt.views))
 
 # `SemanticPlot` is absent on purpose: it owns no markup of its own and
 # delegates every format to its layer's own `show` (below).
 for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
           SemanticUnavailable, SemanticProse, SemanticTable, SemanticMetric,
           SemanticLink, SemanticAction, SemanticArtifact, SemanticSection,
-          SemanticGroup, SemanticDisclosure)
+          SemanticGroup, SemanticDisclosure, SemanticAlternatives)
     @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
         show(io, mime, _semantic_html_node(value))
     @eval Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", value::$T) =
@@ -3223,8 +3280,8 @@ Base.show(io::IO, ::MIME"text/markdown", prose::SemanticProse) =
 Base.show(io::IO, ::MIME"text/markdown", metric::SemanticMetric) =
     print(io, "**", metric.label, ":** ", _semantic_metric_text(metric))
 
-Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink) =
-    print(io, "[", link.label, "](", string(link.target), ")")
+Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink) = print(
+    io, "[", link.label, link.external ? " ↗" : "", "](", string(link.target), ")")
 
 # An action degrades to an ordinary link. No format but HTML can express "swap
 # this in place", and the target is the honest remainder of the meaning — which
@@ -3267,6 +3324,11 @@ function Base.show(io::IO, mime::MIME"text/markdown",
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
+# Collapsed views have no text analogue: the default view is the whole
+# projection, and the alternatives' labels with it stay in HTML alone.
+Base.show(io::IO, mime::MIME"text/markdown", alt::SemanticAlternatives) =
+    _semantic_show_leaf(io, mime, first(alt.views))
+
 function Base.show(io::IO, mime::MIME"text/plain", fields::SemanticFields)
     for (key, value) in fields.pairs
         print(io, key, ": ")
@@ -3295,8 +3357,8 @@ Base.show(io::IO, ::MIME"text/plain", prose::SemanticProse) =
 Base.show(io::IO, ::MIME"text/plain", metric::SemanticMetric) =
     print(io, metric.label, ": ", _semantic_metric_text(metric))
 
-Base.show(io::IO, ::MIME"text/plain", link::SemanticLink) =
-    print(io, link.label, " (", string(link.target), ")")
+Base.show(io::IO, ::MIME"text/plain", link::SemanticLink) = print(
+    io, link.label, link.external ? " ↗" : "", " (", string(link.target), ")")
 
 Base.show(io::IO, ::MIME"text/plain", action::SemanticAction) =
     print(io, action.label, " (", string(action.target), ")")
@@ -3330,6 +3392,9 @@ function Base.show(io::IO, mime::MIME"text/plain",
     isempty(disclosure.children) || print(io, "\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
+
+Base.show(io::IO, mime::MIME"text/plain", alt::SemanticAlternatives) =
+    _semantic_show_leaf(io, mime, first(alt.views))
 
 # Normalize a route return value into something `auto` can render, leaving
 # every value that already has an HTML representation untouched. Arrays stay
@@ -9478,6 +9543,20 @@ _strip_md_chrome(group::SemanticGroup) =
     SemanticGroup(_strip_md_chrome_children(group.children))
 _strip_md_chrome(disclosure::SemanticDisclosure) = SemanticDisclosure(
     disclosure.summary, _strip_md_chrome_children(disclosure.children))
+# Labels are metadata and survive; views strip like any children. An
+# alternative that strips to nothing is dropped; a default that strips to
+# nothing takes the whole element with it (an alternative without a default
+# view cannot exist).
+function _strip_md_chrome(alt::SemanticAlternatives)
+    default = _strip_md_chrome(first(alt.views))
+    isnothing(default) && return nothing
+    rest = Any[]
+    for v in alt.views[2:end]
+        stripped = _strip_md_chrome(last(v))
+        isnothing(stripped) || push!(rest, first(v) => stripped)
+    end
+    SemanticAlternatives(Any[default, rest...])
+end
 
 """
     _rescue_semantic!(out, val)
