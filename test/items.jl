@@ -7480,8 +7480,8 @@ end
     subscribe_key!(subs, sa, "a#1")
 
     @test invalidate_key!(subs, "a#1") == 2
-    @test String(take!(bufa)) == "event: refresh\ndata: a#1\n\n"
-    @test String(take!(bufb)) == "event: refresh\ndata: a#1\n\n"
+    @test String(take!(bufa)) == "event: refresh-a#1\ndata: a#1\n\n"
+    @test String(take!(bufb)) == "event: refresh-a#1\ndata: a#1\n\n"
     @test isempty(take!(bufc))
     @test invalidate_key!(subs, "nobody") == 0
 
@@ -7489,7 +7489,7 @@ end
     # key itself leaves the registry.
     close(sb)
     @test invalidate_key!(subs, "a#1") == 1
-    @test String(take!(bufa)) == "event: refresh\ndata: a#1\n\n"
+    @test String(take!(bufa)) == "event: refresh-a#1\ndata: a#1\n\n"
     @test isempty(take!(bufb))
     close(sa)
     @test invalidate_key!(subs, "a#1") == 0
@@ -7501,11 +7501,21 @@ end
     @test !unsubscribe_key!(subs, sc, "nobody")
     @test isempty(subs.streams)
 
-    # Non-string keys ride `string`.
+    # Non-string keys ride `string`, and `event` is a prefix now.
     other = KeySubscriptions()
-    so = SSEStream(IOBuffer(), HTTP.Request("GET", "/events"))
+    bufo = IOBuffer()
+    so = SSEStream(bufo, HTTP.Request("GET", "/events"))
     @test subscribe_key!(other, so, :k) == "k"
     @test invalidate_key!(other, "k") == 1
+    @test String(take!(bufo)) == "event: refresh-k\ndata: k\n\n"
+    @test invalidate_key!(other, "k"; event="tick") == 1
+    @test String(take!(bufo)) == "event: tick-k\ndata: k\n\n"
+
+    # Keys that would split an `hx-trigger` are escaped identically on the
+    # push side (the fragment side asserts the same spelling below).
+    @test subscribe_key!(other, so, "a,b [c]") == "a,b [c]"
+    @test invalidate_key!(other, "a,b [c]") == 1
+    @test String(take!(bufo)) == "event: refresh-a%2Cb%20%5Bc%5D\ndata: a,b [c]\n\n"
 
     @test_throws ArgumentError subscribe_key!(subs, sa, "")
     @test_throws ArgumentError invalidate_key!(subs, "")
@@ -7530,6 +7540,31 @@ end
     @test_throws ArgumentError serve_key_feed!(sse, subs, "k"; poll=-1)
 end
 
+@testitem "serve_key_feed! multiplexes many keys onto one stream" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    subs = KeySubscriptions()
+    buf = IOBuffer()
+    sse = SSEStream(buf, HTTP.Request("GET", "/events"))
+    task = @async serve_key_feed!(sse, subs, ["a#1", "b#2", "a#1"]; poll=0.005)
+    t0 = time()
+    while !(haskey(subs.streams, "a#1") && haskey(subs.streams, "b#2"))
+        time() - t0 > 15 && error("serve_key_feed! never subscribed")
+        sleep(0.005)
+    end
+    # One stream, subscribed twice over: each key's push reaches it, with
+    # its own event name, and the duplicate subscription is one entry.
+    @test length(subs.streams["a#1"]) == 1
+    @test invalidate_key!(subs, "a#1") == 1
+    @test String(take!(buf)) == "event: refresh-a#1\ndata: a#1\n\n"
+    @test invalidate_key!(subs, "b#2") == 1
+    @test String(take!(buf)) == "event: refresh-b#2\ndata: b#2\n\n"
+    close(sse)
+    @test fetch(task) === nothing
+    @test isempty(subs.streams)
+    @test_throws ArgumentError serve_key_feed!(sse, subs, String[])
+    @test_throws ArgumentError serve_key_feed!(sse, subs, ["ok", ""])
+    @test_throws ArgumentError serve_key_feed!(sse, subs, ["k"]; poll=-1)
+end
+
 @testitem "live_fragment subscribes and re-fetches through one div" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     node = live_fragment("gh:o/r#12", h.span("state: open");
         fragment_url="/card?key=gh%3Ao%2Fr%2312",
@@ -7538,7 +7573,7 @@ end
     @test contains(html, "hx-ext=\"sse\"")
     @test contains(html, "sse-connect=\"/events?key=gh%3Ao%2Fr%2312\"")
     @test contains(html, "hx-get=\"/card?key=gh%3Ao%2Fr%2312\"")
-    @test contains(html, "hx-trigger=\"sse:refresh\"")
+    @test contains(html, "hx-trigger=\"sse:refresh-gh:o/r#12\"")
     @test contains(html, "hx-swap=\"outerHTML\"")
     @test contains(html, "data-key=\"gh:o/r#12\"")
     @test contains(html, "<span>state: open</span>")
@@ -7548,10 +7583,24 @@ end
     custom = repr("text/html", live_fragment("k", "x";
         fragment_url="/f", events_url="/e", event="tick",
         swap="innerHTML", id="frag", class="card"))
-    @test contains(custom, "hx-trigger=\"sse:tick\"")
+    @test contains(custom, "hx-trigger=\"sse:tick-k\"")
     @test contains(custom, "hx-swap=\"innerHTML\"")
     @test contains(custom, "id=\"frag\"")
     @test contains(custom, "class=\"card\"")
+
+    # Without `events_url` the fragment opens no stream of its own: it
+    # keeps the keyed trigger and listens to an ancestor `live_region`.
+    shared = repr("text/html", live_fragment("gh:o/r#12", h.span("state: open");
+        fragment_url="/card?key=gh%3Ao%2Fr%2312"))
+    @test contains(shared, "hx-ext=\"sse\"")
+    @test !contains(shared, "sse-connect=")
+    @test contains(shared, "hx-trigger=\"sse:refresh-gh:o/r#12\"")
+    @test contains(shared, "data-key=\"gh:o/r#12\"")
+
+    # Trigger-unsafe keys escape the same way the push frame does.
+    escaped = repr("text/html", live_fragment("a,b [c]", "x"; fragment_url="/f"))
+    @test contains(escaped, "hx-trigger=\"sse:refresh-a%2Cb%20%5Bc%5D\"")
+    @test contains(escaped, "data-key=\"a,b [c]\"")
 
     @test contains(HTMXObjects.to_markdown_string(node), "state: open")
 
@@ -7561,13 +7610,34 @@ end
         fragment_url="/f", events_url="/e", event="a b")
 end
 
+@testitem "live_region hosts many fragments on one stream" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    keys = ["gh:o/r#$i" for i in 1:22]
+    frags = [live_fragment(k, "row $k"; fragment_url="/row?key=$k") for k in keys]
+    html = repr("text/html", live_region("/events?key=a&key=b", frags...))
+    # The snag's page shape: 22 fragments, exactly one stream.
+    @test count("sse-connect=", html) == 1
+    @test count("hx-trigger=\"sse:refresh-gh:o/r#", html) == 22
+    @test count("data-key=\"gh:o/r#", html) == 22
+
+    custom = repr("text/html", live_region("/e", "x"; id="panel", class="rows"))
+    @test contains(custom, "id=\"panel\"")
+    @test contains(custom, "class=\"rows\"")
+    @test !contains(custom, "hx-get=")
+    @test !contains(custom, "hx-trigger=")
+
+    @test contains(HTMXObjects.to_markdown_string(
+        live_region("/e", live_fragment("k", "body"; fragment_url="/f"))), "body")
+
+    @test_throws ArgumentError live_region("")
+end
+
 @testitem "keyed feed pushes refresh frames over a live stream" setup=[HTMXOTestImports] tags=[:integration, :server, :semantic] begin
     using Sockets
 
     const PUSH_SUBS = KeySubscriptions()
 
     @htmx struct KeyFeedApp
-        @sse key_events(; key::String="") =
+        @sse key_events(; key::Vector{String}=String[]) =
             serve_key_feed!(__sse__, PUSH_SUBS, key; poll=0.02)
         @get card(; key::String="") = live_fragment(key, h.span("body $key");
             fragment_url="/card?key=$(HTTP.URIs.escapeuri(key))",
@@ -7586,7 +7656,15 @@ end
         @test r.status == 200
         card = String(r.body)
         @test contains(card, "sse-connect=\"/key_events?key=a%231\"")
-        @test contains(card, "hx-trigger=\"sse:refresh\"")
+        @test contains(card, "hx-trigger=\"sse:refresh-a#1\"")
+
+        # A feed with no keys ends in the documented error stream (`done`,
+        # never a silent no-op feed) and subscribes nothing.
+        r = HTTP.get("http://127.0.0.1:$port/key_events";
+            status_exception=false, retry=false, readtimeout=60)
+        @test contains(HTTP.header(r, "Content-Type", ""), "text/event-stream")
+        @test contains(String(r.body), "event: done")
+        @test isempty(PUSH_SUBS.streams)
 
         # A connected client receives the pushed refresh frame.
         sock = Sockets.connect("127.0.0.1", port)
@@ -7600,7 +7678,7 @@ end
         @test invalidate_key!(PUSH_SUBS, "a#1") == 1
         t0 = time()
         got = ""
-        while !contains(got, "event: refresh")
+        while !contains(got, "event: refresh-a#1")
             time() - t0 > 15 &&
                 error("refresh frame never arrived: $(repr(got))")
             sleep(0.005)
@@ -7613,6 +7691,45 @@ end
         t0 = time()
         while haskey(PUSH_SUBS.streams, "a#1")
             time() - t0 > 15 && error("key feed never unsubscribed")
+            sleep(0.01)
+        end
+
+        # One stream, two keys: each invalidation arrives under its own
+        # event name, and the other key hears nothing.
+        multi = Sockets.connect("127.0.0.1", port)
+        write(multi, "GET /key_events?key=a%231&key=b%232 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        @test contains(String(readavailable(multi)), "text/event-stream")
+        t0 = time()
+        while !(haskey(PUSH_SUBS.streams, "a#1") && haskey(PUSH_SUBS.streams, "b#2"))
+            time() - t0 > 15 && error("multiplexed feed never subscribed")
+            sleep(0.005)
+        end
+        @test invalidate_key!(PUSH_SUBS, "a#1") == 1
+        t0 = time()
+        mgot = ""
+        while !contains(mgot, "event: refresh-a#1")
+            time() - t0 > 15 &&
+                error("multiplexed refresh frame never arrived: $(repr(mgot))")
+            sleep(0.005)
+            mgot *= String(readavailable(multi))
+        end
+        # Several heartbeats prove the stream is live and drained; the
+        # other key's event must still be absent.
+        sleep(0.3)
+        mgot *= String(readavailable(multi))
+        @test !contains(mgot, "refresh-b#2")
+        @test invalidate_key!(PUSH_SUBS, "b#2") == 1
+        t0 = time()
+        while !contains(mgot, "event: refresh-b#2")
+            time() - t0 > 15 &&
+                error("second multiplexed frame never arrived: $(repr(mgot))")
+            sleep(0.005)
+            mgot *= String(readavailable(multi))
+        end
+        close(multi)
+        t0 = time()
+        while !isempty(PUSH_SUBS.streams)
+            time() - t0 > 15 && error("multiplexed feed never unsubscribed")
             sleep(0.01)
         end
     finally

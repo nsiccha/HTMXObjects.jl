@@ -53,7 +53,7 @@ export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
-    invalidate_key!, live_fragment
+    invalidate_key!, live_fragment, live_region
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
@@ -5001,6 +5001,32 @@ function _push_event(event)
     e
 end
 
+# The key half of a wire event name travels through three layers: the SSE
+# `event:` field (no newlines or NUL), `source.addEventListener(name)` (any
+# string), and the fragment's `hx-trigger="sse:<name>"`, where htmx's trigger
+# parser ends the name at a comma, `[`, or whitespace (a bare `]` also trips
+# a syntax error). Percent-encode exactly those plus the escape character,
+# so `gh:owner/repo#12`-style keys stay readable while arbitrary keys stay
+# one trigger token.
+function _escape_event_key(key)
+    io = IOBuffer()
+    for c in string(key)
+        if c == '%' || c == ',' || c == '[' || c == ']' || c == '\0' ||
+                c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+            print(io, '%', uppercase(string(Int(c); base=16, pad=2)))
+        else
+            print(io, c)
+        end
+    end
+    String(take!(io))
+end
+
+# The wire event name for a keyed refresh: the validated `event` prefix plus
+# the trigger-safe key. Both `live_fragment` (the `hx-trigger`) and
+# `invalidate_key!` (the `event:` frame) compute it, so the two sides agree
+# by construction.
+_push_event_name(event, key) = _push_event(event) * "-" * _escape_event_key(_push_key(key))
+
 """
     subscribe_key!(subs::KeySubscriptions, sse::SSEStream, key) -> String
 
@@ -5039,37 +5065,55 @@ end
 
 """
     serve_key_feed!(sse::SSEStream, subs::KeySubscriptions, key; poll=1.0) -> Nothing
+    serve_key_feed!(sse::SSEStream, subs::KeySubscriptions, keys::AbstractVector; poll=1.0) -> Nothing
 
-`@sse` route body for one keyed subscription feed: subscribes `sse` to
-`key`, blocks while the client stays connected, and unsubscribes on the
-way out. `poll` is the disconnect-check interval in seconds.
+`@sse` route body for a keyed subscription feed: subscribes `sse` to `key`
+(or every key in `keys`), blocks while the client stays connected, and
+unsubscribes on the way out. `poll` is the disconnect-check interval in
+seconds.
+
+The vector form multiplexes many keys onto ONE stream: the page wraps its
+fragments in one [`live_region`](@ref) whose feed URL carries every key
+(`query_url(...; key=keys)`), and each [`live_fragment`](@ref) re-fetches
+only on its own key's event — one connection per page instead of one per
+fragment.
 
 ```julia
-@sse key_events(; key::String="") = serve_key_feed!(__sse__, SUBS, key)
+@sse key_events(; key::Vector{String}=String[]) = serve_key_feed!(__sse__, SUBS, key)
 ```
 """
-function serve_key_feed!(sse::SSEStream, subs::KeySubscriptions, key; poll::Real=1.0)
+function serve_key_feed!(sse::SSEStream, subs::KeySubscriptions, keys::AbstractVector; poll::Real=1.0)
     poll >= 0 || throw(ArgumentError("serve_key_feed! poll must be non-negative, got $poll"))
-    k = subscribe_key!(subs, sse, key)
+    ks = unique!([_push_key(k) for k in keys])
+    isempty(ks) && throw(ArgumentError("serve_key_feed! needs at least one subscription key"))
+    for k in ks
+        subscribe_key!(subs, sse, k)
+    end
     try
         while isopen(sse)
             sleep(poll)
         end
     finally
-        unsubscribe_key!(subs, sse, k)
+        for k in ks
+            unsubscribe_key!(subs, sse, k)
+        end
     end
     nothing
 end
+
+serve_key_feed!(sse::SSEStream, subs::KeySubscriptions, key; poll::Real=1.0) =
+    serve_key_feed!(sse, subs, [key]; poll=poll)
 
 """
     invalidate_key!(subs::KeySubscriptions, key; event="refresh") -> Int
 
 Push a refresh of `key` to every subscribed fragment on every open page:
-each live stream gets one `event` frame carrying the key, which re-fetches
-the fragment through its `hx-trigger="sse:<event>"` (see
-[`live_fragment`](@ref)). Streams whose client is gone are pruned.
-Returns the number of streams notified; a key with no subscribers is a
-quiet no-op (`0`).
+each subscribed stream gets one `<event>-<key>` frame carrying the key,
+which re-fetches exactly the fragments showing that key through their
+`hx-trigger="sse:<event>-<key>"` (see [`live_fragment`](@ref)) — on a
+multiplexed [`live_region`](@ref) stream the other keys' fragments stay
+put. Streams whose client is gone are pruned. Returns the number of
+streams notified; a key with no subscribers is a quiet no-op (`0`).
 
 This is the push half only: it does not touch whatever cache the fragment
 route reads. Refresh the data first (or kick its background rebuild), then
@@ -5077,7 +5121,7 @@ invalidate, so the re-fetch renders the new state.
 """
 function invalidate_key!(subs::KeySubscriptions, key; event::AbstractString="refresh")
     k = _push_key(key)
-    e = _push_event(event)
+    e = _push_event_name(event, k)
     live = lock(subs.lock) do
         copy(get(subs.streams, k, SSEStream[]))
     end
@@ -5105,22 +5149,28 @@ function invalidate_key!(subs::KeySubscriptions, key; event::AbstractString="ref
 end
 
 """
-    live_fragment(key, content...; fragment_url, events_url, event="refresh",
+    live_fragment(key, content...; fragment_url, events_url=nothing, event="refresh",
                   swap="outerHTML", id=nothing, class=nothing)
 
 A fragment that re-fetches itself when `key` is invalidated. Renders a
-`<div>` that opens one [`serve_key_feed!`](@ref) stream (`sse-connect` to
-`events_url`, which must carry the key, e.g.
-`query_url(__self__/"key_events"; key=key)`) and re-`GET`s `fragment_url`
-into itself (`hx-swap`, default `"outerHTML"`) whenever the stream sends
-`event`. The fragment route answers with the same `live_fragment` call, so
-the re-fetch is self-similar; the swapped-out element's stream is closed
-by the SSE extension and the fresh element opens a new one.
+`<div>` that re-`GET`s `fragment_url` into itself (`hx-swap`, default
+`"outerHTML"`) whenever its stream sends the key's event
+(`<event>-<key>`, default `refresh-<key>`). The fragment route answers
+with the same `live_fragment` call, so the re-fetch is self-similar.
+
+- With `events_url` the div opens its own [`serve_key_feed!`](@ref) stream
+  (`sse-connect` to `events_url`, which must carry the key, e.g.
+  `query_url(__self__/"key_events"; key=key)`); the swapped-out element's
+  stream is closed by the SSE extension and the fresh element opens a new
+  one. One stream per fragment.
+- With `events_url=nothing` (the default) the div opens no stream and
+  listens to the [`live_region`](@ref) stream of an ancestor instead, so
+  many fragments share one connection. Outside a `live_region` the
+  fragment renders but never refreshes.
 
 ```julia
 @get issue_card(; key::String="") = live_fragment(key, _issue_body(key);
-    fragment_url=query_url(__self__/"issue_card"; key=key),
-    events_url=query_url(__self__/"key_events"; key=key))
+    fragment_url=query_url(__self__/"issue_card"; key=key))
 ```
 
 An invalidation that lands between the page render and the stream connect
@@ -5128,14 +5178,44 @@ is missed: the fragment shows render-time state until the next one. In
 `?plain` the element degrades to its text content; the refresh machinery
 is inert there.
 """
-function live_fragment(key, content...; fragment_url, events_url,
+function live_fragment(key, content...; fragment_url, events_url=nothing,
         event::AbstractString="refresh", swap::AbstractString="outerHTML",
         id=nothing, class=nothing)
     k = _push_key(key)
-    e = _push_event(event)
-    h.div(content...; id, class, hx_ext="sse", sse_connect=string(events_url),
+    e = _push_event_name(event, k)
+    h.div(content...; id, class, hx_ext="sse",
+        sse_connect=isnothing(events_url) ? nothing : string(events_url),
         hx_get=string(fragment_url), hx_trigger="sse:$e",
         hx_swap=string(swap), data_key=k)
+end
+
+"""
+    live_region(events_url, content...; id=nothing, class=nothing)
+
+One shared [`serve_key_feed!`](@ref) stream for many
+[`live_fragment`](@ref)s. Renders a `<div>` that connects a single event
+stream (`sse-connect` to `events_url`, which must carry every key the
+region shows, e.g. `query_url(__self__/"key_events"; key=keys)`) and hosts
+fragments rendered without their own `events_url`: each re-fetches only on
+its own key's event. One connection per region instead of one per
+fragment — the shape for per-row or per-reference liveness, where a stream
+per fragment would starve the page's other requests under HTTP/1.1's
+per-origin connection limit.
+
+```julia
+@get panel() = live_region(query_url(__self__/"key_events"; key=all_keys),
+    (issue_card(__self__, k) for k in all_keys)...)
+
+@sse key_events(; key::Vector{String}=String[]) =
+    serve_key_feed!(__sse__, SUBS, key)
+```
+
+In `?plain` the element degrades to its children's text content.
+"""
+function live_region(events_url, content...; id=nothing, class=nothing)
+    url = string(events_url)
+    isempty(url) && throw(ArgumentError("live_region events_url must be non-empty"))
+    h.div(content...; id, class, hx_ext="sse", sse_connect=url)
 end
 
 # --- Error handling ---
