@@ -870,6 +870,13 @@ After recording, replay with any static server:
 python -m http.server --directory site
 ```
 
+`route!(app; record_dir)` and `record!` re-register the app's handlers, so they
+cannot run while the same process serves other requests. To export individual
+responses from a live server instead, pass a `StaticExport` spec to in-process
+`dispatch` — one request at a time, forced blocking, with a caller-supplied URL
+map for relative targets and an option to remove non-GET controls rather than
+grey them out. See the API reference's "Request-scoped static export".
+
 ## Revise hot-reload
 
 | Change                                             | Hot-reloaded?                       |
