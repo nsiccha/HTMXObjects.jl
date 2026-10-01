@@ -13,7 +13,8 @@ export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upl
 export terminate, serve, staticfiles, dynamicfiles, vendorfiles
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
-    RecordingState, RecordingRoutes, RECORDING_STATE
+    RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
+    static_export
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -3793,7 +3794,8 @@ function _guard_record_destination!(record_dir::String, dest::String)
 end
 
 # Paths that use kwargs (query params) and thus can't vary by query string on static servers.
-# Populated by route! when record_dir is set; used by _disable_for_static to strip hx-get to these paths.
+# Populated by route! when record_dir is set; consulted only by the recording form of the
+# static transform (`static_transform(val; record_base)`), never by a request-scoped export.
 const _static_kwargs_paths = Set{String}()
 
 const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45;pointer-events:none;cursor:not-allowed}")
@@ -3801,6 +3803,145 @@ const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45
 # Non-GET hx attribute names that are non-functional on a static server.
 # HTMX converts underscores to hyphens in attribute names, so these use hyphens.
 const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-patch"), Symbol("hx-delete")])
+
+"""
+    StaticExport(; url_map=nothing, controls=:disable, record_base="")
+
+Request-scoped static-export spec: pass it as `dispatch(...; static=spec)` to
+receive one route's response in static form from inside a live server. For
+that request only:
+
+- execution is forced blocking — the operation's finished value, never a
+  Treebars poller or a page-load placeholder — and
+- the static transform ([`static_transform`](@ref)) is applied to the route's
+  value before serialization; for a full-page request it runs after the
+  `__page__` wrap, so the page chrome is rewritten too.
+
+The caller receives the transformed `HTTP.Response` and writes it wherever it
+wants. Nothing is saved, and no `route!` registration, operation policy, or
+process-global recording state is read or changed: the spec rides the request
+alone, so concurrent ordinary requests are unaffected.
+
+- `url_map` — `nothing`, or a function from an address (the full attribute
+  value, query included: `"/report/figure?doc=a&name=b"`) to a static target
+  `String` or `nothing`. It is consulted for every `hx-get`, `href`, and `src`.
+  A `String` replaces the attribute verbatim — relative targets such as
+  `"embeds/fig-a.html"` are emitted as given — and the element stays live.
+  `nothing` falls back to the default rules below. Any other return value
+  throws an `ArgumentError`.
+- `controls` — what happens to an element a static server cannot serve: one
+  carrying `hx-post`/`hx-put`/`hx-patch`/`hx-delete`, or an unmapped `hx-get`
+  whose address has a query string. `:disable` (default; the recording
+  behaviour) strips those attributes and greys the element out
+  (`data-static-disabled` + `disabled`, plus the dimming style in a full
+  page's `<head>`). `:remove` drops the element and its subtree instead.
+- `record_base` — the prefix the default rules prepend to rooted addresses an
+  unmapped attribute keeps (`hx-get` → `<record_base>/hx/…`, `href`/`src` →
+  `<record_base>/…`). Empty (default) leaves them unchanged.
+
+A route that returns a finished `HTTP.Response` or [`MIMEResponse`](@ref) has
+no value to transform, so a static dispatch of it throws
+[`StaticExportRefused`](@ref) instead of handing back live markup; fetch those
+with a plain `dispatch`. Markdown requests (`Accept: text/markdown`, `?plain`)
+are forced blocking too but carry no attributes to rewrite.
+
+```julia
+spec = StaticExport(; controls=:remove,
+    url_map = url -> startswith(url, "/report/figure?") ?
+        "embeds/" * figure_name(url) * ".html" : nothing)
+resp = dispatch(:GET, "/report/figure?doc=a&name=qoi";
+                headers=["HX-Request" => "true"], parent=job, static=spec)
+write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
+```
+"""
+struct StaticExport{F}
+    url_map::F
+    controls::Symbol
+    record_base::String
+    function StaticExport(url_map::F, controls::Symbol,
+            record_base::AbstractString) where {F}
+        controls in (:disable, :remove) || throw(ArgumentError(
+            "StaticExport controls must be :disable or :remove (got $(repr(controls)))"))
+        new{F}(url_map, controls, String(record_base))
+    end
+end
+
+StaticExport(; url_map=nothing, controls::Symbol=:disable,
+        record_base::AbstractString="") =
+    StaticExport(url_map, controls, record_base)
+
+"""
+    StaticExportRefused <: Exception
+
+Thrown by `dispatch(...; static=spec)` when the route returned a finished
+`HTTP.Response` or `MIMEResponse`. Such a response bypasses the static
+transform, so returning it would put live markup into a static bundle; the
+handler rethrows instead of rendering an ordinary route error, so the export
+fails at the `dispatch` call.
+"""
+struct StaticExportRefused <: Exception
+    method::String
+    target::String
+    response_type::String
+end
+
+StaticExportRefused(req::HTTP.Request, finalized) =
+    StaticExportRefused(req.method, String(req.target), string(typeof(finalized)))
+
+Base.showerror(io::IO, e::StaticExportRefused) = print(io,
+    "StaticExportRefused: static dispatch of ", e.method, " ", e.target,
+    " — the route returned a finished ", e.response_type, ", which bypasses ",
+    "the static transform. Fetch it with a plain `dispatch` (no `static=`), ",
+    "or return an HTML value from the route.")
+
+"""
+    static_export(req::HTTP.Request) -> Union{StaticExport,Nothing}
+
+The [`StaticExport`](@ref) spec a `dispatch(...; static=spec)` call attached
+to this request, or `nothing` for every other request (real HTTP requests
+never carry it: the request context is server-side).
+
+HTMXObjects forces its own operation transport blocking for such a request.
+A route body that hand-rolls `Treebars.polling_fetchindex` decides its own
+`sync`, so it must block as well — otherwise the export captures a live
+poller:
+
+```julia
+polling_fetchindex(ip, key; sync=wants_markdown(__req__) ||
+                                 static_export(__req__) !== nothing) do rv
+    ...
+end
+```
+"""
+static_export(req::HTTP.Request) = get(req.context, :htmxo_static_export, nothing)
+
+# What a static walk consults: the spec, plus the rooted `hx-get` paths a static
+# server cannot vary by query — `route!`'s recording registry for the recording
+# form of `static_transform`, nothing for a request-scoped export.
+struct _StaticRules{S<:StaticExport}
+    spec::S
+    unservable::Set{String}
+end
+
+# Returned by the walker for an element `controls=:remove` drops; containers
+# filter it out of their children.
+struct _StaticRemoved end
+const _STATIC_REMOVED = _StaticRemoved()
+
+_static_kept(xs) = filter(x -> x !== _STATIC_REMOVED, xs)
+
+# The caller's target for one attribute value, or `nothing` for the default
+# rules. Only string values are addresses; without a `url_map` every address
+# takes the default rules.
+_static_url_target(::StaticExport, url) = nothing
+_static_url_target(::StaticExport{Nothing}, ::AbstractString) = nothing
+function _static_url_target(spec::StaticExport, url::AbstractString)
+    target = spec.url_map(url)
+    target === nothing && return nothing
+    target isa AbstractString && return String(target)
+    throw(ArgumentError("StaticExport url_map must return a String or nothing; " *
+                        "got $(repr(target)) for $(repr(url))"))
+end
 
 """
     escape_html(s) -> String
@@ -3832,26 +3973,34 @@ For values that may contain quotes / apostrophes, use
 html_escape(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;")
 
 """
-    _disable_for_static(val) -> val
+    _static_walk(val, rules::_StaticRules) -> val
 
-Walk a Node tree and disable elements that won't work on a static server:
+Walk a Node tree and make it static-safe under `rules`:
+- `hx-get`, `href`, `src`: a `url_map` target replaces the value verbatim;
+  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`)
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
-- Strip `hx-get` attributes whose URL contains `?` (query-param routes)
-- Strip `hx-get` attributes pointing to kwargs routes (from `_static_kwargs_paths`)
-- Mark affected elements with `data-static-disabled` and `disabled`
+- Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
+  routes) or names one of `rules.unservable` (kwargs routes)
+- Mark affected elements with `data-static-disabled` and `disabled`, or —
+  under `controls=:remove` — drop them (`_STATIC_REMOVED`)
 
 Non-Node values pass through unchanged.
 """
-_disable_for_static(val; record_base::String="") = val
+_static_walk(val, rules::_StaticRules) = val
 # A full page arrives as an `HTMLDocument`; unwrap so the `<html>` tree is
 # walked and re-wrap so the recorded file keeps its doctype. Without this
 # method the catch-all above would return the document untouched and every
 # recorded page would keep its live (non-static) hx attributes.
-_disable_for_static(doc::HTMLDocument; record_base::String="") =
-    HTMLDocument(_disable_for_static(doc.root; record_base))
-_disable_for_static(val::AbstractArray; record_base::String="") = [_disable_for_static(x; record_base) for x in val]
-_disable_for_static(val::Tuple; record_base::String="") = Tuple(_disable_for_static(x; record_base) for x in val)
-_disable_for_static((content, id)::Pair; record_base::String="") = _disable_for_static(content; record_base) => id
+_static_walk(doc::HTMLDocument, rules::_StaticRules) =
+    HTMLDocument(_static_walk(doc.root, rules))
+_static_walk(val::AbstractArray, rules::_StaticRules) =
+    _static_kept([_static_walk(x, rules) for x in val])
+_static_walk(val::Tuple, rules::_StaticRules) =
+    Tuple(_static_kept([_static_walk(x, rules) for x in val]))
+function _static_walk((content, id)::Pair, rules::_StaticRules)
+    walked = _static_walk(content, rules)
+    walked === _STATIC_REMOVED ? walked : walked => id
+end
 
 # Rewrite an absolute-from-root URL (`/foo/bar`) by prepending `prefix`.
 # External URLs (`https://…`), anchors (`#…`), schemes (`mailto:…`), and
@@ -3872,60 +4021,64 @@ end
 _rewrite_hx_url(url::AbstractString, record_base::AbstractString) =
     _rewrite_static_url(url, isempty(record_base) ? "" : (rstrip(record_base, '/') * "/hx"))
 
-function _disable_for_static(node::Node; record_base::String="")
-    attrs = HTMX.attrs(node)
-    children = HTMX.children(node)
-
-    # Check if this element needs disabling
-    disabled = false
-    new_attrs = copy(attrs)
+function _static_walk(node::Node, rules::_StaticRules)
+    spec = rules.spec
+    new_attrs = copy(HTMX.attrs(node))
+    # Set when the element carries a request a static server cannot answer.
+    unservable = false
 
     # Remove non-GET hx attributes
     for attr in _HX_NONGET_ATTRS
         if haskey(new_attrs, attr)
             delete!(new_attrs, attr)
-            disabled = true
+            unservable = true
         end
     end
 
-    # Remove hx-get with query string or pointing to kwargs route; otherwise
-    # rewrite it to the recorded-fragment subtree under `record_base`.
+    # A mapped `hx-get` takes the caller's target verbatim. An unmapped one
+    # with a query string or pointing to a kwargs route is removed; otherwise
+    # it is rewritten to the recorded-fragment subtree under `record_base`.
     hx_get_sym = Symbol("hx-get")
     if haskey(new_attrs, hx_get_sym)
         url = new_attrs[hx_get_sym]
-        if occursin('?', url) || url in _static_kwargs_paths
+        target = _static_url_target(spec, url)
+        if !isnothing(target)
+            new_attrs[hx_get_sym] = target
+        elseif occursin('?', url) || url in rules.unservable
             delete!(new_attrs, hx_get_sym)
-            disabled = true
+            unservable = true
         else
-            new_attrs[hx_get_sym] = _rewrite_hx_url(url, record_base)
+            new_attrs[hx_get_sym] = _rewrite_hx_url(url, spec.record_base)
         end
     end
 
     # Rewrite `<a href="/foo">` to `record_base * /foo` so links from a
     # recorded page land on the matching full-page recording (not the
     # `/hx/` fragment subtree — full pages link to other full pages).
-    href_sym = Symbol("href")
-    if haskey(new_attrs, href_sym)
-        new_attrs[href_sym] = _rewrite_static_url(new_attrs[href_sym], record_base)
-    end
-    src_sym = Symbol("src")
-    if haskey(new_attrs, src_sym)
-        new_attrs[src_sym] = _rewrite_static_url(new_attrs[src_sym], record_base)
+    # A mapped address takes the caller's target instead.
+    for sym in (:href, :src)
+        haskey(new_attrs, sym) || continue
+        url = new_attrs[sym]
+        target = _static_url_target(spec, url)
+        new_attrs[sym] = isnothing(target) ?
+            _rewrite_static_url(url, spec.record_base) : target
     end
 
-    if disabled
+    if unservable
+        spec.controls === :remove && return _STATIC_REMOVED
         new_attrs[Symbol("data-static-disabled")] = "true"  # renders as data-static-disabled
         new_attrs[:disabled] = "true"                        # renders as boolean attribute
     end
 
     # Recurse into children
-    new_children = map(child -> _disable_child(child, record_base), children)
+    new_children = _static_kept(map(child -> _static_walk_child(child, rules),
+                                    HTMX.children(node)))
 
     Node(HTMX.tag(node), new_attrs, new_children)
 end
 
-_disable_child(child, record_base) = child
-_disable_child(child::Node, record_base) = _disable_for_static(child; record_base)
+_static_walk_child(child, rules) = child
+_static_walk_child(child::Node, rules) = _static_walk(child, rules)
 
 """
     _inject_static_style(val)
@@ -3933,7 +4086,7 @@ _disable_child(child::Node, record_base) = _disable_for_static(child; record_bas
 If val is a full HTML page (contains a `<head>`), inject the disabled-element style block.
 """
 _inject_static_style(val) = val
-# Same unwrap/re-wrap as `_disable_for_static`: the `<head>` to inject into
+# Same unwrap/re-wrap as `_static_walk`: the `<head>` to inject into
 # lives inside the document's `<html>` root.
 _inject_static_style(doc::HTMLDocument) = HTMLDocument(_inject_static_style(doc.root))
 function _inject_static_style(node::Node)
@@ -3951,23 +4104,49 @@ _inject_child(child::Node) = _inject_static_style(child)
 
 """
     static_transform(val; record_base="")
+    static_transform(val, spec::StaticExport)
 
-Transform a value for static recording: disable non-functional elements,
+Transform a value for static serving: disable non-functional elements,
 rewrite surviving `hx-get` URLs to point at the recorded fragment subtree
 under `record_base`, and inject the disabled-element style block (full
 pages only).
 
-`record_base` is the URL prefix where the recording will be served (e.g.
-`/HTMXObjects.jl/dev/examples/counter`). Each rooted `hx-get="/foo"`
-becomes `hx-get="<record_base>/hx/foo"` so HTMX-driven sub-fetches resolve
-to the recorded fragment under `<record_dir>/hx/foo.html`. Empty
-`record_base` (default) skips rewriting — useful when recording for a
-root-served deployment, though that's rare in practice.
+The keyword form is the recording form used by `record!` / `route!(;
+record_dir)`: it also strips `hx-get` addresses naming a kwargs route that
+recording registered. `record_base` is the URL prefix where the recording
+will be served (e.g. `/HTMXObjects.jl/dev/examples/counter`). Each rooted
+`hx-get="/foo"` becomes `hx-get="<record_base>/hx/foo"` so HTMX-driven
+sub-fetches resolve to the recorded fragment under
+`<record_dir>/hx/foo.html`. Empty `record_base` (default) skips rewriting —
+useful when recording for a root-served deployment, though that's rare in
+practice.
+
+The [`StaticExport`](@ref) form reads nothing but the spec — its `url_map`,
+`controls`, and `record_base` — and is what `dispatch(...; static=spec)`
+applies. Under `controls=:remove` a value that is itself a removed control
+comes back as an empty fragment.
 """
-function static_transform(val; record_base::String="")
-    result = _disable_for_static(val; record_base)
-    _inject_static_style(result)
+static_transform(val; record_base::String="") =
+    _static_transform(val, _StaticRules(StaticExport(; record_base),
+                                        _static_kwargs_paths))
+static_transform(val, spec::StaticExport) =
+    _static_transform(val, _StaticRules(spec, Set{String}()))
+
+function _static_transform(val, rules::_StaticRules)
+    result = _static_walk(val, rules)
+    result === _STATIC_REMOVED && return Any[]
+    # Removed controls leave nothing to dim.
+    rules.spec.controls === :disable ? _inject_static_style(result) : result
 end
+
+# A request-scoped static export (`dispatch(...; static=spec)`) transforms the
+# value the response pipeline is about to serialize; every other request
+# passes it through untouched.
+_static_response_value(req::HTTP.Request, val) =
+    _static_response_value(static_export(req), val)
+_static_response_value(::Nothing, val) = val
+_static_response_value(spec::StaticExport, val) =
+    static_transform(_html_value(val), spec)
 
 # --- Convenience helpers ---
 
@@ -5955,6 +6134,10 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     # `nothing` so we fall through to the regular pipeline.
     let finalized = _finalized_response(val)
         if !isnothing(finalized)
+            # A static export has no value to transform here; refuse rather
+            # than hand back live markup.
+            isnothing(static_export(req)) ||
+                throw(StaticExportRefused(req, finalized))
             if !isnothing(record_dir) && !isnothing(save_path)
                 _save_typed_response(record_dir, save_path, finalized)
             end
@@ -6004,17 +6187,17 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     # chain is the root's own, so `_page_chain_skip` drops it for every swap
     # made from inside this mount — the same answer `is_htmx(req)` gave — while
     # still honouring an explicit `?__chrome__=` override in either direction.
-    fragment_resp = to_response(val)
     wrapper = _page_wrapper(obj)
-    isnothing(wrapper) && return fragment_resp
-    isempty(_page_chain_to_apply(Any[obj], req; root=obj)) && return fragment_resp
+    (isnothing(wrapper) || isempty(_page_chain_to_apply(Any[obj], req; root=obj))) &&
+        return to_response(_static_response_value(req, val))
 
     # Full page wrap for direct browser navigation. Normalize first so
     # `__page__` receives the same renderable the HX branch above sent —
     # otherwise a plain value reaches the wrapper as a bare Node child and
     # renders as `show(::MIME"text/plain")` text in full-page mode while
     # rendering structurally over HX.
-    to_response(_apply_page(obj, wrapper, _html_value(val)))
+    to_response(_static_response_value(req,
+        _apply_page(obj, wrapper, _html_value(val))))
 end
 
 # For URL paths whose only `{x}` placeholders are at the very end (the
@@ -6586,6 +6769,9 @@ end
 function _operation_execution_mode(policy::OperationPolicy, descriptor,
         req::HTTP.Request, verb_inst::Verb; page_shell::Bool=false)
     _verb_symbol(verb_inst) === :GET || return :blocking
+    # A static export needs the finished value: a poller or page-load
+    # placeholder has nothing to poll once written to disk.
+    isnothing(static_export(req)) || return :blocking
     _declared_final_response(descriptor) && return :blocking
     policy.mode === :auto || return policy.mode
     descriptor === nothing && return :blocking
@@ -7726,7 +7912,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                                                 record_dir, save_path, record_base))
             end
         catch err
-            err isa _RecordDestinationCollision && rethrow()
+            # Both are export-contract failures the caller must see at the
+            # call, not route errors to render.
+            err isa Union{_RecordDestinationCollision,StaticExportRefused} && rethrow()
             bt = catch_backtrace()
             page_chain = is_included ?
                 _collect_page_chain(root, chain, req, root_segs) :
@@ -8493,6 +8681,10 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
     # would get wrapped in `__page__` and served with text/html.
     let finalized = _finalized_response(val)
         if !isnothing(finalized)
+            # A static export has no value to transform here; refuse rather
+            # than hand back live markup.
+            isnothing(static_export(req)) ||
+                throw(StaticExportRefused(req, finalized))
             if !isnothing(record_dir) && !isnothing(save_path)
                 _save_typed_response(record_dir, save_path, finalized)
             end
@@ -8539,7 +8731,7 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
     # only the levels below the swap target for a partial swap, none when the
     # target's position cannot be established (`_page_chain_skip`).
     chain = _page_chain_to_apply(page_chain, req; root)
-    isempty(chain) && return to_response(val)
+    isempty(chain) && return to_response(_static_response_value(req, val))
     # Apply page wrappers: innermost (last) wraps first, then each outer one.
     # Normalized first, so a plain value renders the same structurally in
     # full-page mode as the bare-fragment branch above already returns.
@@ -8548,7 +8740,7 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (val = _apply_page(obj, wrapper, val))
     end
-    to_response(val)
+    to_response(_static_response_value(req, val))
 end
 
 # Register routes from a nested @include struct with chained property access through the parent.
@@ -9793,6 +9985,11 @@ _dispatch_headers(h::AbstractDict) =
 _dispatch_headers(h::NamedTuple) =
     Pair{String,String}[string(k) => string(v) for (k, v) in pairs(h)]
 
+_dispatch_static(::Nothing) = nothing
+_dispatch_static(spec::StaticExport) = spec
+_dispatch_static(other) = throw(ArgumentError(
+    "dispatch takes `static` as a StaticExport spec or nothing; got $(repr(other))"))
+
 _dispatch_body(::Nothing) = UInt8[]
 _dispatch_body(b::Vector{UInt8}) = b
 _dispatch_body(b::AbstractVector{UInt8}) = Vector{UInt8}(b)
@@ -9831,7 +10028,7 @@ requests and the same route body serves both paths.
 dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, nothing)
 
 """
-    dispatch(method, url; headers=[], body=UInt8[], parent=nothing) -> HTTP.Response
+    dispatch(method, url; headers=[], body=UInt8[], parent=nothing, static=nothing) -> HTTP.Response
 
 Run one request against the registered route tree in-process and return the
 handler's `HTTP.Response` — no listener, no socket, no serialization
@@ -9867,6 +10064,17 @@ for a loopback request.
   remains the portable spelling where the ambient bind does not reach — a
   spawned route body on Julia 1.10 crosses a task boundary the task-local
   bind does not.
+- `static` — an optional [`StaticExport`](@ref) spec. This one request is
+  executed blocking and its response comes back in static form: the route's
+  value (after the `__page__` wrap, for a full-page request) passes through
+  `static_transform(val, static)` before serialization, so `hx-get`/`href`/`src`
+  addresses follow the spec's `url_map` and non-GET controls are disabled or
+  removed. Pass `"HX-Request" => "true"` for the bare fragment. Nothing is
+  written to disk and no registration, operation policy, or global
+  recording state changes, so ordinary requests served concurrently are
+  unaffected; `parent=` nests the blocking execution as usual. A route that
+  returns a finished `HTTP.Response`/`MIMEResponse` makes the call throw
+  [`StaticExportRefused`](@ref).
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
@@ -9885,10 +10093,12 @@ markdown = String(resp.body)
 ```
 """
 function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
-        parent=nothing)
+        parent=nothing, static=nothing)
+    spec = _dispatch_static(static)
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
+    spec !== nothing && (req.context[:htmxo_static_export] = spec)
     _with_dispatch_parent(() -> ROUTER(req), parent)
 end
 
