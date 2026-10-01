@@ -10,7 +10,7 @@ export property_descriptor, property_descriptors, static_domain,
     materialization_observation
 export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
-export terminate, serve, staticfiles, dynamicfiles, vendorfiles
+export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfiles, vendor_head
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
@@ -2144,6 +2144,27 @@ function _head_asset_src(pkg::Symbol, version, cdn_src, assets)
     return prefix * "/" * spec.file
 end
 
+# The head node for one asset: pico is a stylesheet, every other vendored
+# library a script. Shared by the `htmx()` shell and `vendor_head`.
+_head_asset_node(::Val{:pico}, src) = h.link(rel="stylesheet", href=src)
+_head_asset_node(::Val, src) = h.script(src=src)
+
+# htmx extensions register themselves against a loaded htmx, so they need
+# htmx loaded before them.
+const _VENDOR_EXTENSIONS = (:sse, :ws, :preload)
+
+# The requested vendored packages, validated and put in load order (the
+# `_VENDOR_ASSETS` order: htmx before its extensions). An unknown name is a
+# loud error, never a skipped file.
+function _vendor_packages(packages)
+    requested = Set{Symbol}(Symbol(p) for p in packages)
+    unknown = setdiff(requested, keys(_VENDOR_ASSETS))
+    isempty(unknown) || throw(ArgumentError(
+        "unknown vendored package(s) " * join(repr.(sort!(collect(unknown))), ", ") *
+        "; known: " * join(repr.(keys(_VENDOR_ASSETS)), ", ")))
+    Symbol[pkg for pkg in keys(_VENDOR_ASSETS) if pkg in requested]
+end
+
 """
     vendorfiles(mountdir="vendor"; headers=[])
 
@@ -2165,13 +2186,73 @@ function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
     prefix = strip(mountdir, '/')
     for pkg in keys(_VENDOR_ASSETS)
         spec = _VENDOR_ASSETS[pkg]
-        path = joinpath(_vendor_artifact(Val(pkg)), spec.relpath)
+        path = _vendor_file(pkg)
         body = read(path)
         route = isempty(prefix) ? "/$(spec.file)" : "/$prefix/$(spec.file)"
         handler = _ -> _file_response(path, body, headers)
         HTTP.register!(ROUTER, "GET", route, handler)
     end
     return nothing
+end
+
+# The pinned file inside its (lazily downloaded) artifact.
+_vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[pkg].relpath)
+
+"""
+    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico)) -> Vector{String}
+
+Copy the vendored head assets — the same pinned files [`vendorfiles`](@ref)
+serves — into `dir` (created if missing), for a static bundle that has no
+routes to serve them from. `packages` selects which libraries to copy; the
+written paths come back in load order. Existing files are overwritten, and
+the copies are ordinary writable files (the artifact store is read-only).
+Like `vendorfiles`, the first call downloads the pinned npm tarballs.
+
+Pair it with [`vendor_head`](@ref) (or `htmx(...; assets=<same relative
+prefix>)`) for head tags that address the copies relative to the page:
+
+```julia
+copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico))
+page = HTMLDocument(h.html(
+    h.head(h.meta(charset="utf-8"), vendor_head("assets/vendor"; packages=(:htmx, :pico))...),
+    h.body(content)))
+```
+"""
+function copy_vendorfiles(dir::AbstractString; packages=keys(_VENDOR_ASSETS))
+    pkgs = _vendor_packages(packages)
+    mkpath(dir)
+    map(pkgs) do pkg
+        dest = joinpath(dir, _VENDOR_ASSETS[pkg].file)
+        write(dest, read(_vendor_file(pkg)))
+        dest
+    end
+end
+
+"""
+    vendor_head(base="vendor"; packages=(:htmx,)) -> Tuple
+
+Head nodes loading the vendored libraries `packages` from `base`: a
+`<script src=…>` per library and a stylesheet `<link>` for `:pico`, in load
+order (htmx before its extensions). `base` is used as given, so a relative
+prefix such as `"assets/vendor"` addresses files [`copy_vendorfiles`](@ref)
+wrote next to the page, and a rooted one (`"/vendor"`) matches a
+[`vendorfiles`](@ref) mount. Splat the result into a hand-built `h.head(…)`.
+
+An extension (`:sse`, `:ws`, `:preload`) without `:htmx` is an
+`ArgumentError`. The tags load the libraries only: `:preload` still needs
+`hx-ext="preload"` on an ancestor and [`preload_runtime_js`](@ref), which the
+[`htmx`](@ref) shell adds for you.
+"""
+function vendor_head(base::AbstractString="vendor"; packages=(:htmx,))
+    pkgs = _vendor_packages(packages)
+    extensions = filter(in(_VENDOR_EXTENSIONS), pkgs)
+    isempty(extensions) || :htmx in pkgs || throw(ArgumentError(
+        "vendor_head: htmx extension(s) " * join(repr.(extensions), ", ") *
+        " need :htmx in `packages` — an extension must load after htmx"))
+    prefix = rstrip(base, '/')
+    Tuple(_head_asset_node(Val(pkg),
+              (isempty(prefix) ? "" : prefix * "/") * _VENDOR_ASSETS[pkg].file)
+          for pkg in pkgs)
 end
 
 """
@@ -2202,7 +2283,9 @@ work only on routes marked `@preload`.
 so the page loads fully offline — mount them with [`vendorfiles`](@ref) and
 pass each library at its pinned version (a non-pinned version errors loudly).
 A string mounts elsewhere: `assets="/static/vendor"` pairs with
-`vendorfiles("static/vendor")`.
+`vendorfiles("static/vendor")`. The string is used as given, so a relative
+prefix (`assets="assets/vendor"`) addresses the files relative to the page —
+for a static bundle whose copies [`copy_vendorfiles`](@ref) wrote.
 
 Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
 `<!DOCTYPE html>` preamble, so the page renders in standards mode.
@@ -2228,16 +2311,16 @@ function htmx(args...;
 )
     _check_assets_mode(assets)
     cdn = []
-    isnothing(htmx_version)        || push!(cdn, h.script(src=_head_asset_src(:htmx, htmx_version, "https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js", assets)))
-    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, h.script(src=_head_asset_src(:sse, sse_version, "https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js", assets)))
-    isnothing(htmx_version) || isnothing(ws_version) || push!(cdn, h.script(src=_head_asset_src(:ws, ws_version, "https://cdn.jsdelivr.net/npm/htmx-ext-ws@$(ws_version)/dist/ws.min.js", assets)))
+    isnothing(htmx_version)        || push!(cdn, _head_asset_node(Val(:htmx), _head_asset_src(:htmx, htmx_version, "https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js", assets)))
+    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, _head_asset_node(Val(:sse), _head_asset_src(:sse, sse_version, "https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js", assets)))
+    isnothing(htmx_version) || isnothing(ws_version) || push!(cdn, _head_asset_node(Val(:ws), _head_asset_src(:ws, ws_version, "https://cdn.jsdelivr.net/npm/htmx-ext-ws@$(ws_version)/dist/ws.min.js", assets)))
     # The extension registers itself on load, so it must follow htmx.
     preload = !isnothing(htmx_version) && !isnothing(preload_version)
     preload && push!(cdn,
-        h.script(src=_head_asset_src(:preload, preload_version, "https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js", assets)),
+        _head_asset_node(Val(:preload), _head_asset_src(:preload, preload_version, "https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js", assets)),
         preload_runtime_js())
-    isnothing(hyperscript_version) || push!(cdn, h.script(src=_head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets)))
-    isnothing(pico_version)        || push!(cdn, h.link(rel="stylesheet", href=_head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets)))
+    isnothing(hyperscript_version) || push!(cdn, _head_asset_node(Val(:hyperscript), _head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets)))
+    isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html = preload ? h.html(; hx_ext="preload") : h.html

@@ -109,11 +109,28 @@ version errors loudly); `pico_page` needs its pin spelled out, since its
 floating `"2"` default is not the pin. A custom mount pairs with a matching
 prefix: `vendorfiles("static/vendor")` + `assets="/static/vendor"`.
 
+A static bundle has no routes to serve the files from, so copy them instead:
+`copy_vendorfiles(dir; packages)` writes the same pinned files into `dir` and
+returns their paths in load order. `vendor_head(base; packages)` returns the
+matching head nodes (scripts, plus a stylesheet link for `:pico`, htmx before
+its extensions) for a hand-built `HTMLDocument`. `base` is used as given, so
+a relative prefix addresses the copies relative to the page. The `htmx()`
+shell accepts the same relative string as `assets=`.
+
+```julia
+copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico))
+head = h.head(h.meta(charset="utf-8"),
+              vendor_head("assets/vendor"; packages=(:htmx, :pico))...)
+# or: htmx(content; assets="assets/vendor", pico_version=HTMXObjects._PICO_VERSION)
+```
+
 ```@docs
 htmx
 HTMXObjects.pico_page
 HTMLDocument
 vendorfiles
+copy_vendorfiles
+vendor_head
 ```
 
 ## Server-sent events
