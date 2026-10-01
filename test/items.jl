@@ -4105,6 +4105,47 @@ end
     end
 end
 
+@testitem "copy_vendorfiles + vendor_head build a relocatable bundle head" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    mktempdir() do dir
+        out = joinpath(dir, "assets", "vendor")
+        # Selected packages only, created dir, load order (not request order).
+        written = copy_vendorfiles(out; packages=(:pico, :htmx))
+        @test written == [joinpath(out, "htmx.min.js"), joinpath(out, "pico.min.css")]
+        @test sort(readdir(out)) == ["htmx.min.js", "pico.min.css"]
+        # Byte-identical to what `vendorfiles` serves.
+        vendorfiles()
+        for f in ("htmx.min.js", "pico.min.css")
+            @test read(joinpath(out, f), String) == String(dispatch(:GET, "/vendor/$f").body)
+        end
+        # Copies are writable, so a re-copy overwrites in place.
+        @test copy_vendorfiles(out; packages=["htmx"]) == [joinpath(out, "htmx.min.js")]
+        # The default copies all six pins.
+        @test length(filter(isfile, copy_vendorfiles(joinpath(dir, "all")))) == 6
+        @test_throws ArgumentError copy_vendorfiles(dir; packages=(:jquery,))
+    end
+
+    # Head nodes address the copies relative to the page, htmx first.
+    head = repr("text/html", h.head(vendor_head("assets/vendor"; packages=(:pico, :sse, :htmx))...))
+    @test contains(head, "<script src=\"assets/vendor/htmx.min.js\"></script>")
+    @test contains(head, "src=\"assets/vendor/sse.min.js\"")
+    @test contains(head, "rel=\"stylesheet\"") && contains(head, "href=\"assets/vendor/pico.min.css\"")
+    @test findfirst("htmx.min.js", head).start < findfirst("sse.min.js", head).start
+    @test !contains(head, "https://") && !contains(head, "\"/assets")
+    # A rooted base matches a `vendorfiles` mount; the default is `vendor/`.
+    @test contains(repr("text/html", h.head(vendor_head("/vendor")...)), "src=\"/vendor/htmx.min.js\"")
+    @test contains(repr("text/html", h.head(vendor_head()...)), "src=\"vendor/htmx.min.js\"")
+    # An extension cannot load without htmx; unknown names fail loudly.
+    @test_throws ArgumentError vendor_head(; packages=(:sse,))
+    @test_throws ArgumentError vendor_head(; packages=(:htmx, :jquery))
+
+    # The `htmx()` shell takes the same relative prefix.
+    page = repr("text/html", htmx(h.main(); assets="assets/vendor",
+                                  pico_version=HTMXObjects._PICO_VERSION))
+    @test contains(page, "src=\"assets/vendor/htmx.min.js\"")
+    @test contains(page, "href=\"assets/vendor/pico.min.css\"")
+    @test !contains(page, "https://")
+end
+
 @testitem "vendor artifacts stay lazy: install selects none, vendor load selects six" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     using Artifacts, TOML
     toml = joinpath(pkgdir(HTMXObjects), "Artifacts.toml")
