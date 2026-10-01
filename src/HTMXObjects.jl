@@ -13152,9 +13152,16 @@ moves the marked node's live children out of the wrapper — no second parse,
 cleanup, or swap cycle (scripts ran once, at insert) — then runs htmx's
 own settle step on the moved nodes explicitly (`process` + autofocus +
 `htmx:load`), since htmx initializes swapped content after `afterSwap`
-through tasks that would otherwise only see the detached husk. The moved
-bare content carries no marker, so the scan cannot re-trigger, and a nested
-marked terminal unwraps in the same pass. Runs in either listener order
+through tasks that would otherwise only see the detached husk. The mirror
+also dispatches a faithful `htmx:afterSettle` per moved node (same swap
+detail htmx would have carried): htmx's own settle event fires on the
+inserted top-level nodes — the wrapper just removed — so without the
+mirror it lands on the detached husk and never reaches document-level
+listeners, and every body-level settle consumer (compose rebind,
+show-when, live-region resync, …) silently misses `:auto` resolutions
+(snag compose-afterswa-9ae50ac9). The moved bare content carries no
+marker, so the scan cannot re-trigger, and a nested marked terminal unwraps
+in the same pass. Runs in either listener order
 against Treebars' `terminalizePoller` (the wrapper may already be renamed
 to `.treebar-terminal` when this fires).
 
@@ -13170,7 +13177,7 @@ auto_terminal_script() = h.script(Raw(raw"""
                 el.classList.contains('treebar-terminal-content') &&
                 el.hasAttribute('data-htmxo-auto-terminal'));
   }
-  function unwrapOne(el) {
+  function unwrapOne(el, detail) {
     if (!marked(el)) return;
     // Live-refresh owns reporter-diverted terminals (its beforeSwap already
     // took over the swap, so afterSwap never fires for them — this is belt
@@ -13212,18 +13219,38 @@ auto_terminal_script() = h.script(Raw(raw"""
         if (af && af.focus) af.focus();
         if (window.htmx.trigger) window.htmx.trigger(m, 'htmx:load');
       }
+      // htmx's own `htmx:afterSettle` fires on the inserted top-level nodes —
+      // the wrapper just removed — so it lands on the detached husk and never
+      // reaches document-level listeners (afterSwap yes / afterSettle no / no
+      // error). Mirror it on the moved nodes so every body-level settle
+      // consumer (compose rebind, show-when, live-region resync, …) sees
+      // :auto resolutions exactly like ordinary swaps (snag
+      // compose-afterswa-9ae50ac9). The detail is a shallow copy: the trigger
+      // writes `detail.elt` per dispatch, and the original object is shared
+      // with later afterSwap listeners.
+      if (window.htmx.trigger && detail) {
+        var dd = {};
+        for (var k in detail) { dd[k] = detail[k]; }
+        for (var j = 0; j < moved.length; j++) {
+          var n = moved[j];
+          if (!n || n.nodeType !== 1) continue;
+          window.htmx.trigger(n, 'htmx:afterSettle', dd);
+        }
+      }
     }
   }
   document.addEventListener('htmx:afterSwap', function(evt) {
     var d = (evt && evt.detail) || {};
-    unwrapOne(d.elt);
-    if (evt.target && evt.target !== d.elt) unwrapOne(evt.target);
+    unwrapOne(d.elt, d);
+    if (evt.target && evt.target !== d.elt) unwrapOne(evt.target, d);
     // A marked node swapped in as part of a larger fragment (never the
     // direct swap node): catch it by scan. Naturally idempotent — an
     // unwrapped node is gone, and bare content carries no marker.
     var root = d.target;
     if (root && root.querySelectorAll) {
-      root.querySelectorAll('[data-htmxo-auto-terminal]').forEach(unwrapOne);
+      root.querySelectorAll('[data-htmxo-auto-terminal]').forEach(function(n) {
+        unwrapOne(n, d);
+      });
     }
   });
 })();

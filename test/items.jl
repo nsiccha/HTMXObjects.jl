@@ -28,6 +28,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
     AutoUnwrapApp, reset_auto_unwrap!, auto_unwrap_pings,
+    ComposeSettleApp,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -854,6 +855,64 @@ end
     @get terminal() = h.div(auto_unwrap_terminal(); class="treebar-poller")
     @get ping() = (auto_unwrap_pings[] += 1;
         h.span("pong"; id="unwrap-pinged"))
+end
+
+# `:auto` resolution settle fixtures (snag compose-afterswa-9ae50ac9): the
+# same `htmx.ajax` wrapper>marked-terminal swap as the unwrap fixtures, but
+# the payload carries a `compose_box` and the driver counts body-level
+# `afterSwap`/`afterSettle`. The unwrap used to detach the settle nodes, so
+# the settle event never reached the document and the box stayed unbound
+# (afterSwap yes / afterSettle no / no error).
+function compose_settle_driver()
+    h.script(Raw("""
+    (function() {
+      window.addEventListener('load', function() {
+        var sawSwap = 0, sawSettle = 0;
+        document.body.addEventListener('htmx:afterSwap', function() { sawSwap++; });
+        document.body.addEventListener('htmx:afterSettle', function() { sawSettle++; });
+        var t = document.getElementById('settle-target');
+        htmx.ajax('GET', 'terminal', {target: t, swap: 'innerHTML'});
+        // Unbounded phases (the suite norm): under --virtual-time-budget
+        // the virtual clock fast-forwards through real-time waits (route
+        // JIT on first hit), so a try bound would expire while the ajax
+        // is still in flight. A stuck phase leaves its flags absent and
+        // the asserts fail on the dumped DOM.
+        var iv = setInterval(function() {
+          var box = document.querySelector('#settle-target .htmxo-compose-textarea');
+          if (!box) return;
+          var bare = !document.querySelector(
+            '#settle-target .treebar-poller, #settle-target .treebar-terminal-content');
+          if (box.dataset.htmxoTaBound === '1' && bare) {
+            document.body.dataset.settleSwaps = String(sawSwap);
+            document.body.dataset.settleSettles = String(sawSettle);
+            document.body.dataset.settleBound = '1';
+            document.body.dataset.settleDone = '1';
+            clearInterval(iv);
+          }
+        }, 50);
+      });
+    })();
+    """))
+end
+
+function compose_settle_terminal()
+    h.div(
+        h.p("settled"; id="settle-done"),
+        h.form(
+            compose_box("message"; draft_key="settle-draft",
+                placeholder="Message…");
+            class="htmxo-compose-form");
+        class="treebar-poller-inner treebar-terminal-content",
+        data_htmxo_auto_terminal="")
+end
+
+@htmx struct ComposeSettleApp
+    __page__(content) = htmx(
+        h.main(content; id="settle-shell"),
+        compose_settle_driver(); hyperscript_version=nothing, feedback=false,
+        overlay=false)
+    @get index() = h.div(; id="settle-target")
+    @get terminal() = h.div(compose_settle_terminal(); class="treebar-poller")
 end
 
 # Live-refresh event-driven fixtures (snag event-driven-mor-fbd7ee77): a
@@ -3456,6 +3515,58 @@ end
             # The live-reporter guard held: reporter-diverted terminals
             # stay wrapped.
             @test contains(dom, "data-unwrap-reporter=\"1\"")
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "unwrap resolution settles compose boxes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        _clear_operation_polls!()
+        route!(ComposeSettleApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # String-host `serve!`: the `Sockets.localhost` spelling has no
+        # method under HTTP 2.x.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            handler(req)
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
+                read(pipeline(cmd; stderr=devnull), String)
+            end
+            # Driver control: the resolution swap ran, the box bound, and the
+            # wrapper unwrapped to the bare fragment.
+            @test contains(dom, "data-settle-done=\"1\"")
+            @test contains(dom, "data-settle-bound=\"1\"")
+            @test contains(dom, "id=\"settle-done\"")
+            # The unwrap mirrors htmx's settle event onto the moved nodes:
+            # body-level listeners saw the resolution settle (pre-fix the
+            # settle count was zero — afterSwap yes / afterSettle no).
+            m = match(r"data-settle-settles=\"(\d+)\"", dom)
+            @test !isnothing(m) && parse(Int, only(m.captures)) >= 1
+            s = match(r"data-settle-swaps=\"(\d+)\"", dom)
+            @test !isnothing(s) && parse(Int, only(s.captures)) >= 1
         finally
             close(server)
             _clear_operation_polls!()
@@ -9108,6 +9219,25 @@ end
     @test contains(script, "htmx:load")
     @test !contains(script, "el.innerHTML")
     @test !contains(script, "htmx.swap(p, content")
+end
+
+# The unwrap detaches htmx's settle nodes (the poller wrapper) inside
+# `afterSwap`, so htmx's own `afterSettle` lands on the detached husk and
+# never reaches document-level listeners — afterSwap yes / afterSettle no /
+# no error — and every body-level settle consumer silently misses `:auto`
+# resolutions (snag compose-afterswa-9ae50ac9). The script mirrors the settle
+# event on the moved nodes with the swap's own detail.
+@testitem "auto terminal unwrap mirrors afterSettle onto moved nodes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    script = repr("text/html", HTMXObjects.auto_terminal_script())
+    @test contains(script, "function unwrapOne(el, detail)")
+    @test contains(script, "window.htmx.trigger(n, 'htmx:afterSettle', dd)")
+    # The trigger writes `detail.elt` per dispatch; the original object is
+    # shared with later afterSwap listeners, so the mirror copies it.
+    @test contains(script, "for (var k in detail) { dd[k] = detail[k]; }")
+    # The mirror rides the unwrap path only — ordinary swaps still settle
+    # through htmx itself, so no swap settles twice.
+    @test contains(script, "unwrapOne(d.elt, d)")
+    @test contains(script, "unwrapOne(n, d)")
 end
 
 @testitem "automatic polling renders a documented operation label once" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
