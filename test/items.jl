@@ -9240,6 +9240,21 @@ end
     @test contains(script, "unwrapOne(n, d)")
 end
 
+# Compose boxes arriving with a swap that never settles stayed dead: the
+# rebind listened on `afterSettle` only (snag compose-afterswa-9ae50ac9).
+# The script rebinds on swap too; the rebind is idempotent per element via
+# dataset flags, so the settle pass is a no-op for already-bound boxes.
+@testitem "compose boxes rebind on afterSwap as well as afterSettle" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    script = repr("text/html", HTMXObjects.compose_box_script())
+    @test contains(script, "addEventListener('htmx:afterSwap'")
+    @test contains(script, "addEventListener('htmx:afterSettle'")
+    @test contains(script, "window.htmxoComposeRebind")
+    @test contains(script, "htmxoTaBound")
+    box = repr("text/html", HTMXObjects.compose_box("message"; draft_key="k"))
+    @test contains(box, "htmxo-compose-textarea")
+    @test contains(box, "data-draft-key=\"k\"")
+end
+
 @testitem "automatic polling renders a documented operation label once" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _clear_operation_polls!, _run_operation, Verb
 

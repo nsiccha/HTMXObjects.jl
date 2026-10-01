@@ -14432,10 +14432,14 @@ JS driving [`compose_box`](@ref): auto-grow (no-op when the browser supports
 Shift+Enter-newline, localStorage draft persistence for `.htmxo-compose-draft`
 elements (keyed by `data-draft-key`), and a submit guard on
 `.htmxo-compose-form` forms (clear drafts + reset on 2xx, toast on
-failure / network error). Re-binds on `htmx:afterSettle`; idempotent per
-element. Exposes `window.htmxoToast(text, status)` and
-`window.htmxoComposeRebind(root)` for reuse. Body-listener attachment is
-deferred to `DOMContentLoaded` so the script is safe to inject in `<head>`.
+failure / network error). Re-binds on `htmx:afterSwap` and
+`htmx:afterSettle`; idempotent per element. The swap pass covers swaps
+that never settle (one whose nodes an `afterSwap` listener detaches —
+the `:auto` terminal unwrap — fires afterSwap but never afterSettle;
+snag compose-afterswa-9ae50ac9). Exposes `window.htmxoToast(text,
+status)` and `window.htmxoComposeRebind(root)` for reuse. Body-listener
+attachment is deferred to `DOMContentLoaded` so the script is safe to
+inject in `<head>`.
 """
 compose_box_script() = h.script(Raw(raw"""
 (function() {
@@ -14501,6 +14505,16 @@ compose_box_script() = h.script(Raw(raw"""
     function init() {
         restoreDrafts(document);
         bindTextareas(document);
+        // Bind on swap as well as settle: a swap whose nodes an `afterSwap`
+        // listener detaches (the `:auto` terminal unwrap) fires afterSwap but
+        // never afterSettle, and boxes arriving with it would stay dead
+        // (snag compose-afterswa-9ae50ac9). The rebind is idempotent per
+        // element (dataset flags), so the settle pass is a no-op for boxes
+        // the swap pass already bound.
+        document.body.addEventListener('htmx:afterSwap', function(evt) {
+            restoreDrafts(evt.detail && evt.detail.elt);
+            bindTextareas(evt.detail && evt.detail.elt);
+        });
         document.body.addEventListener('htmx:afterSettle', function(evt) {
             restoreDrafts(evt.detail && evt.detail.elt);
             bindTextareas(evt.detail && evt.detail.elt);
