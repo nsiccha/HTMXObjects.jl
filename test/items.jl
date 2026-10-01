@@ -53,6 +53,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     EditorMountRoot, RawBodyApp,
     OpenAPIWidgets, OpenAPIRoot,
     DispatchProbeApp, DPARENT_SEEN, DAMBIENT_SEEN, DNESTED_SEEN,
+    StaticExportApp, reset_static_gate!, release_static_gate!,
     LiveThreadApp, LIVE_THREAD, reset_live_thread!
 
 @htmx struct TestApp
@@ -1514,6 +1515,36 @@ const DNESTED_SEEN = Ref{Any}(:unset)
             h.div("inner:$rv")
         end
     end
+end
+
+# Request-scoped static export (`dispatch(...; static=)`): query-identified
+# figures whose `hx-get` targets another query-identified figure, non-GET
+# controls, page chrome with a query link, a gated slow route (forced blocking
+# vs the app's default `:auto` poller), and the two finished-response shapes a
+# static dispatch refuses. Distinct `sx*` names keep the paths off every other
+# fixture's on the shared test router.
+const static_gate = Ref{Base.Event}(Base.Event())
+reset_static_gate!() = (static_gate[] = Base.Event(); nothing)
+release_static_gate!() = notify(static_gate[])
+
+@htmx struct StaticExportApp
+    __page__(content) = htmx(
+        h.main(h.nav(h.a("home"; href=query_url(__self__/"sxfig"; doc="d", name="home"))),
+               content);
+        htmx_version=nothing, hyperscript_version=nothing, overlay=false)
+    @get sxfig(; doc::String="d", name::String="a") = h.div(
+        h.p("figure:$doc:$name"),
+        h.div(; hx_get=query_url(__self__/"sxfig"; doc, name="$name-inner"),
+              hx_trigger="load"),
+        h.button("Rerun"; hx_post=__self__/"sxrun"),
+        h.form(h.input(; name="x"); hx_put=__self__/"sxrun"),
+        h.a("detail"; href=query_url(__self__/"sxfig"; doc, name="detail"));
+        id="sx-$name")
+    "Static export slow embed."
+    @get sxslow(key::String) = (wait(static_gate[]); h.p("slow:$key"))
+    @get sxraw() = HTTP.Response(200, "raw")
+    @get sxmime() = MIMEResponse("application/json", "{}")
+    @post sxrun() = h.p("ran")
 end
 
 # `live_thread` fixture: messages 1..n keyed by index, the newest `final_lag`
@@ -9801,6 +9832,176 @@ end
             @test DAMBIENT_SEEN[] === outer
             @test DNESTED_SEEN[] === nothing
         end
+    end
+end
+
+@testitem "static_transform with a StaticExport spec" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    frag = h.div(
+        h.div(; hx_get="/fig?doc=a&name=b", hx_trigger="load"),
+        h.div(; hx_get="/fig?doc=a&name=unmapped"),
+        h.a("plain"; href="/about"),
+        h.img(; src="/asset?id=1"),
+        h.button("Run"; hx_post="/run"),
+        h.form(h.input(; name="q"); hx_delete="/item/1"),
+        h.p("keep"))
+    urlmap = url -> url == "/fig?doc=a&name=b" ? "embeds/fig-b.html" :
+                    url == "/asset?id=1" ? "assets/1.png" : nothing
+
+    # `:disable`: mapped targets verbatim (relative ones too), everything
+    # unmapped exactly as recording treats it.
+    html = repr("text/html", static_transform(frag, StaticExport(; url_map=urlmap)))
+    @test contains(html, "hx-get=\"embeds/fig-b.html\"")
+    @test !contains(html, "name=unmapped")
+    @test contains(html, "src=\"assets/1.png\"")
+    @test contains(html, "href=\"/about\"")
+    @test !contains(html, "hx-post") && !contains(html, "hx-delete")
+    @test count("data-static-disabled", html) == 3   # unmapped query, button, form
+
+    # `:remove`: no non-GET attribute and no greyed element survives; mapped
+    # and plain content stays.
+    removed = repr("text/html",
+        static_transform(frag, StaticExport(; url_map=urlmap, controls=:remove)))
+    for attr in ("hx-post", "hx-put", "hx-patch", "hx-delete", "disabled")
+        @test !contains(removed, attr)
+    end
+    @test contains(removed, "hx-get=\"embeds/fig-b.html\"")
+    @test contains(removed, "keep") && contains(removed, "assets/1.png")
+    @test !contains(removed, "Run") && !contains(removed, "name=\"q\"")
+    # A value that is itself a removed control is an empty fragment.
+    gone = to_response(static_transform(h.button("x"; hx_post="/p"),
+                                        StaticExport(; controls=:remove)))
+    @test isempty(String(gone.body))
+
+    # The dimming style is injected only where something is dimmed.
+    page = h.html(h.head(h.title("t")), h.body(h.button("x"; hx_post="/p")))
+    @test contains(repr("text/html", static_transform(page, StaticExport())),
+                   "pointer-events:none")
+    @test !contains(repr("text/html",
+        static_transform(page, StaticExport(; controls=:remove))), "pointer-events")
+
+    # `record_base` keeps the recording prefixing for unmapped rooted addresses.
+    based = repr("text/html", static_transform(h.a("x"; href="/a", hx_get="/b"),
+                                               StaticExport(; record_base="/site")))
+    @test contains(based, "href=\"/site/a\"") && contains(based, "hx-get=\"/site/hx/b\"")
+
+    # The spec form never reads `route!`'s recording registry; the keyword
+    # (recording) form still does.
+    push!(HTMXObjects._static_kwargs_paths, "/sxkwroute")
+    try
+        kw = h.div(; hx_get="/sxkwroute")
+        @test contains(repr("text/html", static_transform(kw, StaticExport())),
+                       "hx-get=\"/sxkwroute\"")
+        @test contains(repr("text/html", static_transform(kw)), "data-static-disabled")
+    finally
+        delete!(HTMXObjects._static_kwargs_paths, "/sxkwroute")
+    end
+
+    # Contract violations fail loudly.
+    @test_throws ArgumentError StaticExport(; controls=:hide)
+    @test_throws ArgumentError static_transform(h.div(; hx_get="/x"),
+                                                StaticExport(; url_map=_ -> 42))
+end
+
+@testitem "dispatch static= returns a mapped static response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    route!(StaticExportApp())
+    hx = ["HX-Request" => "true"]
+    embed(url) = startswith(url, "/sxfig?") ?
+        "embeds/" * HTTP.URIs.queryparams(HTTP.URI(url))["name"] * ".html" : nothing
+    spec = StaticExport(; url_map=embed, controls=:remove)
+
+    # A query-identified fragment whose `hx-get` targets another
+    # query-identified fragment, and that target exported in turn: both come
+    # back rewritten to their mapped, relative targets.
+    outer = dispatch(:GET, "/sxfig?doc=d&name=a"; headers=hx, static=spec)
+    @test outer.status == 200
+    ob = String(outer.body)
+    @test contains(ob, "figure:d:a")
+    @test contains(ob, "hx-get=\"embeds/a-inner.html\"")
+    @test contains(ob, "href=\"embeds/detail.html\"")
+    inner = dispatch(:GET, "/sxfig?doc=d&name=a-inner"; headers=hx, static=spec)
+    @test inner.status == 200
+    ib = String(inner.body)
+    @test contains(ib, "figure:d:a-inner")
+    @test contains(ib, "hx-get=\"embeds/a-inner-inner.html\"")
+    for b in (ob, ib), attr in ("hx-post", "hx-put", "hx-patch", "hx-delete", "disabled")
+        @test !contains(b, attr)
+    end
+    @test !contains(ob, "<html")
+
+    # Default controls grey out instead; a full-page export rewrites the
+    # `__page__` chrome too and carries the dimming style.
+    page = dispatch(:GET, "/sxfig?doc=d&name=p"; static=StaticExport(; url_map=embed))
+    @test page.status == 200
+    pb = String(page.body)
+    @test startswith(pb, "<!DOCTYPE html>")
+    @test contains(pb, "href=\"embeds/home.html\"")
+    @test contains(pb, "data-static-disabled")
+    @test contains(pb, "pointer-events:none")
+
+    # Markdown stays markdown.
+    md = dispatch(:GET, "/sxfig?doc=d&name=m"; headers=["Accept" => "text/markdown"],
+                  static=spec)
+    @test md.status == 200 && contains(String(md.body), "figure:d:m")
+
+    # The same request without `static=` is untouched.
+    live = String(dispatch(:GET, "/sxfig?doc=d&name=a"; headers=hx).body)
+    @test contains(live, "hx-post=\"/sxrun\"")
+    @test contains(live, "hx-get=\"/sxfig?name=a-inner")
+    @test !contains(live, "embeds/")
+
+    # A finished response has no value to transform: refused at the call.
+    @test_throws StaticExportRefused dispatch(:GET, "/sxraw"; static=spec)
+    @test_throws StaticExportRefused dispatch(:GET, "/sxmime"; static=spec)
+    @test String(dispatch(:GET, "/sxraw").body) == "raw"
+    @test_throws ArgumentError dispatch(:GET, "/sxfig"; static=:yes)
+end
+
+@testitem "static dispatch is request-scoped under concurrent requests" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    import Treebars
+    import HTMXObjects: _operation_policies, _registered_types, _static_kwargs_paths,
+        _clear_operation_polls!
+    route!(StaticExportApp())
+    reset_static_gate!()
+    hx = ["HX-Request" => "true"]
+    policy_before = _operation_policies[StaticExportApp]
+    registered_before = _registered_types[StaticExportApp]
+    kwargs_before = copy(_static_kwargs_paths)
+    try
+        Treebars.with_progress(:state; description="static-export-job") do parent
+            # The static export blocks inside its route body on the gate...
+            exported = Ref{Any}(nothing)
+            t = @async exported[] = dispatch(:GET, "/sxslow/s1"; headers=hx,
+                                             parent=parent,
+                                             static=StaticExport(; controls=:remove))
+            sleep(0.5)
+            @test !istaskdone(t)
+
+            # ...while ordinary requests keep the app's `:auto` transport and
+            # their live markup.
+            ordinary = String(dispatch(:GET, "/sxslow/o1"; headers=hx).body)
+            @test contains(ordinary, "treebar-poller")
+            @test !contains(ordinary, "slow:o1")
+            live = String(dispatch(:GET, "/sxfig?doc=d&name=c"; headers=hx).body)
+            @test contains(live, "hx-post=\"/sxrun\"")
+            @test !contains(live, "disabled")
+            @test !istaskdone(t)
+
+            release_static_gate!()
+            wait(t)
+            body = String(exported[].body)
+            @test exported[].status == 200
+            @test contains(body, "slow:s1")
+            @test !contains(body, "treebar-poller")
+            # `parent=` nests the forced-blocking execution under the caller.
+            @test contains(Treebars.render_text(parent), "Static export slow embed.")
+        end
+        @test _operation_policies[StaticExportApp] == policy_before
+        @test _operation_policies[StaticExportApp].mode === :auto
+        @test _registered_types[StaticExportApp] == registered_before
+        @test _static_kwargs_paths == kwargs_before
+    finally
+        release_static_gate!()
+        _clear_operation_polls!()
     end
 end
 
