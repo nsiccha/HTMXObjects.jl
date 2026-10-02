@@ -10,6 +10,7 @@ end
 # each item. Test bodies remain independent while avoiding repeated macro work.
 @testmodule HTMXOTestFixtures begin
 using HTMXObjects
+import HTTP
 
 export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     WarmupPrecompileApp, WarmupLiveApp, _WARMUP_PRECOMPILE_CALLS, TypedApp,
@@ -28,7 +29,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
     AutoUnwrapApp, reset_auto_unwrap!, auto_unwrap_pings,
-    ComposeSettleApp,
+    ComposeSettleApp, warm_browser_page,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
     ParamlessHostApp, ParamlessHostChild,
     BareExternalApp, BareExternalChild, InlineContextApp,
@@ -770,13 +771,21 @@ const auto_unwrap_pings = Ref(0)
 
 reset_auto_unwrap!() = (auto_unwrap_pings[] = 0; nothing)
 
+function warm_browser_page(url)
+    # First-hit route and page-rendering JIT must finish before Chrome starts
+    # its virtual clock. The warm request uses a browser's Accept header so
+    # it also exercises direct-page async bootstrap. Drivers must still wait
+    # for their target: :auto can defer even after this warm-up.
+    response = HTTP.get(url; headers=["Accept" => "text/html"], retry=false)
+    response.status == 200 || error("Browser warm-up failed: HTTP $(response.status)")
+    nothing
+end
+
 function auto_unwrap_driver()
     h.script(Raw("""
     (function() {
       window.addEventListener('load', function() {
-        var t = document.getElementById('unwrap-target');
-        htmx.ajax('GET', 'terminal', {target: t, swap: 'innerHTML'});
-        var phase = 1;
+        var phase = 0;
         // Unbounded phases (the suite norm): under --virtual-time-budget
         // the virtual clock fast-forwards through real-time waits (route
         // JIT on first hit), so a try bound would expire while the ajax
@@ -785,6 +794,14 @@ function auto_unwrap_driver()
         var iv = setInterval(function() {
           var tgt = document.getElementById('unwrap-target');
           if (!tgt) return;
+          // A cold :auto page can still be attaching its index fragment at
+          // window.load. A null ajax target defaults to body and destroys
+          // the shell, so wait for the actual target before starting.
+          if (phase === 0) {
+            htmx.ajax('GET', 'terminal', {target: tgt, swap: 'innerHTML'});
+            phase = 1;
+            return;
+          }
           function strays() {
             var bad = [];
             tgt.querySelectorAll('.treebar-poller,.treebar-terminal,.treebar-terminal-content,[data-htmxo-auto-terminal]').forEach(function(n) {
@@ -871,18 +888,24 @@ function compose_settle_driver()
         var sawSwap = 0, sawSettle = 0;
         document.body.addEventListener('htmx:afterSwap', function() { sawSwap++; });
         document.body.addEventListener('htmx:afterSettle', function() { sawSettle++; });
-        var t = document.getElementById('settle-target');
-        htmx.ajax('GET', 'terminal', {target: t, swap: 'innerHTML'});
+        var started = false;
         // Unbounded phases (the suite norm): under --virtual-time-budget
         // the virtual clock fast-forwards through real-time waits (route
         // JIT on first hit), so a try bound would expire while the ajax
         // is still in flight. A stuck phase leaves its flags absent and
         // the asserts fail on the dumped DOM.
         var iv = setInterval(function() {
-          var box = document.querySelector('#settle-target .htmxo-compose-textarea');
+          var target = document.getElementById('settle-target');
+          if (!target) return;
+          if (!started) {
+            htmx.ajax('GET', 'terminal', {target: target, swap: 'innerHTML'});
+            started = true;
+            return;
+          }
+          var box = target.querySelector('.htmxo-compose-textarea');
           if (!box) return;
-          var bare = !document.querySelector(
-            '#settle-target .treebar-poller, #settle-target .treebar-terminal-content');
+          var bare = !target.querySelector(
+            '.treebar-poller, .treebar-terminal-content');
           if (box.dataset.htmxoTaBound === '1' && bare) {
             document.body.dataset.settleSwaps = String(sawSwap);
             document.body.dataset.settleSettles = String(sawSettle);
@@ -3524,6 +3547,7 @@ end
         end
 
         try
+            warm_browser_page("http://127.0.0.1:$port/")
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
@@ -3532,6 +3556,8 @@ end
             # Driver control: the full flow (swap, unwrap, ping click,
             # second swap) ran to completion.
             @test contains(dom, "data-unwrap-done=\"1\"")
+            @test contains(dom, "id=\"unwrap-shell\"")
+            @test contains(dom, "id=\"unwrap-target\"")
             # Bare end state: outer and nested wrappers gone, exactly the
             # route fragment left (the reporter-diverted terminal excluded).
             @test contains(dom, "data-unwrap-bare=\"1\"")
@@ -3581,6 +3607,7 @@ end
         end
 
         try
+            warm_browser_page("http://127.0.0.1:$port/")
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
@@ -3589,6 +3616,8 @@ end
             # Driver control: the resolution swap ran, the box bound, and the
             # wrapper unwrapped to the bare fragment.
             @test contains(dom, "data-settle-done=\"1\"")
+            @test contains(dom, "id=\"settle-shell\"")
+            @test contains(dom, "id=\"settle-target\"")
             @test contains(dom, "data-settle-bound=\"1\"")
             @test contains(dom, "id=\"settle-done\"")
             # The unwrap mirrors htmx's settle event onto the moved nodes:
