@@ -12544,7 +12544,8 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     route = _operation_route(LeafT, name, _verb_symbol(verb_inst))
     route = _semantic_runtime_route(target.leaf, route)
     extracted = _operation_refresh_values(req, route, base, n_params)
-    request_path = String(HTTP.URI(req.target).path)
+    # The operation context retains the external path through stripping proxies.
+    request_path = target.context.route
     target_id = _operation_form_setting(req, :__htmxo_target_id)
     swap = _operation_form_setting(req, :__htmxo_swap, "innerHTML")
     submit = _operation_form_setting(req, :__htmxo_submit, "Run")
@@ -12847,6 +12848,14 @@ function _semantic_operation_slug(route)
     lowercase(string(route.verb)) * "-" * lowercase(path)
 end
 
+function _semantic_operation_target_id(root_prefix, index, route)
+    prefix = _normalize_semantic_prefix(root_prefix)
+    # The descriptor's paths are relative to the selected graph. Encode its
+    # mount losslessly: a lowercase/path slug would collide for distinct keys.
+    mount = isempty(prefix) ? "" : "mount-" * bytes2hex(codeunits(prefix)) * "-"
+    "htmxo-operation-$(index)-$(mount)$(_semantic_operation_slug(route))-result"
+end
+
 _semantic_app_setting(setting::Function, entry) = setting(entry)
 _semantic_app_setting(setting, _entry) = setting
 
@@ -12954,6 +12963,9 @@ operation surface. Routes are discovered in declaration order from
 [`semantic_descriptor`](@ref); each ordinary HTTP operation gets an
 [`operation_form`](@ref) and a stable result target, so adding another route to
 the graph requires no parallel form or route registry.
+Result targets include the normalized mount prefix, so separately selected
+indexed children can coexist on one page. Re-rendering the same mounted graph
+retains its targets, including through dependent form refresh and polling.
 
 Effective fixed-field and declared-domain request `kind=:context` inputs are
 resolved from their mounted `source=(; type, property)`, deduplicated across
@@ -13011,7 +13023,7 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
 
         mounted = _semantic_route_mount(mounts, route)
         local_route = _operation_route(typeof(mounted), route.name, route.verb)
-        target_id = "htmxo-operation-$(index)-$(_semantic_operation_slug(route))-result"
+        target_id = _semantic_operation_target_id(root_prefix, index, route)
         base_entry = (;
             object=mounted,
             route=local_route,
