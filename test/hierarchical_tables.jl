@@ -52,6 +52,12 @@ end
             initially_open=x -> startswith(x.key, "root-"),
             detail_url=x -> isempty(x.children) ? "/detail/$(x.key)" : nothing,
             id="tree")
+        plain = master_detail_table(["Name", "Score"], roots;
+            key=x -> "plain-$(x.key)", master=x -> (h.td(x.name), h.td(x.score)),
+            children=x -> x.children, searchable=true,
+            branches_collapsible=false, detail_toggle=:label,
+            detail_url=x -> isempty(x.children) ? "/detail/plain-$(x.key)" : nothing,
+            id="plain")
         flat = master_detail_table(["Name"], ["Z", "A"];
             key=x -> "flat-$x", master=x -> (h.td(x),), detail=x -> h.p(x), id="flat")
         driver = h.script(Raw(raw"""
@@ -108,12 +114,35 @@ end
             flat.closest('table').tHead.rows[0].cells[0].click();
             check('flat-pair-sort', Array.from(flat.rows).map(r=>r.id).join(',') === 'row-flat-A,detail-flat-A,row-flat-Z,detail-flat-Z');
             check('sort-state', htmxoSortState(tree).sort_col === 2 && htmxoSortState(tree).sort_dir === 'desc');
+            const plain = document.getElementById('plain');
+            const masters = Array.from(plain.rows).filter(r=>r.id.startsWith('row-'));
+            check('plain-all-branches-expanded', masters.every(r=>!r.hidden));
+            check('plain-no-disclosure', !plain.querySelector('[data-htmxo-tree-toggle]'));
+            check('plain-no-group-details', !document.getElementById('detail-plain-root-z'));
+            const label = row('plain-leaf-a').querySelector('[data-htmxo-detail-toggle]');
+            check('plain-native-label', label.tagName==='BUTTON' && label.textContent==='A leaf' && label.getAttribute('aria-expanded')==='false');
+            label.click();
+            for (let n=0; n<100 && !document.getElementById('loaded-plain-leaf-a'); n++)
+                await new Promise(resolve=>setTimeout(resolve,20));
+            const loaded = document.getElementById('loaded-plain-leaf-a');
+            check('plain-label-loads', !!loaded && label.getAttribute('aria-expanded')==='true');
+            label.click();
+            check('plain-label-collapses', document.getElementById('detail-plain-leaf-a').hidden && label.getAttribute('aria-expanded')==='false');
+            label.click();
+            check('plain-reopen-keeps-dom', document.getElementById('loaded-plain-leaf-a')===loaded && !document.getElementById('detail-plain-leaf-a').hidden);
+            plain.closest('table').tHead.rows[0].cells[0].querySelector('.htmxo-sort-control').click();
+            check('plain-sort-keeps-companion', row('plain-leaf-a').nextElementSibling.id==='detail-plain-leaf-a' && document.getElementById('loaded-plain-leaf-a')===loaded);
+            const plainInput = plain.closest('.htmxo-searchable-table').querySelector('input');
+            plainInput.value='B leaf'; plainInput.dispatchEvent(new Event('input'));
+            check('plain-search-hides-detail', row('plain-leaf-a').hidden && document.getElementById('detail-plain-leaf-a').hidden && !row('plain-leaf-b').hidden);
+            plainInput.value=''; plainInput.dispatchEvent(new Event('input'));
+            check('plain-clear-restores-all', masters.every(r=>!r.hidden) && !document.getElementById('detail-plain-leaf-a').hidden && document.getElementById('loaded-plain-leaf-a')===loaded);
             const result = document.createElement('pre'); result.id='checks';
             result.textContent = checks.map(([name,ok]) => name + ':' + ok).join('\n');
             document.body.appendChild(result);
         });
         """))
-        page = repr("text/html", htmx(tree, flat, driver;
+        page = repr("text/html", htmx(tree, plain, flat, driver;
             extra_head=(sortable_table_js(), sortable_table_styles()),
             hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
         requests = Dict{String,Int}()
@@ -146,6 +175,8 @@ end
             @test get(requests, "/detail/leaf-b", 0) == 1
             @test get(requests, "/detail/leaf-z", 0) == 0
             @test get(requests, "/detail/leaf-c", 0) == 0
+            @test get(requests, "/detail/plain-leaf-a", 0) == 1
+            @test get(requests, "/detail/plain-leaf-b", 0) == 0
         finally
             close(server)
         end
