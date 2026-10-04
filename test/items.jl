@@ -4974,7 +4974,7 @@ end
     html = repr("text/html", h.div(master_detail_pair("thing", (h.td("thing"),), nothing, 1;
                                                       detail_url="/detail")...))
     @test contains(html, "onclick=\"var show=htmxoMdToggle(this,event,&#39;thing&#39;,1);if(show==null)return;\"")
-    @test contains(html, "hx-on--before-request=\"htmxoMdBefore(this)\"")
+    @test contains(html, "hx-on--before-request=\"htmxoMdBefore(this,event)\"")
     @test contains(html, "hx-on--after-request=\"htmxoMdAfter(this,event)\"")
     @test contains(html, "hx-on-click=\"htmxoMdRetry(this)\"")
     # No handler body is inlined per row any more.

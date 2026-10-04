@@ -11251,6 +11251,9 @@ _md_lazy_trigger(; also_load::Bool=false) =
 # can re-establish the documented `show` local and early-return contract that
 # caller extensions concatenated onto `master_detail_toggle_js` rely on.
 # `slot` is `1` for the conventional `detail-slot-<key>` id, else an id string.
+# Request lifecycle events bubble through loaded slots. Only the initiating
+# slot owns its loading/retry state; requestConfig.elt preserves that identity
+# when htmx forwards afterRequest after swapping a descendant out of the DOM.
 _md_runtime_js() = """
 function htmxoMdToggle(row, event, key, slot) {
     if (event.target.closest('a,button,input,textarea,select,form')) return;
@@ -11277,11 +11280,13 @@ function htmxoMdControl(button, event) {
     var row = button.closest('tr'), key = row.id.slice(4);
     htmxoMdToggle(row, {target: row}, key, document.getElementById('detail-slot-' + key) ? 1 : 0);
 }
-function htmxoMdBefore(s) {
+function htmxoMdBefore(s, event) {
+    if (event.detail.requestConfig.elt !== s) return;
     s.dataset.loading = '1'; delete s.dataset.failed;
     var p = s.querySelector('[data-status]'); if (p) p.textContent = 'Loading…';
 }
 function htmxoMdAfter(s, event) {
+    if (event.detail.requestConfig.elt !== s) return;
     delete s.dataset.loading;
     if (event.detail.successful) { s.dataset.loaded = '1'; delete s.dataset.failed; }
     else {
@@ -11370,7 +11375,7 @@ function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
           hx_target="this", hx_swap="innerHTML",
           # Latch/retry bodies live once per page in `master_detail_js()`;
           # each slot carries only the call.
-          hx_on__before_request="htmxoMdBefore(this)",
+          hx_on__before_request="htmxoMdBefore(this,event)",
           hx_on__after_request="htmxoMdAfter(this,event)",
           # SINGLE underscore: `hx_on_click` → `hx-on-click`, the DOM `click`
           # event. The DOUBLE-underscore spelling used by the two handlers
@@ -11452,7 +11457,9 @@ the user came to see (a question + answer brief, for example).
   while in flight coalesce) with click-to-retry on failure, driven by the
   toggle's `lazy_slot_id` seam — never by `load`/`revealed`/`intersect`
   (see [`master_detail_toggle_js`](@ref)). A collapsed row issues no
-  request; an `initially_open=true` lazy row loads once on render. **Explicit
+  request; an `initially_open=true` lazy row loads once on render. Requests
+  from controls or nested lazy slots inside the loaded detail leave its
+  loading/retry state and status labels intact. **Explicit
   invalidation:** set the slot's `data-loaded='0'` (id `detail-slot-<safe>`)
   to force a reload on the next expand — an open row reloads on next expand,
   a collapsed row stays lazy; there is no refetch-on-re-open by default.
