@@ -212,6 +212,12 @@ a row's search text. Labels wrap without truncation. Without `children`, the
 existing flat master/detail behavior remains available; `searchable=true` also
 works on flat tables.
 
+Lazy detail controls are initialized before the slot's `htmx:afterSwap` event
+reaches page listeners. Generated forms can be submitted as soon as the detail
+appears, including concurrent actions with separate result targets. The normal
+`htmx:afterSettle` event still marks the end of visual settling; applications
+need no fixed pause or manual `htmx.process` call for the inserted controls.
+
 ### `tabset` and `htmx_tabset` — tab navigation
 
 ```julia

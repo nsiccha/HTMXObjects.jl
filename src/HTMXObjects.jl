@@ -11238,12 +11238,12 @@ _md_lazy_trigger(; also_load::Bool=false) =
     also_load ? "$(_md_lazy_event()) consume, load" : "$(_md_lazy_event()) consume"
 
 # The master/detail client runtime: the toggle and the lazy slot's
-# latch/retry handlers, defined ONCE per page. Every row `master_detail_pair`
+# readiness/latch/retry handlers, defined ONCE per page. Every row `master_detail_pair`
 # renders carries only a short call into it (ids as arguments), so a table
 # re-rendered on a timer does not re-ship the same logic per row — the KB
 # For-You panel paid ~1.2 KB of identical inline JS per row per 15 s refresh
 # (snag `cut-the-kb-for-y-a1c73f46`). Each function body is the former inline
-# handler verbatim, with `this` passed in as the first argument.
+# toggle/latch/retry handler, with `this` passed in as the first argument.
 #
 # `htmxoMdToggle(row, event, key, slot)` returns `undefined` exactly where the
 # inline toggle used to `return` early (an interactive-descendant click, a
@@ -11285,6 +11285,16 @@ function htmxoMdBefore(s, event) {
     s.dataset.loading = '1'; delete s.dataset.failed;
     var p = s.querySelector('[data-status]'); if (p) p.textContent = 'Loading…';
 }
+function htmxoMdReady(s, event) {
+    if (event.target !== s || event.detail.target !== s) return;
+    // htmx normally initializes inserted nodes during its delayed settle
+    // phase. Bind the new children before afterSwap bubbles to consumers,
+    // so an immediately clicked form already owns its submit event.
+    // Leave the active requester and htmx's visual settle tasks untouched.
+    Array.from(s.children).forEach(function(child) {
+        htmx.process(child);
+    });
+}
 function htmxoMdAfter(s, event) {
     if (event.detail.requestConfig.elt !== s) return;
     delete s.dataset.loading;
@@ -11299,14 +11309,24 @@ function htmxoMdRetry(s) {
         s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
     }
 }
+if (!window.__htmxoMdReady) {
+    window.__htmxoMdReady = true;
+    // hx-on--after-swap listens to htmx's later kebab-case alias. Capture
+    // the original event before a consumer can click the inserted forms.
+    document.addEventListener('htmx:afterSwap', function(event) {
+        var s = event.target;
+        if (s.classList && s.classList.contains('htmxo-md-detail-slot')) htmxoMdReady(s, event);
+    }, true);
+}
 """
 
 """
     master_detail_js()
 
 Return an `h.script(...)` node defining the master/detail client runtime
-(`htmxoMdToggle`, `htmxoMdBefore`, `htmxoMdAfter`, `htmxoMdRetry`) that every
-row built by [`master_detail_pair`](@ref) / [`master_detail_table`](@ref) and
+(`htmxoMdToggle`, `htmxoMdBefore`, `htmxoMdReady`, `htmxoMdAfter`,
+`htmxoMdRetry`) that every row built by [`master_detail_pair`](@ref) /
+[`master_detail_table`](@ref) and
 every [`master_detail_toggle_js`](@ref) snippet calls into.
 
 Auto-included by [`htmx`](@ref) (so `pico_page` too) and carried by
@@ -11457,7 +11477,10 @@ the user came to see (a question + answer brief, for example).
   while in flight coalesce) with click-to-retry on failure, driven by the
   toggle's `lazy_slot_id` seam — never by `load`/`revealed`/`intersect`
   (see [`master_detail_toggle_js`](@ref)). A collapsed row issues no
-  request; an `initially_open=true` lazy row loads once on render. Requests
+  request; an `initially_open=true` lazy row loads once on render.
+  The inserted controls are initialized before the slot's `htmx:afterSwap`
+  event bubbles to consumers, so immediate form submissions stay in their
+  HTMX result targets without waiting for the visual settle phase. Requests
   from controls or nested lazy slots inside the loaded detail leave its
   loading/retry state and status labels intact. **Explicit
   invalidation:** set the slot's `data-loaded='0'` (id `detail-slot-<safe>`)

@@ -2,11 +2,177 @@ using TestItemRunner
 
 @testmodule LazyDetailRequestFixtures begin
     using HTMXObjects
-    export LazyDetailActions
+    export LazyDetailActions, LazyDetailReadyActions
 
     @htmx struct LazyDetailActions
         @get run() = SemanticCode(:julia, "answer = 42")
         @post reject() = nothing
+    end
+
+    @htmx struct LazyDetailReadyActions
+        @get first() = SemanticCode(:julia, "first = 1")
+        @get second() = SemanticCode(:julia, "second = 2")
+    end
+end
+
+@testitem "lazy detail forms accept immediate swap clicks" setup=[LazyDetailRequestFixtures] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        actions = LazyDetailReadyActions(; __prefix__="/proxy/demo/actions")
+        controls = semantic_app(actions; render_operation=entry -> h.div(entry.form, entry.result))
+        nested = master_detail_table(["Nested"], ["ready-child"];
+            key=identity, master=x -> (h.td(x),),
+            detail_url="/proxy/demo/child", initially_open=true)
+        detail_html = repr("text/html", h.div(controls, nested; id="ready-controls"))
+        table = master_detail_table(["Name"], ["ready"];
+            key=identity, master=x -> (h.td(x),), detail_url="/proxy/demo/detail")
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        requests = Tuple{String,Bool}[]
+        receipt = Channel{String}(1)
+        action_gate = Channel{Nothing}(2)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+          const phase = new URLSearchParams(location.search).get('phase');
+          const slot = document.getElementById('detail-slot-ready');
+          const checks = [];
+          let clicked = false, settled = false, completed = false;
+          const forms = () => Array.from(slot.querySelectorAll('form[hx-get]'));
+          const require = (ok, label) => { if (!ok) throw new Error(label); checks.push(label); };
+          async function finish(status) {
+            if (completed) return;
+            completed = true;
+            await fetch('/complete?status=' + encodeURIComponent(status));
+          }
+          window.addEventListener('error', event => finish(event.message));
+          // This observer runs after each form's own HTMX submit listener.
+          document.body.addEventListener('submit', function(event) {
+            if (!slot.contains(event.target)) return;
+            try { require(event.defaultPrevented, 'HTMX owns submit'); }
+            catch (error) { finish(String(error)); }
+            // Only a failing negative control needs protection from native
+            // navigation, so it can send its diagnostic before unloading.
+            if (!event.defaultPrevented) event.preventDefault();
+          });
+          function clickForms() {
+            try {
+              require(forms().length === 2, 'both forms inserted');
+              require(phase === 'settle' || !settled, 'swap clicks precede settle');
+              require(phase === 'settle' || document.getElementById('ready-controls').classList.contains(htmx.config.addedClass),
+                      'visual settling still pending at swap');
+              clicked = true;
+              forms().forEach(form => form.querySelector('button[type=submit]').click());
+            } catch (error) { finish(String(error)); }
+          }
+          function checkResults() {
+            if (!clicked || !settled || completed) return;
+            const results = forms().map(form => document.querySelector(form.getAttribute('hx-target')));
+            if (results.length !== 2 || results.some(result => !result.textContent.trim())) return;
+            try {
+              require(results[0] !== results[1], 'independent result targets');
+              require(results.some(result => result.textContent.includes('first = 1')) &&
+                      results.some(result => result.textContent.includes('second = 2')), 'both results');
+              require(document.getElementById('ready-controls') && document.getElementById('row-ready'), 'detail and table survive');
+              require(location.pathname === '/proxy/demo/', 'table URL survives');
+              require(!document.getElementById('ready-controls').classList.contains(htmx.config.addedClass),
+                      'visual settling completes');
+              require(slot.dataset.loaded === '1' && !slot.dataset.loading && !slot.dataset.failed, 'loaded latches');
+              const child = document.getElementById('detail-slot-ready-child');
+              if (child.dataset.loaded !== '1') return;
+              require(child.textContent === 'child ready', 'nested load completes');
+              // Collapse/reopen must preserve those exact nodes and avoid a new fetch.
+              const controls = document.getElementById('ready-controls');
+              document.getElementById('row-ready').click();
+              document.getElementById('row-ready').click();
+              require(document.getElementById('ready-controls') === controls, 'loaded DOM reused');
+              finish('passed:' + checks.length);
+            } catch (error) { finish(String(error)); }
+          }
+          document.body.addEventListener('htmx:afterSwap', function(event) {
+            if (event.target === slot && phase === 'swap' && !clicked) clickForms();
+            checkResults();
+          });
+          document.body.addEventListener('htmx:afterSettle', function(event) {
+            if (event.target === slot) {
+              settled = true;
+              if (phase === 'settle' && !clicked) clickForms();
+              // Keep both operations in flight across the ordinary settle
+              // pass, using a server gate instead of a timing-based pause.
+              fetch('/release');
+            }
+            checkResults();
+          });
+          document.getElementById('row-ready').click();
+        }, {once: true});
+        """))
+        page = "<!DOCTYPE html>" * repr("text/html", h.html(
+            h.head(h.meta(charset="UTF-8"), h.script(src="/htmx.js"), master_detail_js()), h.body(table, driver)))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/proxy/demo/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/htmx.js" && return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                put!(action_gate, nothing)
+                put!(action_gate, nothing)
+                return HTTP.Response(204)
+            end
+            push!(requests, (path, HTTP.header(req, "HX-Request", "") == "true"))
+            path == "/proxy/demo/detail" && return HTTP.Response(200, ["Content-Type" => "text/html"], detail_html)
+            path == "/proxy/demo/child" && return HTTP.Response(200, ["Content-Type" => "text/html"], "child ready")
+            for name in ("first", "second")
+                if path == "/proxy/demo/actions/" * name
+                    take!(action_gate)
+                    return HTTP.Response(200, ["Content-Type" => "text/html"],
+                        repr("text/html", SemanticCode(:julia, "$name = $(name == "first" ? 1 : 2)")))
+                end
+            end
+            HTTP.Response(404)
+        end
+        try
+            # The settle-only control proves the fixture and generated targets
+            # work before the immediate-click case tests the readiness boundary.
+            for phase in ("settle", "swap")
+                empty!(requests)
+                mktempdir() do profile
+                    browser_log = joinpath(profile, "browser.log")
+                    url = "http://127.0.0.1:$port/proxy/demo/?phase=$phase"
+                    browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $url`;
+                        stdout=devnull, stderr=browser_log); wait=false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(browser), 30; pollint=0.05) === :ok
+                        @test isready(receipt)
+                        if isready(receipt)
+                            outcome = take!(receipt)
+                            @info "Lazy detail readiness" phase outcome requests
+                            @test startswith(outcome, "/complete?status=passed%3A")
+                        else
+                            @info "Lazy detail readiness timeout" phase requests log=read(browser_log, String)
+                        end
+                    finally
+                        process_exited(browser) || kill(browser)
+                        wait(browser)
+                    end
+                end
+                for path in ("/proxy/demo/detail", "/proxy/demo/child", "/proxy/demo/actions/first", "/proxy/demo/actions/second")
+                    @test count(==((path, true)), requests) == 1
+                end
+                @test all(last, requests)
+            end
+        finally
+            close(action_gate)
+            close(server)
+        end
     end
 end
 
