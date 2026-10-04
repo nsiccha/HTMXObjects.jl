@@ -22,6 +22,93 @@
     @test_throws ArgumentError comparison_view("one" => content, "two" => content; id="x", active=3)
 end
 
+@testitem "comparison generated forms retain shared context" tags=[:unit, :browser, :semantic] begin
+    using HTMXObjects, HTTP, Sockets
+    @htmx struct ComparisonFormFixture
+        @param variant::Symbol = :one
+        @options(variant) = (:one, :two)
+
+        @include sources = begin
+            @get source_alpha() = h.p("alpha:$(variant)")
+            @get source_beta() = h.p("beta:$(variant)")
+        end
+    end
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        app = ComparisonFormFixture(; __cache_base__=mktempdir())
+        entries = Any[]
+        surface = semantic_app(app; render_operation=entry -> begin
+            push!(entries, entry)
+            h.div()
+        end)
+        widget = comparison_view((entry.title => h.div(entry.form, entry.result)
+                                  for entry in entries)...; id="generated")
+        route!(app)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks=[];
+            const check=(name,ok)=>checks.push([name,Boolean(ok)]);
+            const root=document.getElementById('generated');
+            const panels=htmxoComparisonPanels(root);
+            const forms=panels.map(p=>p.querySelector('form'));
+            const results=panels.map(p=>p.querySelector('.htmxo-semantic-operation-result'));
+            const shared=document.querySelector('.htmxo-semantic-context');
+            const choose=value=>{shared.querySelector('input[name="variant"][value="'+value+'"]').checked=true;};
+            const wait=async(index,text)=>{for(let n=0;n<100 && !results[index].textContent.includes(text);n++) await new Promise(r=>setTimeout(r,20));};
+            check('one-shared-context', document.querySelectorAll('.htmxo-semantic-context').length===1);
+            check('generated-context-selector', forms.every(f=>f.getAttribute('hx-include')==='#'+shared.id));
+            check('initially-on-demand', results.every(r=>r.textContent===''));
+            choose('two');
+            root.querySelector('[data-htmxo-compare-open]').click();
+            forms.forEach(f=>f.querySelector('button[type="submit"]').click());
+            await wait(0,'alpha:two'); await wait(1,'beta:two');
+            check('dialog-submits-current-context', results[0].textContent==='alpha:two' && results[1].textContent==='beta:two');
+            check('original-form-and-result', panels.every((p,i)=>p.querySelector('form')===forms[i] && p.querySelector('.htmxo-semantic-operation-result')===results[i]));
+            root.querySelector('dialog header button').click();
+            check('inline-restores-same-result', results[0].closest('[data-htmxo-compare-home]')!==null && results[0].textContent==='alpha:two');
+            choose('one');
+            forms[0].querySelector('button[type="submit"]').click(); await wait(0,'alpha:one');
+            check('later-context-change', results[0].textContent==='alpha:one');
+            check('independent-result', results[1].textContent==='beta:two');
+            const result=document.createElement('pre'); result.id='checks';
+            result.textContent=checks.map(([name,ok])=>name+':'+ok).join('\n'); document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(surface, widget, driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        requests = Dict{String,Int}()
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            if path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            else
+                requests[path] = get(requests, path, 0) + 1
+                dispatch(req.method, req.target; headers=["HX-Request" => "true"])
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; stderr=devnull), String)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+            end
+            @test get(requests, "/sources/source_alpha", 0) == 2
+            @test get(requests, "/sources/source_beta", 0) == 1
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "comparison view browser" tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"

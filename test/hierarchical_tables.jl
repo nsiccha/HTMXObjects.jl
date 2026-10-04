@@ -23,6 +23,7 @@
     @test !contains(html, "style=\"")
     @test contains(html, "type=\"button\"")
     @test contains(html, "type=\"search\"")
+    @test contains(html, "class=\"htmxo-sort-control\"")
     @test contains(html, "No matching rows")
     @test !contains(html, "htmxo-md-load consume, load")
     pure = master_detail_table(["Name"], [group];
@@ -62,7 +63,7 @@ end
             const input = tree.closest('.htmxo-searchable-table').querySelector('input');
             const filter = value => { input.value = value; input.dispatchEvent(new Event('input', {bubbles:true})); };
             const ids = () => Array.from(tree.rows).map(r => r.id).join(',');
-            const sort = col => tree.closest('table').tHead.rows[0].cells[col].click();
+            const sort = col => tree.closest('table').tHead.rows[0].cells[col].querySelector('.htmxo-sort-control').click();
             const toggle = key => row(key).querySelector('[data-htmxo-tree-toggle]').click();
             check('initial-branch', !row('builder-z').hidden && row('leaf-z').hidden);
             check('initial-lazy', !document.querySelector('[data-loaded="1"]'));
@@ -75,6 +76,7 @@ end
             check('lazy-loaded', !!document.getElementById('loaded-leaf-a'));
             const slot = document.getElementById('detail-slot-leaf-a');
             sort(0);
+            check('sort-button-once', tree.closest('table').tHead.rows[0].cells[0].getAttribute('aria-sort') === 'ascending');
             check('preorder-sort', ids() === 'row-root-a,row-leaf-c,detail-leaf-c,row-root-z,row-builder-a,row-leaf-b,detail-leaf-b,row-builder-z,row-leaf-a,detail-leaf-a,row-leaf-z,detail-leaf-z');
             check('paired-after-sort', row('leaf-a').nextElementSibling.id === 'detail-leaf-a');
             check('dom-preserved', document.getElementById('detail-slot-leaf-a') === slot);

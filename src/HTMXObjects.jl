@@ -10712,13 +10712,15 @@ end
 # toggle from the right direction (`sortTable` reads `data-sort-dir`).
 function _sortable_th(label, i, ds)
     onclick = "sortTable($(i-1), this)"
+    control = h.button(label; type="button", class="htmxo-sort-control",
+        onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))")
     if !isnothing(ds) && first(ds) == i
         dir = last(ds)
-        h.th(label, h.span(dir == "asc" ? " ▲" : " ▼"; class="htmxo-sort-caret");
+        h.th(control, h.span(dir == "asc" ? " ▲" : " ▼"; class="htmxo-sort-caret");
             onclick, class="u-pointer", data_sort_dir=dir,
             aria_sort=(dir == "asc" ? "ascending" : "descending"))
     else
-        h.th(label; onclick, class="u-pointer")
+        h.th(control; onclick, class="u-pointer")
     end
 end
 
@@ -10968,6 +10970,14 @@ function sortable_table_styles()
 /* Body cells with a hyperscript handler are clickable too (htmx-attr cells
    already get cursor:pointer from the global rule in htmxo_utility_styles). */
 .htmxo-sortable-table tbody td[_] { cursor: pointer; }
+}
+/* Native sort controls keep header text and focus visible in host themes. */
+.htmxo-sortable-table thead th > .htmxo-sort-control {
+    width: auto; margin: 0; padding: 0; border: none; background: transparent;
+    color: inherit; font: inherit; text-align: inherit; box-shadow: none;
+}
+.htmxo-sortable-table thead th > .htmxo-sort-control:focus-visible {
+    outline: 2px solid var(--htmxo-accent); outline-offset: .15em;
 }
 /* Master/detail paired-row rules — INTENTIONALLY UNLAYERED so they beat
    Pico's unlayered tr/td defaults. The sortable_table_js convention pairs

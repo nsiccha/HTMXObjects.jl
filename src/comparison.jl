@@ -13,6 +13,12 @@ DOM, and allow retry after failure. Opening Compare activates every selected
 pane. Moving between inline and dialog views reuses the same pane DOM.
 `active` and `selected` are 1-based pane indices; `id` must be unique on the page.
 
+URL panes GET the supplied address; they do not add generated operation-form
+shared-context submission. For changing `semantic_app` context, supply node
+bodies containing each generated `entry.form` and `entry.result`, and preserve
+the compiler's shared context controls. Showing a node pane does not submit
+its form or execute its operation.
+
 `htmx` includes [`comparison_js`](@ref) and [`comparison_styles`](@ref) once.
 Hand-built page heads must include both. URLs are ordinary HTMXObjects fragment
 routes and keep the application's normal operation/error policy.

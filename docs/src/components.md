@@ -196,9 +196,9 @@ master_detail_table(["Name", "Status"], roots;
 # Include sortable_table_js() and sortable_table_styles() once in extra_head.
 ```
 
-Column clicks sort siblings and move each whole subtree, keeping open details
+Column buttons sort siblings and move each whole subtree, keeping open details
 next to their master and preserving loaded DOM. Native branch and Details
-buttons support keyboard activation. `initially_open` accepts a Boolean or
+buttons and auto-wired sort headers support keyboard activation. `initially_open` accepts a Boolean or
 predicate and controls both branch expansion and leaf detail expansion. Groups
 without a detail body or URL have no companion or request. Keys must be unique
 after sanitisation throughout the tree and page.
@@ -258,6 +258,13 @@ content as a node (`h.p("text")`); a string body denotes a fragment URL.
 `htmx` includes `comparison_js()` and `comparison_styles()` automatically;
 include both once for a hand-built page head. The application owns each
 fragment route and its operation/result handling.
+
+A URL body GETs the supplied address; it does not submit changing shared
+`semantic_app` controls. For custom placement of generated operations, pass
+nodes containing `entry.form` and `entry.result` from `render_operation`, and
+preserve the compiler's shared context controls with their original IDs. The
+form keeps its generated submission wiring when moved into Compare. Showing
+that node pane does not submit the form; its operation runs when submitted.
 
 ### `nav_sidebar`
 
