@@ -1149,6 +1149,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group` | Form input widgets (label, select, radio, number, checkbox, textarea, autocomplete, …) |
 | `Long`                          | Marker type for long-text fields                          |
 | `tabset`, `tabset_styles`, `htmx_tabset` | Tab navigation widgets                            |
+| `comparison_view`, `comparison_js`, `comparison_styles` | Inline tabs and a selectable comparison dialog with independently loaded and scrolling columns; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
 | `loading_indicator_script`, `request_feedback_*`, `show_when_script` | UX scripts injected into the page |
 
@@ -1159,6 +1160,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `render_table(rows; …)`   | Sortable HTML table with optional CSV download              |
 | `sortable_table_js`, `download_table_js` | Companion scripts for `render_table`         |
 | `master_detail_js` | Shared runtime for `master_detail_table`/`master_detail_pair` rows; auto-included by `htmx`, also carried by `sortable_table_js` |
+| `master_detail_table(headers, roots; children, searchable, …)` | Hierarchical sibling sorting, ancestor-preserving search, keyboard branch/detail controls, and lazy details; see [components](components.md#hierarchical-master-detail-tables) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 
 ## Formatting

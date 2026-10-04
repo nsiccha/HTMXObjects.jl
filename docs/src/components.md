@@ -180,6 +180,38 @@ it spreads cleanly into an htmx `hx-vals`.
 
 ## Layout / widgets
 
+### Hierarchical master/detail tables
+
+Supply roots and a `children` callback to build one searchable tree table:
+
+```julia
+master_detail_table(["Name", "Status"], roots;
+    key = item -> item.id,
+    master = item -> (h.td(item.name), h.td(item.status)),
+    children = item -> item.children,
+    detail_url = item -> isempty(item.children) ? item.detail_url : nothing,
+    initially_open = item -> item.kind == :family,
+    searchable = true,
+    id = "catalog")
+# Include sortable_table_js() and sortable_table_styles() once in extra_head.
+```
+
+Column buttons sort siblings and move each whole subtree, keeping open details
+next to their master and preserving loaded DOM. Native branch and Details
+buttons and auto-wired sort headers support keyboard activation. `initially_open` accepts a Boolean or
+predicate and controls both branch expansion and leaf detail expansion. Groups
+without a detail body or URL have no companion or request. Keys must be unique
+after sanitisation throughout the tree and page.
+
+Search matches a case-insensitive phrase against visible master cells and
+ancestor text. A matching group includes its descendants; a matching leaf
+retains its ancestors. Search temporarily reveals matching paths, then restores
+branch/detail state when cleared. Collapsed details stay lazy, and detail-body
+text is excluded. Use `search_text = item -> item.searchable_metadata` to replace
+a row's search text. Labels wrap without truncation. Without `children`, the
+existing flat master/detail behavior remains available; `searchable=true` also
+works on flat tables.
+
 ### `tabset` and `htmx_tabset` — tab navigation
 
 ```julia
@@ -202,6 +234,37 @@ htmx_tabset(
 ```
 
 Drop `tabset_styles()` once per page to style the active-tab indicator.
+
+### `comparison_view` — tabs and selectable comparison columns {#comparison-view}
+
+```julia
+comparison_view(
+    "Summary" => h.p("Complete summary"),
+    "Source" => "/model/source",
+    "Results" => "/model/results";
+    id="model-views", active=1, selected=(1, 3))
+```
+
+The inline view shows one tab. **Compare** opens a near-fullscreen dialog whose
+checkboxes select any subset of at least two views. Selected columns stay side
+by side and scroll independently. Tabs support ArrowLeft/ArrowRight, Home and
+End; Escape and Close dismiss the dialog and return focus to Compare.
+
+URL bodies load independently when first shown, share the master/detail
+single-flight loader, and allow retry after failure. Moving a view into or out
+of the dialog retains its DOM, loaded content and user input. Supply eager
+content as a node (`h.p("text")`); a string body denotes a fragment URL.
+`active` and `selected` use 1-based indices; `id` must be unique on the page.
+`htmx` includes `comparison_js()` and `comparison_styles()` automatically;
+include both once for a hand-built page head. The application owns each
+fragment route and its operation/result handling.
+
+A URL body GETs the supplied address; it does not submit changing shared
+`semantic_app` controls. For custom placement of generated operations, pass
+nodes containing `entry.form` and `entry.result` from `render_operation`, and
+preserve the compiler's shared context controls with their original IDs. The
+form keeps its generated submission wiring when moved into Compare. Showing
+that node pane does not submit the form; its operation runs when submitted.
 
 ### `nav_sidebar`
 
