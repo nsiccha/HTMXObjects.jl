@@ -25,7 +25,8 @@ end
             key=identity, master=x -> (h.td(x),), detail_url="/outer", initially_open=true)
         outer_nodes = (
             h.div(SemanticStatus(:recorded); id="outer-status"), controls, inner,
-            h.button("Replace"; id="replace-self", hx_get="/replace", hx_target="this", hx_swap="outerHTML"))
+            h.button("Replace"; id="replace-self", hx_get="/replace", hx_target="this", hx_swap="outerHTML",
+                hx_on__before_swap="event.detail.shouldSwap=true"))
         outer_html = join(repr("text/html", node) for node in outer_nodes)
         inner_html = repr("text/html", h.div(
             h.div(SemanticStatus(:recorded); id="inner-status"),
@@ -110,7 +111,9 @@ end
             // though detail.elt and event.target are now the lazy slot itself.
             let forwarded = false;
             slot('outer').addEventListener('htmx:afterRequest', function(event) {
-              if (event.detail.requestConfig.elt.id === 'replace-self') forwarded = event.target === slot('outer');
+              if (event.detail.requestConfig.elt.id === 'replace-self') {
+                forwarded = event.target === slot('outer') && event.detail.failed;
+              }
             });
             document.getElementById('replace-self').click();
             await until(() => document.getElementById('replacement') && forwarded, 'forwarded afterRequest');
@@ -149,7 +152,9 @@ end
             path == "/actions/run" && return HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", SemanticCode(:julia, "answer = 42")))
             path == "/actions/reject" && return HTTP.Response(500, "operation failed")
             path == "/inner-operation" && return HTTP.Response(200, "inner complete")
-            path == "/replace" && return HTTP.Response(200, "<p id=\"replacement\">replaced</p>")
+            # The control explicitly swaps an error response, exercising the
+            # forwarded failure event after its original requester is removed.
+            path == "/replace" && return HTTP.Response(500, "<p id=\"replacement\">failed</p>")
             HTTP.Response(404)
         end
         try
