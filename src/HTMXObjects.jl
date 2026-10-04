@@ -4714,6 +4714,14 @@ _convert_param(val, ::Nothing) = val
 # misses (it only matches ::String, not ::SubString{String}).
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = convert(T, val)
 _convert_param(val::AbstractString, ::Type{Symbol}) = Symbol(val)
+# Enum controls submit the shared option wire spelling, not an integer storage
+# code. Recover the exact instance without requiring an application Base.parse.
+function _convert_param(val::AbstractString, ::Type{T}) where {T<:Base.Enum}
+    for candidate in instances(T)
+        _option_wire_string(candidate) == val && return candidate
+    end
+    throw(ArgumentError("no $(T) instance matching $(repr(val))"))
+end
 # `parse` needs a concrete type — `parse(Integer, "3")` fails inside `tryparse`
 # on `typemax(::Type{Integer})`. An abstract numeric annotation is the natural
 # way to write an index parameter (`@include chains(chain::Integer)`), and it
@@ -4764,6 +4772,10 @@ end
 struct _NoDefault end
 const _NO_DEFAULT = _NoDefault()
 
+_inferred_param_domain(::Any) = nothing
+_inferred_param_domain(::Type{Bool}) = (false, true)
+_inferred_param_domain(::Type{T}) where {T<:Base.Enum} = instances(T)
+
 """
     _lookup_param(src, fallback, name, T) -> value or _NO_DEFAULT
 
@@ -4783,11 +4795,10 @@ function _lookup_param(src, fallback, name, T)
     try
         _convert_param(v, T)
     catch err
-        # HTML checkboxes/radios submit strings. A malformed Bool is a bad
-        # parameter value, not an internal server failure; keep the narrower
-        # status policy for other parse errors intact.
-        T === Bool && err isa ArgumentError &&
-            throw(InvalidDomainValue(Symbol(name), v, (false, true)))
+        # A value outside a type-inferred closed domain is a caller fault.
+        allowed = _inferred_param_domain(T)
+        allowed !== nothing && err isa ArgumentError &&
+            throw(InvalidDomainValue(Symbol(name), v, allowed))
         rethrow()
     end
 end
@@ -4836,8 +4847,9 @@ function _lookup_option_param(options, src, fallback, name, T)
     try
         _convert_option_param(options, v, name, T)
     catch err
-        T === Bool && err isa ArgumentError &&
-            throw(InvalidDomainValue(Symbol(name), v, (false, true)))
+        allowed = _inferred_param_domain(T)
+        allowed !== nothing && err isa ArgumentError &&
+            throw(InvalidDomainValue(Symbol(name), v, allowed))
         rethrow()
     end
 end
