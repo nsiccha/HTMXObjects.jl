@@ -235,6 +235,30 @@ htmx_tabset(
 
 Drop `tabset_styles()` once per page to style the active-tab indicator.
 
+### `comparison_view` — tabs and selectable comparison columns {#comparison-view}
+
+```julia
+comparison_view(
+    "Summary" => h.p("Complete summary"),
+    "Source" => "/model/source",
+    "Results" => "/model/results";
+    id="model-views", active=1, selected=(1, 3))
+```
+
+The inline view shows one tab. **Compare** opens a near-fullscreen dialog whose
+checkboxes select any subset of at least two views. Selected columns stay side
+by side and scroll independently. Tabs support ArrowLeft/ArrowRight, Home and
+End; Escape and Close dismiss the dialog and return focus to Compare.
+
+URL bodies load independently when first shown, share the master/detail
+single-flight loader, and allow retry after failure. Moving a view into or out
+of the dialog retains its DOM, loaded content and user input. Supply eager
+content as a node (`h.p("text")`); a string body denotes a fragment URL.
+`active` and `selected` use 1-based indices; `id` must be unique on the page.
+`htmx` includes `comparison_js()` and `comparison_styles()` automatically;
+include both once for a hand-built page head. The application owns each
+fragment route and its operation/result handling.
+
 ### `nav_sidebar`
 
 A vertical navigation panel — pass a vector of `("Label", "/url")` pairs (or `Pair`-of-`String`-with-children for nested groups).

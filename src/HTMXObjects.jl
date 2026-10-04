@@ -29,6 +29,7 @@ export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, render_caption, with_caption, caption_style
+export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
@@ -2345,9 +2346,10 @@ function htmx(args...;
             (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
             htmxo_utility_styles(),
             tabset_styles(),
+            comparison_styles(),
             editor_styles(),
-            # Master/detail rows carry only a call into this shared runtime.
-            master_detail_js(),
+            # Comparison panes and master/detail rows share the lazy runtime.
+            comparison_js(),
             # Discover-mode live regions keep one reconnecting stream behind
             # this runtime; inert on pages without one.
             live_region_script(),
@@ -15172,6 +15174,8 @@ _tabset_lazy_link_attrs(content::AbstractString, i, active, id, preload) =
         _preload_attrs(preload)...,
     )
 _tabset_lazy_link_attrs(content, i, active, id, preload) = (;)
+
+include("comparison.jl")
 
 """
     tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))", preload=nothing)
