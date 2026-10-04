@@ -10782,17 +10782,7 @@ function sortTable(col, th) {
     const all = Array.from(tbody.querySelectorAll(':scope > tr'));
     const isCompanion = r => r.id && r.id.startsWith('detail-');
     const primaries = all.filter(r => !isCompanion(r) && r.cells.length > col);
-    const companionFor = r => {
-        if (!r.id) return null;
-        const idx = r.id.indexOf('-');
-        if (idx < 0) return null;
-        // Pair via an attribute selector, NOT `#detail-<key>`: row keys can
-        // contain `:` (e.g. agent ids like `Claude:agents2`) or start with a
-        // digit (timestamp slugs), both of which are illegal in a `#id`
-        // selector and would throw. `[id="..."]` sidesteps CSS-identifier
-        // rules; our keys never contain `"`.
-        return tbody.querySelector(':scope > [id="detail-' + r.id.slice(idx + 1) + '"]');
-    };
+    const companions = htmxoTableCompanions(all);
     const asc = th.dataset.sortDir !== 'asc';
     th.dataset.sortDir = asc ? 'asc' : 'desc';
     // `aria-sort` mirrors `data-sort-dir` on the active <th>: it is the
@@ -10806,19 +10796,37 @@ function sortTable(col, th) {
     // Sort key: prefer `data-sort-value` if the cell sets one, else the
     // visible text. This lets callers force a semantic order (e.g. status:
     // proposed → approved → rejected) without re-encoding the displayed text.
-    const sortKey = cell => (cell.dataset.sortValue ?? cell.textContent).trim();
-    primaries.sort((a, b) => {
+    const sortKey = cell => (cell.dataset.sortValue ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
+    const compare = (a, b) => {
         const av = sortKey(a.cells[col]);
         const bv = sortKey(b.cells[col]);
         const an = parseFloat(av), bn = parseFloat(bv);
         if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
         return asc ? av.localeCompare(bv) : bv.localeCompare(av);
-    });
-    primaries.forEach(r => {
+    };
+    const append = r => {
         tbody.appendChild(r);
-        const c = companionFor(r);
+        const c = companions.get(r.id);
         if (c) tbody.appendChild(c);
-    });
+    };
+    if (th.closest('table').hasAttribute('data-htmxo-hierarchy')) {
+        // Sort each sibling set, then emit whole subtrees in preorder. Detail
+        // rows and their loaded DOM move with their master without rebuilding.
+        const siblings = new Map();
+        all.filter(r => !isCompanion(r)).forEach(r => {
+            const parent = r.dataset.htmxoParent || '';
+            if (!siblings.has(parent)) siblings.set(parent, []);
+            siblings.get(parent).push(r);
+        });
+        const visit = parent => {
+            const rows = siblings.get(parent) || [];
+            rows.sort((a, b) => a.cells.length > col && b.cells.length > col ? compare(a, b) : 0);
+            rows.forEach(r => { append(r); visit(r.id); });
+        };
+        visit('');
+    } else {
+        primaries.sort(compare).forEach(append);
+    }
     // Sort caret in a dedicated trailing <span> per <th>: the old approach
     // assigned th.textContent, which flattens EVERY child node to a text node,
     // so sorting any column destroyed interactive content living in a header
@@ -10833,6 +10841,70 @@ function sortTable(col, th) {
     caret.className = 'htmxo-sort-caret';
     caret.textContent = asc ? ' ▲' : ' ▼';
     th.appendChild(caret);
+}
+
+// Pair lookup uses literal ids, so punctuation in a hand-built key cannot
+// turn into a CSS selector. Shared by sorting and filtering.
+function htmxoTableCompanions(rows) {
+    const details = new Map(rows.filter(r => r.id.startsWith('detail-')).map(r => [r.id, r]));
+    const companions = new Map();
+    rows.forEach(r => {
+        const dash = r.id.indexOf('-');
+        if (dash >= 0 && !r.id.startsWith('detail-')) {
+            const detail = details.get('detail-' + r.id.slice(dash + 1));
+            if (detail) companions.set(r.id, detail);
+        }
+    });
+    return companions;
+}
+
+function htmxoFilterTable(input) {
+    const root = input.closest('.htmxo-searchable-table');
+    const table = root.querySelector('table');
+    const all = Array.from(table.tBodies[0].rows);
+    const rows = all.filter(r => !r.id.startsWith('detail-'));
+    const byId = new Map(rows.map(r => [r.id, r]));
+    const companions = htmxoTableCompanions(all);
+    const query = input.value.toLocaleLowerCase().trim().replace(/\s+/g, ' ');
+    const visible = new Set();
+    const text = r => (r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
+    rows.forEach(row => {
+        const path = [];
+        for (let r = row; r; r = byId.get(r.dataset.htmxoParent)) path.push(r);
+        // Ancestor text participates: a group match includes its descendants,
+        // and a leaf match retains the entire path needed to understand it.
+        const haystack = path.reverse().map(text).join(' ').replace(/\s+/g, ' ');
+        if (haystack.includes(query)) path.forEach(r => visible.add(r));
+    });
+    rows.forEach(row => {
+        let ancestorsOpen = true;
+        for (let p = byId.get(row.dataset.htmxoParent); p; p = byId.get(p.dataset.htmxoParent)) {
+            if (p.dataset.htmxoTreeOpen === 'false') ancestorsOpen = false;
+        }
+        row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen);
+        const branch = row.querySelector('[data-htmxo-tree-toggle]');
+        if (branch) {
+            const open = query.length > 0 || row.dataset.htmxoTreeOpen === 'true';
+            row.setAttribute('aria-expanded', open);
+            branch.setAttribute('aria-expanded', open);
+            branch.textContent = open ? '▾' : '▸';
+            branch.disabled = query.length > 0;
+        }
+        const detail = companions.get(row.id);
+        if (detail) {
+            detail.hidden = row.hidden || (row.dataset.htmxoDetailOpen ?? row.getAttribute('aria-expanded')) !== 'true';
+            if (!detail.hidden) htmxoLoadSlot(detail.querySelector('[data-loaded]'));
+        }
+    });
+    root.querySelector(':scope > [data-htmxo-table-empty]').hidden = visible.size !== 0;
+}
+
+function htmxoTreeToggle(button) {
+    const row = button.closest('tr');
+    row.dataset.htmxoTreeOpen = row.dataset.htmxoTreeOpen === 'true' ? 'false' : 'true';
+    // Hierarchical tables always have a scoped search input, even when the
+    // input is hidden. One visibility path owns both collapse and filtering.
+    htmxoFilterTable(row.closest('.htmxo-searchable-table').querySelector(':scope > label > input[type="search"]'));
 }
 
 // Read a table's CURRENT client-side sort state. `target` is a CSS selector
@@ -10853,7 +10925,7 @@ function htmxoSortState(target) {
     const root = typeof target === 'string' ? document.querySelector(target) : target;
     if (!root) return {};
     const table = root.tagName === 'TABLE' ? root
-        : (root.querySelector('table') || root.closest('table'));
+        : (root.closest('table') || root.querySelector('table'));
     if (!table) return {};
     const th = table.querySelector('thead th[data-sort-dir]');
     if (!th) return {};
@@ -11065,7 +11137,7 @@ Pair with [`sortable_table_js`](@ref) (which ships `htmxoSortState`) and
 function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
-                        caption=nothing, default_sort=nothing, kwargs...)
+                        caption=nothing, default_sort=nothing, role="grid", kwargs...)
     isnothing(id) && (id = "tbl-" * string(hash(headers), base=16))
 
     if !isnothing(default_sort) && !sortable
@@ -11087,7 +11159,7 @@ function sortable_table(headers, rows;
     # forget-proof.
     table_class = sortable ? string(class, " htmxo-sortable-table") : class
 
-    table_node = h.table(; class=table_class, role="grid", kwargs...)(
+    table_node = h.table(; class=table_class, role, kwargs...)(
         h.thead(h.tr(th_nodes...)),
         h.tbody(rows...; id),
     )
@@ -11171,15 +11243,27 @@ _md_runtime_js() = """
 function htmxoMdToggle(row, event, key, slot) {
     if (event.target.closest('a,button,input,textarea,select,form')) return;
     var d = document.getElementById('detail-' + key); if (!d) return;
-    var show = d.hidden; d.hidden = !show;
-    row.setAttribute('aria-expanded', show);
+    var show = row.dataset.htmxoDetailOpen === undefined ? d.hidden : row.dataset.htmxoDetailOpen !== 'true';
+    d.hidden = !show;
+    if (row.dataset.htmxoDetailOpen !== undefined) row.dataset.htmxoDetailOpen = String(show);
+    if (row.dataset.htmxoTreeOpen === undefined) row.setAttribute('aria-expanded', show);
+    var control = row.querySelector('[data-htmxo-detail-toggle]');
+    if (control) control.setAttribute('aria-expanded', show);
     if (show && slot) {
         var s = document.getElementById(slot === 1 ? 'detail-slot-' + key : slot);
-        if (s && s.dataset.loaded !== '1' && s.dataset.loading !== '1') {
-            s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
-        }
+        htmxoLoadSlot(s);
     }
     return show;
+}
+function htmxoLoadSlot(s) {
+    if (s && s.dataset.loaded !== '1' && s.dataset.loading !== '1') {
+        s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
+    }
+}
+function htmxoMdControl(button, event) {
+    event.stopPropagation();
+    var row = button.closest('tr'), key = row.id.slice(4);
+    htmxoMdToggle(row, {target: row}, key, document.getElementById('detail-slot-' + key) ? 1 : 0);
 }
 function htmxoMdBefore(s) {
     s.dataset.loading = '1'; delete s.dataset.failed;
@@ -11457,8 +11541,25 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   When the predicate is `true` for an item, that row renders open from
   the first paint (see [`master_detail_pair`](@ref) for the mechanics).
   Defaults to `false` (all rows collapsed initially).
+- `children(item)`: optional callback returning child items. `items` then
+  contains roots; the helper emits a single tree table in preorder. Keys must
+  be unique after sanitisation, including across levels. Native branch buttons
+  expand children; `initially_open` controls branches and leaf details. A group
+  with neither a detail body nor URL has no companion or detail request.
+- `searchable`: include a labelled, client-side search field (default `false`).
+  Search matches a case-insensitive phrase against master cells and ancestor
+  text, retains matching paths, and reveals descendants of a matching group.
+  It temporarily reveals matching branches; clearing restores branch and
+  detail state. Collapsed details stay lazy. Only master text is searched.
+- `search_text(item)`: optional replacement for a row's searchable text; useful
+  for metadata absent from its visible cells. It does not affect sorting.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
+
+With `children`, column sorting reorders siblings and moves whole subtrees,
+keeping each detail directly after its master and preserving loaded DOM.
+All labels remain complete. Branch and Details buttons support native keyboard
+activation; tree levels and expansion state are represented by ARIA attributes.
 
 For **lazy** detail loading (fetch each row's detail on first expand rather
 than rendering every collapsed detail up front), pass `detail_url` — the
@@ -11478,26 +11579,103 @@ function master_detail_table(headers, items;
                              master_class=nothing,
                              detail_class=nothing,
                              initially_open::Union{Bool,Function}=false,
+                             children=nothing,
+                             searchable::Bool=false,
+                             search_text=nothing,
                              kwargs...)
     ncols = length(headers)
-    (!isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
+    (!isnothing(children) || !isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
         "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
     # `detail_url` may be a per-item `item -> url` callback or a bare String
     # (same URL for every row — unusual, but supported).
     _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
     rows = Any[]
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
-    for item in items
-        attrs = isnothing(master_attrs) ? () : master_attrs(item)
+    seen = Set{String}()
+    max_level = Ref(1)
+    function visit(item, parent, level, ancestors_open)
+        item_key = key(item)
+        attrs = Dict{Symbol,Any}(pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
+        descendants = isnothing(children) ? () : collect(children(item))
+        branch = !isempty(descendants)
+        open = _open(item)
+        safe = _md_safe_key(item_key)
+        if !isnothing(children)
+            safe in seen && throw(ArgumentError(
+                "master_detail_table: hierarchy keys must be unique after sanitisation; repeated $(repr(item_key))"))
+            push!(seen, safe)
+            attrs[:data_htmxo_parent] = parent
+            attrs[:aria_level] = string(level)
+            ancestors_open || (attrs[:hidden] = true)
+            if branch
+                attrs[:data_htmxo_tree_open] = string(open)
+                attrs[:aria_expanded] = string(open)
+            end
+            max_level[] = max(max_level[], level)
+        end
+        isnothing(search_text) || (attrs[:data_htmxo_search] = string(search_text(item)))
         # In lazy mode `detail(item)` (if given) is the per-row placeholder.
         body = isnothing(detail) ? nothing : detail(item)
         url  = isnothing(_url) ? nothing : _url(item)
-        (m, d) = master_detail_pair(key(item), master(item), body, ncols;
+        has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
+        cells = collect(master(item))
+        if !isnothing(children)
+            isempty(cells) && throw(ArgumentError("master_detail_table: hierarchical rows require at least one cell"))
+            controls = Any[]
+            if branch
+                child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
+                push!(controls, h.button(open ? "▾" : "▸"; type="button",
+                    data_htmxo_tree_toggle="", aria_label="Toggle child rows",
+                    aria_controls=child_ids, aria_expanded=string(open),
+                    onclick="htmxoTreeToggle(this); event.stopPropagation()"))
+            end
+            if has_detail
+                attrs[:data_htmxo_detail_open] = string(open)
+                push!(controls, h.button("Details"; type="button",
+                    data_htmxo_detail_toggle="", aria_controls="detail-$safe",
+                    aria_expanded=string(open), onclick="htmxoMdControl(this,event)"))
+            end
+            first_cell = first(cells)
+            cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
+                Any[controls..., h.span(; data_htmxo_row_label="")(HTMX.children(first_cell)...)])
+        end
+        if !isnothing(children) && isnothing(body) && isnothing(url)
+            # Group rows need no placeholder or detail request. Their children
+            # are ordinary rows in this same tbody, visible from first paint.
+            isnothing(master_class) || (attrs[:class] = master_class)
+            push!(rows, h.tr(; id="row-$safe", attrs...)(cells...))
+        else
+            (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
-                                    initially_open=_open(item), detail_url=url)
-        push!(rows, m, d)
+                                    initially_open=open && ancestors_open, detail_url=url)
+            push!(rows, m, d)
+        end
+        if !isnothing(children)
+            for child in descendants
+                visit(child, "row-$safe", level + 1, ancestors_open && open)
+            end
+        end
     end
-    sortable_table(headers, rows; kwargs...)
+    for item in items
+        visit(item, "", 1, true)
+    end
+    table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
+    table = sortable_table(headers, rows; table_attrs..., kwargs...)
+    if !isnothing(children)
+        # Depth is semantic row metadata, not per-row inline styling. The
+        # stylesheet covers the actual depth and remains scoped to tree tables.
+        rules = """
+        [data-htmxo-hierarchy] > tbody > tr > td:first-child > button { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
+        [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
+        """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
+                      for level in 2:max_level[]), "\n")
+        table = h.div(h.style(Raw(rules)), table)
+    end
+    (searchable || !isnothing(children)) ? h.div(; class="htmxo-searchable-table")(
+        h.label("Search", h.input(; type="search", oninput="htmxoFilterTable(this)"); hidden=!searchable),
+        table,
+        h.p("No matching rows"; hidden=true, data_htmxo_table_empty="", role="status"),
+    ) : table
 end
 
 # --- Formatting helpers ---

@@ -180,6 +180,38 @@ it spreads cleanly into an htmx `hx-vals`.
 
 ## Layout / widgets
 
+### Hierarchical master/detail tables
+
+Supply roots and a `children` callback to build one searchable tree table:
+
+```julia
+master_detail_table(["Name", "Status"], roots;
+    key = item -> item.id,
+    master = item -> (h.td(item.name), h.td(item.status)),
+    children = item -> item.children,
+    detail_url = item -> isempty(item.children) ? item.detail_url : nothing,
+    initially_open = item -> item.kind == :family,
+    searchable = true,
+    id = "catalog")
+# Include sortable_table_js() and sortable_table_styles() once in extra_head.
+```
+
+Column clicks sort siblings and move each whole subtree, keeping open details
+next to their master and preserving loaded DOM. Native branch and Details
+buttons support keyboard activation. `initially_open` accepts a Boolean or
+predicate and controls both branch expansion and leaf detail expansion. Groups
+without a detail body or URL have no companion or request. Keys must be unique
+after sanitisation throughout the tree and page.
+
+Search matches a case-insensitive phrase against visible master cells and
+ancestor text. A matching group includes its descendants; a matching leaf
+retains its ancestors. Search temporarily reveals matching paths, then restores
+branch/detail state when cleared. Collapsed details stay lazy, and detail-body
+text is excluded. Use `search_text = item -> item.searchable_metadata` to replace
+a row's search text. Labels wrap without truncation. Without `children`, the
+existing flat master/detail behavior remains available; `searchable=true` also
+works on flat tables.
+
 ### `tabset` and `htmx_tabset` — tab navigation
 
 ```julia
