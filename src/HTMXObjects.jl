@@ -11588,6 +11588,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   be unique after sanitisation, including across levels. Native branch buttons
   expand children; `initially_open` controls branches and leaf details. A group
   with neither a detail body nor URL has no companion or detail request.
+- `branches_collapsible`: with `children`, default `true`. Set `false` to
+  keep every branch expanded without disclosure controls. This overrides
+  `initially_open` for branch visibility only; detail expansion stays independent.
+- `detail_toggle`: default `:button` keeps the hierarchical "Details" button
+  (flat tables retain row-click activation). `:label` uses the first master
+  cell's complete content as the native detail button instead, with no separate
+  "Details" label. Supply non-interactive label content in that cell; other
+  cells can contain links or controls. Group rows without details stay plain.
 - `searchable`: include a labelled, client-side search field (default `false`).
   Search matches a case-insensitive phrase against master cells and ancestor
   text, retains matching paths, and reveals descendants of a matching group.
@@ -11622,9 +11630,13 @@ function master_detail_table(headers, items;
                              detail_class=nothing,
                              initially_open::Union{Bool,Function}=false,
                              children=nothing,
+                             branches_collapsible::Bool=true,
+                             detail_toggle::Symbol=:button,
                              searchable::Bool=false,
                              search_text=nothing,
                              kwargs...)
+    detail_toggle in (:button, :label) || throw(ArgumentError(
+        "master_detail_table: detail_toggle must be :button or :label"))
     ncols = length(headers)
     (!isnothing(children) || !isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
         "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
@@ -11641,6 +11653,7 @@ function master_detail_table(headers, items;
         descendants = isnothing(children) ? () : collect(children(item))
         branch = !isempty(descendants)
         open = _open(item)
+        branch_open = branch && (!branches_collapsible || open)
         safe = _md_safe_key(item_key)
         if !isnothing(children)
             safe in seen && throw(ArgumentError(
@@ -11649,7 +11662,7 @@ function master_detail_table(headers, items;
             attrs[:data_htmxo_parent] = parent
             attrs[:aria_level] = string(level)
             ancestors_open || (attrs[:hidden] = true)
-            if branch
+            if branch && branches_collapsible
                 attrs[:data_htmxo_tree_open] = string(open)
                 attrs[:aria_expanded] = string(open)
             end
@@ -11661,25 +11674,32 @@ function master_detail_table(headers, items;
         url  = isnothing(_url) ? nothing : _url(item)
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
         cells = collect(master(item))
-        if !isnothing(children)
-            isempty(cells) && throw(ArgumentError("master_detail_table: hierarchical rows require at least one cell"))
+        if !isnothing(children) || detail_toggle === :label
+            isempty(cells) && throw(ArgumentError("master_detail_table: controlled rows require at least one cell"))
             controls = Any[]
-            if branch
+            if branch && branches_collapsible
                 child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
                 push!(controls, h.button(open ? "▾" : "▸"; type="button",
                     data_htmxo_tree_toggle="", aria_label="Toggle child rows",
                     aria_controls=child_ids, aria_expanded=string(open),
                     onclick="htmxoTreeToggle(this); event.stopPropagation()"))
             end
-            if has_detail
-                attrs[:data_htmxo_detail_open] = string(open)
-                push!(controls, h.button("Details"; type="button",
-                    data_htmxo_detail_toggle="", aria_controls="detail-$safe",
-                    aria_expanded=string(open), onclick="htmxoMdControl(this,event)"))
-            end
             first_cell = first(cells)
+            label = Any[HTMX.children(first_cell)...]
+            if has_detail
+                isnothing(children) || (attrs[:data_htmxo_detail_open] = string(open))
+                toggle_label = detail_toggle === :label ? label : Any["Details"]
+                toggle = h.button(toggle_label...; type="button",
+                    data_htmxo_detail_toggle="", aria_controls="detail-$safe",
+                    aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
+                if detail_toggle === :label
+                    label = Any[toggle]
+                else
+                    push!(controls, toggle)
+                end
+            end
             cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
-                Any[controls..., h.span(; data_htmxo_row_label="")(HTMX.children(first_cell)...)])
+                Any[controls..., h.span(; data_htmxo_row_label="")(label...)])
         end
         if !isnothing(children) && isnothing(body) && isnothing(url)
             # Group rows need no placeholder or detail request. Their children
@@ -11694,7 +11714,7 @@ function master_detail_table(headers, items;
         end
         if !isnothing(children)
             for child in descendants
-                visit(child, "row-$safe", level + 1, ancestors_open && open)
+                visit(child, "row-$safe", level + 1, ancestors_open && branch_open)
             end
         end
     end
@@ -11703,12 +11723,14 @@ function master_detail_table(headers, items;
     end
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
     table = sortable_table(headers, rows; table_attrs..., kwargs...)
-    if !isnothing(children)
+    if !isnothing(children) || detail_toggle === :label
         # Depth is semantic row metadata, not per-row inline styling. The
         # stylesheet covers the actual depth and remains scoped to tree tables.
         rules = """
         [data-htmxo-hierarchy] > tbody > tr > td:first-child > button { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
         [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
+        [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
+        [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
         """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
                       for level in 2:max_level[]), "\n")
         table = h.div(h.style(Raw(rules)), table)
@@ -13198,7 +13220,13 @@ shared.
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` may likewise be a value or function. Override
 `render_operation(entry)` for local layout; the entry carries `object`, `route`,
-`name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`. The default
+`name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`.
+For a parameter-free GET operation using fixed defaults, its mounted URL is
+`entry.object / entry.route.path`, the same public target recipe as
+[`operation_form`](@ref). This retains indexed mounts and external prefixes.
+`entry.path` is the reflected graph path, not the mounted owner's URL. A bare
+URL does not submit current form/context values; use `entry.form` and
+`entry.result` when those inputs can change. The default
 renderer fails closed for WebSocket and SSE routes, whose client transport must
 be rendered explicitly.
 

@@ -197,7 +197,13 @@ master_detail_table(["Name", "Status"], roots;
 ```
 
 Column buttons sort siblings and move each whole subtree, keeping open details
-next to their master and preserving loaded DOM. Native branch and Details
+next to their master and preserving loaded DOM. For plain expanded group
+headings and model-name detail controls, pass `branches_collapsible=false,
+detail_toggle=:label`. Branches then have no disclosure control, while the
+complete first-cell label becomes a native button. Supply non-interactive label
+content in that cell; links or inputs can live in the other cells. Detail
+expansion still follows `initially_open`; search and sort retain loaded DOM.
+The defaults keep the existing branch and Details controls. Native branch and Details
 buttons and auto-wired sort headers support keyboard activation. `initially_open` accepts a Boolean or
 predicate and controls both branch expansion and leaf detail expansion. Groups
 without a detail body or URL have no companion or request. Keys must be unique
@@ -264,6 +270,12 @@ content as a node (`h.p("text")`); a string body denotes a fragment URL.
 `htmx` includes `comparison_js()` and `comparison_styles()` automatically;
 include both once for a hand-built page head. The application owns each
 fragment route and its operation/result handling.
+
+For parameter-free GET operations with fixed defaults, derive pane URLs from
+the generated graph with `entry.title => (entry.object / entry.route.path)` in
+`semantic_app`'s `render_operation` callback. The mounted owner carries selected
+indices and the external prefix; bare `entry.path` is a reflected graph path.
+This uses the same public URL recipe as `operation_form`'s default target.
 
 A URL body GETs the supplied address; it does not submit changing shared
 `semantic_app` controls. For custom placement of generated operations, pass

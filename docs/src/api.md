@@ -424,6 +424,13 @@ provider lock. Applications construct no executor/store and call no GC.
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
 | `internal_input(input)` | Is this descriptor input framework-injected rather than author-declared? |
 
+`render_operation(entry)` supplies `object`, `route`, `name`, `verb`, `path`,
+`title`, `target_id`, `form`, and `result`. A parameter-free GET using fixed
+defaults can feed `entry.title => (entry.object / entry.route.path)` into
+`comparison_view`. This preserves the mounted index and external prefix;
+`entry.path` is the reflected graph path. Use generated forms/results when
+current context or form values need submission.
+
 ```@docs
 semantic_descriptor
 application_descriptor
