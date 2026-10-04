@@ -343,6 +343,10 @@ visible shared control, deduplicated across every mounted operation that carries
 it; its submitted value still flows through the request extractor. An indexed
 `@include` is intentionally fail-closed until an index is selected—call
 `semantic_app(app.models(:chosen))` to compile that concrete subtree.
+Generated result targets are stable for each mounted graph and distinct across
+selected mounts, including application and forwarded prefixes. Two selected
+children can therefore share a page; their forms, dependent refreshes, and
+polling continue to target their own results without manually assigned IDs.
 
 For custom placement, `operation_form` renders its request/fixed context inside
 one local `.htmxo-semantic-context` fieldset. It does not need an external
