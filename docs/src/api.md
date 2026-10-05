@@ -1576,6 +1576,93 @@ the next request for it starts afresh. Blocking executions are not queued.
 configure_job_queue!(; max_running=2, abandon_after=60)
 ```
 
+#### App-owned background batches
+
+The public submission seam is the ordinary routed operation. Put the batch
+computation on an indexed property, and let an ordinary `@get` read it and
+return the result fragment. Under the default `OperationPolicy(:auto)`, an
+in-process request with `"HX-Request" => "true"` starts that GET through the
+configured queue and returns native progress while the work is unfinished.
+Load Treebars to enable the progress transport.
+
+For intentional startup or unattended work, disable abandonment explicitly:
+
+```julia
+configure_job_queue!(; max_running=30, abandon_after=Inf)
+```
+
+`Inf` applies process-wide, including browser-originated waiting jobs; running
+jobs are never abandoned by this setting. The queue and retained roots are
+process-local, so request/result files remain the application's restart and
+recovery boundary.
+
+[`examples/native_background_batch.jl`](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/native_background_batch.jl)
+is a complete synthetic example. Its heavy `batch_result(batch_id)` reads an
+immutable request file and writes a result file; `@get result(batch_id::Int)`
+renders its value. A lightweight manual POST delegates to that same GET:
+
+```julia
+@fresh @post submit(batch_id::Int) = dispatch(:GET,
+    query_url("/result/$batch_id", __self__);
+    headers=["HX-Request" => "true",
+             "X-Forwarded-Prefix" => HTTP.header(__req__, "X-Forwarded-Prefix", "")],
+    parent=dispatch_parent(__req__))
+```
+
+The POST itself stays inline and does only request acceptance/submission. Its
+returned response contains the GET's native progress fragment. Save/validate a
+new immutable request before dispatching; use a new batch identity when its
+inputs change. Do not mark the heavy GET `@fresh` or declare its output as
+`HTTP.Response`/`MIMEResponse`, since those select inline execution. Keep status
+and job-board routes `@fresh` so they can answer while the workers are occupied.
+
+Startup uses the same entry after registering routes, with no HTTP listener or
+browser required:
+
+```julia
+# On the example's mounted graph, compile forms once to activate managed retention.
+surface = semantic_app(root; values=(; batch_id=1))
+route!(root)
+response = dispatch(:GET, "/result/1";
+                    headers=["HX-Request" => "true"])
+```
+
+Dispatch targets the **internally registered path**, including any actual
+`route!(; prefix=...)` or `@include` mount. It does not traverse a reverse
+proxy: `query_url(jobs/"execute"; id)` on a live request may contain an external
+`/p/<app>` prefix that the internal router cannot match. For an internal
+`/jobs/execute` mount, use `query_url("/jobs/execute", jobs; id)` and forward
+`X-Forwarded-Prefix` separately as above; returned poll URLs retain the external
+prefix. Also pass the cookies/headers required by an existing session provider's
+key function. Startup must use the same intended provider key and mount prefix
+as later requests; a different key selects a different retained graph. Explicit
+POST body parameters must be passed as `query_url` overrides (§URL helpers).
+
+Check both the response status and `X-HTMXO-Error-Id`: an HTMX error fragment can
+have status 200. A successful progress response means submission, not batch
+completion. Omitting the HX header under `:auto`, requesting static export, or
+calling the heavy property directly does not select this queued transport.
+`track_job!` records independently started work; it does not admit it to the
+queue. A hand-shaped `polling_fetchindex` likewise does not by itself choose the
+app queue's executor.
+
+Repeat calls coalesce on the same retained graph and typed batch identity,
+whether queued or running; successful results are memoized there too. A
+`semantic_app` graph activates its managed provider when compiled; do that
+before startup submission if no page has rendered yet. For a manual `route!`
+app, use the scoped-root contract above instead. Poll tokens alone preserve
+follow-up polling, not unrelated new submissions' computation identity. Bound
+provider retention consistently with the required batch lifetime; `Inf` only
+disables queue abandonment, not root eviction. Existing authored Treebars
+progress can remain inside the indexed computation; no app-owned worker pool,
+`Deferred` constructor or external admission layer is needed.
+
+The focused acceptance in `test/native_background_batch.jl` demonstrates two
+running jobs plus one FIFO waiting job, duplicate POST coalescing, result-file
+completion without browser polling, and a finite-timeout abandonment control.
+The concurrency bound counts background executions, not every transient inline
+request shown by the runtime ledger.
+
 ```@docs
 RuntimeRoutes
 runtime_dashboard
