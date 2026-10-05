@@ -1,20 +1,22 @@
 """
     comparison_view(panes::Pair...; id, presentation=:tabs, active=1, selected=(1, 2))
 
-Selectable side-by-side comparison of two or more views. Checkboxes select any
-subset of two or more panes, displayed side by side with independent
-scrolling. Labels and bodies are preserved in full.
+Selectable side-by-side comparison of two or more views. Checkboxes choose
+which panes to display, with independent scrolling. Labels and bodies are
+preserved in full.
 
 `presentation` chooses how the comparison is shown:
 
 - `:tabs` (default): one inline tabbed view with a near-fullscreen Compare
   dialog holding the checkboxes and columns. Tabs support Arrow keys, Home and
   End; native buttons support Enter/Space, and Escape closes the dialog and
-  returns focus to Compare. `active` is the initially shown tab.
+  returns focus to Compare. `active` is the initially shown tab. The dialog
+  requires at least two selected panes.
 - `:inline`: the checkboxes and selected columns are shown directly in the
   page, with no tabs and no dialog. The comparison is limited to the viewport
   height (`--htmxo-comparison-height`, default `100dvh`), so each column
-  scrolls independently. `active` selects a tab and is refused here.
+  scrolls independently. One or more panes may be selected; a single selected
+  pane fills the available width. `active` selects a tab and is refused here.
 
 Each pair is `label => body` or `label => "/fragment/url"`. URL panes load
 independently on first display, coalesce in-flight requests, retain loaded
@@ -34,15 +36,19 @@ routes and keep the application's normal operation/error policy.
 """
 function comparison_view(panes::Pair...; id, presentation::Symbol=:tabs, active=nothing, selected=(1, 2))
     length(panes) >= 2 || throw(ArgumentError("comparison_view: supply at least two panes"))
+    mode = Val(presentation)
+    minimum = _comparison_minimum(mode)
     selection = Set(selected)
-    length(selection) >= 2 && all(i -> i isa Integer && i in eachindex(panes), selection) ||
-        throw(ArgumentError("comparison_view: selected must contain at least two distinct pane indices in range"))
+    length(selection) >= minimum && all(i -> i isa Integer && i in eachindex(panes), selection) ||
+        throw(ArgumentError("comparison_view: selected must contain at least $minimum distinct pane indices in range"))
     safe = _md_safe_key(id)
     isempty(safe) && throw(ArgumentError("comparison_view: id must be nonempty"))
-    _comparison_view(Val(presentation), panes, id, safe, active, selection)
+    _comparison_view(mode, panes, id, safe, active, selection)
 end
 
-_comparison_view(::Val{P}, panes, id, safe, active, selection) where {P} = throw(ArgumentError(
+_comparison_minimum(::Val{:tabs}) = 2
+_comparison_minimum(::Val{:inline}) = 1
+_comparison_minimum(::Val{P}) where {P} = throw(ArgumentError(
     "comparison_view: unknown presentation :$P; use :tabs or :inline"))
 
 function _comparison_view(::Val{:tabs}, panes, id, safe, active, selection)
@@ -79,7 +85,7 @@ function _comparison_view(::Val{:inline}, panes, id, safe, active, selection)
         "comparison_view: active selects a tab and applies only to presentation=:tabs"))
     heading_id(i) = "comparison-$safe-heading-$i"
     h.div(; id, class="htmxo-comparison", data_htmxo_presentation="inline")(
-        _comparison_choices(panes, selection)...,
+        _comparison_choices(panes, selection, "Select at least one view")...,
         # Unselected panes stay in place, hidden, so their DOM is never moved.
         h.div(; data_htmxo_compare_grid="")(
             (_comparison_pane(safe, i, label, body, i in selection;
@@ -95,9 +101,9 @@ _comparison_pane(safe, i, label, body, shown; role=nothing, aria_labelledby, hea
         h.h3(string(label); id=heading_id),
         _comparison_body(body, "$safe-$i", shown))
 
-_comparison_choices(panes, selection) = (
+_comparison_choices(panes, selection, instruction="Select at least two views") = (
     h.fieldset(
-        h.legend("Select at least two views"),
+        h.legend(instruction),
         (h.label(h.input(; type="checkbox", value=string(i),
             data_htmxo_compare_choice="", checked=i in selection,
             onchange="htmxoComparisonChoice(this)"), string(label))
@@ -156,8 +162,11 @@ function htmxoComparisonOpen(button) {
 function htmxoComparisonChoice(input) {
     const root = input.closest('.htmxo-comparison');
     const status = htmxoComparisonPart(root, 'status');
-    if (htmxoComparisonSelected(root).length < 2) {
-        input.checked = true; status.textContent = 'Select at least two views'; return;
+    const minimum = root.dataset.htmxoPresentation === 'inline' ? 1 : 2;
+    if (htmxoComparisonSelected(root).length < minimum) {
+        input.checked = true;
+        status.textContent = input.closest('fieldset').querySelector('legend').textContent;
+        return;
     }
     status.textContent = '';
     htmxoComparisonArrange(root);
