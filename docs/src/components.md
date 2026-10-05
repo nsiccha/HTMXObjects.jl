@@ -257,16 +257,35 @@ comparison_view(
     id="model-views", active=1, selected=(1, 3))
 ```
 
-The inline view shows one tab. **Compare** opens a near-fullscreen dialog whose
-checkboxes select any subset of at least two views. Selected columns stay side
-by side and scroll independently. Tabs support ArrowLeft/ArrowRight, Home and
-End; Escape and Close dismiss the dialog and return focus to Compare.
+The default `presentation=:tabs` shows one tab inline. **Compare** opens a
+near-fullscreen dialog whose checkboxes select any subset of at least two
+views. Selected columns stay side by side and scroll independently. Tabs
+support ArrowLeft/ArrowRight, Home and End; Escape and Close dismiss the dialog
+and return focus to Compare.
 
-URL bodies load independently when first shown, share the master/detail
-single-flight loader, and allow retry after failure. Moving a view into or out
-of the dialog retains its DOM, loaded content and user input. Supply eager
-content as a node (`h.p("text")`); a string body denotes a fragment URL.
-`active` and `selected` use 1-based indices; `id` must be unique on the page.
+```julia
+comparison_view(
+    "Summary" => h.p("Complete summary"), "Source" => "/model/source",
+    "Generated" => "/model/generated", "Results" => "/model/results";
+    id="model-columns", presentation=:inline, selected=(2, 3, 4))
+```
+
+`presentation=:inline` shows the same checkboxes and the selected columns
+directly in the page, with no tabs, Compare button or dialog. Unselected views
+stay hidden in place. The comparison is limited to the viewport height
+(`--htmxo-comparison-height`, default `100dvh`; subtract a sticky header with
+`calc(100dvh - 4rem)` for a 4rem header), and each column scrolls independently. Nested fixed
+`max-height` rules inside a column add a second, shorter scroll area.
+`--htmxo-comparison-pane-width` (default `20rem`) is each column's minimum
+width; wider selections scroll horizontally. `active` names the initial tab and
+is refused with `presentation=:inline`.
+
+In both presentations, URL bodies load independently when first shown, share
+the master/detail single-flight loader, and allow retry after failure.
+Selecting, deselecting and reselecting a view, or moving it into or out of the
+dialog, retains its DOM, loaded content and user input. Supply eager content as
+a node (`h.p("text")`); a string body denotes a fragment URL. `active` and
+`selected` use 1-based indices; `id` must be unique on the page.
 `htmx` includes `comparison_js()` and `comparison_styles()` automatically;
 include both once for a hand-built page head. The application owns each
 fragment route and its operation/result handling.
