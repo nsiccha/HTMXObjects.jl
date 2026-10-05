@@ -456,6 +456,23 @@ remain in place. Submit content never rides a hidden input as Julia text;
 generated forms carry only the request/context inputs needed for submission.
 Older full-form refresh requests remain accepted for already-rendered pages.
 
+### Reusing generated markup
+
+Retaining a generated form Node avoids rebuilding that Node, but rendering it
+still projects its leaves and serializes the tree on every response. The existing
+trusted-markup seam also accepts a previously serialized, server-generated
+snapshot: `snapshot = repr("text/html", surface)`, then
+`h.div(HTMX.Raw(snapshot))`. That reuses the exact emitted wiring and bytes.
+
+A snapshot freezes its context. Reuse it only while the mounted root/provider
+lifetime, selected indices, resolved external prefix, inherited request values,
+current controls/domains, and presentation settings remain the same. Rebuild
+when any of those change. It does not remount a root, rebind request values, or
+activate a new semantic root provider; compile the appropriate graph before
+reusing its markup. HTMXObjects supplies no automatic cache key or invalidation
+policy for those changing inputs. `Raw` is for trusted generated HTML, with
+ordinary application data escaped during the original Node serialization.
+
 ```@docs
 semantic_descriptor
 application_descriptor
