@@ -1156,7 +1156,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group` | Form input widgets (label, select, radio, number, checkbox, textarea, autocomplete, …) |
 | `Long`                          | Marker type for long-text fields                          |
 | `tabset`, `tabset_styles`, `htmx_tabset` | Tab navigation widgets                            |
-| `comparison_view`, `comparison_js`, `comparison_styles` | Inline tabs and a selectable comparison dialog with independently loaded and scrolling columns; see [components](components.md#comparison-view) |
+| `comparison_view`, `comparison_js`, `comparison_styles` | Selectable comparison columns, either inline tabs with a Compare dialog or shown directly inline, independently loaded and scrolling; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
 | `loading_indicator_script`, `request_feedback_*`, `show_when_script` | UX scripts injected into the page |
 
