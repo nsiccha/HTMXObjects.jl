@@ -1649,8 +1649,13 @@ app queue's executor.
 Repeat calls coalesce on the same retained graph and typed batch identity,
 whether queued or running; successful results are memoized there too. A
 `semantic_app` graph activates its managed provider when compiled; do that
-before startup submission if no page has rendered yet. For a manual `route!`
-app, use the scoped-root contract above instead. Poll tokens alone preserve
+before startup submission if no page has rendered yet. An explicitly supplied
+`RootProvider(scope=:session, key=..., retention=RootRetention(...))` already
+retains the mounted graph, including unrelated indexed-child computations:
+there is no need to render `semantic_app` on the job child to obtain retention.
+Existing `semantic_app` calls on other mounted children keep that provider
+authoritative. A scoped provider without `retention` uses its factory directly;
+it is not the managed retained-store constructor. Poll tokens alone preserve
 follow-up polling, not unrelated new submissions' computation identity. Bound
 provider retention consistently with the required batch lifetime; `Inf` only
 disables queue abandonment, not root eviction. Existing authored Treebars
