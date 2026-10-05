@@ -456,6 +456,83 @@ remain in place. Submit content never rides a hidden input as Julia text;
 generated forms carry only the request/context inputs needed for submission.
 Older full-form refresh requests remain accepted for already-rendered pages.
 
+### Sharing settings across a table
+
+Put common request settings and event handling on an enclosing `h.div`,
+`h.table`, or `h.tbody`. These builders accept the ordinary htmx attributes;
+no settings registry or per-row script is needed. For example:
+
+```julia
+h.div(
+    h.table(h.tbody(rows...)),
+    h.output("Ready"; aria_live="polite");
+    class="operations-table",
+    hx_swap="innerHTML",
+    hx_vals="{\"view\":\"compact\"}",
+    hx_on__before_request="this.querySelector('output').textContent = 'Working';",
+    hx_on__after_request="this.querySelector('output').textContent = event.detail.successful ? 'Ready' : 'Request failed';")
+```
+
+The request events bubble from descendant controls to that ancestor, including
+controls inserted by later swaps. `hx_on__before_request` spells
+`hx-on--before-request`, the `htmx:beforeRequest` event; `hx_on_click` handles
+bubbling ordinary clicks. Keep a longer shared handler in one page-shell
+`h.script(Raw(...))` or script asset and call it from the ancestor, or register
+one delegated `document.body.addEventListener(...)` there. Return row fragments
+without repeating that page-level installation.
+
+| Setting | Where it can be shared | Boundary |
+|---|---|---|
+| `hx_target`, `hx_swap` | Nearest common ancestor | A descendant's explicit value wins. Relative targets such as `next .row-operations` resolve from the requesting control. Generated operation forms retain their own stable target and swap. |
+| `hx_vals`, `hx_headers` | Common ancestor | Use static JSON for common values. A nearer declaration overrides the same key; evaluated `js:` expressions must be trusted application code. |
+| `hx_include` | Common ancestor | Use a stable selector for external controls. Extended selectors such as `find` are evaluated from the requester, even when inherited; they do not search from the ancestor that declares them. |
+| `hx_on__…`, `hx_on_click` | Ancestor that receives bubbling events | The handler is installed on that ancestor; `this` is the ancestor and `event.target` identifies the originating node. These are event delegation, not inherited attributes. |
+| Appearance | One wrapper class and a stylesheet selector | HTML `class`, `title`, and `aria-label` are not inherited. A generated submit button's accessible name remains on that button via `submit_attrs`. |
+
+Request URLs, request triggers, operation result addresses, and successful form
+inputs keep their local identities. In particular, `hx_get`, `hx_post`, and
+`hx_trigger` are not inherited. Sharing a callback or NamedTuple avoids
+duplicating the Julia declaration; each application of it still emits its
+attributes. Put the common attributes on the ancestor once to reduce HTML
+bytes. For a custom low-level `operation_form`, the default `target_id=nothing`
+omits its target/swap attributes and allows both to inherit. A form with an
+explicit `target_id` supplies its own swap as well.
+
+Keep `semantic_app` responsible for discovering operations and creating their
+forms/results. Its `submit`, `submit_attrs`, and `values` callbacks share
+presentation policy across entries; `render_operation` places `entry.form` and
+`entry.result` in each row's layout. Wrap those surfaces in the common settings
+ancestor. Do not replace their generated controls or stable target addresses
+with a parallel operation list.
+
+The standalone [shared-settings table example](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/shared_settings.jl)
+uses this shape for 400 indexed mounts and 800 descriptor-discovered GET/POST
+forms, with rich submit labels, one common settings ancestor, and reloadable
+row fragments. Run `julia --project examples/shared_settings.jl`. Its regression
+fixture compares raw serialized bytes against the same markup with attributes
+repeated on every row and exercises both shapes in a real browser. The reference
+capture is 1,273,931 bytes repeated versus 912,836 bytes shared: 361,095 bytes
+saved (28.3%), with the generated markup otherwise equal. The fixture also
+checks that the mounted HTTP response body equals the measured shared markup.
+This measures payload savings for that table, not a full-application latency
+improvement.
+
+**Native submissions use successful HTML controls.** `hx_vals` and `hx_include`
+add values to htmx requests only; they do not supply a native form submission.
+Preserve the generated hidden request inputs. For a standalone native GET,
+use `operation_form(...; navigate=true)`, which keeps context inside the form.
+For a low-level POST with a native fallback, pass
+`method="post", action=leaf / "write"` to `operation_form(leaf, :write; verb=:POST, …)`.
+An external shared context panel still needs htmx; choosing a native standalone
+form keeps its controls local. Shared ancestor settings do not change that
+boundary or the server's typed/domain validation.
+
+The [htmx inheritance guide](https://htmx.org/docs/#inheritance),
+[`hx-vals`](https://htmx.org/attributes/hx-vals/), and
+[`hx-include`](https://htmx.org/attributes/hx-include/) describe the underlying
+attribute rules. Measure UTF-8 response bytes as well as effective requests;
+decoded attribute counts alone do not establish a payload reduction.
+
 ### Reusing generated markup
 
 Retaining a generated form Node avoids rebuilding that Node, but rendering it
