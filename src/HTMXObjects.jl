@@ -11073,11 +11073,14 @@ as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
 so a wide table scrolls inside its own wrapper instead of widening the page.
 
 # Keyword arguments
-- `id`: tbody element id (auto-generated if `nothing`)
+- `id`: tbody element id (omitted if `nothing`). Supply a document-unique id
+  when targeting the body from elsewhere; sorting and download do not need one.
+  With a caption, the surrounding figure uses `"tbl-" * id` as its distinct id.
 - `sortable`: add click-to-sort headers (default `true`; requires `sortable_table_js()` on the page)
 - `download`: add a "⬇ CSV" button (default `true`; requires `download_table_js()` on the page).
   Placed in the caption header when `caption` is given, otherwise above the table.
-- `download_filename`: filename for the CSV download (default: `id * ".csv"`)
+- `download_filename`: filename for the CSV download (default: `id * ".csv"`
+  when `id` is supplied, otherwise `"table.csv"`)
 - `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
 - `cell(value, column_name, row_index)`: custom cell renderer (default: `string(value)`)
 - `class`: table CSS class (default `"striped"`)
@@ -11098,7 +11101,6 @@ page = htmx(
 """
 function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
     cols = Tables.columnnames(Tables.columns(table))
-    isnothing(id) && (id = "tbl-" * string(hash(cols), base=16))
 
     body_rows = [
         h.tr([h.td(isnothing(cell) ? string(Tables.getcolumn(row, c)) : cell(Tables.getcolumn(row, c), c, ri))
@@ -11185,8 +11187,6 @@ function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
                         caption=nothing, default_sort=nothing, role="grid", kwargs...)
-    isnothing(id) && (id = "tbl-" * string(hash(headers), base=16))
-
     if !isnothing(default_sort) && !sortable
         error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
     end
@@ -11205,10 +11205,11 @@ function sortable_table(headers, rows;
     # the hook `sortable_table_styles()` reads, and it makes call sites
     # forget-proof.
     table_class = sortable ? string(class, " htmxo-sortable-table") : class
+    body_attrs = isnothing(id) ? (;) : (; id)
 
     table_node = h.table(; class=table_class, role, kwargs...)(
         h.thead(h.tr(th_nodes...)),
-        h.tbody(rows...; id),
+        h.tbody(rows...; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
@@ -11216,7 +11217,7 @@ function sortable_table(headers, rows;
     # `downloadTableCsv` already seeks, so CSV download keeps working.
     table_wrap = h.div(; class="table-wrap")(table_node)
 
-    fname = something(download_filename, id * ".csv")
+    fname = something(download_filename, isnothing(id) ? "table.csv" : id * ".csv")
     download_btn = download ?
         h.button("⬇ CSV"; type="button", class="outline caption-action",
             onclick="downloadTableCsv(this, '$(fname)')") :
@@ -11224,7 +11225,7 @@ function sortable_table(headers, rows;
 
     if !isnothing(caption)
         actions = download ? (download_btn,) : ()
-        fig_id = startswith(id, "tbl-") ? id : "tbl-$id"
+        fig_id = isnothing(id) ? nothing : "tbl-$id"
         with_caption(caption, table_wrap; actions, id=fig_id)
     elseif download
         h.figure(; class="captioned")(
