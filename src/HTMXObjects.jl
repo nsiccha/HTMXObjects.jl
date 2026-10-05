@@ -9,7 +9,7 @@ export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @i
 export property_descriptor, property_descriptors, static_domain,
     materialization_observation
 export create_app
-export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload
+export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload, MultilineText
 export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfiles, vendor_head
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
@@ -664,6 +664,37 @@ struct Upload
 end
 Base.show(io::IO, u::Upload) =
     print(io, "Upload(", repr(u.filename), ", ", repr(u.contenttype), ", ", length(u.data), " bytes)")
+
+"""
+    MultilineText(text)
+    MultilineText()
+
+Free-form text that may span several lines — a note, a comment, a description.
+Declare a route argument or fixed field as `MultilineText`
+(`@post flag(; note::MultilineText)`) and generated operation forms render it
+as a `<textarea>` instead of the single-line `<input>` an ordinary `String`
+gets. The route body receives a `MultilineText`: an `AbstractString` backed by
+a `String`, which `String(note)` returns unchanged. A submitted value's line
+breaks arrive as `\\n`, whether the browser sent `\\r\\n`, `\\r` or `\\n`.
+
+An optional argument needs a `MultilineText` default (`note::MultilineText =
+MultilineText()`), because Julia checks a keyword's declared type. A string
+literal default, `MultilineText("…")`, also prefills the textarea; any other
+default expression leaves it blank, and a blank submission uses the default.
+"""
+struct MultilineText <: AbstractString
+    value::String
+    MultilineText(text::AbstractString) = new(String(text))
+    MultilineText() = new("")
+end
+Base.codeunit(::MultilineText) = UInt8
+Base.ncodeunits(text::MultilineText) = ncodeunits(text.value)
+Base.codeunit(text::MultilineText, i::Integer) = codeunit(text.value, i)
+Base.isvalid(text::MultilineText, i::Integer) = isvalid(text.value, i)
+Base.iterate(text::MultilineText) = iterate(text.value)
+Base.iterate(text::MultilineText, i::Integer) = iterate(text.value, i)
+Base.print(io::IO, text::MultilineText) = print(io, text.value)
+Base.String(text::MultilineText) = text.value
 
 # Multi-value append for repeated multipart field names. Value-type-agnostic
 # (works for `Upload` and `String` parts alike), mirroring `_form_append`.
@@ -4715,6 +4746,10 @@ _convert_param(val, ::Nothing) = val
 # SubString{String}; without a coercion the typed iscached method dispatch
 # misses (it only matches ::String, not ::SubString{String}).
 _convert_param(val::AbstractString, T::Type{<:AbstractString}) = convert(T, val)
+# HTML form encoding submits a textarea's line breaks as CRLF; the argument
+# sees one line-break spelling whatever the transport sent.
+_convert_param(val::AbstractString, ::Type{MultilineText}) =
+    MultilineText(replace(val, "\r\n" => "\n", "\r" => "\n"))
 _convert_param(val::AbstractString, ::Type{Symbol}) = Symbol(val)
 # Enum controls submit the shared option wire spelling, not an integer storage
 # code. Recover the exact instance without requiring an application Base.parse.
@@ -12136,7 +12171,9 @@ end
     Long(x)
 
 Convert a symbol/string to a human-readable label by replacing underscores with spaces.
-Add methods for custom labels: `Long(::Val{:pk}) = "Pharmacokinetics"`.
+Generated operation forms use it only as a fallback: an argument documented in
+the route docstring's `# Arguments` section (``- `name`: Label``) is labelled
+with that entry instead.
 """
 Long(x) = replace(string(x), "_" => " ")
 Long(nt::NamedTuple) = Long(_aname(nt))
@@ -12590,17 +12627,35 @@ function _semantic_control(obj, owner, param, values;
         end
     end
 
-    required_attrs = param.required ? (; required="true") : (;)
-    T = param.type
-    if T isa Type && T === Bool
-        return cinput(string(param.name); label, checked=something(value, false),
-                      required_attrs...)
-    elseif T isa Type && T <: Number
-        return ninput(string(param.name); label, value=something(value, 0),
-                      required_attrs...)
-    end
-    linput(string(param.name); label, value=something(value, ""), required_attrs...)
+    _typed_control(param.type, string(param.name), label, value,
+                   param.required ? (; required="true") : (;))
 end
+
+# The control an input without a finite domain gets from its declared type.
+_typed_control(T, name, label, value, required_attrs) =
+    linput(name; label, value=something(value, ""), required_attrs...)
+_typed_control(::Type{Bool}, name, label, value, required_attrs) =
+    cinput(name; label, checked=something(value, false), required_attrs...)
+_typed_control(::Type{<:Number}, name, label, value, required_attrs) =
+    ninput(name; label, value=something(value, 0), required_attrs...)
+_typed_control(::Type{MultilineText}, name, label, value, required_attrs) =
+    tinput(name; label, value=_multiline_text_value(value), required_attrs...)
+
+# A submitted or stored value fills the textarea as-is. A route default is the
+# unevaluated source expression, and a `MultilineText` default can only be
+# written as a constructor call, so recover the string literal it wraps. Any
+# other default expression leaves the textarea blank; a blank submission is an
+# absent argument, so the route's own default still applies.
+_multiline_text_value(value::AbstractString) = String(value)
+_multiline_text_value(value) = ""
+function _multiline_text_value(value::Expr)
+    Meta.isexpr(value, :call) && _is_multiline_text_ref(value.args[1]) || return ""
+    length(value.args) == 1 && return ""
+    length(value.args) == 2 && value.args[2] isa AbstractString || return ""
+    String(value.args[2])
+end
+_is_multiline_text_ref(callee) = callee === :MultilineText ||
+    Meta.isexpr(callee, :.) && callee.args[end] == QuoteNode(:MultilineText)
 
 function _semantic_context_inputs(route, values)
     nodes = Any[]

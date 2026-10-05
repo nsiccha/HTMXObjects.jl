@@ -719,9 +719,10 @@ target. An option-backed `@param` is also `kind=:context`, with
 shared-control identity, while submission continues through `@param` request
 extraction rather than remaking fixed object state.
 
-So, to answer the obvious question directly: labels, help text, units and
-ordering are **not** declarable, and there is no effect/side-effect policy key
-at all.
+So, to answer the obvious question directly: help text, units and ordering are
+**not** declarable, and there is no effect/side-effect policy key at all. A
+control's label is the argument's documentation, not a separate declaration:
+write it in the route docstring's `# Arguments` section, as below.
 
 #### Injected inputs — the `internal` flag
 
@@ -758,9 +759,9 @@ faithful account of the generated signature, and the verb is reachable as
 | What you want to control | Where it actually comes from |
 |--------------------------|------------------------------|
 | Operation card title | The route's **docstring** — first non-empty line; falls back to a humanised property name |
-| Control label | The param's doc as recorded by `reflect(T)`; falls back to a humanised input name |
+| Control label | The param's doc as recorded by `reflect(T)` — for a route argument, its ``- `name`: Label`` entry under the route docstring's `# Arguments` heading; falls back to a humanised input name |
 | Control order | Shared context discovery order, then route parameter declaration order — there is no ordering key |
-| Which control is rendered | `domain` if present, else the declared Julia `type` |
+| Which control is rendered | `domain` if present, else the declared Julia `type` — declare free-form prose as [`MultilineText`](@ref) for a `<textarea>` |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |
 | Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key. Defaults to `:auto`; it governs every route under the app root, not just compiled operations; see [What the policy governs](#What-the-policy-governs) |
@@ -824,7 +825,36 @@ Given a resolved domain the control is picked by this rule, in order:
 `allow_custom` → `sinput_custom`; otherwise not `multiple` and at most
 `radio_max` options (default 4) → a radio `fieldset`; otherwise a `<select>`.
 Only with no domain, or `kind=:unrestricted`, does the input fall back to the
-type-driven control.
+type-driven control: `Bool` renders a checkbox, a `Number` a number input,
+[`MultilineText`](@ref) a `<textarea>`, and anything else — `String` included
+— a single-line text input.
+
+A `String` cannot carry a line break through a single-line input, so declare
+free-form prose as `MultilineText`. The documented argument below renders as a
+required `<textarea>` labelled "What looks wrong with this model":
+
+```julia
+@htmx struct ModelActions
+    """
+    Flag this model
+
+    # Arguments
+    - `note`: What looks wrong with this model
+    """
+    @post flag(; note::MultilineText) = record_flag(String(note))
+end
+```
+
+The body receives a `MultilineText`, an `AbstractString` backed by a `String`,
+with every submitted line break as `\n`. An optional argument defaults to
+`MultilineText()` (Julia enforces the declared keyword type, so a bare `""`
+default is a `TypeError`). A `MultilineText("…")` string-literal default
+prefills the textarea; any other default expression leaves it blank, and a
+blank submission uses the default.
+
+```@docs
+MultilineText
+```
 
 `operation_form(...; presentation=:cards)` is an explicit rich-presentation
 override for finite, single-choice domains. It emits one native radio label per
@@ -1154,7 +1184,8 @@ See the [Components catalog](components.md) for the full list with examples.
 | `hidden_inputs(; key=val, …)`   | A `Vector{Node}` of `<input type="hidden">` elements    |
 | `query_url(path; …)` / `@query_url`  | URL with encoded query string, type-safe                |
 | `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group` | Form input widgets (label, select, radio, number, checkbox, textarea, autocomplete, …) |
-| `Long`                          | Marker type for long-text fields                          |
+| `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
+| `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |
 | `tabset`, `tabset_styles`, `htmx_tabset` | Tab navigation widgets                            |
 | `comparison_view`, `comparison_js`, `comparison_styles` | Inline tabs and a selectable comparison dialog with independently loaded and scrolling columns; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
