@@ -23,6 +23,8 @@ using TestItemRunner
         @include rows(row::Int) = TargetLeaf(string(row), :short)
         @include items(item::String) = TargetLeaf(item, :short)
         @get detail(; row::Int) = semantic_app(rows(row);
+            submit=entry -> h.span("Run ", h.strong(entry.title)),
+            submit_attrs=entry -> (; title="Run $(entry.name)", aria_label="Run $(entry.name)"),
             render_operation=entry -> h.div(entry.form, entry.result))
     end
 
@@ -86,21 +88,32 @@ end
             var all = Array.from(document.querySelectorAll('[id]')).map(el => el.id);
             require(new Set(all).size === all.length, 'duplicate DOM ids');
             var read2 = form(2, 'get', 'read');
+            var button2 = read2.querySelector('button[type="submit"]');
+            var buttonMarkup = button2.innerHTML;
             var target2 = read2.getAttribute('hx-target');
             var otherRead = result(1, 'get', 'read');
             var otherWrite = result(2, 'post', 'write');
             var refreshedSettled = false;
             row(2).addEventListener('htmx:afterSettle', function(event) {
-              if (event.target.tagName === 'FORM') refreshedSettled = true;
+              if (event.target.classList.contains('htmxo-semantic-controls')) refreshedSettled = true;
             });
-            await htmx.ajax('GET', read2.getAttribute('hx-get') + '?__htmxo_form=1', {
-              source: read2, target: read2, swap: 'outerHTML', values: {mode: 'long'}
+            var controls2 = read2.querySelector('.htmxo-semantic-controls');
+            var context2 = document.querySelector(read2.getAttribute('hx-include'));
+            var sharedNames = Array.from(new Set(Array.from(context2.querySelectorAll('[name]')).map(el => el.name))).join(',');
+            await htmx.ajax('GET', read2.getAttribute('hx-get') + '?__htmxo_form=1&__htmxo_controls=1', {
+              source: read2, target: controls2, swap: 'outerHTML', values: {
+                mode: 'long', __htmxo_shared_context: sharedNames,
+                __htmxo_context_selector: read2.getAttribute('hx-include')
+              }
             });
-            await until(() => refreshedSettled, 'refreshed form initialized');
-            read2 = form(2, 'get', 'read');
+            await until(() => refreshedSettled, 'refreshed controls initialized');
+            require(read2 === form(2, 'get', 'read'), 'refresh replaced form');
             require(read2.getAttribute('hx-target') === target2, 'refresh changed target');
-            require(read2.querySelector('[name="__htmxo_target_id"]').value === target2,
-                    'refresh lost target state');
+            require(read2.querySelector('button[type="submit"]') === button2, 'refresh replaced button');
+            require(button2.innerHTML === buttonMarkup, 'refresh changed rich submit content');
+            require(button2.title === 'Run read' && button2.getAttribute('aria-label') === 'Run read',
+                    'refresh lost button decoration');
+            require(!read2.querySelector('[name^="__htmxo_"]'), 'internal settings are successful inputs');
             var choice = read2.querySelector('[name="choice"][value="c"]');
             require(!!choice, 'dependent refresh did not update choices');
             // The shared field remains the source of context at submission.
@@ -220,7 +233,7 @@ end
     @test ids(TargetHost(; __cache_base__=mktempdir()).rows(1)) == ids(root.rows(1))
     for entry in [left; right]
         @test contains(repr("text/html", entry.form), "hx-target=\"#$(entry.target_id)\"")
-        @test contains(repr("text/html", entry.form), "name=\"__htmxo_target_id\" value=\"#$(entry.target_id)\"")
+        @test !contains(repr("text/html", entry.form), "name=\"__htmxo_")
         @test contains(repr("text/html", entry.result), "id=\"$(entry.target_id)\"")
         @test occursin(r"^[A-Za-z][A-Za-z0-9_-]*$", entry.target_id)
     end
