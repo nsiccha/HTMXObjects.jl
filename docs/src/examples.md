@@ -87,6 +87,42 @@ run it locally.
 
 [View source](https://github.com/nsiccha/HTMXObjects.jl/blob/main/examples/chat.jl)
 
+## Shared settings in a large table
+
+The [standalone source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/shared_settings.jl)
+renders 400 rows with two discovered operations per row. Common `hx_vals`,
+swap policy, and bubbling request/click handlers are declared once on the table's
+enclosing element; row reloads retain that ancestor. The mounted graph owns
+the operations and request context:
+
+```julia
+@htmx struct Row
+    number::Int
+    @param (; session_key, view) = __parent__
+    @options mode = (:short, :long)
+    mode::Symbol
+    @options choice = mode === :short ? (:a, :b) : (:c, :d)
+    @get read(; choice::Symbol=:a) = h.p("read:$(number):$(session_key):$(view):$(mode):$(choice)")
+    @post write(; note::String="hello") = h.p("write:$(number):$(session_key):$(view):$(note)")
+end
+
+@htmx struct App
+    @param session_key::String="demo"
+    @param view::String="compact"
+    @include rows(row::Int) = Row(row, :short)
+end
+
+# Discover the selected row's operations; place its generated forms/results.
+semantic_app(App().rows(7);
+    submit=entry -> h.span("Run ", h.strong(entry.title)),
+    submit_attrs=entry -> (; title="Run $(entry.title)", aria_label="Run $(entry.title)"),
+    render_operation=entry -> h.div(entry.form, entry.result))
+```
+
+See [Sharing settings across a table](api.md#sharing-settings-across-a-table)
+for the common wrapper, selector rules, native form boundary, and byte-size
+acceptance. Run `julia --project examples/shared_settings.jl` to try the full table.
+
 ## Embedded examples
 
 Each app below is rendered into the docs via an HTMX placeholder
