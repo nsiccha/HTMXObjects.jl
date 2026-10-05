@@ -21,7 +21,7 @@ end
     using HTMXObjects, HTTP
     root = SharedSettings.App(; __prefix__="/proxy/demo",
         __req__=HTTP.Request("GET", "/?session_key=token"), __cache_base__=mktempdir())
-    shared = repr("text/html", SharedSettings.table_surface(root))
+    shared = repr("text/html", SharedSettings.table_surface(root; load_operations=true))
     repeated = repeated_settings(shared)
     for html in (shared, repeated)
         @test count("<form ", html) == 800
@@ -48,11 +48,39 @@ end
     @test strip_common(shared) == strip_common(repeated)
     @test ncodeunits(shared) < 0.75 * ncodeunits(repeated)
     route!(root; operation_policy=:blocking)
-    response = dispatch(:GET, "/?session_key=token";
+    response = dispatch(:GET, "/eager?session_key=token";
         headers=["HX-Request" => "true", "X-Forwarded-Prefix" => "/proxy/demo"])
     @test response.status == 200
     @test String(response.body) == shared
     @info "Shared table raw HTML bytes (400 rows / 800 forms)" repeated=ncodeunits(repeated) shared=ncodeunits(shared) saved=ncodeunits(repeated)-ncodeunits(shared)
+end
+
+@testitem "deferred row controls reduce initial table bytes" setup=[SharedSettingsFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    root = SharedSettings.App(; __prefix__="/proxy/demo",
+        __req__=HTTP.Request("GET", "/?session_key=token"), __cache_base__=mktempdir())
+    deferred = repr("text/html", SharedSettings.table_surface(root))
+    eager = repr("text/html", SharedSettings.table_surface(root; load_operations=true))
+    @test count("<tr data-row=", deferred) == 400
+    @test count("<form ", deferred) == 0
+    @test count("Load operations", deferred) == 400
+    @test count("hx-vals=", deferred) == 1
+    has_last_row_url = occursin(r"hx-get=\"/proxy/demo/detail\?[^\"]*\brow=400(?:&amp;[^\"]*)?\"", deferred)
+    @test has_last_row_url
+    @test count("session_key=token", deferred) == 400
+    @test !contains(deferred, ">nothing</div>")
+    @test ncodeunits(deferred) < 0.2 * ncodeunits(eager)
+    route!(root; operation_policy=:blocking)
+    response = dispatch(:GET, "/?session_key=token";
+        headers=["HX-Request" => "true", "X-Forwarded-Prefix" => "/proxy/demo"])
+    @test response.status == 200
+    @test String(response.body) == deferred
+    detail = dispatch(:GET, "/detail?row=400&session_key=token";
+        headers=["HX-Request" => "true", "X-Forwarded-Prefix" => "/proxy/demo"])
+    @test detail.status == 200
+    @test count("<form ", String(detail.body)) == 2
+    @test contains(String(detail.body), "hx-post=\"/proxy/demo/rows/400/write\"")
+    @info "Deferred table raw HTML bytes (400 rows; forms loaded when requested)" eager=ncodeunits(eager) deferred=ncodeunits(deferred) detail=ncodeunits(detail.body) saved=ncodeunits(eager)-ncodeunits(deferred)
 end
 
 @testitem "shared table ancestor behavior survives mounted swaps and form refresh" setup=[SharedSettingsFixtures] tags=[:browser, :semantic] begin
@@ -66,6 +94,7 @@ end
         route!(root; operation_policy=:blocking)
         receipt = Channel{String}(1)
         requests = Any[]
+        page_loads = String[]
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function() {
           function require(value, label) { if (!value) throw new Error(label); }
@@ -79,13 +108,24 @@ end
           function row(n) { return document.querySelector('tr[data-row="' + n + '"]'); }
           function form(n, verb) { return row(n).querySelector('form[hx-' + verb + ']'); }
           function result(n, verb) { return document.querySelector(form(n, verb).getAttribute('hx-target')); }
+          async function loadRow(n) {
+            const settled = new Promise(resolve => row(n).querySelector('.row-operations')
+              .addEventListener('htmx:afterSettle', resolve, {once:true}));
+            row(n).querySelector('button').click();
+            await settled;
+          }
           try {
             const table = document.querySelector('.shared-settings-table');
             const original = form(2, 'get');
-            row(2).querySelector('button').click();
+            if (location.pathname !== '/deferred') require(original && form(1, 'get'), 'eager initial forms');
+            await loadRow(2);
             await until(() => form(2, 'get') !== original, 'relative target reload');
             await until(() => table.querySelector('output').textContent === 'Ready', 'ancestor after-request');
             require(table.dataset.lastRow === '2', 'ancestor click handler');
+            if (!form(1, 'get')) {
+              await loadRow(1);
+              await until(() => form(1, 'get'), 'deferred first row');
+            }
             const read = form(2, 'get');
             const target = read.getAttribute('hx-target');
             const button = read.querySelector('button');
@@ -95,12 +135,14 @@ end
             const mode = context.querySelector('[name="mode"][value="long"]');
             mode.checked = true;
             const controls = read.querySelector('.htmxo-semantic-controls');
+            const refreshed = new Promise(resolve => read.addEventListener('htmx:afterSettle', resolve, {once:true}));
             await htmx.ajax('GET', read.getAttribute('hx-get') + '?__htmxo_form=1&__htmxo_controls=1', {
               source: read, target: controls, swap: 'outerHTML', values: {
                 mode: 'long', session_key: 'token', __htmxo_shared_context: sharedNames,
                 __htmxo_context_selector: read.getAttribute('hx-include')
               }
             });
+            await refreshed;
             await until(() => read.querySelector('[name="choice"][value="c"]'), 'dependent choices');
             require(form(2, 'get') === read && read.getAttribute('hx-target') === target, 'form and target identity');
             require(read.querySelector('button') === button && button.innerHTML === label, 'rich submit identity');
@@ -121,15 +163,18 @@ end
           }
         }, {once:true});
         """))
-        table = repr("text/html", SharedSettings.table_surface(root; indices=1:2))
+        table = repr("text/html", SharedSettings.table_surface(root; indices=1:2, load_operations=true))
+        deferred = repr("text/html", SharedSettings.table_surface(root; indices=1:2))
         htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
         server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             path = HTTP.URI(req.target).path
-            if path in ("/shared", "/repeated")
-                content = path == "/shared" ? table : repeated_settings(table)
+            if path in ("/shared", "/repeated", "/deferred")
+                push!(page_loads, String(req.target))
+                content = path == "/deferred" ? deferred :
+                    path == "/shared" ? table : repeated_settings(table)
                 page = htmx(Raw(content), driver; assets="/test-assets",
                     sse_version=nothing, ws_version=nothing, preload_version=nothing,
                     hyperscript_version=nothing, pico_version=nothing,
@@ -177,8 +222,9 @@ end
                 @test warm.status == 200
                 warm.status == 200 || error(String(warm.body))
             end
-            for path in ("/shared", "/repeated", "/native-get", "/native-post")
+            for path in ("/shared", "/repeated", "/deferred", "/native-get", "/native-post")
                 empty!(requests)
+                empty!(page_loads)
                 mktempdir() do profile
                     process = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port$path`;
                         stdout=devnull, stderr=joinpath(profile, "browser.log")); wait=false)
@@ -206,7 +252,13 @@ end
                     @test !contains(values, "__htmxo_")
                     @test contains(values, path == "/native-get" ? "choice=b" : "note=native")
                 else
-                    @test length(requests) == 4
+                    @test page_loads == [path]
+                    @test length(requests) == (path == "/deferred" ? 5 : 4)
+                    @test count(req -> HTTP.URI(req.target).path == "/proxy/demo/detail", requests) ==
+                        (path == "/deferred" ? 2 : 1)
+                    @test count(req -> HTTP.URI(req.target).path == "/proxy/demo/rows/2/read" &&
+                        !contains(req.target, "__htmxo_form=1"), requests) == 1
+                    @test any(req -> contains(req.target, "__htmxo_controls=1"), requests)
                     @test all(req -> contains(req.target * "&" * req.body, "columns=column1"), requests)
                     @test count(req -> req.method == "POST", requests) == 1
                 end

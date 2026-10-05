@@ -90,7 +90,8 @@ run it locally.
 ## Shared settings in a large table
 
 The [standalone source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/shared_settings.jl)
-renders 400 rows with two discovered operations per row. Common `hx_vals`,
+lists 400 rows and loads each row's two discovered operations when opened.
+The `/eager` route renders all operations up front for comparison. Common `hx_vals`,
 swap policy, and bubbling request/click handlers are declared once on the table's
 enclosing element; row reloads retain that ancestor. The mounted graph owns
 the operations and request context:
@@ -121,7 +122,10 @@ semantic_app(App().rows(7);
 
 See [Sharing settings across a table](api.md#sharing-settings-across-a-table)
 for the common wrapper, selector rules, native form boundary, and byte-size
-acceptance. Run `julia --project examples/shared_settings.jl` to try the full table.
+acceptance. Run `julia --project examples/shared_settings.jl` to try the table:
+the default page starts without operation forms, and **Load operations** fetches
+only the chosen row. The measured initial 400-row HTML is 88,748 bytes versus
+912,836 bytes when all forms are present (90.3% smaller).
 
 ## Embedded examples
 

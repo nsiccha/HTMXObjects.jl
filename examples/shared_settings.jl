@@ -29,6 +29,7 @@ end
     @include rows(row::Int) = Row(row, :short)
     __page__(content) = htmx(h.main(content))
     @get index() = table_surface(__self__)
+    @get eager() = table_surface(__self__; load_operations=true)
     @get detail(; row::Int) = operation_surface(rows(row))
 end
 
@@ -37,21 +38,22 @@ operation_surface(row) = semantic_app(row;
     submit_attrs=entry -> (; title="Run $(entry.title)", aria_label="Run $(entry.title)"),
     render_operation=entry -> h.div(entry.form, entry.result))
 
-function table_row(app, number)
+function table_row(app, number; load_operations=false)
     h.tr(
         h.td("Row $(number)"),
         h.td(
-            h.button("Reload operations"; type="button",
+            h.button(load_operations ? "Reload operations" : "Load operations"; type="button",
                 hx_get=query_url(app / "detail"; row=number, session_key=app.session_key),
                 hx_target="next .row-operations"),
-            h.div(operation_surface(app.rows(number)); class="row-operations")),
+            h.div(load_operations ? operation_surface(app.rows(number)) : "";
+                class="row-operations")),
         data_row=number)
 end
 
-function table_surface(app; indices=1:400)
+function table_surface(app; indices=1:400, load_operations=false)
     h.div(
         h.table(h.thead(h.tr(h.th("Row"), h.th("Operations"))),
-                h.tbody((table_row(app, number) for number in indices)...)),
+                h.tbody((table_row(app, number; load_operations) for number in indices)...)),
         h.output("Ready"; aria_live="polite");
         class="shared-settings-table", TABLE_SETTINGS...)
 end
