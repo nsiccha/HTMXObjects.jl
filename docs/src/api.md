@@ -359,9 +359,10 @@ attributes, so selection performs a full browser navigation: the selected
 request rebuilds the page shell and navigation as well as its route fragment.
 HTMX remains only on controls that need a dependent-domain refresh before
 submission, and navigation mode is retained across that refresh. Static native
-forms omit the internal refresh query fields; dynamic forms carry reconstruction
-settings on the HTMX refresh URL rather than as successful form controls, so the
-eventual browser location stays clean. The mode is GET-only and requires context
+forms omit internal refresh fields; dynamic forms refresh only their control
+region, leaving the form and button in place. Only control-rendering settings
+ride the HTMX refresh URL, so the eventual browser location stays clean.
+The mode is GET-only and requires context
 inside the form; `semantic_app` operation cards remain local HTMX swaps. A raw
 `hx_push_url="/custom"` is still available in that default HTMX mode, but
 changing history alone does not rebuild an outer shell. Native navigation owns
@@ -418,7 +419,7 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
@@ -430,6 +431,30 @@ defaults can feed `entry.title => (entry.object / entry.route.path)` into
 `comparison_view`. This preserves the mounted index and external prefix;
 `entry.path` is the reflected graph path. Use generated forms/results when
 current context or form values need submission.
+
+`submit` supplies **content inside the generated submit button**. It can be text
+or presentational `h.*` nodes; avoid nesting another button, link, or input.
+`submit_attrs` decorates the interactive button itself, so tooltip and accessible
+label attributes belong there:
+
+```julia
+semantic_app(app.models(:chosen);
+    submit=entry -> h.span(h.span(; class="icon", aria_hidden="true")),
+    submit_attrs=entry -> (; title=entry.title, aria_label=entry.title, class="compact"),
+    render_operation=entry -> h.div(entry.form, entry.result))
+```
+
+Both keywords accept a fixed value or an operation-entry callback.
+`operation_form(...; submit, submit_attrs=(; title="Run", aria_label="Run"))`
+uses the same button contract. Form-level `kwargs` continue to decorate the
+form. Button submission attributes (`type`, `name`, `value`, `form*`, `hx_*`)
+are compiler-owned; presentation cannot redirect the operation or its result.
+
+Dependent refresh updates only `.htmxo-semantic-controls` and does not execute
+the operation. The form, its attributes and target, and the original rich button
+remain in place. Submit content never rides a hidden input as Julia text;
+generated forms carry only the request/context inputs needed for submission.
+Older full-form refresh requests remain accepted for already-rendered pages.
 
 ```@docs
 semantic_descriptor

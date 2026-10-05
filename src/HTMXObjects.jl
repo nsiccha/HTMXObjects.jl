@@ -12789,13 +12789,15 @@ function _semantic_refresh_dependencies(route)
     dependencies
 end
 
-function _semantic_refresh_attrs(route, action, settings=(;))
+function _semantic_refresh_attrs(route, action, settings=(;); context_selector=nothing)
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     refresh_url = _operation_marker_url(string(action), "__htmxo_form")
     refresh_url = query_url(refresh_url; settings...)
     method_attrs = NamedTuple{(method_key,)}((refresh_url,))
-    merge(method_attrs, (hx_trigger="change", hx_include="closest form",
-                         hx_target="closest form", hx_swap="outerHTML"))
+    include_selector = isnothing(context_selector) ? "closest form" :
+        "closest form, $(context_selector)"
+    merge(method_attrs, (hx_trigger="change", hx_include=include_selector,
+                         hx_target="closest .htmxo-semantic-controls", hx_swap="outerHTML"))
 end
 
 function _operation_form_setting(req, name, default=nothing)
@@ -12854,11 +12856,21 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
     shared_context = _semantic_context_names(
         _operation_form_setting(req, :__htmxo_shared_context, ""))
-    value = operation_form(target.leaf, route; values=extracted.values,
+    controls_only = _operation_poll_marker(get(queryparams(req), "__htmxo_controls", nothing))
+    value = if controls_only
+        current = _semantic_form_values(target.leaf, route, extracted.values)
+        only(_operation_form_controls(target.leaf, route, current, request_path;
+            radio_max, presentation, shared_names=shared_context, context_selector,
+            fragment=true))
+    else
+        # Accept full-form refresh requests from pages rendered before the
+        # controls-only protocol; new pages keep the form and button in place.
+        operation_form(target.leaf, route; values=extracted.values,
                            target=request_path, target_id, swap, submit,
                            form_class, radio_max, navigate, presentation,
                            context_selector,
                            shared_context)
+    end
     kw_pairs = Pair{Symbol,Any}[
         param.name => extracted.values[param.name] for param in route.params
         if param.source !== :path && get(param, :kind, nothing) !== :context &&
@@ -12891,9 +12903,60 @@ function _operation_route(T, name::Symbol, verb::Symbol)
     only(candidates)
 end
 
+function _operation_form_controls(obj, route, current, action;
+        radio_max=4, presentation=:auto, shared_names=Set{Symbol}(),
+        context_selector=nothing, fragment=false)
+    presentation in (:auto, :cards) || throw(ArgumentError(
+        "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
+    refresh_dependencies = _semantic_refresh_dependencies(route)
+    settings = (; __htmxo_controls=1)
+    radio_max == 4 || (settings = merge(settings, (; __htmxo_radio_max=radio_max)))
+    presentation === :auto || (settings = merge(settings, (; __htmxo_presentation=presentation)))
+    isempty(shared_names) || (settings = merge(settings, (;
+        __htmxo_shared_context=join(string.(sort!(collect(shared_names))), ','))))
+    isnothing(context_selector) || (settings = merge(settings, (;
+        __htmxo_context_selector=context_selector)))
+    context_controls = Any[]
+    controls = Any[]
+    for param in route.params
+        param.source === :path && continue
+        get(param, :kind, nothing) === nothing && continue
+        get(param, :kind, nothing) === :context && param.name in shared_names && continue
+        control = _semantic_control(obj, route.owner, param, current; radio_max, presentation)
+        if param.name in refresh_dependencies
+            control = h.div(control;
+                _semantic_refresh_attrs(route, action, settings; context_selector)...)
+        end
+        push!(get(param, :kind, nothing) === :context ? context_controls : controls, control)
+    end
+    local_context = isempty(context_controls) ? Any[] : Any[
+        h.fieldset(h.legend("Model inputs"), context_controls...;
+                   class="htmxo-semantic-context")
+    ]
+    children = Any[local_context..., controls...]
+    # Static forms keep their existing layout, including a button-only form.
+    # Dependent forms need a region that can swap without replacing the form.
+    fragment || !isempty(refresh_dependencies) ?
+        Any[h.div(children...; class="htmxo-semantic-controls")] : children
+end
+
+function _operation_submit_attributes(attributes)
+    attrs = (; attributes...)
+    reserved = [key for key in keys(attrs) if let name = lowercase(replace(string(key), '_' => '-'))
+        name in
+            ("type", "name", "value", "form", "formaction", "formmethod",
+             "formenctype", "formtarget", "formnovalidate") ||
+        startswith(name, "hx-") || startswith(name, "data-hx-")
+    end]
+    isempty(reserved) || throw(ArgumentError(
+        "submit_attrs decorates the generated button; submission attributes are " *
+        "compiler-owned: $(join(string.(reserved), ", "))"))
+    merge(attrs, (; type="submit"))
+end
+
 """
-    operation_form(obj, name::Symbol; verb=:GET, values=(;), navigate=false,
-                   presentation=:auto, kwargs...)
+    operation_form(obj, name::Symbol; verb=:GET, values=(;), submit="Run",
+                   submit_attrs=(;), navigate=false, presentation=:auto, kwargs...)
     operation_form(obj, route::NamedTuple; values=(;), target=obj/route.path, kwargs...)
 
 Generate an HTMX form from a merged semantic route descriptor. Static domains
@@ -12902,6 +12965,13 @@ provider from the supplied current `values`; unrestricted values use typed
 boolean, numeric, or text controls. Positional path inputs must be supplied in
 `values` and are encoded into the route URL. Submitted values still pass through
 the shared typed extractor and current-domain validation on the server.
+
+`submit` is the generated button's content: plain text or rich presentational
+nodes, not a replacement button. `submit_attrs=(; title="Run", aria_label="Run",
+class="compact")` decorates that interactive button. Submission attributes
+(`type`, `name`, `value`, `form*`, and `hx_*`) remain compiler-owned. The button
+content and attributes stay in the DOM across dependent-control refreshes;
+neither is serialized into hidden fields or sent back to the server.
 
 Enclosing `@param` values without a declared domain are inferred from the
 current request and carried as hidden inputs. An `@param` with matching
@@ -12963,13 +13033,16 @@ delegate explicitly:
     end
 
 When a dynamic domain declares dependencies, changing one of those controls
-rerenders the generated form through the same verb and route without executing
-the operation. The refreshed form retains `target_id`, `swap`, submit label,
-form class, radio threshold, presentation policy, and navigation mode.
+rerenders only the `.htmxo-semantic-controls` region through the same verb and
+route without executing the operation. The existing form retains its result
+target, swap, attributes, submit button, and navigation mode. The refresh URL
+carries only the settings needed to rebuild controls; inherited request inputs
+remain successful form controls. Full-form requests from older rendered pages
+remain supported.
 """
 function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
-        submit="Run", target_id=nothing, swap="innerHTML", radio_max::Int=4,
+        submit="Run", submit_attrs=(;), target_id=nothing, swap="innerHTML", radio_max::Int=4,
         form_class="", navigate::Bool=false, presentation::Symbol=:auto,
         shared_context=(),
         context_selector=nothing, kwargs...)
@@ -12983,7 +13056,6 @@ function operation_form(obj, route::NamedTuple; values=(;),
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
     current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
-    refresh_dependencies = _semantic_refresh_dependencies(route)
     shared_names = _semantic_context_names(shared_context)
     if navigate
         route.verb === :GET || throw(ArgumentError(
@@ -12998,60 +13070,9 @@ function operation_form(obj, route::NamedTuple; values=(;),
         isempty(shared_names) || throw(ArgumentError(
             "operation_form navigate=true does not support shared external context"))
     end
-    refresh_settings = navigate ? merge((;
-        __htmxo_swap=swap,
-        __htmxo_submit=submit,
-        __htmxo_form_class=form_class,
-        __htmxo_radio_max=radio_max,
-        __htmxo_navigate=true,
-        __htmxo_target_id=target_id,
-    ), presentation === :auto ? (;) : (;
-        __htmxo_presentation=presentation,
-    )) : (;)
-    context_controls = Any[]
-    controls = Any[]
-    for param in route.params
-        param.source === :path && continue
-        get(param, :kind, nothing) === nothing && continue
-        get(param, :kind, nothing) === :context &&
-            param.name in shared_names && continue
-        control = _semantic_control(obj, route.owner, param, current;
-                                    radio_max, presentation)
-        if param.name in refresh_dependencies
-            control = h.div(control;
-                _semantic_refresh_attrs(route, action, refresh_settings)...)
-        end
-        if get(param, :kind, nothing) === :context
-            push!(context_controls, control)
-        else
-            push!(controls, control)
-        end
-    end
-    local_context = isempty(context_controls) ? Any[] : Any[
-        h.fieldset(h.legend("Model inputs"), context_controls...;
-                   class="htmxo-semantic-context")
-    ]
+    controls = _operation_form_controls(obj, route, current, action;
+        radio_max, presentation, shared_names, context_selector)
     context_inputs = _semantic_context_inputs(route, current)
-    # Default HTMX forms retain their established hidden reconstruction state.
-    # Native forms instead put that state directly on a dependent control's
-    # refresh URL, so no internal transport fields are successful controls in
-    # the final browser GET.
-    config_inputs = navigate ? Any[] : hidden_inputs(
-        __htmxo_swap=swap,
-        __htmxo_submit=submit,
-        __htmxo_form_class=form_class,
-        __htmxo_radio_max=radio_max,
-    )
-    if !isempty(config_inputs)
-        presentation === :auto || append!(config_inputs,
-            hidden_inputs(__htmxo_presentation=presentation))
-        isempty(shared_names) || append!(config_inputs,
-            hidden_inputs(__htmxo_shared_context=join(string.(sort!(collect(shared_names))), ',')))
-        isnothing(context_selector) || append!(config_inputs,
-            hidden_inputs(__htmxo_context_selector=context_selector))
-        isnothing(target_id) || append!(config_inputs,
-            hidden_inputs(__htmxo_target_id=target_id))
-    end
     form_attrs = if navigate
         merge((; class=form_class), (; kwargs...), (; method="get", action))
     else
@@ -13063,8 +13084,8 @@ function operation_form(obj, route::NamedTuple; values=(;),
         merge(method_attrs, target_attrs, swap_attrs, include_attrs,
               (; class=form_class), (; kwargs...))
     end
-    h.form(context_inputs..., config_inputs..., local_context..., controls...,
-           h.button(submit; type="submit");
+    h.form(context_inputs..., controls...,
+           h.button(submit; _operation_submit_attributes(submit_attrs)...);
            form_attrs...)
 end
 
@@ -13253,7 +13274,7 @@ function _activate_semantic_root_provider!(obj)
 end
 
 """
-    semantic_app(obj; values=(;), title=nothing, submit="Run",
+    semantic_app(obj; values=(;), title=nothing, submit="Run", submit_attrs=(;),
                  render_operation=_default_semantic_operation)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
@@ -13274,7 +13295,10 @@ route/prefix context uses same-type remounting. Unrelated retained caches remain
 shared.
 
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
-of an operation entry. `submit` may likewise be a value or function. Override
+of an operation entry. `submit` and `submit_attrs` may likewise be values or
+functions of that entry. `submit` supplies content inside the generated button;
+`submit_attrs` supplies its presentation attributes, such as `title`,
+`aria_label`, and `class`, while the compiler owns submission and targets. Override
 `render_operation(entry)` for local layout; the entry carries `object`, `route`,
 `name`, `verb`, `path`, `title`, `target_id`, `form`, and `result`.
 For a parameter-free GET operation using fixed defaults, its mounted URL is
@@ -13304,7 +13328,7 @@ one mounted child, when `(verb, path)` identities collide, or when an indexed
 `@include` has no selected runtime child. Call `semantic_app` on a selected
 indexed child to compile that subtree.
 """
-function semantic_app(obj; values=(;), title=nothing, submit="Run",
+function semantic_app(obj; values=(;), title=nothing, submit="Run", submit_attrs=(;),
         render_operation=_default_semantic_operation)
     descriptor = semantic_descriptor(obj)
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
@@ -13339,10 +13363,11 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
         )
         operation_values = _semantic_app_setting(values, base_entry)
         operation_submit = _semantic_app_setting(submit, base_entry)
+        operation_submit_attrs = _semantic_app_setting(submit_attrs, base_entry)
         runtime_route = _semantic_runtime_route(mounted, local_route)
         current = _semantic_form_values(mounted, runtime_route, operation_values)
         push!(specs, (; base_entry, mounted, local_route, runtime_route,
-                       current, operation_values, operation_submit))
+                       current, operation_values, operation_submit, operation_submit_attrs))
     end
 
     context_entries = Any[]
@@ -13394,6 +13419,7 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run",
             values=spec.operation_values,
             target_id="#$(target_id)",
             submit=spec.operation_submit,
+            submit_attrs=spec.operation_submit_attrs,
             form_class="htmxo-semantic-operation-form",
             shared_context,
             context_selector=selector,
