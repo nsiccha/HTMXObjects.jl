@@ -506,9 +506,11 @@ ancestor. Do not replace their generated controls or stable target addresses
 with a parallel operation list.
 
 The standalone [shared-settings table example](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/shared_settings.jl)
-uses this shape for 400 indexed mounts and 800 descriptor-discovered GET/POST
-forms, with rich submit labels, one common settings ancestor, and reloadable
-row fragments. Run `julia --project examples/shared_settings.jl`. Its regression
+uses this shape for 400 indexed mounts, with rich submit labels, one common
+settings ancestor, and loadable row fragments. Run
+`julia --project examples/shared_settings.jl`. The default page loads a row's
+two discovered GET/POST forms when its **Load operations** button is clicked;
+`/eager` renders all 800 forms up front for comparison. Its regression
 fixture compares raw serialized bytes against the same markup with attributes
 repeated on every row and exercises both shapes in a real browser. The reference
 capture is 1,273,931 bytes repeated versus 912,836 bytes shared: 361,095 bytes
@@ -517,14 +519,41 @@ checks that the mounted HTTP response body equals the measured shared markup.
 This measures payload savings for that table, not a full-application latency
 improvement.
 
+**Render controls when needed.** Sharing settings removes repeated attributes;
+loading a row's operation surface on demand also avoids generating and sending
+the unopened forms. The example uses its ordinary mounted `detail` route:
+
+```julia
+h.td(
+    h.button("Load operations"; type="button",
+        hx_get=query_url(app / "detail"; row=number, session_key=app.session_key),
+        hx_target="next .row-operations"),
+    h.div(""; class="row-operations"))
+# detail returns operation_surface(app.rows(number)), using semantic_app.
+```
+
+The same 400 row summaries then start at **88,748 bytes**, compared with
+912,836 bytes including every form: **824,088 bytes saved (90.3%)**. The
+measured last-row fragment is 2,062 bytes. The mounted HTTP response matches
+the smaller serialization, and browser acceptance loads two independent rows,
+refreshes dependent controls, and submits both GET and POST under the original
+shared ancestor. No new settings or deferred-rendering API is involved.
+
+Opening a row requires an extra request. Opening every row eventually loads
+all its controls; this reduces initial HTML and DOM size. For a large number
+of summaries, render a bounded range as well (for example,
+`table_surface(app; indices=1:25)`) and provide page navigation in the app.
+Use the eager shape when simultaneous controls for every row are required.
+
 **Native submissions use successful HTML controls.** `hx_vals` and `hx_include`
 add values to htmx requests only; they do not supply a native form submission.
 Preserve the generated hidden request inputs. For a standalone native GET,
 use `operation_form(...; navigate=true)`, which keeps context inside the form.
 For a low-level POST with a native fallback, pass
 `method="post", action=leaf / "write"` to `operation_form(leaf, :write; verb=:POST, …)`.
-An external shared context panel still needs htmx; choosing a native standalone
-form keeps its controls local. Shared ancestor settings do not change that
+The example's load button and an external shared context panel need htmx;
+choosing a native standalone form keeps its controls local.
+Shared ancestor settings do not change that
 boundary or the server's typed/domain validation.
 
 The [htmx inheritance guide](https://htmx.org/docs/#inheritance),
