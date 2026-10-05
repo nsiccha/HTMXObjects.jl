@@ -272,7 +272,10 @@ comparison_view(
 
 `presentation=:inline` shows the same checkboxes and the selected columns
 directly in the page, with no tabs, Compare button or dialog. Unselected views
-stay hidden in place. The comparison is limited to the viewport height
+stay hidden in place. Select one or more views; a single selected pane fills
+the available width. An initial single selection uses `selected=(2,)`.
+The dialog presentation continues to require at least two selected views.
+The comparison is limited to the viewport height
 (`--htmxo-comparison-height`, default `100dvh`; subtract a sticky header with
 `calc(100dvh - 4rem)` for a 4rem header), and each column scrolls independently. Nested fixed
 `max-height` rules inside a column add a second, shorter scroll area.

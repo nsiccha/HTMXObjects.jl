@@ -81,7 +81,7 @@ end
     @test !contains(html, "data-htmxo-compare-home")
     @test count("data-htmxo-compare-choice", html) == 4
     @test count("checked=\"true\"", html) == 3
-    @test contains(html, "<legend>Select at least two views</legend>")
+    @test contains(html, "<legend>Select at least one view</legend>")
     @test contains(html, "role=\"status\"")
     @test count("<section", html) == 4
     @test count("hidden=\"true\"", html) == 1
@@ -96,7 +96,16 @@ end
     @test_throws ArgumentError comparison_view("one" => content, "two" => content; id="x", presentation=:inline, active=1)
     # Refused: presentations are a closed set; an unknown one must not fall back.
     @test_throws ArgumentError comparison_view("one" => content, "two" => content; id="x", presentation=:dialog)
-    @test_throws ArgumentError comparison_view("one" => content, "two" => content; id="x", presentation=:inline, selected=(1,))
+    single = repr("text/html", comparison_view("one" => "/pane/one", "two" => "/pane/two";
+        id="single", presentation=:inline, selected=(1,)))
+    @test count("checked=\"true\"", single) == 1
+    @test count("hidden=\"true\"", single) == 1
+    @test count("htmxo-md-load consume, load", single) == 1
+    @test count("hx-get=", single) == 2
+    # Refused: inline must display a valid pane rather than an empty grid.
+    @test_throws ArgumentError comparison_view("one" => content, "two" => content; id="x", presentation=:inline, selected=())
+    @test_throws ArgumentError comparison_view("one" => content, "two" => content; id="x", presentation=:inline, selected=(3,))
+    @test_throws ArgumentError comparison_view("one" => content, "two" => content; id="x", presentation=:inline, selected=("1",))
 end
 
 @testitem "comparison generated forms retain shared context" setup=[ComparisonBrowserFixtures] tags=[:unit, :browser, :semantic] begin
@@ -318,10 +327,18 @@ end
             toggle(1); toggle(3);
             check('arbitrary-subset', shown() === '2,4,5');
             toggle(2); toggle(5);
-            check('minimum-two', choices[4].checked && shown() === '4,5');
-            check('minimum-message', status.textContent === 'Select at least two views');
+            check('single-selection', !choices[4].checked && shown() === '4');
+            const single = panels[3];
+            const width = single.getBoundingClientRect().width;
+            check('single-fills-width', Math.abs(width - grid.clientWidth) <= 1);
+            check('single-scrolls', getComputedStyle(single).overflowY === 'auto' && single.scrollHeight > single.clientHeight);
+            toggle(4);
+            check('minimum-one', choices[3].checked && shown() === '4');
+            check('minimum-message', status.textContent === 'Select at least one view');
             toggle(6); await wait('loaded-6');
-            check('message-clears', status.textContent === '' && shown() === '4,5,6');
+            check('message-clears', status.textContent === '' && shown() === '4,6');
+            toggle(1);
+            check('reselect-after-single-same-dom', panels[0] === panel && document.getElementById('input-1') === field && field.value === 'kept user input' && shown() === '1,4,6');
             check('labelled-columns', visible.every(p => document.getElementById(p.getAttribute('aria-labelledby')).textContent === 'View ' + p.dataset.htmxoPane));
         """)
         page = repr("text/html", htmx(widget, driver;
