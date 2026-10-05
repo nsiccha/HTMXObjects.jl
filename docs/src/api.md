@@ -1187,7 +1187,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
 | `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |
 | `tabset`, `tabset_styles`, `htmx_tabset` | Tab navigation widgets                            |
-| `comparison_view`, `comparison_js`, `comparison_styles` | Inline tabs and a selectable comparison dialog with independently loaded and scrolling columns; see [components](components.md#comparison-view) |
+| `comparison_view`, `comparison_js`, `comparison_styles` | Selectable comparison columns, either inline tabs with a Compare dialog or shown directly inline, independently loaded and scrolling; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
 | `loading_indicator_script`, `request_feedback_*`, `show_when_script` | UX scripts injected into the page |
 
