@@ -419,7 +419,7 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, and `layout(parts)` places the compiled parts |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
@@ -617,6 +617,48 @@ nothing from the action row. Like generated forms, the buttons need htmx.
 Compact rows reduce the number of generated elements and bytes per operation;
 they do not change which operations exist or how they execute. Rendering many
 same-type rows reads one memoized descriptor per type in either layout.
+
+#### Placing compact parts in table cells
+
+A row may need its buttons spread over existing columns and one result panel
+below them. Pass `results=:shared` and a `layout`:
+
+```julia
+button(parts, name) = only(a.button for a in parts.actions if a.name === name)
+
+row_cells(parts) = (
+    h.tr(h.td(row_summary(parts.object)),
+         h.td(something(parts.context, ""), parts.inputs...,
+              button(parts, :lower), button(parts, :compile)),
+         h.td(button(parts, :primal)),
+         h.td(button(parts, :gradient)),
+         h.td(parts.operations...)),
+    h.tr(h.td(parts.result; colspan="5")))
+
+h.tbody((semantic_app(app.rows(n); compact=true, results=:shared,
+                      layout=row_cells) for n in indices)...)
+```
+
+`results=:shared` renders one `aria-live` result host per surface, with an id
+derived from the mount prefix, so every row's host is distinct. Each button,
+and each form that remains, targets that host by id. A response replaces
+whatever the host showed before, including a running poll. Without
+`results=:shared`, each result stays a separate element that must directly
+follow its button.
+
+`layout(parts)` receives the compiled parts and may return any renderable
+value: here two table rows. `parts` carries `object`, `title`, `context` (the
+shared context group, or `nothing`), `inputs` (the hidden-context holders),
+`actions` (each with `object`, `route`, `name`, `verb`, `path`, `title`,
+`button`, and `result`), `operations` (what `render_operation` returned), and
+`result` (the shared host, or `nothing`). The compiler keeps the URL, verb,
+included context, target, and polling on each button; the layout only places
+it. Holders and the context group are included by id, so they can sit in any
+cell. Place the context group, every holder, button, and result, and the shared
+host exactly once, as the nodes given. Do not rebuild them, for example with
+call syntax. A layout that omits, repeats, or rebuilds one of these throws an
+`ArgumentError` naming it. Put holders inside a cell, since a `<div>` directly
+inside `<tr>` is moved out of the table by the browser.
 
 ### Reusing generated markup
 

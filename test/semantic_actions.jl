@@ -2,7 +2,8 @@ using TestItemRunner
 
 @testmodule SemanticActionFixtures begin
     using HTMXObjects
-    export ActionHost, ActionRow, ActionGraph, ActionGates, action_surface, OrderHost
+    export ActionHost, ActionRow, ActionGraph, ActionGates, action_surface, OrderHost,
+           shared_surface, row_cells, present
 
     const ActionGates = Dict{String,Channel{Nothing}}()
 
@@ -27,10 +28,26 @@ using TestItemRunner
     action_surface(row; kwargs...) = semantic_app(row; compact=true,
         submit_attrs=entry -> (; title=entry.title, aria_label=entry.title), kwargs...)
 
+    # A table row layout: pipeline buttons in the first cell, the other two in
+    # the second, the form operation in the third, and one shared result host
+    # spanning a second row below all three columns.
+    button_of(parts, name) = only(action.button for action in parts.actions
+                                  if action.name === name)
+    present(nodes...) = Any[node for node in nodes if !isnothing(node)]
+    row_cells(parts) = (
+        h.tr(h.td(present(parts.context)..., parts.inputs...,
+                  button_of(parts, :compile), button_of(parts, :source)),
+             h.td(button_of(parts, :reset), button_of(parts, :slow)),
+             h.td(parts.operations...)),
+        h.tr(h.td(parts.result; colspan="3")))
+    shared_surface(row; kwargs...) = action_surface(row; results=:shared,
+        layout=row_cells, kwargs...)
+
     @htmx struct ActionHost
         @param session_key::String = "demo"
         @include rows(row::Int) = ActionRow(string(row))
         @get detail(; row::Int) = action_surface(rows(row))
+        @get shared_detail(; row::Int) = h.table(h.tbody(shared_surface(rows(row))...))
     end
 
     @htmx struct ActionChild
@@ -357,4 +374,276 @@ end
     measured = dispatch(:POST, "/rows/r7/benchmark"; headers,
                         body="session_key=token&failed_only=true&view=compact")
     @test String(measured.body) == "<p>benchmark:r7:true</p>"
+end
+
+@testitem "compact semantic actions place parts through a layout around one shared result" setup=[SemanticActionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    root = ActionHost(; __prefix__="/proxy/demo",
+        __req__=HTTP.Request("GET", "/?session_key=token"), __cache_base__=mktempdir())
+    holder = "htmxo-semantic-actions-_2fproxy_2fdemo_2frows_2f1"
+    host = "htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f1"
+
+    # results=:shared in the default layout: one host, last in the section;
+    # every button and the remaining form target it by id; nothing else is a
+    # result.
+    entries = Any[]
+    shared = repr("text/html", action_surface(root.rows(1); results=:shared,
+        render_operation=entry -> (push!(entries, entry);
+                                   HTMXObjects._default_semantic_operation(entry))))
+    @test count("class=\"htmxo-semantic-operation-result\"", shared) == 1
+    @test endswith(shared, "<div id=\"$(host)\" class=\"htmxo-semantic-operation-result\" " *
+                           "aria-live=\"polite\"></div></section>")
+    @test count("hx-target=\"#$(host)\"", shared) == 5
+    @test !contains(shared, "next .htmxo-semantic-operation-result")
+    @test only(entries).target_id == host
+    @test only(entries).result === nothing
+    @test !contains(shared, "nothing")
+
+    # A table layout places each button in its own cell and the host in a
+    # row-spanning cell below them.
+    cells = repr("text/html", h.tbody(shared_surface(root.rows(1))...))
+    rows = [m.captures[1] for m in eachmatch(r"<tr>(.*?)</tr>", cells)]
+    @test length(rows) == 2
+    tds = [m.captures[1] for m in eachmatch(r"<td>(.*?)</td>", rows[1])]
+    @test length(tds) == 3
+    @test contains(tds[1], "id=\"$(holder)\"")
+    @test contains(tds[1], "hx-post=\"/proxy/demo/rows/1/compile\"")
+    @test contains(tds[1], "hx-get=\"/proxy/demo/rows/1/source\"")
+    @test contains(tds[2], "hx-delete=\"/proxy/demo/rows/1/reset\"")
+    @test contains(tds[2], "hx-post=\"/proxy/demo/rows/1/slow\"")
+    @test contains(tds[3], "<form ") && contains(tds[3], "hx-target=\"#$(host)\"")
+    @test rows[2] == "<td colspan=\"3\"><div id=\"$(host)\" " *
+                     "class=\"htmxo-semantic-operation-result\" aria-live=\"polite\"></div></td>"
+    for m in eachmatch(r"<button[^>]*type=\"button\"[^>]*>", cells)
+        @test contains(m.match, "hx-target=\"#$(host)\"")
+        @test contains(m.match, "hx-include=\"#$(holder), #")
+    end
+
+    # Two rows in one table: unique ids, and each row's buttons address only
+    # their own holder and host.
+    two = repr("text/html", h.table(h.tbody(shared_surface(root.rows(1))...,
+                                            shared_surface(root.rows(2))...)))
+    ids = [m.captures[1] for m in eachmatch(r"\bid=\"([^\"]+)\"", two)]
+    @test length(unique(ids)) == length(ids)
+    for m in eachmatch(r"<button[^>]*hx-(?:get|post|delete)=\"/proxy/demo/rows/(\d)/[^>]*>", two)
+        n = m.captures[1]
+        @test contains(m.match, "hx-target=\"#htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f$(n)\"")
+        @test contains(m.match, "hx-include=\"#htmxo-semantic-actions-_2fproxy_2fdemo_2frows_2f$(n),")
+    end
+
+    # The default layout, passed explicitly through the validated seam, is the
+    # default output.
+    @test repr("text/html", action_surface(root.rows(1);
+              layout=parts -> HTMXObjects._default_semantic_layout(parts))) ==
+          repr("text/html", action_surface(root.rows(1)))
+    @test repr("text/html", action_surface(root.rows(1); results=:shared,
+              layout=parts -> HTMXObjects._default_semantic_layout(parts))) == shared
+
+    # Compiler-owned wiring is placed exactly once, as given.
+    without(parts, name) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
+        (action.button for action in parts.actions if action.name !== name)...)),
+        h.tr(h.td(parts.result)))
+    error_text(f) = try f(); "" catch err; err isa ArgumentError ? err.msg : rethrow() end
+    message = error_text(() -> shared_surface(root.rows(1); layout=parts -> without(parts, :reset)))
+    @test contains(message, "button is placed 0 times")
+    @test contains(message, "reset")
+    @test contains(error_text(() -> shared_surface(root.rows(1); layout=parts ->
+        (row_cells(parts)..., h.tr(h.td(parts.inputs...))))), "hidden-context holder 1 is placed 2 times")
+    @test contains(error_text(() -> shared_surface(root.rows(1); layout=parts ->
+        (without(parts, nothing)[1], h.tr(h.td(h.div(; class="mine")))))),
+        "the shared result host is placed 0 times")
+    # A rebuilt button is a different node, even with the same attributes.
+    rebuilt(parts) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
+        (action.button(; class="mine") for action in parts.actions)...)), h.tr(h.td(parts.result)))
+    @test contains(error_text(() -> shared_surface(root.rows(1); layout=rebuilt)), "placed 0 times")
+    # results=:each keeps each result directly after its button.
+    apart(parts) = h.div(present(parts.context)..., parts.inputs...,
+        (action.button for action in parts.actions)...,
+        (action.result for action in parts.actions)...)
+    @test contains(error_text(() -> action_surface(root.rows(1); layout=apart)),
+                   "result does not directly follow its button")
+    together(parts) = h.div(present(parts.context)..., parts.inputs...,
+        (node for action in parts.actions for node in (action.button, action.result))...)
+    @test count("</button><div class=\"htmxo-semantic-operation-result\"",
+                repr("text/html", action_surface(root.rows(1); layout=together))) == 4
+    @test_throws ArgumentError action_surface(root.rows(1); results=:row)
+
+    # Forms keep the shared host when compact is off.
+    plain_shared = repr("text/html", semantic_app(root.rows(1); results=:shared))
+    @test count("<form ", plain_shared) == 5
+    @test count("hx-target=\"#$(host)\"", plain_shared) == 5
+    @test count("class=\"htmxo-semantic-operation-result\"", plain_shared) == 1
+end
+
+@testitem "shared compact results land in their own row's host in a browser" setup=[SemanticActionFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+        for n in 1:2
+            ActionGates[string(n)] = Channel{Nothing}(1)
+        end
+        route!(ActionHost(; __cache_base__=mktempdir());
+            operation_policy=OperationPolicy(:auto; keep_progress=false))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        requests = String[]
+        diagnostics = h.script(Raw(raw"""
+          window.addEventListener('error', function(event) {
+            fetch('/complete?status=' + encodeURIComponent(event.message));
+          });
+        """))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          function row(n) { return document.getElementById('row' + n); }
+          function host(n) {
+            return document.getElementById('htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f' + n);
+          }
+          function button(n, verb, name) {
+            return row(n).querySelector('button[hx-' + verb + '$="/' + name + '"]');
+          }
+          function text(n) { return host(n).textContent; }
+          async function until(check, label) {
+            var end = Date.now() + 15000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label);
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+          }
+          function require(value, label) { if (!value) throw new Error(label); }
+          document.body.addEventListener('htmx:afterSettle', function(event) {
+            var target = event.detail.target;
+            if (target && /^row[12]$/.test(target.id)) document.body.dataset['settled' + target.id] = 'yes';
+          });
+          document.body.addEventListener('htmx:afterSwap', function() {
+            [1, 2].forEach(function(n) {
+              var h = host(n);
+              if (h && h.querySelector('.treebar-poller')) document.body.dataset['polled' + n] = 'yes';
+            });
+          });
+          try {
+            document.getElementById('expand1').click();
+            await until(() => document.body.dataset.settledrow1 === 'yes', 'row 1 settled');
+            document.getElementById('expand2').click();
+            await until(() => document.body.dataset.settledrow2 === 'yes', 'row 2 settled');
+            var all = Array.from(document.querySelectorAll('[id]')).map(el => el.id);
+            require(new Set(all).size === all.length, 'duplicate DOM ids');
+            // Placement: buttons in their cells, one host in a row-spanning
+            // cell of its own table row, and no other result element.
+            [1, 2].forEach(function(n) {
+              require(button(n, 'post', 'compile').closest('td') === button(n, 'get', 'source').closest('td'),
+                      'pipeline cell ' + n);
+              require(button(n, 'delete', 'reset').closest('td') !== button(n, 'post', 'compile').closest('td'),
+                      'second cell ' + n);
+              require(host(n).closest('td').getAttribute('colspan') === '3', 'spanning host ' + n);
+              require(host(n).closest('tr') !== button(n, 'post', 'compile').closest('tr'), 'host row ' + n);
+            });
+            require(document.querySelectorAll('.htmxo-semantic-operation-result').length === 2,
+                    'only the two hosts are results');
+
+            button(2, 'get', 'source').click();
+            await until(() => text(2).includes('source:2:token'), 'row 2 GET');
+            require(text(1) === '', 'GET filled row 1');
+            button(1, 'post', 'compile').click();
+            await until(() => text(1).includes('compile:1:token'), 'row 1 POST');
+            require(text(2).includes('source:2:token'), 'POST changed row 2');
+            button(1, 'get', 'source').click();
+            await until(() => text(1).includes('source:1:token'), 'row 1 replaced');
+            require(!text(1).includes('compile'), 'shared host kept the earlier result');
+            button(2, 'delete', 'reset').click();
+            await until(() => text(2).includes('reset:2'), 'row 2 DELETE');
+            require(!text(2).includes('source'), 'DELETE kept the earlier result');
+            row(1).querySelector('form').requestSubmit();
+            await until(() => text(1).includes('seeded:1:1'), 'row 1 form into the host');
+
+            button(1, 'post', 'slow').click();
+            button(2, 'post', 'slow').click();
+            await until(() => document.body.dataset.polled1 === 'yes' &&
+                              document.body.dataset.polled2 === 'yes', 'both mutation pollers');
+            await fetch('/release');
+            await until(() => text(1).includes('slow:1') && text(2).includes('slow:2'), 'both slow results');
+            require(!text(1).includes('slow:2') && !text(2).includes('slow:1'), 'mutation polls crossed rows');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        rows = [h.div(
+            h.button("Expand"; id="expand$(n)",
+                     hx_get="/proxy/demo/shared_detail?row=$(n)&session_key=token",
+                     hx_target="#row$(n)", hx_swap="innerHTML"),
+            h.div(; id="row$(n)")) for n in 1:2]
+        page = repr("text/html", htmx(rows..., diagnostics, driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
+            feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" && return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
+                return HTTP.Response(204)
+            end
+            HTTP.header(req, "HX-Request", "") == "true" &&
+                push!(requests, string(req.method, " ", req.target))
+            internal = replace(String(req.target), r"^/proxy/demo" => "")
+            dispatch(req.method, internal;
+                headers=[collect(req.headers); "X-Forwarded-Prefix" => "/proxy/demo"],
+                body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            for n in 1:2
+                warm = HTTP.get("http://127.0.0.1:$port/proxy/demo/shared_detail?row=$(n)&session_key=token";
+                                retry=false, status_exception=false)
+                @test warm.status == 200
+                warm.status == 200 || error(String(warm.body))
+                @test contains(String(warm.body),
+                    "hx-target=\"#htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f$(n)\"")
+            end
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        outcome = take!(receipt)
+                        @test outcome == "/complete?status=passed"
+                        outcome == "/complete?status=passed" ||
+                            @info "Browser requests" requests=join(requests, "\n")
+                    else
+                        @info "Browser diagnostics" requests=join(requests, "\n") log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            polls = filter(r -> contains(r, "__htmxo_poll=1"), requests)
+            @test any(r -> startswith(r, "GET /proxy/demo/rows/1/slow?"), polls)
+            @test any(r -> startswith(r, "GET /proxy/demo/rows/2/slow?"), polls)
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/1/slow"), requests) == 1
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/2/slow"), requests) == 1
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/1/seeded"), requests) == 1
+            @test isempty(filter(r -> !contains(r, " /proxy/demo/"), requests))
+        finally
+            foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
+            close(server)
+        end
+    end
 end
