@@ -31,10 +31,14 @@ using TestItemRunner
     release_retention!(key::Symbol) = notify(gate(key))
     # Count the computation, then hold it in flight until the test releases it.
     gated(key::Symbol, value) = (hit!(key); wait(gate(key)); value)
+    # An outside function that receives the root but reads nothing from it.
+    pass_self(_app, value) = value
 
     @htmx struct RetentionProbe
         root_value(k::Int) = (hit!(:root_value); k)
         root_slow(k::Int) = gated(:root_slow, k)
+        root_self(k::Int) = (hit!(:root_self); pass_self(__self__, k))
+        root_self_slow(k::Int) = pass_self(__self__, gated(:root_self_slow, k))
         @struct child(k::Int) = begin
             value() = (hit!(:child_value); k)
             slow() = gated(:child_slow, k)
@@ -48,6 +52,9 @@ using TestItemRunner
             Treebars.polling_fetchindex(x -> h.p("root-done:$x"), root_slow, k)
         @fresh @get poll_child(k::Int) =
             Treebars.polling_fetchindex(x -> h.p("child-done:$x"), child(k).slow)
+        @get self_value(k::Int) = h.p("self=$(root_self(k))")
+        @fresh @get poll_self(k::Int) =
+            Treebars.polling_fetchindex(x -> h.p("self-done:$x"), root_self_slow, k)
     end
 
     # A custom factory that returns one retained root (remounted by
@@ -136,6 +143,34 @@ end
         settled = settled_body("/poll_child/1"; attempts=40)
         @test_broken settled !== nothing && contains(settled, "child-done:1")
         @test_broken retention_runs(:child_slow) == 1
+    end
+    reset_retention!()
+end
+
+# DynamicObjects' remount shares a property's work only when it can prove the
+# property independent of the request context. A body that passes `__self__` to
+# an outside function is opaque to that proof, so the property is recomputed per
+# request even though `pass_self` reads nothing (documented on
+# `DynamicObjects.remount`; snag `DynamicObjects/remount-opaque-s-2938c22c`).
+# These assertions pin the boundary the `RootProvider` docs state: if
+# DynamicObjects changes it, update those docs together with this item.
+@testitem "provider-retained roots recompute properties that pass __self__ out" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, Treebars
+
+    for (label, provider) in pairs(retention_providers())
+        reset_retention!()
+        route!(RetentionProbe(); root_provider=provider)
+
+        @test all(_ -> contains(String(hx_get("/self_value/1").body), "self=1"), 1:3)
+        @test retention_runs(:root_self) == 3
+
+        # Each poll starts its own computation instead of attaching to the one
+        # still in flight from the previous request.
+        @test all(_ -> running(String(hx_get("/poll_self/1").body)), 1:3)
+        @test timedwait(() -> retention_runs(:root_self_slow) >= 3, 10.0;
+                        pollint=0.01) === :ok
+        release_retention!(:root_self_slow)
+        @test retention_runs(:root_self_slow) == 3
     end
     reset_retention!()
 end
