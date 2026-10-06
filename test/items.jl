@@ -1616,7 +1616,7 @@ _lt_version() = string(LIVE_THREAD.version[])
 @htmx struct LiveThreadApp
     __page__(content) = htmx(content; htmx_version=nothing, hyperscript_version=nothing, overlay=false)
 
-    @fresh @get index() = let n = length(LIVE_THREAD.messages), lo = max(1, n - 9)
+    @fresh @direct @get index() = let n = length(LIVE_THREAD.messages), lo = max(1, n - 9)
         h.div(
             h.style(".lt-msg { margin: 0; padding: 20px 8px; } body { margin: 0; }"),
             live_thread(_lt_item.(lo:n); id="lt", older_url=__self__/"older",
@@ -1625,10 +1625,10 @@ _lt_version() = string(LIVE_THREAD.version[])
             h.script(Raw(get(ENV, "HTMXO_LIVE_THREAD_DRIVER", ""))),
         )
     end
-    @fresh @get older(; before::String) = let hi = parse(Int, before) - 1, lo = max(1, hi - 9)
+    @fresh @direct @get older(; before::String) = let hi = parse(Int, before) - 1, lo = max(1, hi - 9)
         live_thread_page(_lt_item.(lo:hi); cursor=_lt_cursor(lo))
     end
-    @fresh @get tail(; since::String="", v::String="") =
+    @fresh @direct @get tail(; since::String="", v::String="") =
         v == _lt_version() ? live_thread_unchanged() :
             let i = parse(Int, since), n = length(LIVE_THREAD.messages)
                 live_thread_tail(_lt_item.(i+1:n); since=string(n), version=_lt_version())
@@ -3515,6 +3515,10 @@ end
     end
 
     direct_headers = ["Accept" => "text/html,application/xhtml+xml"]
+    # Compile the route's compute first: a first call's compile time alone can
+    # outlast the 0.1 s grace budget, and how much of it earlier items already
+    # paid depends on suite order. The contract under test is the warm one.
+    @test drive("/fast", ["HX-Request" => "true"]).status == 200
     direct = drive("/fast", direct_headers)
     body = String(direct.body)
     @test direct.status == 200
@@ -11054,7 +11058,7 @@ end
     const hand_ip = getproperty(HandRolledIP(), :fit)
 
     @htmx struct HandRolledJobApp
-        @fresh @get hand_fit(key::String) = Treebars.polling_fetchindex(
+        @fresh @direct @get hand_fit(key::String) = Treebars.polling_fetchindex(
                 hand_ip, key; poll_url="/hand_fit/$key", label="Hand-rolled fit",
                 req=__req__) do rv
             h.p(rv)
@@ -11138,13 +11142,13 @@ end
     @htmx struct SessionJobsApp
         "Session crunch"
         @get session_crunch(n::Int) = (wait(session_gate[]); h.p("crunched:$n"))
-        @fresh @get my_jobs() = jobs_board(; mine=__req__, poll_url="/my_jobs",
+        @fresh @direct @get my_jobs() = jobs_board(; mine=__req__, poll_url="/my_jobs",
                                            id="my-jobs")
     end
     @htmx struct RequestScopedJobsApp
         "Request crunch"
         @get request_crunch() = (wait(session_gate[]); h.p("crunched"))
-        @fresh @get request_jobs() = jobs_board(; mine=__req__, id="request-jobs")
+        @fresh @direct @get request_jobs() = jobs_board(; mine=__req__, id="request-jobs")
     end
     session_key(req) = HTTP.header(req, "X-Session", "anonymous")
     route!(SessionJobsApp(); root_provider=RootProvider(scope=:session,
