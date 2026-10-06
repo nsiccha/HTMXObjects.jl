@@ -133,6 +133,40 @@ option_wire_value(value) =
 _option_wire_string(value) = string(option_wire_value(value))
 
 """
+    _url_segment(value) -> String
+
+`value`'s wire identity ([`option_wire_value`](@ref)) as ONE URL path segment.
+Every path segment the framework builds from a value goes through here: indexed
+`@include` mount prefixes (inline and external), `@query_url` positional
+arguments, and `Resource` list links. The request side decodes each segment
+exactly once (`_percent_decode_lenient`), so the value round-trips to the same
+child.
+
+Only the bytes that would otherwise end, split or reinterpret the segment are
+percent-encoded: `/` (segment separator), `?` and `#` (start of query and
+fragment), `%` (the escape introducer, so a literal `a%20b` is not decoded to
+`a b`), `\\` (browsers read it as `/` in http(s) paths), and ASCII controls and
+space (rejected by URI parsing). Every other byte — unreserved and
+sub-delimiter characters, `:`, `@`, non-ASCII UTF-8 — stays literal, so a value
+free of the escaped bytes keeps the byte-identical URL, `__prefix__`, semantic
+result-target id and static recording file name it always had.
+"""
+function _url_segment(value)
+    s = _option_wire_string(value)
+    any(_url_segment_escapes, codeunits(s)) || return s
+    io = IOBuffer()
+    for b in codeunits(s)
+        _url_segment_escapes(b) ?
+            print(io, '%', uppercase(string(b; base=16, pad=2))) :
+            write(io, b)
+    end
+    String(take!(io))
+end
+
+_url_segment_escapes(b::UInt8) =
+    b <= 0x20 || b == 0x7f || b in (UInt8('#'), UInt8('%'), UInt8('/'), UInt8('?'), UInt8('\\'))
+
+"""
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
           middleware=[], access_log=<timed default>, runtime_tracking=true, kwargs...)
 
@@ -1359,13 +1393,15 @@ function _convert_include_to_struct!(struct_expr)
             # `:index` is dropped from the URL segment (mirrors `_route_path`
             # and `_nested_prefix_and_step`), so an `@include index(x) = …`
             # inside `/skills` produces children at `/skills/{x}`, not
-            # `/skills/index/{x}`.
+            # `/skills/index/{x}`. Each index value is one `_url_segment`, the
+            # same wire identity and encoding as the call form.
             struct_name = Symbol("_Include_", prop_name)
             prefix_expr = prop_name === :index ?
                 :(__parent__.__prefix__) :
                 :(__parent__.__prefix__ * "/" * $(string(prop_name)))
+            url_segment = GlobalRef(@__MODULE__, :_url_segment)
             for ip in index_params
-                prefix_expr = :($prefix_expr * "/" * string($ip))
+                prefix_expr = :($prefix_expr * "/" * $url_segment($ip))
             end
             pushfirst!(rhs.args, :(__prefix__ = $prefix_expr))
             child_struct = Expr(:struct, false, struct_name, rhs)
@@ -1451,11 +1487,13 @@ end
     _inject_include_prefix!(call_expr, prop_name; index_params=Symbol[])
 
 Mutate the kwargs of `SomeStruct(args...; ...)` so that
-`__mount_step__="/prop_name"[ * "/" * string(arg)…]` is present (without
+`__mount_step__="/prop_name"[ * "/" * _url_segment(arg)…]` is present (without
 overriding any user-provided value). For an indexed include
 (`@include prop(x, y) = External(x, y)`), the `index_params` are interpolated
 into the step at runtime so each invocation of the property gets the URL
-segment for its current arg values.
+segment for its current arg values — percent-encoded by `_url_segment`, so a
+value containing `/`, `?`, `#` or `%` stays one segment that routes back to the
+same child.
 
 The recorded step is PARENT-RELATIVE; the child's injected `__prefix__` body
 composes it with `__parent__.__prefix__` at access time (see `_mounted_prefix`).
@@ -1481,9 +1519,9 @@ function _inject_include_prefix!(call_expr, prop_name; index_params::Vector{Symb
         # `_nested_prefix_and_step`. So `@include index(x) = External(x)`
         # mounts children at `/parent/{x}`, not `/parent/index/{x}`.
         step_expr = prop_name === :index ? "" : "/" * string(prop_name)
-        wire_string = GlobalRef(@__MODULE__, :_option_wire_string)
+        url_segment = GlobalRef(@__MODULE__, :_url_segment)
         for ip in index_params
-            step_expr = :($step_expr * "/" * $wire_string($ip))
+            step_expr = :($step_expr * "/" * $url_segment($ip))
         end
         push!(params.args, Expr(:kw, :__mount_step__, step_expr))
     end
@@ -9083,10 +9121,10 @@ answers in [`_page_chain_skip`](@ref).
 _mount_prefix(obj) = hasproperty(obj, :__prefix__) ?
                      string(getproperty(obj, :__prefix__)) : nothing
 
-# One URL segment, compared tolerantly across encodings: `__prefix__` is built
-# from decoded values (`string(arg)` for an indexed mount) while the browser
-# reports the encoded form in `HX-Current-URL`, so `a b` and `a%20b` are the
-# same segment.
+# One URL segment, compared tolerantly across encodings: `__prefix__` encodes an
+# indexed mount's value minimally (`_url_segment` leaves `:`, `@`, non-ASCII …
+# literal) while the browser may report a fuller percent-encoding in
+# `HX-Current-URL`, so `aüb` and `a%C3%BCb` are the same segment.
 _seg_eq(a, b) = a == b ||
                 String(HTTP.URIs.unescapeuri(a)) == String(HTTP.URIs.unescapeuri(b))
 
@@ -12545,6 +12583,9 @@ _query_url_kw(kw::Expr) = Expr(:kw, kw.args[1], esc(kw.args[2]))
 
 Build a `query_url` from a property-call expression, following the same conventions as
 `@get` route definitions. Positional args become path segments, kwargs become query params.
+Each positional arg is one percent-encoded segment (`_url_segment`, the encoding indexed
+`@include` mounts use), so pass raw values — `@query_url item("a/b")` builds `/item/a%2Fb`,
+which the route receives decoded as `"a/b"`.
 
 Designed for use inside `@htmx`/`@dynamicstruct` bodies, where it intercepts the call
 before `walk_rhs` turns it into a property access.
@@ -12575,8 +12616,8 @@ macro query_url(expr)
     if isempty(positional)
         path_expr = base
     else
-        wire_string = GlobalRef(@__MODULE__, :_option_wire_string)
-        segments = [base; [:("/" * $wire_string($(esc(a)))) for a in positional]...]
+        url_segment = GlobalRef(@__MODULE__, :_url_segment)
+        segments = [base; [:("/" * $url_segment($(esc(a)))) for a in positional]...]
         path_expr = Expr(:call, :*, segments...)
     end
 
