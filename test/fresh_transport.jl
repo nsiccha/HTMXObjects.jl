@@ -260,7 +260,9 @@ end
     first_url, second_url = poll_url(first_body), poll_url(second_body)
     @test startswith(first_url, "/fresh_order?")
     @test contains(first_url, "__htmxo_verb=POST")
-    @test !contains(first_url, "n=5")
+    # The submitted body never rides the poll URL (as an `n=` parameter;
+    # a bare substring test would match the random token's `operation=5…`).
+    @test !occursin(r"[?&]n=", first_url)
     @test poll_token(first_url) != poll_token(second_url)
 
     # Resuming never re-runs the body.
