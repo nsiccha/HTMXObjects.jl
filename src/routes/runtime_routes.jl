@@ -8,6 +8,8 @@
 #                            in-flight requests, per-route timings, recent requests
 #   GET  /runtime/panel      the same view as a fragment (the refresh target)
 #   GET  /runtime/jobs       one job board as a fragment (it polls itself)
+#   GET  /runtime/job/:id    inspect or watch one retained job
+#   GET  /runtime/job_board/:id  one retained job as a polling fragment
 #   GET  /runtime/snapshot   `runtime_snapshot()` as JSON
 #   POST /runtime/clear      forget finished requests and jobs
 #
@@ -22,6 +24,7 @@
 # bodies, and request targets are stored redacted (see `runtime.jl`).
 
 _runtime_clock(t::Real) = Libc.strftime("%H:%M:%S", t)
+_runtime_timestamp(t::Real) = Libc.strftime("%Y-%m-%d %H:%M:%S", t)
 
 _runtime_duration(t::Real) = isfinite(t) ? fmt_time(t) : "—"
 
@@ -80,24 +83,40 @@ const _jobs_board_render_impl = Ref{Any}(nothing)
 _jobs_board_ms(seconds::Real) = isfinite(seconds) ? max(0, round(Int, seconds * 1000)) : 0
 
 # Small label/value pairs under an item's header. Targets are stored redacted.
-function _jobs_board_meta(row; show_id::Bool=false)
+function _runtime_job_actions(row, prefix::AbstractString)
+    inspect = query_url("$(prefix)/job/$(row.id)"; live=false)
+    children = Any[
+        h.a("Inspect"; href=inspect), " · ",
+        h.a("Watch"; href="$(prefix)/job/$(row.id)"),
+    ]
+    if !isempty(row.result_url)
+        push!(children, " · ", h.a("Result"; href=row.result_url))
+    end
+    h.span(children...; class="htmxo-runtime-job-actions")
+end
+
+function _jobs_board_meta(row; show_id::Bool=false, actions_prefix=nothing)
     meta = Pair{String,Any}[]
     show_id && push!(meta, "job" => "#$(row.id)")
     row.state === :queued && row.position > 0 && push!(meta, "position" => row.position)
     isempty(row.route) || push!(meta, "route" => row.route)
     isempty(row.target) || push!(meta, "target" => h.code(row.target))
-    row.state in (:done, :failed) && push!(meta, "started" => _runtime_clock(row.started_at))
-    row.requests > 1 && push!(meta, "requests" => string(row.requests))
+    push!(meta, "started" => _runtime_timestamp(row.started_at))
+    push!(meta, "updated" => _runtime_timestamp(row.updated_at))
+    push!(meta, "callers" => string(row.requests))
     row.polls > 0 && push!(meta, "polls" => string(row.polls))
     row.state === :running && row.idle >= _RUNTIME_UNWATCHED_AFTER &&
         push!(meta, "unwatched" => fmt_time(row.idle))
     isempty(row.error) || push!(meta, "error" => row.error)
+    isnothing(actions_prefix) ||
+        push!(meta, "actions" => _runtime_job_actions(row, actions_prefix))
     meta
 end
 
-_jobs_board_entry(row; show_id::Bool=false) = (; key=row.id, label=row.label,
-    state=row.state, elapsed_ms=_jobs_board_ms(row.duration), node=row.progress,
-    meta=_jobs_board_meta(row; show_id))
+_jobs_board_entry(row; show_id::Bool=false, actions_prefix=nothing) =
+    (; key=row.id, label=row.label, state=row.state,
+     elapsed_ms=_jobs_board_ms(row.duration), node=row.progress,
+     meta=_jobs_board_meta(row; show_id, actions_prefix))
 
 function _jobs_board_state_text(entry)
     d = fmt_time(entry.elapsed_ms / 1000)
@@ -129,12 +148,13 @@ end
                newest_first=false, limit=nothing)
 
 A live board of jobs from the runtime ledger ([`runtime_jobs`](@ref)): each job
-with its label, state, elapsed time and — with Treebars loaded — its progress
-tree, rendered by `Treebars.htmx_render_board`. With `poll_url` the board polls
-that URL every `poll_interval` and updates in place: new jobs appear, running
-ones tick and update without resetting an expanded tree, finished ones show
-their outcome and leave. Serve it from an `@fresh` route that returns the same
-call, so the board never queues behind the work it shows:
+with its label, state, elapsed time, start/update time, caller count and — with
+Treebars loaded — its progress tree, rendered by `Treebars.htmx_render_board`.
+With `poll_url` the board polls that URL every `poll_interval` and updates in
+place: new jobs appear, running ones tick and update without resetting an
+expanded tree, finished ones show their outcome and leave. Serve it from an
+`@fresh` route that returns the same call, so the board never queues behind the
+work it shows:
 
 ```julia
 @fresh @get my_jobs() = jobs_board(; mine=__req__, poll_url=query_url(__self__ / "my_jobs"))
@@ -162,7 +182,7 @@ function jobs_board(; mine=nothing, all::Bool=false, tracker=nothing,
         poll_url=nothing, poll_interval="1s", id::AbstractString="htmxo-jobs",
         empty::AbstractString="No running jobs.", expanded::Bool=false,
         linger_ms::Integer=1500, newest_first::Bool=false, limit=nothing,
-        _show_ids::Bool=false)
+        _show_ids::Bool=false, _actions_prefix=nothing)
     isnothing(mine) && !all && throw(ArgumentError(
         "jobs_board shows one session's jobs or, explicitly, everyone's: " *
         "pass `mine=req` (the requesting session) or `all=true` (the developer view)"))
@@ -176,7 +196,8 @@ function jobs_board(; mine=nothing, all::Bool=false, tracker=nothing,
     end
     sort!(rows; by=r -> r.id, rev=newest_first)
     isnothing(limit) || (rows = first(rows, max(0, Int(limit))))
-    entries = [_jobs_board_entry(row; show_id=_show_ids) for row in rows]
+    entries = [_jobs_board_entry(row; show_id=_show_ids,
+                                 actions_prefix=_actions_prefix) for row in rows]
     impl = something(_jobs_board_render_impl[], _jobs_board_fallback)
     impl(entries; id, empty, poll_url, poll_interval, expanded, linger_ms)
 end
@@ -190,18 +211,44 @@ function _runtime_jobs_board(tracker::RuntimeTracker; prefix::AbstractString,
     poll_url = live ? query_url("$(prefix)/jobs"; state, limit) : nothing
     if state == "running"
         jobs_board(; all=true, _show_ids=true, tracker, states=(:queued, :running), poll_url,
-                   poll_interval, id="htmxo-runtime-jobs", empty="No running jobs.")
+                   poll_interval, id="htmxo-runtime-jobs", empty="No running jobs.",
+                   _actions_prefix=prefix)
     elseif state == "finished"
         jobs_board(; all=true, _show_ids=true, tracker, states=(:done, :failed), poll_url,
                    poll_interval, id="htmxo-runtime-finished", newest_first=true,
-                   limit, empty="No finished jobs recorded yet.")
+                   limit, empty="No finished jobs recorded yet.",
+                   _actions_prefix=prefix)
     elseif state == "all"
         jobs_board(; all=true, _show_ids=true, tracker, states=(:queued, :running, :done, :failed),
                    poll_url, poll_interval, id="htmxo-runtime-all", newest_first=true,
-                   limit, empty="No jobs recorded yet.")
+                   limit, empty="No jobs recorded yet.", _actions_prefix=prefix)
     else
         throw(ArgumentError("state must be \"running\", \"finished\" or \"all\" (got $(repr(state)))"))
     end
+end
+
+function _runtime_job_board(tracker::RuntimeTracker; prefix::AbstractString,
+        id::Int, live::Bool=true, poll_interval::AbstractString="1s")
+    poll_url = live ? "$(prefix)/job_board/$(id)" : nothing
+    jobs_board(; all=true, _show_ids=true, _actions_prefix=prefix, tracker,
+               states=(:queued, :running, :done, :failed),
+               filter=row -> row.id == id, poll_url, poll_interval,
+               id="htmxo-runtime-job-$(id)", expanded=true,
+               empty="Job #$(id) is no longer retained.")
+end
+
+function _runtime_job_view(tracker::RuntimeTracker; prefix::AbstractString,
+        id::Int, live::Bool=true, refresh::AbstractString="2s")
+    h.section(
+        h.style(_RUNTIME_STYLES),
+        h.p(h.a("← Runtime"; href=prefix)),
+        h.h1("Job #$(id)"),
+        h.p(live ? "Watching the authoritative runtime record." :
+                   "Inspecting a fixed snapshot of the authoritative runtime record.";
+            class="u-text-muted"),
+        _runtime_job_board(tracker; prefix, id, live, poll_interval=refresh);
+        class="htmxo-runtime",
+    )
 end
 
 function _runtime_inflight(snapshot)
@@ -308,10 +355,11 @@ end
 
 Render the runtime dashboard for `tracker`: a process summary, the running and
 the latest `limit` finished jobs as live job boards (see [`jobs_board`](@ref);
-with Treebars, each with its progress tree), in-flight requests, per-route
-timings, and the latest `limit` finished requests. With `live=true` the boards
-poll `\$prefix/jobs` and the other sections re-fetch `\$prefix/panel` every
-`refresh`; `live=false` renders a still snapshot. Used by
+with Treebars, each with its progress tree), with stable job identity,
+start/update times, caller counts and inspect/watch/result actions; in-flight
+requests, per-route timings, and the latest `limit` finished requests. With
+`live=true` the boards poll `\$prefix/jobs` and the other sections re-fetch
+`\$prefix/panel` every `refresh`; `live=false` renders a still snapshot. Used by
 [`RuntimeRoutes`](@ref); callable directly to embed the view elsewhere.
 """
 function runtime_dashboard(tracker::RuntimeTracker=runtime_tracker();
@@ -377,6 +425,10 @@ Provides:
   finished), `"finished"` (the latest `limit`, newest first) or `"all"`. It
   shows every session's jobs: this is the developer view (see
   [`jobs_board`](@ref) for per-session boards on app pages).
+- `@get job(id; live=true)` — inspect one retained job, or watch the same
+  authoritative record live; its Result action appears only for a safe,
+  unredacted GET target.
+- `@get job_board(id)` — the single-job polling fragment used by `job`.
 - `@get snapshot()` — [`runtime_snapshot`](@ref) as JSON.
 - `@post clear()` — [`clear_runtime_history!`](@ref).
 
@@ -414,6 +466,16 @@ headers, cookies or bodies.
         _runtime_jobs_board(something(tracker, runtime_tracker());
                             prefix=string(__self__), state, limit=max(0, limit),
                             poll_interval=state == "running" ? "1s" : refresh)
+    end
+    @fresh @get job(id::Int; live::Bool=true) = begin
+        _runtime_hide_request!(__req__)
+        _runtime_job_view(something(tracker, runtime_tracker());
+                          prefix=string(__self__), id, live, refresh)
+    end
+    @fresh @get job_board(id::Int) = begin
+        _runtime_hide_request!(__req__)
+        _runtime_job_board(something(tracker, runtime_tracker());
+                           prefix=string(__self__), id, poll_interval=refresh)
     end
     @fresh @get snapshot() = begin
         _runtime_hide_request!(__req__)

@@ -11087,7 +11087,8 @@ end
 # route; the rest of the dashboard refreshes around them.
 @testitem "RuntimeRoutes serves job boards" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
     import Treebars
-    import HTMXObjects: _runtime_new_job!, _jobs_board_fallback
+    import HTMXObjects: _runtime_new_job!, _runtime_result_url,
+                        _jobs_board_fallback
 
     const board_gate = Ref(Base.Event())
     const board_tracker = RuntimeTracker()
@@ -11116,6 +11117,18 @@ end
         @test timedwait(() -> !isempty(runtime_jobs(board_tracker; states=:failed)),
                         10.0; pollint=0.02) === :ok
         running = only(runtime_jobs(board_tracker))
+        @test running.updated_at >= running.started_at
+        @test running.result_url == "/board_crunch/1"
+
+        # Result actions preserve the public proxy prefix, but are omitted for
+        # non-GET work and any target whose credentials had to be redacted.
+        proxied = HTTP.Request("GET", "/board_crunch/2",
+            ["X-Forwarded-Prefix" => "/p/demo"], UInt8[])
+        @test _runtime_result_url(nothing, proxied) == "/p/demo/board_crunch/2"
+        @test _runtime_result_url(nothing,
+            HTTP.Request("GET", "/board_crunch/2?api_key=secret")) == ""
+        @test _runtime_result_url(nothing,
+            HTTP.Request("POST", "/board_crunch/2")) == ""
 
         # The running board: a self-polling fragment, keyed by job id.
         fragment = String(drive("/board_dash/jobs").body)
@@ -11134,6 +11147,31 @@ end
             @test contains(fragment, "job #$(running.id)")
         end
         @test contains(fragment, "Board crunch")
+        @test contains(fragment, "started")
+        @test contains(fragment, "updated")
+        @test contains(fragment, "callers")
+        @test contains(fragment, "href=\"/board_dash/job/$(running.id)?live=false\"")
+        @test contains(fragment, ">Inspect</a>")
+        @test contains(fragment, "href=\"/board_dash/job/$(running.id)\"")
+        @test contains(fragment, ">Watch</a>")
+        @test contains(fragment, "href=\"/board_crunch/1\">Result</a>")
+
+        # Inspect is a fixed view; Watch is the same ledger row with a
+        # lightweight single-job fragment polling underneath it.
+        inspected = String(drive("/board_dash/job/$(running.id)?live=false"; hx=false).body)
+        @test contains(inspected, "Job #$(running.id)")
+        @test contains(inspected, "fixed snapshot")
+        @test contains(inspected, "id=\"htmxo-runtime-job-$(running.id)\"")
+        @test !contains(inspected, "hx-get=\"/board_dash/job_board/$(running.id)\"")
+        watched = String(drive("/board_dash/job/$(running.id)"; hx=false).body)
+        @test contains(watched, "Watching the authoritative runtime record")
+        @test contains(watched, "hx-get=\"/board_dash/job_board/$(running.id)\"")
+        single = String(drive("/board_dash/job_board/$(running.id)").body)
+        @test contains(single, "id=\"htmxo-runtime-job-$(running.id)\"")
+        @test contains(single, "Board crunch")
+        missing = String(drive("/board_dash/job/999999?live=false"; hx=false).body)
+        @test contains(missing, "Job #999999 is no longer retained.")
+
         # A just-finished job stays listed with its outcome for `recent`
         # seconds, so the board shows it before it leaves.
         recent = repr("text/html", jobs_board(; all=true, tracker=board_tracker, recent=600))
