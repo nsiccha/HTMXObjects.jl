@@ -15041,15 +15041,32 @@ request_feedback_style() = h.style(Raw("""
 
 JS that hooks into HTMX events to add visual feedback classes on the target element
 of each request.
+
+The target is the one htmx itself resolved for the request (`event.detail.target`):
+an inherited `hx-target`, an extended selector such as `next .result`,
+`closest tr` or `find output`, an `htmx.ajax` target, and an `HX-Retarget`
+response all mark the element the response actually lands in. A target that an
+`outerHTML` swap has already replaced is marked through its same-id
+replacement; otherwise the requesting element's own `hx-target` CSS selector is
+used, then the requesting element itself.
 """
 request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
     function getTarget(evt) {
         var elt = evt.detail.elt;
+        var resolved = evt.detail.target;
+        if (resolved && resolved.isConnected) return resolved;
+        // afterRequest follows the swap: an outerHTML swap has replaced the
+        // resolved node, so mark its replacement when it kept the id.
+        if (resolved && resolved.id) {
+            var replaced = document.getElementById(resolved.id);
+            if (replaced) return replaced;
+        }
         var targetSel = elt.getAttribute('hx-target');
         if (targetSel) {
             if (targetSel === 'this') return elt;
-            var found = document.querySelector(targetSel);
+            var found = null;
+            try { found = document.querySelector(targetSel); } catch (_) {}
             if (found) return found;
         }
         return elt;

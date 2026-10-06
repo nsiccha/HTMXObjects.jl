@@ -400,6 +400,11 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 ### `loading_indicator_script()` and `request_feedback_*`
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.
+`htmx()` includes `request_feedback()` by default (`feedback=true`);
+`loading_indicator_script()` is deprecated in its favour. Request feedback marks the requesting element
+and the element htmx resolved as the request's target. That covers an inherited
+`hx-target`, relative selectors such as `next .result` or `closest tr`, and an
+`HX-Retarget` response.
 
 ## Links and links-as-actions
 
