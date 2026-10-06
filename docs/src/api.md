@@ -605,9 +605,12 @@ operation title; `submit` and `submit_attrs` work as for forms, with
 submission and target attributes still compiler-owned.
 
 Only operations without visible controls become buttons. An operation with
-inputs, or whose hidden context differs from the first compact operation's (for
-example, a child mount with an extra `@param`), keeps its form and is passed to
-`render_operation`. Compact buttons carry no `target_id`. Their attributes are
+inputs keeps its form and is passed to `render_operation`. Hidden request
+context is carried by one holder per distinct set of names and values: the
+operations of a row and of its mounted children share a holder when they carry
+the same values, in whatever order their mounts declare them, and a child mount
+with an extra `@param` gets a second holder rather than falling back to forms.
+Compact buttons carry no `target_id`. Their attributes are
 on the button itself rather than an ancestor, so result content inherits
 nothing from the action row. Like generated forms, the buttons need htmx.
 
