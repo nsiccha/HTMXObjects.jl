@@ -4479,9 +4479,21 @@ HTMXObjects supplies the locked store, caches one root per `(RootT,
 context.key)`, and returns a same-type DynamicObjects remount for every request.
 Request-derived properties and their transitive dependents—including mounted
 children—refresh, while unrelated settled, in-flight, mmap, and indexed cache
-identity remains shared. The default `RootProvider()` keeps the historic fresh
-root-per-request behavior. `retention` is rejected for `scope=:request` because
-request scope already has exactly one request per root.
+identity remains shared. A property counts as request-derived when its body
+reads request context directly or through the properties it calls, and also
+when it uses `__self__` opaquely, such as passing it to a function defined
+outside the struct (DynamicObjects snag `remount-opaque-s-2938c22c`). An inline
+nested child shares that identity only once it exists on the retained source
+root: the managed store realizes declaration-level children there when it
+creates the root, but a child first realized during a request—every indexed
+`@struct child(k)`, and a declaration-level child a custom factory's root has
+not realized—is rebuilt per request, restarting its memoized and in-flight work
+(DynamicObjects snag `remount-drops-ne-af0c7132`). Keep long-running work that
+requests poll on an indexed property of the root itself whose body calls
+sibling properties and passes plain values to outside functions. The default
+`RootProvider()` keeps the historic fresh root-per-request behavior. `retention`
+is rejected for `scope=:request` because request scope already has exactly one
+request per root.
 
 The managed store is deliberately process-local. A distributed/multipod job
 store remains an application/runtime adapter expressed by the factory form.

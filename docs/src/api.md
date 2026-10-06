@@ -1099,6 +1099,39 @@ subcaches retain their identity. `max_entries` applies LRU cleanup; optional
 `ttl` is an idle timeout in seconds. Cleanup is opportunistic and removes only
 the provider's reference, so work already holding a root can finish.
 
+"Unrelated" is DynamicObjects' `remount` partition: a property keeps its
+retained work only when DynamicObjects can prove it independent of the rebound
+request context. Two body shapes fail that proof, and the property is then
+recomputed per request, restarting its memoized and in-flight work:
+
+- it reads request context — `__req__`, `__route__`, `__prefix__`, `__parent__`,
+  or route params — directly or through the properties it calls;
+- it uses `__self__` opaquely, for example by passing it to a function defined
+  outside the struct. DynamicObjects cannot see what that function reads, so it
+  treats the property as request-dependent even when the function reads nothing
+  (DynamicObjects snag `remount-opaque-s-2938c22c`).
+
+An inline nested child shares that identity only once it exists on the retained
+source root. The managed store realizes declaration-level children there when it
+creates the root. A child first realized during a request — every indexed
+`@struct child(k)`, and a declaration-level child that a custom factory's root
+has not realized — is rebuilt per request, so its memoized and in-flight work
+restarts (DynamicObjects snag `remount-drops-ne-af0c7132`).
+
+So keep long-running work that requests poll on an indexed property of the root
+itself, and have its body call sibling properties and pass their plain values to
+outside functions:
+
+```julia
+@htmx struct ModelApp
+    data(key::String) = load_data(key)
+    run_result(key::String) = fit_model(data(key))   # retained across requests
+    # not: run_result(key::String) = fit_model(__self__, key)
+    @fresh @get poll(key::String) =
+        Treebars.polling_fetchindex(render_fit, run_result, key)
+end
+```
+
 Outside `semantic_app`, `RootProvider()` remains fresh-per-request. The managed
 store is process-local; use `RootProvider(factory; scope, key)` as the adapter
 seam for a distributed or externally owned job/session store.
