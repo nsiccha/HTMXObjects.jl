@@ -4484,15 +4484,11 @@ reads request context directly, through the properties it calls, or through a
 `__self__` it passes to a function defined outside the struct; such opaque
 `__self__` work that reads no request context is shared (DynamicObjects
 `c0c742c`; earlier DynamicObjects pins recompute it per request even when it
-reads nothing, snag `remount-opaque-s-2938c22c`). An inline
-nested child shares that identity only once it exists on the retained source
-root: the managed store realizes declaration-level children there when it
-creates the root, but a child first realized during a request—every indexed
-`@struct child(k)`, and a declaration-level child a custom factory's root has
-not realized—is rebuilt per request, restarting its memoized and in-flight work
-(DynamicObjects snag `remount-drops-ne-af0c7132`). Keep long-running work that
-requests poll on an indexed property of the root itself, with a body that reads
-no request context. The default
+reads nothing, snag `remount-opaque-s-2938c22c`). Inline nested children share
+it too, including an indexed `@struct child(k)` first realized during a request
+(DynamicObjects `822765e`; earlier DynamicObjects pins rebuild such a child per
+request, snag `remount-drops-ne-af0c7132`). Keep long-running work that requests
+poll on an indexed property whose body reads no request context. The default
 `RootProvider()` keeps the historic fresh root-per-request behavior. `retention`
 is rejected for `scope=:request` because request scope already has exactly one
 request per root.

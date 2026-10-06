@@ -10,7 +10,7 @@ using TestItemRunner
     import HTMXObjects: h
 
     export RetentionProbe, retention_providers, reset_retention!, retention_runs,
-        release_retention!, hx_get, running, settle, settled_body
+        release_retention!, hx_get, running, settle
 
     const runs_lock = ReentrantLock()
     const runs = Dict{Symbol,Int}()
@@ -130,14 +130,13 @@ end
     reset_retention!()
 end
 
-# DynamicObjects shares a nested child with a remount only when the child was
-# realized on the retained source before that remount. A child first realized
-# during a request — every indexed `@struct child(k)`, and a declaration-level
-# child under a custom factory — is rebuilt per request, so its memoized and
-# in-flight work restarts. Its poller then never settles: every poll rebuilds
-# the child and starts a fresh computation, so it always reports a just-started
-# node. Tracked upstream as snag `DynamicObjects/remount-drops-ne-af0c7132`; an
-# Unexpected Pass here means it landed: promote these to `@test`.
+# An inline nested child first realized during a request — every indexed
+# `@struct child(k)`, and a declaration-level child a custom factory never
+# realized — is realized on the retained source, so later requests share its
+# memoized and in-flight work and a poller on it settles (DynamicObjects
+# `822765e`, snag `DynamicObjects/remount-drops-ne-af0c7132`; earlier pins
+# rebuilt it per request). The custom factory primes nothing, so its
+# declaration-level `single` child is shared without `_prime_managed_root!`.
 @testitem "provider-retained roots reuse inline-child work across requests" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, Treebars
 
@@ -147,16 +146,15 @@ end
 
         @test all(_ -> contains(String(hx_get("/values/1").body),
                                 "root=1 child=1 single=1"), 1:3)
-        @test_broken retention_runs(:child_value) == 1
-        label === :custom && @test_broken retention_runs(:single_value) == 1
+        @test retention_runs(:child_value) == 1
+        @test retention_runs(:single_value) == 1
 
         @test all(_ -> running(String(hx_get("/poll_child/1").body)), 1:3)
         @test timedwait(() -> retention_runs(:child_slow) >= 1, 10.0;
                         pollint=0.01) === :ok
         release_retention!(:child_slow)
-        settled = settled_body("/poll_child/1"; attempts=40)
-        @test_broken settled !== nothing && contains(settled, "child-done:1")
-        @test_broken retention_runs(:child_slow) == 1
+        @test contains(settle("/poll_child/1"), "child-done:1")
+        @test retention_runs(:child_slow) == 1
     end
     reset_retention!()
 end
