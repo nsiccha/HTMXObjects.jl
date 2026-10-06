@@ -312,6 +312,11 @@ end
   positional arg of every route LHS, so multiple `compute_property`
   methods on the same property name coexist. There is no name mangling;
   only exact `(name, verb)` duplicates are rejected.
+- **Mutation routes execute fresh.** `@post`, `@put`, `@patch`, and `@delete`
+  run their route body for every request, including repeated submissions with
+  identical arguments on a retained session/job root. A same-named `@get`
+  remains memoized, and child properties read by the mutation keep their own
+  declared cache policy; `@fresh` is not needed on mutation routes.
 
 ### Register with `route!`
 

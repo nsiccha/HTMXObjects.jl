@@ -24,7 +24,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     PolicyApp, FreshPolicyApp, MediaRangeApp, SlowPolicyApp,
     SlowInstrumentedPolicyApp,
     SlowPagePolicyApp, FastPagePolicyApp, SlowRecordApp,
-    MultiVerbPolicyApp, reset_slow_page!, release_slow_page!, slow_page_runs,
+    MultiVerbPolicyApp, MutationVerbApp, reset_mutation_verbs!, mutation_verb_runs,
+    reset_slow_page!, release_slow_page!, slow_page_runs,
     PreloadApp, reset_preload!, release_preload!, preload_count,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
@@ -1055,6 +1056,34 @@ end
     @options count = (1, 2)
     @post exchange(; count::Int=1) =
         h.p("post:$(count)")
+end
+
+# Mutation routes deliberately share one property name with a GET. This pins
+# freshness to the selected verb declaration: making DynamicObjects' name-wide
+# `_never_cache` trait true would also disable the GET cache.
+const mutation_verb_runs = Dict{Symbol,Int}()
+
+function reset_mutation_verbs!()
+    empty!(mutation_verb_runs)
+    nothing
+end
+
+function mutation_verb_hit!(verb::Symbol, child)
+    runs = get(mutation_verb_runs, verb, 0) + 1
+    mutation_verb_runs[verb] = runs
+    h.p("$(lowercase(String(verb))):$runs child:$child")
+end
+
+@htmx struct MutationVerbApp
+    cached_child = begin
+        mutation_verb_runs[:CHILD] = get(mutation_verb_runs, :CHILD, 0) + 1
+        mutation_verb_runs[:CHILD]
+    end
+    @get mutation_probe() = mutation_verb_hit!(:GET, cached_child)
+    @post mutation_probe() = mutation_verb_hit!(:POST, cached_child)
+    @put mutation_probe() = mutation_verb_hit!(:PUT, cached_child)
+    @patch mutation_probe() = mutation_verb_hit!(:PATCH, cached_child)
+    @delete mutation_probe() = mutation_verb_hit!(:DELETE, cached_child)
 end
 
 # One declaration owns its semantic input, route, disk materialization, and
@@ -2956,6 +2985,59 @@ end
     @test length(HTMXObjects.DynamicObjects.static_domain(
         HTMXObjects.DynamicObjects.property_options(
             StackedSemanticRoute(), :count)).options) == 3
+end
+
+# Identical mutation submissions are actions, not reads: every POST/PUT/PATCH/
+# DELETE request executes its body even when a retained root sees the same verb,
+# path, and arguments again. GET remains compute-at-most-once on that same
+# property name, proving the policy is declaration/verb scoped rather than a
+# DynamicObjects name-wide `@fresh` trait.
+@testitem "mutation routes execute fresh while GET remains memoized" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    reset_mutation_verbs!()
+    provider = RootProvider(
+        scope=:session,
+        key=_req -> "mutation-verbs",
+        retention=RootRetention(max_entries=1),
+    )
+    route!(MutationVerbApp(); root_provider=provider,
+           operation_policy=OperationPolicy(:blocking))
+
+    function twice(verb)
+        first = dispatch(verb, "/mutation_probe")
+        second = dispatch(verb, "/mutation_probe")
+        @test first.status == 200
+        @test second.status == 200
+        String(first.body), String(second.body)
+    end
+
+    get_first, get_second = twice(:GET)
+    @test contains(get_first, "get:1")
+    @test contains(get_second, "get:1")
+    @test contains(get_first, "child:1")
+
+    for verb in (:POST, :PUT, :PATCH, :DELETE)
+        first, second = twice(verb)
+        label = lowercase(String(verb))
+        @test contains(first, "$label:1")
+        @test contains(second, "$label:2")
+        @test contains(first, "child:1")
+        @test contains(second, "child:1")
+    end
+    @test mutation_verb_runs[:CHILD] == 1
+
+    routes = filter(route -> route.name === :mutation_probe,
+                    semantic_descriptor(MutationVerbApp).routes)
+    @test length(routes) == 5
+    get_route = only(filter(route -> route.verb === :GET, routes))
+    @test !get_route.property.semantics.fresh
+    @test get_route.property.semantics.memoized
+    @test get_route.property.output.materialization.tier === :automatic
+    for route in filter(route -> route.verb !== :GET, routes)
+        @test route.property.semantics.fresh
+        @test !route.property.semantics.memoized
+        @test !route.property.semantics.pending
+        @test route.property.output.materialization.tier === :recompute
+    end
 end
 
 # A route computation may finish quickly by returning ANOTHER compute-at-most-

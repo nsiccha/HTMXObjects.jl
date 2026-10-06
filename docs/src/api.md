@@ -1609,19 +1609,21 @@ immutable request file and writes a result file; `@get result(batch_id::Int)`
 renders its value. A lightweight manual POST delegates to that same GET:
 
 ```julia
-@fresh @post submit(batch_id::Int) = dispatch(:GET,
+@post submit(batch_id::Int) = dispatch(:GET,
     query_url("/result/$batch_id", __self__);
     headers=["HX-Request" => "true",
              "X-Forwarded-Prefix" => HTTP.header(__req__, "X-Forwarded-Prefix", "")],
     parent=dispatch_parent(__req__))
 ```
 
-The POST itself stays inline and does only request acceptance/submission. Its
-returned response contains the GET's native progress fragment. Save/validate a
-new immutable request before dispatching; use a new batch identity when its
+The POST itself stays inline and does only request acceptance/submission.
+Mutation routes execute fresh by construction, so it needs no `@fresh` marker;
+its returned response contains the GET's native progress fragment. Save/validate
+a new immutable request before dispatching; use a new batch identity when its
 inputs change. Do not mark the heavy GET `@fresh` or declare its output as
 `HTTP.Response`/`MIMEResponse`, since those select inline execution. Keep status
-and job-board routes `@fresh` so they can answer while the workers are occupied.
+and job-board GET routes `@fresh` so they can answer while the workers are
+occupied.
 
 Startup uses the same entry after registering routes, with no HTTP listener or
 browser required:

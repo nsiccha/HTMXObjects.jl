@@ -4363,6 +4363,9 @@ updates the struct.
   (`GET` / `DELETE` → `queryparams`, `POST` / `PUT` / `PATCH` → `formparams`).
   Both parsers preserve multi-value keys, so a `Vector`-typed kwarg receives
   every repeated value (`?tag=a&tag=b` or repeated `image=a&image=b` body fields).
+- `@post` / `@put` / `@patch` / `@delete` execute fresh on every request,
+  including identical submissions on a retained root. `@get`, `@ws`, `@sse`,
+  and properties read inside a mutation retain their own declared cache policy.
 - The `:index` property (with empty prefix) maps to `GET /`
 
 If `record_dir` is given, each response is also written to disk under that
@@ -6578,6 +6581,39 @@ function _mark_internal_inputs(descriptor)
         for input in inputs]))
 end
 
+# DynamicObjects' declaration-site `@fresh` trait is keyed by property NAME.
+# HTMXObjects routes are keyed more finely — the injected `Verb{V}` lets one
+# property name own GET and mutation declarations side by side — so mutation
+# freshness must live on the exact verb descriptor instead. Streaming GET
+# upgrades retain their ordinary declaration semantics; the four HTTP mutation
+# verbs always describe recomputation and never advertise a pending cache cell.
+_route_cache_policy(::Any) = Val(:memoized)
+_route_cache_policy(::Type{Verb{:POST}}) = Val(:fresh)
+_route_cache_policy(::Type{Verb{:PUT}}) = Val(:fresh)
+_route_cache_policy(::Type{Verb{:PATCH}}) = Val(:fresh)
+_route_cache_policy(::Type{Verb{:DELETE}}) = Val(:fresh)
+
+_effective_route_descriptor(descriptor, ::Val{:memoized}) = descriptor
+function _effective_route_descriptor(descriptor, ::Val{:fresh})
+    semantics = merge(get(descriptor, :semantics, (;)),
+        (; fresh=true, memoized=false, cached=false, mmap=false, pending=false))
+    output = get(descriptor, :output, (;))
+    materialization = merge(get(output, :materialization, (;)),
+                            (; tier=:recompute))
+    merge(descriptor, (; semantics,
+        output=merge(output, (; materialization))))
+end
+
+function _effective_route_descriptor(descriptor)
+    descriptor === nothing && return nothing
+    for input in get(descriptor, :inputs, NamedTuple[])
+        input.name === :__verb__ || continue
+        return _effective_route_descriptor(
+            descriptor, _route_cache_policy(get(input, :type, nothing)))
+    end
+    descriptor
+end
+
 # Per-type descriptor memo. DO rebuilds every descriptor from `meta(T)` source
 # metadata — signature parsing, `Core.eval` of each argument type, per-property
 # dependency closures — so one build of a large route type costs milliseconds,
@@ -6595,7 +6631,8 @@ function _shared_property_descriptors(T)
     cached = lock(() -> get(_property_descriptors_cache, T, nothing),
                   _property_descriptors_lock)
     cached !== nothing && first(cached) == world && return last(cached)
-    descriptors = NamedTuple[_mark_internal_inputs(descriptor) for descriptor in
+    descriptors = NamedTuple[_effective_route_descriptor(
+        _mark_internal_inputs(descriptor)) for descriptor in
         Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)]
     lock(() -> _property_descriptors_cache[T] = (world, descriptors),
          _property_descriptors_lock)
@@ -6628,8 +6665,8 @@ end
 # declaration they actually walked.
 function _property_descriptor(T, name::Symbol, info::NamedTuple)
     isdefined(DynamicObjects, :property_descriptor) || return nothing
-    _mark_internal_inputs(Base.invokelatest(
-        getproperty(DynamicObjects, :property_descriptor), T, name, info))
+    _effective_route_descriptor(_mark_internal_inputs(Base.invokelatest(
+        getproperty(DynamicObjects, :property_descriptor), T, name, info)))
 end
 
 function _property_descriptor(T, name::Symbol, verb::Symbol)
@@ -7533,8 +7570,9 @@ _with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
 # value. `identity` takes the `:spawn` branch: kick the compute off and hand back
 # a `Pending` — and so does a `Deferred(executor)`, which the operation layer
 # passes instead when the job queue is on (`_operation_background_fetch`), so
-# the compute waits its turn. A declaration-site `@fresh` IP has no two-phase selector; its
-# descriptor lets us keep this framework-only keyword out of the authored call.
+# the compute waits its turn. A fresh route — authored with `@fresh` or implied
+# by a mutation verb — has no two-phase selector; its descriptor lets us keep
+# this framework-only keyword out of the authored call.
 # Only the spawned branch makes polling transport real — see
 # `_execute_operation`.
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
@@ -7542,6 +7580,22 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
     context = get(target, :context, nothing)
     governed = get(target, :governed, false) && context isa OperationContext &&
         isdefined(DynamicObjects, :execute_materialization)
+    prop = getproperty(target.leaf, name)
+
+    # The declaration-site `@fresh` trait in DO is property-name-wide, while a
+    # route's effective descriptor is verb-specific. Call the explicit fresh
+    # API so POST/PUT/PATCH/DELETE bypass the cache cell without changing a
+    # same-named GET (or memoized child properties). Fresh results have no
+    # governed artifact to lease or post-hoc shared status to attach.
+    if declared_fresh
+        return parent_progress !== nothing && fetch === Base.fetch ?
+            DynamicObjects.maybeprogress!(
+                parent_progress, prop, verb_inst, idx_vals...;
+                NamedTuple(kw_pairs)...) :
+            DynamicObjects.fresh(
+                prop, verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+    end
+
     started = if governed
         framework_context = (;
             scope=context.scope,
@@ -7549,41 +7603,20 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
             retention=get(target, :retention, nothing),
         )
         executor = getproperty(DynamicObjects, :execute_materialization)
-        if declared_fresh
-            # A declaration-site `@fresh` IP computes directly and therefore
-            # has no two-phase `fetch` selector to consume. Its descriptor is
-            # what selected blocking transport under `:auto`; keep the
-            # framework-only keyword out of the route's authored kwargs.
-            Base.invokelatest(
-                executor, framework_context, target.root, target.leaf, name,
-                verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
-        else
-            Base.invokelatest(
-                executor, framework_context, target.root, target.leaf, name,
-                verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
-        end
+        Base.invokelatest(
+            executor, framework_context, target.root, target.leaf, name,
+            verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
     else
-        prop = getproperty(target.leaf, name)
         if parent_progress !== nothing && fetch === Base.fetch
             # DO's own parenthesized call: a cached IP attaches its shared
-            # substatus under the caller node (relabeling cache hits); an
-            # uncached `@fresh` IP opens a per-call substatus under it
-            # instead of defaulting to the leaf's own `__status__` root.
+            # substatus under the caller node (relabeling cache hits).
             # Restricted to the inline branch: the `ProgressNode`
             # `fetchindex!` overload always blocks, so using it for a
             # spawned (`fetch = identity`) polling execution would silently
             # degrade polling to blocking.
-            if declared_fresh
-                DynamicObjects.maybefetchindex!(
-                    parent_progress, prop, verb_inst, idx_vals...;
-                    NamedTuple(kw_pairs)...)
-            else
-                DynamicObjects.maybefetchindex!(
-                    parent_progress, prop, verb_inst, idx_vals...;
-                    fetch, NamedTuple(kw_pairs)...)
-            end
-        elseif declared_fresh
-            prop(verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+            DynamicObjects.maybefetchindex!(
+                parent_progress, prop, verb_inst, idx_vals...;
+                fetch, NamedTuple(kw_pairs)...)
         else
             prop(verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
         end
@@ -9596,10 +9629,10 @@ end
 # A "node" is one mounted `@htmx` struct. Everything below answers structural
 # questions about nodes — what a node is called, where it lives, what hangs off
 # it. It answers NO semantic question itself: dependencies, option domains,
-# lifecycle and materialization are DynamicObjects' `property_descriptor`
-# records, carried through unchanged apart from the additive `internal` flag we
-# owe on our OWN injected `__verb__` arg. Deriving those here would be a
-# second, drifting answer to a question DO already owns.
+# lifecycle and materialization start from DynamicObjects'
+# `property_descriptor` records. HTMXObjects adds the `internal` flag owed on
+# its OWN injected `__verb__` arg and applies the mutation-verb freshness that
+# only HTMXObjects can know; every other semantic stays DO-owned.
 #
 # Paths are always built by `_route_path` / `_nested_prefix_and_step` — the
 # same pair the registrar uses. That is deliberate: the `:index` URL-collapse
@@ -9719,7 +9752,7 @@ node has the same shape, root included, so a consumer walks it with one rule:
   identity  — `name`, `label`, `type`, `doc`, `path`, `origin`
   selection — `indexed`, `selection` (the index params that pick this node,
               each with its type and option `domain`)
-  content   — `properties` (verbatim DynamicObjects descriptors: role,
+  content   — `properties` (DynamicObjects descriptors plus route policy: role,
               dependencies, materialization, domains), `options` (the node's
               `@options` declarations), `resources` (the on-disk projection),
               `routes` (mount-resolved, shared with `reflect`)
@@ -9772,8 +9805,11 @@ the owning type, its matching property descriptor, effective fixed-field
 `kind=:context` inputs, and each declared parameter's semantic `kind` and
 `domain`. Existing `reflect(T)` output is unchanged.
 
-Those DO records are reported as DO builds them, with one additive
-annotation: every entry of a descriptor's `inputs` carries `internal::Bool`.
+Those records start as DO builds them. Every entry of a descriptor's `inputs`
+carries the additive `internal::Bool` annotation. Mutation-route descriptors
+(`POST`, `PUT`, `PATCH`, `DELETE`) additionally report their effective
+HTMXObjects policy: `fresh=true`, `memoized=false`, `pending=false`, and
+`output.materialization.tier=:recompute`.
 A routed property's signature has the framework-injected
 `__verb__::Verb{V}` prepended to it, and DO — deliberately verb-agnostic —
 reports that as an ordinary positional input; the flag is what lets a
@@ -9948,6 +9984,11 @@ end
 Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` route declared on
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) on
 [`ROUTER`](@ref). Returns `app`.
+
+Mutation routes (`@post`, `@put`, `@patch`, `@delete`) execute their route body
+fresh for every request, even when a managed `root_provider` retains the root
+and the submitted arguments are identical. GET/WS/SSE routes and any child
+properties a mutation reads keep their own DynamicObjects cache semantics.
 
 - `prefix` — mount the entire app under a URL prefix (e.g. `prefix="api"` puts
   the root route at `/api/`). Default: root (`""`).
