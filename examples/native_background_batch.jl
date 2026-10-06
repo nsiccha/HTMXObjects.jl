@@ -20,7 +20,7 @@ using HTMXObjects, DynamicObjects, HTTP
     @get result(batch_id::Int) = h.p("batch:$batch_id result:", batch_result(batch_id))
 
     # POST accepts/identifies the request; the result GET owns background work.
-    @fresh @post submit(batch_id::Int) = dispatch(:GET,
+    @post submit(batch_id::Int) = dispatch(:GET,
         query_url("/result/$batch_id", __self__);
         headers=["HX-Request" => "true",
                  "X-Forwarded-Prefix" => HTTP.header(__req__, "X-Forwarded-Prefix", "")],
