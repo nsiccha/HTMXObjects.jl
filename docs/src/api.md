@@ -1099,6 +1099,22 @@ subcaches retain their identity. `max_entries` applies LRU cleanup; optional
 `ttl` is an idle timeout in seconds. Cleanup is opportunistic and removes only
 the provider's reference, so work already holding a root can finish.
 
+An inline nested child shares that identity only once it exists on the retained
+source root. The managed store realizes declaration-level children there when it
+creates the root. A child first realized during a request — every indexed
+`@struct child(k)`, and a declaration-level child that a custom factory's root
+has not realized — is rebuilt per request, so its memoized and in-flight work
+restarts (DynamicObjects snag `remount-drops-ne-af0c7132`). Keep long-running
+work that requests poll on an indexed property of the root itself:
+
+```julia
+@htmx struct ModelApp
+    run_result(key::String) = fit_model(key)   # retained across requests
+    @fresh @get poll(key::String) =
+        Treebars.polling_fetchindex(render_fit, run_result, key)
+end
+```
+
 Outside `semantic_app`, `RootProvider()` remains fresh-per-request. The managed
 store is process-local; use `RootProvider(factory; scope, key)` as the adapter
 seam for a distributed or externally owned job/session store.
