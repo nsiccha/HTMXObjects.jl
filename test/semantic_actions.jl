@@ -2,7 +2,7 @@ using TestItemRunner
 
 @testmodule SemanticActionFixtures begin
     using HTMXObjects
-    export ActionHost, ActionRow, ActionGraph, ActionGates, action_surface
+    export ActionHost, ActionRow, ActionGraph, ActionGates, action_surface, OrderHost
 
     const ActionGates = Dict{String,Channel{Nothing}}()
 
@@ -43,6 +43,28 @@ using TestItemRunner
         @param session_key::String = "demo"
         @post root_action() = h.p("root")
         @include child = ActionChild()
+    end
+
+    # A row and its mounted stage child carry the same request context, but the
+    # child delegates its params in a different order than the row declares.
+    @htmx struct OrderStages
+        @param (; session_key, failed_only) = __parent__
+        @post lower() = h.p("lower:$(session_key):$(failed_only)")
+    end
+
+    @htmx struct OrderRow
+        label::String = ""
+        @param (; session_key, view, failed_only) = __parent__
+        @include stages = OrderStages()
+        @get source() = h.p("source:$(label):$(view)")
+        @post benchmark() = h.p("benchmark:$(label):$(failed_only)")
+    end
+
+    @htmx struct OrderHost
+        @param session_key::String = "demo"
+        @param view::String = "compact"
+        @param failed_only::Bool = false
+        @include rows(key::String) = OrderRow(; label=key)
     end
 end
 
@@ -103,12 +125,23 @@ end
     @test count("<form ", repr("text/html", plain)) == 5
     @test !contains(repr("text/html", plain), "htmxo-semantic-actions")
 
-    # Operations whose hidden context differs from the shared holder keep forms.
+    # A child whose hidden context differs (an extra `@param`) gets its own
+    # holder instead of falling back to a form (snag compact-repeated-222f51ff,
+    # user decision 0brkhpx).
     graph = repr("text/html", semantic_app(ActionGraph(; __prefix__="/graph",
         __req__=HTTP.Request("GET", "/?session_key=token")); compact=true))
     @test contains(graph, "<button type=\"button\" hx-post=\"/graph/root_action\"")
-    @test contains(graph, "<form hx-post=\"/graph/child/child_action\"")
-    @test count("<form ", graph) == 1
+    @test count("<form ", graph) == 0
+    graph_holders = [m.captures[1] for m in eachmatch(
+        r"<div id=\"([^\"]+)\" class=\"htmxo-semantic-action-inputs\">", graph)]
+    @test graph_holders == ["htmxo-semantic-actions-_2fgraph", "htmxo-semantic-actions-_2fgraph-2"]
+    @test contains(graph, "<div id=\"htmxo-semantic-actions-_2fgraph-2\" class=\"htmxo-semantic-action-inputs\">" *
+                          "<input type=\"hidden\" name=\"session_key\" value=\"token\">" *
+                          "<input type=\"hidden\" name=\"flavor\" value=\"plain\"></div>")
+    child_button = only(m.match for m in eachmatch(r"<button[^>]*hx-post=\"/graph/child/child_action\"[^>]*>", graph))
+    @test contains(child_button, "hx-include=\"#htmxo-semantic-actions-_2fgraph-2\"")
+    root_button = only(m.match for m in eachmatch(r"<button[^>]*hx-post=\"/graph/root_action\"[^>]*>", graph))
+    @test contains(root_button, "hx-include=\"#htmxo-semantic-actions-_2fgraph\"")
 
     # A button's included values are exactly what its form would have submitted.
     route!(root; operation_policy=:blocking)
@@ -297,4 +330,31 @@ end
             close(server)
         end
     end
+end
+
+@testitem "compact semantic actions share one holder for equal context in any order" setup=[SemanticActionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    root = OrderHost(; __prefix__="/app",
+        __req__=HTTP.Request("GET", "/?session_key=token&failed_only=true"),
+        __cache_base__=mktempdir())
+    html = repr("text/html", semantic_app(root.rows("r7"); compact=true))
+    # Every operation is control-free, so none keeps a form, although the stage
+    # child declares the same request context in a different order.
+    @test count("<form ", html) == 0
+    @test count("<button", html) == 3
+    @test count("class=\"htmxo-semantic-action-inputs\"", html) == 1
+    for input in ("name=\"session_key\" value=\"token\"", "name=\"failed_only\" value=\"true\"",
+                  "name=\"view\" value=\"compact\"")
+        @test count(input, html) == 1
+    end
+    @test count("hx-include=\"#htmxo-semantic-actions-_2fapp_2frows_2fr7\"", html) == 3
+    route!(root; operation_policy=:blocking)
+    headers = ["HX-Request" => "true", "Content-Type" => "application/x-www-form-urlencoded"]
+    lowered = dispatch(:POST, "/rows/r7/stages/lower"; headers,
+                       body="session_key=token&failed_only=true&view=compact")
+    @test String(lowered.body) == "<p>lower:token:true</p>"
+    measured = dispatch(:POST, "/rows/r7/benchmark"; headers,
+                        body="session_key=token&failed_only=true&view=compact")
+    @test String(measured.body) == "<p>benchmark:r7:true</p>"
 end
