@@ -13081,18 +13081,26 @@ end
 _is_multiline_text_ref(callee) = callee === :MultilineText ||
     Meta.isexpr(callee, :.) && callee.args[end] == QuoteNode(:MultilineText)
 
-function _semantic_context_inputs(route, values)
-    nodes = Any[]
+# The request context a generated submission carries as hidden inputs: values
+# of inputs that have no semantic control (inherited request `@param`s).
+function _semantic_hidden_values(route, values)
+    hidden = Pair{Symbol,Any}[]
     for param in route.params
         param.source === :path && continue
         get(param, :kind, nothing) === nothing || continue
         haskey(values, param.name) || continue
         value = values[param.name]
         value === nothing && continue
-        append!(nodes, _hidden_input(param.name, value))
+        push!(hidden, param.name => value)
     end
-    nodes
+    hidden
 end
+
+_semantic_hidden_inputs(hidden) =
+    Any[node for (name, value) in hidden for node in _hidden_input(name, value)]
+
+_semantic_context_inputs(route, values) =
+    _semantic_hidden_inputs(_semantic_hidden_values(route, values))
 
 function _semantic_runtime_route(obj, route)
     params = NamedTuple[route.params...]
@@ -13329,6 +13337,13 @@ function _operation_route(T, name::Symbol, verb::Symbol)
     merge(route, (; params=copy(route.params)))
 end
 
+# The inputs an operation form renders as visible controls: everything except
+# positional path inputs (encoded into the URL), hidden request context, and
+# context lifted into a shared group. An operation with none is control-free.
+_operation_control_params(route, shared_names) = [param for param in route.params
+    if param.source !== :path && get(param, :kind, nothing) !== nothing &&
+       !(get(param, :kind, nothing) === :context && param.name in shared_names)]
+
 function _operation_form_controls(obj, route, current, action;
         radio_max=4, presentation=:auto, shared_names=Set{Symbol}(),
         context_selector=nothing, fragment=false)
@@ -13344,10 +13359,7 @@ function _operation_form_controls(obj, route, current, action;
         __htmxo_context_selector=context_selector)))
     context_controls = Any[]
     controls = Any[]
-    for param in route.params
-        param.source === :path && continue
-        get(param, :kind, nothing) === nothing && continue
-        get(param, :kind, nothing) === :context && param.name in shared_names && continue
+    for param in _operation_control_params(route, shared_names)
         control = _semantic_control(obj, route.owner, param, current; radio_max, presentation)
         if param.name in refresh_dependencies
             control = h.div(control;
@@ -13604,6 +13616,65 @@ end
 _semantic_app_setting(setting::Function, entry) = setting(entry)
 _semantic_app_setting(setting, _entry) = setting
 
+# Lossless, id-safe spelling of a mount prefix: ASCII letters and digits stay,
+# every other byte becomes `_` plus two hex digits. Shorter than a hex dump of
+# every byte, and distinct keys such as `/a-b` and `/a_b` stay distinct.
+_semantic_id_token(prefix) = join(
+    isascii(Char(byte)) && isletter(Char(byte)) || isdigit(Char(byte)) ?
+        string(Char(byte)) : "_" * string(byte; base=16, pad=2)
+    for byte in codeunits(_normalize_semantic_prefix(prefix)))
+
+const _SEMANTIC_ACTION_TARGET = "next .htmxo-semantic-operation-result"
+
+# Which operations `semantic_app(...; compact=true)` renders as action buttons:
+# ordinary HTTP operations with no visible control whose hidden request context
+# equals the first such operation's, so one shared holder supplies it exactly.
+# Everything else keeps its generated form.
+function _semantic_action_plan(specs, shared_names)
+    hidden = nothing
+    indices = Set{Int}()
+    for (index, spec) in enumerate(specs)
+        spec.base_entry.verb in (:WEBSOCKET, :SSE) && continue
+        isempty(_operation_control_params(spec.runtime_route, shared_names)) || continue
+        values = _semantic_hidden_values(spec.runtime_route, spec.current)
+        hidden === nothing && (hidden = values)
+        isequal(values, hidden) || continue
+        push!(indices, index)
+    end
+    (; indices, hidden=something(hidden, Pair{Symbol,Any}[]))
+end
+
+function _semantic_action(spec, content, include)
+    route = spec.runtime_route
+    _check_mounted_include_child(spec.mounted, route)
+    action = _operation_form_action(route, spec.current,
+                                    _operation_form_target(spec.mounted, route))
+    method_key = Symbol("hx_" * lowercase(string(route.verb)))
+    attrs = merge(_operation_submit_attributes(spec.operation_submit_attrs),
+                  (; type="button"), NamedTuple{(method_key,)}((action,)),
+                  isnothing(include) ? (;) : (; hx_include=include),
+                  (; hx_target=_SEMANTIC_ACTION_TARGET, hx_swap="innerHTML"))
+    (h.button(content; attrs...),
+     h.div(; class="htmxo-semantic-operation-result", aria_live="polite"))
+end
+
+function _semantic_actions(root_prefix, specs, plan, context_selector)
+    holder_id = "htmxo-semantic-actions-" * _semantic_id_token(root_prefix)
+    holder = isempty(plan.hidden) ? Any[] : Any[h.div(_semantic_hidden_inputs(plan.hidden)...;
+        id=holder_id, class="htmxo-semantic-action-inputs")]
+    selectors = String[]
+    isempty(plan.hidden) || push!(selectors, "#" * holder_id)
+    isnothing(context_selector) || push!(selectors, context_selector)
+    include = isempty(selectors) ? nothing : join(selectors, ", ")
+    nodes = Any[holder...]
+    for (index, spec) in enumerate(specs)
+        index in plan.indices || continue
+        content = something(spec.operation_submit, spec.base_entry.title)
+        append!(nodes, _semantic_action(spec, content, include))
+    end
+    h.div(nodes...; class="htmxo-semantic-actions")
+end
+
 function _default_semantic_operation(entry)
     entry.form === nothing && throw(ArgumentError(string(
         "semantic_app has no default control for ",
@@ -13700,8 +13771,8 @@ function _activate_semantic_root_provider!(obj)
 end
 
 """
-    semantic_app(obj; values=(;), title=nothing, submit="Run", submit_attrs=(;),
-                 render_operation=_default_semantic_operation)
+    semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
+                 render_operation=_default_semantic_operation, compact=false)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -13722,7 +13793,8 @@ shared.
 
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` and `submit_attrs` may likewise be values or
-functions of that entry. `submit` supplies content inside the generated button;
+functions of that entry. `submit` supplies content inside the generated button
+(`"Run"` when `nothing`);
 `submit_attrs` supplies its presentation attributes, such as `title`,
 `aria_label`, and `class`, while the compiler owns submission and targets. Override
 `render_operation(entry)` for local layout; the entry carries `object`, `route`,
@@ -13735,6 +13807,23 @@ URL does not submit current form/context values; use `entry.form` and
 `entry.result` when those inputs can change. The default
 renderer fails closed for WebSocket and SSE routes, whose client transport must
 be rendered explicitly.
+
+Set `compact=true` for many repeated mounts, such as one surface per table row.
+Every ordinary HTTP operation without a visible control then renders as one
+`<button type="button">` followed by its own result `<div>`, inside one
+`.htmxo-semantic-actions` container placed before the remaining operations. The
+button submits to the same mounted URL and verb; `hx-target="next
+.htmxo-semantic-operation-result"` addresses the result directly after it, and
+mutation transport (verb freshness, polling, resume) is unchanged. Hidden
+request context is rendered once per surface in a
+`.htmxo-semantic-action-inputs` holder that each button includes, together with
+the shared context group. All attributes are on the button itself, so nothing is
+inherited by result content. Button content defaults to the operation title
+(`entry.title`); `submit`/`submit_attrs` apply as for forms, and
+`render_operation` renders only the operations that keep a form: those with
+visible inputs, and those whose hidden context differs from the first compact
+operation's. Compact actions carry no `target_id` and are not passed to
+`render_operation`.
 
 The first successful render also promotes the historic request-scoped default
 to a managed provider keyed by the root type and normalized mount prefix. The
@@ -13754,8 +13843,8 @@ one mounted child, when `(verb, path)` identities collide, or when an indexed
 `@include` has no selected runtime child. Call `semantic_app` on a selected
 indexed child to compile that subtree.
 """
-function semantic_app(obj; values=(;), title=nothing, submit="Run", submit_attrs=(;),
-        render_operation=_default_semantic_operation)
+function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
+        render_operation=_default_semantic_operation, compact::Bool=false)
     descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
@@ -13835,16 +13924,21 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run", submit_attrs
                    id=context_id, class="htmxo-semantic-context")
     end
 
+    selector = isempty(context_entries) ? nothing : "#$(context_id)"
+    plan = compact ? _semantic_action_plan(specs, shared_context) :
+                     (; indices=Set{Int}(), hidden=Pair{Symbol,Any}[])
+    actions = isempty(plan.indices) ? Any[] :
+              Any[_semantic_actions(root_prefix, specs, plan, selector)]
     operations = Any[]
-    for spec in specs
+    for (index, spec) in enumerate(specs)
+        index in plan.indices && continue
         base_entry = spec.base_entry
         target_id = base_entry.target_id
-        selector = isempty(context_entries) ? nothing : "#$(context_id)"
         form = base_entry.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
             spec.mounted, spec.local_route;
             values=spec.operation_values,
             target_id="#$(target_id)",
-            submit=spec.operation_submit,
+            submit=something(spec.operation_submit, "Run"),
             submit_attrs=spec.operation_submit_attrs,
             form_class="htmxo-semantic-operation-form",
             shared_context,
@@ -13859,7 +13953,7 @@ function semantic_app(obj; values=(;), title=nothing, submit="Run", submit_attrs
     _activate_semantic_root_provider!(obj)
     heading = isnothing(title) ? Any[] : Any[h.header(h.h1(title))]
     context = isnothing(context_panel) ? Any[] : Any[context_panel]
-    h.section(heading..., context..., operations...; class="htmxo-semantic-app")
+    h.section(heading..., context..., actions..., operations...; class="htmxo-semantic-app")
 end
 
 # --- Conditional visibility (show_when) ---

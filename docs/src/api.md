@@ -419,7 +419,7 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, submit_attrs, render_operation)` | Compile a mounted graph into operation cards/forms and result targets |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
@@ -561,6 +561,59 @@ The [htmx inheritance guide](https://htmx.org/docs/#inheritance),
 [`hx-include`](https://htmx.org/attributes/hx-include/) describe the underlying
 attribute rules. Measure UTF-8 response bytes as well as effective requests;
 decoded attribute counts alone do not establish a payload reduction.
+
+### Compact action rows
+
+When every row of a table needs its operations inline, pass `compact=true`.
+Each ordinary HTTP operation without a visible control renders as a button
+followed by its own result, instead of a form, hidden inputs, button, and an
+id-addressed result:
+
+```julia
+operation_surface(row) = semantic_app(row; compact=true,
+    submit_attrs=entry -> (; title=entry.title, aria_label=entry.title))
+
+h.tbody((h.tr(h.td("Row $(n)"), h.td(operation_surface(app.rows(n))))
+         for n in indices)...)
+```
+
+One row then renders as:
+
+```html
+<section class="htmxo-semantic-app">
+  <div class="htmxo-semantic-actions">
+    <div id="htmxo-semantic-actions-…" class="htmxo-semantic-action-inputs">
+      <input type="hidden" name="session_key" value="token">
+    </div>
+    <button title="Compile the model." aria-label="Compile the model." type="button"
+            hx-post="/app/rows/7/compile" hx-include="#htmxo-semantic-actions-…"
+            hx-target="next .htmxo-semantic-operation-result" hx-swap="innerHTML">Compile the model.</button>
+    <div class="htmxo-semantic-operation-result" aria-live="polite"></div>
+    …
+  </div>
+  <!-- operations with visible inputs keep their generated form -->
+</section>
+```
+
+The compiler still discovers every operation, so adding a route adds its
+button. Each button submits to the operation's mounted URL with its declared
+verb, and the hidden request context and any shared context group are included,
+so the server receives the values the operation's form would have submitted.
+Mutation transport is unchanged: verb freshness, `:auto` polling into the
+button's own result, and resume without replay. Button content defaults to the
+operation title; `submit` and `submit_attrs` work as for forms, with
+submission and target attributes still compiler-owned.
+
+Only operations without visible controls become buttons. An operation with
+inputs, or whose hidden context differs from the first compact operation's (for
+example, a child mount with an extra `@param`), keeps its form and is passed to
+`render_operation`. Compact buttons carry no `target_id`. Their attributes are
+on the button itself rather than an ancestor, so result content inherits
+nothing from the action row. Like generated forms, the buttons need htmx.
+
+Compact rows reduce the number of generated elements and bytes per operation;
+they do not change which operations exist or how they execute. Rendering many
+same-type rows reads one memoized descriptor per type in either layout.
 
 ### Reusing generated markup
 
