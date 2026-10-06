@@ -196,7 +196,7 @@ end
 
 function _resource_list_html(resource, ks)
     isempty(ks) && return h.p(h.em("No $(resource.name) yet."))
-    h.ul((h.li(hx_link(resource.__prefix__ * "/" * string(k))(string(k))) for k in ks)...)
+    h.ul((h.li(hx_link(resource.__prefix__ * "/" * _url_segment(k))(string(k))) for k in ks)...)
 end
 
 """
