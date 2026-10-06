@@ -641,7 +641,7 @@ end
 function _runtime_job_started!(tracker::RuntimeTracker, entry, label)
     tracker.enabled || return nothing
     handle = entry.started
-    handle isa DynamicObjects.Pending || return nothing
+    handle isa _OperationHandle || return nothing
     req = entry.request
     record = _runtime_record(req)
     key = _runtime_handle_key(handle)
@@ -745,8 +745,8 @@ end
 # Wait for a job's work, following nested `Pending`s (a route may finish by
 # returning another one) and tasks. Anything else is waited on once.
 function _runtime_await(handle)
-    value = handle isa Union{DynamicObjects.Pending,Task} ? handle : fetch(handle)
-    while value isa Union{DynamicObjects.Pending,Task}
+    value = handle isa Union{_OperationHandle,Task} ? handle : fetch(handle)
+    while value isa Union{_OperationHandle,Task}
         value = fetch(value)
     end
     nothing
@@ -808,7 +808,7 @@ _runtime_job_polled!(req, handle) =
 function _runtime_count_poll!(req, handle)
     tracker = _runtime_tracker_of(req)
     tracker.enabled || return nothing
-    handle isa DynamicObjects.Pending || return nothing
+    handle isa _OperationHandle || return nothing
     key = _runtime_handle_key(handle)
     record = _runtime_record(req)
     lock(tracker.lock) do
@@ -901,8 +901,12 @@ gone. Its job is recorded as `:failed` with reason "abandoned", and the next
 request for it starts a fresh compute. `abandon_after=Inf` never abandons.
 Running computes are never interrupted.
 
-Only background computes queue: blocking executions (POST and other mutation
-verbs, `:blocking` policies, `@fresh` routes, …) answer inline as before.
+Only memoized background computes queue: direct executions (`@direct` routes,
+non-HTMX submissions, `:blocking` policies, …) answer inline, and fresh
+invocations (`@fresh` routes and mutation verbs) start at once — in the
+background when the polling transport answers them — because nothing can
+coalesce or abandon a computation no cache cell holds. Route heavy batch work
+through a memoized GET (see *App-owned background batches* in the API docs).
 Needs a DynamicObjects with `Deferred`. Returns the current settings; omitted
 settings are unchanged. Setting `max_running=0` starts everything still queued.
 """

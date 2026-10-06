@@ -20,13 +20,15 @@ using HTMXObjects, DynamicObjects, HTTP
     @get result(batch_id::Int) = h.p("batch:$batch_id result:", batch_result(batch_id))
 
     # POST accepts/identifies the request; the result GET owns background work.
-    @post submit(batch_id::Int) = dispatch(:GET,
+    # `@direct`: its answer IS the dispatched GET's response (headers included),
+    # so it never waits behind a poller of its own.
+    @direct @post submit(batch_id::Int) = dispatch(:GET,
         query_url("/result/$batch_id", __self__);
         headers=["HX-Request" => "true",
                  "X-Forwarded-Prefix" => HTTP.header(__req__, "X-Forwarded-Prefix", "")],
         parent=dispatch_parent(__req__))
 
-    @fresh @get jobs() = jobs_board(; all=true)
+    @fresh @direct @get jobs() = jobs_board(; all=true)
 end
 
 function mount(directory; before_compute=batch_id -> sleep(2), prefix="")

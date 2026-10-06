@@ -73,7 +73,7 @@ tail route should then answer with `reset=true`.
 - one tail request at a time, a 30 s timeout, exponential back-off on failure;
   failures show in a status line (never a silent retry loop); a route that
   answers with an interim Treebars poller is reported as such (declare tail and
-  older routes `@fresh @get`);
+  older routes `@fresh @direct @get`);
 - new items get htmx processing, their scripts run and `htmx:load` fires, as
   after an htmx swap; the root emits `htmxo:thread-updated` after each change;
 - `htmxo:thread-refresh` (e.g. via [`live_thread_refresh`](@ref) in an
@@ -83,17 +83,18 @@ tail route should then answer with `reset=true`.
 Requires [`live_thread_assets`](@ref), which [`htmx`](@ref) includes by default
 (`thread=true`).
 
-All three routes are `@fresh`: a memoized index would keep serving its first
-render, and a slow tail/older render under the default `:auto` operation policy
-would come back as an interim poller.
+All three routes are `@fresh @direct`: `@fresh` because a memoized index would
+keep serving its first render, `@direct` because a slow tail/older render under
+the default `:auto` operation policy would otherwise come back as an interim
+poller, which the thread client cannot reconcile.
 
 ```julia
-@fresh @get index() = live_thread(latest_items(); id="chat",
+@fresh @direct @get index() = live_thread(latest_items(); id="chat",
     older_url=__self__/"older", tail_url=__self__/"tail",
     cursor=oldest_key(), since=last_final_key(), version=current_version())
-@fresh @get older(; before::String) =
+@fresh @direct @get older(; before::String) =
     live_thread_page(page_before(before); cursor=oldest_key_or_nothing())
-@fresh @get tail(; since::String="", v::String="") =
+@fresh @direct @get tail(; since::String="", v::String="") =
     v == current_version() ? live_thread_unchanged() :
         live_thread_tail(items_after(since); since=last_final_key(), version=current_version())
 ```
@@ -172,12 +173,15 @@ live_thread_unchanged() = HTTP.Response(204)
 now — e.g. from the POST that sent a message:
 
 ```julia
-@post send(; text::String) = (append!(text);
+@direct @post send(; text::String) = (append!(text);
     hx_response(""; trigger=live_thread_refresh("#chat")))
 ```
 
 `target` is a CSS selector (all threads on the page when `nothing`); `bottom`
-scrolls the thread to its newest item, as a chat does after you send.
+scrolls the thread to its newest item, as a chat does after you send. The POST
+is `@direct` because its answer IS the response headers: under the default
+`:auto` policy a slow mutation is answered by a poller, which carries a
+fragment, not the original response's `HX-Trigger`.
 """
 function live_thread_refresh(target=nothing; bottom::Bool=true)
     fields = String["\"bottom\":$(bottom)"]
@@ -344,7 +348,7 @@ live_thread_script() = h.script(Raw(raw"""
     if (!frag) {
       throw {
         message: /treebar-poller/.test(res.text)
-          ? 'the route answered with an interim poller; declare it `@fresh @get`'
+          ? 'the route answered with an interim poller; declare it `@fresh @direct @get`'
           : 'unexpected response (no .' + cls + ')',
         html: res.text
       };

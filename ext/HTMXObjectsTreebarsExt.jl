@@ -15,7 +15,7 @@ function _grace_fetch(render_result, started, grace_period)
     # A route may finish by returning another Pending. Follow that chain only
     # inside the original grace budget; rendering an unresolved inner handle
     # would synchronously fetch it and hold the request open.
-    while rv isa HTMXObjects.DynamicObjects.Pending
+    while rv isa HTMXObjects._OperationHandle
         elapsed = (time_ns() - grace_started) / 1.0e9
         remaining = grace_period - elapsed
         remaining > 0 || return (ready=false, value=nothing)
@@ -29,7 +29,7 @@ end
 
 function _operation_ready_terminal(render_result, started)
     value = started
-    while value isa HTMXObjects.DynamicObjects.Pending
+    while value isa HTMXObjects._OperationHandle
         isready(value) || return (ready=false, value=nothing)
         try
             value = fetch(value)
@@ -41,6 +41,13 @@ function _operation_ready_terminal(render_result, started)
         end
     end
     terminal = render_result(value)
+    # An operation answered with a finalized response (`HTTP.Response`,
+    # `MIMEResponse`) its route did not declare — `hx_response`, a
+    # `dispatch`ed sub-request — keeps its headers on the poll response,
+    # with its body inside the same terminal node.
+    finalized = HTMXObjects._finalized_response(terminal)
+    finalized === nothing ||
+        return (ready=true, value=HTMXObjects._operation_finalized_terminal(finalized))
     # Dual-class terminal: the trigger-less `.treebar-poller-inner` is the
     # shape every deployed poller hx-select matches — the live select has no
     # `.treebar-terminal-content` branch, so the bare marker swapped an EMPTY
@@ -126,6 +133,14 @@ function __init__()
 
     HTMXObjects._progress_attach_impl[] =
         (parent, node) -> Treebars.add_child!(parent, node)
+
+    # A background fresh operation's own progress root: a detached, bare
+    # node (empty description, so it renders no header row of its own). The
+    # invocation runs through DynamicObjects' `maybeprogress!`, which opens
+    # the route's documented substatus beneath it — the same labelled node a
+    # memoized operation's poller renders.
+    HTMXObjects._fresh_operation_root_impl[] =
+        () -> Treebars.initialize_progress!(:state; description="")
 
     # Ambient dispatch-parent protocol (companion of Treebars `b4c2182`):
     # route bodies nesting a bare `polling_fetchindex` resolve the caller
