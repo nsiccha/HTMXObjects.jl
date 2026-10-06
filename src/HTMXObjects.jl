@@ -7581,28 +7581,38 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
     governed = get(target, :governed, false) && context isa OperationContext &&
         isdefined(DynamicObjects, :execute_materialization)
     prop = getproperty(target.leaf, name)
+    framework_context = governed ? (;
+        scope=context.scope,
+        key=context.key,
+        retention=get(target, :retention, nothing),
+    ) : nothing
+    executor = governed ?
+        getproperty(DynamicObjects, :execute_materialization) : nothing
 
     # The declaration-site `@fresh` trait in DO is property-name-wide, while a
     # route's effective descriptor is verb-specific. Call the explicit fresh
     # API so POST/PUT/PATCH/DELETE bypass the cache cell without changing a
-    # same-named GET (or memoized child properties). Fresh results have no
-    # governed artifact to lease or post-hoc shared status to attach.
+    # same-named GET (or memoized child properties). A retained semantic root
+    # still needs DO's governance lease even though this result itself is never
+    # automatically stored; the callback executor provides exactly that scope.
     if declared_fresh
-        return parent_progress !== nothing && fetch === Base.fetch ?
+        compute_fresh = () -> parent_progress !== nothing && fetch === Base.fetch ?
             DynamicObjects.maybeprogress!(
                 parent_progress, prop, verb_inst, idx_vals...;
                 NamedTuple(kw_pairs)...) :
             DynamicObjects.fresh(
                 prop, verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
+        if governed
+            applicable(executor, compute_fresh, framework_context, target.root) ||
+                error("DynamicObjects' governed callback executor is required " *
+                      "for fresh mutation routes; upgrade DynamicObjects")
+            return Base.invokelatest(
+                executor, compute_fresh, framework_context, target.root)
+        end
+        return compute_fresh()
     end
 
     started = if governed
-        framework_context = (;
-            scope=context.scope,
-            key=context.key,
-            retention=get(target, :retention, nothing),
-        )
-        executor = getproperty(DynamicObjects, :execute_materialization)
         Base.invokelatest(
             executor, framework_context, target.root, target.leaf, name,
             verb_inst, idx_vals...; fetch, NamedTuple(kw_pairs)...)
