@@ -2711,18 +2711,30 @@ end
                                     plain, Verb{:GET}()) === :blocking
     @test _operation_execution_mode(OperationPolicy(:auto), marked_descriptor,
                                     marked_hx, Verb{:GET}()) === :polling
+    # `@fresh` is cache policy only: a fresh read recomputes per invocation and
+    # stays eligible for the background transport exactly like a memoized
+    # one. `@direct` (the registration-time `direct` flag) is the per-route
+    # transport opt-out — a hand-shaped poller, a structural fragment.
     @test _operation_execution_mode(OperationPolicy(:auto), fresh_descriptor,
-                                    hx, Verb{:GET}()) === :blocking
+                                    hx, Verb{:GET}()) === :polling
+    @test _operation_execution_mode(OperationPolicy(:auto), fresh_descriptor,
+                                    plain, Verb{:GET}()) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:auto), fresh_descriptor,
+                                    hx, Verb{:GET}(); direct=true) === :blocking
+    @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
+                                    hx, Verb{:GET}(); direct=true) === :blocking
 
-    # `@fresh` is both a cache-policy declaration and the supported per-route
-    # opt-out for a hand-shaped poller under app-wide `:auto`. The blocking
-    # executor must not leak its private `fetch` selector into the route body.
+    # Neither executor leaks its private `fetch` selector into the route body:
+    # the inline one (a non-HTMX request) and the background one (an HTMX
+    # request, finished within the grace budget).
     fresh_app = FreshPolicyApp()
     fresh_target = (context=nothing, root=fresh_app, leaf=fresh_app)
-    fresh_result = _run_operation(
-        fresh_target, FreshPolicyApp, :html, Verb{:GET}(), hx, 0, 0;
-        operation_policy=OperationPolicy(:auto))
-    @test repr("text/html", fresh_result.value) == "<p>fresh:2</p>"
+    for request in (plain, hx)
+        fresh_result = _run_operation(
+            fresh_target, FreshPolicyApp, :html, Verb{:GET}(), request, 0, 0;
+            operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", fresh_result.value) == "<p>fresh:2</p>"
+    end
 
     # The governed executor forwards its kwargs through DynamicObjects'
     # materialization lease, so pin the same reserved-keyword boundary there.
@@ -2730,10 +2742,12 @@ end
         hx, "", "/html", :http, :request, nothing)
     governed_target = (context=governed_context, root=fresh_app,
                        leaf=fresh_app, governed=true, retention=nothing)
-    governed_result = _run_operation(
-        governed_target, FreshPolicyApp, :html, Verb{:GET}(), hx, 0, 0;
-        operation_policy=OperationPolicy(:auto))
-    @test repr("text/html", governed_result.value) == "<p>fresh:2</p>"
+    for request in (plain, hx)
+        governed_result = _run_operation(
+            governed_target, FreshPolicyApp, :html, Verb{:GET}(), request, 0, 0;
+            operation_policy=OperationPolicy(:auto))
+        @test repr("text/html", governed_result.value) == "<p>fresh:2</p>"
+    end
     # The pending gate, cell by cell: the `pending` capability alone selects
     # polling — `progress_mode` is descriptive (it shapes the progress tree),
     # never a transport gate — and a descriptor that predates the field polls
@@ -2778,9 +2792,32 @@ end
     @test _operation_execution_mode(OperationPolicy(:polling),
                                     get_exchange.property, hx,
                                     Verb{:GET}()) === :blocking
+    # A mutation polls through GET resumes of its token, so an HTMX
+    # submission whose client declares a swap target (`HTMXO-Swap`, set by
+    # `mutation_poll_script`) is eligible. A swap-less submission
+    # (`hx-swap="none"`), an undeclared one, and a non-HTMX one (a classic
+    # form post, curl) are answered by their own response.
+    swapping = HTTP.Request("POST", "/exchange",
+                            ["HX-Request" => "true", "HTMXO-Swap" => "outerHTML"])
+    swapless = HTTP.Request("POST", "/exchange",
+                            ["HX-Request" => "true", "HTMXO-Swap" => "none"])
     @test _operation_execution_mode(OperationPolicy(:polling),
-                                    post_exchange.property, hx,
-                                    Verb{:POST}()) === :blocking
+                                    post_exchange.property, swapping,
+                                    Verb{:POST}()) === :polling
+    @test _operation_execution_mode(OperationPolicy(:auto),
+                                    post_exchange.property, swapping,
+                                    Verb{:POST}()) === :polling
+    for request in (swapless, hx, HTTP.Request("POST", "/exchange"))
+        @test _operation_execution_mode(OperationPolicy(:auto),
+                                        post_exchange.property, request,
+                                        Verb{:POST}()) === :blocking
+        @test _operation_execution_mode(OperationPolicy(:polling),
+                                        post_exchange.property, request,
+                                        Verb{:POST}()) === :blocking
+    end
+    @test _operation_execution_mode(OperationPolicy(:auto),
+                                    post_exchange.property, swapping,
+                                    Verb{:POST}(); direct=true) === :blocking
 
     app = PolicyApp()
     target = (context=nothing, root=app, leaf=app)
@@ -5923,7 +5960,25 @@ transport actually *delivers*, not merely that it engages.
     @test post_handler !== HTTP.Handlers.default404
     post_response = post_handler(post_request)
     @test post_response.status == 200
-    @test contains(String(post_response.body), "Unknown test selection")
+    # The submission is a mutation: when its catalog scan outlives the grace
+    # period it is answered by a poller whose GET resumes that one submission
+    # (never a re-run of it) until it settles to the same content.
+    function settle_post(body)
+        for _ in 1:100
+            contains(body, "hx-trigger=\"every ") || return body
+            found = match(Regex("hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\""),
+                          body)
+            @test !isnothing(found)
+            poll_target = replace(only(found.captures), "&amp;" => "&")
+            @test startswith(poll_target, "/tests/run/not-a-catalog-id?")
+            @test contains(poll_target, "__htmxo_verb=POST")
+            sleep(0.05)
+            body = drive(poll_target)
+        end
+        body
+    end
+    @test contains(settle_post(String(post_response.body)),
+                   "Unknown test selection")
 end
 
 """
@@ -9359,11 +9414,15 @@ end
     @test contains(shell, ".treebar-poller")
     @test contains(shell, "terminalizePoller")
     @test contains(shell, "__htmxoAutoTerminal")
+    # Mutations declare their swap so a slow one can be answered by a poller.
+    @test contains(shell, "__htmxoMutationPolls")
+    @test contains(shell, "HTMXO-Swap")
 
     opted_out = repr("text/html", htmx(h.p("body"); treebars_assets=false))
     @test !contains(opted_out, ".treebar-poller")
     @test !contains(opted_out, "terminalizePoller")
     @test !contains(opted_out, "__htmxoAutoTerminal")
+    @test !contains(opted_out, "__htmxoMutationPolls")
 
     titled = repr("text/html",
         htmx(h.p("body"); extra_head=(h.title("App"),)))
@@ -10885,7 +10944,7 @@ end
         "Save the upload"
         @post blocking_save(n::Int) = (wait(blocking_gate[]); h.p("saved:$n"))
         "Fresh crunch"
-        @fresh @get blocking_fresh() = (wait(blocking_gate[]); h.p("fresh"))
+        @fresh @direct @get blocking_fresh() = (wait(blocking_gate[]); h.p("fresh"))
         "Raw response"
         @get blocking_raw()::HTTP.Response = (wait(blocking_gate[]); HTTP.Response(200, "raw"))
         "Plain crunch"
@@ -10914,9 +10973,9 @@ end
         drive("/blocking_quick"; method="POST")
         clear_runtime_history!(blocking_tracker)
 
-        # POST/@fresh/declared HTTP.Response/plain non-HTMX GET/:blocking
-        # policy: none of them polls, all of them answer inline — and all of
-        # them are jobs while they run.
+        # Non-HTMX POST/`@direct`/declared HTTP.Response/plain non-HTMX
+        # GET/:blocking policy: none of them polls, all of them answer inline
+        # — and all of them are jobs while they run.
         tasks = [
             Threads.@spawn(drive("/blocking_save/1"; method="POST")),
             Threads.@spawn(drive("/blocking_fresh"; hx=true)),
@@ -10956,7 +11015,7 @@ end
                    if r.path == "/blocking_plain/2").job > 0
 
         # A failing slow execution is a failed job with the error's summary.
-        drive("/blocking_doomed"; method="POST", hx=true)
+        drive("/blocking_doomed"; method="POST")
         failed = only(runtime_jobs(blocking_tracker; states=:failed))
         @test failed.label == "Doomed save"
         @test contains(failed.error, "disk full")

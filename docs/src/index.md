@@ -317,6 +317,14 @@ end
   identical arguments on a retained session/job root. A same-named `@get`
   remains memoized, and child properties read by the mutation keep their own
   declared cache policy; `@fresh` is not needed on mutation routes.
+- **Freshness is not transport.** A slow `@fresh` read or HTMX mutation is
+  answered by the default `:auto` poller like any other slow route; the
+  mutation's poller resumes that one submission by token and never re-runs it.
+  A mutation polls only when its response swaps into a target (the `htmx()`
+  shell declares it); `hx-swap="none"` and non-HTMX submissions answer inline.
+  Mark a route `@direct` when it must always answer inline (a structural
+  fragment, a silent refresh, a hand-shaped `polling_fetchindex` wrapper, a
+  status/header answer such as `hx_response`).
 
 ### Register with `route!`
 

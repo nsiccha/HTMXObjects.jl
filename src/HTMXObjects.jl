@@ -591,15 +591,17 @@ Reads a non-destructive copy of the request body; an empty body yields an empty
 dict. Never throws — a body that isn't really urlencoded yields junk keys at
 worst, never a 500 (see `_percent_decode_lenient`).
 """
-function _request_body_bytes(req::HTTP.Request)
+_request_body_bytes(req::HTTP.Request) = _message_body_bytes(req)
+
+function _message_body_bytes(message::Union{HTTP.Request,HTTP.Response})
     # HTTP 1.x exposes `payload(message)` and stores ordinary request bodies as
     # byte vectors. HTTP 2.x replaced it with explicit body objects; BytesBody
     # conversion copies only the unread bytes and therefore keeps argument
     # extraction non-destructive in both worlds.
     if isdefined(HTTP, :payload)
-        return copy(getproperty(HTTP, :payload)(req))
+        return copy(getproperty(HTTP, :payload)(message))
     end
-    body = req.body
+    body = message.body
     if isdefined(HTTP, :BytesBody) && isa(body, getproperty(HTTP, :BytesBody))
         return Vector{UInt8}(body)
     elseif isdefined(HTTP, :EmptyBody) && isa(body, getproperty(HTTP, :EmptyBody))
@@ -4366,6 +4368,13 @@ updates the struct.
 - `@post` / `@put` / `@patch` / `@delete` execute fresh on every request,
   including identical submissions on a retained root. `@get`, `@ws`, `@sse`,
   and properties read inside a mutation retain their own declared cache policy.
+- Freshness is cache policy, not transport: under the default
+  [`OperationPolicy`](@ref) a slow `@fresh` read or HTMX mutation (one whose
+  response swaps into a target) is answered by a poller like any other slow
+  route. A mutation path also answers the GET resumes of its pollers (a plain
+  GET there is still `405`).
+- `@direct` (alongside the verb marker, e.g. `@fresh @direct @get rows()`) pins a
+  route to direct transport: it always answers inline on the request's own task.
 - The `:index` property (with empty prefix) maps to `GET /`
 
 If `record_dir` is given, each response is also written to disk under that
@@ -4498,10 +4507,27 @@ Markdown/error requests and routes without page chrome stay direct. `:polling`
 forces the polling transport. `:blocking` keeps every route direct; it is the
 opt-out for a route surface that genuinely must answer inline.
 
-Polling is limited to GET operations because the Treebars poller issues GET
-refreshes; mutation verbs therefore remain direct. Declared `HTTP.Response` and
-`MIMEResponse` outputs always remain direct, as do WebSocket and SSE route lambdas, and
-[`record!`](@ref) forces `:blocking` for its static-export pass.
+Cache policy never selects the transport. A `@fresh` route and every mutation
+verb (`POST`/`PUT`/`PATCH`/`DELETE`) recompute on each invocation, and a slow
+invocation is still answered by the poller: it runs in the background as an
+ephemeral operation that only its poll token retains — never memoized, never
+joined by an identical request. The Treebars poller issues GET refreshes, so an
+HTMX mutation is resumed by GETs of its own path carrying its token. Such a
+resume never re-runs the submission: a token the server no longer holds (a
+restart, an expired entry) answers `HTMXObjects.OperationResultUnavailable`
+(`410`) instead. A mutation's poller needs a swap target to live in, so a slow
+submission is answered by one only when its client declares such a swap: the
+`htmx()` shell's `mutation_poll_script()` sends `HTMXO-Swap`. A
+swap-less submission (`hx-swap="none"`), a page that does not declare it, and
+a non-HTMX submission (a classic form post, curl) are answered by their own
+response.
+
+Direct handling is reserved for what genuinely needs it: declared
+`HTTP.Response` and `MIMEResponse` outputs (a route whose answer is its status
+or headers — `hx_response` included — declares that return type), WebSocket
+and SSE route lambdas, [`record!`](@ref)'s static export (it forces
+`:blocking`), and routes marked `@direct` — the per-route opt-out for a
+fragment that must answer inline on the request's own task.
 
 You never have to write `OperationPolicy` to get non-blocking long routes —
 `route!(app)` alone already does. Reach for it to tune (`poll_interval`),
@@ -4548,8 +4574,10 @@ tree. While loading, the interim poller swaps into
 the target and transiently displaces its children; a route whose fragment
 must be the direct children of a structural element (`details`/`summary`,
 `table`/`tr`, `select`/`option`, …) and cannot tolerate that transient
-should declare itself `@fresh @get` instead — likewise any route that must
-stay bare under a tree-keeping policy, since a kept tree is not bare-safe.
+should declare itself `@direct @get` instead — likewise any route that must
+stay bare under a tree-keeping policy, since a kept tree is not bare-safe, and
+a hand-shaped `polling_fetchindex` wrapper, which owns its transport
+(`@fresh @direct @get`).
 """
 struct OperationPolicy
     mode::Symbol
@@ -4954,6 +4982,9 @@ end
 # the single chokepoint for all HTTP route registrations, so the check
 # applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
 function _register_handler(method, path, handler)
+    http_method = get(_TRANSPORT_HTTP_METHODS, method, method)
+    pass = _route_registration_pass()
+    pass === nothing || http_method != "GET" || push!(pass.get_paths, String(path))
     wrapped = function(req)
         _runtime_note_route!(req, method, path)
         try
@@ -4963,7 +4994,26 @@ function _register_handler(method, path, handler)
         end
         handler(req)
     end
-    HTTP.register!(ROUTER, get(_TRANSPORT_HTTP_METHODS, method, method), path, wrapped)
+    HTTP.register!(ROUTER, http_method, path, wrapped)
+end
+
+# One `_register_routes` pass over a root type. Mutation routes poll through
+# GETs of their own path; a path whose type declares no GET there gets a
+# resume-only GET once the pass has seen every route, so a GET declared after
+# its mutation is never replaced by (or replaces) the resume handler.
+const _ROUTE_REGISTRATION_PASS = :htmxo_route_registration_pass
+
+_route_registration_pass() =
+    get(task_local_storage(), _ROUTE_REGISTRATION_PASS, nothing)
+
+function _with_route_registration_pass(f)
+    pass = (; get_paths=Set{String}(), mutation_resumes=Dict{String,Any}())
+    task_local_storage(f, _ROUTE_REGISTRATION_PASS, pass)
+    for (path, resume) in pass.mutation_resumes
+        path in pass.get_paths && continue
+        resume.register(join(sort!(collect(resume.methods)), ", "))
+    end
+    nothing
 end
 
 # A WebSocket route is a GET route that upgrades the connection, behind the same
@@ -5987,6 +6037,26 @@ function Base.showerror(io::IO, e::InvalidDomainValue)
     isempty(e.allowed) || print(io, "; allowed values: ", join(repr.(e.allowed), ", "))
 end
 
+"""
+    OperationResultUnavailable(route, verb)
+
+A poll asked for the result of a mutation submission (`POST`/`PUT`/`PATCH`/
+`DELETE`) the server no longer retains: the process restarted, the bounded
+operation registry expired or evicted it, or the poll token does not name an
+operation of this route. The submission ran at most once; it is never re-run to
+recover the response. Answers `410 Gone` (an HTMX poll receives the error
+article, which retires the poller).
+"""
+struct OperationResultUnavailable <: Exception
+    route::Symbol
+    verb::Symbol
+end
+function Base.showerror(io::IO, e::OperationResultUnavailable)
+    print(io, "The result of this ", e.verb, " ", e.route,
+          " submission is no longer available. It ran at most once and was ",
+          "not repeated; reload to see the current state.")
+end
+
 function _check_revise_errors!()
     # Both checks: queue errors (Revise tried but failed) and missed edits
     # (FS watcher silently dropped a save). Either condition means the
@@ -6156,15 +6226,23 @@ function _invoke_error_handler(obj, err, uid, path)
         return getproperty(obj, :__error__)(err)
     end
     inner = unwrap_error(err)
-    if inner isa Union{MissingRequiredParam,InvalidDomainValue}
+    title = _caller_fault_title(inner)
+    if title !== nothing
         return h.article(
-            h.header("Bad Request"),
+            h.header(title),
             h.p(sprint(showerror, inner));
             aria_invalid="true",
         )
     end
     _default_error_render(uid, path)
 end
+
+# Caller-facing faults render their message under a plain title instead of
+# the server-fault error page.
+_caller_fault_title(::Union{MissingRequiredParam,InvalidDomainValue}) =
+    "Bad Request"
+_caller_fault_title(::OperationResultUnavailable) = "Result unavailable"
+_caller_fault_title(_err) = nothing
 
 """
     _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
@@ -6188,6 +6266,7 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 # this file — and stays hot-reloadable, exactly like `_finalized_response`.
 _error_status_code(err) = _unwrapped_status_code(unwrap_error(err))
 _unwrapped_status_code(::Union{MissingRequiredParam,InvalidDomainValue}) = 400
+_unwrapped_status_code(::OperationResultUnavailable) = 410
 _unwrapped_status_code(_err) = 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
@@ -6935,23 +7014,62 @@ function _declared_final_response(descriptor)
     T isa Type && T <: Union{HTTP.Response,MIMEResponse}
 end
 
+# How a verb's request can be answered off its own task. A GET read polls
+# through GETs of its own URL. The four mutation verbs poll through GET resumes
+# of their token (`_execute_mutation_resume`), which never re-run the body.
+# WebSocket and SSE upgrades are protocol-direct: the stream IS the response.
+const _MutationVerb = Union{Verb{:POST},Verb{:PUT},Verb{:PATCH},Verb{:DELETE}}
+
+_operation_verb_transport(::Verb) = :direct
+_operation_verb_transport(::Verb{:GET}) = :read
+_operation_verb_transport(::_MutationVerb) = :mutation
+
+function _operation_mutation_pollable(req::HTTP.Request)
+    is_htmx(req) || return false
+    swap = lowercase(strip(HTTP.header(req, "HTMXO-Swap", "")))
+    !isempty(swap) && swap != "none"
+end
+
+# Whether an invocation can run in the background at all: a memoized route
+# through DynamicObjects' `Pending` cache cell, a fresh one (`@fresh`, or a
+# mutation verb) as a `_FreshOperation`. Cache policy decides WHAT runs —
+# recompute or memoize — never whether the request may be answered by a
+# poller.
+function _operation_background_capable(descriptor)
+    descriptor === nothing && return false
+    semantics = get(descriptor, :semantics, nothing)
+    semantics === nothing && return false
+    get(semantics, :pending, false) || get(semantics, :fresh, false)
+end
+
 function _operation_execution_mode(policy::OperationPolicy, descriptor,
-        req::HTTP.Request, verb_inst::Verb; page_shell::Bool=false)
-    _verb_symbol(verb_inst) === :GET || return :blocking
+        req::HTTP.Request, verb_inst::Verb; page_shell::Bool=false,
+        direct::Bool=false)
+    transport = _operation_verb_transport(verb_inst)
+    transport === :direct && return :blocking
+    # `@direct`: the route must answer inline (a structural fragment, a
+    # silent live refresh, its own hand-shaped poller).
+    direct && return :blocking
     # A static export needs the finished value: a poller or page-load
     # placeholder has nothing to poll once written to disk.
     isnothing(static_export(req)) || return :blocking
     _declared_final_response(descriptor) && return :blocking
-    policy.mode === :auto || return policy.mode
-    descriptor === nothing && return :blocking
-    semantics = get(descriptor, :semantics, nothing)
-    semantics === nothing && return :blocking
-    get(semantics, :pending, false) || return :blocking
-    # `pending` is a capability (a Pending handle CAN exist), and `:auto`
-    # deliberately polls on it alone: an ordinary route over slow work polls
-    # with no annotation (a881161). No explicit-intent gate belongs here — the
-    # transport underneath (heal-on-unknown-token, chrome-free terminal) is
-    # what makes the marker-free default safe, not narrowing who may poll.
+    policy.mode === :blocking && return :blocking
+    # A mutation's poller lives in the swap target of the HTMX request that
+    # submitted it, so the client must say one exists (`mutation_poll_script`).
+    # A non-HTMX submission (a classic form post, curl), a swap-less one
+    # (`hx-swap="none"`), and a client that does not say are answered by their
+    # own response.
+    transport === :mutation && !_operation_mutation_pollable(req) &&
+        return :blocking
+    policy.mode === :polling && return :polling
+    _operation_background_capable(descriptor) || return :blocking
+    # `:auto` deliberately polls on the capability alone: an ordinary route
+    # over slow work polls with no annotation (a881161). No explicit-intent
+    # gate belongs here — the transport underneath (grace fast path,
+    # heal-on-unknown-token for reads, no-replay resume for mutations,
+    # chrome-free terminal) is what makes the marker-free default safe, not
+    # narrowing who may poll.
     is_htmx(req) && return :polling
     page_shell && !wants_markdown(req) && !wants_errors(req) ?
         :page_load : :blocking
@@ -7026,11 +7144,36 @@ function _operation_request_url(req::HTTP.Request, prefix::AbstractString="")
 end
 
 function _operation_poll_url(req::HTTP.Request, token::AbstractString,
-        prefix::AbstractString="")
+        prefix::AbstractString="", verb_inst::Verb=Verb{:GET}())
     target = _operation_request_url(req, prefix)
     _operation_poll_request(req) && return target
     target = _operation_marker_url(target, "__htmxo_poll")
-    _operation_marker_url(target, "__htmxo_operation", token)
+    target = _operation_marker_url(target, "__htmxo_operation", token)
+    _operation_mark_poll_verb(target, verb_inst)
+end
+
+# A mutation's follow-up polls are GETs of its own URL (the Treebars poller
+# only issues GETs). `__htmxo_verb` tells the GET handler at that path that the
+# token names a MUTATION invocation to resume — never a read to heal by
+# re-running it (`_execute_mutation_resume`).
+_operation_mark_poll_verb(target, ::Verb) = target
+_operation_mark_poll_verb(target, verb_inst::_MutationVerb) =
+    _operation_marker_url(target, "__htmxo_verb", String(_verb_symbol(verb_inst)))
+
+const _MUTATION_POLL_VERBS = Dict{String,Verb}(
+    "POST" => Verb{:POST}(), "PUT" => Verb{:PUT}(),
+    "PATCH" => Verb{:PATCH}(), "DELETE" => Verb{:DELETE}())
+
+# The mutation verb a GET poll resumes, or `nothing` for an ordinary GET. Any
+# other value is a malformed poll URL — a caller fault (400), never a GET.
+function _operation_mutation_poll_verb(req::HTTP.Request)
+    value = get(queryparams(req), "__htmxo_verb", nothing)
+    value === nothing && return nothing
+    verb = value isa AbstractString ? get(_MUTATION_POLL_VERBS, value, nothing) :
+           nothing
+    verb === nothing && throw(InvalidDomainValue(
+        :__htmxo_verb, value, sort!(collect(keys(_MUTATION_POLL_VERBS)))))
+    verb
 end
 
 # A deferred direct-page placeholder carries the poll token WITHOUT the poll
@@ -7067,6 +7210,32 @@ function _operation_page_runtime(req::HTTP.Request, value)
     h.div(value; id, class="htmxo-operation-runtime",
           data_htmxo_operation_runtime="")
 end
+_operation_page_runtime(::HTTP.Request, value::HTTP.Response) = value
+
+# The poll response for an operation that resolved to a finalized response its
+# route did not declare (`hx_response(...)`, a `dispatch`ed sub-request, a raw
+# `HTTP.Response`). A live poller is waiting for a terminal fragment, so the
+# original answer cannot be returned verbatim: its body would never be selected
+# and a 204 would not swap at all, leaving the poller re-polling a spent token.
+# Keep its headers (`HX-Trigger`, `HX-Redirect`, … take effect on this
+# response) and hand its body to the poller — inside the `:auto` terminal node
+# for a 2xx answer, as an error article (which the poller also selects) for any
+# other status.
+function _operation_finalized_terminal(resp::HTTP.Response)
+    body = String(_message_body_bytes(resp))
+    inner = if 200 <= resp.status < 300
+        "<div class=\"treebar-poller-inner treebar-terminal-content\" " *
+            "data-htmxo-auto-terminal=\"\">" * body * "</div>"
+    else
+        "<article aria-invalid=\"true\"><header>HTTP " *
+            string(resp.status) * "</header>" * body * "</article>"
+    end
+    headers = Pair{String,String}[String(name) => String(value)
+        for (name, value) in resp.headers
+        if !(lowercase(name) in ("content-type", "content-length"))]
+    push!(headers, "Content-Type" => "text/html; charset=utf-8")
+    HTTP.Response(200, headers; body=inner)
+end
 
 function _operation_has_page_shell(target)
     objects = get(target, :objects, nothing)
@@ -7087,17 +7256,89 @@ _operation_rich_page_request(req::HTTP.Request) =
 _operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
     policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
 
+# A background FRESH operation: one invocation of a fresh route (`@fresh`, or
+# a mutation verb), started off the request task. It is the fresh counterpart
+# of DynamicObjects' `Pending`, but it is NOT a cache cell — nothing memoizes
+# its value, and nothing else can join it. Its identity is the retained poll
+# entry that holds it, so a follow-up poll resumes exactly this invocation and
+# a lost token can never rediscover (or re-run) it.
+#
+# It presents the protocols the transport already speaks: `isready`/`fetch`
+# (rethrowing the route's own exception, like `fetch(::Pending)`), and the
+# two-phase `fetchindex(callback, handle)`/`getstatus(handle)` pair that
+# `Treebars.polling_fetchindex` drives — so the generic Treebars poller renders
+# it with no Treebars change. `status` is the operation's own progress root
+# (`nothing` without the Treebars extension).
+struct _FreshOperation
+    task::Task
+    status::Any
+end
+
+Base.isready(op::_FreshOperation) = istaskdone(op.task)
+
+function Base.fetch(op::_FreshOperation)
+    try
+        fetch(op.task)
+    catch err
+        err isa TaskFailedException && throw(err.task.exception)
+        rethrow()
+    end
+end
+
+# DynamicObjects' contract: a failed compute is rethrown BEFORE the callback
+# runs; otherwise the callback receives the handle (still running) or the
+# value (done) plus the progress node.
+function DynamicObjects.fetchindex(callback, op::_FreshOperation; force=false,
+        kwargs...)
+    isempty(kwargs) || throw(ArgumentError(
+        "a fresh operation takes no call arguments (got $(keys(kwargs)))"))
+    callback(isready(op) ? fetch(op) : op, op.status)
+end
+
+DynamicObjects.getstatus(op::_FreshOperation; kwargs...) = op.status
+
+# Every in-flight operation handle the transport follows: a memoized
+# computation's `Pending` or a fresh invocation.
+const _OperationHandle = Union{DynamicObjects.Pending,_FreshOperation}
+
+# What the polling transport and the runtime ledger read progress through:
+# `(prop, keys, call_kwargs)` such that `getstatus(prop, keys...; call_kwargs...)`
+# finds the operation's tree. A memoized computation is addressed through its
+# IP cache cell; a fresh one has no cell and is its own address.
+_operation_poll_source(_started, prop, keys, call_kwargs) =
+    (prop, keys, call_kwargs)
+_operation_poll_source(started::_FreshOperation, _prop, _keys, _call_kwargs) =
+    (started, (), (;))
+
+# Extension seam: the progress root a background fresh operation reports into.
+# The Treebars extension returns a fresh detached node; core has no progress
+# implementation and runs the invocation unobserved.
+const _fresh_operation_root_impl = Ref{Any}(() -> nothing)
+
+_fresh_operation_root() = _fresh_operation_root_impl[]()
+
+# Start one fresh invocation off the request task. `compute(root)` runs the
+# route body (inside a governed lease when the root is retained); `root` is
+# the operation's progress node, attached under the dispatch caller's node so
+# an in-process `dispatch(; parent)` still sees the work.
+function _start_fresh_operation(compute, parent_progress)
+    root = _fresh_operation_root()
+    parent_progress === nothing || root === nothing ||
+        _progress_attach(parent_progress, root)
+    _FreshOperation(Threads.@spawn(Base.invokelatest(compute, root)), root)
+end
+
 # Grace fast-path shared by the polling transport (via the Treebars extension
 # seam) and the direct-page initial request: wait up to `grace_period` for
-# `started`, following nested Pending handles inside the one budget — a route
+# `started`, following nested in-flight handles inside the one budget — a route
 # may finish by returning another Pending, and rendering an unresolved inner
-# handle would synchronously fetch it and hold the request open. A non-Pending
+# handle would synchronously fetch it and hold the request open. A non-handle
 # `started` is ready at once. Returns `(ready, value)`; only `ready` values
 # have passed through `render_result`.
 function _operation_grace_fetch(render_result, started, grace_period::Real)
     rv = started
     grace_started = time_ns()
-    while rv isa DynamicObjects.Pending
+    while rv isa _OperationHandle
         elapsed = (time_ns() - grace_started) / 1.0e9
         remaining = grace_period - elapsed
         remaining > 0 || return (ready=false, value=nothing)
@@ -7244,18 +7485,28 @@ function _operation_poll_signature(target, LeafT, name, verb_inst, idx_vals,
     route = context isa OperationContext ? context.route : ""
     scope = context isa OperationContext ? context.scope : :request
     scope_key = context isa OperationContext ? context.key : nothing
+    bound_idx, bound_kwargs = _operation_bound_args(verb_inst, idx_vals, kw_pairs)
     (;
         root_type=typeof(target.root),
         leaf_type=LeafT,
         route,
         name,
         verb=_verb_symbol(verb_inst),
-        idx_vals=Tuple(idx_vals),
-        call_kwargs=NamedTuple(kw_pairs),
+        idx_vals=bound_idx,
+        call_kwargs=bound_kwargs,
         scope,
         scope_key,
     )
 end
+
+# A read's token is bound to its typed args: a poll whose args drifted heals
+# into the read those args name. A mutation's arguments arrived in its request
+# body, which its GET resumes do not (and must not) repeat, so its token binds
+# the route, types and provider scope only — the 256-bit bearer token alone
+# identifies the one submission.
+_operation_bound_args(::Verb, idx_vals, kw_pairs) =
+    (Tuple(idx_vals), NamedTuple(kw_pairs))
+_operation_bound_args(::_MutationVerb, _idx_vals, _kw_pairs) = ((), (;))
 
 function _finish_operation_poll(token::AbstractString, value)
     try
@@ -7278,7 +7529,7 @@ end
 # skew-tolerant design on Treebars' side, but it means the guard has to exist on
 # ours too — a `render_result` of bare `identity` renders whatever arrives.
 _resolve_operation_value(value) =
-    value isa DynamicObjects.Pending ? fetch(value) : value
+    value isa _OperationHandle ? fetch(value) : value
 
 # Speculative preloads (`@preload`). htmx's `preload` extension issues the GET
 # a link WOULD issue — early, on hover or mousedown — marked `HX-Preloaded:
@@ -7387,8 +7638,8 @@ end
 
 # Start a preload's materialization off the request task. The spawn yields the
 # same `started` a `:polling` start would — a DO `Pending` for a cached route,
-# the value itself for a `@fresh` one, which computes inside the spawn — so a
-# join can hand it to whichever transport the click resolves to.
+# a `_FreshOperation` for a fresh one — so a join can hand it to whichever
+# transport the click resolves to.
 function _start_preload(descriptor, target, name, verb_inst, idx_vals, kw_pairs,
         signature, req::HTTP.Request)
     declared_fresh = _operation_declared_fresh(descriptor)
@@ -7595,21 +7846,31 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
     # same-named GET (or memoized child properties). A retained semantic root
     # still needs DO's governance lease even though this result itself is never
     # automatically stored; the callback executor provides exactly that scope.
+    #
+    # Freshness is cache policy, not transport: the two-phase selector picks
+    # where the invocation runs exactly as it does for a memoized route.
+    # `Base.fetch` runs it here, on the request task; anything else (`identity`,
+    # or the job queue's `Deferred`) starts it in the background and returns a
+    # `_FreshOperation` the polling transport retains by token. Either way the
+    # body runs exactly once per call — nothing caches or replays it.
     if declared_fresh
-        compute_fresh = () -> parent_progress !== nothing && fetch === Base.fetch ?
-            DynamicObjects.maybeprogress!(
-                parent_progress, prop, verb_inst, idx_vals...;
-                NamedTuple(kw_pairs)...) :
+        compute_fresh = progress -> progress === nothing ?
             DynamicObjects.fresh(
-                prop, verb_inst, idx_vals...; NamedTuple(kw_pairs)...)
-        if governed
-            applicable(executor, compute_fresh, framework_context, target.root) ||
+                prop, verb_inst, idx_vals...; NamedTuple(kw_pairs)...) :
+            DynamicObjects.maybeprogress!(
+                progress, prop, verb_inst, idx_vals...;
+                NamedTuple(kw_pairs)...)
+        compute = if governed
+            applicable(executor, () -> nothing, framework_context, target.root) ||
                 error("DynamicObjects' governed callback executor is required " *
-                      "for fresh mutation routes; upgrade DynamicObjects")
-            return Base.invokelatest(
-                executor, compute_fresh, framework_context, target.root)
+                      "for fresh routes; upgrade DynamicObjects")
+            progress -> Base.invokelatest(executor,
+                () -> compute_fresh(progress), framework_context, target.root)
+        else
+            compute_fresh
         end
-        return compute_fresh()
+        fetch === Base.fetch && return compute(parent_progress)
+        return _start_fresh_operation(compute, parent_progress)
     end
 
     started = if governed
@@ -7694,7 +7955,7 @@ end
 # and the marker keys the client finalizer that retires the transport.
 function _operation_ready_terminal_fallback(render_result, started)
     value = started
-    while value isa DynamicObjects.Pending
+    while value isa _OperationHandle
         isready(value) || return (ready=false, value=nothing)
         try
             value = fetch(value)
@@ -7767,6 +8028,30 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
 end
 
+# A GET carrying `__htmxo_verb=<mutation>` polls a mutation submission. It
+# resumes exactly the retained invocation its token names, through the same
+# resume path a read's poll takes. It never heals: re-executing a submission to
+# recover its response would run the side effect twice, so a token the
+# registry no longer holds (a restart, TTL/LRU expiry, another route's token)
+# fails closed as `OperationResultUnavailable` — whose error article the live
+# poller selects, retiring it.
+function _execute_mutation_resume(policy::OperationPolicy, target, LeafT,
+        name::Symbol, verb_inst::_MutationVerb, req::HTTP.Request)
+    context = get(target, :context, nothing)
+    prefix = context isa OperationContext ? context.prefix : ""
+    token = _operation_poll_token(req)
+    signature = _operation_poll_signature(
+        target, LeafT, name, verb_inst, (), ())
+    entry = isnothing(token) ? nothing :
+        _lookup_operation_poll(token, signature)
+    entry isa _OperationPollEntry ||
+        throw(OperationResultUnavailable(name, _verb_symbol(verb_inst)))
+    _runtime_note_mode!(req, :polling)
+    descriptor = _property_descriptor(LeafT, name, _verb_symbol(verb_inst))
+    _execute_operation_resume(policy, descriptor, target, name, verb_inst,
+        (), (), req, prefix, token, entry)
+end
+
 function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
         call_kwargs; parent_progress=nothing, job=nothing)
@@ -7776,6 +8061,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                                        parent_progress=parent_progress,
                                        declared_fresh=
                                            _operation_declared_fresh(descriptor))
+    prop, keys, call_kwargs =
+        _operation_poll_source(started, prop, keys, call_kwargs)
     token = _new_operation_poll_token()
     now = _operation_poll_now()
     signature = _operation_poll_signature(
@@ -7809,14 +8096,14 @@ end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false,
-        parent_progress=nothing, preload::Bool=false)
+        parent_progress=nothing, preload::Bool=false, direct::Bool=false)
     if preload && _preload_request(req)
         _runtime_note_mode!(req, :preload)
         return _execute_preload(descriptor, target, name, verb_inst, idx_vals,
                                 kw_pairs, req)
     end
     mode = _operation_execution_mode(
-        policy, descriptor, req, verb_inst; page_shell)
+        policy, descriptor, req, verb_inst; page_shell, direct)
     _runtime_note_mode!(req, mode)
     context = get(target, :context, nothing)
     prefix = context isa OperationContext ? context.prefix : ""
@@ -7840,7 +8127,11 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         end
     end
 
-    if mode === :polling &&
+    # A mutation request is always a new submission: its follow-up polls are
+    # GET resumes (`_execute_mutation_resume`), so poll markers on the
+    # submission itself name no operation to join — and healing one would
+    # run the body a second time.
+    if mode === :polling && _operation_verb_transport(verb_inst) === :read &&
             (_operation_poll_request(req) || _operation_attach_request(req))
         token = _operation_poll_token(req)
         signature = _operation_poll_signature(
@@ -7898,6 +8189,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         fast = _operation_grace_fetch(_resolve_operation_value, started,
                                       _operation_grace_period(policy, req))
         fast.ready && return fast.value
+        prop, keys, call_kwargs =
+            _operation_poll_source(started, prop, keys, call_kwargs)
         token = _new_operation_poll_token()
         now = _operation_poll_now()
         signature = _operation_poll_signature(
@@ -7931,6 +8224,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
             _resolve_operation_value(preloaded.started)
     end
     if mode === :polling
+        prop, keys, call_kwargs =
+            _operation_poll_source(started, prop, keys, call_kwargs)
         token = _new_operation_poll_token()
         now = _operation_poll_now()
         signature = _operation_poll_signature(
@@ -7939,7 +8234,7 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
             token, signature, prop, keys, call_kwargs, started,
             error_obj, req, now, now, job)
         page_load_id = _operation_page_load_id(req)
-        transport = (poll_url=_operation_poll_url(req, token, prefix),
+        transport = (poll_url=_operation_poll_url(req, token, prefix, verb_inst),
                      label=_operation_poll_label(descriptor, name),
                      poll_interval=policy.poll_interval,
                      keep_progress=_operation_treebars_keep(policy),
@@ -7973,10 +8268,22 @@ end
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
         operation_policy::OperationPolicy=OperationPolicy(),
-        parent_progress=nothing, preload::Bool=false)
+        parent_progress=nothing, preload::Bool=false, direct::Bool=false)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
+    end
+    # A mutation's follow-up poll arrives as a GET of the same path — served by
+    # that path's own GET route, or by the resume-only GET registered for a
+    # mutation path without one. It resumes the submission before any GET
+    # argument parsing: the poll carries none of the submitted fields.
+    mutation_verb = verb_inst isa Verb{:GET} ?
+        _operation_mutation_poll_verb(req) : nothing
+    if mutation_verb !== nothing
+        value = _execute_mutation_resume(operation_policy, target, LeafT, name,
+                                         mutation_verb, req)
+        return (; context=target.context, root=target.root, leaf=target.leaf,
+                  idx_vals=(), kw_pairs=Pair{Symbol,Any}[], value)
     end
     idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
     verb = _verb_symbol(verb_inst)
@@ -7988,9 +8295,25 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
                  _operation_rich_page_request(req)
     value = _execute_operation(operation_policy, descriptor, target, name,
                                verb_inst, idx_vals, kw_pairs, req; page_shell,
-                               parent_progress=parent_progress, preload)
+                               parent_progress=parent_progress, preload,
+                               direct)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
+end
+
+_verb_mutation(method::AbstractString) = method in ("POST", "PUT", "PATCH", "DELETE")
+
+# Queue the resume-only GET for a mutation path on the active registration
+# pass (see `_with_route_registration_pass`); `register(allow)` installs it
+# with the `Allow` list of every mutation verb declared at that path.
+function _register_mutation_resume!(register, path, method)
+    pass = _route_registration_pass()
+    pass === nothing && return register(String(method))
+    resume = get!(pass.mutation_resumes, String(path)) do
+        (; register, methods=Set{String}())
+    end
+    push!(resume.methods, String(method))
+    nothing
 end
 
 """
@@ -8017,7 +8340,15 @@ but retain a transport-specific `ws` signature and response lifecycle.
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         path, n_params, record_dir; root_prefix="", record_base::String="",
         root_provider=RootProvider(), operation_policy=OperationPolicy(),
-        preload::Bool=false)
+        preload::Bool=false, direct::Bool=false, resume_only::Bool=false,
+        allow::String="")
+    if _verb_mutation(method)
+        _register_mutation_resume!(path, method) do allow
+            _register_route_handler(RootT, LeafT, chain, "GET", name, path,
+                n_params, record_dir; root_prefix, record_base, root_provider,
+                operation_policy, resume_only=true, allow)
+        end
+    end
     base = _base_segments(path, n_params)
     is_included = !isempty(chain)
     # Number of URL segments consumed by the root prefix (e.g. "/foo/bar" → 2)
@@ -8027,6 +8358,12 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     # `Symbol(method)` is the verb short symbol used in `Verb{V}`.
     verb_inst = Verb{Symbol(method)}()
     _register_handler(method, path, function(req)
+        # The resume-only GET of a mutation path answers mutation polls and
+        # nothing else: a plain GET is still a method the path does not have.
+        if resume_only &&
+                get(queryparams(req), "__htmxo_verb", nothing) === nothing
+            return HTTP.Response(405, ["Allow" => allow])
+        end
         # A speculative request does no work unless the route opted in with
         # `@preload` — decided before a root is constructed.
         if _preload_request(req) &&
@@ -8068,7 +8405,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy,
                                        parent_progress=parent_progress,
-                                       preload)
+                                       preload, direct)
             val = operation.value
             val === _PRELOAD_SKIPPED && return _preload_skipped_response()
 
@@ -8207,6 +8544,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
     param_strs, n_params, default_positions = _route_param_shape(positional_indices)
     path = _route_path(prefix, name, param_strs)
     preload = Symbol("@preload") in info.macros
+    direct = Symbol("@direct") in info.macros
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
@@ -8250,17 +8588,17 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload)
+                                    operation_policy, preload, direct)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload)
+                                    operation_policy, preload, direct)
         else
             # Register the full route (all params explicit)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload)
+                                    operation_policy, preload, direct)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -8271,7 +8609,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
                                         length(short_params), record_dir;
                                         root_prefix=mount_prefix, record_base, root_provider,
-                                        operation_policy, preload)
+                                        operation_policy, preload, direct)
             end
         end
     end
@@ -8338,18 +8676,20 @@ function _register_routes(T; prefix="", record_dir=nothing, record_base::String=
         parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
         operation_policy=get(_operation_policies, T, OperationPolicy()))
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
-    _walk_route_meta(T,
-        (name, info, nested_type) -> begin
-            nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
-            chain = vcat(parent_chain, [step])
-            _register_included_routes(T, nested_type, chain, nested_prefix, record_dir;
-                                      root_prefix=mount_prefix, record_base, root_provider,
-                                      operation_policy)
-        end,
-        (name, info, method) -> _register_one_route(T, T, Symbol[], prefix,
-            mount_prefix, name, info, method, record_dir, record_base,
-            root_provider, operation_policy),
-    )
+    _with_route_registration_pass() do
+        _walk_route_meta(T,
+            (name, info, nested_type) -> begin
+                nested_prefix, step = _nested_prefix_and_step(T, name, info, prefix)
+                chain = vcat(parent_chain, [step])
+                _register_included_routes(T, nested_type, chain, nested_prefix, record_dir;
+                                          root_prefix=mount_prefix, record_base, root_provider,
+                                          operation_policy)
+            end,
+            (name, info, method) -> _register_one_route(T, T, Symbol[], prefix,
+                mount_prefix, name, info, method, record_dir, record_base,
+                root_provider, operation_policy),
+        )
+    end
 end
 
 # `@include`'d nested route registration goes through `_register_route_handler`
@@ -13965,8 +14305,45 @@ function _operation_page_assets(treebars_assets::Bool)
     treebars_assets || return ()
     assets = _polling_page_assets()
     isempty(assets) ? assets :
-        (assets..., live_refresh_script(), auto_terminal_script())
+        (assets..., live_refresh_script(), auto_terminal_script(),
+         mutation_poll_script())
 end
+
+"""
+    mutation_poll_script()
+
+Declare, on every HTMX mutation request (`POST`/`PUT`/`PATCH`/`DELETE`), where
+its response will land: the `HTMXO-Swap` request header carries the effective
+swap style — `htmx.ajax`'s `swap` option, else the nearest `hx-swap`, else
+`htmx.config.defaultSwapStyle`. Under the default `:auto` policy a slow
+mutation is answered by a poller only when that header names a swap that can
+host one: a poller swapped nowhere (`hx-swap="none"`) would never poll, so the
+submission's real answer — its fragment, its `HX-Trigger`, the
+`hx-on::after-request` refresh it drives — would be lost. Without the header (a
+hand-built page, curl) a mutation is answered directly, as before.
+
+Automatic — no consumer wiring. The `htmx()` shell installs it alongside the
+Treebars assets; include it once per page when building a `<head>` by hand.
+"""
+mutation_poll_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoMutationPolls) return;
+  window.__htmxoMutationPolls = true;
+  document.addEventListener('htmx:beforeRequest', function(e) {
+    var d = e.detail, config = d.requestConfig || {}, verb = config.verb;
+    if (!verb || verb === 'get' || !d.xhr) return;
+    var value = d.etc && d.etc.swapOverride;
+    if (!value) {
+      var elt = config.elt, source = elt && elt.closest &&
+        elt.closest('[hx-swap],[data-hx-swap]');
+      value = source && (source.getAttribute('hx-swap') ||
+                         source.getAttribute('data-hx-swap'));
+    }
+    value = value || (window.htmx && htmx.config.defaultSwapStyle) || 'innerHTML';
+    d.xhr.setRequestHeader('HTMXO-Swap', String(value).trim().split(/\s+/)[0]);
+  });
+})();
+"""))
 
 # --- Theme ---
 

@@ -240,8 +240,11 @@ transformational work is an explicit route, not a resource verb.
                           _resource_render(__self__, context, _resource_keys(collection)))
     end
 
+    # Mutations are `@direct`: a resource's answer can be its status and
+    # headers (`ResourcePolicy(; respond)` may return an `HTTP.Response`), which
+    # an interim poller would replace with a fragment.
     """Create one item in the collection."""
-    @post index() = let draft = _resource_draft(__self__, __req__, nothing, false)
+    @direct @post index() = let draft = _resource_draft(__self__, __req__, nothing, false)
         context = _resource_context(__self__, :create; draft, req=__req__)
         _resource_gate(__self__, context)
         key = policy.key(context)
@@ -277,22 +280,23 @@ directly.
         _resource_render(resource, context, context.current)
     end
 
+    # Mutations are `@direct` for the same reason as `Resource`'s create.
     """Replace one item completely."""
-    @put index() = _resource_item(__self__, :replace;
+    @direct @put index() = _resource_item(__self__, :replace;
                                   draft=() -> _resource_draft(resource, __req__, nothing, false)) do context
         resource.collection[__self__.stored_key] = context.draft
         _resource_render(resource, context, resource.collection[__self__.stored_key])
     end
 
     """Update part of one item."""
-    @patch index() = _resource_item(__self__, :update;
+    @direct @patch index() = _resource_item(__self__, :update;
                                     draft=() -> _resource_draft(resource, __req__, __self__.current, true)) do context
         resource.collection[__self__.stored_key] = context.draft
         _resource_render(resource, context, resource.collection[__self__.stored_key])
     end
 
     """Remove one item."""
-    @delete index() = _resource_item(__self__, :delete) do context
+    @direct @delete index() = _resource_item(__self__, :delete) do context
         delete!(resource.collection, __self__.stored_key)
         _resource_render(resource, context, (; deleted=__self__.key))
     end

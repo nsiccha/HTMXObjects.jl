@@ -355,21 +355,22 @@ new items are inserted, vanished ones removed. The client holds the viewport
 with its own scroll anchoring, sticks to the bottom while the viewer is there,
 and otherwise counts arrivals in a "↓ N new" pill.
 
-The server side is three routes. Declare them `@fresh` — the default `:auto`
-operation policy would answer a slow render with an interim poller, which the
-client reports as an error:
+The server side is three routes. Declare them `@fresh @direct` — `@fresh` so
+each request reads the thread now, `@direct` because the default `:auto`
+operation policy would otherwise answer a slow render with an interim poller,
+which the client reports as an error:
 
 ```julia
-@fresh @get index() = live_thread(latest_items();
+@fresh @direct @get index() = live_thread(latest_items();
     id="chat", older_url=__self__/"older", tail_url=__self__/"tail",
     cursor=oldest_key(),        # cursor for the page before these; nothing = no older
     since=last_final_key(),     # newest item that will never change again ("" if none)
     version=current_version())  # any token that changes whenever the thread does
 
-@fresh @get older(; before::String) =
+@fresh @direct @get older(; before::String) =
     live_thread_page(items_before(before); cursor=oldest_key_or_nothing())
 
-@fresh @get tail(; since::String="", v::String="") =
+@fresh @direct @get tail(; since::String="", v::String="") =
     v == current_version() ? live_thread_unchanged() :          # 204: nothing to do
         live_thread_tail(items_after(since); since=last_final_key(), version=current_version())
 ```

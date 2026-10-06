@@ -1152,9 +1152,10 @@ otherwise it stays direct:
 
 | Condition | Where it comes from |
 |-----------|---------------------|
-| The verb is `GET` | The poller issues GET refreshes, so mutations stay direct |
+| The verb is `GET`, or an HTMX `POST`/`PUT`/`PATCH`/`DELETE` that swaps into a target | Reads poll through GETs of their own URL; a mutation polls through GET resumes of its token when its client declares a swap that can host the poller (see *Fresh and mutation invocations*). WebSocket/SSE handshakes, `hx-swap="none"`, undeclared and non-HTMX submissions stay direct |
+| The route is not marked `@direct` | The per-route transport opt-out |
 | The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
-| The descriptor advertises `semantics.pending` | A Pending handle can exist; false for a fixed field or a `@fresh` one |
+| The invocation can run in the background | A memoized route through its `Pending` cache cell (`semantics.pending`); a fresh one (`semantics.fresh`: `@fresh`, or any mutation verb) as a per-invocation operation |
 
 For an HTMX request, those conditions enter the polling transport directly.
 For a browser navigation that accepts `text/html` and has a `__page__` wrapper,
@@ -1173,18 +1174,18 @@ eligible GETs; `:blocking` keeps every route direct.
 A polling-mode route is *started* non-blockingly and answers within the grace
 period (~0.1s) with a poller; an operation that finishes inside grace skips the
 poller and returns its value directly. `polling_fetchindex` therefore remains
-useful only for what the policy does not cover — a non-GET operation, a declared
-final response, or a poller you want to shape by hand.
+useful only for what the policy does not cover — a declared final response, or
+a poller you want to shape by hand.
 
 A hand-shaped poller under the default `:auto` policy must own the route's
-transport by itself. Mark its wrapper route `@fresh @get`: `@fresh` makes that
-route's descriptor non-pending, so the app-wide outer transport stays blocking,
-while the route body re-runs on each inner poll to inspect the indexed
-property's current state. The indexed property itself remains memoized and
-coalesces the long-running work.
+transport by itself. Mark its wrapper route `@fresh @direct @get`: `@direct`
+keeps the app-wide outer transport off this route, and `@fresh` makes the route
+body re-run on each inner poll to inspect the indexed property's current state.
+The indexed property itself remains memoized and coalesces the long-running
+work.
 
 ```julia
-@fresh @get stage(name::Symbol) = polling_fetchindex(
+@fresh @direct @get stage(name::Symbol) = polling_fetchindex(
     compute_steps, name;
     poll_url=query_url(__self__/"stage/$name"),
     label="Preparing $name",
@@ -1193,12 +1194,60 @@ coalesces the long-running work.
 end
 ```
 
-Without the wrapper's `@fresh`, both transports are active: a slow inner
+Without the wrapper's `@direct`, both transports are active: a slow inner
 re-poll can cross the outer grace period and temporarily replace the shaped
 Treebars fragment with HTMXObjects' generic interim poller. That presents as a
 visible flip-flop between the two fragments. `OperationPolicy(:blocking)` also
 avoids the conflict, but it applies to every route under the root type rather
 than to this route alone.
+
+#### Fresh and mutation invocations
+
+Cache policy and response transport are independent. `@fresh` (and every
+mutation verb, which is fresh by construction) decides *what* runs: the route
+body recomputes on every invocation and nothing memoizes its value. It does not
+decide *how the request is answered*: under `:auto`, an invocation that outlives
+the grace period is answered by the same poller a memoized route gets.
+
+- The invocation runs in the background as an ephemeral operation retained only
+  by its poll token. Two identical requests are two invocations with two
+  tokens; a poll resumes exactly its own, and nothing is cached on the root.
+- A read's lost token (process restart, expiry, drifted arguments) heals by
+  recomputing, as for any read: a fresh GET of that URL computes the same.
+- A mutation's poller issues GETs of the submission's own path carrying the
+  token and `__htmxo_verb=<VERB>`, served by that path's GET route or, when the
+  type declares none, by a resume-only GET (a plain GET there still answers
+  `405`). The resume binds the route, types and provider scope — never the
+  submitted body, which no poll URL repeats. It **never re-runs the
+  submission**: a token the server no longer holds answers
+  `HTMXObjects.OperationResultUnavailable` (`410`; an HTMX poll receives its
+  "Result unavailable" article, which retires the poller).
+- A mutation's poller lives in the submission's swap target, so a slow
+  submission is answered by one only when its client says that target exists:
+  the `htmx()` shell's `mutation_poll_script()` sends the effective swap style
+  as `HTMXO-Swap` (`htmx.ajax`'s `swap`, else the nearest `hx-swap`, else
+  `htmx.config.defaultSwapStyle`). A swap-less submission (`hx-swap="none"`,
+  whose answer is its triggers, out-of-band swaps or `hx-on::after-request`
+  refresh), a hand-built page that does not send the header, and a non-HTMX
+  submission (a classic form post, curl) are answered by their own response.
+- A route whose answer is a finalized response — `hx_response(...; trigger=...)`,
+  a redirect, a `204`, a `dispatch`ed sub-request — should stay direct: declare
+  the return type (`::HTTP.Response`) or mark it `@direct`. If such an answer
+  arrives through a poller anyway, its headers are kept on the poll response
+  and its body becomes the terminal (an error article for a non-2xx status),
+  but its original status is not.
+- Fresh invocations are not admitted through [`configure_job_queue!`](@ref):
+  there is no cache cell to coalesce or abandon. Heavy batch work belongs behind
+  a memoized GET (see *App-owned background batches*).
+
+Mark a route `@direct` when it must always answer inline on the request's own
+task, whatever its cache policy:
+
+```julia
+@fresh @direct @get rows() = table_rows(current())     # <tbody> children
+@direct @post send(; text::String) = (append!(text);
+    hx_response(""; trigger=live_thread_refresh("#chat")))
+```
 
 Every emitted poller carries an independently generated, OS-random bearer
 token. Keep it confidential. HTMXObjects binds the token to the original route,
@@ -1228,7 +1277,7 @@ in a collapsed `<details>` — instead of the bare node. Operations that
 finish within the grace budget still answer inline bare either way: no
 poll, no tree. The kept tree is not bare-safe, so a route whose fragment
 must be the direct children of a structural element keeps the default and
-declares itself `@fresh @get`.
+declares itself `@direct @get`.
 
 While loading, the interim poller swaps into the request's target and
 transiently displaces its children. A first paint into a structural element
@@ -1239,7 +1288,7 @@ periodic trigger keeps its settled content while a re-fetch runs (the
 interim diverts into the progress reporter beside it) instead. A route
 whose fragment must be the direct children of such an
 element and cannot tolerate the transient should declare itself
-`@fresh @get` (blocking transport, no poller at all).
+`@direct @get` (direct transport, no poller at all).
 
 A documented route's auto poller carries no separate header label: the route
 docstring's **first line** — the same summary that titles the route's semantic
@@ -1477,8 +1526,8 @@ end
 
 - **Running jobs** — a live Treebars board of every operation execution that
   outlived the `:auto` grace period, whether it continued in the background
-  while its client polled or answered inline (POST/PUT/PATCH/DELETE,
-  `OperationPolicy(:blocking)`, `@fresh` routes, declared `HTTP.Response` /
+  while its client polled or answered inline (non-HTMX submissions,
+  `OperationPolicy(:blocking)`, `@direct` routes, declared `HTTP.Response` /
   `MIMEResponse` outputs, plain GETs without a page shell), plus work reported
   through `track_job!`: stable job id, route and target, queued/running state,
   start and latest-update time, how many callers started or joined the same
@@ -1510,8 +1559,9 @@ every two seconds (`RuntimeRoutes(; refresh="5s")` to change; *Pause* stops
 it); `GET /runtime/job/<id>` supplies its inspect/watch views.
 `GET /runtime/snapshot` is the secondary JSON projection of the same ledger,
 and `POST /runtime/clear` forgets the history. The dashboard's routes are
-`@fresh`, so they render inline on the request's own task and never queue
-behind a saturated compute pool; its own requests and executions are left out
+`@direct`, so they render inline on the request's own task and never queue
+behind a saturated compute pool (its reads are also `@fresh`, so each shows the
+ledger now); its own requests and executions are left out
 of what it shows.
 
 Recording is independent of the server. Requests are recorded by
@@ -1545,7 +1595,7 @@ polls a route of your choice:
 ```julia
 @htmx struct MyApp
     "Your running jobs"
-    @fresh @get my_jobs() = jobs_board(; mine=__req__,
+    @fresh @direct @get my_jobs() = jobs_board(; mine=__req__,
                                        poll_url=query_url(__self__ / "my_jobs"))
 end
 ```
@@ -1557,14 +1607,15 @@ requests with the same `:session`/`:job` scope and key. Other sessions' jobs
 never show unless the caller opts into the global view with `all=true`, as the
 developer dashboard does. With the default `:request`-scoped provider every
 request is its own session, so per-session boards need a session-scoped
-provider. Serve the board from an `@fresh` route so it never queues behind the
-work it shows.
+provider. Serve the board from a `@fresh @direct` route: `@fresh` so each poll
+reads the ledger anew, `@direct` so it renders on the request's own task and
+never queues behind the work it shows.
 
 Known limits: the ledgers are process-local and in memory, so they are empty
 after a restart and per process in a multi-process deployment; an operation
 that finishes within the grace period is a request, not a job; and a job has no
-progress tree when DynamicObjects produced no substatus for it (an uncached
-`@fresh` route) or Treebars is not loaded. Work started outside any request is
+progress tree when DynamicObjects produced no substatus for it (a fresh
+invocation answered inline) or Treebars is not loaded. Work started outside any request is
 only visible when reported through `track_job!`.
 
 #### Queued jobs
@@ -1609,21 +1660,23 @@ immutable request file and writes a result file; `@get result(batch_id::Int)`
 renders its value. A lightweight manual POST delegates to that same GET:
 
 ```julia
-@post submit(batch_id::Int) = dispatch(:GET,
+@direct @post submit(batch_id::Int) = dispatch(:GET,
     query_url("/result/$batch_id", __self__);
     headers=["HX-Request" => "true",
              "X-Forwarded-Prefix" => HTTP.header(__req__, "X-Forwarded-Prefix", "")],
     parent=dispatch_parent(__req__))
 ```
 
-The POST itself stays inline and does only request acceptance/submission.
-Mutation routes execute fresh by construction, so it needs no `@fresh` marker;
-its returned response contains the GET's native progress fragment. Save/validate
-a new immutable request before dispatching; use a new batch identity when its
-inputs change. Do not mark the heavy GET `@fresh` or declare its output as
-`HTTP.Response`/`MIMEResponse`, since those select inline execution. Keep status
-and job-board GET routes `@fresh` so they can answer while the workers are
-occupied.
+The POST does only request acceptance/submission and answers inline: it is
+`@direct` because its answer is the dispatched GET's response, which contains
+the GET's native progress fragment. Mutation routes execute fresh by
+construction, so it needs no `@fresh` marker. Save/validate a new immutable request before dispatching;
+use a new batch identity when its inputs change. Do not mark the heavy GET
+`@fresh` (each request would recompute it, outside the job queue, and nothing
+would retain the result) or declare its output as `HTTP.Response`/`MIMEResponse`
+(which selects inline execution). Declare status and job-board GET routes
+`@fresh @direct` so they render on their own request task and answer while the
+workers are occupied.
 
 Startup uses the same entry after registering routes, with no HTTP listener or
 browser required:
@@ -1758,8 +1811,10 @@ export fetching embeds, a batch warmup: the route's compute nests under
 the caller's node instead of rooting a fresh `__status__` tree. Without it
 the execution roots its own tree, exactly as over loopback. Scoped-root
 (governed) and polling-mode executions attach best-effort after the fact;
-when no progress node exists to attach (an uncached `@fresh` route),
-`dispatch` warns rather than returning a silently unparented response.
+when no progress node exists to attach, `dispatch` warns rather than returning
+a silently unparented response. A fresh invocation (`@fresh`, or a mutation
+verb) always nests: inline through the caller's node, in the background
+through its own progress root attached beneath it.
 
 `dispatch_parent(req)` reads that node back inside a route body (`__req__`
 is the live request): `parent=dispatch_parent(__req__)` on a nested

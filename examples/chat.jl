@@ -98,7 +98,7 @@ const SIMULATIONS = Dict(
         extra_head=(h.style(CSS),
                     h.script(src="https://cdn.jsdelivr.net/npm/idiomorph@0.7.3/dist/idiomorph.min.js")))
 
-    @fresh @get index() = let w = lock(window, LOCK)
+    @fresh @direct @get index() = let w = lock(window, LOCK)
         h.div(
             h.h1("Live thread"),
             live_thread(w.items; id="chat", older_url=__self__/"older", tail_url=__self__/"tail",
@@ -118,14 +118,14 @@ const SIMULATIONS = Dict(
         )
     end
 
-    @fresh @get older(; before::String) = lock(LOCK) do
+    @fresh @direct @get older(; before::String) = lock(LOCK) do
         hi = something(index_of(before), 0) - 1
         hi < 0 && throw(ArgumentError("unknown cursor $(repr(before))"))
         lo = max(1, hi - PAGE + 1)
         live_thread_page(item.(MESSAGES[lo:hi]); cursor=cursor_at(lo))
     end
 
-    @fresh @get tail(; since::String="", v::String="") = lock(LOCK) do
+    @fresh @direct @get tail(; since::String="", v::String="") = lock(LOCK) do
         v == string(VERSION[]) && return live_thread_unchanged()
         i = isempty(since) ? nothing : index_of(since)
         if isnothing(i)
@@ -137,7 +137,7 @@ const SIMULATIONS = Dict(
                          version=string(VERSION[]))
     end
 
-    @post send(; text::String="") = begin
+    @direct @post send(; text::String="") = begin
         if !isempty(strip(text))
             post!("you", strip(text))
             @async begin
@@ -150,7 +150,7 @@ const SIMULATIONS = Dict(
         hx_response(""; trigger=live_thread_refresh("#chat"))
     end
 
-    @post simulate(; kind::String) = begin
+    @direct @post simulate(; kind::String) = begin
         get(() -> throw(ArgumentError("unknown simulation $(repr(kind))")), SIMULATIONS, kind)()
         hx_response(""; trigger=live_thread_refresh("#chat"; bottom=false))
     end

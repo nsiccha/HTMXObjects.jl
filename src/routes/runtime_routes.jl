@@ -13,11 +13,12 @@
 #   GET  /runtime/snapshot   `runtime_snapshot()` as JSON
 #   POST /runtime/clear      forget finished requests and jobs
 #
-# Every route is `@fresh`: it renders inline on the request's own task. Under
-# `:auto`, an ordinary GET would spawn its render onto the `:default` pool and
-# poll after the grace period — so on a server whose compute threads are
-# saturated, the dashboard would queue behind the very jobs it is meant to
-# show. The dashboard also hides its own requests from the history.
+# Every route is `@direct`: it renders inline on the request's own task. Under
+# `:auto`, any other route — fresh or memoized — would spawn its render onto
+# the `:default` pool and poll after the grace period, so on a server whose
+# compute threads are saturated the dashboard would queue behind the very jobs
+# it is meant to show. The reads are also `@fresh`: each shows the ledger now.
+# The dashboard hides its own requests from the history.
 #
 # Like `TestRoutes` and `SharedOpsRoutes`, this is a development surface: mount
 # it where only developers can reach it. It never shows headers, cookies or
@@ -152,12 +153,13 @@ with its label, state, elapsed time, start/update time, caller count and — wit
 Treebars loaded — its progress tree, rendered by `Treebars.htmx_render_board`.
 With `poll_url` the board polls that URL every `poll_interval` and updates in
 place: new jobs appear, running ones tick and update without resetting an
-expanded tree, finished ones show their outcome and leave. Serve it from an
-`@fresh` route that returns the same call, so the board never queues behind the
-work it shows:
+expanded tree, finished ones show their outcome and leave. Serve it from a
+`@fresh @direct` route that returns the same call: `@fresh` so every poll reads
+the ledger anew, `@direct` so the board renders on the request's own task and
+never queues behind the work it shows:
 
 ```julia
-@fresh @get my_jobs() = jobs_board(; mine=__req__, poll_url=query_url(__self__ / "my_jobs"))
+@fresh @direct @get my_jobs() = jobs_board(; mine=__req__, poll_url=query_url(__self__ / "my_jobs"))
 ```
 
 Whose jobs: `mine=req` shows the jobs started under the requesting session —
@@ -438,9 +440,9 @@ execution that outlives the `:auto` grace period, and by [`track_job!`](@ref)
 for work it did not start (hand-rolled Treebars pollers report themselves).
 `tracker=nothing` shows the global [`runtime_tracker`](@ref).
 
-Every route is `@fresh`: it renders inline on the request's own task, so the
+Every route is `@direct`: it renders inline on the request's own task, so the
 dashboard never queues behind a saturated compute pool — the situation it
-exists to diagnose.
+exists to diagnose. The reads are also `@fresh`, so each shows the ledger now.
 
 This is a development surface in the same sense as [`TestRoutes`](@ref): mount
 it only where developers can reach it. It shows request paths and query
@@ -451,38 +453,38 @@ headers, cookies or bodies.
     tracker::Any = nothing
     refresh::String = "2s"
 
-    @fresh @get index(; live::Bool=true, limit::Int=100) = begin
+    @fresh @direct @get index(; live::Bool=true, limit::Int=100) = begin
         _runtime_hide_request!(__req__)
         runtime_dashboard(something(tracker, runtime_tracker());
                           prefix=string(__self__), live, refresh, limit)
     end
-    @fresh @get panel(; live::Bool=true, limit::Int=100) = begin
+    @fresh @direct @get panel(; live::Bool=true, limit::Int=100) = begin
         _runtime_hide_request!(__req__)
         runtime_dashboard(something(tracker, runtime_tracker());
                           prefix=string(__self__), live, refresh, limit)
     end
-    @fresh @get jobs(; state::String="running", limit::Int=100) = begin
+    @fresh @direct @get jobs(; state::String="running", limit::Int=100) = begin
         _runtime_hide_request!(__req__)
         _runtime_jobs_board(something(tracker, runtime_tracker());
                             prefix=string(__self__), state, limit=max(0, limit),
                             poll_interval=state == "running" ? "1s" : refresh)
     end
-    @fresh @get job(id::Int; live::Bool=true) = begin
+    @fresh @direct @get job(id::Int; live::Bool=true) = begin
         _runtime_hide_request!(__req__)
         _runtime_job_view(something(tracker, runtime_tracker());
                           prefix=string(__self__), id, live, refresh)
     end
-    @fresh @get job_board(id::Int) = begin
+    @fresh @direct @get job_board(id::Int) = begin
         _runtime_hide_request!(__req__)
         _runtime_job_board(something(tracker, runtime_tracker());
                            prefix=string(__self__), id, poll_interval=refresh)
     end
-    @fresh @get snapshot() = begin
+    @fresh @direct @get snapshot() = begin
         _runtime_hide_request!(__req__)
         MIMEResponse("application/json",
             _schema_json_encode(runtime_snapshot(something(tracker, runtime_tracker()))))
     end
-    @post clear(; live::Bool=true, limit::Int=100) = begin
+    @direct @post clear(; live::Bool=true, limit::Int=100) = begin
         _runtime_hide_request!(__req__)
         t = something(tracker, runtime_tracker())
         clear_runtime_history!(t)
