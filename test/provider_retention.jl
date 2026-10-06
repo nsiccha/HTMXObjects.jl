@@ -30,9 +30,17 @@ using TestItemRunner
     gate(key::Symbol) = lock(() -> get!(Base.Event, gates, key), runs_lock)
     release_retention!(key::Symbol) = notify(gate(key))
     # Count the computation, then hold it in flight until the test releases it.
-    gated(key::Symbol, value) = (hit!(key); wait(gate(key)); value)
-    # An outside function that receives the root but reads nothing from it.
+    # Only a key's first computation is released; any later one — a restart
+    # that retention should have prevented — stays blocked until the reset, so
+    # a poller can settle only on the original computation's result.
+    gated(key::Symbol, value) = let n = hit!(key)
+        wait(gate(n == 1 ? key : Symbol(key, :_restarted)))
+        value
+    end
+    # Outside functions that receive the root: one reads nothing from it, the
+    # other reads the current request through it.
     pass_self(_app, value) = value
+    read_request(app, value) = (app.__req__; value)
 
     # Every route is `@direct`: these items measure property retention, so each
     # response must come from the route itself, never from the default `:auto`
@@ -43,6 +51,7 @@ using TestItemRunner
         root_slow(k::Int) = gated(:root_slow, k)
         root_self(k::Int) = (hit!(:root_self); pass_self(__self__, k))
         root_self_slow(k::Int) = pass_self(__self__, gated(:root_self_slow, k))
+        root_self_req(k::Int) = (hit!(:root_self_req); read_request(__self__, k))
         @struct child(k::Int) = begin
             value() = (hit!(:child_value); k)
             slow() = gated(:child_slow, k)
@@ -56,7 +65,8 @@ using TestItemRunner
             Treebars.polling_fetchindex(x -> h.p("root-done:$x"), root_slow, k)
         @fresh @direct @get poll_child(k::Int) =
             Treebars.polling_fetchindex(x -> h.p("child-done:$x"), child(k).slow)
-        @direct @get self_value(k::Int) = h.p("self=$(root_self(k))")
+        @direct @get self_value(k::Int) =
+            h.p("self=$(root_self(k)) req=$(root_self_req(k))")
         @fresh @direct @get poll_self(k::Int) =
             Treebars.polling_fetchindex(x -> h.p("self-done:$x"), root_self_slow, k)
     end
@@ -151,30 +161,32 @@ end
     reset_retention!()
 end
 
-# DynamicObjects' remount shares a property's work only when it can prove the
-# property independent of the request context. A body that passes `__self__` to
-# an outside function is opaque to that proof, so the property is recomputed per
-# request even though `pass_self` reads nothing (documented on
-# `DynamicObjects.remount`; snag `DynamicObjects/remount-opaque-s-2938c22c`).
-# These assertions pin the boundary the `RootProvider` docs state: if
-# DynamicObjects changes it, update those docs together with this item.
-@testitem "provider-retained roots recompute properties that pass __self__ out" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
+# A body that passes `__self__` to an outside function is judged by what that
+# function reads through it (DynamicObjects `c0c742c`, snag
+# `DynamicObjects/remount-opaque-s-2938c22c`): reading no request context, its
+# memoized and in-flight work is shared across request remounts, so a poller on
+# it settles; reading the request, it is recomputed per request. The
+# `RootProvider` docs state this rule; keep them and this item together.
+@testitem "provider-retained roots share opaque __self__ work that reads no request context" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, Treebars
 
     for (label, provider) in pairs(retention_providers())
         reset_retention!()
         route!(RetentionProbe(); root_provider=provider)
 
-        @test all(_ -> contains(String(hx_get("/self_value/1").body), "self=1"), 1:3)
-        @test retention_runs(:root_self) == 3
+        @test all(_ -> contains(String(hx_get("/self_value/1").body),
+                                "self=1 req=1"), 1:3)
+        @test retention_runs(:root_self) == 1
+        # At least once per request: never shared across requests.
+        @test retention_runs(:root_self_req) >= 3
 
-        # Each poll starts its own computation instead of attaching to the one
-        # still in flight from the previous request.
+        # Requests while the computation is held in flight attach to it.
         @test all(_ -> running(String(hx_get("/poll_self/1").body)), 1:3)
-        @test timedwait(() -> retention_runs(:root_self_slow) >= 3, 10.0;
+        @test timedwait(() -> retention_runs(:root_self_slow) >= 1, 10.0;
                         pollint=0.01) === :ok
         release_retention!(:root_self_slow)
-        @test retention_runs(:root_self_slow) == 3
+        @test contains(settle("/poll_self/1"), "self-done:1")
+        @test retention_runs(:root_self_slow) == 1
     end
     reset_retention!()
 end
