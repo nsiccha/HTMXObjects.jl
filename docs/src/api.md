@@ -1127,7 +1127,7 @@ outside functions:
     data(key::String) = load_data(key)
     run_result(key::String) = fit_model(data(key))   # retained across requests
     # not: run_result(key::String) = fit_model(__self__, key)
-    @fresh @get poll(key::String) =
+    @fresh @direct @get poll(key::String) =
         Treebars.polling_fetchindex(render_fit, run_result, key)
 end
 ```

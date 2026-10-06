@@ -34,6 +34,10 @@ using TestItemRunner
     # An outside function that receives the root but reads nothing from it.
     pass_self(_app, value) = value
 
+    # Every route is `@direct`: these items measure property retention, so each
+    # response must come from the route itself, never from the default `:auto`
+    # operation poller a slow first compile can trigger. The poll routes are
+    # hand-shaped pollers, whose documented shape is `@fresh @direct @get`.
     @htmx struct RetentionProbe
         root_value(k::Int) = (hit!(:root_value); k)
         root_slow(k::Int) = gated(:root_slow, k)
@@ -46,14 +50,14 @@ using TestItemRunner
         @struct single = begin
             value() = (hit!(:single_value); 1)
         end
-        @get values(k::Int) =
+        @direct @get values(k::Int) =
             h.p("root=$(root_value(k)) child=$(child(k).value()) single=$(single.value())")
-        @fresh @get poll_root(k::Int) =
+        @fresh @direct @get poll_root(k::Int) =
             Treebars.polling_fetchindex(x -> h.p("root-done:$x"), root_slow, k)
-        @fresh @get poll_child(k::Int) =
+        @fresh @direct @get poll_child(k::Int) =
             Treebars.polling_fetchindex(x -> h.p("child-done:$x"), child(k).slow)
-        @get self_value(k::Int) = h.p("self=$(root_self(k))")
-        @fresh @get poll_self(k::Int) =
+        @direct @get self_value(k::Int) = h.p("self=$(root_self(k))")
+        @fresh @direct @get poll_self(k::Int) =
             Treebars.polling_fetchindex(x -> h.p("self-done:$x"), root_self_slow, k)
     end
 
