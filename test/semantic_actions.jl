@@ -171,8 +171,12 @@ end
             }
           }
           function require(value, label) { if (!value) throw new Error(label); }
-          var settled = 0;
-          document.body.addEventListener('htmx:afterSettle', function() { settled += 1; });
+          // Act only after htmx has settled (processed) the swapped-in row; a
+          // click on an inserted button before that sends no request.
+          document.body.addEventListener('htmx:afterSettle', function(event) {
+            var target = event.detail.target;
+            if (target && /^row[12]$/.test(target.id)) document.body.dataset['settled' + target.id] = 'yes';
+          });
           document.body.addEventListener('htmx:afterSwap', function() {
             [1, 2].forEach(function(n) {
               var slow = result(n, 'post', 'slow');
@@ -183,11 +187,10 @@ end
           });
           try {
             document.getElementById('expand1').click();
-            await until(() => button(1, 'get', 'source'), 'row 1 actions');
+            await until(() => document.body.dataset.settledrow1 === 'yes', 'row 1 settled');
             document.getElementById('expand2').click();
-            await until(() => button(2, 'get', 'source'), 'row 2 actions');
-            var mark = settled;
-            await until(() => settled > mark || button(2, 'post', 'compile'), 'row 2 settled');
+            await until(() => document.body.dataset.settledrow2 === 'yes', 'row 2 settled');
+            require(button(1, 'get', 'source') && button(2, 'get', 'source'), 'row actions');
             var all = Array.from(document.querySelectorAll('[id]')).map(el => el.id);
             require(new Set(all).size === all.length, 'duplicate DOM ids');
             require(row(1).querySelectorAll('form').length === 1, 'row 1 forms');
