@@ -1805,8 +1805,10 @@ export fetching embeds, a batch warmup: the route's compute nests under
 the caller's node instead of rooting a fresh `__status__` tree. Without it
 the execution roots its own tree, exactly as over loopback. Scoped-root
 (governed) and polling-mode executions attach best-effort after the fact;
-when no progress node exists to attach (an uncached `@fresh` route),
-`dispatch` warns rather than returning a silently unparented response.
+when no progress node exists to attach, `dispatch` warns rather than returning
+a silently unparented response. A fresh invocation (`@fresh`, or a mutation
+verb) always nests: inline through the caller's node, in the background
+through its own progress root attached beneath it.
 
 `dispatch_parent(req)` reads that node back inside a route body (`__req__`
 is the live request): `parent=dispatch_parent(__req__)` on a nested
