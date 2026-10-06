@@ -1152,7 +1152,7 @@ otherwise it stays direct:
 
 | Condition | Where it comes from |
 |-----------|---------------------|
-| The verb is `GET`, or an HTMX `POST`/`PUT`/`PATCH`/`DELETE` | Reads poll through GETs of their own URL; an HTMX mutation polls through GET resumes of its token (see *Fresh and mutation invocations*). WebSocket/SSE handshakes and non-HTMX submissions stay direct |
+| The verb is `GET`, or an HTMX `POST`/`PUT`/`PATCH`/`DELETE` that swaps into a target | Reads poll through GETs of their own URL; a mutation polls through GET resumes of its token when its client declares a swap that can host the poller (see *Fresh and mutation invocations*). WebSocket/SSE handshakes, `hx-swap="none"`, undeclared and non-HTMX submissions stay direct |
 | The route is not marked `@direct` | The per-route transport opt-out |
 | The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
 | The invocation can run in the background | A memoized route through its `Pending` cache cell (`semantics.pending`); a fresh one (`semantics.fresh`: `@fresh`, or any mutation verb) as a per-invocation operation |
@@ -1222,8 +1222,14 @@ the grace period is answered by the same poller a memoized route gets.
   submission**: a token the server no longer holds answers
   `HTMXObjects.OperationResultUnavailable` (`410`; an HTMX poll receives its
   "Result unavailable" article, which retires the poller).
-- A non-HTMX submission (a classic form post, curl) is answered by its own
-  response.
+- A mutation's poller lives in the submission's swap target, so a slow
+  submission is answered by one only when its client says that target exists:
+  the `htmx()` shell's `mutation_poll_script()` sends the effective swap style
+  as `HTMXO-Swap` (`htmx.ajax`'s `swap`, else the nearest `hx-swap`, else
+  `htmx.config.defaultSwapStyle`). A swap-less submission (`hx-swap="none"`,
+  whose answer is its triggers, out-of-band swaps or `hx-on::after-request`
+  refresh), a hand-built page that does not send the header, and a non-HTMX
+  submission (a classic form post, curl) are answered by their own response.
 - A route whose answer is a finalized response — `hx_response(...; trigger=...)`,
   a redirect, a `204`, a `dispatch`ed sub-request — should stay direct: declare
   the return type (`::HTTP.Response`) or mark it `@direct`. If such an answer

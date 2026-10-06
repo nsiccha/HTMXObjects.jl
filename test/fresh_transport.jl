@@ -122,8 +122,13 @@ using TestItemRunner
 
     hx_get(target; headers=Pair{String,String}[]) =
         dispatch(:GET, target; headers=[hx; headers])
-    hx_post(target, body=""; method=:POST) =
-        dispatch(method, target; headers=[hx; form], body)
+    # `HTMXO-Swap` is what `mutation_poll_script` declares for a submission
+    # whose response swaps into a target.
+    hx_post(target, body=""; method=:POST, swap="innerHTML") =
+        dispatch(method, target;
+                 headers=[hx; form; (isnothing(swap) ? Pair{String,String}[] :
+                                     ["HTMXO-Swap" => swap])],
+                 body)
     plain(method, target, body="") =
         dispatch(method, target; headers=[form], body)
 
@@ -289,6 +294,20 @@ end
     malformed = "/fresh_order?__htmxo_poll=1&__htmxo_verb=TRACE"
     @test contains(String(hx_get(malformed).body), "Bad Request")
     @test dispatch(:GET, malformed).status == 400
+
+    # A submission whose response swaps nowhere (`hx-swap="none"`), or whose
+    # client does not declare its swap, cannot host a poller: it is answered
+    # inline by its own response.
+    for swap in ("none", nothing)
+        reset_fresh!()
+        task = Threads.@spawn hx_post("/fresh_order", "n=9"; swap)
+        @test timedwait(() -> fresh_runs(:order) == 1, 10.0; pollint=0.01) === :ok
+        sleep(0.3)
+        @test !istaskdone(task)
+        release_fresh!(:order)
+        inline = body_text(fetch(task))
+        @test contains(inline, "order-9:1") && !running(inline)
+    end
 
     # A non-HTMX submission has no swap target for a poller: it is answered
     # inline by its own response.
@@ -466,7 +485,13 @@ end
             await until(() => panel.querySelector('.treebar-poller'), 'panel poller');
             htmx.trigger(document.getElementById('save-form'), 'submit');
             await until(() => result.querySelector('.treebar-poller'), 'save poller');
+            // A swap-less submission cannot host a poller: it is answered
+            // inline, so its after-request hook sees the real answer.
+            htmx.trigger(document.getElementById('quiet-form'), 'submit');
+            await sleep(300);
+            if (document.body.dataset.quietDone) throw new Error('quiet POST answered early');
             await fetch('/release');
+            await until(() => document.body.dataset.quietDone === 'yes', 'quiet answer');
             await until(() => panel.textContent.includes('panel:1') &&
                               !panel.querySelector('.treebar-poller'), 'panel result');
             await until(() => result.textContent.includes('saved-hello:1') &&
@@ -484,6 +509,9 @@ end
                 h.form(; id="save-form", hx_post="/browser_save",
                        hx_target="#result", hx_swap="innerHTML")(
                     h.input(; type="hidden", name="note", value="hello")),
+                h.form(; id="quiet-form", hx_post="/browser_save", hx_swap="none",
+                       hx_on__after_request="document.body.dataset.quietDone = event.detail.xhr.responseText.includes('saved-quiet') ? 'yes' : 'early'")(
+                    h.input(; type="hidden", name="note", value="quiet")),
                 h.div(; id="result"),
                 driver);
                 assets="/test-assets", sse_version=nothing, ws_version=nothing,
@@ -509,7 +537,8 @@ end
                 release_fresh!(:browser_post)
                 return HTTP.Response(204)
             end
-            push!(requests, string(req.method, " ", req.target))
+            push!(requests, string(req.method, " ", req.target, " swap=",
+                                   HTTP.header(req, "HTMXO-Swap", "")))
             dispatch(req.method, String(req.target);
                 headers=collect(req.headers),
                 body=HTMXObjects._request_body_bytes(req))
@@ -537,10 +566,13 @@ end
                     wait(process)
                 end
             end
-            # One click, one execution: the browser's polls resumed it.
-            @test fresh_runs(:browser_post) == 1
+            # One submission, one execution: the browser's polls resumed it.
+            @test fresh_runs(:browser_post) == 2
             @test fresh_runs(:browser_read) == 1
-            @test count(r -> startswith(r, "POST /browser_save"), requests) == 1
+            posts = filter(r -> startswith(r, "POST /browser_save"), requests)
+            @test length(posts) == 2
+            @test count(r -> endswith(r, "swap=innerHTML"), posts) == 1
+            @test count(r -> endswith(r, "swap=none"), posts) == 1
             @test any(r -> startswith(r, "GET /browser_save?") &&
                            contains(r, "__htmxo_verb=POST"), requests)
         finally

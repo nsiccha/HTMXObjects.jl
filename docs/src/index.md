@@ -320,6 +320,8 @@ end
 - **Freshness is not transport.** A slow `@fresh` read or HTMX mutation is
   answered by the default `:auto` poller like any other slow route; the
   mutation's poller resumes that one submission by token and never re-runs it.
+  A mutation polls only when its response swaps into a target (the `htmx()`
+  shell declares it); `hx-swap="none"` and non-HTMX submissions answer inline.
   Mark a route `@direct` when it must always answer inline (a structural
   fragment, a silent refresh, a hand-shaped `polling_fetchindex` wrapper, a
   status/header answer such as `hx_response`).

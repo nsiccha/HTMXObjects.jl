@@ -4369,9 +4369,10 @@ updates the struct.
   including identical submissions on a retained root. `@get`, `@ws`, `@sse`,
   and properties read inside a mutation retain their own declared cache policy.
 - Freshness is cache policy, not transport: under the default
-  [`OperationPolicy`](@ref) a slow `@fresh` read or HTMX mutation is answered by
-  a poller like any other slow route. A mutation path also answers the GET
-  resumes of its pollers (a plain GET there is still `405`).
+  [`OperationPolicy`](@ref) a slow `@fresh` read or HTMX mutation (one whose
+  response swaps into a target) is answered by a poller like any other slow
+  route. A mutation path also answers the GET resumes of its pollers (a plain
+  GET there is still `405`).
 - `@direct` (alongside the verb marker, e.g. `@fresh @direct @get rows()`) pins a
   route to direct transport: it always answers inline on the request's own task.
 - The `:index` property (with empty prefix) maps to `GET /`
@@ -4514,8 +4515,12 @@ joined by an identical request. The Treebars poller issues GET refreshes, so an
 HTMX mutation is resumed by GETs of its own path carrying its token. Such a
 resume never re-runs the submission: a token the server no longer holds (a
 restart, an expired entry) answers `HTMXObjects.OperationResultUnavailable`
-(`410`) instead. A non-HTMX submission (a classic form post, curl) is answered
-by its own response.
+(`410`) instead. A mutation's poller needs a swap target to live in, so a slow
+submission is answered by one only when its client declares such a swap: the
+`htmx()` shell's `mutation_poll_script()` sends `HTMXO-Swap`. A
+swap-less submission (`hx-swap="none"`), a page that does not declare it, and
+a non-HTMX submission (a classic form post, curl) are answered by their own
+response.
 
 Direct handling is reserved for what genuinely needs it: declared
 `HTTP.Response` and `MIMEResponse` outputs (a route whose answer is its status
@@ -7019,6 +7024,12 @@ _operation_verb_transport(::Verb) = :direct
 _operation_verb_transport(::Verb{:GET}) = :read
 _operation_verb_transport(::_MutationVerb) = :mutation
 
+function _operation_mutation_pollable(req::HTTP.Request)
+    is_htmx(req) || return false
+    swap = lowercase(strip(HTTP.header(req, "HTMXO-Swap", "")))
+    !isempty(swap) && swap != "none"
+end
+
 # Whether an invocation can run in the background at all: a memoized route
 # through DynamicObjects' `Pending` cache cell, a fresh one (`@fresh`, or a
 # mutation verb) as a `_FreshOperation`. Cache policy decides WHAT runs —
@@ -7045,9 +7056,12 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     _declared_final_response(descriptor) && return :blocking
     policy.mode === :blocking && return :blocking
     # A mutation's poller lives in the swap target of the HTMX request that
-    # submitted it. A non-HTMX submission (a classic form post, curl) is
-    # answered by its own response, so it stays direct.
-    transport === :mutation && !is_htmx(req) && return :blocking
+    # submitted it, so the client must say one exists (`mutation_poll_script`).
+    # A non-HTMX submission (a classic form post, curl), a swap-less one
+    # (`hx-swap="none"`), and a client that does not say are answered by their
+    # own response.
+    transport === :mutation && !_operation_mutation_pollable(req) &&
+        return :blocking
     policy.mode === :polling && return :polling
     _operation_background_capable(descriptor) || return :blocking
     # `:auto` deliberately polls on the capability alone: an ordinary route
@@ -14291,8 +14305,45 @@ function _operation_page_assets(treebars_assets::Bool)
     treebars_assets || return ()
     assets = _polling_page_assets()
     isempty(assets) ? assets :
-        (assets..., live_refresh_script(), auto_terminal_script())
+        (assets..., live_refresh_script(), auto_terminal_script(),
+         mutation_poll_script())
 end
+
+"""
+    mutation_poll_script()
+
+Declare, on every HTMX mutation request (`POST`/`PUT`/`PATCH`/`DELETE`), where
+its response will land: the `HTMXO-Swap` request header carries the effective
+swap style — `htmx.ajax`'s `swap` option, else the nearest `hx-swap`, else
+`htmx.config.defaultSwapStyle`. Under the default `:auto` policy a slow
+mutation is answered by a poller only when that header names a swap that can
+host one: a poller swapped nowhere (`hx-swap="none"`) would never poll, so the
+submission's real answer — its fragment, its `HX-Trigger`, the
+`hx-on::after-request` refresh it drives — would be lost. Without the header (a
+hand-built page, curl) a mutation is answered directly, as before.
+
+Automatic — no consumer wiring. The `htmx()` shell installs it alongside the
+Treebars assets; include it once per page when building a `<head>` by hand.
+"""
+mutation_poll_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoMutationPolls) return;
+  window.__htmxoMutationPolls = true;
+  document.addEventListener('htmx:beforeRequest', function(e) {
+    var d = e.detail, config = d.requestConfig || {}, verb = config.verb;
+    if (!verb || verb === 'get' || !d.xhr) return;
+    var value = d.etc && d.etc.swapOverride;
+    if (!value) {
+      var elt = config.elt, source = elt && elt.closest &&
+        elt.closest('[hx-swap],[data-hx-swap]');
+      value = source && (source.getAttribute('hx-swap') ||
+                         source.getAttribute('data-hx-swap'));
+    }
+    value = value || (window.htmx && htmx.config.defaultSwapStyle) || 'innerHTML';
+    d.xhr.setRequestHeader('HTMXO-Swap', String(value).trim().split(/\s+/)[0]);
+  });
+})();
+"""))
 
 # --- Theme ---
 

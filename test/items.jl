@@ -2793,20 +2793,30 @@ end
                                     get_exchange.property, hx,
                                     Verb{:GET}()) === :blocking
     # A mutation polls through GET resumes of its token, so an HTMX
-    # submission is eligible; a non-HTMX one (a classic form post, curl) is
-    # answered by its own response.
+    # submission whose client declares a swap target (`HTMXO-Swap`, set by
+    # `mutation_poll_script`) is eligible. A swap-less submission
+    # (`hx-swap="none"`), an undeclared one, and a non-HTMX one (a classic
+    # form post, curl) are answered by their own response.
+    swapping = HTTP.Request("POST", "/exchange",
+                            ["HX-Request" => "true", "HTMXO-Swap" => "outerHTML"])
+    swapless = HTTP.Request("POST", "/exchange",
+                            ["HX-Request" => "true", "HTMXO-Swap" => "none"])
     @test _operation_execution_mode(OperationPolicy(:polling),
-                                    post_exchange.property, hx,
+                                    post_exchange.property, swapping,
                                     Verb{:POST}()) === :polling
     @test _operation_execution_mode(OperationPolicy(:auto),
-                                    post_exchange.property, hx,
+                                    post_exchange.property, swapping,
                                     Verb{:POST}()) === :polling
+    for request in (swapless, hx, HTTP.Request("POST", "/exchange"))
+        @test _operation_execution_mode(OperationPolicy(:auto),
+                                        post_exchange.property, request,
+                                        Verb{:POST}()) === :blocking
+        @test _operation_execution_mode(OperationPolicy(:polling),
+                                        post_exchange.property, request,
+                                        Verb{:POST}()) === :blocking
+    end
     @test _operation_execution_mode(OperationPolicy(:auto),
-                                    post_exchange.property,
-                                    HTTP.Request("POST", "/exchange"),
-                                    Verb{:POST}()) === :blocking
-    @test _operation_execution_mode(OperationPolicy(:auto),
-                                    post_exchange.property, hx,
+                                    post_exchange.property, swapping,
                                     Verb{:POST}(); direct=true) === :blocking
 
     app = PolicyApp()
@@ -9404,11 +9414,15 @@ end
     @test contains(shell, ".treebar-poller")
     @test contains(shell, "terminalizePoller")
     @test contains(shell, "__htmxoAutoTerminal")
+    # Mutations declare their swap so a slow one can be answered by a poller.
+    @test contains(shell, "__htmxoMutationPolls")
+    @test contains(shell, "HTMXO-Swap")
 
     opted_out = repr("text/html", htmx(h.p("body"); treebars_assets=false))
     @test !contains(opted_out, ".treebar-poller")
     @test !contains(opted_out, "terminalizePoller")
     @test !contains(opted_out, "__htmxoAutoTerminal")
+    @test !contains(opted_out, "__htmxoMutationPolls")
 
     titled = repr("text/html",
         htmx(h.p("body"); extra_head=(h.title("App"),)))
