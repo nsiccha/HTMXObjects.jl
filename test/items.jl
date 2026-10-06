@@ -1997,6 +1997,69 @@ end
     end
 end
 
+@testitem "semantic app reads one memoized descriptor per type" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _shared_semantic_descriptor, _operation_route
+    import HTMXObjects.DynamicObjects
+
+    @htmx struct MemoRow
+        number::Int
+        "Before the edit."
+        @post compile() = h.p("compile:$(number)")
+        @get source() = h.p("source:$(number)")
+        @post seeded(; seed::Int=1) = h.p("seeded:$(number):$(seed)")
+    end
+    @htmx struct MemoTable
+        @include rows(row::Int) = MemoRow(row)
+    end
+    root = MemoTable(; __prefix__="/table")
+    render(n) = repr("text/html", semantic_app(root.rows(n)))
+    # One function body: any top-level method definition — including the
+    # closure a top-level comprehension lowers to — moves the world counter and
+    # correctly invalidates the memo, so identity is observed without one.
+    function memo_probe(root)
+        shared = _shared_semantic_descriptor(MemoRow)
+        rows = String[]
+        for n in 2:4
+            push!(rows, render(n))
+        end
+        same = _shared_semantic_descriptor(MemoRow) === shared
+        public = semantic_descriptor(MemoRow)
+        route = _operation_route(MemoRow, :seeded, :POST)
+        memo_route = only(filter(r -> r.name === :seeded, shared.routes))
+        aliased = route.params === memo_route.params
+        empty!(route.params)
+        (; shared, rows, same, public, aliased, intact=!isempty(memo_route.params),
+           still=_shared_semantic_descriptor(MemoRow) === shared)
+    end
+
+    # A table of same-type rows compiles each row's operations against ONE
+    # descriptor build instead of rebuilding the type's reflection per row and
+    # per operation (the dominant cost of a many-row operation table).
+    first_row = render(1)
+    probe = memo_probe(root)
+    @test probe.same && probe.still
+    @test all(n -> contains(probe.rows[n - 1], "hx-post=\"/table/rows/$(n)/compile\""), 2:4)
+    @test replace(probe.rows[1], "/rows/2/" => "/rows/1/", "726f77732f32" => "726f77732f31",
+                  "rows-2" => "rows-1", "value=\"2\"" => "value=\"1\"") == first_row
+
+    # The public descriptor stays caller-owned, and a compiled route handed to a
+    # consumer does not alias the memo's parameter list.
+    @test probe.public.routes !== probe.shared.routes
+    @test probe.public.routes == probe.shared.routes
+    @test !probe.aliased
+    @test probe.intact
+
+    # A redefinition moves the world counter and the next render describes it.
+    @test contains(first_row, ">Run<")
+    edited = Pair[name === :compile ? name => merge(info, (; doc="After the edit.")) :
+                      name => info
+                  for (name, info) in DynamicObjects.meta(MemoRow)]
+    @eval DynamicObjects.meta(::Type{MemoRow}) = $edited
+    @test _shared_semantic_descriptor(MemoRow) !== probe.shared
+    @test startswith(only(r for r in _shared_semantic_descriptor(MemoRow).routes
+                          if r.name === :compile).property.description, "After the edit.")
+end
+
 @testitem "semantic app compiles one mounted graph without an operation registry" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     import HTMXObjects: _is_semantic_root_provider, _operation_context,
                         _root_providers
