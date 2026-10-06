@@ -13693,7 +13693,10 @@ function _semantic_action_plan(specs, shared_names)
     (; indices=Set(keys(group_of)), group_of, groups)
 end
 
-function _semantic_action(spec, content, include)
+# One compact action: its button, plus its own result when the button targets
+# the next result relatively. With a shared result host (`target`, an id
+# selector) the button targets that host and has no result of its own.
+function _semantic_action(spec, content, include, target)
     route = spec.runtime_route
     _check_mounted_include_child(spec.mounted, route)
     action = _operation_form_action(route, spec.current,
@@ -13702,33 +13705,41 @@ function _semantic_action(spec, content, include)
     attrs = merge(_operation_submit_attributes(spec.operation_submit_attrs),
                   (; type="button"), NamedTuple{(method_key,)}((action,)),
                   isnothing(include) ? (;) : (; hx_include=include),
-                  (; hx_target=_SEMANTIC_ACTION_TARGET, hx_swap="innerHTML"))
-    (h.button(content; attrs...),
-     h.div(; class="htmxo-semantic-operation-result", aria_live="polite"))
+                  (; hx_target=something(target, _SEMANTIC_ACTION_TARGET),
+                     hx_swap="innerHTML"))
+    entry = spec.base_entry
+    (; object=entry.object, route=entry.route, name=entry.name, verb=entry.verb,
+       path=entry.path, title=entry.title,
+       button=h.button(content; attrs...),
+       result=isnothing(target) ?
+           h.div(; class="htmxo-semantic-operation-result", aria_live="polite") :
+           nothing)
 end
 
-function _semantic_actions(root_prefix, specs, plan, context_selector)
+function _semantic_actions(root_prefix, specs, plan, context_selector, target)
     base_id = "htmxo-semantic-actions-" * _semantic_id_token(root_prefix)
-    nodes = Any[]
+    inputs = Any[]
     includes = map(enumerate(plan.groups)) do (group, hidden)
         selectors = String[]
         if !isempty(hidden)
             # The first holder keeps the surface's historic id.
             holder_id = group == 1 ? base_id : base_id * "-" * string(group)
-            push!(nodes, h.div(_semantic_hidden_inputs(hidden)...;
+            push!(inputs, h.div(_semantic_hidden_inputs(hidden)...;
                 id=holder_id, class="htmxo-semantic-action-inputs"))
             push!(selectors, "#" * holder_id)
         end
         isnothing(context_selector) || push!(selectors, context_selector)
         isempty(selectors) ? nothing : join(selectors, ", ")
     end
-    for (index, spec) in enumerate(specs)
-        index in plan.indices || continue
-        content = something(spec.operation_submit, spec.base_entry.title)
-        append!(nodes, _semantic_action(spec, content, includes[plan.group_of[index]]))
-    end
-    h.div(nodes...; class="htmxo-semantic-actions")
+    actions = Any[_semantic_action(spec,
+                      something(spec.operation_submit, spec.base_entry.title),
+                      includes[plan.group_of[index]], target)
+                  for (index, spec) in enumerate(specs) if index in plan.indices]
+    (; inputs, actions)
 end
+
+_semantic_result_host_id(root_prefix) =
+    "htmxo-semantic-result-" * _semantic_id_token(root_prefix)
 
 function _default_semantic_operation(entry)
     entry.form === nothing && throw(ArgumentError(string(
@@ -13739,12 +13750,76 @@ function _default_semantic_operation(entry)
     h.article(
         h.header(h.h2(entry.title), h.code("$(entry.verb) $(entry.path)")),
         entry.form,
-        entry.result;
+        (isnothing(entry.result) ? () : (entry.result,))...;
         class="htmxo-semantic-operation",
         data_operation=entry.name,
         data_verb=entry.verb,
         data_path=entry.path,
     )
+end
+
+# The historic surface: the shared context group, then every compact action
+# (holders first, each button followed by its own result), then the operations
+# that keep a form, then the shared result host when `results=:shared`.
+function _default_semantic_layout(parts)
+    heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
+    context = isnothing(parts.context) ? Any[] : Any[parts.context]
+    actions = isempty(parts.actions) ? Any[] : Any[h.div(parts.inputs...,
+        (node for action in parts.actions
+              for node in (action.button, action.result) if !isnothing(node))...;
+        class="htmxo-semantic-actions")]
+    result = isnothing(parts.result) ? Any[] : Any[parts.result]
+    h.section(heading..., context..., actions..., parts.operations..., result...;
+              class="htmxo-semantic-app")
+end
+
+_semantic_layout_children(node::Node) = HTMX.children(node)
+_semantic_layout_children(nodes::Union{AbstractVector,Tuple}) = nodes
+_semantic_layout_children(_) = ()
+
+function _count_semantic_parts!(counts, following, value)
+    haskey(counts, value) && (counts[value] += 1)
+    children = _semantic_layout_children(value)
+    for (index, child) in enumerate(children)
+        _count_semantic_parts!(counts, following, child)
+        haskey(counts, child) && index < length(children) &&
+            (following[child] = children[index + 1])
+    end
+end
+
+# A custom layout places the compiled parts itself. Every piece of
+# compiler-owned wiring must appear exactly once, as the node it was given:
+# buttons include holders and the context group by id and address their result
+# by id or as their next sibling, so a missing, repeated or rebuilt part would
+# submit the wrong values or swap into the wrong element.
+function _check_semantic_layout(surface, parts)
+    required = Pair{Any,String}[]
+    isnothing(parts.context) || push!(required, parts.context => "the shared context group")
+    for (n, holder) in enumerate(parts.inputs)
+        push!(required, holder => "hidden-context holder $(n)")
+    end
+    for action in parts.actions
+        push!(required, action.button => "the $(action.verb) $(action.path) button")
+        isnothing(action.result) ||
+            push!(required, action.result => "the $(action.verb) $(action.path) result")
+    end
+    isnothing(parts.result) || push!(required, parts.result => "the shared result host")
+    counts = IdDict{Any,Int}(part => 0 for (part, _) in required)
+    following = IdDict{Any,Any}()
+    _count_semantic_parts!(counts, following, surface)
+    problems = ["$(label) is placed $(counts[part]) times"
+                for (part, label) in required if counts[part] != 1]
+    for action in parts.actions
+        isnothing(action.result) && continue
+        counts[action.button] == counts[action.result] == 1 || continue
+        get(following, action.button, nothing) === action.result || push!(problems,
+            "the $(action.verb) $(action.path) result does not directly follow its button")
+    end
+    isempty(problems) || throw(ArgumentError(string(
+        "semantic_app layout must place every compiled part exactly once, as given ",
+        "(results=:each also keeps each result directly after its button): ",
+        join(problems, "; "))))
+    nothing
 end
 
 function _semantic_context_identity(obj, param)
@@ -13827,7 +13902,8 @@ end
 
 """
     semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
-                 render_operation=_default_semantic_operation, compact=false)
+                 render_operation=_default_semantic_operation, compact=false,
+                 results=:each, layout=_default_semantic_layout)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -13882,6 +13958,28 @@ result content. Button content defaults to the operation title
 visible inputs. Compact actions carry no `target_id` and are not passed to
 `render_operation`.
 
+Set `results=:shared` to send every operation's result to one result host per
+surface instead: an `aria-live` `<div id="htmxo-semantic-result-…"
+class="htmxo-semantic-operation-result">` whose id is derived from the mount
+prefix, so each row's host is distinct. Compact buttons and generated forms
+target it by id and no operation gets a result of its own; `render_operation`
+entries then carry the host's `target_id` and `result=nothing`. Each response
+replaces the previous one, polling included. The default `results=:each`
+keeps one result per operation.
+
+`layout(parts)` composes the surface from its compiled parts and may return any
+renderable value, such as several table cells or rows. `parts` carries `object`,
+`title`, `context` (the shared context group or `nothing`), `inputs` (the
+hidden-context holders), `actions`, `operations` (what `render_operation`
+returned, in order) and `result` (the shared host or `nothing`). Each action
+carries `object`, `route`, `name`, `verb`, `path`, `title`, `button`, and
+`result` (its own result, or `nothing` with `results=:shared`). A custom layout
+must place the context group, every holder, button and result, and the shared
+host exactly once, as the nodes it was given; with `results=:each` each result
+must directly follow its button. Anything else throws an `ArgumentError`. The
+default layout renders the `<section>` described above, with the shared host
+last.
+
 The first successful render also promotes the historic request-scoped default
 to a managed provider keyed by the root type and normalized mount prefix. The
 current rooted graph is retained—including fixed semantic state declared
@@ -13901,7 +13999,10 @@ one mounted child, when `(verb, path)` identities collide, or when an indexed
 indexed child to compile that subtree.
 """
 function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
-        render_operation=_default_semantic_operation, compact::Bool=false)
+        render_operation=_default_semantic_operation, compact::Bool=false,
+        results::Symbol=:each, layout=_default_semantic_layout)
+    results in (:each, :shared) || throw(ArgumentError(
+        "semantic_app results must be :each or :shared, got $(repr(results))"))
     descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
@@ -13982,16 +14083,18 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     end
 
     selector = isempty(context_entries) ? nothing : "#$(context_id)"
+    host_id = results === :shared ? _semantic_result_host_id(root_prefix) : nothing
     plan = compact ? _semantic_action_plan(specs, shared_context) :
                      (; indices=Set{Int}(), group_of=Dict{Int,Int}(),
                         groups=Vector{Pair{Symbol,Any}}[])
-    actions = isempty(plan.indices) ? Any[] :
-              Any[_semantic_actions(root_prefix, specs, plan, selector)]
+    compiled = isempty(plan.indices) ? (; inputs=Any[], actions=Any[]) :
+        _semantic_actions(root_prefix, specs, plan, selector,
+                          isnothing(host_id) ? nothing : "#" * host_id)
     operations = Any[]
     for (index, spec) in enumerate(specs)
         index in plan.indices && continue
         base_entry = spec.base_entry
-        target_id = base_entry.target_id
+        target_id = something(host_id, base_entry.target_id)
         form = base_entry.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
             spec.mounted, spec.local_route;
             values=spec.operation_values,
@@ -14002,16 +14105,22 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             shared_context,
             context_selector=selector,
         )
-        result = h.div(; id=target_id, class="htmxo-semantic-operation-result",
-                       aria_live="polite")
-        entry = merge(base_entry, (; form, result))
+        result = isnothing(host_id) ?
+            h.div(; id=target_id, class="htmxo-semantic-operation-result",
+                  aria_live="polite") : nothing
+        entry = merge(base_entry, (; target_id, form, result))
         push!(operations, render_operation(entry))
     end
 
     _activate_semantic_root_provider!(obj)
-    heading = isnothing(title) ? Any[] : Any[h.header(h.h1(title))]
-    context = isnothing(context_panel) ? Any[] : Any[context_panel]
-    h.section(heading..., context..., actions..., operations...; class="htmxo-semantic-app")
+    parts = (; object=obj, title, context=context_panel, inputs=compiled.inputs,
+               actions=compiled.actions, operations,
+               result=isnothing(host_id) ? nothing :
+                   h.div(; id=host_id, class="htmxo-semantic-operation-result",
+                         aria_live="polite"))
+    surface = layout(parts)
+    layout === _default_semantic_layout || _check_semantic_layout(surface, parts)
+    surface
 end
 
 # --- Conditional visibility (show_when) ---
