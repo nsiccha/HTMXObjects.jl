@@ -68,13 +68,15 @@ continued in the background while clients polled it or answered inline), or
 work reported through [`track_job!`](@ref). `state` is `:queued`, `:running`,
 `:done` or `:failed`; `duration` is `NaN` until it finishes. `requests` counts
 the requests that started or joined the same computation, `polls` the
-follow-up requests it answered. `progress` is the job's progress node (a
-Treebars tree when Treebars is loaded), kept after completion so history shows
-per-phase timings. `scope` is the root-provider scope of the operation that
-started it (`:request`, `:session`, `:job`, or `:none` outside any operation);
-the provider key itself is only kept as a salted in-process digest, used to
-match [`jobs_board`](@ref)'s `mine` filter. `position` is the queue position of
-a `:queued` job (`0` otherwise); a job whose computation waits in the job queue
+follow-up requests it answered. `result_url` is the externally visible target
+of an originating GET whose query needed no token/credential redaction (empty
+otherwise). `progress` is the job's progress node (a Treebars tree when
+Treebars is loaded), kept after completion so history shows per-phase timings.
+`scope` is the root-provider scope of the operation that started it
+(`:request`, `:session`, `:job`, or `:none` outside any operation); the provider
+key itself is only kept as a salted in-process digest, used to match
+[`jobs_board`](@ref)'s `mine` filter. `position` is the queue position of a
+`:queued` job (`0` otherwise); a job whose computation waits in the job queue
 ([`configure_job_queue!`](@ref)) is listed as `:queued` with its current
 position.
 """
@@ -83,6 +85,7 @@ mutable struct RuntimeJob
     label::String
     route::String
     target::String
+    result_url::String
     state::Symbol
     started_at::Float64
     started_ns::UInt64
@@ -486,6 +489,17 @@ _runtime_link_request!(tracker::RuntimeTracker, record, job::RuntimeJob) =
     record isa RuntimeRequest && haskey(tracker.inflight, record.id) &&
         (record.job = job.id)
 
+# A retained operation result is safe to link only when its originating GET
+# target needed no credential/token redaction. Preserve the externally visible
+# prefix so the link stays inside a path-stripping reverse proxy.
+function _runtime_result_url(record, req)
+    req isa HTTP.Request || return ""
+    method = record isa RuntimeRequest ? record.method : String(req.method)
+    method == "GET" || return ""
+    target = _operation_request_url(req, _request_prefix(req, ""))
+    _runtime_redact_target(target) == target ? target : ""
+end
+
 # Create and register a job. The caller holds `tracker.lock`.
 function _runtime_new_job!(tracker::RuntimeTracker, label, record, req;
         scope::Symbol, session::UInt, handle=nothing, progress=nothing,
@@ -496,9 +510,10 @@ function _runtime_new_job!(tracker::RuntimeTracker, label, record, req;
         (record.started_at, record.started_ns) : (time(), now_ns)
     target = record isa RuntimeRequest ? record.target :
              req isa HTTP.Request ? _runtime_redact_target(req.target) : ""
+    result_url = _runtime_result_url(record, req)
     route = record isa RuntimeRequest ? record.route : ""
     hidden = record isa RuntimeRequest && record.hidden
-    job = RuntimeJob(tracker.next_job, string(label), route, target, :running,
+    job = RuntimeJob(tracker.next_job, string(label), route, target, result_url, :running,
         started_at, started_ns, NaN, "", 1, 0, now_ns, handle, progress,
         scope, session, 0, hidden, false, source)
     tracker.running[job.id] = job
@@ -645,6 +660,8 @@ function _runtime_job_started!(tracker::RuntimeTracker, entry, label)
             # This execution joined a computation that is already a job.
             existing.requests += 1
             existing.last_seen_ns = now_ns
+            isempty(existing.result_url) &&
+                (existing.result_url = _runtime_result_url(record, req))
             existing.progress === nothing && (existing.progress = progress)
             if mine !== nothing
                 delete!(tracker.running, mine.id)
@@ -709,6 +726,8 @@ function _runtime_track_job!(tracker::RuntimeTracker, handle, label, progress, r
         if existing isa RuntimeJob
             existing.polls += 1
             existing.last_seen_ns = now_ns
+            isempty(existing.result_url) &&
+                (existing.result_url = _runtime_result_url(record, req))
             existing.progress === nothing && (existing.progress = progress)
             _runtime_link_request!(tracker, record, existing)
             return existing, false
@@ -1032,14 +1051,22 @@ _runtime_request_row(r::RuntimeRequest, now_ns::UInt64) = (;
 
 _runtime_job_active(j::RuntimeJob) = j.state === :queued || j.state === :running
 
+function _runtime_job_updated_at(j::RuntimeJob)
+    _runtime_job_active(j) || return j.started_at + j.duration
+    elapsed = j.last_seen_ns >= j.started_ns ?
+        (j.last_seen_ns - j.started_ns) / 1.0e9 : 0.0
+    j.started_at + elapsed
+end
+
 # A running job whose computation waits in the job queue reads as `:queued`
 # with its position (`queued` maps job ids to positions, see
 # `_runtime_queued_jobs`).
 function _runtime_job_row(j::RuntimeJob, now_ns::UInt64, queued=nothing)
     position = queued === nothing ? j.position : get(queued, j.id, j.position)
     state = position > 0 && _runtime_job_active(j) ? :queued : j.state
-    (; id=j.id, label=j.label, route=j.route, target=j.target, state,
-       started_at=j.started_at,
+    (; id=j.id, label=j.label, route=j.route, target=j.target,
+       result_url=j.result_url, state, started_at=j.started_at,
+       updated_at=_runtime_job_updated_at(j),
        duration=isnan(j.duration) ? _runtime_elapsed(j.started_ns, now_ns) : j.duration,
        requests=j.requests, polls=j.polls,
        idle=_runtime_job_active(j) ? _runtime_elapsed(j.last_seen_ns, now_ns) : 0.0,
@@ -1149,15 +1176,18 @@ const _RUNTIME_JOB_STATES = (:queued, :running, :done, :failed)
 The tracker's jobs in `states` (any of `:queued`, `:running`, `:done`,
 `:failed`) as plain rows, oldest first, each with its progress node:
 
-`(; id, label, route, target, state, started_at, duration, requests, polls,
-idle, error, scope, position, progress)`
+`(; id, label, route, target, result_url, state, started_at, updated_at,
+duration, requests, polls, idle, error, scope, position, progress)`
 
 — `duration` is the time so far for a queued/running job and the wall time of
-a finished one, `idle` the time since a request last started, joined or polled
-a running job, `position` a queued job's queue position, and `progress` its
-progress node (a Treebars tree, or `nothing`). The jobs are selected under the
-tracker lock; progress nodes are handed out as they are, for rendering outside
-it. A running inline execution's node is read from DynamicObjects on demand.
+a finished one, `updated_at` the latest recorded start/join/poll or completion,
+`result_url` the safe original GET target for a retained result (empty when the
+target was not a GET or required redaction), `idle` the time since a request
+last started, joined or polled a running job, `position` a queued job's queue
+position, and `progress` its progress node (a Treebars tree, or `nothing`). The
+jobs are selected under the tracker lock; progress nodes are handed out as they
+are, for rendering outside it. A running inline execution's node is read from
+DynamicObjects on demand.
 
 - `filter(row) -> Bool` keeps only matching rows.
 - `mine` — a request (or `OperationContext`): only jobs started under the same
@@ -1213,4 +1243,3 @@ function runtime_jobs(tracker::RuntimeTracker=runtime_tracker();
     end
     filter === nothing ? rows : Base.filter(filter, rows)
 end
-

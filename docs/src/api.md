@@ -1480,9 +1480,13 @@ end
   while its client polled or answered inline (POST/PUT/PATCH/DELETE,
   `OperationPolicy(:blocking)`, `@fresh` routes, declared `HTTP.Response` /
   `MIMEResponse` outputs, plain GETs without a page shell), plus work reported
-  through `track_job!`: how long it has been running, how many requests
-  started or joined the same computation, how many polls it answered, when a
-  client last looked at it, and its live progress tree. The board polls
+  through `track_job!`: stable job id, route and target, queued/running state,
+  start and latest-update time, how many callers started or joined the same
+  computation, how many polls it answered, when a client last looked at it,
+  and its live progress tree. Every row has **Inspect** (a fixed snapshot) and
+  **Watch** (a live single-job view) actions. **Result** links back to the
+  retained operation result when the originating target was a GET and needed
+  no credential/token redaction; it is omitted otherwise. The board polls
   `GET /runtime/jobs` and updates in place: new jobs appear, an expanded tree
   stays expanded, a finished job shows its outcome and leaves, and durations
   tick between polls; its *Pause* freezes it. A job nobody has polled for ten
@@ -1494,15 +1498,18 @@ end
   pattern and the thread pool handling them.
 - **Route timings** — request count, errors, p50/p95/max and total handling
   time per route over the recorded history.
-- **Recent jobs** (a board too, newest first) and **recent requests** —
-  bounded histories with durations, outcomes and frozen progress trees.
+- **Recent jobs** (a board too, newest first) and **recent requests** — bounded
+  histories with completed/failed outcomes, timestamps, actions and frozen
+  progress trees.
 - A process line: thread-pool sizes, running jobs against `:default` threads
   (highlighted when jobs outnumber compute threads and are time-sharing it),
   heap, GC time and free memory.
 
-The view refreshes itself every two seconds (`RuntimeRoutes(; refresh="5s")`
-to change; *Pause* stops it), `GET /runtime/snapshot` serves the same data as
-JSON, and `POST /runtime/clear` forgets the history. The dashboard's routes are
+The human dashboard is the primary operations surface. It refreshes itself
+every two seconds (`RuntimeRoutes(; refresh="5s")` to change; *Pause* stops
+it); `GET /runtime/job/<id>` supplies its inspect/watch views.
+`GET /runtime/snapshot` is the secondary JSON projection of the same ledger,
+and `POST /runtime/clear` forgets the history. The dashboard's routes are
 `@fresh`, so they render inline on the request's own task and never queue
 behind a saturated compute pool; its own requests and executions are left out
 of what it shows.
