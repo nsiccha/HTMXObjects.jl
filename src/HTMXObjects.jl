@@ -13627,21 +13627,29 @@ _semantic_id_token(prefix) = join(
 const _SEMANTIC_ACTION_TARGET = "next .htmxo-semantic-operation-result"
 
 # Which operations `semantic_app(...; compact=true)` renders as action buttons:
-# ordinary HTTP operations with no visible control whose hidden request context
-# equals the first such operation's, so one shared holder supplies it exactly.
-# Everything else keeps its generated form.
+# every ordinary HTTP operation with no visible control. Operations whose hidden
+# request context is the same name => value map, in whatever order their mounts
+# declare it, share one holder; each distinct map gets its own, so every button
+# includes exactly what its form would have carried. Everything else keeps its
+# generated form.
 function _semantic_action_plan(specs, shared_names)
-    hidden = nothing
-    indices = Set{Int}()
+    groups = Vector{Pair{Symbol,Any}}[]
+    keys_by_group = Any[]
+    group_of = Dict{Int,Int}()
     for (index, spec) in enumerate(specs)
         spec.base_entry.verb in (:WEBSOCKET, :SSE) && continue
         isempty(_operation_control_params(spec.runtime_route, shared_names)) || continue
         values = _semantic_hidden_values(spec.runtime_route, spec.current)
-        hidden === nothing && (hidden = values)
-        isequal(values, hidden) || continue
-        push!(indices, index)
+        key = sort(values; by=first)
+        group = findfirst(existing -> isequal(existing, key), keys_by_group)
+        if group === nothing
+            push!(groups, values)
+            push!(keys_by_group, key)
+            group = length(groups)
+        end
+        group_of[index] = group
     end
-    (; indices, hidden=something(hidden, Pair{Symbol,Any}[]))
+    (; indices=Set(keys(group_of)), group_of, groups)
 end
 
 function _semantic_action(spec, content, include)
@@ -13659,18 +13667,24 @@ function _semantic_action(spec, content, include)
 end
 
 function _semantic_actions(root_prefix, specs, plan, context_selector)
-    holder_id = "htmxo-semantic-actions-" * _semantic_id_token(root_prefix)
-    holder = isempty(plan.hidden) ? Any[] : Any[h.div(_semantic_hidden_inputs(plan.hidden)...;
-        id=holder_id, class="htmxo-semantic-action-inputs")]
-    selectors = String[]
-    isempty(plan.hidden) || push!(selectors, "#" * holder_id)
-    isnothing(context_selector) || push!(selectors, context_selector)
-    include = isempty(selectors) ? nothing : join(selectors, ", ")
-    nodes = Any[holder...]
+    base_id = "htmxo-semantic-actions-" * _semantic_id_token(root_prefix)
+    nodes = Any[]
+    includes = map(enumerate(plan.groups)) do (group, hidden)
+        selectors = String[]
+        if !isempty(hidden)
+            # The first holder keeps the surface's historic id.
+            holder_id = group == 1 ? base_id : base_id * "-" * string(group)
+            push!(nodes, h.div(_semantic_hidden_inputs(hidden)...;
+                id=holder_id, class="htmxo-semantic-action-inputs"))
+            push!(selectors, "#" * holder_id)
+        end
+        isnothing(context_selector) || push!(selectors, context_selector)
+        isempty(selectors) ? nothing : join(selectors, ", ")
+    end
     for (index, spec) in enumerate(specs)
         index in plan.indices || continue
         content = something(spec.operation_submit, spec.base_entry.title)
-        append!(nodes, _semantic_action(spec, content, include))
+        append!(nodes, _semantic_action(spec, content, includes[plan.group_of[index]]))
     end
     h.div(nodes...; class="htmxo-semantic-actions")
 end
@@ -13817,12 +13831,14 @@ button submits to the same mounted URL and verb; `hx-target="next
 mutation transport (verb freshness, polling, resume) is unchanged. Hidden
 request context is rendered once per surface in a
 `.htmxo-semantic-action-inputs` holder that each button includes, together with
-the shared context group. All attributes are on the button itself, so nothing is
-inherited by result content. Button content defaults to the operation title
+the shared context group. Operations whose hidden context is the same set of
+names and values share one holder, whatever order their mounts declare it in;
+a mounted child whose context differs (an extra `@param`, say) gets its own
+holder. All attributes are on the button itself, so nothing is inherited by
+result content. Button content defaults to the operation title
 (`entry.title`); `submit`/`submit_attrs` apply as for forms, and
 `render_operation` renders only the operations that keep a form: those with
-visible inputs, and those whose hidden context differs from the first compact
-operation's. Compact actions carry no `target_id` and are not passed to
+visible inputs. Compact actions carry no `target_id` and are not passed to
 `render_operation`.
 
 The first successful render also promotes the historic request-scoped default
@@ -13926,7 +13942,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
 
     selector = isempty(context_entries) ? nothing : "#$(context_id)"
     plan = compact ? _semantic_action_plan(specs, shared_context) :
-                     (; indices=Set{Int}(), hidden=Pair{Symbol,Any}[])
+                     (; indices=Set{Int}(), group_of=Dict{Int,Int}(),
+                        groups=Vector{Pair{Symbol,Any}}[])
     actions = isempty(plan.indices) ? Any[] :
               Any[_semantic_actions(root_prefix, specs, plan, selector)]
     operations = Any[]
