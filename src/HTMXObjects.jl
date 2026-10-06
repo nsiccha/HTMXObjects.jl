@@ -6703,29 +6703,38 @@ function _effective_route_descriptor(descriptor)
     descriptor
 end
 
-# Per-type descriptor memo. DO rebuilds every descriptor from `meta(T)` source
+# Per-type reflection memo. DO rebuilds every descriptor from `meta(T)` source
 # metadata — signature parsing, `Core.eval` of each argument type, per-property
 # dependency closures — so one build of a large route type costs milliseconds,
 # and the request path used to pay it twice per request (snag
-# `per-request-prop-096b23ad`). The result depends only on `T` and on the
-# method table, never on the request, so it is keyed on the world counter: any
-# (re)definition — a Revise edit, a struct redefinition — rebuilds on the next
-# read. The counter is read BEFORE the build, so a definition racing a build
-# stamps the entry stale rather than fresh.
-const _property_descriptors_cache = IdDict{Any,Tuple{UInt,Vector{NamedTuple}}}()
-const _property_descriptors_lock = ReentrantLock()
+# `per-request-prop-096b23ad`). A type-level reflection result depends only on
+# `T` and on the method table, never on the request, so it is keyed on the
+# world counter: any (re)definition — a Revise edit, a struct redefinition —
+# rebuilds on the next read. The counter is read BEFORE the build, so a
+# definition racing a build stamps the entry stale rather than fresh. The
+# cached value is shared: callers must not mutate it, and anything handed to a
+# consumer gets its own outer container.
+struct _WorldMemo{V}
+    entries::IdDict{Any,Tuple{UInt,V}}
+    lock::ReentrantLock
+end
+_WorldMemo{V}() where {V} = _WorldMemo{V}(IdDict{Any,Tuple{UInt,V}}(), ReentrantLock())
 
-function _shared_property_descriptors(T)
+function _world_memo!(build, memo::_WorldMemo, T)
     world = Base.get_world_counter()
-    cached = lock(() -> get(_property_descriptors_cache, T, nothing),
-                  _property_descriptors_lock)
+    cached = lock(() -> get(memo.entries, T, nothing), memo.lock)
     cached !== nothing && first(cached) == world && return last(cached)
-    descriptors = NamedTuple[_effective_route_descriptor(
+    value = build()
+    lock(() -> memo.entries[T] = (world, value), memo.lock)
+    value
+end
+
+const _property_descriptors_memo = _WorldMemo{Vector{NamedTuple}}()
+
+_shared_property_descriptors(T) = _world_memo!(_property_descriptors_memo, T) do
+    NamedTuple[_effective_route_descriptor(
         _mark_internal_inputs(descriptor)) for descriptor in
         Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)]
-    lock(() -> _property_descriptors_cache[T] = (world, descriptors),
-         _property_descriptors_lock)
-    descriptors
 end
 
 # First-declaration-wins, like DO's `property_descriptor(T, name)`: that method
@@ -10177,7 +10186,22 @@ generic walker drop it without hardcoding the name. See
 [`internal_input`](@ref), which is the same predicate for a descriptor read
 straight from `DynamicObjects.property_descriptor`.
 """
-function semantic_descriptor(::Type{T}) where {T}
+semantic_descriptor(::Type{T}) where {T} = _build_semantic_descriptor(T)
+
+semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
+
+# The compiler's read of the same descriptor. `semantic_app` resolves every
+# operation of every rendered mount against its type's descriptor, so a table
+# of N same-type rows with M operations each would otherwise rebuild the
+# identical reflection N×(M+1) times — milliseconds each, dominating the render.
+# Shared and world-keyed like `_shared_property_descriptors`; the public
+# `semantic_descriptor` keeps returning a freshly built, caller-owned value.
+const _semantic_descriptor_memo = _WorldMemo{NamedTuple}()
+
+_shared_semantic_descriptor(T::Type) =
+    _world_memo!(() -> _build_semantic_descriptor(T), _semantic_descriptor_memo, T)
+
+function _build_semantic_descriptor(T)
     routes = NamedTuple[]
     # `_reflect_walk!` needs a route table to walk; `_semantic_graph` degrades to
     # an empty node on its own, so the non-`@htmx` case only has to skip the walk
@@ -10187,8 +10211,6 @@ function semantic_descriptor(::Type{T}) where {T}
         _reflect_walk!(routes, T, ""; enrich=_semantic_route)
     (type=T, graph=_semantic_graph(T), routes=routes)
 end
-
-semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
 
 # --- Navigation ------------------------------------------------------------
 
@@ -13295,13 +13317,16 @@ end
 _operation_form_target(obj, route) = obj / route.path
 
 function _operation_route(T, name::Symbol, verb::Symbol)
-    candidates = [route for route in semantic_descriptor(T).routes
+    candidates = [route for route in _shared_semantic_descriptor(T).routes
                   if route.owner === T && route.name === name && route.verb === verb]
     isempty(candidates) && throw(ArgumentError(
         "no semantic $(verb) route $(repr(name)) on $(T)"))
     length(candidates) == 1 || throw(ArgumentError(
         "semantic route $(repr(name)) on $(T) is ambiguous for verb $(verb)"))
-    only(candidates)
+    # The route escapes into `operation_form` callers and `render_operation`
+    # entries; its parameter list must not alias the shared descriptor.
+    route = only(candidates)
+    merge(route, (; params=copy(route.params)))
 end
 
 function _operation_form_controls(obj, route, current, action;
@@ -13731,7 +13756,7 @@ indexed child to compile that subtree.
 """
 function semantic_app(obj; values=(;), title=nothing, submit="Run", submit_attrs=(;),
         render_operation=_default_semantic_operation)
-    descriptor = semantic_descriptor(obj)
+    descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
     _semantic_mounts!(mounts, obj, descriptor.graph, root_prefix)
