@@ -1111,24 +1111,23 @@ does, the property is recomputed per request. On DynamicObjects pins without
 `c0c742c`, such a body is recomputed per request even when the function reads
 nothing (DynamicObjects snag `remount-opaque-s-2938c22c`).
 
-An inline nested child shares that identity only once it exists on the retained
-source root. The managed store realizes declaration-level children there when it
-creates the root. A child first realized during a request — every indexed
-`@struct child(k)`, and a declaration-level child that a custom factory's root
-has not realized — is rebuilt per request, so its memoized and in-flight work
-restarts (DynamicObjects snag `remount-drops-ne-af0c7132`).
+Inline nested children share that identity too: a child first realized during
+a request — including every indexed `@struct child(k)` — is realized on the
+retained source root, so later requests reuse its memoized and in-flight work.
+On DynamicObjects pins without `822765e`, such a child is rebuilt per request
+(DynamicObjects snag `remount-drops-ne-af0c7132`).
 
-So keep long-running work that requests poll on an indexed property of the root
-itself, with a body that reads no request context:
+So keep long-running work that requests poll on an indexed property — of the
+root or of an inline child — whose body reads no request context:
 
 ```julia
 @htmx struct ModelApp
     data(key::String) = load_data(key)
     run_result(key::String) = fit_model(data(key))   # retained across requests
-    # on DynamicObjects pins without c0c742c, also not:
-    #   run_result(key::String) = fit_model(__self__, key)
     @fresh @direct @get poll(key::String) =
         Treebars.polling_fetchindex(render_fit, run_result, key)
+    # on DynamicObjects pins without 822765e, not: run(key).result on @struct run(key)
+    # on DynamicObjects pins without c0c742c, not: fit_model(__self__, key)
 end
 ```
 
