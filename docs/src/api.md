@@ -241,6 +241,37 @@ processed a fragment swapped in later — is missed; the fragment shows its
 rendered state until the next one. In `?plain` the
 element degrades to its text content.
 
+### Streams behind an auth gateway
+
+A browser exposes no HTTP status for a refused WebSocket handshake (just
+`error` and `close` 1006) or a refused `EventSource` (it ends `CLOSED`). A
+stream behind a gateway whose login has expired therefore cannot tell a
+`401` from a transient failure: htmx's ws and sse extensions reconnect with
+backoff forever, and the page goes stale until a manual reload.
+
+[`htmx`](@ref) page shells carry [`stream_probe_script`](@ref) for this.
+When a ws-extension socket closes without having opened, or an sse-extension
+or discover [`live_region`](@ref) source ends `CLOSED`, it sends one
+htmx-shaped GET (`HX-Request: true`, `X-HTMXO-Probe: stream`) to that
+stream's own URL and reads only the response headers: `HX-Redirect`
+navigates and `HX-Refresh: true` reloads the page, the way htmx itself
+answers them. A gateway that answers an expired htmx request with `401` +
+`HX-Refresh: true` thus reloads the page into its sign-in. Any other answer
+leaves the stream's own reconnect running, so an outage or restart only
+costs the probes.
+
+- `@ws` and `@sse` routes answer a probe with an empty 204 before upgrading,
+  parsing arguments, or starting the stream. Another endpoint answers however
+  it answers a GET; the probe aborts once the headers arrive, so it never
+  holds a stream open.
+- Probes are page-wide: at most one in flight and one per 5 seconds, however
+  many streams fail, and only for same-origin streams.
+- A bare `401` (no `HX-Refresh`) does not reload: only the gateway's explicit
+  instruction does, so a stream refused while the page itself loads cannot
+  start a reload loop.
+- A stream the runtime does not watch can report a failure itself:
+  `window.htmxoStreamProbe.failed(url)`.
+
 ```@docs
 SSEStream
 last_event_id
@@ -253,6 +284,7 @@ invalidate_key!
 live_fragment
 live_region
 live_region_script
+stream_probe_script
 ```
 
 ## Markdown / agent-readable responses
