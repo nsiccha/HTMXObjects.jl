@@ -3,7 +3,7 @@ using TestItemRunner
 @testmodule SemanticActionFixtures begin
     using HTMXObjects
     export ActionHost, ActionRow, ActionGraph, ActionGates, action_surface, OrderHost,
-           shared_surface, row_cells, present
+           shared_surface, row_cells, present, SelectHost, SelectStages
 
     const ActionGates = Dict{String,Channel{Nothing}}()
 
@@ -43,11 +43,24 @@ using TestItemRunner
     shared_surface(row; kwargs...) = action_surface(row; results=:shared,
         layout=row_cells, kwargs...)
 
+    # Two surfaces of one row on one page: the table cells show two of its
+    # operations, and the complementary selection renders below the table.
+    in_cells(entry) = entry.name in (:compile, :slow)
+    split_cells(parts) = (
+        h.tr(h.td(present(parts.context)..., parts.inputs...,
+                  (action.button for action in parts.actions)...)),
+        h.tr(h.td(parts.result; colspan="3")))
+    split_surfaces(row) = h.div(
+        h.table(h.tbody(action_surface(row; results=:shared, layout=split_cells,
+                                       select=in_cells)...)),
+        action_surface(row; results=:shared, select=!in_cells))
+
     @htmx struct ActionHost
         @param session_key::String = "demo"
         @include rows(row::Int) = ActionRow(string(row))
         @get detail(; row::Int) = action_surface(rows(row))
         @get shared_detail(; row::Int) = h.table(h.tbody(shared_surface(rows(row))...))
+        @get split_detail(; row::Int) = split_surfaces(rows(row))
     end
 
     @htmx struct ActionChild
@@ -82,6 +95,36 @@ using TestItemRunner
         @param view::String = "compact"
         @param failed_only::Bool = false
         @include rows(key::String) = OrderRow(; label=key)
+    end
+
+    # A row whose table cells show the mounted stage buttons and some of the
+    # row's own operations; the rest of the graph is used on other surfaces.
+    @htmx struct SelectStages
+        @param (; session_key) = __parent__
+        @param tier::String = "full"
+        "Lower the model."
+        @post lower() = h.p("lower:$(session_key):$(tier)")
+        "Emit the program."
+        @post emit() = h.p("emit:$(session_key):$(tier)")
+    end
+
+    @htmx struct SelectRow
+        label::String
+        @param (; session_key) = __parent__
+        @include steps = SelectStages()
+        "Check the model."
+        @post check() = h.p("check:$(label):$(session_key)")
+        "Measure the model."
+        @post measure() = h.p("measure:$(label)")
+        "Flag the model."
+        @post flag(; note::String) = h.p("flag:$(label):$(note)")
+        "Follow the model."
+        @ws follow() = h.p("follow:$(label)")
+    end
+
+    @htmx struct SelectHost
+        @param session_key::String = "demo"
+        @include rows(key::String) = SelectRow(key)
     end
 end
 
@@ -476,6 +519,153 @@ end
     @test count("class=\"htmxo-semantic-operation-result\"", plain_shared) == 1
 end
 
+@testitem "select compiles only the chosen operations of a surface" setup=[SemanticActionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    root = SelectHost(; __prefix__="/app",
+        __req__=HTTP.Request("GET", "/?session_key=token"), __cache_base__=mktempdir())
+    row = root.rows("r1")
+    html(value) = repr("text/html", value)
+    buttons(surface) = Dict(m.captures[1] => m.match for m in eachmatch(
+        r"<button[^>]*hx-(?:get|post|delete)=\"([^\"]+)\"[^>]*>", surface))
+    error_text(f) = try f(); "" catch err; err isa ArgumentError ? err.msg : rethrow() end
+    holder = "htmxo-semantic-actions-_2fapp_2frows_2fr1"
+    host = "htmxo-semantic-result-_2fapp_2frows_2fr1"
+    # The table cells show the mounted stage buttons and the row's check; the
+    # row's measure and flag operations and its stream belong to other surfaces.
+    inline(entry) = entry.object isa SelectStages || entry.name === :check
+    http_only(entry) = entry.verb !== :WEBSOCKET
+    cells(parts) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
+                             (action.button for action in parts.actions)...,
+                             parts.operations...)),
+                    h.tr(h.td(parts.result)))
+
+    # Selecting everything is the default, byte for byte, in every shape.
+    action_row = ActionHost(; __prefix__="/proxy/demo",
+        __req__=HTTP.Request("GET", "/?session_key=token"),
+        __cache_base__=mktempdir()).rows(1)
+    everything = entry -> true
+    @test html(semantic_app(action_row)) == html(semantic_app(action_row; select=everything))
+    @test html(action_surface(action_row)) == html(action_surface(action_row; select=everything))
+    @test html(h.tbody(shared_surface(action_row)...)) ==
+          html(h.tbody(shared_surface(action_row; select=everything)...))
+
+    # The default renderer refuses the row's stream; leaving it out compiles.
+    @test contains(error_text(() -> semantic_app(row; compact=true)),
+                   "no default control for WebSocket")
+    full = html(h.tbody(semantic_app(row; compact=true, results=:shared,
+                                     layout=cells, select=http_only)...))
+    @test sort(collect(keys(buttons(full)))) == ["/app/rows/r1/check", "/app/rows/r1/measure",
+        "/app/rows/r1/steps/emit", "/app/rows/r1/steps/lower"]
+    @test count("<form ", full) == 1
+
+    # Only the selected operations are compiled: no other callback sees the
+    # rest, and the layout need not (and cannot) place them.
+    seen = Symbol[]
+    selected = semantic_app(row; compact=true, results=:shared, layout=cells, select=inline,
+        submit_attrs=entry -> (push!(seen, entry.name); (; title=entry.title)),
+        render_operation=entry -> error("no selected operation keeps a form"))
+    surface = html(h.tbody(selected...))
+    @test sort(seen) == [:check, :emit, :lower]
+    @test sort(collect(keys(buttons(surface)))) ==
+          ["/app/rows/r1/check", "/app/rows/r1/steps/emit", "/app/rows/r1/steps/lower"]
+    @test !contains(surface, "measure") && !contains(surface, "flag") &&
+          !contains(surface, "follow") && !contains(surface, "<form")
+    @test count("class=\"htmxo-semantic-operation-result\"", surface) == 1
+    # A surface that leaves operations out has ids of its own for the parts it
+    # shares across operations; the suffix names the selected graph positions.
+    suffix = only(m.captures[1] for m in eachmatch(
+        Regex("<div id=\"$(host)(-only-[0-9a-f]+)\" class=\"htmxo-semantic-operation-result\""), surface))
+    @test contains(surface, "id=\"$(holder)$(suffix)\"")
+    @test contains(surface, "-context-selectrow-app-rows-r1$(suffix)\" class=\"htmxo-semantic-context\"")
+    unsuffixed(markup) = replace(markup, r"-only-[0-9a-f]+" => "")
+
+    # Apart from those ids, a selected button is the full surface's button: same
+    # URL, verb, included holder and context, and target — so submission and
+    # polling are unchanged.
+    full_buttons = buttons(html(h.tbody(semantic_app(row; compact=true, results=:shared,
+        layout=cells, select=http_only, submit_attrs=entry -> (; title=entry.title))...)))
+    for (url, button) in buttons(surface)
+        @test unsuffixed(button) == unsuffixed(full_buttons[url])
+        @test contains(button, "hx-target=\"#$(host)$(suffix)\"")
+    end
+    each = html(semantic_app(row; compact=true, select=inline))
+    each_full = html(semantic_app(row; compact=true, select=http_only))
+    for (url, button) in buttons(each)
+        @test unsuffixed(button) == unsuffixed(buttons(each_full)[url])
+    end
+
+    # Holders and the context group carry only what the selection needs. The
+    # stages declare an extra `@param`, so they keep their own holder; they
+    # read no fixed field, so a stages-only surface has no context group.
+    @test count("class=\"htmxo-semantic-action-inputs\"", surface) == 2
+    @test contains(surface, "class=\"htmxo-semantic-context\"")
+    stages = html(semantic_app(row; compact=true, select=entry -> entry.object isa SelectStages))
+    @test !contains(stages, "htmxo-semantic-context")
+    stage_holders = [m.captures[1] for m in eachmatch(
+        r"<div id=\"([^\"]+)\" class=\"htmxo-semantic-action-inputs\">", stages)]
+    @test length(stage_holders) == 1 && startswith(only(stage_holders), holder * "-only-")
+    @test contains(stages, "name=\"tier\" value=\"full\"") &&
+          contains(stages, "name=\"session_key\" value=\"token\"")
+    for button in values(buttons(stages))
+        @test contains(button, "hx-include=\"#$(only(stage_holders))\"")
+    end
+
+    # The cells and the complementary surface share one page: every id is
+    # unique, every include resolves, and each surface's buttons swap into its
+    # own result host.
+    rest = semantic_app(row; compact=true, results=:shared,
+                        select=entry -> !inline(entry) && http_only(entry))
+    page = html(h.div(h.table(h.tbody(selected...)), rest))
+    ids = [m.captures[1] for m in eachmatch(r"\bid=\"([^\"]+)\"", page)]
+    @test length(unique(ids)) == length(ids)
+    for m in eachmatch(r"hx-include=\"([^\"]+)\"", page), selector in split(m.captures[1], ", ")
+        @test startswith(selector, "#") && selector[2:end] in ids
+    end
+    rest_html = html(rest)
+    rest_host = only(m.captures[1] for m in eachmatch(
+        r"<div id=\"([^\"]+)\" class=\"htmxo-semantic-operation-result\"", rest_html))
+    @test rest_host != host * suffix && startswith(rest_host, host * "-only-")
+    @test sort(collect(keys(buttons(rest_html)))) == ["/app/rows/r1/measure"]
+    @test count("hx-target=\"#$(rest_host)\"", rest_html) == 2   # measure's button, flag's form
+    @test !contains(rest_html, "hx-target=\"#$(host)$(suffix)\"")
+
+    # A form operation keeps its graph-derived result target when selected.
+    target(surface) = only(match(r"hx-target=\"([^\"]+)\"", m.match).captures[1]
+        for m in eachmatch(r"<form[^>]*>", surface) if contains(m.match, "/app/rows/r1/flag\""))
+    forms = Any[]
+    flag_only = html(semantic_app(row; select=entry -> entry.name === :flag,
+        render_operation=entry -> (push!(forms, entry);
+                                   HTMXObjects._default_semantic_operation(entry))))
+    @test length(forms) == 1 && only(forms).name === :flag
+    @test target(flag_only) == target(html(semantic_app(row; select=http_only)))
+    @test contains(flag_only, "id=\"$(only(forms).target_id)\"")
+
+    # Placement is still checked for every selected part.
+    missing_emit(parts) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
+        (action.button for action in parts.actions if action.name !== :emit)...)),
+        h.tr(h.td(parts.result)))
+    message = error_text(() -> semantic_app(row; compact=true, results=:shared,
+                                            layout=missing_emit, select=inline))
+    @test contains(message, "/steps/emit button is placed 0 times")
+
+    # The predicate answers true or false; its own failures propagate; and the
+    # whole graph is still discovered and checked.
+    @test contains(error_text(() -> semantic_app(row; select=entry -> nothing)),
+                   "select must return true or false")
+    @test_throws ErrorException semantic_app(row; select=entry -> error("boom"))
+    @test contains(error_text(() -> semantic_app(root; select=entry -> false)), "rows")
+    @test !contains(html(semantic_app(row; compact=true, select=entry -> false)), "<button")
+
+    # Selected buttons submit what their forms would have.
+    route!(root; operation_policy=:blocking)
+    headers = ["HX-Request" => "true", "Content-Type" => "application/x-www-form-urlencoded"]
+    lowered = dispatch(:POST, "/rows/r1/steps/lower"; headers, body="session_key=token&tier=full")
+    @test String(lowered.body) == "<p>lower:token:full</p>"
+    checked = dispatch(:POST, "/rows/r1/check"; headers, body="session_key=token&label=r1")
+    @test String(checked.body) == "<p>check:r1:token</p>"
+end
+
 @testitem "shared compact results land in their own row's host in a browser" setup=[SemanticActionFixtures] tags=[:browser, :semantic] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
@@ -643,6 +833,143 @@ end
             @test isempty(filter(r -> !contains(r, " /proxy/demo/"), requests))
         finally
             foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
+            close(server)
+        end
+    end
+end
+
+@testitem "selected surfaces of one row share a page in a browser" setup=[SemanticActionFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+        ActionGates["1"] = Channel{Nothing}(1)
+        route!(ActionHost(; __cache_base__=mktempdir());
+            operation_policy=OperationPolicy(:auto; keep_progress=false))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        requests = String[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          var prefix = 'htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f1-only-';
+          function hosts() { return Array.from(document.querySelectorAll('[id^="' + prefix + '"]')); }
+          function cells() { return hosts().find(el => el.closest('table')); }
+          function rest() { return hosts().find(el => !el.closest('table')); }
+          function button(verb, name) {
+            return document.querySelector('button[hx-' + verb + '$="/rows/1/' + name + '"]');
+          }
+          async function until(check, label) {
+            var end = Date.now() + 15000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label);
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+          }
+          function require(value, label) { if (!value) throw new Error(label); }
+          document.body.addEventListener('htmx:afterSettle', function(event) {
+            if (event.detail.target && event.detail.target.id === 'row1') document.body.dataset.settled = 'yes';
+          });
+          document.body.addEventListener('htmx:afterSwap', function() {
+            var host = cells();
+            if (host && host.querySelector('.treebar-poller')) document.body.dataset.polled = 'yes';
+          });
+          try {
+            document.getElementById('expand').click();
+            await until(() => document.body.dataset.settled === 'yes', 'row settled');
+            var all = Array.from(document.querySelectorAll('[id]')).map(el => el.id);
+            require(new Set(all).size === all.length, 'duplicate DOM ids');
+            require(hosts().length === 2 && cells() && rest() && cells() !== rest(), 'one host per surface');
+            require(button('post', 'compile').closest('table') && button('post', 'slow').closest('table'),
+                    'selected buttons in the cells');
+            require(!button('get', 'source').closest('table') && !button('delete', 'reset').closest('table'),
+                    'complementary buttons below the table');
+
+            button('post', 'compile').click();
+            await until(() => cells().textContent.includes('compile:1:token'), 'cells POST');
+            require(rest().textContent === '', 'cells POST reached the other surface');
+            button('get', 'source').click();
+            await until(() => rest().textContent.includes('source:1:token'), 'rest GET');
+            require(cells().textContent.includes('compile:1:token'), 'rest GET reached the cells');
+            rest().closest('section').querySelector('form').requestSubmit();
+            await until(() => rest().textContent.includes('seeded:1:1'), 'rest form');
+            button('post', 'slow').click();
+            await until(() => document.body.dataset.polled === 'yes', 'cells mutation poller');
+            await fetch('/release');
+            await until(() => cells().textContent.includes('slow:1'), 'cells slow result');
+            require(rest().textContent.includes('seeded:1:1'), 'poll reached the other surface');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        page = repr("text/html", htmx(
+            h.button("Expand"; id="expand",
+                     hx_get="/proxy/demo/split_detail?row=1&session_key=token",
+                     hx_target="#row1", hx_swap="innerHTML"),
+            h.div(; id="row1"), driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
+            feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" && return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                isready(ActionGates["1"]) || put!(ActionGates["1"], nothing)
+                return HTTP.Response(204)
+            end
+            HTTP.header(req, "HX-Request", "") == "true" &&
+                push!(requests, string(req.method, " ", req.target))
+            internal = replace(String(req.target), r"^/proxy/demo" => "")
+            dispatch(req.method, internal;
+                headers=[collect(req.headers); "X-Forwarded-Prefix" => "/proxy/demo"],
+                body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            warm = HTTP.get("http://127.0.0.1:$port/proxy/demo/split_detail?row=1&session_key=token";
+                            retry=false, status_exception=false)
+            @test warm.status == 200
+            warm.status == 200 || error(String(warm.body))
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        outcome = take!(receipt)
+                        @test outcome == "/complete?status=passed"
+                        outcome == "/complete?status=passed" ||
+                            @info "Browser requests" requests=join(requests, "\n")
+                    else
+                        @info "Browser diagnostics" requests=join(requests, "\n") log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            polls = filter(r -> contains(r, "__htmxo_poll=1"), requests)
+            @test any(r -> startswith(r, "GET /proxy/demo/rows/1/slow?"), polls)
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/1/slow"), requests) == 1
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/1/compile"), requests) == 1
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/1/seeded"), requests) == 1
+            @test isempty(filter(r -> !contains(r, " /proxy/demo/"), requests))
+        finally
+            isready(ActionGates["1"]) || put!(ActionGates["1"], nothing)
             close(server)
         end
     end
