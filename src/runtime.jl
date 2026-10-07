@@ -943,12 +943,25 @@ job_queue_settings(q::_JobQueue=_JOB_QUEUE) = lock(q.lock) do
        queued=length(q.waiting))
 end
 
-# The `fetch` selector for a background compute: `identity` spawns it at once,
-# a `Deferred` hands it to the queue.
-function _operation_background_fetch(req)
+# The `fetch` selector for a background compute on `pool`: on `:default`,
+# `identity` spawns it at once and a `Deferred` hands it to the queue.
+_operation_background_fetch(req, pool::Symbol=:default) =
+    _operation_background_fetch(req, Val(pool))
+
+function _operation_background_fetch(req, ::Val{:default})
     _JOB_QUEUE.max_running > 0 || return identity
     tracker = _runtime_tracker_of(req)
     getproperty(DynamicObjects, :Deferred)(d -> _job_queue_enqueue!(_JOB_QUEUE, d, tracker))
+end
+
+# An `@interactive` route's compute starts at once on `:interactive`. The queue
+# bounds heavy `:default` work, and its workers live on that pool: admitting a
+# latency-critical compute through it would wait behind the very work the
+# marker exists to avoid.
+function _operation_background_fetch(req, ::Val{:interactive})
+    run! = getproperty(DynamicObjects, :run!)
+    getproperty(DynamicObjects, :Deferred)(
+        d -> (_spawn_operation(() -> run!(d), :interactive); nothing))
 end
 
 _job_queue_key(d) = (objectid(getfield(d, :cache)), getfield(d, :key), UInt(0))

@@ -7398,15 +7398,33 @@ const _fresh_operation_root_impl = Ref{Any}(() -> nothing)
 
 _fresh_operation_root() = _fresh_operation_root_impl[]()
 
+# The threadpool a route's background work starts on: `:default`, or
+# `:interactive` for an `@interactive` route — a latency-critical operation
+# that must not wait for a `:default` thread while app compute saturates it.
+# Every background start goes through here: a memoized compute (through
+# `_operation_background_fetch`), a fresh invocation, and a preload.
+# Literal pool symbols: `@spawn` only accepts a computed pool on newer Julia.
+_spawn_operation(f, pool::Symbol) = _spawn_operation(f, Val(pool))
+_spawn_operation(f, ::Val{:default}) = Threads.@spawn :default f()
+function _spawn_operation(f, ::Val{:interactive})
+    # Julia runs an `:interactive` spawn on `:default` when that pool is empty.
+    Threads.nthreads(:interactive) > 0 || @warn(
+        "An `@interactive` route started its operation, but Julia has no " *
+        ":interactive threads, so it runs on :default. Launch julia with " *
+        "e.g. `julia -t 8,4` for 4 interactive threads.", maxlog=1)
+    Threads.@spawn :interactive f()
+end
+
 # Start one fresh invocation off the request task. `compute(root)` runs the
 # route body (inside a governed lease when the root is retained); `root` is
 # the operation's progress node, attached under the dispatch caller's node so
 # an in-process `dispatch(; parent)` still sees the work.
-function _start_fresh_operation(compute, parent_progress)
+function _start_fresh_operation(compute, parent_progress, pool::Symbol=:default)
     root = _fresh_operation_root()
     parent_progress === nothing || root === nothing ||
         _progress_attach(parent_progress, root)
-    _FreshOperation(Threads.@spawn(Base.invokelatest(compute, root)), root)
+    _FreshOperation(_spawn_operation(() -> Base.invokelatest(compute, root), pool),
+                    root)
 end
 
 # Grace fast-path shared by the polling transport (via the Treebars extension
@@ -7722,12 +7740,14 @@ end
 # a `_FreshOperation` for a fresh one — so a join can hand it to whichever
 # transport the click resolves to.
 function _start_preload(descriptor, target, name, verb_inst, idx_vals, kw_pairs,
-        signature, req::HTTP.Request)
+        signature, req::HTTP.Request; pool::Symbol=:default)
     declared_fresh = _operation_declared_fresh(descriptor)
-    fetch = _operation_background_fetch(req)
-    task = Threads.@spawn Base.invokelatest(_execute_materialization,
-        target, name, verb_inst, idx_vals, kw_pairs;
-        fetch, declared_fresh)
+    fetch = _operation_background_fetch(req, pool)
+    task = _spawn_operation(pool) do
+        Base.invokelatest(_execute_materialization,
+            target, name, verb_inst, idx_vals, kw_pairs;
+            fetch, pool, declared_fresh)
+    end
     now = _operation_poll_now()
     _OperationPollEntry("", signature, getproperty(target.leaf, name),
         (verb_inst, idx_vals...), NamedTuple(kw_pairs), task, target.leaf, req,
@@ -7753,7 +7773,7 @@ function _preload_ready(entry::_OperationPollEntry, grace::Real)
 end
 
 function _execute_preload(descriptor, target, name, verb_inst, idx_vals,
-        kw_pairs, req::HTTP.Request)
+        kw_pairs, req::HTTP.Request; pool::Symbol=:default)
     _preloadable_request(req, verb_inst) || return _PRELOAD_SKIPPED
     signature = _operation_poll_signature(
         target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
@@ -7762,7 +7782,7 @@ function _execute_preload(descriptor, target, name, verb_inst, idx_vals,
     entry = isnothing(client) ? nothing : _lookup_preload(key)
     if !(entry isa _OperationPollEntry)
         entry = _start_preload(descriptor, target, name, verb_inst, idx_vals,
-                               kw_pairs, signature, req)
+                               kw_pairs, signature, req; pool)
         isnothing(client) || _retain_preload!(key, entry)
     end
     ready = _preload_ready(entry, _PRELOAD_GRACE)
@@ -7901,14 +7921,17 @@ _with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
 # `Base.fetch` takes DO's `:inline` branch: compute on THIS task and return the
 # value. `identity` takes the `:spawn` branch: kick the compute off and hand back
 # a `Pending` — and so does a `Deferred(executor)`, which the operation layer
-# passes instead when the job queue is on (`_operation_background_fetch`), so
-# the compute waits its turn. A fresh route — authored with `@fresh` or implied
-# by a mutation verb — has no two-phase selector; its descriptor lets us keep
-# this framework-only keyword out of the authored call.
+# passes instead when the job queue is on, so the compute waits its turn, or
+# for an `@interactive` route, so it starts on that pool
+# (`_operation_background_fetch`). A fresh route — authored with `@fresh` or
+# implied by a mutation verb — has no two-phase selector; its descriptor lets
+# us keep this framework-only keyword out of the authored call, and `pool`
+# names where its background invocation starts.
 # Only the spawned branch makes polling transport real — see
 # `_execute_operation`.
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
-        fetch=Base.fetch, parent_progress=nothing, declared_fresh::Bool=false)
+        fetch=Base.fetch, pool::Symbol=:default, parent_progress=nothing,
+        declared_fresh::Bool=false)
     context = get(target, :context, nothing)
     governed = get(target, :governed, false) && context isa OperationContext &&
         isdefined(DynamicObjects, :execute_materialization)
@@ -7951,7 +7974,7 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
             compute_fresh
         end
         fetch === Base.fetch && return compute(parent_progress)
-        return _start_fresh_operation(compute, parent_progress)
+        return _start_fresh_operation(compute, parent_progress, pool)
     end
 
     started = if governed
@@ -8135,11 +8158,11 @@ end
 
 function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-        call_kwargs; parent_progress=nothing, job=nothing)
+        call_kwargs; parent_progress=nothing, job=nothing, pool::Symbol=:default)
     started = _execute_materialization(target, name, verb_inst, idx_vals,
                                        kw_pairs;
-                                       fetch=_operation_background_fetch(req),
-                                       parent_progress=parent_progress,
+                                       fetch=_operation_background_fetch(req, pool),
+                                       pool, parent_progress=parent_progress,
                                        declared_fresh=
                                            _operation_declared_fresh(descriptor))
     prop, keys, call_kwargs =
@@ -8177,11 +8200,12 @@ end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false,
-        parent_progress=nothing, preload::Bool=false, direct::Bool=false)
+        parent_progress=nothing, preload::Bool=false, direct::Bool=false,
+        pool::Symbol=:default)
     if preload && _preload_request(req)
         _runtime_note_mode!(req, :preload)
         return _execute_preload(descriptor, target, name, verb_inst, idx_vals,
-                                kw_pairs, req)
+                                kw_pairs, req; pool)
     end
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell, direct)
@@ -8233,7 +8257,7 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                                  call_kwargs; leaf=target.leaf) do job
             _execute_operation_heal(policy, descriptor, target, name,
                 verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-                call_kwargs; parent_progress=parent_progress, job)
+                call_kwargs; parent_progress=parent_progress, job, pool)
         end
     end
 
@@ -8243,14 +8267,14 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
                       call_kwargs; leaf=target.leaf) do job
         _execute_operation_fresh(policy, descriptor, target, name, verb_inst,
             idx_vals, kw_pairs, req, mode, prefix, prop, keys, call_kwargs, job;
-            parent_progress, preloaded, error_obj)
+            parent_progress, preloaded, error_obj, pool)
     end
 end
 
 function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, mode::Symbol, prefix, prop,
         keys, call_kwargs, job; parent_progress=nothing, preloaded=nothing,
-        error_obj=target.leaf)
+        error_obj=target.leaf, pool::Symbol=:default)
     if mode === :page_load
         # A direct rich-page visit spends the same grace budget an HTMX request
         # would: a fast operation renders inline in the shell — one response,
@@ -8262,8 +8286,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         started = isnothing(preloaded) ?
             _execute_materialization(target, name, verb_inst, idx_vals,
                                      kw_pairs;
-                                     fetch=_operation_background_fetch(req),
-                                     parent_progress=parent_progress,
+                                     fetch=_operation_background_fetch(req, pool),
+                                     pool, parent_progress=parent_progress,
                                      declared_fresh=
                                          _operation_declared_fresh(descriptor)) :
             preloaded.started
@@ -8294,9 +8318,9 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
     started = if isnothing(preloaded)
         _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
                                  fetch=mode === :polling ?
-                                       _operation_background_fetch(req) :
+                                       _operation_background_fetch(req, pool) :
                                        Base.fetch,
-                                 parent_progress=parent_progress,
+                                 pool, parent_progress=parent_progress,
                                  declared_fresh=
                                      _operation_declared_fresh(descriptor))
     else
@@ -8349,7 +8373,8 @@ end
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
         operation_policy::OperationPolicy=OperationPolicy(),
-        parent_progress=nothing, preload::Bool=false, direct::Bool=false)
+        parent_progress=nothing, preload::Bool=false, direct::Bool=false,
+        pool::Symbol=:default)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
@@ -8377,7 +8402,7 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
     value = _execute_operation(operation_policy, descriptor, target, name,
                                verb_inst, idx_vals, kw_pairs, req; page_shell,
                                parent_progress=parent_progress, preload,
-                               direct)
+                               direct, pool)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -8421,8 +8446,8 @@ but retain a transport-specific `ws` signature and response lifecycle.
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         path, n_params, record_dir; root_prefix="", record_base::String="",
         root_provider=RootProvider(), operation_policy=OperationPolicy(),
-        preload::Bool=false, direct::Bool=false, resume_only::Bool=false,
-        allow::String="")
+        preload::Bool=false, direct::Bool=false, pool::Symbol=:default,
+        resume_only::Bool=false, allow::String="")
     if _verb_mutation(method)
         _register_mutation_resume!(path, method) do allow
             _register_route_handler(RootT, LeafT, chain, "GET", name, path,
@@ -8486,7 +8511,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy,
                                        parent_progress=parent_progress,
-                                       preload, direct)
+                                       preload, direct, pool)
             val = operation.value
             val === _PRELOAD_SKIPPED && return _preload_skipped_response()
 
@@ -8626,6 +8651,19 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
     path = _route_path(prefix, name, param_strs)
     preload = Symbol("@preload") in info.macros
     direct = Symbol("@direct") in info.macros
+    # `@interactive`: the route's background operation starts on the
+    # `:interactive` pool, so it does not wait behind saturated `:default`
+    # compute. A route that never answers in the background has none to place.
+    interactive = Symbol("@interactive") in info.macros
+    if interactive && (direct || method in ("WEBSOCKET", "SSE"))
+        throw(ArgumentError("`@interactive` starts a route's background " *
+            "operation on the :interactive threadpool, but $(RouteT).$(name) " *
+            "answers on its request's own task " *
+            "($(direct ? "`@direct`" : method)); drop `@interactive`"))
+    end
+    interactive && !isdefined(DynamicObjects, :Deferred) && throw(ArgumentError(
+        "`@interactive` ($(RouteT).$(name)) needs a DynamicObjects with `Deferred`"))
+    pool = interactive ? :interactive : :default
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
@@ -8669,17 +8707,17 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload, direct)
+                                    operation_policy, preload, direct, pool)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload, direct)
+                                    operation_policy, preload, direct, pool)
         else
             # Register the full route (all params explicit)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload, direct)
+                                    operation_policy, preload, direct, pool)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -8690,7 +8728,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
                                         length(short_params), record_dir;
                                         root_prefix=mount_prefix, record_base, root_provider,
-                                        operation_policy, preload, direct)
+                                        operation_policy, preload, direct, pool)
             end
         end
     end
