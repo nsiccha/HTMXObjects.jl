@@ -7421,9 +7421,10 @@ _fresh_operation_root() = _fresh_operation_root_impl[]()
 # Where a route's background work starts. An ordinary route's operation stays
 # on the pool of the request that started it — `:interactive` under HTTP.jl 2
 # or `serve(; parallel=:interactive)` — so a page answers while application
-# compute saturates `:default`. A `@queued` route declares heavy computation: it
-# runs on `:default`, admitted through the job queue (`configure_job_queue!`)
-# when one is configured (`tracker` names the requesting ledger).
+# compute saturates `:default`. A `@queued` route declares heavy computation:
+# DynamicObjects' `@queued` marker admits each of its computations through the
+# job queue (`configure_job_queue!`), on `:default` (`tracker` names the
+# requesting ledger, which records the job).
 struct _OperationStart
     pool::Symbol
     tracker::Any    # `nothing`, or the `RuntimeTracker` of a queued start
@@ -7433,13 +7434,33 @@ _OperationStart() = _OperationStart(:default, nothing)
 # The pool of the calling task; a foreign thread counts as `:default`.
 _request_pool() = Threads.threadpool() === :interactive ? :interactive : :default
 
-function _operation_start(req, queued::Bool)
-    queued || return _OperationStart(_request_pool(), nothing)
-    _OperationStart(:default,
-        _JOB_QUEUE.max_running > 0 ? _runtime_tracker_of(req) : nothing)
-end
+_operation_start(req, queued::Bool) = queued ?
+    _OperationStart(:default, _runtime_tracker_of(req)) :
+    _OperationStart(_request_pool(), nothing)
 
 _operation_start_queued(start::_OperationStart) = start.tracker !== nothing
+
+# The `fetch` selector for a background compute started at `start`. A queued
+# start passes `identity`: the route property's declared executor (its
+# `@queued` marker) then admits the compute through the job queue. Any other
+# starts at once on its pool — `identity` is DynamicObjects' own `:default`
+# spawn.
+_operation_background_fetch(start) =
+    _operation_start_queued(start) ? identity : _pool_fetch(Val(start.pool))
+
+_pool_fetch(::Val{:default}) = identity
+
+function _pool_fetch(::Val{:interactive})
+    if !isdefined(DynamicObjects, :Deferred)
+        @warn("This DynamicObjects has no `Deferred`, so memoized operations " *
+              "start on :default; upgrade DynamicObjects to keep them on the " *
+              "request's :interactive pool.", maxlog=1)
+        return identity
+    end
+    run! = getproperty(DynamicObjects, :run!)
+    getproperty(DynamicObjects, :Deferred)(
+        d -> (_spawn_operation(() -> run!(d), :interactive); nothing))
+end
 
 # Every background start goes through here: a memoized compute (through
 # `_operation_background_fetch`), a fresh invocation, and a preload.
@@ -7458,9 +7479,15 @@ function _start_fresh_operation(compute, parent_progress,
     parent_progress === nothing || root === nothing ||
         _progress_attach(parent_progress, root)
     run = () -> Base.invokelatest(compute, root)
-    _operation_start_queued(start) && return _enqueue_fresh_operation(run, root,
-                                                                      start.tracker)
-    _FreshOperation(_spawn_operation(run, start.pool), root)
+    _operation_start_queued(start) || return _FreshOperation(_spawn_operation(run, start.pool), root)
+    # A queued invocation: DynamicObjects admits it through the job queue and
+    # this task waits for its turn and its value. What it enqueues is this
+    # operation's, keyed in the ledger by the operation itself.
+    op = Ref{Any}(nothing)
+    task = _spawn_operation(_request_pool()) do
+        _route_queue_scope(run, start.tracker, () -> _runtime_handle_key(op[]), true)
+    end
+    op[] = _FreshOperation(task, root)
 end
 
 # Grace fast-path shared by the polling transport (via the Treebars extension
@@ -7971,6 +7998,16 @@ _with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
         fetch=Base.fetch, start::_OperationStart=_OperationStart(),
         parent_progress=nothing, declared_fresh::Bool=false)
+    # A `@queued` route's computation is enqueued from here: mark it as the
+    # route's, so the ledger records it as this operation's job (and the reaper
+    # may abandon it once nobody polls it — never one a request waits on inline).
+    if _operation_start_queued(start) &&
+            !haskey(task_local_storage(), _ROUTE_QUEUE_SCOPE)
+        return _route_queue_scope(start.tracker, nothing, fetch !== Base.fetch) do
+            _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
+                fetch, start, parent_progress, declared_fresh)
+        end
+    end
     context = get(target, :context, nothing)
     governed = get(target, :governed, false) && context isa OperationContext &&
         isdefined(DynamicObjects, :execute_materialization)
@@ -8712,6 +8749,9 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             "through the job queue, but $(RouteT).$(name) is a $(method) route, " *
             "whose body runs on its connection's own task; drop `@queued`"))
     end
+    queued && !_has_job_queue() && throw(ArgumentError("`@queued` on " *
+        "$(RouteT).$(name) needs a DynamicObjects with its job queue " *
+        "(pre-inference ≥ 64aba0c); upgrade DynamicObjects"))
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
@@ -17266,6 +17306,8 @@ function __init__()
     _RUNTIME_SESSION_SALT[] = rand(Random.RandomDevice(), UInt)
     isassigned(_managed_root_release_handler) ||
         (_managed_root_release_handler[] = nothing)
+    # Record DynamicObjects' queued computations in the runtime ledger.
+    _has_job_queue() && _dynamicobjects_queue(:observe_queue!)(_observe_queued!)
 end
 
 end # module HTMXObjects
