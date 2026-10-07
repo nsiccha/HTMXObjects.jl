@@ -5,8 +5,9 @@
 # - requests: every request that passes through `track_requests` — in flight
 #   (with a ticking age) and a bounded history of finished ones with their
 #   handling time, status, matched route and execution mode;
-# - jobs: every operation execution that outlives the `:auto` grace period —
-#   polled, deferred direct-page loads and blocking/inline ones alike — plus
+# - jobs: every `@queued` (heavy) execution that outlives the `:auto` grace
+#   period — polled, deferred direct-page loads and blocking/inline ones
+#   alike — plus
 #   work reported through `track_job!` (hand-rolled Treebars pollers, app
 #   tasks): queued/running, and a bounded history of finished ones with wall
 #   time, outcome and the frozen progress tree.
@@ -15,8 +16,9 @@
 # middleware (`handler -> req -> response`), so any server that composes
 # HTTP.jl handlers can install it; `serve` puts it in its own request pipeline.
 # Jobs are recorded by HTMXObjects' own operation layer (`_execute_operation`
-# registers every execution at start, `_retain_operation!` hands polled ones
-# to a watcher), not by the server.
+# registers every `@queued` execution at start, `_retain_operation!` hands
+# polled ones to a watcher), not by the server. Ordinary operations are only
+# requests.
 #
 # Known limits: the ledgers are process-local and in memory — empty after a
 # restart, and per process in a multi-process deployment. An operation that
@@ -63,9 +65,9 @@ end
 """
     RuntimeJob
 
-One job: a route execution that outlived the `:auto` grace period (whether it
-continued in the background while clients polled it or answered inline), or
-work reported through [`track_job!`](@ref). `state` is `:queued`, `:running`,
+One job: a `@queued` route execution that outlived the `:auto` grace period
+(whether it continued in the background while clients polled it or answered
+inline), or work reported through [`track_job!`](@ref). `state` is `:queued`, `:running`,
 `:done` or `:failed`; `duration` is `NaN` until it finishes. `requests` counts
 the requests that started or joined the same computation, `polls` the
 follow-up requests it answered. `result_url` is the externally visible target
@@ -465,9 +467,9 @@ _runtime_same_session(j::RuntimeJob, (scope, session)) =
 
 # --- jobs ------------------------------------------------------------------
 
-# An operation is a job once it outlives the `:auto` grace period (see
-# `_operation_grace_period`): every execution is registered at start, shown once
-# it is older than this, and forgotten if it finishes sooner.
+# A `@queued` operation is a job once it outlives the `:auto` grace period (see
+# `_operation_grace_period`): every such execution is registered at start, shown
+# once it is older than this, and forgotten if it finishes sooner.
 const _RUNTIME_JOB_GRACE = 0.1
 
 # Identity of the computation behind a handle. Two requests that join the same
@@ -524,8 +526,8 @@ end
 """
     _runtime_operation_started!(req, descriptor, name, context, prop, keys, call_kwargs)
 
-Register one operation execution as a job at its start — every transport
-(`:blocking`, `:polling`, `:page_load`), so inline work is visible too. The job
+Register one `@queued` operation execution as a job at its start — every
+transport (`:blocking`, `:polling`, `:page_load`), so inline work is visible too. The job
 shows once it outlives the grace period; `_runtime_operation_finished!` ends it
 when the execution returns, unless the execution was retained as a poller, in
 which case `_retain_operation!` hands it to a watcher. `source` lets the
@@ -597,7 +599,10 @@ _runtime_untracked(_) = false
 # Run `f` as an operation execution: registered at start, ended on return or
 # throw. Tracking is guarded: a ledger failure never affects the operation.
 function _with_runtime_job(f, req, descriptor, name, context, prop, keys,
-        call_kwargs; leaf=nothing)
+        call_kwargs; leaf=nothing, track::Bool=true)
+    # Only `@queued` (heavy) computations are jobs; an ordinary operation is
+    # recorded as the request it is.
+    track || return f(nothing)
     job = _runtime_guarded("job start") do
         _runtime_operation_started!(req, descriptor, name, context, prop, keys,
                                     call_kwargs; leaf)
@@ -622,8 +627,10 @@ through here. The job registered when the execution started (`entry.job`) is
 handed to a watcher, or merged into the job already tracking the same
 computation.
 """
-function _retain_operation!(entry::_OperationPollEntry, descriptor, name::Symbol)
+function _retain_operation!(entry::_OperationPollEntry, descriptor, name::Symbol;
+        track::Bool=true)
     _retain_operation_poll!(entry)
+    track || return nothing
     _runtime_guarded("job start") do
         _runtime_job_started!(_runtime_tracker_of(entry.request), entry,
                               _runtime_operation_label(descriptor, name))
@@ -848,21 +855,20 @@ end
 
 # --- job queue ---------------------------------------------------------------
 #
-# Opt-in bounded execution for background operations
-# (`configure_job_queue!`). Without it, every operation that goes to the
-# background — the polling transport, a deferred direct-page load, a healed
-# poll, a `@preload` — starts its compute with `Threads.@spawn`, so N heavy
-# computes all run
-# at once on the `:default` pool. With it, the operation layer hands them to
-# DynamicObjects through `Deferred(executor)` instead: at most `max_running` run
-# at a time and the rest wait in FIFO order, listed as `:queued` jobs with their
-# position. A queued compute nobody has started, joined or polled for
-# `abandon_after` seconds is abandoned (`DynamicObjects.abandon!`): its job
-# fails with reason "abandoned", and the next request for it starts afresh.
+# Opt-in bounded execution for `@queued` (heavy) computations
+# (`configure_job_queue!`). Without it, a `@queued` computation starts on
+# `:default` at once, so N heavy computes all run at once there. With it, the
+# operation layer hands memoized computes to DynamicObjects through
+# `Deferred(executor)` and fresh invocations as `_QueuedFresh` items: at most
+# `max_running` run at a time and the rest wait in FIFO order, listed as
+# `:queued` jobs with their position. A queued compute nobody has started,
+# joined or polled for `abandon_after` seconds is abandoned: its job fails with
+# reason "abandoned", and the next request for it starts afresh. Ordinary
+# (unmarked) operations never queue; they start on their request's pool.
 
 mutable struct _QueuedCompute
-    compute::Any             # DynamicObjects.DeferredCompute
-    key::Any                 # `_runtime_handle_key` of the compute's Pending
+    compute::Any             # DynamicObjects.DeferredCompute, or a `_QueuedFresh`
+    key::Any                 # `_runtime_handle_key` of the compute's handle
     tracker::RuntimeTracker
     enqueued_ns::UInt64
 end
@@ -887,10 +893,10 @@ const _JOB_QUEUE = _JobQueue()
 """
     configure_job_queue!(; max_running=nothing, abandon_after=nothing) -> NamedTuple
 
-Bound how many background operations compute at once. Off by default
-(`max_running=0`): every operation that outlives the grace period starts its
-compute immediately. With `max_running=n`, at most `n` such computes run at a
-time and the rest wait in FIFO order; the runtime dashboard and
+Bound how many `@queued` (heavy) computations run at once. Off by default
+(`max_running=0`): a `@queued` computation starts on `:default` immediately. With
+`max_running=n`, at most `n` such computations run at a time and the rest wait in
+FIFO order; the runtime dashboard and
 [`jobs_board`](@ref)s list them as `:queued` with their queue position ("queued
 · #3"), and they start as earlier ones finish. Concurrent requests for the same
 computation still share it, queued or running.
@@ -901,12 +907,12 @@ gone. Its job is recorded as `:failed` with reason "abandoned", and the next
 request for it starts a fresh compute. `abandon_after=Inf` never abandons.
 Running computes are never interrupted.
 
-Only memoized background computes queue: direct executions (`@direct` routes,
-non-HTMX submissions, `:blocking` policies, …) answer inline, and fresh
-invocations (`@fresh` routes and mutation verbs) start at once — in the
-background when the polling transport answers them — because nothing can
-coalesce or abandon a computation no cache cell holds. Route heavy batch work
-through a memoized GET (see *App-owned background batches* in the API docs).
+Only `@queued` routes are admitted, and all of their computations are: memoized
+or fresh (`@fresh` routes and mutation verbs, which are never coalesced), polled
+or answered inline — an inline (`@direct`, non-HTMX, `:blocking`) request waits
+for its turn and its result. Ordinary operations start at once on their
+request's pool. Mark heavy batch work `@queued` (see *App-owned background
+batches* in the API docs).
 Needs a DynamicObjects with `Deferred`. Returns the current settings; omitted
 settings are unchanged. Setting `max_running=0` starts everything still queued.
 """
@@ -943,18 +949,87 @@ job_queue_settings(q::_JobQueue=_JOB_QUEUE) = lock(q.lock) do
        queued=length(q.waiting))
 end
 
-# The `fetch` selector for a background compute: `identity` spawns it at once,
-# a `Deferred` hands it to the queue.
-function _operation_background_fetch(req)
-    _JOB_QUEUE.max_running > 0 || return identity
-    tracker = _runtime_tracker_of(req)
-    getproperty(DynamicObjects, :Deferred)(d -> _job_queue_enqueue!(_JOB_QUEUE, d, tracker))
+# The `fetch` selector for a background compute started at `start`
+# (`_operation_start`): a queued start waits its turn in the job queue; any
+# other starts at once on its pool — `identity` is DynamicObjects' own
+# `:default` spawn.
+_operation_background_fetch(start) =
+    _operation_start_queued(start) ? _queue_fetch(start.tracker) :
+        _pool_fetch(Val(start.pool))
+
+_queue_fetch(tracker::RuntimeTracker) = getproperty(DynamicObjects, :Deferred)(
+    d -> _job_queue_enqueue!(_JOB_QUEUE, d, tracker))
+
+_pool_fetch(::Val{:default}) = identity
+
+function _pool_fetch(::Val{:interactive})
+    if !isdefined(DynamicObjects, :Deferred)
+        @warn("This DynamicObjects has no `Deferred`, so memoized operations " *
+              "start on :default; upgrade DynamicObjects to keep them on the " *
+              "request's :interactive pool.", maxlog=1)
+        return identity
+    end
+    run! = getproperty(DynamicObjects, :run!)
+    getproperty(DynamicObjects, :Deferred)(
+        d -> (_spawn_operation(() -> run!(d), :interactive); nothing))
+end
+
+# A fresh invocation waiting for a job-queue slot. No cache cell holds it, so
+# its `_FreshOperation`'s task waits on `result` for the worker that runs it.
+# Exactly one of running and abandoning takes effect, as for a
+# `DynamicObjects.DeferredCompute`.
+mutable struct _QueuedFresh
+    run::Any                            # () -> value
+    result::Channel{Tuple{Bool,Any}}    # (true, value) | (false, exception)
+    @atomic claimed::Bool
+end
+
+_QueuedFresh(run) = _QueuedFresh(run, Channel{Tuple{Bool,Any}}(1), false)
+
+_job_queue_claim!(f::_QueuedFresh) = (@atomicswap f.claimed = true) === false
+
+# Run or abandon one queued item, whichever kind it is.
+_job_queue_run!(d) = getproperty(DynamicObjects, :run!)(d)
+
+function _job_queue_run!(f::_QueuedFresh)
+    _job_queue_claim!(f) || return false
+    outcome = try
+        (true, f.run())
+    catch err
+        (false, err)
+    end
+    put!(f.result, outcome)
+    true
+end
+
+_job_queue_abandon!(d, reason) = getproperty(DynamicObjects, :abandon!)(d, reason)
+
+function _job_queue_abandon!(f::_QueuedFresh, reason)
+    _job_queue_claim!(f) || return false
+    put!(f.result,
+         (false, getproperty(DynamicObjects, :ComputeAbandoned)(String(reason))))
+    true
+end
+
+# Enqueue one fresh invocation as an operation the transport can follow like
+# any other: its task finishes when a worker has run (or the reaper abandoned)
+# the invocation, and the ledger keys it by the operation itself.
+function _enqueue_fresh_operation(run, root, tracker::RuntimeTracker)
+    queued = _QueuedFresh(run)
+    task = _spawn_operation(_request_pool()) do
+        ok, value = take!(queued.result)
+        ok ? value : throw(value)
+    end
+    op = _FreshOperation(task, root)
+    _job_queue_enqueue!(_JOB_QUEUE, queued, tracker; key=_runtime_handle_key(op))
+    op
 end
 
 _job_queue_key(d) = (objectid(getfield(d, :cache)), getfield(d, :key), UInt(0))
 
-function _job_queue_enqueue!(q::_JobQueue, d, tracker::RuntimeTracker)
-    item = _QueuedCompute(d, _job_queue_key(d), tracker, time_ns())
+function _job_queue_enqueue!(q::_JobQueue, d, tracker::RuntimeTracker;
+        key=_job_queue_key(d))
+    item = _QueuedCompute(d, key, tracker, time_ns())
     reap = lock(q.lock) do
         if q.max_running == 0
             # Switched off since this operation chose its selector.
@@ -981,8 +1056,7 @@ function _job_queue_staff!(q::_JobQueue)
     end
 end
 
-_job_queue_run(item::_QueuedCompute) =
-    getproperty(DynamicObjects, :run!)(item.compute)
+_job_queue_run(item::_QueuedCompute) = _job_queue_run!(item.compute)
 
 function _job_queue_worker(q::_JobQueue)
     while true
@@ -1032,7 +1106,7 @@ function _job_queue_reap!(q::_JobQueue, now_ns::UInt64=time_ns())
     end
     reason = "abandoned: unwatched for $(fmt_time(limit))"
     for item in stale
-        getproperty(DynamicObjects, :abandon!)(item.compute, reason)
+        _job_queue_abandon!(item.compute, reason)
     end
     length(stale)
 end

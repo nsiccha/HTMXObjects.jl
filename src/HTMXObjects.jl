@@ -182,8 +182,8 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 - `runtime_tracking=true` (the default) installs [`track_requests`](@ref)
   outside `middleware`, recording in-flight and finished requests with their
   handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref)
-  dev dashboard. Pass `false` to skip it. Long-running operations are recorded
-  as jobs either way.
+  dev dashboard. Pass `false` to skip it. Long-running `@queued` operations are
+  recorded as jobs either way.
 - `revise` — `:lazy` applies pending Revise revisions before each request;
   `:eager` also applies them in the background as soon as a file changes. Both
   need `using Revise` before the app is loaded.
@@ -205,6 +205,11 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 With exactly one interactive thread, `false` (on HTTP.jl 2) and `:interactive`
 both handle requests one at a time; with none, `:interactive` requests run on
 `:default`. `serve` warns about both `:interactive` cases.
+
+A route's background operation (see [`OperationPolicy`](@ref)) starts on the pool
+that handles its request, so with requests on `:interactive` pages keep answering
+while application compute saturates `:default`. A `@queued` route declares heavy
+computation and runs it on `:default` instead, through [`configure_job_queue!`](@ref).
 
 **Footgun:** `julia -tauto,auto` and `JULIA_NUM_THREADS=auto,auto` both resolve the
 second slot to `1`, not "match default" — `:interactive` stays at 1 thread even
@@ -4437,6 +4442,12 @@ updates the struct.
   GET there is still `405`).
 - `@direct` (alongside the verb marker, e.g. `@fresh @direct @get rows()`) pins a
   route to direct transport: it always answers inline on the request's own task.
+- `@queued` (e.g. `@queued @get results(id::String)`) declares heavy computation.
+  An ordinary route's background operation starts on the pool of the request that
+  started it; a `@queued` route's computation runs on `:default` instead, admitted
+  through [`configure_job_queue!`](@ref), however the request is answered (a
+  blocking or `@direct` request waits for it). It is an `ArgumentError` on a `@ws`
+  or `@sse` route, whose body runs on its connection's task.
 - The `:index` property (with empty prefix) maps to `GET /`
 
 If `record_dir` is given, each response is also written to disk under that
@@ -4600,6 +4611,15 @@ or headers — `hx_response` included — declares that return type), WebSocket
 and SSE route lambdas, [`record!`](@ref)'s static export (it forces
 `:blocking`), and routes marked `@direct` — the per-route opt-out for a
 fragment that must answer inline on the request's own task.
+
+A background operation starts on the threadpool of the request that started it:
+`:interactive` under HTTP.jl 2 or `serve(; parallel=:interactive)`, so a page keeps
+answering while application compute saturates `:default`. Mark heavy computation
+`@queued`: it runs on `:default`, admitted through [`configure_job_queue!`](@ref),
+whatever the transport — polled, page-load, preload, or inline (`@direct`,
+non-HTMX, `:blocking`), where the request waits for it. Only `@queued` work is
+queued. Work a route body spawns itself (`Threads.@threads`) runs where it spawns
+it.
 
 You never have to write `OperationPolicy` to get non-blocking long routes —
 `route!(app)` alone already does. Reach for it to tune (`poll_interval`),
@@ -7398,15 +7418,49 @@ const _fresh_operation_root_impl = Ref{Any}(() -> nothing)
 
 _fresh_operation_root() = _fresh_operation_root_impl[]()
 
+# Where a route's background work starts. An ordinary route's operation stays
+# on the pool of the request that started it — `:interactive` under HTTP.jl 2
+# or `serve(; parallel=:interactive)` — so a page answers while application
+# compute saturates `:default`. A `@queued` route declares heavy computation: it
+# runs on `:default`, admitted through the job queue (`configure_job_queue!`)
+# when one is configured (`tracker` names the requesting ledger).
+struct _OperationStart
+    pool::Symbol
+    tracker::Any    # `nothing`, or the `RuntimeTracker` of a queued start
+end
+_OperationStart() = _OperationStart(:default, nothing)
+
+# The pool of the calling task; a foreign thread counts as `:default`.
+_request_pool() = Threads.threadpool() === :interactive ? :interactive : :default
+
+function _operation_start(req, queued::Bool)
+    queued || return _OperationStart(_request_pool(), nothing)
+    _OperationStart(:default,
+        _JOB_QUEUE.max_running > 0 ? _runtime_tracker_of(req) : nothing)
+end
+
+_operation_start_queued(start::_OperationStart) = start.tracker !== nothing
+
+# Every background start goes through here: a memoized compute (through
+# `_operation_background_fetch`), a fresh invocation, and a preload.
+# Literal pool symbols: `@spawn` only accepts a computed pool on newer Julia.
+_spawn_operation(f, pool::Symbol) = _spawn_operation(f, Val(pool))
+_spawn_operation(f, ::Val{:default}) = Threads.@spawn :default f()
+_spawn_operation(f, ::Val{:interactive}) = Threads.@spawn :interactive f()
+
 # Start one fresh invocation off the request task. `compute(root)` runs the
 # route body (inside a governed lease when the root is retained); `root` is
 # the operation's progress node, attached under the dispatch caller's node so
 # an in-process `dispatch(; parent)` still sees the work.
-function _start_fresh_operation(compute, parent_progress)
+function _start_fresh_operation(compute, parent_progress,
+        start::_OperationStart=_OperationStart())
     root = _fresh_operation_root()
     parent_progress === nothing || root === nothing ||
         _progress_attach(parent_progress, root)
-    _FreshOperation(Threads.@spawn(Base.invokelatest(compute, root)), root)
+    run = () -> Base.invokelatest(compute, root)
+    _operation_start_queued(start) && return _enqueue_fresh_operation(run, root,
+                                                                      start.tracker)
+    _FreshOperation(_spawn_operation(run, start.pool), root)
 end
 
 # Grace fast-path shared by the polling transport (via the Treebars extension
@@ -7722,12 +7776,17 @@ end
 # a `_FreshOperation` for a fresh one — so a join can hand it to whichever
 # transport the click resolves to.
 function _start_preload(descriptor, target, name, verb_inst, idx_vals, kw_pairs,
-        signature, req::HTTP.Request)
+        signature, req::HTTP.Request; queued::Bool=false)
     declared_fresh = _operation_declared_fresh(descriptor)
-    fetch = _operation_background_fetch(req)
-    task = Threads.@spawn Base.invokelatest(_execute_materialization,
-        target, name, verb_inst, idx_vals, kw_pairs;
-        fetch, declared_fresh)
+    start = _operation_start(req, queued)
+    fetch = _operation_background_fetch(start)
+    # The starter only kicks the computation off, so it stays on the request's
+    # pool; `start` places the computation itself.
+    task = _spawn_operation(_request_pool()) do
+        Base.invokelatest(_execute_materialization,
+            target, name, verb_inst, idx_vals, kw_pairs;
+            fetch, start, declared_fresh)
+    end
     now = _operation_poll_now()
     _OperationPollEntry("", signature, getproperty(target.leaf, name),
         (verb_inst, idx_vals...), NamedTuple(kw_pairs), task, target.leaf, req,
@@ -7753,7 +7812,7 @@ function _preload_ready(entry::_OperationPollEntry, grace::Real)
 end
 
 function _execute_preload(descriptor, target, name, verb_inst, idx_vals,
-        kw_pairs, req::HTTP.Request)
+        kw_pairs, req::HTTP.Request; queued::Bool=false)
     _preloadable_request(req, verb_inst) || return _PRELOAD_SKIPPED
     signature = _operation_poll_signature(
         target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
@@ -7762,7 +7821,7 @@ function _execute_preload(descriptor, target, name, verb_inst, idx_vals,
     entry = isnothing(client) ? nothing : _lookup_preload(key)
     if !(entry isa _OperationPollEntry)
         entry = _start_preload(descriptor, target, name, verb_inst, idx_vals,
-                               kw_pairs, signature, req)
+                               kw_pairs, signature, req; queued)
         isnothing(client) || _retain_preload!(key, entry)
     end
     ready = _preload_ready(entry, _PRELOAD_GRACE)
@@ -7901,14 +7960,17 @@ _with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
 # `Base.fetch` takes DO's `:inline` branch: compute on THIS task and return the
 # value. `identity` takes the `:spawn` branch: kick the compute off and hand back
 # a `Pending` — and so does a `Deferred(executor)`, which the operation layer
-# passes instead when the job queue is on (`_operation_background_fetch`), so
-# the compute waits its turn. A fresh route — authored with `@fresh` or implied
-# by a mutation verb — has no two-phase selector; its descriptor lets us keep
-# this framework-only keyword out of the authored call.
+# passes instead to put the compute on the request's `:interactive` pool, or —
+# for a `@queued` route with the job queue on — to make it wait its turn
+# (`_operation_background_fetch`). A fresh route — authored with `@fresh` or
+# implied by a mutation verb — has no two-phase selector; its descriptor lets
+# us keep this framework-only keyword out of the authored call, and `start`
+# names where (and whether through the queue) its background invocation runs.
 # Only the spawned branch makes polling transport real — see
 # `_execute_operation`.
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
-        fetch=Base.fetch, parent_progress=nothing, declared_fresh::Bool=false)
+        fetch=Base.fetch, start::_OperationStart=_OperationStart(),
+        parent_progress=nothing, declared_fresh::Bool=false)
     context = get(target, :context, nothing)
     governed = get(target, :governed, false) && context isa OperationContext &&
         isdefined(DynamicObjects, :execute_materialization)
@@ -7951,7 +8013,7 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
             compute_fresh
         end
         fetch === Base.fetch && return compute(parent_progress)
-        return _start_fresh_operation(compute, parent_progress)
+        return _start_fresh_operation(compute, parent_progress, start)
     end
 
     started = if governed
@@ -8135,11 +8197,12 @@ end
 
 function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-        call_kwargs; parent_progress=nothing, job=nothing)
+        call_kwargs; parent_progress=nothing, job=nothing, queued::Bool=false)
+    start = _operation_start(req, queued)
     started = _execute_materialization(target, name, verb_inst, idx_vals,
                                        kw_pairs;
-                                       fetch=_operation_background_fetch(req),
-                                       parent_progress=parent_progress,
+                                       fetch=_operation_background_fetch(start),
+                                       start, parent_progress=parent_progress,
                                        declared_fresh=
                                            _operation_declared_fresh(descriptor))
     prop, keys, call_kwargs =
@@ -8168,7 +8231,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  replace_page_load,
                  error_obj=target.leaf, req=req,
                  grace_period=0.0,
-                 retain=() -> _retain_operation!(entry, descriptor, name),
+                 retain=() -> _retain_operation!(entry, descriptor, name;
+                                                 track=queued),
                  cleanup=() -> _delete_operation_poll!(token))
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -8177,11 +8241,12 @@ end
 
 function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         verb_inst, idx_vals, kw_pairs, req; page_shell::Bool=false,
-        parent_progress=nothing, preload::Bool=false, direct::Bool=false)
+        parent_progress=nothing, preload::Bool=false, direct::Bool=false,
+        queued::Bool=false)
     if preload && _preload_request(req)
         _runtime_note_mode!(req, :preload)
         return _execute_preload(descriptor, target, name, verb_inst, idx_vals,
-                                kw_pairs, req)
+                                kw_pairs, req; queued)
     end
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell, direct)
@@ -8230,27 +8295,29 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         # poll request's current args; that computes what a fresh GET would,
         # so the poll recovers instead of failing.
         return _with_runtime_job(req, descriptor, name, context, prop, keys,
-                                 call_kwargs; leaf=target.leaf) do job
+                                 call_kwargs; leaf=target.leaf, track=queued) do job
             _execute_operation_heal(policy, descriptor, target, name,
                 verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-                call_kwargs; parent_progress=parent_progress, job)
+                call_kwargs; parent_progress=parent_progress, job, queued)
         end
     end
 
-    # Every fresh execution — blocking ones included — is a runtime job from
-    # its start; the ledger shows it once it outlives the grace period.
+    # Every `@queued` execution — blocking ones included — is a runtime job
+    # from its start; the ledger shows it once it outlives the grace period.
+    # Ordinary operations are not jobs: the ledger records them as requests.
     _with_runtime_job(req, descriptor, name, context, prop, keys,
-                      call_kwargs; leaf=target.leaf) do job
+                      call_kwargs; leaf=target.leaf, track=queued) do job
         _execute_operation_fresh(policy, descriptor, target, name, verb_inst,
             idx_vals, kw_pairs, req, mode, prefix, prop, keys, call_kwargs, job;
-            parent_progress, preloaded, error_obj)
+            parent_progress, preloaded, error_obj, queued)
     end
 end
 
 function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, mode::Symbol, prefix, prop,
         keys, call_kwargs, job; parent_progress=nothing, preloaded=nothing,
-        error_obj=target.leaf)
+        error_obj=target.leaf, queued::Bool=false)
+    start = _operation_start(req, queued)
     if mode === :page_load
         # A direct rich-page visit spends the same grace budget an HTMX request
         # would: a fast operation renders inline in the shell — one response,
@@ -8262,8 +8329,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         started = isnothing(preloaded) ?
             _execute_materialization(target, name, verb_inst, idx_vals,
                                      kw_pairs;
-                                     fetch=_operation_background_fetch(req),
-                                     parent_progress=parent_progress,
+                                     fetch=_operation_background_fetch(start),
+                                     start, parent_progress=parent_progress,
                                      declared_fresh=
                                          _operation_declared_fresh(descriptor)) :
             preloaded.started
@@ -8279,7 +8346,7 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
             error_obj, req, now, now, job)
-        _retain_operation!(entry, descriptor, name)
+        _retain_operation!(entry, descriptor, name; track=queued)
         return _operation_page_load(
             req, prefix; replace_terminal=!_operation_treebars_keep(policy),
             poll_token=token)
@@ -8291,14 +8358,21 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
     # `:polling`/`:auto` would behave exactly like `:blocking` and the
     # extension's grace-period fast path — written against `started isa
     # Pending` — could never be reached.
+    #
+    # A `@queued` route's computation belongs on `:default`, behind the job
+    # queue, however the request is answered: a blocking transport starts it
+    # there too and waits for it on the request's task.
     started = if isnothing(preloaded)
-        _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
-                                 fetch=mode === :polling ?
-                                       _operation_background_fetch(req) :
+        background = mode === :polling || queued
+        value = _execute_materialization(target, name, verb_inst, idx_vals,
+                                 kw_pairs;
+                                 fetch=background ?
+                                       _operation_background_fetch(start) :
                                        Base.fetch,
-                                 parent_progress=parent_progress,
+                                 start, parent_progress=parent_progress,
                                  declared_fresh=
                                      _operation_declared_fresh(descriptor))
+        mode === :polling ? value : _resolve_operation_value(value)
     else
         # A blocking transport answers the value, as a blocking start would.
         mode === :polling ? preloaded.started :
@@ -8325,7 +8399,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      replace_page_load=false,
                      error_obj=error_obj, req=req,
                      grace_period=_operation_grace_period(policy, req),
-                     retain=() -> _retain_operation!(entry, descriptor, name),
+                     retain=() -> _retain_operation!(entry, descriptor, name;
+                                                 track=queued),
                      cleanup=() -> _delete_operation_poll!(token))
         return _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
@@ -8349,7 +8424,8 @@ end
 function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int;
         operation_policy::OperationPolicy=OperationPolicy(),
-        parent_progress=nothing, preload::Bool=false, direct::Bool=false)
+        parent_progress=nothing, preload::Bool=false, direct::Bool=false,
+        queued::Bool=false)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
@@ -8377,7 +8453,7 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
     value = _execute_operation(operation_policy, descriptor, target, name,
                                verb_inst, idx_vals, kw_pairs, req; page_shell,
                                parent_progress=parent_progress, preload,
-                               direct)
+                               direct, queued)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -8421,8 +8497,8 @@ but retain a transport-specific `ws` signature and response lifecycle.
 function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         path, n_params, record_dir; root_prefix="", record_base::String="",
         root_provider=RootProvider(), operation_policy=OperationPolicy(),
-        preload::Bool=false, direct::Bool=false, resume_only::Bool=false,
-        allow::String="")
+        preload::Bool=false, direct::Bool=false, queued::Bool=false,
+        resume_only::Bool=false, allow::String="")
     if _verb_mutation(method)
         _register_mutation_resume!(path, method) do allow
             _register_route_handler(RootT, LeafT, chain, "GET", name, path,
@@ -8486,7 +8562,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
                                        operation_policy,
                                        parent_progress=parent_progress,
-                                       preload, direct)
+                                       preload, direct, queued)
             val = operation.value
             val === _PRELOAD_SKIPPED && return _preload_skipped_response()
 
@@ -8626,6 +8702,16 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
     path = _route_path(prefix, name, param_strs)
     preload = Symbol("@preload") in info.macros
     direct = Symbol("@direct") in info.macros
+    # `@queued`: the route's computation is heavy — it runs on `:default`,
+    # admitted through the job queue, however the request is answered. A
+    # stream route runs its body on the connection's task for its lifetime,
+    # so there is no computation to place.
+    queued = Symbol("@queued") in info.macros
+    if queued && method in ("WEBSOCKET", "SSE")
+        throw(ArgumentError("`@queued` runs a route's computation on :default " *
+            "through the job queue, but $(RouteT).$(name) is a $(method) route, " *
+            "whose body runs on its connection's own task; drop `@queued`"))
+    end
 
     let name=name, chain=chain, param_strs=param_strs, n_params=n_params, path=path,
         record_dir=record_dir, method=method, default_positions=default_positions,
@@ -8669,17 +8755,17 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
             !isnothing(record_dir) && push!(_static_kwargs_paths, path)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload, direct)
+                                    operation_policy, preload, direct, queued)
         elseif isempty(param_strs)
             # Zero-arg call form (e.g. `@get index() = ...`)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, 0, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload, direct)
+                                    operation_policy, preload, direct, queued)
         else
             # Register the full route (all params explicit)
             _register_route_handler(OwnerT, RouteT, chain, method, name, path, n_params, record_dir;
                                     root_prefix=mount_prefix, record_base, root_provider,
-                                    operation_policy, preload, direct)
+                                    operation_policy, preload, direct, queued)
 
             # Register shortened routes for trailing defaults
             # e.g. filter(a, b=1, c=2) → also /filter/{a}/{b} and /filter/{a}
@@ -8690,7 +8776,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                 _register_route_handler(OwnerT, RouteT, chain, method, name, short_path,
                                         length(short_params), record_dir;
                                         root_prefix=mount_prefix, record_base, root_provider,
-                                        operation_policy, preload, direct)
+                                        operation_policy, preload, direct, queued)
             end
         end
     end
