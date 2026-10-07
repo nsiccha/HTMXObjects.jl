@@ -1366,9 +1366,9 @@ the grace period is answered by the same poller a memoized route gets.
   arrives through a poller anyway, its headers are kept on the poll response
   and its body becomes the terminal (an error article for a non-2xx status),
   but its original status is not.
-- Fresh invocations are not admitted through [`configure_job_queue!`](@ref):
-  there is no cache cell to coalesce or abandon. Heavy batch work belongs behind
-  a memoized GET (see *App-owned background batches*).
+- A fresh invocation of a `@queued` route waits its turn in
+  [`configure_job_queue!`](@ref) like a memoized one, but is never coalesced:
+  identical requests are separate invocations.
 
 Mark a route `@direct` when it must always answer inline on the request's own
 task, whatever its cache policy:
@@ -1378,6 +1378,32 @@ task, whatever its cache policy:
 @direct @post send(; text::String) = (append!(text);
     hx_response(""; trigger=live_thread_refresh("#chat")))
 ```
+
+A route's background operation — the memoized compute, a fresh invocation, a
+`@preload` — starts on the threadpool of the request that started it. Requests run
+on `:interactive` under HTTP.jl 2 or `serve(; parallel=:interactive)`, so pages and
+their operations keep answering while application compute saturates `:default`:
+Julia does not preempt, and CPU-bound work that rarely yields holds its threads
+until it finishes. Mark heavy computation `@queued` to keep it off the
+interactive pool: it runs on `:default`, admitted through the job queue
+([`configure_job_queue!`](@ref)), however the request is answered — polled,
+page-load, preload, or inline (`@direct`, non-HTMX, `:blocking`), where the
+request waits for its turn and its result:
+
+```julia
+"Run overview"
+@get index() = overview(current_runs())                  # light: stays on the request's pool
+"Batch results"
+@queued @get results(id::String) = run_heavy_batch(id)  # heavy: :default, through the queue
+```
+
+The interactive pool is for latency-sensitive work: an unmarked CPU-bound route
+body occupies an interactive thread until it finishes, and with Julia's default
+of one interactive thread that holds up request handling. Mark such routes
+`@queued`. Work a route body spawns itself (a `Threads.@threads` loop) runs where
+it spawns it, which is `:default` for `@threads`. `@queued` on a `@ws` or `@sse`
+route is an `ArgumentError` at `route!`: a stream body runs on its connection's
+task.
 
 Every emitted poller carries an independently generated, OS-random bearer
 token. Keep it confidential. HTMXObjects binds the token to the original route,
@@ -1654,8 +1680,8 @@ what it did recently:
 end
 ```
 
-- **Running jobs** — a live Treebars board of every operation execution that
-  outlived the `:auto` grace period, whether it continued in the background
+- **Running jobs** — a live Treebars board of every `@queued` (heavy) operation
+  execution that outlived the `:auto` grace period, whether it continued in the background
   while its client polled or answered inline (non-HTMX submissions,
   `OperationPolicy(:blocking)`, `@direct` routes, declared `HTTP.Response` /
   `MIMEResponse` outputs, plain GETs without a page shell), plus work reported
@@ -1700,9 +1726,12 @@ Recording is independent of the server. Requests are recorded by
 (`serve(; runtime_tracking=false)` opts out) and that any HTTP.jl server stack
 can compose directly, e.g. `HTTP.serve(track_requests(router), host, port)`.
 Jobs are recorded by HTMXObjects' own operation layer, whatever server
-delivered the request: every execution is registered when it starts and shown
-once it outlives the grace period, and one that crosses it as a poller is
-handed to a watcher that stamps its outcome. A hand-rolled
+delivered the request: every `@queued` execution is registered when it starts
+and shown once it outlives the grace period, and one that crosses it as a
+poller is handed to a watcher that stamps its outcome. Ordinary operations are
+recorded only as requests: the board lists the heavy work you marked. A job's
+label is its route docstring's first line (else the humanized property name),
+and its row carries the live progress tree. A hand-rolled
 `Treebars.polling_fetchindex` poller reports its compute through
 [`track_job!`](@ref) by itself; call `track_job!` directly for other work you
 start — an app's `Threads.@spawn`, a warm-up task.
@@ -1750,15 +1779,17 @@ only visible when reported through `track_job!`.
 
 #### Queued jobs
 
-By default every operation that goes to the background starts computing at
-once, so many heavy requests all run concurrently on the `:default` pool.
-[`configure_job_queue!`](@ref) bounds that: with `max_running=n`, at most `n`
-background computes run at a time and the rest wait in FIFO order, built on
-DynamicObjects' `Deferred` executor hook. Waiting jobs show on the dashboard and
-on job boards as `:queued`, with their position ("queued · #3"), and start as
-earlier ones finish. A queued compute nobody has polled for `abandon_after`
-seconds is abandoned before it starts and recorded as a failed job ("abandoned");
-the next request for it starts afresh. Blocking executions are not queued.
+By default every `@queued` computation starts at once, so many heavy requests all
+run concurrently on the `:default` pool. [`configure_job_queue!`](@ref) bounds
+that: with `max_running=n`, at most `n` `@queued` computations run at a time and
+the rest wait in FIFO order — memoized ones through DynamicObjects' `Deferred`
+executor hook, fresh ones as queued invocations. Waiting jobs show on the
+dashboard and on job boards as `:queued`, with their position ("queued · #3"),
+and start as earlier ones finish. A queued compute nobody has polled for
+`abandon_after` seconds is abandoned before it starts and recorded as a failed
+job ("abandoned"); the next request for it starts afresh. An inline (`@direct`,
+non-HTMX, `:blocking`) request to a `@queued` route waits for its turn too.
+Ordinary routes never queue.
 
 ```julia
 configure_job_queue!(; max_running=2, abandon_after=60)
@@ -1767,10 +1798,10 @@ configure_job_queue!(; max_running=2, abandon_after=60)
 #### App-owned background batches
 
 The public submission seam is the ordinary routed operation. Put the batch
-computation on an indexed property, and let an ordinary `@get` read it and
-return the result fragment. Under the default `OperationPolicy(:auto)`, an
-in-process request with `"HX-Request" => "true"` starts that GET through the
-configured queue and returns native progress while the work is unfinished.
+computation on an indexed property, and let a `@queued @get` read it and return
+the result fragment. Under the default `OperationPolicy(:auto)`, an in-process
+request with `"HX-Request" => "true"` starts that GET through the configured
+queue and returns native progress while the work is unfinished.
 Load Treebars to enable the progress transport.
 
 For intentional startup or unattended work, disable abandonment explicitly:

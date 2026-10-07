@@ -10787,8 +10787,8 @@ end
 
     @htmx struct RuntimeJobApp
         "Crunch the numbers"
-        @get runtime_crunch(n::Int) = (wait(runtime_job_gate[]); h.p("crunched:$n"))
-        @get runtime_doomed() = (wait(runtime_fail_gate[]); error("doomed job"))
+        @queued @get runtime_crunch(n::Int) = (wait(runtime_job_gate[]); h.p("crunched:$n"))
+        @queued @get runtime_doomed() = (wait(runtime_fail_gate[]); error("doomed job"))
         @get runtime_quick() = h.p("quick")
         @include runtime_dash = RuntimeRoutes(; tracker=runtime_job_tracker)
     end
@@ -10941,7 +10941,7 @@ end
 
     @htmx struct MidflightApp
         "Crunch the numbers"
-        @get midflight_slow(; n::Int=0) = (wait(midflight_gate[]); h.p("midflight:$n"))
+        @queued @get midflight_slow(; n::Int=0) = (wait(midflight_gate[]); h.p("midflight:$n"))
     end
 
     route!(MidflightApp())
@@ -11009,20 +11009,20 @@ end
 
     @htmx struct BlockingJobApp
         "Save the upload"
-        @post blocking_save(n::Int) = (wait(blocking_gate[]); h.p("saved:$n"))
+        @queued @post blocking_save(n::Int) = (wait(blocking_gate[]); h.p("saved:$n"))
         "Fresh crunch"
-        @fresh @direct @get blocking_fresh() = (wait(blocking_gate[]); h.p("fresh"))
+        @queued @fresh @direct @get blocking_fresh() = (wait(blocking_gate[]); h.p("fresh"))
         "Raw response"
-        @get blocking_raw()::HTTP.Response = (wait(blocking_gate[]); HTTP.Response(200, "raw"))
+        @queued @get blocking_raw()::HTTP.Response = (wait(blocking_gate[]); HTTP.Response(200, "raw"))
         "Plain crunch"
-        @get blocking_plain(n::Int) = (wait(blocking_gate[]); h.p("plain:$n"))
+        @queued @get blocking_plain(n::Int) = (wait(blocking_gate[]); h.p("plain:$n"))
         "Doomed save"
-        @post blocking_doomed() = (sleep(0.3); error("disk full"))
-        @post blocking_quick() = h.p("quick")
+        @queued @post blocking_doomed() = (sleep(0.3); error("disk full"))
+        @queued @post blocking_quick() = h.p("quick")
     end
     @htmx struct BlockingPolicyJobApp
         "Policy crunch"
-        @get blocking_policy() = (wait(blocking_gate[]); h.p("policy"))
+        @queued @get blocking_policy() = (wait(blocking_gate[]); h.p("policy"))
     end
 
     route!(BlockingJobApp())
@@ -11204,13 +11204,13 @@ end
 
     @htmx struct SessionJobsApp
         "Session crunch"
-        @get session_crunch(n::Int) = (wait(session_gate[]); h.p("crunched:$n"))
+        @queued @get session_crunch(n::Int) = (wait(session_gate[]); h.p("crunched:$n"))
         @fresh @direct @get my_jobs() = jobs_board(; mine=__req__, poll_url="/my_jobs",
                                            id="my-jobs")
     end
     @htmx struct RequestScopedJobsApp
         "Request crunch"
-        @get request_crunch() = (wait(session_gate[]); h.p("crunched"))
+        @queued @get request_crunch() = (wait(session_gate[]); h.p("crunched"))
         @fresh @direct @get request_jobs() = jobs_board(; mine=__req__, id="request-jobs")
     end
     session_key(req) = HTTP.header(req, "X-Session", "anonymous")
@@ -11303,9 +11303,9 @@ end
 
     @htmx struct RuntimeBoardApp
         "Board crunch"
-        @get board_crunch(n::Int) = (wait(board_gate[]); h.p("crunched:$n"))
+        @queued @get board_crunch(n::Int) = (wait(board_gate[]); h.p("crunched:$n"))
         "Board doomed"
-        @get board_doomed() = (sleep(0.3); error("board doomed"))
+        @queued @get board_doomed() = (sleep(0.3); error("board doomed"))
         @include board_dash = RuntimeRoutes(; tracker=board_tracker)
     end
     route!(RuntimeBoardApp())
@@ -11534,7 +11534,7 @@ end
             __page__(content) = htmx(content, dash_driver(); hyperscript_version=nothing,
                                      feedback=false)
             "Dashboard crunch"
-            @get dash_crunch(n::Int) = (wait(dash_gates[n]); h.p("crunched:$n"))
+            @queued @get dash_crunch(n::Int) = (wait(dash_gates[n]); h.p("crunched:$n"))
             @include runtime = RuntimeRoutes(; tracker=dash_tracker)
         end
         route!(DashboardBrowserApp())
@@ -11589,19 +11589,20 @@ end
     end
 end
 
-# `configure_job_queue!` puts background computes behind a bounded FIFO
+# `configure_job_queue!` puts `@queued` computes behind a bounded FIFO
 # (DynamicObjects' `Deferred`): the rest are queued jobs with a position, move
 # up as earlier ones finish, and are abandoned once nobody watches them.
 @testitem "configure_job_queue! queues background jobs and abandons unwatched ones" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
     import Treebars
-    import HTMXObjects: _clear_operation_polls!, _operation_background_fetch
+    import HTMXObjects: _clear_operation_polls!, _operation_background_fetch,
+        _operation_start
 
     const queue_gates = Dict(n => Base.Event() for n in 1:4)
     const queue_tracker = RuntimeTracker()
 
     @htmx struct QueuedJobsApp
         "Queued crunch"
-        @get queued_crunch(n::Int) = (wait(queue_gates[n]); h.p("crunched:$n"))
+        @queued @get queued_crunch(n::Int) = (wait(queue_gates[n]); h.p("crunched:$n"))
     end
     route!(QueuedJobsApp())
     router = HTMXObjects.ROUTER
@@ -11619,9 +11620,11 @@ end
 
     @test_throws ArgumentError configure_job_queue!(; max_running=-1)
     @test_throws ArgumentError configure_job_queue!(; abandon_after=0)
-    # Off by default: background computes start at once.
+    # Off by default: background computes start at once — a `@queued` one
+    # through DynamicObjects' own `:default` spawn.
     @test configure_job_queue!().max_running == 0
-    @test _operation_background_fetch(HTTP.Request("GET", "/")) === identity
+    @test _operation_background_fetch(
+        _operation_start(HTTP.Request("GET", "/"), true)) === identity
 
     _clear_operation_polls!()
     try

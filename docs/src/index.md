@@ -325,6 +325,11 @@ end
   Mark a route `@direct` when it must always answer inline (a structural
   fragment, a silent refresh, a hand-shaped `polling_fetchindex` wrapper, a
   status/header answer such as `hx_response`).
+- **Heavy work is marked `@queued`.** An ordinary route's background operation
+  starts on its request's pool (`:interactive` under HTTP.jl 2), so pages answer
+  while application compute saturates `:default`. A `@queued` route's computation
+  runs on `:default` through the job queue (API reference, *What the policy
+  governs*).
 
 ### Register with `route!`
 
@@ -1047,7 +1052,8 @@ serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing
 - `parallel=true` → the `:default` thread pool.
 - `parallel=:interactive` → `:interactive` threadpool, leaving `:default`
   free for heavy computation. Launch Julia with e.g. `julia -t 8,4` for 8
-  computation threads + 4 request-handling threads.
+  computation threads + 4 request-handling threads. A route's background
+  operation starts on its request's pool; `@queued` routes run on `:default`.
 - `revise=:lazy` is the usual dev setting (needs `using Revise` first);
   `:eager` also revises in the background as soon as a file changes.
 - `middleware` wraps the request handler (`handler -> (req -> response)`),
