@@ -8625,6 +8625,188 @@ end
     end
 end
 
+@testitem "discover region reopens a refused stream with backoff" setup=[HTMXOTestImports, HTMXOTestPorts] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        refused_subs = KeySubscriptions()
+        refused_revs = Dict{String,Int}()
+        refused_steps = String[]
+        # A gateway in front of the app: the next `refuse[]` stream connects
+        # get `503` (a negative count refuses every one), as while the app
+        # restarts. Every connect is recorded with its time and status; probes
+        # pass through to the app, which answers them `204`.
+        refuse = Ref(2)
+        connects = Tuple{Float64,Int}[]
+        probes = Int[]
+        loads = Ref(0)
+        feed = Ref{Any}(nothing)
+        gateway = handler -> function (req)
+            path = HTTP.URI(req.target).path
+            path == "/" && (loads[] += 1)
+            path == "/rr_events" || return handler(req)
+            if !isempty(HTTP.header(req, "X-HTMXO-Probe", ""))
+                response = handler(req)
+                push!(probes, response.status)
+                return response
+            end
+            if refuse[] != 0
+                refuse[] > 0 && (refuse[] -= 1)
+                push!(connects, (time(), 503))
+                return HTTP.Response(503, "restarting")
+            end
+            push!(connects, (time(), 200))
+            handler(req)
+        end
+
+        @htmx struct RefusedDiscoverApp
+            @get index() = begin
+                driver = h.script(Raw("""
+                    window.addEventListener('load', async function() {
+                        function until(pred) {
+                            var t0 = Date.now();
+                            return new Promise(function(resolve) {
+                                var t = setInterval(function() {
+                                    var v = pred();
+                                    if (v || Date.now() - t0 > 15000) { clearInterval(t); resolve(v || null); }
+                                }, 25);
+                            });
+                        }
+                        function ready(text) {
+                            return until(function() {
+                                var el = document.querySelector('.card');
+                                return el && !el.classList.contains('htmx-added') &&
+                                    el.textContent.indexOf(text) >= 0 && el;
+                            });
+                        }
+                        function step(name, el) {
+                            var text = el ? el.textContent : 'TIMEOUT';
+                            return fetch('/rr_beacon?text=' + encodeURIComponent(name + ': ' + text));
+                        }
+                        async function refusals() {
+                            return parseInt(await (await fetch('/rr_refusals')).text(), 10);
+                        }
+                        await until(function() { return window.htmxoLiveRegion; });
+                        // The first two connects are refused: the region reopens
+                        // by itself, and a push then reaches the fragment.
+                        await fetch('/rr_bump?key=a%231');
+                        await step('reopened', await ready('rev 1'));
+                        // The open stream drops as in a restart, and the
+                        // browser's own reconnect is refused.
+                        await fetch('/rr_drop?n=1');
+                        await fetch('/rr_bump?key=a%231');
+                        await step('dropped', await ready('rev 2'));
+                        // Every connect is refused; removing the region while
+                        // its retry is pending ends the retries. Three
+                        // refusals came before; the fourth is this drop's.
+                        await fetch('/rr_drop?n=-1');
+                        var t0 = Date.now();
+                        while (await refusals() < 4 && Date.now() - t0 < 15000)
+                            await new Promise(function(r) { setTimeout(r, 25); });
+                        document.getElementById('region').remove();
+                        await fetch('/rr_beacon?text=removed');
+                    });
+                    """))
+                htmx(h.main(live_region("/rr_events",
+                        live_fragment("a#1", h.span("a#1 rev 0");
+                            fragment_url="/rr_card?key=a%231", class="card");
+                        id="region", discover=true)),
+                    driver; assets=:vendor, hyperscript_version=nothing,
+                    preload_version=nothing, compose=false, thread=false)
+            end
+            @get rr_card(; key::String="") = live_fragment(key,
+                h.span("$key rev $(get(refused_revs, key, 0))");
+                fragment_url="/rr_card?key=$(HTTP.URIs.escapeuri(key))", class="card")
+            @sse rr_events(; key::Vector{String}=String[]) = begin
+                feed[] = __sse__
+                serve_key_feed!(__sse__, refused_subs, key; poll=0.02)
+            end
+            # Waits for the subscription, so the push under test cannot slip
+            # into a reconnect gap.
+            @get rr_bump(; key::String="") = begin
+                t0 = time()
+                while !haskey(refused_subs.streams, key)
+                    time() - t0 > 20 && error("discover feed never resubscribed $key")
+                    sleep(0.02)
+                end
+                refused_revs[key] = get(refused_revs, key, 0) + 1
+                invalidate_key!(refused_subs, key)
+                "bumped $key"
+            end
+            # Ends the open stream from the server and refuses the next `n`
+            # connects; returns once the old feed has unsubscribed.
+            @get rr_drop(; n::Int=1) = begin
+                refuse[] = n
+                close(feed[])
+                t0 = time()
+                while haskey(refused_subs.streams, "a#1")
+                    time() - t0 > 10 && error("discover feed never unsubscribed")
+                    sleep(0.02)
+                end
+                "dropped"
+            end
+            @get rr_refusals() = string(count(c -> c[2] == 503, connects))
+            @get rr_beacon(; text::String="") = (push!(refused_steps, text); "ok")
+        end
+
+        vendorfiles()
+        route!(RefusedDiscoverApp())
+        port = free_port()
+        heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
+        HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
+        serve(; port, async=true, middleware=[gateway])
+        try
+            @test HTTP.get("http://127.0.0.1:$port/";
+                status_exception=false, retry=false, readtimeout=60).status == 200
+            loads[] = 0
+            removed_at = Ref(NaN)
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                proc = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    t0 = time()
+                    while !("removed" in refused_steps) && time() - t0 < 90
+                        sleep(0.05)
+                    end
+                    removed_at[] = time()
+                    # Longer than any retry pending at the removal (≤ 1 s).
+                    sleep(3)
+                finally
+                    process_exited(proc) || kill(proc)
+                    wait(proc)
+                end
+            end
+            @test refused_steps == ["reopened: a#1 rev 1", "dropped: a#1 rev 2", "removed"]
+            statuses = last.(connects)
+            times = first.(connects)
+            @test length(statuses) >= 6
+            if length(statuses) >= 6
+                # Two refusals, then the reopen; one refusal after the drop,
+                # then the reopen; then refusals until the region was removed.
+                @test statuses[1:5] == [503, 503, 200, 503, 200]
+                @test all(==(503), statuses[6:end])
+                # Backoff doubles across consecutive refusals (500 ms, 1 s) ...
+                @test times[2] - times[1] >= 0.4
+                @test times[3] - times[2] >= 0.9
+                # ... and restarts at 500 ms once a stream has opened (a count
+                # kept across the open would wait 2 s).
+                @test 0.4 <= times[5] - times[4] < 1.5
+            end
+            # No connect after the region was removed.
+            @test all(<(removed_at[] + 0.3), times)
+            # The probe reached the app and got 204, so the page never reloaded.
+            @test !isempty(probes) && all(==(204), probes)
+            @test loads[] == 1
+        finally
+            HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
+            terminate()
+        end
+    end
+end
+
 @testitem "a mounted semantic card survives the response pipeline" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     drive(path; headers=Pair{String,String}[]) = begin
         req = HTTP.Request("GET", path, headers, UInt8[])

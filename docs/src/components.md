@@ -201,7 +201,8 @@ next to their master and preserving loaded DOM. For plain expanded group
 headings and model-name detail controls, pass `branches_collapsible=false,
 detail_toggle=:label`. Branches then have no disclosure control, while the
 complete first-cell label becomes a native button. Supply non-interactive label
-content in that cell; links or inputs can live in the other cells. Detail
+content in that cell; links or inputs can live in the other cells. Markdown
+keeps that label and the column names; it drops the search field. Detail
 expansion still follows `initially_open`; search and sort retain loaded DOM.
 The defaults keep the existing branch and Details controls. Native branch and Details
 buttons and auto-wired sort headers support keyboard activation. `initially_open` accepts a Boolean or
