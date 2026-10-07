@@ -189,19 +189,27 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   need `using Revise` before the app is loaded.
 - Remaining keyword arguments are passed to `HTTP.listen!`.
 
-`parallel` controls request concurrency:
-- `false` — single-threaded (default)
-- `true` — multi-threaded on the `:default` threadpool
-- `:interactive` — multi-threaded on the `:interactive` threadpool, leaving `:default`
-  free for heavy computation. Launch julia with e.g. `julia -t 8,4` for 8 computation
+`parallel` chooses where each request is handled:
+- `false` (default) — on HTTP.jl's own connection task. HTTP.jl 2 spawns that
+  task on the `:interactive` threadpool (Julia uses `:default` when there are no
+  interactive threads), so requests on different connections already run
+  concurrently across a sized interactive pool. HTTP.jl 1.x handles every request
+  on one thread; `serve` warns when that leaves several interactive threads unused.
+- `true` — spawned on the `:default` threadpool.
+- `:interactive` — spawned on the `:interactive` threadpool, leaving `:default`
+  free for heavy computation. With HTTP.jl 2 this is the default's placement plus
+  one extra spawn per request; with HTTP.jl 1.x it is what puts requests on the
+  interactive pool. Launch julia with e.g. `julia -t 8,4` for 8 computation
   threads and 4 request-handling threads.
+
+With exactly one interactive thread, `false` (on HTTP.jl 2) and `:interactive`
+both handle requests one at a time; with none, `:interactive` requests run on
+`:default`. `serve` warns about both `:interactive` cases.
 
 **Footgun:** `julia -tauto,auto` and `JULIA_NUM_THREADS=auto,auto` both resolve the
 second slot to `1`, not "match default" — `:interactive` stays at 1 thread even
 with `auto`. To size both pools equally, compute shell-side:
-`julia -t\$(nproc),\$(nproc)`. Without a sized `:interactive` pool,
-`parallel=:interactive` is strictly worse than `parallel=false` (same effective
-concurrency, plus extra spawn overhead per request, plus a startup `@warn`).
+`julia -t\$(nproc),\$(nproc)`.
 """
 function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], access_log=_timed_access_log,
@@ -215,17 +223,10 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
 
     tracker = runtime_tracking ? runtime_tracker() : nothing
     handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker))
-    if parallel === :interactive
-        if Threads.nthreads(:interactive) <= 1
-            @warn "Only 1 interactive thread available. Launch julia with e.g. \"julia -t 8,4\" to add more interactive threads for request handling."
-        end
-        handle = _spawning_stream_handler(handle, :interactive)
-    elseif parallel === true
-        if Threads.nthreads() <= 1
-            @warn "`parallel=true` with only 1 thread available. Launch julia with e.g. \"julia -t auto\" to handle requests on several threads."
-        end
-        handle = _spawning_stream_handler(handle, :default)
-    end
+    pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
+        Threads.nthreads(:default), pkgversion(HTTP))
+    warning === nothing || @warn warning
+    pool === nothing || (handle = _spawning_stream_handler(handle, pool))
 
     server = HTTP.listen!(handle, host, port; kwargs...)
     _SERVER[] = server
@@ -344,6 +345,29 @@ function _stream_handler(app)
         end
         return nothing
     end
+end
+
+# `serve(; parallel)`: the threadpool each request is spawned on (`nothing`: it
+# runs on HTTP.jl's own connection task) and the startup warning for a setting
+# that leaves threads unused (`nothing`: none), given the `interactive` and
+# `default` threadpool sizes and HTTP.jl's version `http`. HTTP.jl 2 spawns each
+# connection's task on `:interactive` (Julia falls back to `:default` when that
+# pool is empty); HTTP.jl 1.x serves every connection on the listener's thread.
+function _request_threadpool(parallel, interactive::Integer, default::Integer, http::VersionNumber)
+    if parallel === :interactive
+        interactive == 0 && return :interactive,
+            "`parallel=:interactive` without interactive threads: requests run on the :default threadpool. Launch julia with e.g. \"julia -t 8,4\" to add interactive threads for request handling."
+        interactive == 1 && return :interactive,
+            "Only 1 interactive thread available, so requests are handled one at a time. Launch julia with e.g. \"julia -t 8,4\" to add more interactive threads for request handling."
+        return :interactive, nothing
+    elseif parallel === true
+        return :default, default <= 1 ?
+            "`parallel=true` with only 1 thread available. Launch julia with e.g. \"julia -t auto\" to handle requests on several threads." :
+            nothing
+    end
+    http < v"2" && interactive > 1 && return nothing,
+        "HTTP.jl $http handles every request on one thread with `parallel=false`, leaving $interactive interactive threads unused. Pass `parallel=:interactive`, or use HTTP.jl 2, which runs connections across the interactive threadpool."
+    return nothing, nothing
 end
 
 # `parallel=true`/`:interactive`: handle each request on a task spawned on `pool`.
