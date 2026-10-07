@@ -1680,8 +1680,8 @@ what it did recently:
 end
 ```
 
-- **Running jobs** — a live Treebars board of every operation execution that
-  outlived the `:auto` grace period, whether it continued in the background
+- **Running jobs** — a live Treebars board of every `@queued` (heavy) operation
+  execution that outlived the `:auto` grace period, whether it continued in the background
   while its client polled or answered inline (non-HTMX submissions,
   `OperationPolicy(:blocking)`, `@direct` routes, declared `HTTP.Response` /
   `MIMEResponse` outputs, plain GETs without a page shell), plus work reported
@@ -1726,9 +1726,12 @@ Recording is independent of the server. Requests are recorded by
 (`serve(; runtime_tracking=false)` opts out) and that any HTTP.jl server stack
 can compose directly, e.g. `HTTP.serve(track_requests(router), host, port)`.
 Jobs are recorded by HTMXObjects' own operation layer, whatever server
-delivered the request: every execution is registered when it starts and shown
-once it outlives the grace period, and one that crosses it as a poller is
-handed to a watcher that stamps its outcome. A hand-rolled
+delivered the request: every `@queued` execution is registered when it starts
+and shown once it outlives the grace period, and one that crosses it as a
+poller is handed to a watcher that stamps its outcome. Ordinary operations are
+recorded only as requests: the board lists the heavy work you marked. A job's
+label is its route docstring's first line (else the humanized property name),
+and its row carries the live progress tree. A hand-rolled
 `Treebars.polling_fetchindex` poller reports its compute through
 [`track_job!`](@ref) by itself; call `track_job!` directly for other work you
 start — an app's `Threads.@spawn`, a warm-up task.

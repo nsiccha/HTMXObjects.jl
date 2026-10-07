@@ -219,6 +219,13 @@ end
         @test timedwait(() -> pool_started(:plain_fresh4), 10.0; pollint=0.01) === :ok
         @test configure_job_queue!().queued == 1
 
+        # Only `@queued` computations are jobs: the ledger lists the heavy two
+        # and records the ordinary one as the request it is.
+        targets = [r.target for r in runtime_jobs(runtime_tracker();
+                                                  states=(:queued, :running))]
+        @test "/heavy_read?n=4" in targets && "/heavy_fresh?n=4" in targets
+        @test !("/plain_fresh?n=4" in targets)
+
         # Finishing the running computation admits the waiting one.
         pool_release!(:heavy_read4)
         @test contains(settle(poll_url(first)), "pool:heavy_read4")

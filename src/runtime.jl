@@ -5,8 +5,9 @@
 # - requests: every request that passes through `track_requests` — in flight
 #   (with a ticking age) and a bounded history of finished ones with their
 #   handling time, status, matched route and execution mode;
-# - jobs: every operation execution that outlives the `:auto` grace period —
-#   polled, deferred direct-page loads and blocking/inline ones alike — plus
+# - jobs: every `@queued` (heavy) execution that outlives the `:auto` grace
+#   period — polled, deferred direct-page loads and blocking/inline ones
+#   alike — plus
 #   work reported through `track_job!` (hand-rolled Treebars pollers, app
 #   tasks): queued/running, and a bounded history of finished ones with wall
 #   time, outcome and the frozen progress tree.
@@ -15,8 +16,9 @@
 # middleware (`handler -> req -> response`), so any server that composes
 # HTTP.jl handlers can install it; `serve` puts it in its own request pipeline.
 # Jobs are recorded by HTMXObjects' own operation layer (`_execute_operation`
-# registers every execution at start, `_retain_operation!` hands polled ones
-# to a watcher), not by the server.
+# registers every `@queued` execution at start, `_retain_operation!` hands
+# polled ones to a watcher), not by the server. Ordinary operations are only
+# requests.
 #
 # Known limits: the ledgers are process-local and in memory — empty after a
 # restart, and per process in a multi-process deployment. An operation that
@@ -63,9 +65,9 @@ end
 """
     RuntimeJob
 
-One job: a route execution that outlived the `:auto` grace period (whether it
-continued in the background while clients polled it or answered inline), or
-work reported through [`track_job!`](@ref). `state` is `:queued`, `:running`,
+One job: a `@queued` route execution that outlived the `:auto` grace period
+(whether it continued in the background while clients polled it or answered
+inline), or work reported through [`track_job!`](@ref). `state` is `:queued`, `:running`,
 `:done` or `:failed`; `duration` is `NaN` until it finishes. `requests` counts
 the requests that started or joined the same computation, `polls` the
 follow-up requests it answered. `result_url` is the externally visible target
@@ -465,9 +467,9 @@ _runtime_same_session(j::RuntimeJob, (scope, session)) =
 
 # --- jobs ------------------------------------------------------------------
 
-# An operation is a job once it outlives the `:auto` grace period (see
-# `_operation_grace_period`): every execution is registered at start, shown once
-# it is older than this, and forgotten if it finishes sooner.
+# A `@queued` operation is a job once it outlives the `:auto` grace period (see
+# `_operation_grace_period`): every such execution is registered at start, shown
+# once it is older than this, and forgotten if it finishes sooner.
 const _RUNTIME_JOB_GRACE = 0.1
 
 # Identity of the computation behind a handle. Two requests that join the same
@@ -524,8 +526,8 @@ end
 """
     _runtime_operation_started!(req, descriptor, name, context, prop, keys, call_kwargs)
 
-Register one operation execution as a job at its start — every transport
-(`:blocking`, `:polling`, `:page_load`), so inline work is visible too. The job
+Register one `@queued` operation execution as a job at its start — every
+transport (`:blocking`, `:polling`, `:page_load`), so inline work is visible too. The job
 shows once it outlives the grace period; `_runtime_operation_finished!` ends it
 when the execution returns, unless the execution was retained as a poller, in
 which case `_retain_operation!` hands it to a watcher. `source` lets the
@@ -597,7 +599,10 @@ _runtime_untracked(_) = false
 # Run `f` as an operation execution: registered at start, ended on return or
 # throw. Tracking is guarded: a ledger failure never affects the operation.
 function _with_runtime_job(f, req, descriptor, name, context, prop, keys,
-        call_kwargs; leaf=nothing)
+        call_kwargs; leaf=nothing, track::Bool=true)
+    # Only `@queued` (heavy) computations are jobs; an ordinary operation is
+    # recorded as the request it is.
+    track || return f(nothing)
     job = _runtime_guarded("job start") do
         _runtime_operation_started!(req, descriptor, name, context, prop, keys,
                                     call_kwargs; leaf)
@@ -622,8 +627,10 @@ through here. The job registered when the execution started (`entry.job`) is
 handed to a watcher, or merged into the job already tracking the same
 computation.
 """
-function _retain_operation!(entry::_OperationPollEntry, descriptor, name::Symbol)
+function _retain_operation!(entry::_OperationPollEntry, descriptor, name::Symbol;
+        track::Bool=true)
     _retain_operation_poll!(entry)
+    track || return nothing
     _runtime_guarded("job start") do
         _runtime_job_started!(_runtime_tracker_of(entry.request), entry,
                               _runtime_operation_label(descriptor, name))

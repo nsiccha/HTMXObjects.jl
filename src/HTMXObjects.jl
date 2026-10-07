@@ -182,8 +182,8 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 - `runtime_tracking=true` (the default) installs [`track_requests`](@ref)
   outside `middleware`, recording in-flight and finished requests with their
   handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref)
-  dev dashboard. Pass `false` to skip it. Long-running operations are recorded
-  as jobs either way.
+  dev dashboard. Pass `false` to skip it. Long-running `@queued` operations are
+  recorded as jobs either way.
 - `revise` — `:lazy` applies pending Revise revisions before each request;
   `:eager` also applies them in the background as soon as a file changes. Both
   need `using Revise` before the app is loaded.
@@ -8231,7 +8231,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  replace_page_load,
                  error_obj=target.leaf, req=req,
                  grace_period=0.0,
-                 retain=() -> _retain_operation!(entry, descriptor, name),
+                 retain=() -> _retain_operation!(entry, descriptor, name;
+                                                 track=queued),
                  cleanup=() -> _delete_operation_poll!(token))
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -8294,17 +8295,18 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         # poll request's current args; that computes what a fresh GET would,
         # so the poll recovers instead of failing.
         return _with_runtime_job(req, descriptor, name, context, prop, keys,
-                                 call_kwargs; leaf=target.leaf) do job
+                                 call_kwargs; leaf=target.leaf, track=queued) do job
             _execute_operation_heal(policy, descriptor, target, name,
                 verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
                 call_kwargs; parent_progress=parent_progress, job, queued)
         end
     end
 
-    # Every fresh execution — blocking ones included — is a runtime job from
-    # its start; the ledger shows it once it outlives the grace period.
+    # Every `@queued` execution — blocking ones included — is a runtime job
+    # from its start; the ledger shows it once it outlives the grace period.
+    # Ordinary operations are not jobs: the ledger records them as requests.
     _with_runtime_job(req, descriptor, name, context, prop, keys,
-                      call_kwargs; leaf=target.leaf) do job
+                      call_kwargs; leaf=target.leaf, track=queued) do job
         _execute_operation_fresh(policy, descriptor, target, name, verb_inst,
             idx_vals, kw_pairs, req, mode, prefix, prop, keys, call_kwargs, job;
             parent_progress, preloaded, error_obj, queued)
@@ -8344,7 +8346,7 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
             error_obj, req, now, now, job)
-        _retain_operation!(entry, descriptor, name)
+        _retain_operation!(entry, descriptor, name; track=queued)
         return _operation_page_load(
             req, prefix; replace_terminal=!_operation_treebars_keep(policy),
             poll_token=token)
@@ -8397,7 +8399,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      replace_page_load=false,
                      error_obj=error_obj, req=req,
                      grace_period=_operation_grace_period(policy, req),
-                     retain=() -> _retain_operation!(entry, descriptor, name),
+                     retain=() -> _retain_operation!(entry, descriptor, name;
+                                                 track=queued),
                      cleanup=() -> _delete_operation_poll!(token))
         return _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
