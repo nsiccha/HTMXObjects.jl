@@ -300,6 +300,14 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
+| `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
+
+Markdown drops interactive chrome (`form`, `input`, `textarea`, `button`) with
+its subtree. A control whose content labels the document carries the
+presence-only `data-htmxo-label` attribute (`h.button(name;
+data_htmxo_label="")`): Markdown drops the control and keeps that label in its
+place. Sortable column headers and `master_detail_table(...;
+detail_toggle=:label)` row buttons carry it, so column and row names survive.
 
 For authoring Markdown that renders to HTML — the reverse direction:
 
@@ -702,21 +710,42 @@ inside `<tr>` is moved out of the table by the browser.
 ### Reusing generated markup
 
 Retaining a generated form Node avoids rebuilding that Node, but rendering it
-still projects its leaves and serializes the tree on every response. The existing
-trusted-markup seam also accepts a previously serialized, server-generated
-snapshot: `snapshot = repr("text/html", surface)`, then
-`h.div(HTMX.Raw(snapshot))`. That reuses the exact emitted wiring and bytes.
+still projects its leaves and serializes the tree on every response. To reuse
+the serialized bytes too, retain an `HTMLSnapshot` of the surface:
+
+```julia
+@htmx struct Catalogue
+    surface = HTMLSnapshot(catalogue_table())   # built once per retained root
+    @fresh @get index() = h.section(h.h1("Models"), surface)
+end
+
+route!(Catalogue(); root_provider=RootProvider(;
+    scope=:job, key=_ -> :catalogue, retention=RootRetention()))
+```
+
+`HTMLSnapshot(value)` serializes `value`'s HTML once and keeps `value`. A page
+or HX swap writes the stored bytes; `?plain`/`?markdown`/`Accept:
+text/markdown`, `?error` and static export project `value` exactly as if the
+route had returned it. That holds wherever the snapshot sits, returned directly
+or nested in a larger Node, so one build serves every projection and the
+application defines no response wrapper of its own.
+
+`h.div(HTMX.Raw(repr("text/html", surface)))` replays the same bytes but has
+no other projection: Markdown carries the raw markup and `?error` prunes it.
+Keep `Raw` for trusted inline JavaScript or CSS.
 
 A snapshot freezes its context. Reuse it only while the mounted root/provider
 lifetime, selected indices, resolved external prefix, inherited request values,
 current controls/domains, and presentation settings remain the same. Rebuild
 when any of those change. It does not remount a root, rebind request values, or
 activate a new semantic root provider; compile the appropriate graph before
-reusing its markup. HTMXObjects supplies no automatic cache key or invalidation
-policy for those changing inputs. `Raw` is for trusted generated HTML, with
-ordinary application data escaped during the original Node serialization.
+reusing its markup. `HTMLSnapshot` is a value, not a cache: HTMXObjects supplies
+no automatic cache key or invalidation policy for those changing inputs, so the
+key a snapshot is retained under (above, the provider root) is the
+application's.
 
 ```@docs
+HTMLSnapshot
 semantic_descriptor
 application_descriptor
 application_observations

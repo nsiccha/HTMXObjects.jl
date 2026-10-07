@@ -30,7 +30,7 @@ export hx_response
 export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
-export html_only, markdown_only, HtmlOnly, MarkdownOnly
+export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
@@ -3896,6 +3896,47 @@ Base.show(io::IO, ::MIME"text/html", ::MarkdownOnly) = nothing
 Base.show(io::IO, ::MIME"text/markdown", ::HtmlOnly) = nothing
 Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text)
 
+"""
+    HTMLSnapshot(value)
+
+Serialize `value`'s HTML once, at construction, and keep `value` for every
+other projection. Use it when an application retains a generated surface across
+responses: an HTML response or HX swap writes the stored bytes, while
+`?plain`/`?markdown`/`Accept: text/markdown`, `?error` and static export project
+the retained `value` exactly as if the route had returned `value` itself. One
+build serves every projection.
+
+The snapshot is projection-transparent wherever it sits: returned from a route,
+or nested as a child of a larger Node (`h.div(header, snapshot)`). The Node
+error filter, Markdown chrome stripping and static export all descend into it.
+The `repr("text/html", value)` + `HTMX.Raw` recipe cannot do this: Raw bytes
+have no Markdown or error projection.
+
+It is a value, not a cache. It holds no key, invalidation or request identity,
+and captures whatever context `value` was built under. Retain it only under the
+application-owned identity documented in "Reusing generated markup" (root and
+provider lifetime, external prefix, selected indices, request inputs, controls
+and domains, presentation settings).
+"""
+struct HTMLSnapshot
+    value::Any
+    html::String
+    HTMLSnapshot(value) = new(value, repr(MIME"text/html"(), _html_value(value)))
+end
+
+Base.show(io::IO, ::MIME"text/html", s::HTMLSnapshot) = print(io, s.html)
+Base.show(io::IO, ::MIME"text/markdown", s::HTMLSnapshot) =
+    print(io, to_markdown_string(s.value))
+Base.show(io::IO, s::HTMLSnapshot) =
+    print(io, "HTMLSnapshot(", ncodeunits(s.html), " bytes)")
+# Every projection other than HTML reads the retained value. The walker
+# methods for static export sit beside `_static_walk_child`.
+filter_errors(s::HTMLSnapshot) = filter_errors(s.value)
+_filter_errors_child(s::HTMLSnapshot) = _filter_errors_child(s.value)
+_strip_md_chrome(s::HTMLSnapshot) = _strip_md_chrome(s.value)
+_strip_md_chrome_child(s::HTMLSnapshot) = _strip_md_chrome_child(s.value)
+_rescue_semantic!(out, s::HTMLSnapshot) = _rescue_semantic!(out, s.value)
+
 
 """
     _save_typed_response(record_dir, url_path, response)
@@ -4276,6 +4317,9 @@ end
 
 _static_walk_child(child, rules) = child
 _static_walk_child(child::Node, rules) = _static_walk(child, rules)
+# A snapshot's stored bytes predate the rewrite, so export walks its value.
+_static_walk(s::HTMLSnapshot, rules::_StaticRules) = _static_walk(_html_value(s.value), rules)
+_static_walk_child(s::HTMLSnapshot, rules) = _static_walk(s, rules)
 
 """
     _inject_static_style(val)
@@ -11351,6 +11395,11 @@ wherever it appears, including inside dropped chrome (see
 [`_rescue_semantic!`](@ref)). Its own children are still stripped, so no chrome
 reaches markdown through it.
 
+A chrome element carrying the presence-only `data-htmxo-label` attribute is a
+labelled control: the element is dropped but its (stripped) children stay where
+it stood. `sortable_table` header buttons and `master_detail_table(...;
+detail_toggle=:label)` row buttons carry it, so column and row names survive.
+
 Applied automatically by [`to_markdown_string`](@ref) so every
 `?plain` / `?markdown` / `Accept: text/markdown` read drops form chrome with no
 consumer annotation — the automatic counterpart to [`html_only`](@ref), which
@@ -11447,8 +11496,16 @@ function _rescued_md_run(node::Node)
     run
 end
 
+# A control marked `data-htmxo-label` wraps a label that belongs to the
+# document — a sortable column's name, a `detail_toggle=:label` row's name.
+# Markdown drops the control and keeps that label in its place.
+_is_md_label(node::Node) = haskey(HTMX.attrs(node), Symbol("data-htmxo-label"))
+
 function _strip_md_chrome(node::Node)
-    _is_md_chrome(HTMX.tag(node)) && return _rescued_md_run(node)
+    if _is_md_chrome(HTMX.tag(node))
+        _is_md_label(node) || return _rescued_md_run(node)
+        return Node(:span, empty(HTMX.attrs(node)), _strip_md_chrome_children(HTMX.children(node)))
+    end
     new_children = []
     for child in HTMX.children(node)
         kept = _strip_md_chrome_child(child)
@@ -11594,7 +11651,7 @@ end
 # toggle from the right direction (`sortTable` reads `data-sort-dir`).
 function _sortable_th(label, i, ds)
     onclick = "sortTable($(i-1), this)"
-    control = h.button(label; type="button", class="htmxo-sort-control",
+    control = h.button(label; type="button", class="htmxo-sort-control", data_htmxo_label="",
         onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))")
     if !isnothing(ds) && first(ds) == i
         dir = last(ds)
@@ -12513,6 +12570,7 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   cell's complete content as the native detail button instead, with no separate
   "Details" label. Supply non-interactive label content in that cell; other
   cells can contain links or controls. Group rows without details stay plain.
+  The button carries `data-htmxo-label`, so Markdown keeps the row's label.
 - `searchable`: include a labelled, client-side search field (default `false`).
   Search matches a case-insensitive phrase against master cells and ancestor
   text, retains matching paths, and reveals descendants of a matching group.
@@ -12606,8 +12664,10 @@ function master_detail_table(headers, items;
             if has_detail
                 isnothing(children) || (attrs[:data_htmxo_detail_open] = string(open))
                 toggle_label = detail_toggle === :label ? label : Any["Details"]
+                # A label toggle's content is the row's name, kept in Markdown.
+                label_attrs = detail_toggle === :label ? (; data_htmxo_label="") : (;)
                 toggle = h.button(toggle_label...; type="button",
-                    data_htmxo_detail_toggle="", aria_controls="detail-$safe",
+                    data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
                     aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
                 if detail_toggle === :label
                     label = Any[toggle]
@@ -12652,10 +12712,12 @@ function master_detail_table(headers, items;
                       for level in 2:max_level[]), "\n")
         table = h.div(h.style(Raw(rules)), table)
     end
+    # The search field and its empty state are client-side affordances: the
+    # label would otherwise run into the Markdown table's header row.
     (searchable || !isnothing(children)) ? h.div(; class="htmxo-searchable-table")(
-        h.label("Search", h.input(; type="search", oninput="htmxoFilterTable(this)"); hidden=!searchable),
+        html_only(h.label("Search", h.input(; type="search", oninput="htmxoFilterTable(this)"); hidden=!searchable)),
         table,
-        h.p("No matching rows"; hidden=true, data_htmxo_table_empty="", role="status"),
+        html_only(h.p("No matching rows"; hidden=true, data_htmxo_table_empty="", role="status")),
     ) : table
 end
 
