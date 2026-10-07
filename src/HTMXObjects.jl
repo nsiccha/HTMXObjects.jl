@@ -14048,6 +14048,17 @@ end
 _semantic_app_setting(setting::Function, entry) = setting(entry)
 _semantic_app_setting(setting, _entry) = setting
 
+# `semantic_app(...; select)` keeps every discovered operation by default.
+_select_every_operation(_entry) = true
+
+function _semantic_selected(select, entry)
+    selected = select(entry)
+    selected isa Bool || throw(ArgumentError(string(
+        "semantic_app select must return true or false for every operation; got ",
+        repr(selected), " for $(entry.verb) $(entry.path)")))
+    selected
+end
+
 # Lossless, id-safe spelling of a mount prefix: ASCII letters and digits stay,
 # every other byte becomes `_` plus two hex digits. Shorter than a hex dump of
 # every byte, and distinct keys such as `/a-b` and `/a_b` stay distinct.
@@ -14107,8 +14118,8 @@ function _semantic_action(spec, content, include, target)
            nothing)
 end
 
-function _semantic_actions(root_prefix, specs, plan, context_selector, target)
-    base_id = "htmxo-semantic-actions-" * _semantic_id_token(root_prefix)
+function _semantic_actions(root_prefix, specs, plan, context_selector, target, suffix)
+    base_id = "htmxo-semantic-actions-" * _semantic_id_token(root_prefix) * suffix
     inputs = Any[]
     includes = map(enumerate(plan.groups)) do (group, hidden)
         selectors = String[]
@@ -14129,8 +14140,20 @@ function _semantic_actions(root_prefix, specs, plan, context_selector, target)
     (; inputs, actions)
 end
 
-_semantic_result_host_id(root_prefix) =
-    "htmxo-semantic-result-" * _semantic_id_token(root_prefix)
+_semantic_result_host_id(root_prefix, suffix="") =
+    "htmxo-semantic-result-" * _semantic_id_token(root_prefix) * suffix
+
+# A surface that shows only some of its graph's operations gets its own ids for
+# the parts it shares across operations — holders, the context group and the
+# shared result host — so several selections of one mount can share a page: a
+# button includes its own surface's holder and swaps into its own surface's
+# host. The suffix encodes the selected graph positions; the full surface has
+# none, so its ids are unchanged.
+function _semantic_selection_suffix(selected, total)
+    length(selected) == total && return ""
+    mask = foldl((acc, index) -> acc | (big(1) << (index - 1)), selected; init=big(0))
+    "-only-" * string(mask; base=16)
+end
 
 function _default_semantic_operation(entry)
     entry.form === nothing && throw(ArgumentError(string(
@@ -14294,7 +14317,8 @@ end
 """
     semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
                  render_operation=_default_semantic_operation, compact=false,
-                 results=:each, layout=_default_semantic_layout)
+                 results=:each, layout=_default_semantic_layout,
+                 select=entry -> true)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -14371,6 +14395,22 @@ must directly follow its button. Anything else throws an `ArgumentError`. The
 default layout renders the `<section>` described above, with the shared host
 last.
 
+`select(entry)` chooses which discovered operations this surface compiles, for
+a page that shows only some of a mounted graph's operations. It is called once
+per operation, in declaration order, with the entry `values` and `submit`
+receive (`object`, `route`, `name`, `verb`, `path`, `title`, `target_id`), and
+must return `true` or `false`. An unselected operation gets no button, form,
+holder, context control or result, and no other callback sees it. A selected
+operation compiles as it would on the full surface: it submits the same values
+to the same mounted URL and verb, keeps its result target and transport, and
+its holders and context group carry only what the selected operations need.
+A surface that leaves operations out gives its holders, context group and
+shared result host ids of its own, so differently selected surfaces of one
+mount can share a page. Discovery and its fail-closed checks still cover the
+whole graph; an unselected `@ws` or `@sse` route needs no `render_operation`.
+Prefer a structural choice, such as `entry -> entry.object isa StageActions`,
+so a route added to a selected mount appears without another edit.
+
 The first successful render also promotes the historic request-scoped default
 to a managed provider keyed by the root type and normalized mount prefix. The
 current rooted graph is retained—including fixed semantic state declared
@@ -14391,7 +14431,8 @@ indexed child to compile that subtree.
 """
 function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
         render_operation=_default_semantic_operation, compact::Bool=false,
-        results::Symbol=:each, layout=_default_semantic_layout)
+        results::Symbol=:each, layout=_default_semantic_layout,
+        select=_select_every_operation)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     descriptor = _shared_semantic_descriptor(typeof(obj))
@@ -14401,6 +14442,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
 
     seen = Set{Tuple{Symbol,String}}()
     specs = Any[]
+    selected = Int[]
     for (index, route) in enumerate(descriptor.routes)
         identity = (route.verb, route.path)
         identity in seen && throw(ArgumentError(
@@ -14425,6 +14467,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             title=_semantic_operation_title(route),
             target_id,
         )
+        _semantic_selected(select, base_entry) || continue
+        push!(selected, index)
         operation_values = _semantic_app_setting(values, base_entry)
         operation_submit = _semantic_app_setting(submit, base_entry)
         operation_submit_attrs = _semantic_app_setting(submit_attrs, base_entry)
@@ -14461,7 +14505,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         context_indices[identity] = length(context_entries)
     end
 
-    context_id = _semantic_context_panel_id(obj)
+    suffix = _semantic_selection_suffix(selected, length(descriptor.routes))
+    context_id = _semantic_context_panel_id(obj) * suffix
     shared_context = Set(keys(context_names))
     context_panel = if isempty(context_entries)
         nothing
@@ -14474,13 +14519,13 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     end
 
     selector = isempty(context_entries) ? nothing : "#$(context_id)"
-    host_id = results === :shared ? _semantic_result_host_id(root_prefix) : nothing
+    host_id = results === :shared ? _semantic_result_host_id(root_prefix, suffix) : nothing
     plan = compact ? _semantic_action_plan(specs, shared_context) :
                      (; indices=Set{Int}(), group_of=Dict{Int,Int}(),
                         groups=Vector{Pair{Symbol,Any}}[])
     compiled = isempty(plan.indices) ? (; inputs=Any[], actions=Any[]) :
         _semantic_actions(root_prefix, specs, plan, selector,
-                          isnothing(host_id) ? nothing : "#" * host_id)
+                          isnothing(host_id) ? nothing : "#" * host_id, suffix)
     operations = Any[]
     for (index, spec) in enumerate(specs)
         index in plan.indices && continue
