@@ -124,6 +124,33 @@ head = h.head(h.meta(charset="utf-8"),
 # or: htmx(content; assets="assets/vendor", pico_version=HTMXObjects._PICO_VERSION)
 ```
 
+### Cacheable page runtime — `runtime=:linked`
+
+Besides the libraries, every shell inlines HTMXObjects' own CSS and JS
+runtime (request feedback, live threads, tabs, comparison/master-detail,
+the stream probe, live regions, and the Treebars poll assets while that
+extension is loaded) — about 135 KB on every full-page load with Treebars
+loaded. With a vendor
+mount, `runtime=:linked` moves each of those blocks into its own file on that
+mount, `<mount>/htmxo/<name>.css|js?v=<content version>`, and the library
+URLs gain their pins (`/vendor/htmx.min.js?v=2.0.8`):
+
+```julia
+vendorfiles()                                  # also serves /vendor/htmxo/…
+__page__(content) = htmx(content; assets=:vendor, runtime=:linked)
+```
+
+`vendorfiles` answers a request carrying the current `?v=` as
+`Cache-Control: public, max-age=31536000, immutable`, so a browser loads the
+head once and reuses it on every later page; a changed runtime (an upgrade,
+a Revise edit) is a new URL. Other requests revalidate against an `ETag`.
+Each block keeps its own element in its old position, so load order and
+script isolation are unchanged. A static export or recording puts the
+runtime back inline, so exported pages stay standalone. Behind a
+path-stripping proxy, a root `__page__` passes the request mount once:
+`assets=__prefix__ * "/vendor"`. `runtime=:linked` with `assets=:cdn` is an
+error; the default `runtime=:inline` is unchanged.
+
 ```@docs
 htmx
 HTMXObjects.pico_page
