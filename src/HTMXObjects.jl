@@ -726,6 +726,11 @@ kwarg by the POST/PUT/PATCH argument extractor. `filename` is the client-supplie
 name, `contenttype` the part's declared MIME type, `data` the raw bytes, `name`
 the form field name. Declare `@post upload(; file)` and the handler receives an
 `Upload` for `file` — no need to call `HTTP.parse_multipart_form` yourself.
+
+Declare the argument as `file::Upload` (or `files::Vector{Upload}` for several)
+and generated operation forms render an `<input type="file">` (`multiple` for
+the vector) and submit as `multipart/form-data`. A file travels only in a
+request body, so such an argument belongs on a POST, PUT or PATCH route.
 """
 struct Upload
     name::String
@@ -13587,6 +13592,21 @@ _typed_control(::Type{<:Number}, name, label, value, required_attrs) =
     ninput(name; label, value=something(value, 0), required_attrs...)
 _typed_control(::Type{MultilineText}, name, label, value, required_attrs) =
     tinput(name; label, value=_multiline_text_value(value), required_attrs...)
+# A file argument binds from a multipart part. A browser never lets a page set
+# a file input's value, so a submitted or default value cannot prefill it.
+_typed_control(::Type{Upload}, name, label, value, required_attrs) =
+    h.label(label, h.input(; type="file", name, required_attrs...))
+_typed_control(::Type{<:AbstractVector{Upload}}, name, label, value, required_attrs) =
+    h.label(label, h.input(; type="file", name, multiple="true", required_attrs...))
+
+# Whether a declared argument type binds from multipart file parts: its form
+# renders a file control and has to submit `multipart/form-data`.
+_is_upload_type(T) = false
+_is_upload_type(::Type{Upload}) = true
+_is_upload_type(::Type{<:AbstractVector{Upload}}) = true
+
+_upload_param_names(route) = Symbol[param.name for param in route.params
+    if param.source !== :path && _is_upload_type(param.type)]
 
 # A submitted or stored value fills the textarea as-is. A route default is the
 # unevaluated source expression, and a `MultilineText` default can only be
@@ -13750,8 +13770,13 @@ function _semantic_refresh_attrs(route, action, settings=(;); context_selector=n
     method_attrs = NamedTuple{(method_key,)}((refresh_url,))
     include_selector = isnothing(context_selector) ? "closest form" :
         "closest form, $(context_selector)"
+    # Rebuilding the controls reads no file, so a refresh does not re-upload one.
+    uploads = _upload_param_names(route)
+    params_attrs = isempty(uploads) ? (;) :
+        (; hx_params="not " * join(string.(uploads), ","))
     merge(method_attrs, (hx_trigger="change", hx_include=include_selector,
-                         hx_target="closest .htmxo-semantic-controls", hx_swap="outerHTML"))
+                         hx_target="closest .htmxo-semantic-controls", hx_swap="outerHTML"),
+          params_attrs)
 end
 
 function _operation_form_setting(req, name, default=nothing)
@@ -13880,25 +13905,34 @@ function _operation_form_controls(obj, route, current, action;
         __htmxo_shared_context=join(string.(sort!(collect(shared_names))), ','))))
     isnothing(context_selector) || (settings = merge(settings, (;
         __htmxo_context_selector=context_selector)))
+    # Static forms keep their existing layout, including a button-only form.
+    # Dependent forms need a region that can swap without replacing the form.
+    refreshable = fragment || !isempty(refresh_dependencies)
     context_controls = Any[]
     controls = Any[]
+    # A swap would clear a chosen file, and a page cannot restore one, so a
+    # refreshable form keeps its file controls after the swapped region.
+    file_controls = Any[]
     for param in _operation_control_params(route, shared_names)
         control = _semantic_control(obj, route.owner, param, current; radio_max, presentation)
         if param.name in refresh_dependencies
             control = h.div(control;
                 _semantic_refresh_attrs(route, action, settings; context_selector)...)
         end
-        push!(get(param, :kind, nothing) === :context ? context_controls : controls, control)
+        if refreshable && _is_upload_type(param.type)
+            push!(file_controls, control)
+        else
+            push!(get(param, :kind, nothing) === :context ? context_controls : controls, control)
+        end
     end
     local_context = isempty(context_controls) ? Any[] : Any[
         h.fieldset(h.legend("Model inputs"), context_controls...;
                    class="htmxo-semantic-context")
     ]
     children = Any[local_context..., controls...]
-    # Static forms keep their existing layout, including a button-only form.
-    # Dependent forms need a region that can swap without replacing the form.
-    fragment || !isempty(refresh_dependencies) ?
-        Any[h.div(children...; class="htmxo-semantic-controls")] : children
+    refreshable || return children
+    region = h.div(children...; class="htmxo-semantic-controls")
+    fragment ? Any[region] : Any[region, file_controls...]
 end
 
 function _operation_submit_attributes(attributes)
@@ -13923,9 +13957,14 @@ end
 Generate an HTMX form from a merged semantic route descriptor. Static domains
 become radio/select/custom controls; dynamic domains execute their declared DO
 provider from the supplied current `values`; unrestricted values use typed
-boolean, numeric, or text controls. Positional path inputs must be supplied in
+boolean, numeric, text, or file controls. Positional path inputs must be supplied in
 `values` and are encoded into the route URL. Submitted values still pass through
 the shared typed extractor and current-domain validation on the server.
+
+An [`Upload`](@ref) or `Vector{Upload}` argument renders a file input, and its
+form submits `hx-encoding="multipart/form-data"`. Such a form must belong to a
+POST, PUT or PATCH route; a GET or DELETE route carries its arguments in the URL
+and is rejected.
 
 `submit` is the generated button's content: plain text or rich presentational
 nodes, not a replacement button. `submit_attrs=(; title="Run", aria_label="Run",
@@ -13999,7 +14038,9 @@ route without executing the operation. The existing form retains its result
 target, swap, attributes, submit button, and navigation mode. The refresh URL
 carries only the settings needed to rebuild controls; inherited request inputs
 remain successful form controls. Full-form requests from older rendered pages
-remain supported.
+remain supported. File inputs in such a form follow the refreshed region and
+are left out of the refresh request, so a chosen file is neither cleared nor
+re-uploaded when a dependency changes.
 """
 function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
@@ -14015,6 +14056,12 @@ function operation_form(obj, route::NamedTuple; values=(;),
     _check_mounted_include_child(obj, route)
     presentation in (:auto, :cards) || throw(ArgumentError(
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
+    uploads = _upload_param_names(route)
+    isempty(uploads) || !(string(route.verb) in _queryparams_verbs) || throw(ArgumentError(
+        "operation_form cannot submit file argument(s) " *
+        "$(join(map(repr, uploads), ", ")) of $(route.verb) $(route.path): " *
+        "a $(route.verb) request carries its arguments in the URL, and a file " *
+        "travels only in a POST, PUT or PATCH body"))
     current = _semantic_form_values(obj, route, values)
     action = _operation_form_action(route, current, target)
     shared_names = _semantic_context_names(shared_context)
@@ -14042,7 +14089,8 @@ function operation_form(obj, route::NamedTuple; values=(;),
         target_attrs = isnothing(target_id) ? (;) : (; hx_target=target_id)
         swap_attrs = isnothing(target_id) ? (;) : (; hx_swap=swap)
         include_attrs = isnothing(context_selector) ? (;) : (; hx_include=context_selector)
-        merge(method_attrs, target_attrs, swap_attrs, include_attrs,
+        encoding_attrs = isempty(uploads) ? (;) : (; hx_encoding="multipart/form-data")
+        merge(method_attrs, target_attrs, swap_attrs, include_attrs, encoding_attrs,
               (; class=form_class), (; kwargs...))
     end
     h.form(context_inputs..., controls...,
