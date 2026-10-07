@@ -6,6 +6,21 @@ using TestItemRunner
     import HTMXObjects: _convert_param
 end
 
+# A free loopback port for an item's test server. A hard-coded port collides
+# with whatever else holds it — a long-running app or a concurrent suite on a
+# shared host — and the item then errors with `bind: Address already in use`.
+@testmodule HTMXOTestPorts begin
+import Sockets
+export free_port
+
+function free_port()
+    socket = Sockets.listen(Sockets.localhost, 0)
+    port = Int(Sockets.getsockname(socket)[2])
+    close(socket)
+    port
+end
+end
+
 # Route fixtures are evaluated once per TestItemRunner process and imported by
 # each item. Test bodies remain independent while avoiding repeated macro work.
 @testmodule HTMXOTestFixtures begin
@@ -4436,11 +4451,11 @@ Starts a real HTTP server and verifies that live responses are recorded at the
 same route-shaped paths used by static output. Tagged `integration`/`server`
 because it binds a port and mutates the process-global `HTMXObjects.ROUTER`.
 """
-@testitem "recording - end-to-end" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "recording - end-to-end" setup=[HTMXOTestFixtures, HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     mktempdir() do dir
         app = RecordApp()
         route!(app; record_dir=dir)
-        port = 8099
+        port = free_port()
         serve(; port, async=true)
         try
             r1 = HTTP.get("http://127.0.0.1:$port/")
@@ -4466,9 +4481,9 @@ because it binds a port and mutates the process-global `HTMXObjects.ROUTER`.
     end
 end
 
-@testitem "serve delivers non-200 Vector-body responses" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "serve delivers non-200 Vector-body responses" setup=[HTMXOTestFixtures, HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     route!(MediaRangeApp())
-    port = 8131
+    port = free_port()
     serve(; port, async=true)
     try
         # Warm the shared route machinery first: first-request compile takes
@@ -4798,15 +4813,16 @@ end
     @test Dict(kw_blob)[:ext] == "jl"
 end
 
-@testitem "nothing default in kwargs route" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "nothing default in kwargs route" setup=[HTMXOTestFixtures, HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     route!(NothingDefaultApp())
-    serve(; port=8098, async=true)
+    port = free_port()
+    serve(; port, async=true)
     try
-        r = HTTP.get("http://127.0.0.1:8098/filtered")
+        r = HTTP.get("http://127.0.0.1:$port/filtered")
         body = String(r.body)
         @test contains(body, "filter=nothing")
         @test !contains(body, "filter=:nothing")
-        r2 = HTTP.get("http://127.0.0.1:8098/filtered?filter=active")
+        r2 = HTTP.get("http://127.0.0.1:$port/filtered?filter=active")
         body2 = String(r2.body)
         @test contains(body2, "filter=\"active\"") || contains(body2, "filter=&quot;active&quot;")
     finally
@@ -6331,13 +6347,13 @@ End-to-end counterpart: a live `@get` returning a `NamedTuple` must answer an
 HX request with the result itself — status 200 *and* the data — rather than
 200 with an error article and an `X-HTMXO-Error-Id` header.
 """
-@testitem "generic_html - live @get returning a NamedTuple" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "generic_html - live @get returning a NamedTuple" setup=[HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     @htmx struct StructuredResultApp
         __page__(content) = h.html(h.body(content))
         @get summary() = (accepted=3, rejected=1)
     end
     route!(StructuredResultApp())
-    port = 8101
+    port = free_port()
     serve(; port, async=true)
     try
         r = HTTP.get("http://127.0.0.1:$port/summary";
@@ -6404,13 +6420,13 @@ answer an HX request with the grid itself — status 200 *and* the data — not
 200 with an error article and an `X-HTMXO-Error-Id` header, which is how the
 `MethodError` from `repr("text/html", ::Float64)` surfaced to the reporter.
 """
-@testitem "generic_html - live @get returning a Matrix" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "generic_html - live @get returning a Matrix" setup=[HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     @htmx struct MatrixResultApp
         __page__(content) = h.html(h.body(content))
         @get prediction_grid() = [1.0 2.0; 3.0 4.0]
     end
     route!(MatrixResultApp())
-    port = 8102
+    port = free_port()
     serve(; port, async=true)
     try
         r = HTTP.get("http://127.0.0.1:$port/prediction_grid";
@@ -6804,7 +6820,7 @@ end
     @test SwaggerRoutes().swagger_version == "5.7.2"
 end
 
-@testitem "serve answers /docs, WebSocket and static-file routes" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "serve answers /docs, WebSocket and static-file routes" setup=[HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     using Logging
 
     @htmx struct ServeDocsChild
@@ -6824,7 +6840,7 @@ end
     staticfiles(dir, "serve-static")
     dynamicfiles(dir, "/serve-dynamic")
 
-    port = 8135
+    port = free_port()
     base = "http://127.0.0.1:$port"
     logger = TestLogger()
     with_logger(logger) do
@@ -8259,7 +8275,7 @@ end
     @test contains(repr("text/html", htmx(h.p("body"))), "htmxoLiveRegion")
 end
 
-@testitem "keyed feed pushes refresh frames over a live stream" setup=[HTMXOTestImports] tags=[:integration, :server, :semantic] begin
+@testitem "keyed feed pushes refresh frames over a live stream" setup=[HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server, :semantic] begin
     using Sockets
 
     const PUSH_SUBS = KeySubscriptions()
@@ -8273,7 +8289,7 @@ end
     end
 
     route!(KeyFeedApp())
-    port = 8147
+    port = free_port()
     heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
     HTMXObjects._SSE_HEARTBEAT_SECONDS[] = 0.05
     serve(; port, async=true)
@@ -9866,11 +9882,12 @@ end
     @test_throws ArgumentError precompile_routes!(WarmupSelectApp, [r"^/zzz/"])
 end
 
-@testitem "warmup - prewarm validates live routes, POST opt-in" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "warmup - prewarm validates live routes, POST opt-in" setup=[HTMXOTestFixtures, HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     route!(WarmupLiveApp())
-    serve(; port=8123, async=true)
+    port = free_port()
+    serve(; port, async=true)
     try
-        base = "http://127.0.0.1:8123"
+        base = "http://127.0.0.1:$port"
         # One shared collection drives both halves: precompile it, then warm it.
         coll = select_routes(WarmupLiveApp)
         precompile_routes!(WarmupLiveApp, coll)
@@ -10283,9 +10300,9 @@ end
     end
 end
 
-@testitem "dispatch matches loopback bytes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:integration, :server] begin
+@testitem "dispatch matches loopback bytes" setup=[HTMXOTestFixtures, HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
     route!(DispatchProbeApp())
-    port = 8137
+    port = free_port()
     serve(; port, async=true)
     base = "http://127.0.0.1:$port"
     try
@@ -10576,7 +10593,7 @@ end
     @test !contains(repr("text/html", htmx(h.main(); htmx_version=nothing)), "htmx-ext-ws")
 end
 
-@testitem "@sse streams events, final values, and errors end to end" setup=[HTMXOTestImports] tags=[:integration, :server, :sse] begin
+@testitem "@sse streams events, final values, and errors end to end" setup=[HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server, :sse] begin
     using Sockets
     using HTTP.WebSockets: send
 
@@ -10615,7 +10632,7 @@ end
     end
 
     route!(SSEServeApp())
-    port = 8141
+    port = free_port()
     heartbeat = HTMXObjects._SSE_HEARTBEAT_SECONDS[]
     serve(; port, async=true)
     try
