@@ -10631,12 +10631,11 @@ instead of after the grace period; no other request is affected. On one thread
 followed whatever its speed, and what it compiles also serves a server that
 answers requests on an `:interactive` threadpool. With several threads, an
 operation that finishes while its first HTMX response is being assembled still
-answers at once. Rows
-then gain `transport` (`:plain`, `:htmx`, `:page`) and `requests`, the round
-trips of both runs: `2` means the route answered at once (a `@direct` or
-`:blocking` route, a declared final response, a server in another process,
-which does not know the token, or that race), `1` a plain request, and `0` a
-skipped route.
+answers at once. Rows then gain `transport` (`:plain`, `:htmx`, `:page`) and
+`requests`, the round trips of both runs: `2` means the route answered at once
+(a `@direct` or `:blocking` route, a declared final response, a server in
+another process, which does not know the token, or that race), `1` a plain
+request, and `0` a skipped route.
 
 ```julia
 @compile_workload begin
