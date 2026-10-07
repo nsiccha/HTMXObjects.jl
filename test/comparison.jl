@@ -182,10 +182,22 @@ end
             route!(app)
             page = repr("text/html", htmx(surface, widget, browser_driver(drivers[presentation]);
                 hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+            # A submission that outlives the `:auto` grace window (a cold first
+            # call, a loaded host) is answered by a poller that resumes it with
+            # GETs of its own path carrying `__htmxo_poll`; those are not new
+            # submissions, so they are counted apart. Each resume is slowed so
+            # Chrome's virtual clock, which skips ahead between polls, cannot
+            # outrun the server and expire the driver's waits.
             requests = Dict{String,Int}()
+            resumes = Dict{String,Int}()
             checks = browser_checks(page, req -> begin
-                path = HTTP.URI(req.target).path
-                requests[path] = get(requests, path, 0) + 1
+                uri = HTTP.URI(req.target)
+                if haskey(HTTP.queryparams(uri), "__htmxo_poll")
+                    resumes[uri.path] = get(resumes, uri.path, 0) + 1
+                    sleep(0.2)
+                else
+                    requests[uri.path] = get(requests, uri.path, 0) + 1
+                end
                 dispatch(req.method, req.target; headers=["HX-Request" => "true"])
             end)
             @test !isnothing(checks)
@@ -195,6 +207,8 @@ end
             @test get(requests, "/sources/source_alpha", 0) == 2 - (presentation === :inline)
             @test get(requests, "/sources/source_beta", 0) == 1
             @test get(requests, "/sources/source_gamma", 0) == (presentation === :inline)
+            # Only a submitted operation is ever resumed.
+            @test issubset(keys(resumes), keys(requests))
         end
     end
 end
