@@ -5633,9 +5633,10 @@ with the same `live_fragment` call, so the re-fetch is self-similar.
 ```
 
 An invalidation that lands between the page render and the stream connect
-is missed: the fragment shows render-time state until the next one. In
-`?plain` the element degrades to its text content; the refresh machinery
-is inert there.
+is missed: the fragment shows render-time state until the next one. The
+same holds for a fragment swapped in later until htmx has processed it
+(its triggers attach when the swap settles). In `?plain` the element
+degrades to its text content; the refresh machinery is inert there.
 """
 function live_fragment(key, content...; fragment_url, events_url=nothing,
         event::AbstractString="refresh", swap::AbstractString="outerHTML",
@@ -5674,7 +5675,10 @@ the region follows the fragments actually present instead of the keys
 known at render time: the [`live_region_script`](@ref) runtime gathers
 the `data-key`s of descendant fragments — including ones swapped in
 later by htmx, a poller, or a modal — opens one stream with `?key=…` for
-the union, and reconnects whenever the set changes. Each reconnect is an
+the union, and reconnects whenever the set changes. An event reaches the
+fragments present when it arrives, so a fragment's own `outerHTML`
+refresh and a late fragment on a key the stream already carries refresh
+like the fragments present at load, with no reconnect. Each reconnect is an
 ordinary fresh subscription; the previous stream's server task
 unsubscribes when it notices the disconnect (within one `poll`
 interval), so a push landing in that window re-fetches its fragments
@@ -5705,10 +5709,11 @@ its base url with `?key=…` for the union of its descendant
 [`live_fragment`](@ref) `data-key`s — however they reach the DOM (page
 load, htmx swap, poller, modal) — and reconnects when the set changes. A
 reconnect is an ordinary fresh [`serve_key_feed!`](@ref) subscription; the
-previous stream's server task unsubscribes on disconnect. Refreshes
-dispatch through the fragment's own `hx-trigger="sse:<event>"`, the exact
-call the sse extension makes for a static region, so a fragment behaves
-identically under either shape. A fragment belongs to its nearest
+previous stream's server task unsubscribes on disconnect. Each event is
+dispatched to the region's fragments for that event at arrival, through
+the fragment's own `hx-trigger="sse:<event>"` — the exact call the sse
+extension makes for a static region, so a fragment behaves identically
+under either shape, including after its own swap replaces it. A fragment belongs to its nearest
 ancestor discover region. Exposes `window.htmxoLiveRegion.init(el)` /
 `.resync()`. Safe to include more than once. Auto-included by [`htmx`](@ref);
 include it yourself only on pages built without the shell.
@@ -5752,7 +5757,8 @@ live_region_script() = h.script(Raw(raw"""
     return Array.prototype.filter.call(
       region.querySelectorAll(FRAG_SELECTOR),
       function (el) {
-        return el.closest('[' + MARK + ']') === region && triggersOf(el).length > 0;
+        return el.getAttribute('data-key') &&
+          el.closest('[' + MARK + ']') === region && triggersOf(el).length > 0;
       });
   }
 
@@ -5772,47 +5778,58 @@ live_region_script() = h.script(Raw(raw"""
 
   function closeState(state) {
     if (state.source) { state.source.close(); state.source = null; }
+    state.names = new Set();
   }
 
-  // Reconcile the region's stream with the fragments present: a no-op when
-  // the sorted key set is unchanged, else close + reopen on the new union.
+  // One listener per wire event name on the open stream. It reads the
+  // region's fragments for that name when the event arrives, never a list
+  // taken when the stream opened: a fragment's own outerHTML refresh and a
+  // fragment swapped in later on a key the stream already carries are new
+  // elements, and neither changes the key set that reopens the stream.
+  function listen(state, name) {
+    if (state.names.has(name)) return;
+    state.names.add(name);
+    var region = state.region;
+    state.source.addEventListener(name, function (evt) {
+      if (!document.contains(region)) return;
+      ownFragments(region).forEach(function (f) {
+        if (triggersOf(f).indexOf(name) < 0) return;
+        // The static region shape's exact dispatch: the sse extension
+        // turns a wire event into `htmx.trigger(f, 'sse:NAME')`, and htmx
+        // core answers through the fragment's `hx-trigger`.
+        if (window.htmx) {
+          htmx.trigger(f, 'sse:' + name, evt);
+          htmx.trigger(f, 'htmx:sseMessage', evt);
+        } else {
+          f.dispatchEvent(new CustomEvent('sse:' + name, { bubbles: true, detail: evt }));
+        }
+      });
+    });
+  }
+
+  // Reconcile the region's stream with the fragments present: close + reopen
+  // on the new union when the sorted key set changed, then listen for any
+  // wire name not yet heard on the open stream.
   function sync(state) {
     if (!document.contains(state.region)) { teardown(state.region); return; }
-    var byName = new Map();   // wire event name -> fragments to trigger
     var keys = [];
+    var names = [];
     ownFragments(state.region).forEach(function (el) {
       var key = el.getAttribute('data-key');
-      if (!key) return;
       if (keys.indexOf(key) < 0) keys.push(key);
       triggersOf(el).forEach(function (name) {
-        if (!byName.has(name)) byName.set(name, []);
-        byName.get(name).push(el);
+        if (names.indexOf(name) < 0) names.push(name);
       });
     });
     keys.sort();
     var sig = JSON.stringify(keys);
-    if (sig === state.sig) return;
-    state.sig = sig;
-    closeState(state);
-    if (!keys.length) return;   // no fragments: hold no stream until one arrives
-    var source = openSource(feedUrl(state.base, keys));
-    state.source = source;
-    byName.forEach(function (frags, name) {
-      source.addEventListener(name, function (evt) {
-        frags.forEach(function (f) {
-          if (!document.contains(f)) return;
-          // The static region shape's exact dispatch: the sse extension
-          // turns a wire event into `htmx.trigger(f, 'sse:NAME')`, and htmx
-          // core answers through the fragment's `hx-trigger`.
-          if (window.htmx) {
-            htmx.trigger(f, 'sse:' + name, evt);
-            htmx.trigger(f, 'htmx:sseMessage', evt);
-          } else {
-            f.dispatchEvent(new CustomEvent('sse:' + name, { bubbles: true, detail: evt }));
-          }
-        });
-      });
-    });
+    if (sig !== state.sig) {
+      state.sig = sig;
+      closeState(state);
+      // No fragments: hold no stream until one arrives.
+      if (keys.length) state.source = openSource(feedUrl(state.base, keys));
+    }
+    if (state.source) names.forEach(function (name) { listen(state, name); });
   }
 
   function schedule(state) {
@@ -5825,7 +5842,8 @@ live_region_script() = h.script(Raw(raw"""
     if (region.__htmxoLive) return region.__htmxoLive;
     var base = region.getAttribute(BASE);
     if (!base) return null;
-    var state = { region: region, base: base, sig: null, source: null, timer: null, mo: null };
+    var state = { region: region, base: base, sig: null, source: null, names: new Set(),
+                  timer: null, mo: null };
     region.__htmxoLive = state;
     live.push(state);
     state.mo = new MutationObserver(function () { schedule(state); });
@@ -5880,9 +5898,10 @@ live_region_script() = h.script(Raw(raw"""
       });
       sweep();
     }).observe(document.body, { childList: true, subtree: true });
-    // Swaps land through the region observer too, but only `afterSettle`
-    // runs after htmx has processed (and attached the triggers of) the new
-    // fragments — resync then so the first push cannot miss them.
+    // Backstop for the observers above: once htmx settles a swap, scan it
+    // for new regions and resync the region it landed in. Dispatch reads the
+    // fragments when an event arrives, so a resync only settles the stream's
+    // key set and wire names; it is a no-op when neither changed.
     document.body.addEventListener('htmx:afterSettle', function (e) {
       var t = e.target;
       if (!t || t.nodeType !== 1) return;
