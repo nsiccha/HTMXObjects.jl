@@ -12108,6 +12108,16 @@ _md_lazy_trigger(; also_load::Bool=false) =
 # Request lifecycle events bubble through loaded slots. Only the initiating
 # slot owns its loading/retry state; requestConfig.elt preserves that identity
 # when htmx forwards afterRequest after swapping a descendant out of the DOM.
+#
+# A slot's own request that fails in transit (`xhr.status` 0: a connection a
+# mobile link or proxy dropped) or meets a briefly unavailable gateway
+# (502/503/504) retries by itself after 1 s, then 3 s, holding the
+# single-flight latch so a click or re-expand cannot double-fire. The pollers
+# a slot hosts already recover from the same failures on their next tick; the
+# slot's first request was the one request on the path that did not (snag
+# `expand-several-l-28054c83`). An application error (any other status), an
+# explicit `htmx:abort` of the slot's request, or an exhausted budget shows
+# click-to-retry, which grants a fresh budget.
 _md_runtime_js() = """
 function htmxoMdToggle(row, event, key, slot) {
     if (event.target.closest('a,button,input,textarea,select,form')) return;
@@ -12136,7 +12146,7 @@ function htmxoMdControl(button, event) {
 }
 function htmxoMdBefore(s, event) {
     if (event.detail.requestConfig.elt !== s) return;
-    s.dataset.loading = '1'; delete s.dataset.failed;
+    s.dataset.loading = '1'; delete s.dataset.failed; s.__htmxoMdAborted = false;
     var p = s.querySelector('[data-status]'); if (p) p.textContent = 'Loading…';
 }
 function htmxoMdReady(s, event) {
@@ -12149,13 +12159,28 @@ function htmxoMdReady(s, event) {
         htmx.process(child);
     });
 }
+var htmxoMdRetryDelays = [1000, 3000];
+function htmxoMdTransient(s, event) {
+    var status = event.detail.xhr ? event.detail.xhr.status : 0;
+    return !s.__htmxoMdAborted && (status === 0 || status === 502 || status === 503 || status === 504);
+}
 function htmxoMdAfter(s, event) {
     if (event.detail.requestConfig.elt !== s) return;
-    delete s.dataset.loading;
-    if (event.detail.successful) { s.dataset.loaded = '1'; delete s.dataset.failed; }
-    else {
+    var p = s.querySelector('[data-status]'), n = +(s.dataset.retries || 0);
+    if (event.detail.successful) {
+        delete s.dataset.loading; delete s.dataset.retries;
+        s.dataset.loaded = '1'; delete s.dataset.failed;
+    } else if (htmxoMdTransient(s, event) && n < htmxoMdRetryDelays.length) {
+        // Still latched as loading: the retry owns the next request.
+        s.dataset.retries = String(n + 1);
+        if (p) p.textContent = 'Connection lost — retrying…';
+        setTimeout(function() {
+            if (document.contains(s) && s.dataset.loaded !== '1') htmx.trigger(s, '$(_md_lazy_event())');
+        }, htmxoMdRetryDelays[n]);
+    } else {
+        delete s.dataset.loading; delete s.dataset.retries;
         s.dataset.loaded = '0'; s.dataset.failed = '1';
-        var p = s.querySelector('[data-status]'); if (p) p.textContent = 'Failed to load — click to retry';
+        if (p) p.textContent = 'Failed to load — click to retry';
     }
 }
 function htmxoMdRetry(s) {
@@ -12165,6 +12190,11 @@ function htmxoMdRetry(s) {
 }
 if (!window.__htmxoMdReady) {
     window.__htmxoMdReady = true;
+    // An explicit abort is a request to stop, never a transient failure.
+    document.addEventListener('htmx:abort', function(event) {
+        var s = event.target;
+        if (s.classList && s.classList.contains('htmxo-md-detail-slot')) s.__htmxoMdAborted = true;
+    }, true);
     // hx-on--after-swap listens to htmx's later kebab-case alias. Capture
     // the original event before a consumer can click the inserted forms.
     document.addEventListener('htmx:afterSwap', function(event) {
@@ -12328,7 +12358,11 @@ the user came to see (a question + answer brief, for example).
   **first expand** and reuses the loaded DOM thereafter — `detail_body` is
   not rendered eagerly; it serves as the pre-load placeholder instead
   (default: a muted "Loading…"). The load is single-flight (repeat clicks
-  while in flight coalesce) with click-to-retry on failure, driven by the
+  while in flight coalesce). A request that fails in transit (no response,
+  e.g. a dropped connection) or meets a 502/503/504 retries by itself after
+  1 s and then 3 s, showing "Connection lost — retrying…"; any other failure,
+  an explicit `htmx:abort`, or the third transient failure shows
+  click-to-retry. The load is driven by the
   toggle's `lazy_slot_id` seam — never by `load`/`revealed`/`intersect`
   (see [`master_detail_toggle_js`](@ref)). A collapsed row issues no
   request; an `initially_open=true` lazy row loads once on render.
