@@ -8465,32 +8465,57 @@ end
         discover_revs = Dict{String,Int}()
         discover_feeds = Vector{String}[]
         discover_card_hits = Dict{String,Int}()
-        discover_beacon = Ref("")
+        discover_steps = String[]
 
         @htmx struct DiscoverBrowserApp
             @get index() = begin
+                # Each step beacons its fragment text (or TIMEOUT), so a
+                # failing run names every step that never refreshed. A
+                # fragment is bumped only once htmx has processed it
+                # (`htmx-added` is cleared as its triggers attach): a push
+                # before that is lost on either region shape.
                 driver = h.script(Raw("""
-                    window.addEventListener('load', function() {
-                        setTimeout(function() {
-                            var timer = setInterval(function() {
-                                if (!window.htmxoLiveRegion) return;
-                                clearInterval(timer);
-                                document.getElementById('add-card').click();
-                                var t2 = setInterval(function() {
-                                    if (!document.querySelector('[data-key="b#2"]')) return;
-                                    clearInterval(t2);
-                                    fetch('/bump?key=' + encodeURIComponent('b#2')).then(function() {
-                                        var t3 = setInterval(function() {
-                                            var b = document.querySelector('[data-key="b#2"]');
-                                            if (b && b.textContent.indexOf('rev 1') >= 0) {
-                                                clearInterval(t3);
-                                                fetch('/beacon?text=' + encodeURIComponent(b.textContent));
-                                            }
-                                        }, 25);
-                                    });
+                    window.addEventListener('load', async function() {
+                        // Resolves the predicate's value, or null after 5 s so
+                        // one missed refresh cannot hide the steps after it.
+                        function until(pred) {
+                            var t0 = Date.now();
+                            return new Promise(function(resolve) {
+                                var t = setInterval(function() {
+                                    var v = pred();
+                                    if (v || Date.now() - t0 > 5000) { clearInterval(t); resolve(v || null); }
                                 }, 25);
-                            }, 25);
-                        }, 50);
+                            });
+                        }
+                        function ready(sel, text) {
+                            return until(function() {
+                                var el = document.querySelector(sel);
+                                return el && !el.classList.contains('htmx-added') &&
+                                    el.textContent.indexOf(text) >= 0 && el;
+                            });
+                        }
+                        function bump(key) { return fetch('/bump?key=' + encodeURIComponent(key)); }
+                        function step(name, el) {
+                            var text = el ? el.textContent : 'TIMEOUT';
+                            return fetch('/beacon?text=' + encodeURIComponent(name + ': ' + text));
+                        }
+                        await until(function() { return window.htmxoLiveRegion; });
+                        // A late fragment with a NEW key: the region reconnects on the union.
+                        document.getElementById('add-card').click();
+                        await ready('[data-key="b#2"]', 'rev 0');
+                        await bump('b#2');
+                        await step('late', await ready('[data-key="b#2"]', 'rev 1'));
+                        // Its outerHTML refresh is a NEW element with the same key.
+                        await bump('b#2');
+                        await step('again', await ready('[data-key="b#2"]', 'rev 2'));
+                        // A late fragment whose key the stream already carries,
+                        // through a load-triggered placeholder like a modal body.
+                        document.getElementById('add-twin').click();
+                        await ready('.twin', 'rev 0');
+                        await bump('a#1');
+                        await step('twin', await ready('.twin', 'rev 1'));
+                        await step('card', await ready('.card[data-key="a#1"]', 'rev 1'));
+                        await fetch('/beacon?text=done');
                     });
                     """))
                 # Hand-built head: only the runtime, no `htmx()` shell — the
@@ -8503,10 +8528,14 @@ end
                     h.body(
                         live_region("/events",
                             live_fragment("a#1", h.span("body a#1 rev 0");
-                                fragment_url="/card?key=a%231");
+                                fragment_url="/card?key=a%231", class="card");
                             id="discover-region", discover=true),
                         h.button("add card"; id="add-card",
                             hx_get=query_url(__self__/"card"; key="b#2"),
+                            hx_target="#discover-region",
+                            hx_swap="beforeend"),
+                        h.button("add twin"; id="add-twin",
+                            hx_get=query_url(__self__/"twin_slot"),
                             hx_target="#discover-region",
                             hx_swap="beforeend"),
                         driver)))
@@ -8514,8 +8543,13 @@ end
             @get card(; key::String="") = begin
                 discover_card_hits[key] = get(discover_card_hits, key, 0) + 1
                 live_fragment(key, h.span("body $key rev $(get(discover_revs, key, 0))");
-                    fragment_url="/card?key=$(HTTP.URIs.escapeuri(key))")
+                    fragment_url="/card?key=$(HTTP.URIs.escapeuri(key))", class="card")
             end
+            @get twin_slot() = h.div(; hx_get=query_url(__self__/"twin"; key="a#1"),
+                hx_trigger="load", hx_swap="outerHTML")
+            @get twin(; key::String="") = live_fragment(key,
+                h.span("twin $key rev $(get(discover_revs, key, 0))");
+                fragment_url="/twin?key=$(HTTP.URIs.escapeuri(key))", class="twin")
             @sse events(; key::Vector{String}=String[]) = begin
                 push!(discover_feeds, sort!(copy(key)))
                 serve_key_feed!(__sse__, discover_subs, key; poll=0.02)
@@ -8533,10 +8567,10 @@ end
                 invalidate_key!(discover_subs, key)
                 "bumped $key"
             end
-            # The driver beacons the refreshed fragment's text back: the
-            # completion signal and the DOM proof in one request.
+            # The driver beacons each refreshed fragment's text back: the
+            # progress signal and the DOM proof in one request.
             @get beacon(; text::String="") = begin
-                discover_beacon[] = text
+                push!(discover_steps, text)
                 "ok"
             end
         end
@@ -8562,7 +8596,7 @@ end
                 proc = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
                 try
                     t0 = time()
-                    while isempty(discover_beacon[]) && time() - t0 < 60
+                    while !("done" in discover_steps) && time() - t0 < 60
                         sleep(0.1)
                     end
                 finally
@@ -8573,14 +8607,17 @@ end
                     end
                 end
             end
-            # The late card refreshed to the pushed revision: discovery,
-            # reconnect, and dispatch all fired.
-            @test contains(discover_beacon[], "rev 1")
+            # Every fragment refreshed to the pushed revision: a late card on a
+            # new key (reconnect), the same card again after its own swap, and
+            # a late fragment on a key the stream already carried, beside the
+            # original fragment on that key.
+            @test discover_steps == ["late: body b#2 rev 1", "again: body b#2 rev 2",
+                "twin: twin a#1 rev 1", "card: body a#1 rev 1", "done"]
             # The runtime opened one stream per key set, not one per card.
             @test !isempty(discover_feeds) && discover_feeds[1] == ["a#1"]
             @test any(==(["a#1", "b#2"]), discover_feeds)
-            # The late card rendered once on swap and re-fetched on the push.
-            @test get(discover_card_hits, "b#2", 0) >= 2
+            # The late card rendered once on swap and re-fetched on each push.
+            @test get(discover_card_hits, "b#2", 0) == 3
         finally
             HTMXObjects._SSE_HEARTBEAT_SECONDS[] = heartbeat
             terminate()

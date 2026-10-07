@@ -220,7 +220,10 @@ page, or fragments swapped in later by htmx, a poller, or a modal — pass
 [`live_region_script`](@ref) runtime (included by [`htmx`](@ref); a page
 built without the shell includes it itself) gathers the `data-key`s of
 the descendant fragments, opens one stream with `?key=…` for the union,
-and reconnects whenever the set changes. Each reconnect is an ordinary
+and reconnects whenever the set changes. Each event reaches the fragments
+present when it arrives, so a fragment's own `outerHTML` refresh and a
+late fragment on a key the stream already carries keep refreshing with no
+reconnect. Each reconnect is an ordinary
 fresh [`serve_key_feed!`](@ref) subscription — no server change is
 needed — and a push landing in the handover window re-fetches its
 fragments twice, idempotent. With no fragments present the region holds
@@ -233,8 +236,9 @@ fragment route answers with the same `live_fragment` call, so the re-fetch
 is self-similar. In single-stream mode the swapped-out element's stream is
 closed by the SSE extension and the fresh element opens a new one; in a
 `live_region` the shared stream outlives every swap. An invalidation that
-lands between the page render and the stream connect is missed; the
-fragment shows render-time state until the next one. In `?plain` the
+lands between the page render and the stream connect — or before htmx has
+processed a fragment swapped in later — is missed; the fragment shows its
+rendered state until the next one. In `?plain` the
 element degrades to its text content.
 
 ```@docs
