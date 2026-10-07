@@ -142,6 +142,37 @@ end
     @test_throws ArgumentError route!(PoolStreamApp())
 end
 
+# A PrecompileTools workload runs on one thread, so the operations its requests
+# start never start on `:interactive`. It compiles what a server with an
+# interactive pool (`JULIA_NUM_THREADS=4,2`) runs only if both pools start a
+# memoized compute through the same types.
+@testitem "a memoized operation's handle type does not depend on its start pool" setup=[OperationPoolFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    import HTMXObjects: _operation_background_fetch, _OperationStart, Verb
+
+    on_default = _operation_background_fetch(_OperationStart(:default, nothing))
+    on_interactive = _operation_background_fetch(_OperationStart(:interactive, nothing))
+    @test typeof(on_default) === typeof(on_interactive)
+
+    pool_reset!()
+    app = PoolApp()
+    handles = map((on_default, on_interactive), (31, 32)) do fetch, n
+        app.plain_read(Verb{:GET}(); n, fetch)
+    end
+    @test all(handle -> handle isa HTMXObjects.DynamicObjects.Pending, handles)
+    @test typeof(handles[1]) === typeof(handles[2])
+    for (key, handle) in zip((:plain_read31, :plain_read32), handles)
+        @test timedwait(() -> pool_started(key), 10.0; pollint=0.01) === :ok
+        pool_release!(key)
+        @test contains(repr("text/html", fetch(handle)), "pool:$(key)")
+    end
+    # Each compute still runs on the pool it was started for (`:interactive`
+    # is `:default` in a process without interactive threads).
+    @test pool_of(:plain_read31) === :default
+    @test pool_of(:plain_read32) ===
+        (Threads.nthreads(:interactive) > 0 ? :interactive : :default)
+end
+
 @testitem "an ordinary operation starts while app compute saturates :default" setup=[FreshTransportFixtures, OperationPoolFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP, Treebars
     import HTMXObjects: _clear_operation_polls!

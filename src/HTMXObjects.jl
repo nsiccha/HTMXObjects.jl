@@ -7898,27 +7898,35 @@ _operation_start_queued(start::_OperationStart) = start.tracker !== nothing
 # The `fetch` selector for a background compute started at `start`. A queued
 # start passes `identity`: the route property's declared executor (its
 # `@queued` marker) then admits the compute through the job queue. Any other
-# starts at once on its pool — `identity` is DynamicObjects' own `:default`
-# spawn.
+# starts at once on its pool, through a `_PoolExecutor`.
 _operation_background_fetch(start) =
-    _operation_start_queued(start) ? identity : _pool_fetch(Val(start.pool))
+    _operation_start_queued(start) ? identity : _pool_fetch(start.pool)
 
-_pool_fetch(::Val{:default}) = identity
+# Starts a memoized compute on `pool`. Every pool shares this one executor
+# type, so the DynamicObjects types a compute flows through
+# (`Deferred{_PoolExecutor}`, the `Pending` carrying it) do not depend on the
+# server's thread topology: a single-threaded PrecompileTools workload, whose
+# requests never run on `:interactive`, compiles the code an
+# `:interactive`-pool server runs.
+struct _PoolExecutor
+    pool::Symbol
+end
 
-function _pool_fetch(::Val{:interactive})
+(e::_PoolExecutor)(d) = (_spawn_operation(() -> DynamicObjects.run!(d), e.pool); nothing)
+
+function _pool_fetch(pool::Symbol)
     if !isdefined(DynamicObjects, :Deferred)
-        @warn("This DynamicObjects has no `Deferred`, so memoized operations " *
-              "start on :default; upgrade DynamicObjects to keep them on the " *
-              "request's :interactive pool.", maxlog=1)
+        pool === :interactive &&
+            @warn("This DynamicObjects has no `Deferred`, so memoized " *
+                  "operations start on :default; upgrade DynamicObjects to " *
+                  "keep them on the request's :interactive pool.", maxlog=1)
         return identity
     end
-    run! = getproperty(DynamicObjects, :run!)
-    getproperty(DynamicObjects, :Deferred)(
-        d -> (_spawn_operation(() -> run!(d), :interactive); nothing))
+    getproperty(DynamicObjects, :Deferred)(_PoolExecutor(pool))
 end
 
 # Every background start goes through here: a memoized compute (through
-# `_operation_background_fetch`), a fresh invocation, and a preload.
+# `_PoolExecutor`), a fresh invocation, and a preload.
 # Literal pool symbols: `@spawn` only accepts a computed pool on newer Julia.
 _spawn_operation(f, pool::Symbol) = _spawn_operation(f, Val(pool))
 _spawn_operation(f, ::Val{:default}) = Threads.@spawn :default f()
@@ -10620,8 +10628,10 @@ runs twice more per transport). These requests carry a token only this
 process's server knows, which makes it defer every eligible operation at once
 instead of after the grace period; no other request is affected. On one thread
 — a precompile worker — every eligible route is therefore deferred and
-followed whatever its speed. With several threads, an operation that finishes
-while its first HTMX response is being assembled still answers at once. Rows
+followed whatever its speed, and what it compiles also serves a server that
+answers requests on an `:interactive` threadpool. With several threads, an
+operation that finishes while its first HTMX response is being assembled still
+answers at once. Rows
 then gain `transport` (`:plain`, `:htmx`, `:page`) and `requests`, the round
 trips of both runs: `2` means the route answered at once (a `@direct` or
 `:blocking` route, a declared final response, a server in another process,

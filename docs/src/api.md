@@ -2233,7 +2233,9 @@ finding the operation still running, once finding it finished. Its requests
 carry a token that only a server in the same process knows; with it the server
 defers every eligible operation at once instead of after the grace period, so
 on one thread every eligible route is deferred whatever its speed. Requests
-without the token are unaffected.
+without the token are unaffected. An operation starts through the same code
+whichever thread pool its request runs on, so the warm-up also covers a server
+that answers requests on an `:interactive` pool (`JULIA_NUM_THREADS=4,2`).
 
 ```julia
 @compile_workload begin
