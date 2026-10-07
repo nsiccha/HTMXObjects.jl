@@ -1379,6 +1379,33 @@ task, whatever its cache policy:
     hx_response(""; trigger=live_thread_refresh("#chat")))
 ```
 
+A route's background operation — the memoized compute, a fresh invocation, a
+`@preload` — starts on Julia's `:default` threadpool, whichever pool serves the
+request. Request *handling* can run on `:interactive` (`serve(; parallel=:interactive)`,
+or HTTP.jl 2's own connection tasks), so pages and polls answer while application
+compute saturates `:default`, but an operation started there still waits for a
+free `:default` thread before its body runs: Julia does not preempt, so CPU-bound work that
+rarely yields holds its threads until it finishes. Mark a latency-critical
+route `@interactive` to start its operation on `:interactive` instead. It keeps
+its poller and progress; `@direct` also avoids the wait, but answers inline and
+holds the request for the whole computation:
+
+```julia
+"Run overview"
+@interactive @get index() = overview(current_runs())   # polls, never waits behind a batch
+@get results(id::String) = run_heavy_batch(id)        # heavy work stays on :default
+```
+
+The interactive pool is for latency-sensitive work: reserve `@interactive` for
+light routes that must answer during heavy compute, and keep heavy computation
+unmarked. It needs interactive threads (`julia -t 8,4`); without them the
+operation runs on `:default` and HTMXObjects warns once. An `@interactive`
+compute starts at once rather than through [`configure_job_queue!`](@ref),
+whose workers bound `:default` work. Only the operation's own body moves:
+anything it spawns, including a `Threads.@threads` loop, still runs on
+`:default`. `@interactive` on a route that never answers in the background — a
+`@direct`, `@ws` or `@sse` route — is an `ArgumentError` at `route!`.
+
 Every emitted poller carries an independently generated, OS-random bearer
 token. Keep it confidential. HTMXObjects binds the token to the original route,
 typed arguments, and `RootProvider` scope/key, so a poll request reaches the

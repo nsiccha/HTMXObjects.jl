@@ -206,6 +206,12 @@ With exactly one interactive thread, `false` (on HTTP.jl 2) and `:interactive`
 both handle requests one at a time; with none, `:interactive` requests run on
 `:default`. `serve` warns about both `:interactive` cases.
 
+`parallel` places request handling only. A route's background operation (see
+[`OperationPolicy`](@ref)) starts on `:default` whichever pool handles its request,
+so while app compute saturates `:default` a page answers with its placeholder but
+the operation waits for a free thread. Mark a latency-critical route `@interactive`
+to start its operation on `:interactive`.
+
 **Footgun:** `julia -tauto,auto` and `JULIA_NUM_THREADS=auto,auto` both resolve the
 second slot to `1`, not "match default" — `:interactive` stays at 1 thread even
 with `auto`. To size both pools equally, compute shell-side:
@@ -4437,6 +4443,11 @@ updates the struct.
   GET there is still `405`).
 - `@direct` (alongside the verb marker, e.g. `@fresh @direct @get rows()`) pins a
   route to direct transport: it always answers inline on the request's own task.
+- `@interactive` (e.g. `@interactive @get index()`) starts the route's background
+  operation on the `:interactive` threadpool instead of `:default`, so it is not
+  held up while application compute saturates `:default`; it still polls. Keep it
+  for light routes. It is an `ArgumentError` on a `@direct`, `@ws` or `@sse` route,
+  which never answers in the background.
 - The `:index` property (with empty prefix) maps to `GET /`
 
 If `record_dir` is given, each response is also written to disk under that
@@ -4600,6 +4611,14 @@ or headers — `hx_response` included — declares that return type), WebSocket
 and SSE route lambdas, [`record!`](@ref)'s static export (it forces
 `:blocking`), and routes marked `@direct` — the per-route opt-out for a
 fragment that must answer inline on the request's own task.
+
+A background operation starts on Julia's `:default` threadpool, whichever pool
+serves the request. A route marked `@interactive` starts its operation on
+`:interactive` instead and keeps its poller, so a light route still answers
+while application compute saturates `:default` ([`serve`](@ref)'s `parallel`
+places only request handling). Its compute starts at once rather than
+through [`configure_job_queue!`](@ref), and work it spawns itself still runs on
+`:default`. Without interactive threads it runs on `:default`, with a warning.
 
 You never have to write `OperationPolicy` to get non-blocking long routes —
 `route!(app)` alone already does. Reach for it to tune (`poll_interval`),

@@ -905,7 +905,9 @@ Only memoized background computes queue: direct executions (`@direct` routes,
 non-HTMX submissions, `:blocking` policies, …) answer inline, and fresh
 invocations (`@fresh` routes and mutation verbs) start at once — in the
 background when the polling transport answers them — because nothing can
-coalesce or abandon a computation no cache cell holds. Route heavy batch work
+coalesce or abandon a computation no cache cell holds. `@interactive` routes
+start at once on the `:interactive` threadpool too: the queue's workers run on
+`:default`, behind the very work such a route must not wait for. Route heavy batch work
 through a memoized GET (see *App-owned background batches* in the API docs).
 Needs a DynamicObjects with `Deferred`. Returns the current settings; omitted
 settings are unchanged. Setting `max_running=0` starts everything still queued.
