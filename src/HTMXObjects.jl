@@ -14235,26 +14235,59 @@ function _semantic_action_plan(specs, shared_names)
 end
 
 # One compact action: its button, plus its own result when the button targets
-# the next result relatively. With a shared result host (`target`, an id
-# selector) the button targets that host and has no result of its own.
-function _semantic_action(spec, content, include, target)
+# the next result relatively (`own_result`). `wiring` is the include, target
+# and swap the button declares itself; with a shared result host the surface
+# declares them once instead (see `_semantic_shared_action_attrs`).
+function _semantic_action(spec, content, wiring, own_result)
     route = spec.runtime_route
     _check_mounted_include_child(spec.mounted, route)
     action = _operation_form_action(route, spec.current,
                                     _operation_form_target(spec.mounted, route))
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     attrs = merge(_operation_submit_attributes(spec.operation_submit_attrs),
-                  (; type="button"), NamedTuple{(method_key,)}((action,)),
-                  isnothing(include) ? (;) : (; hx_include=include),
-                  (; hx_target=something(target, _SEMANTIC_ACTION_TARGET),
-                     hx_swap="innerHTML"))
+                  (; type="button"), NamedTuple{(method_key,)}((action,)), wiring)
     entry = spec.base_entry
     (; object=entry.object, route=entry.route, name=entry.name, verb=entry.verb,
        path=entry.path, title=entry.title,
        button=h.button(content; attrs...),
-       result=isnothing(target) ?
+       result=own_result ?
            h.div(; class="htmxo-semantic-operation-result", aria_live="polite") :
            nothing)
+end
+
+# With a shared result host every compact button of a surface swaps into the
+# same host the same way, and most include the same holder. Those attributes
+# are declared once, on an element containing the buttons, and htmx resolves
+# them for each button by inheritance: a surface of many buttons then repeats
+# only each button's own URL. `hx-inherit` keeps them inherited on pages that
+# set `htmx.config.disableInheritance`. The include is shared only when every
+# button has one, so a button without one inherits nothing it did not before.
+# Each relative result (`results=:each`) sits inside the button container, so
+# there every button keeps its own attributes and its results inherit nothing.
+function _semantic_shared_action_attrs(target, includes)
+    (isnothing(target) || isempty(includes)) && return (;)
+    include = any(isnothing, includes) ? nothing :
+        argmax(selector -> count(==(selector), includes), unique(includes))
+    attrs = merge((; hx_target=target, hx_swap="innerHTML"),
+                  isnothing(include) ? (;) : (; hx_include=include))
+    merge(attrs, (; hx_inherit=join((_htmx_attr_name(key) for key in keys(attrs)), " ")))
+end
+
+_htmx_attr_name(key::Symbol) = replace(string(key), '_' => '-')
+
+# A remaining form declares its own target and swap. One that includes no
+# context declares that too, so a layout may place it beside the buttons without
+# it inheriting their shared include.
+_semantic_form_include_reset(attrs, context_selector) =
+    haskey(attrs, :hx_include) && isnothing(context_selector) ?
+        (; hx_include="unset") : (;)
+
+function _semantic_button_wiring(include, target, shared)
+    isempty(shared) && return merge(
+        isnothing(include) ? (;) : (; hx_include=include),
+        (; hx_target=something(target, _SEMANTIC_ACTION_TARGET), hx_swap="innerHTML"))
+    isequal(include, get(shared, :hx_include, nothing)) || isnothing(include) ?
+        (;) : (; hx_include=include)
 end
 
 function _semantic_actions(root_prefix, specs, plan, context_selector, target, suffix)
@@ -14272,11 +14305,15 @@ function _semantic_actions(root_prefix, specs, plan, context_selector, target, s
         isnothing(context_selector) || push!(selectors, context_selector)
         isempty(selectors) ? nothing : join(selectors, ", ")
     end
-    actions = Any[_semantic_action(spec,
-                      something(spec.operation_submit, spec.base_entry.title),
-                      includes[plan.group_of[index]], target)
-                  for (index, spec) in enumerate(specs) if index in plan.indices]
-    (; inputs, actions)
+    compact = [index for index in eachindex(specs) if index in plan.indices]
+    attrs = _semantic_shared_action_attrs(
+        target, [includes[plan.group_of[index]] for index in compact])
+    actions = Any[_semantic_action(specs[index],
+                      something(specs[index].operation_submit, specs[index].base_entry.title),
+                      _semantic_button_wiring(includes[plan.group_of[index]], target, attrs),
+                      isnothing(target))
+                  for index in compact]
+    (; inputs, actions, attrs)
 end
 
 _semantic_result_host_id(root_prefix, suffix="") =
@@ -14312,15 +14349,16 @@ function _default_semantic_operation(entry)
 end
 
 # The historic surface: the shared context group, then every compact action
-# (holders first, each button followed by its own result), then the operations
-# that keep a form, then the shared result host when `results=:shared`.
+# (holders first, each button followed by its own result) in a container that
+# declares the buttons' shared attributes, then the operations that keep a
+# form, then the shared result host when `results=:shared`.
 function _default_semantic_layout(parts)
     heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
     context = isnothing(parts.context) ? Any[] : Any[parts.context]
     actions = isempty(parts.actions) ? Any[] : Any[h.div(parts.inputs...,
         (node for action in parts.actions
               for node in (action.button, action.result) if !isnothing(node))...;
-        class="htmxo-semantic-actions")]
+        class="htmxo-semantic-actions", parts.action_attrs...)]
     result = isnothing(parts.result) ? Any[] : Any[parts.result]
     h.section(heading..., context..., actions..., parts.operations..., result...;
               class="htmxo-semantic-app")
@@ -14368,11 +14406,87 @@ function _check_semantic_layout(surface, parts)
         get(following, action.button, nothing) === action.result || push!(problems,
             "the $(action.verb) $(action.path) result does not directly follow its button")
     end
+    _check_semantic_inheritance!(problems, surface, parts)
     isempty(problems) || throw(ArgumentError(string(
         "semantic_app layout must place every compiled part exactly once, as given ",
-        "(results=:each also keeps each result directly after its button): ",
+        "(results=:each also keeps each result directly after its button; with a ",
+        "shared result host, `parts.action_attrs` goes on an element that contains ",
+        "the buttons but not the host): ",
         join(problems, "; "))))
     nothing
+end
+
+# htmx reads `data-hx-*` (and an extension's `data-sse-*`/`data-ws-*`) exactly
+# like the unprefixed attribute.
+function _htmx_declared_attrs(node::Node)
+    declared = Dict{String,Any}()
+    for (key, value) in HTMX.attrs(node)
+        name = string(key)
+        startswith(name, r"data-(hx|sse|ws)-") && (name = chop(name; head=5, tail=0))
+        declared[name] = value
+    end
+    declared
+end
+
+# Attributes that make an element issue a request or swap a response, and so
+# resolve an inherited target, swap or include.
+const _HTMX_REQUEST_ATTRS = ("hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete",
+                             "hx-boost", "sse-swap", "ws-send")
+
+# With a shared result host the compact buttons declare no target, swap or
+# shared include of their own; they inherit `parts.action_attrs` from an element
+# the layout puts them in. Resolve inheritance through the placed nodes as htmx
+# does — nearest declaration wins, `hx-disinherit` stops it — and require that
+# every button resolves the compiler's values, while the result host and every
+# other requesting element (a remaining form, the application's own controls)
+# resolve none of them: results and unrelated controls must not start
+# submitting the holder or swapping into the host.
+function _check_semantic_inheritance!(problems, surface, parts)
+    shared = Dict(_htmx_attr_name(key) => value
+                  for (key, value) in pairs(parts.action_attrs) if key !== :hx_inherit)
+    isempty(shared) && return problems
+    buttons = IdDict{Any,Any}(action.button => action for action in parts.actions)
+    _walk_semantic_inheritance!(problems, surface, Dict{String,Any}(), shared, buttons,
+                                parts.result)
+    problems
+end
+
+function _walk_semantic_inheritance!(problems, value, inherited, shared, buttons, host)
+    if !(value isa Node)
+        for child in _semantic_layout_children(value)
+            _walk_semantic_inheritance!(problems, child, inherited, shared, buttons, host)
+        end
+        return
+    end
+    declared = _htmx_declared_attrs(value)
+    inherits(key) = !haskey(declared, key) && isequal(get(inherited, key, nothing), shared[key])
+    leaked = sort!([key for key in keys(shared) if inherits(key)])
+    if haskey(buttons, value)
+        action = buttons[value]
+        absent = sort!([key for key in keys(shared) if !haskey(declared, key) && !inherits(key)])
+        isempty(absent) || push!(problems, string(
+            "the $(action.verb) $(action.path) button does not inherit ",
+            join(absent, ", "), " from `parts.action_attrs`"))
+    elseif value === host
+        isempty(leaked) || push!(problems, string(
+            "the shared result host would inherit ", join(leaked, ", "),
+            " from `parts.action_attrs`"))
+    elseif !isempty(leaked)
+        request = findfirst(name -> haskey(declared, name), _HTMX_REQUEST_ATTRS)
+        isnothing(request) || push!(problems, string(
+            "<", HTMX.tag(value), " ", _HTMX_REQUEST_ATTRS[request], "=",
+            repr(string(declared[_HTMX_REQUEST_ATTRS[request]])), "> would inherit ",
+            join(leaked, ", "), " from `parts.action_attrs`"))
+    end
+    passed = copy(inherited)
+    disinherit = string(get(declared, "hx-disinherit", ""))
+    for key in keys(shared)
+        haskey(declared, key) && (passed[key] = declared[key])
+        (disinherit == "*" || key in split(disinherit)) && (passed[key] = "unset")
+    end
+    for child in HTMX.children(value)
+        _walk_semantic_inheritance!(problems, child, passed, shared, buttons, host)
+    end
 end
 
 function _semantic_context_identity(obj, param)
@@ -14506,7 +14620,7 @@ the shared context group. Operations whose hidden context is the same set of
 names and values share one holder, whatever order their mounts declare it in;
 a mounted child whose context differs (an extra `@param`, say) gets its own
 holder. All attributes are on the button itself, so nothing is inherited by
-result content. Button content defaults to the operation title
+result content (with `results=:shared`, see below). Button content defaults to the operation title
 (`entry.title`); `submit`/`submit_attrs` apply as for forms, and
 `render_operation` renders only the operations that keep a form: those with
 visible inputs. Compact actions carry no `target_id` and are not passed to
@@ -14518,19 +14632,31 @@ class="htmxo-semantic-operation-result">` whose id is derived from the mount
 prefix, so each row's host is distinct. Compact buttons and generated forms
 target it by id and no operation gets a result of its own; `render_operation`
 entries then carry the host's `target_id` and `result=nothing`. Each response
-replaces the previous one, polling included. The default `results=:each`
+replaces the previous one, polling included. Every compact button of the
+surface then swaps into the same host, so the buttons do not repeat that
+wiring: the button container declares `hx-target`, `hx-swap` and the most
+common `hx-include` once, with `hx-inherit` so they are inherited even where a
+page sets `htmx.config.disableInheritance`, and each button carries only its
+own URL and verb, plus an `hx-include` of its own when its holder differs. The
+include is shared only when every button has one. The default `results=:each`
 keeps one result per operation.
 
 `layout(parts)` composes the surface from its compiled parts and may return any
 renderable value, such as several table cells or rows. `parts` carries `object`,
 `title`, `context` (the shared context group or `nothing`), `inputs` (the
-hidden-context holders), `actions`, `operations` (what `render_operation`
+hidden-context holders), `actions`, `action_attrs` (the buttons' shared
+attributes, empty with `results=:each`), `operations` (what `render_operation`
 returned, in order) and `result` (the shared host or `nothing`). Each action
 carries `object`, `route`, `name`, `verb`, `path`, `title`, `button`, and
 `result` (its own result, or `nothing` with `results=:shared`). A custom layout
 must place the context group, every holder, button and result, and the shared
 host exactly once, as the nodes it was given; with `results=:each` each result
-must directly follow its button. Anything else throws an `ArgumentError`. The
+must directly follow its button. With `results=:shared` it splats
+`parts.action_attrs` onto an element that contains every button but not the
+host, such as the table row holding the button cells. The compiler resolves
+inheritance through the placed nodes as htmx does and requires that every
+button inherits those values, and that neither the host nor any other element
+that requests or swaps would. Anything else throws an `ArgumentError`. The
 default layout renders the `<section>` described above, with the shared host
 last.
 
@@ -14662,7 +14788,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     plan = compact ? _semantic_action_plan(specs, shared_context) :
                      (; indices=Set{Int}(), group_of=Dict{Int,Int}(),
                         groups=Vector{Pair{Symbol,Any}}[])
-    compiled = isempty(plan.indices) ? (; inputs=Any[], actions=Any[]) :
+    compiled = isempty(plan.indices) ? (; inputs=Any[], actions=Any[], attrs=(;)) :
         _semantic_actions(root_prefix, specs, plan, selector,
                           isnothing(host_id) ? nothing : "#" * host_id, suffix)
     operations = Any[]
@@ -14679,6 +14805,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             form_class="htmxo-semantic-operation-form",
             shared_context,
             context_selector=selector,
+            _semantic_form_include_reset(compiled.attrs, selector)...,
         )
         result = isnothing(host_id) ?
             h.div(; id=target_id, class="htmxo-semantic-operation-result",
@@ -14689,7 +14816,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
 
     _activate_semantic_root_provider!(obj)
     parts = (; object=obj, title, context=context_panel, inputs=compiled.inputs,
-               actions=compiled.actions, operations,
+               actions=compiled.actions, action_attrs=compiled.attrs, operations,
                result=isnothing(host_id) ? nothing :
                    h.div(; id=host_id, class="htmxo-semantic-operation-result",
                          aria_live="polite"))

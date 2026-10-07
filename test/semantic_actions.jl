@@ -3,7 +3,8 @@ using TestItemRunner
 @testmodule SemanticActionFixtures begin
     using HTMXObjects
     export ActionHost, ActionRow, ActionGraph, ActionGates, action_surface, OrderHost,
-           shared_surface, row_cells, present, SelectHost, SelectStages
+           shared_surface, row_cells, present, SelectHost, SelectStages, KeyedRow,
+           LabelHost, label_cells
 
     const ActionGates = Dict{String,Channel{Nothing}}()
 
@@ -30,7 +31,8 @@ using TestItemRunner
 
     # A table row layout: pipeline buttons in the first cell, the other two in
     # the second, the form operation in the third, and one shared result host
-    # spanning a second row below all three columns.
+    # spanning a second row below all three columns. The buttons' row declares
+    # their shared target, swap and include once.
     button_of(parts, name) = only(action.button for action in parts.actions
                                   if action.name === name)
     present(nodes...) = Any[node for node in nodes if !isnothing(node)]
@@ -38,7 +40,7 @@ using TestItemRunner
         h.tr(h.td(present(parts.context)..., parts.inputs...,
                   button_of(parts, :compile), button_of(parts, :source)),
              h.td(button_of(parts, :reset), button_of(parts, :slow)),
-             h.td(parts.operations...)),
+             h.td(parts.operations...); parts.action_attrs...),
         h.tr(h.td(parts.result; colspan="3")))
     shared_surface(row; kwargs...) = action_surface(row; results=:shared,
         layout=row_cells, kwargs...)
@@ -48,7 +50,7 @@ using TestItemRunner
     in_cells(entry) = entry.name in (:compile, :slow)
     split_cells(parts) = (
         h.tr(h.td(present(parts.context)..., parts.inputs...,
-                  (action.button for action in parts.actions)...)),
+                  (action.button for action in parts.actions)...); parts.action_attrs...),
         h.tr(h.td(parts.result; colspan="3")))
     split_surfaces(row) = h.div(
         h.table(h.tbody(action_surface(row; results=:shared, layout=split_cells,
@@ -60,6 +62,7 @@ using TestItemRunner
         @include rows(row::Int) = ActionRow(string(row))
         @get detail(; row::Int) = action_surface(rows(row))
         @get shared_detail(; row::Int) = h.table(h.tbody(shared_surface(rows(row))...))
+        @get shared_section(; row::Int) = action_surface(rows(row); results=:shared)
         @get split_detail(; row::Int) = split_surfaces(rows(row))
     end
 
@@ -125,6 +128,38 @@ using TestItemRunner
     @htmx struct SelectHost
         @param session_key::String = "demo"
         @include rows(key::String) = SelectRow(key)
+    end
+
+    # A row that reads no request context, so its own button includes
+    # nothing, and a mounted child whose button includes its own holder.
+    @htmx struct KeyedChild
+        @param flavor::String = "plain"
+        @post keyed() = h.p("keyed:$(flavor)")
+    end
+
+    @htmx struct KeyedRow
+        @post bare() = h.p("bare")
+        @include child = KeyedChild()
+    end
+
+    # A row whose buttons share their holder's include and whose remaining
+    # form includes no context, placed in the buttons' table row. The form is a
+    # GET, whose submission would carry an inherited include's values twice.
+    @htmx struct LabelRow
+        @param key::String = ""
+        @post go() = h.p("go:$(key)")
+        @get preview(; label::String = "") = h.p("preview:$(key):$(label)")
+    end
+
+    label_cells(parts) = (
+        h.tr(h.td(parts.inputs..., (action.button for action in parts.actions)...),
+             h.td(parts.operations...); parts.action_attrs...),
+        h.tr(h.td(parts.result)))
+
+    @htmx struct LabelHost
+        @include labelled(key::String) = LabelRow()
+        @get label_table(; key::String) = h.table(h.tbody(semantic_app(labelled(key);
+            compact=true, results=:shared, values=(; key), layout=label_cells)...))
     end
 end
 
@@ -428,16 +463,26 @@ end
     host = "htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f1"
 
     # results=:shared in the default layout: one host, last in the section;
-    # every button and the remaining form target it by id; nothing else is a
-    # result.
+    # the buttons' container and the remaining form target it by id; nothing
+    # else is a result. The buttons inherit the container's target, swap and
+    # include, so each repeats only its own URL.
     entries = Any[]
     shared = repr("text/html", action_surface(root.rows(1); results=:shared,
         render_operation=entry -> (push!(entries, entry);
                                    HTMXObjects._default_semantic_operation(entry))))
+    context = "htmxo-semantic-context-actionrow-proxy-demo-rows-1"
     @test count("class=\"htmxo-semantic-operation-result\"", shared) == 1
     @test endswith(shared, "<div id=\"$(host)\" class=\"htmxo-semantic-operation-result\" " *
                            "aria-live=\"polite\"></div></section>")
-    @test count("hx-target=\"#$(host)\"", shared) == 5
+    @test contains(shared, "<div class=\"htmxo-semantic-actions\" hx-target=\"#$(host)\" " *
+        "hx-swap=\"innerHTML\" hx-include=\"#$(holder), #$(context)\" " *
+        "hx-inherit=\"hx-target hx-swap hx-include\">")
+    @test count("hx-target=\"#$(host)\"", shared) == 2
+    @test count("<button title=", shared) == 5     # four actions and the form's submit
+    for m in eachmatch(r"<button title=[^>]*>", shared)
+        @test !contains(m.match, "hx-target") && !contains(m.match, "hx-swap") &&
+              !contains(m.match, "hx-include")
+    end
     @test !contains(shared, "next .htmxo-semantic-operation-result")
     @test only(entries).target_id == host
     @test only(entries).result === nothing
@@ -446,8 +491,10 @@ end
     # A table layout places each button in its own cell and the host in a
     # row-spanning cell below them.
     cells = repr("text/html", h.tbody(shared_surface(root.rows(1))...))
-    rows = [m.captures[1] for m in eachmatch(r"<tr>(.*?)</tr>", cells)]
+    rows = [m.captures[1] for m in eachmatch(r"<tr[^>]*>(.*?)</tr>", cells)]
     @test length(rows) == 2
+    @test contains(cells, "<tr hx-target=\"#$(host)\" hx-swap=\"innerHTML\" " *
+        "hx-include=\"#$(holder), #$(context)\" hx-inherit=\"hx-target hx-swap hx-include\">")
     tds = [m.captures[1] for m in eachmatch(r"<td>(.*?)</td>", rows[1])]
     @test length(tds) == 3
     @test contains(tds[1], "id=\"$(holder)\"")
@@ -459,20 +506,22 @@ end
     @test rows[2] == "<td colspan=\"3\"><div id=\"$(host)\" " *
                      "class=\"htmxo-semantic-operation-result\" aria-live=\"polite\"></div></td>"
     for m in eachmatch(r"<button[^>]*type=\"button\"[^>]*>", cells)
-        @test contains(m.match, "hx-target=\"#$(host)\"")
-        @test contains(m.match, "hx-include=\"#$(holder), #")
+        @test !contains(m.match, "hx-target") && !contains(m.match, "hx-include")
     end
 
-    # Two rows in one table: unique ids, and each row's buttons address only
-    # their own holder and host.
+    # Two rows in one table: unique ids, and each row's buttons inherit only
+    # their own row's holder and host.
     two = repr("text/html", h.table(h.tbody(shared_surface(root.rows(1))...,
                                             shared_surface(root.rows(2))...)))
     ids = [m.captures[1] for m in eachmatch(r"\bid=\"([^\"]+)\"", two)]
     @test length(unique(ids)) == length(ids)
-    for m in eachmatch(r"<button[^>]*hx-(?:get|post|delete)=\"/proxy/demo/rows/(\d)/[^>]*>", two)
-        n = m.captures[1]
-        @test contains(m.match, "hx-target=\"#htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f$(n)\"")
-        @test contains(m.match, "hx-include=\"#htmxo-semantic-actions-_2fproxy_2fdemo_2frows_2f$(n),")
+    button_rows = [m for m in eachmatch(r"<tr ([^>]*)>(.*?)</tr>", two) if contains(m.match, "<button")]
+    @test length(button_rows) == 2
+    for m in button_rows
+        n = only(unique(b.captures[1] for b in eachmatch(
+            r"<button[^>]*hx-(?:get|post|delete)=\"/proxy/demo/rows/(\d)/", m.captures[2])))
+        @test contains(m.captures[1], "hx-target=\"#htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f$(n)\"")
+        @test contains(m.captures[1], "hx-include=\"#htmxo-semantic-actions-_2fproxy_2fdemo_2frows_2f$(n),")
     end
 
     # The default layout, passed explicitly through the validated seam, is the
@@ -485,8 +534,8 @@ end
 
     # Compiler-owned wiring is placed exactly once, as given.
     without(parts, name) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
-        (action.button for action in parts.actions if action.name !== name)...)),
-        h.tr(h.td(parts.result)))
+        (action.button for action in parts.actions if action.name !== name)...);
+        parts.action_attrs...), h.tr(h.td(parts.result)))
     error_text(f) = try f(); "" catch err; err isa ArgumentError ? err.msg : rethrow() end
     message = error_text(() -> shared_surface(root.rows(1); layout=parts -> without(parts, :reset)))
     @test contains(message, "button is placed 0 times")
@@ -519,6 +568,134 @@ end
     @test count("class=\"htmxo-semantic-operation-result\"", plain_shared) == 1
 end
 
+@testitem "shared compact buttons inherit one declaration of their target, swap and include" setup=[SemanticActionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    html(value) = repr("text/html", value)
+    error_text(f) = try f(); "" catch err; err isa ArgumentError ? err.msg : rethrow() end
+    tags(name, markup) = [m.match for m in eachmatch(Regex("<$(name)\\b[^>]*>"), markup)]
+    container(markup) = only(t for t in tags("div", markup)
+                             if contains(t, "class=\"htmxo-semantic-actions\""))
+    by_url(markup) = Dict(match(r"hx-(?:get|post|delete)=\"([^\"]+)\"", t).captures[1] => t
+                          for t in tags("button", markup))
+    request(path) = HTTP.Request("GET", path)
+
+    # Two holders: the buttons share the most common include (on a tie, the
+    # first button's), and a button with the other holder declares its own,
+    # which wins over the inherited one. No button repeats the target or swap.
+    graph = ActionGraph(; __prefix__="/graph", __req__=request("/?session_key=token"),
+                        __cache_base__=mktempdir())
+    markup = html(semantic_app(graph; compact=true, results=:shared))
+    @test container(markup) == "<div class=\"htmxo-semantic-actions\" " *
+        "hx-target=\"#htmxo-semantic-result-_2fgraph\" hx-swap=\"innerHTML\" " *
+        "hx-include=\"#htmxo-semantic-actions-_2fgraph\" " *
+        "hx-inherit=\"hx-target hx-swap hx-include\">"
+    buttons = by_url(markup)
+    @test buttons["/graph/root_action"] ==
+          "<button type=\"button\" hx-post=\"/graph/root_action\">"
+    @test buttons["/graph/child/child_action"] == "<button type=\"button\" " *
+        "hx-post=\"/graph/child/child_action\" hx-include=\"#htmxo-semantic-actions-_2fgraph-2\">"
+
+    # A button without an include must not inherit one, so when any button has
+    # none the include is not shared: each other button keeps its own.
+    keyed = KeyedRow(; __prefix__="/keyed", __req__=request("/?flavor=sweet"),
+                     __cache_base__=mktempdir())
+    mixed = html(semantic_app(keyed; compact=true, results=:shared))
+    @test container(mixed) == "<div class=\"htmxo-semantic-actions\" " *
+        "hx-target=\"#htmxo-semantic-result-_2fkeyed\" hx-swap=\"innerHTML\" " *
+        "hx-inherit=\"hx-target hx-swap\">"
+    @test by_url(mixed)["/keyed/bare"] == "<button type=\"button\" hx-post=\"/keyed/bare\">"
+    # The bare button's group holds no inputs, so the child's holder is the
+    # surface's second.
+    @test contains(mixed, "<div id=\"htmxo-semantic-actions-_2fkeyed-2\" ")
+    @test by_url(mixed)["/keyed/child/keyed"] == "<button type=\"button\" " *
+        "hx-post=\"/keyed/child/keyed\" hx-include=\"#htmxo-semantic-actions-_2fkeyed-2\">"
+
+    # Each relative result sits inside the button container, so results=:each
+    # declares nothing there: every button keeps its own attributes.
+    captured = Ref{Any}()
+    each = html(semantic_app(graph; compact=true, layout=parts ->
+        (captured[] = parts; HTMXObjects._default_semantic_layout(parts))))
+    @test captured[].action_attrs == (;)
+    @test container(each) == "<div class=\"htmxo-semantic-actions\">"
+    @test count("hx-target=\"next .htmxo-semantic-operation-result\" hx-swap=\"innerHTML\"", each) == 2
+    @test each == html(semantic_app(graph; compact=true))
+
+    # The declaration is per surface: a table of rows repeats only each
+    # button's URL, plus one target, swap and include per row.
+    root = ActionHost(; __prefix__="/proxy/demo", __req__=request("/?session_key=token"),
+                      __cache_base__=mktempdir())
+    table = html(h.tbody((part for n in 1:5 for part in shared_surface(root.rows(n)))...))
+    @test count("<button", table) == 25       # four actions and the form's submit per row
+    for attr in ("hx-include=", "hx-swap=\"innerHTML\"", "hx-target=")
+        @test count(attr, table) == 5 + 5      # each row, and each row's remaining form
+    end
+
+    # A custom layout declares `parts.action_attrs` on an element containing
+    # the buttons. The compiler resolves inheritance through the placed nodes as
+    # htmx does, and fails closed when a button would not get them ...
+    row = root.rows(1)
+    surface(layout) = action_surface(row; results=:shared, layout)
+    buttons_of(parts) = (action.button for action in parts.actions)
+    lines(parts, cell...; attrs=parts.action_attrs) = (
+        h.tr(cell..., h.td(present(parts.context)..., parts.inputs...,
+                           parts.operations...); attrs...),
+        h.tr(h.td(parts.result)))
+    message = error_text(() -> surface(parts -> lines(parts, h.td(buttons_of(parts)...); attrs=(;))))
+    @test contains(message, "the POST /compile button does not inherit " *
+                            "hx-include, hx-swap, hx-target from `parts.action_attrs`")
+    @test contains(message, "`parts.action_attrs` goes on an element that contains the buttons")
+    # ... when a nearer declaration overrides one of them ...
+    message = error_text(() -> surface(parts -> lines(parts,
+        h.td(h.div(buttons_of(parts)...; hx_target="#elsewhere")))))
+    @test contains(message, "the DELETE /reset button does not inherit hx-target from")
+    @test !contains(message, "hx-include, hx-swap")
+    @test contains(error_text(() -> surface(parts -> lines(parts,
+        h.td(h.div(buttons_of(parts)...; data_hx_swap="outerHTML"))))),
+        "the GET /source button does not inherit hx-swap from")
+    # ... or stops inheritance on the way ...
+    @test contains(error_text(() -> surface(parts -> lines(parts,
+        h.td(h.div(buttons_of(parts)...; hx_disinherit="*"))))),
+        "the POST /slow button does not inherit hx-include, hx-swap, hx-target from")
+    # ... and when the shared result host, or another element that requests or
+    # swaps, would inherit them and start submitting the holder or swapping
+    # into the host.
+    @test contains(error_text(() -> surface(parts -> (h.tr(h.td(buttons_of(parts)...),
+        h.td(present(parts.context)..., parts.inputs..., parts.operations..., parts.result);
+        parts.action_attrs...),))),
+        "the shared result host would inherit hx-include, hx-swap, hx-target from")
+    @test contains(error_text(() -> surface(parts -> lines(parts,
+        h.td(h.a("Details"; hx_get="/details")), h.td(buttons_of(parts)...)))),
+        "<a hx-get=\"/details\"> would inherit hx-include, hx-swap, hx-target from")
+    @test contains(error_text(() -> surface(parts -> lines(parts,
+        h.td(h.span(; data_sse_swap="tick", hx_target="this")), h.td(buttons_of(parts)...)))),
+        "<span sse-swap=\"tick\"> would inherit hx-include, hx-swap from")
+    # An element that declares all three itself inherits nothing; nor does a
+    # remaining generated form, which declares its own; a plain element is not
+    # a request at all.
+    own = h.a("Details"; hx_get="/details", hx_target="this", hx_swap="outerHTML",
+              hx_include="unset")
+    cells = html(h.tbody(surface(parts -> lines(parts, h.td(own, h.span("ready")),
+                                               h.td(buttons_of(parts)...)))...))
+    @test contains(cells, "hx-get=\"/details\"") && contains(cells, "<form ")
+    @test count("hx-include=", cells) == 3    # the row, the form, the link
+
+    # A remaining form that includes no context declares that it includes
+    # nothing, so it may sit in the buttons' row without inheriting their
+    # include; a form that includes context already declares its own.
+    labels = LabelHost(; __prefix__="/label", __req__=request("/"), __cache_base__=mktempdir())
+    placed = html(h.tbody(semantic_app(labels.labelled("k1"); compact=true, results=:shared,
+                                       values=(; key="k1"), layout=label_cells)...))
+    @test contains(placed, "<tr hx-target=\"#htmxo-semantic-result-_2flabel_2flabelled_2fk1\" " *
+        "hx-swap=\"innerHTML\" hx-include=\"#htmxo-semantic-actions-_2flabel_2flabelled_2fk1\" ")
+    @test only(tags("form", placed)) == "<form hx-get=\"/label/labelled/k1/preview\" " *
+        "hx-target=\"#htmxo-semantic-result-_2flabel_2flabelled_2fk1\" hx-swap=\"innerHTML\" " *
+        "class=\"htmxo-semantic-operation-form\" hx-include=\"unset\">"
+    @test !contains(only(tags("form", cells)), "unset")
+    @test !contains(html(semantic_app(labels.labelled("k1"); compact=true, values=(; key="k1"))),
+                    "hx-include=\"unset\"")
+end
+
 @testitem "select compiles only the chosen operations of a surface" setup=[SemanticActionFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP
 
@@ -537,7 +714,7 @@ end
     http_only(entry) = entry.verb !== :WEBSOCKET
     cells(parts) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
                              (action.button for action in parts.actions)...,
-                             parts.operations...)),
+                             parts.operations...); parts.action_attrs...),
                     h.tr(h.td(parts.result)))
 
     # Selecting everything is the default, byte for byte, in every shape.
@@ -582,13 +759,17 @@ end
 
     # Apart from those ids, a selected button is the full surface's button: same
     # URL, verb, included holder and context, and target — so submission and
-    # polling are unchanged.
+    # polling are unchanged. The row declares the target and the shared
+    # include; the check button includes its own, other holder.
     full_buttons = buttons(html(h.tbody(semantic_app(row; compact=true, results=:shared,
         layout=cells, select=http_only, submit_attrs=entry -> (; title=entry.title))...)))
     for (url, button) in buttons(surface)
         @test unsuffixed(button) == unsuffixed(full_buttons[url])
-        @test contains(button, "hx-target=\"#$(host)$(suffix)\"")
+        @test !contains(button, "hx-target")
     end
+    @test contains(surface, "<tr hx-target=\"#$(host)$(suffix)\" hx-swap=\"innerHTML\" " *
+                            "hx-include=\"#$(holder)$(suffix), ")
+    @test contains(buttons(surface)["/app/rows/r1/check"], "hx-include=\"#$(holder)$(suffix)-2, ")
     each = html(semantic_app(row; compact=true, select=inline))
     each_full = html(semantic_app(row; compact=true, select=http_only))
     for (url, button) in buttons(each)
@@ -643,8 +824,8 @@ end
 
     # Placement is still checked for every selected part.
     missing_emit(parts) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
-        (action.button for action in parts.actions if action.name !== :emit)...)),
-        h.tr(h.td(parts.result)))
+        (action.button for action in parts.actions if action.name !== :emit)...);
+        parts.action_attrs...), h.tr(h.td(parts.result)))
     message = error_text(() -> semantic_app(row; compact=true, results=:shared,
                                             layout=missing_emit, select=inline))
     @test contains(message, "/steps/emit button is placed 0 times")
@@ -833,6 +1014,242 @@ end
             @test isempty(filter(r -> !contains(r, " /proxy/demo/"), requests))
         finally
             foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
+            close(server)
+        end
+    end
+end
+
+@testitem "shared compact buttons inherit their wiring when a page disables htmx inheritance" setup=[SemanticActionFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        # The default layout declares the buttons' target, swap and include once
+        # on their container; `hx-inherit` keeps them inherited on a page that
+        # sets `htmx.config.disableInheritance`.
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        route!(ActionHost(; __cache_base__=mktempdir()); operation_policy=:blocking)
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        requests = String[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          function row(n) { return document.getElementById('row' + n); }
+          function host(n) {
+            return document.getElementById('htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f' + n);
+          }
+          function button(n, verb, name) {
+            return row(n).querySelector('button[hx-' + verb + '$="/' + name + '"]');
+          }
+          function text(n) { return host(n) ? host(n).textContent : ''; }
+          async function until(check, label) {
+            var end = Date.now() + 15000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label);
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+          }
+          function require(value, label) { if (!value) throw new Error(label); }
+          try {
+            require(htmx.config.disableInheritance === true, 'inheritance is disabled');
+            document.getElementById('expand1').click();
+            await until(() => !!host(1), 'row 1 loaded');
+            document.getElementById('expand2').click();
+            await until(() => !!host(2), 'row 2 loaded');
+            [1, 2].forEach(function(n) {
+              require(!button(n, 'post', 'compile').hasAttribute('hx-target'), 'lean button ' + n);
+            });
+            button(1, 'post', 'compile').click();
+            await until(() => text(1).includes('compile:1:token'), 'row 1 POST into its host');
+            require(button(1, 'post', 'compile').textContent === 'Compile the model.', 'button kept');
+            button(2, 'get', 'source').click();
+            await until(() => text(2).includes('source:2:token'), 'row 2 GET into its host');
+            require(text(1).includes('compile:1:token'), 'row 2 changed row 1');
+            button(2, 'delete', 'reset').click();
+            await until(() => text(2).includes('reset:2'), 'row 2 DELETE replaces');
+            row(1).querySelector('form').requestSubmit();
+            await until(() => text(1).includes('seeded:1:1'), 'row 1 form into its host');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        rows = [h.div(
+            h.button("Expand"; id="expand$(n)",
+                     hx_get="/proxy/demo/shared_section?row=$(n)&session_key=token",
+                     hx_target="#row$(n)", hx_swap="innerHTML"),
+            h.div(; id="row$(n)")) for n in 1:2]
+        page = repr("text/html", htmx(rows..., driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
+            feedback=false, compose=false, overlay=false,
+            extra_head=(h.meta(; name="htmx-config", content="{\"disableInheritance\":true}"),)))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" && return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            HTTP.header(req, "HX-Request", "") == "true" &&
+                push!(requests, string(req.method, " ", req.target))
+            internal = replace(String(req.target), r"^/proxy/demo" => "")
+            dispatch(req.method, internal;
+                headers=[collect(req.headers); "X-Forwarded-Prefix" => "/proxy/demo"],
+                body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            warm = HTTP.get("http://127.0.0.1:$port/proxy/demo/shared_section?row=1&session_key=token";
+                            retry=false, status_exception=false)
+            @test warm.status == 200
+            @test contains(String(warm.body), "hx-inherit=\"hx-target hx-swap hx-include\"")
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        outcome = take!(receipt)
+                        @test outcome == "/complete?status=passed"
+                        outcome == "/complete?status=passed" ||
+                            @info "Browser requests" requests=join(requests, "\n")
+                    else
+                        @info "Browser diagnostics" requests=join(requests, "\n") log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/1/compile"), requests) == 1
+            @test isempty(filter(r -> !contains(r, " /proxy/demo/"), requests))
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "a remaining form beside shared compact buttons submits only its own values in a browser" setup=[SemanticActionFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        # The form sits in the buttons' table row, which declares their shared
+        # include; it declares `hx-include="unset"`, so it submits its own values
+        # once, into the row's shared host. (A POST form's own values would
+        # override same-named included ones; a GET form's would not.)
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        route!(LabelHost(; __cache_base__=mktempdir()); operation_policy=:blocking)
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        sent_values = Pair{String,String}[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          var id = 'htmxo-semantic-result-_2fproxy_2fdemo_2flabelled_2fk1';
+          function text() { var host = document.getElementById(id); return host ? host.textContent : ''; }
+          async function until(check, label) {
+            var end = Date.now() + 15000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label);
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+          }
+          function require(value, label) { if (!value) throw new Error(label); }
+          try {
+            // htmx processes swapped-in controls when the swap settles.
+            var settled = new Promise(resolve =>
+              document.body.addEventListener('htmx:afterSettle', resolve, {once: true}));
+            document.getElementById('expand').click();
+            await settled;
+            require(!!document.getElementById(id), 'row loaded');
+            document.querySelector('button[hx-post$="/go"]').click();
+            await until(() => text().includes('go:k1'), 'button into the host');
+            var form = document.querySelector('form[hx-get$="/preview"]');
+            form.querySelector('input[name="label"]').value = 'fresh';
+            form.requestSubmit();
+            await until(() => text().includes('preview:k1:fresh'), 'form into the host');
+            // Positive control: without its own declaration the form inherits
+            // the row's include and submits the holder's values as well.
+            form.removeAttribute('hx-include');
+            form.querySelector('input[name="label"]').value = 'leaked';
+            var done = new Promise(resolve =>
+              form.addEventListener('htmx:afterRequest', resolve, {once: true}));
+            form.requestSubmit();
+            await done;
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        page = repr("text/html", htmx(
+            h.button("Expand"; id="expand", hx_get="/proxy/demo/label_table?key=k1",
+                     hx_target="#table", hx_swap="innerHTML"),
+            h.div(; id="table"), driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
+            feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" && return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            startswith(path, "/proxy/demo/labelled/") && push!(sent_values, path =>
+                (req.method == "GET" ? HTTP.URI(req.target).query :
+                                       String(HTMXObjects._request_body_bytes(req))))
+            internal = replace(String(req.target), r"^/proxy/demo" => "")
+            dispatch(req.method, internal;
+                headers=[collect(req.headers); "X-Forwarded-Prefix" => "/proxy/demo"],
+                body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        outcome = take!(receipt)
+                        @test outcome == "/complete?status=passed"
+                        outcome == "/complete?status=passed" ||
+                            @info "Browser requests" sent=join(string.(sent_values), "\n")
+                    else
+                        @info "Browser diagnostics" sent=join(string.(sent_values), "\n") log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            sent(name) = [values for (path, values) in sent_values if endswith(path, "/" * name)]
+            keys_in(values) = count(r"(^|&)key=", values)
+            @test keys_in(only(sent("go"))) == 1      # the inherited holder include
+            previews = sent("preview")
+            @test length(previews) == 2
+            @test contains(previews[1], "label=fresh")
+            @test keys_in(previews[1]) == 1           # the form's own input, not also the holder
+            @test contains(previews[2], "label=leaked")
+            @test keys_in(previews[2]) == 2           # the control: an inherited include adds it
+        finally
             close(server)
         end
     end
