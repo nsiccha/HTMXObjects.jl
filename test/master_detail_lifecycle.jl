@@ -353,3 +353,149 @@ end
         end
     end
 end
+
+@testitem "lazy detail retries transient transport failures by itself" tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        names = ["drop", "gateway", "app", "aborted", "down"]
+        table = master_detail_table(["Name"], names;
+            key=identity, master=k -> (h.td(k),), detail_url=k -> "/detail/$k")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+          const names = ['drop', 'gateway', 'app', 'aborted', 'down'];
+          const slot = k => document.getElementById('detail-slot-' + k);
+          const data = k => slot(k).dataset;
+          const status = k => { const p = slot(k).querySelector('[data-status]'); return p ? p.textContent : ''; };
+          const failedLabel = 'Failed to load — click to retry';
+          const sent = {}, sawRetrying = {}, failedAt = {};
+          names.forEach(k => sent[k] = 0);
+          document.addEventListener('htmx:beforeRequest', function(event) {
+            const elt = event.detail.requestConfig && event.detail.requestConfig.elt;
+            names.forEach(k => { if (elt === slot(k)) sent[k]++; });
+          }, true);
+          const start = performance.now();
+          let appSentBeforeClick = null, done = false;
+          const checks = [];
+          const require = (ok, label) => { if (!ok) throw new Error(label + ' ' + JSON.stringify({sent, sawRetrying, appSentBeforeClick,
+            state: names.map(k => [k, data(k).loaded, data(k).failed, data(k).loading, status(k)])})); checks.push(label); };
+          async function finish(outcome) {
+            if (done) return;
+            done = true;
+            await fetch('/complete?status=' + encodeURIComponent(outcome));
+          }
+          function tick() {
+            const now = performance.now();
+            names.forEach(k => {
+              if (status(k).indexOf('retrying') >= 0) sawRetrying[k] = true;
+              if (data(k).failed === '1' && failedAt[k] === undefined) failedAt[k] = now;
+            });
+            // An application error must stay failed: click only after the
+            // retry window has passed, then the manual retry must still load.
+            if (appSentBeforeClick === null && failedAt.app !== undefined && now - failedAt.app > 1500) {
+              appSentBeforeClick = sent.app;
+              slot('app').click();
+            }
+            const settled = data('drop').loaded === '1' && data('gateway').loaded === '1' &&
+              appSentBeforeClick !== null && data('app').loaded === '1' && data('down').failed === '1' &&
+              failedAt.aborted !== undefined && now - failedAt.aborted > 1500;
+            if (settled) {
+              try {
+                require(sent.drop === 2 && slot('drop').querySelector('[data-detail="drop"]'), 'dropped connection retried once and loaded');
+                require(sawRetrying.drop, 'retry status shown while waiting');
+                require(sent.gateway === 2 && slot('gateway').querySelector('[data-detail="gateway"]'), 'unavailable gateway retried once and loaded');
+                require(appSentBeforeClick === 1, 'application error does not retry by itself');
+                require(sent.app === 2 && slot('app').querySelector('[data-detail="app"]'), 'click-to-retry loads after an application error');
+                require(sent.aborted === 1 && data('aborted').failed === '1' && status('aborted') === failedLabel, 'explicit abort does not retry');
+                require(sent.down === 3 && !data('down').loading && status('down') === failedLabel, 'two retries, then click-to-retry');
+                finish('passed:' + checks.length);
+              } catch (error) { finish(String(error)); }
+            } else if (now - start > 20000) {
+              try { require(false, 'timed out'); } catch (error) { finish(String(error)); }
+            } else setTimeout(tick, 50);
+          }
+          names.forEach(k => document.getElementById('row-' + k).click());
+          setTimeout(() => htmx.trigger(slot('aborted'), 'htmx:abort'), 300);
+          tick();
+        }, {once: true});
+        """))
+        page = "<!DOCTYPE html>" * repr("text/html", h.html(
+            h.head(h.meta(charset="UTF-8"), h.script(src="/htmx.js"), master_detail_js()), h.body(table, driver)))
+
+        # A raw socket server, so a request can be answered by closing the
+        # connection without any response (what a dropped mobile link or a
+        # proxy teardown looks like to the browser), on either HTTP.jl major.
+        served = Dict(k => 0 for k in names)
+        receipt = Channel{String}(1)
+        listener = listen(Sockets.localhost, 0)
+        port = Int(getsockname(listener)[2])
+        reasons = Dict(200 => "OK", 204 => "No Content", 404 => "Not Found",
+            500 => "Internal Server Error", 503 => "Service Unavailable")
+        respond(io, code, body=""; type="text/html") = write(io,
+            "HTTP/1.1 $code $(reasons[code])\r\nContent-Type: $type; charset=utf-8\r\n" *
+            "Content-Length: $(sizeof(body))\r\nConnection: close\r\n\r\n", body)
+        loaded(k) = repr("text/html", h.div("loaded $k"; data_detail=k))
+        function handle(io)
+            request_line = readline(io)
+            while !isempty(strip(readline(io))) end
+            target = split(request_line)[2]
+            path = first(split(target, '?'))
+            path == "/" && return respond(io, 200, page)
+            path == "/htmx.js" && return respond(io, 200, htmx_js; type="application/javascript")
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(target))
+                return respond(io, 204)
+            end
+            startswith(path, "/detail/") || return respond(io, 404)
+            k = path[length("/detail/")+1:end]
+            n = (served[k] += 1)
+            k == "drop" && return n == 1 ? nothing : respond(io, 200, loaded(k))
+            k == "gateway" && return respond(io, n == 1 ? 503 : 200, n == 1 ? "unavailable" : loaded(k))
+            k == "app" && return respond(io, n == 1 ? 500 : 200, n == 1 ? "failed" : loaded(k))
+            # Held past the client's abort; the late write may hit a closed socket.
+            k == "aborted" && (sleep(2); return respond(io, 200, loaded(k)))
+            k == "down" && return nothing
+            respond(io, 404)
+        end
+        acceptor = @async while isopen(listener)
+            io = try accept(listener) catch; break end
+            @async try
+                handle(io)
+            catch err
+                # Only the aborted request's late write may fail.
+                err isa Base.IOError || @error "test server handler failed" exception=(err, catch_backtrace())
+            finally
+                close(io)
+            end
+        end
+        try
+            mktempdir() do profile
+                browser_log = joinpath(profile, "browser.log")
+                browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`;
+                    stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(browser), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        outcome = take!(receipt)
+                        @test startswith(outcome, "/complete?status=passed%3A7")
+                        startswith(outcome, "/complete?status=passed") || @info "Lazy detail retry outcome" outcome served
+                    else
+                        @info "Lazy detail retry timeout" served log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(browser) || kill(browser)
+                    wait(browser)
+                end
+            end
+            # The browser itself resent nothing: every request is the runtime's.
+            @test served == Dict("drop" => 2, "gateway" => 2, "app" => 2, "aborted" => 1, "down" => 3)
+        finally
+            close(listener)
+        end
+    end
+end
