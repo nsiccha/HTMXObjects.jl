@@ -2203,7 +2203,7 @@ prewarm_routes!(base_url, warm)  # post-listen validation
 | `reflect(T)` / `reflect(app)` | In-process route inventory: one `(verb, path, name, doc, params)` NamedTuple per route, mirroring what `route!` registers. `SchemaRoutes` serves this same inventory as JSON |
 | `select_routes(routes; verb, prefix, names, pattern)` | Pure, stateless filter over the inventory (filters combine with AND); also accepts the app type directly. Returns the collection the two functions below consume |
 | `precompile_routes!(root, coll=nothing)` | Pre-listen: `Base.precompile` each resolved handler body + argument parser. Reports `(verb, path, name, precompiled)` per route; bodies never run |
-| `prewarm_routes!(base_url, coll; include_post=false)` | Post-listen: one real request per resolved route. Reports `(verb, path, name, url, status, error)` per route; non-`GET` routes are skipped unless `include_post=true`, failures never throw |
+| `prewarm_routes!(base_url, coll; include_post=false, operations=false)` | Post-listen: one real request per resolved route. Reports `(verb, path, name, url, status, error)` per route; non-`GET` routes are skipped unless `include_post=true`, failures never throw. `operations=true` also drives each route's deferred answer (below) |
 
 Collections also accept ergonomic shorthands wherever they go: concrete
 `"/url"` strings (exact segments beat `{param}` placeholders), `:route_name`
@@ -2211,6 +2211,50 @@ symbols, and `Regex`es over paths. Zero-match entries throw an
 `ArgumentError`, so a stale warm list fails loudly instead of warming
 nothing. `{param}` templates are concretized with boring type samples for
 requests — pass concrete URLs for an exact warm of id-lookup routes.
+
+### Warming deferred answers in a precompile workload
+
+Under `:auto` (see [`OperationPolicy`](@ref)) a slow operation is answered in
+pieces: an HTMX request gets a poller, a page navigation gets a page-load
+placeholder, and their follow-up requests resume the retained operation until
+the final answer. That path runs only once an operation outlasts the grace
+period, and on one thread — every precompile worker runs with one — a
+computation that never yields cannot: the grace timer only fires after it has
+finished. A PrecompileTools workload therefore never compiles the deferred
+path, and the first slow request of a multi-threaded app compiles it on live
+traffic.
+
+`prewarm_routes!(...; operations=true)` closes that gap. After the plain
+request, it drives each requested route again through every transport that
+can defer it — an HTMX request and a page navigation for a `GET`, an HTMX
+request for a mutation opted in with `include_post=true` — and follows the
+placeholder and poller to the final answer, twice: once with each follow-up
+finding the operation still running, once finding it finished. Its requests
+carry a token that only a server in the same process knows; with it the server
+defers every eligible operation at once instead of after the grace period, so
+on one thread every eligible route is deferred whatever its speed. Requests
+without the token are unaffected.
+
+```julia
+@compile_workload begin
+    route!(MyApp())
+    server = serve(; port=0, listenany=true, async=true)
+    try
+        prewarm_routes!(MyApp, "http://127.0.0.1:$(HTTP.port(server))";
+                        operations=true)
+    finally
+        close(server)
+    end
+end
+```
+
+Rows then also carry `transport` (`:plain`, `:htmx` or `:page`) and
+`requests`, the round trips of the two runs: `2` means the route answered at
+once (`@direct`, `:blocking`, a declared final response, or a server in
+another process), `1` is the plain request and `0` a skipped route. With
+several threads, a fast operation can still finish while its first HTMX
+response is assembled and answer at once; warming inside the precompile
+workload, on its single thread, is the deterministic use.
 
 ## In-process dispatch
 
