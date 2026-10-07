@@ -8007,10 +8007,12 @@ end
         end
     end
 
-    calls = Ref(0)
+    # The builder records the keys of every call.
+    built = String[]
+    built_lock = ReentrantLock()
     cache = BackgroundCache{String,Any}(
         keys -> begin
-            calls[] += 1
+            lock(() -> append!(built, keys), built_lock)
             Dict(k => (; state="open", title="Title $k") for k in keys)
         end; batch=50, ttl=600.0, unbuilt=nothing)
     rule = MarkdownRule(r"(\w+)#(\d+)", (m, ctx) -> begin
@@ -8024,12 +8026,15 @@ end
     @test !contains(
         repr("text/html", render_markdown(src; rules=[rule])), "data-state")
 
-    # Both refs decorate once the single batch lands.
+    # Both refs decorate once their batch lands, each key built exactly once.
+    # `batch=50` bounds a call; it does not promise that misses read one after
+    # another share it — with several threads the drain can claim the first
+    # before the second arrives — so the test counts keys, not calls.
     _await_landed() do
-        contains(repr("text/html", render_markdown(src; rules=[rule])),
-            "Title repo#34")
+        html = repr("text/html", render_markdown(src; rules=[rule]))
+        contains(html, "Title repo#12") && contains(html, "Title repo#34")
     end
-    @test calls[] == 1
+    @test sort(lock(() -> copy(built), built_lock)) == ["repo#12", "repo#34"]
     landed = repr("text/html", render_markdown(src; rules=[rule]))
     @test contains(landed, "data-state=\"open\"")
     @test contains(landed, "Title repo#12")
