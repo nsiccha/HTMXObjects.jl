@@ -87,6 +87,8 @@ end
         @fresh @get direct() = surface
         "Catalogue nested in a page-level node"
         @fresh @get nested() = h.section(h.h1("Models"), surface)
+        "Catalogue inside a discovering live region"
+        @fresh @get live() = live_region("/events", surface; discover=true)
     end
     BUILDS[] = 0
     expected = repr("text/html", catalogue())
@@ -97,7 +99,7 @@ end
         @test r.status == 200
         String(r.body)
     end
-    for round in 1:2, path in ("/direct", "/nested")
+    for round in 1:2, path in ("/direct", "/nested", "/live")
         @test contains(body(path), expected)
         @test contains(body(path; headers=["HX-Request" => "true"]), expected)
         for md in (body(path * "?plain"), body(path * "?markdown"),
