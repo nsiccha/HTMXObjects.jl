@@ -28,7 +28,8 @@ using HTMXObjects
 import HTTP
 
 export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
-    WarmupPrecompileApp, WarmupLiveApp, _WARMUP_PRECOMPILE_CALLS, TypedApp,
+    WarmupPrecompileApp, WarmupLiveApp, WarmupOperationApp,
+    _WARMUP_PRECOMPILE_CALLS, TypedApp,
     NothingDefaultApp, RecordApp, ParamApp, ParamBlockApp,
     ParamRequiredApp, ParamPostApp, MountSubRoutes, MountRootApp,
     AppDataApp, AppDataSingletonApp, PrefixDefaultApp, HeaderApp,
@@ -116,6 +117,18 @@ end
     @get index() = h.p("home")
     @get item(id::Int) = h.p("item $id")
     @post submit(; name="world") = h.p("hi $name")
+end
+
+# `prewarm_routes!(...; operations=true)`: `:auto` reads, a mutation and a
+# `@direct` read, under page chrome so that a navigation can defer too. With
+# several threads a fast operation may finish before its first HTMX response is
+# assembled and answer at once, so the HTMX transports use work that yields.
+@htmx struct WarmupOperationApp
+    __page__(body) = htmx(h.main(body); pico_version=nothing)
+    @get read() = h.p("read")
+    @get slow() = (sleep(0.3); h.p("slow"))
+    @post submit(; name="world") = (sleep(0.3); h.p("hi $name"))
+    @direct @get direct() = h.p("direct")
 end
 
 # A POST route that declares a kwarg beside one that declares nothing at all —
@@ -10134,6 +10147,64 @@ end
         # The Type form resolves shorthands against the inventory.
         typed = prewarm_routes!(WarmupLiveApp, base, [:submit]; include_post=true)
         @test length(typed) == 1 && typed[1].status == 200
+    finally
+        terminate()
+    end
+end
+
+@testitem "warmup - prewarm token removes the grace period" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: _operation_grace_period, _operation_prewarm_token
+    request(headers...) = HTTP.Request("GET", "/", collect(Pair{String,String}, headers))
+    policy = OperationPolicy()
+    @test _operation_grace_period(policy, request()) == 0.1
+    token = _operation_prewarm_token()
+    @test occursin(r"^[0-9a-f]{32}$", token)
+    @test _operation_prewarm_token() == token
+    # Only this process's token defers: any other value is an ordinary request.
+    @test _operation_grace_period(policy, request("HTMXO-Prewarm" => token)) == 0.0
+    @test _operation_grace_period(policy, request("HTMXO-Prewarm" => "0"^32)) == 0.1
+    @test _operation_grace_period(policy, request("HTMXO-Prewarm" => "")) == 0.1
+end
+
+@testitem "warmup - prewarm drives deferred operation transports" setup=[HTMXOTestFixtures, HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server] begin
+    route!(WarmupOperationApp())
+    port = free_port()
+    serve(; port, async=true)
+    try
+        base = "http://127.0.0.1:$port"
+        # With several threads, the first deferred answer of a cold process
+        # compiles for longer than a short operation runs, so it may settle at
+        # once: warm the code, then assert on the second run.
+        prewarm_routes!(WarmupOperationApp, base; operations=true, include_post=true)
+        rows = prewarm_routes!(WarmupOperationApp, base; operations=true,
+                               include_post=true)
+        @test all(r -> r.status == 200 && r.error === nothing, rows)
+        by = Dict((r.name, r.transport) => r for r in rows)
+        @test Set(keys(by)) == Set([
+            (:read, :plain), (:read, :htmx), (:read, :page),
+            (:slow, :plain), (:slow, :htmx), (:slow, :page),
+            (:submit, :plain), (:submit, :htmx),
+            (:direct, :plain), (:direct, :htmx), (:direct, :page)])
+        @test all(n -> by[(n, :plain)].requests == 1, (:read, :slow, :submit, :direct))
+        # Each transport runs twice; a deferred answer adds at least one
+        # follow-up (placeholder or poll) to each run.
+        @test by[(:slow, :page)].requests >= 4
+        @test by[(:slow, :htmx)].requests >= 4
+        @test by[(:submit, :htmx)].requests >= 4
+        @test by[(:read, :page)].requests >= 2
+        @test by[(:read, :htmx)].requests >= 2
+        # On one thread — a precompile worker — no operation can finish before
+        # its answer is assembled: every eligible route defers however fast.
+        if Threads.nthreads(:default) + Threads.nthreads(:interactive) == 1
+            @test by[(:read, :page)].requests >= 4
+            @test by[(:read, :htmx)].requests >= 4
+        end
+        # `@direct` answers at once on every transport.
+        @test by[(:direct, :htmx)].requests == 2
+        @test by[(:direct, :page)].requests == 2
+        # The default rows keep their shape.
+        plain = prewarm_routes!(WarmupOperationApp, base, [:read])
+        @test keys(only(plain)) == (:verb, :path, :name, :url, :status, :error)
     finally
         terminate()
     end

@@ -7781,8 +7781,36 @@ _operation_rich_page_request(req::HTTP.Request) =
 # DO Pending handle. The extension returns a fast value directly; only a
 # timeout becomes a Treebars poller. Keep this outside OperationPolicy's struct
 # shape so the public type remains Revise-safe on Julia 1.10.
-_operation_grace_period(policy::OperationPolicy, req::HTTP.Request) =
+#
+# A `prewarm_routes!(...; operations=true)` request gets no grace at all, so an
+# eligible operation is deferred at once (poller, page-load placeholder,
+# retained poll entry). On one thread — every precompile worker — a computation
+# that never yields cannot be observed unfinished, so without this that path
+# would never run there.
+function _operation_grace_period(policy::OperationPolicy, req::HTTP.Request)
+    _operation_prewarm_request(req) && return 0.0
     policy.mode === :auto && !_operation_poll_request(req) ? 0.1 : 0.0
+end
+
+# The process-local secret a `prewarm_routes!(...; operations=true)` request
+# carries in `HTMXO-Prewarm`. Only a server in the same process knows it, so no
+# outside client can change how its requests are answered.
+const _OPERATION_PREWARM_TOKEN = Ref("")
+const _operation_prewarm_lock = ReentrantLock()
+
+function _operation_prewarm_token()
+    lock(_operation_prewarm_lock) do
+        isempty(_OPERATION_PREWARM_TOKEN[]) &&
+            (_OPERATION_PREWARM_TOKEN[] =
+                bytes2hex(Random.rand(Random.RandomDevice(), UInt8, 16)))
+        _OPERATION_PREWARM_TOKEN[]
+    end
+end
+
+function _operation_prewarm_request(req::HTTP.Request)
+    token = _OPERATION_PREWARM_TOKEN[]
+    !isempty(token) && HTTP.header(req, "HTMXO-Prewarm", "") == token
+end
 
 # A background FRESH operation: one invocation of a fresh route (`@fresh`, or
 # a mutation verb), started off the request task. It is the fresh counterpart
@@ -8613,9 +8641,12 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
-    probe = _operation_ready_probe(policy,
-        value -> _finish_operation_poll(token, value), entry.started;
-        replace_page_load)
+    # A prewarm follow-up takes the path of a poll whose operation is still
+    # running even when it has finished: on one thread it always has.
+    probe = _operation_prewarm_request(req) ? (ready=false, value=nothing) :
+        _operation_ready_probe(policy,
+            value -> _finish_operation_poll(token, value), entry.started;
+            replace_page_load)
     probe.ready && return _operation_page_runtime(req, probe.value)
     # A follow-up poll already carries its marker; an attach promotes its
     # marker-free URL to one for the live poller that the attach response
@@ -10440,19 +10471,110 @@ end
 _prewarm_base(base_url::AbstractString) = rstrip(String(base_url), '/')
 
 # One concrete request. Never throws: transport failures are data.
-function _prewarm_request(verb::Symbol, url::AbstractString, timeout::Real)
+function _prewarm_request(verb::Symbol, url::AbstractString, timeout::Real;
+        headers=Pair{String,String}[])
     try
-        resp = HTTP.request(string(verb), url; readtimeout=Int(timeout),
+        resp = HTTP.request(string(verb), url, headers; readtimeout=Int(timeout),
                             connect_timeout=10, status_exception=false,
                             retry=false)
-        (; status=resp.status, error=nothing)
+        (; status=resp.status, error=nothing, body=resp.body)
     catch err
-        (; status=nothing, error=sprint(showerror, err))
+        (; status=nothing, error=sprint(showerror, err), body=nothing)
     end
 end
 
+# The transports a browser can receive a deferred answer through: an HTMX
+# request, and — for a read — a page navigation.
+_prewarm_transports(verb::Symbol) = verb === :GET ? (:htmx, :page) : (:htmx,)
+
+# How a browser asks through each transport. A mutation's HTMX request also
+# declares the swap its poller would live in (`_operation_mutation_pollable`).
+# The first request carries the prewarm token (`_operation_grace_period`); a
+# follow-up carries it only when it must find the operation still running
+# (`_execute_operation_resume`).
+_prewarm_headers(::Val{:page}, ::Val, token) =
+    ["Accept" => "text/html", "HTMXO-Prewarm" => token]
+_prewarm_headers(::Val{:htmx}, ::Val{:GET}, token) =
+    ["HX-Request" => "true", "HTMXO-Prewarm" => token]
+_prewarm_headers(::Val{:htmx}, ::Val, token) =
+    ["HX-Request" => "true", "HTMXO-Swap" => "innerHTML", "HTMXO-Prewarm" => token]
+_prewarm_headers(::Val{:htmx}, ::Val{:GET}, ::Nothing) = ["HX-Request" => "true"]
+
+# The request a browser makes next for a deferred answer: the `hx-get` of the
+# page-load placeholder or of the live poller, both of which name the retained
+# operation. A final answer names none.
+function _prewarm_next(body::AbstractString)
+    m = match(r"hx-get=\"([^\"]*__htmxo_operation=[^\"]*)\"", body)
+    m === nothing ? nothing : replace(m[1], "&amp;" => "&")
+end
+
+# Resolve a follow-up URL (an absolute path, prefix included) against the
+# origin of the URL that produced it.
+function _prewarm_resolve(url::AbstractString, next::AbstractString)
+    occursin(r"^https?://", next) && return String(next)
+    origin = match(r"^https?://[^/?#]*", url)
+    (origin === nothing ? "" : origin.match) * next
+end
+
+# Drive one route through `transport` the way a browser does when the answer
+# is deferred: request it, then follow the page-load placeholder and the live
+# poller until the final answer. The prewarm token makes a server in this
+# process defer every eligible operation at once, so the deferred path runs
+# even where a grace period could never expire (one thread). Two
+# passes: the first's follow-ups find the operation still running, the
+# second's find it finished — the two polls a slow operation receives.
+# `requests` counts the round trips of both; 2 means the route answered at once.
+function _prewarm_transport(verb::Symbol, url::AbstractString,
+        transport::Symbol, timeout::Real)
+    token = _operation_prewarm_token()
+    running = _prewarm_pass(verb, url, transport, timeout, token, token)
+    _prewarm_ok(running) || return running
+    finished = _prewarm_pass(verb, url, transport, timeout, token, nothing)
+    (; finished.status, requests=running.requests + finished.requests,
+       finished.error)
+end
+
+_prewarm_ok(r) = r.error === nothing && r.status !== nothing && 200 <= r.status < 300
+
+function _prewarm_pass(verb::Symbol, url::AbstractString, transport::Symbol,
+        timeout::Real, token::String, follow_token)
+    deadline = time() + timeout
+    r = _prewarm_request(verb, url, timeout;
+                         headers=_prewarm_headers(Val(transport), Val(verb), token))
+    requests = 1
+    pause = 0.05
+    while _prewarm_ok(r)
+        next = _prewarm_next(String(r.body))
+        next === nothing && break
+        time() < deadline || return (; status=r.status, requests,
+            error="no final answer within $(timeout)s after $requests requests")
+        sleep(pause)
+        pause = min(1.0, 2pause)
+        r = _prewarm_request(:GET, _prewarm_resolve(url, next), timeout;
+                             headers=_prewarm_headers(Val(:htmx), Val(:GET), follow_token))
+        requests += 1
+    end
+    (; status=r.status, requests, error=r.error)
+end
+
+# A prewarm result row, plus — with `operations=true` — one row per transport
+# that can defer the answer of a requested route.
+function _prewarm_rows(row::NamedTuple, operations::Bool, timeout::Real)
+    operations || return NamedTuple[row]
+    requested = row.status !== nothing
+    rows = NamedTuple[merge(row, (; transport=:plain,
+                                    requests=isempty(row.url) ? 0 : 1))]
+    requested || return rows
+    for transport in _prewarm_transports(row.verb)
+        r = _prewarm_transport(row.verb, row.url, transport, timeout)
+        push!(rows, merge(row, (; status=r.status, error=r.error, transport,
+                                  requests=r.requests)))
+    end
+    rows
+end
+
 """
-    prewarm_routes!(base_url, coll; include_post=false, timeout=45) -> Vector{NamedTuple}
+    prewarm_routes!(base_url, coll; include_post=false, timeout=45, operations=false) -> Vector{NamedTuple}
     prewarm_routes!(::Type{T}, base_url, coll=nothing; kwargs...) -> Vector{NamedTuple}
 
 Validate selected routes post-listen with real HTTP requests — the live half
@@ -10481,9 +10603,46 @@ and entries that are already absolute (`"http://…"`) are requested as-is.
 `:name` symbols and `Regex`es need the inventory to resolve, so they require
 the `(::Type{T}, base_url, coll)` form — or a `select_routes` descriptor
 vector, which is the recommended shape: one collection for both halves.
+
+`operations=true` also warms the deferred answer of each requested route. A
+slow operation is answered in pieces (see [`OperationPolicy`](@ref)): a poller
+for an HTMX request, a page-load placeholder for a page navigation, then the
+polls and the final answer. That path runs only once an operation outlasts the
+grace period, which on one thread — every precompile worker — a computation
+that never yields cannot do, so without this a PrecompileTools workload never
+compiles it and the first slow request on live traffic does. With
+`operations=true`, every requested route is driven again through each transport
+that can defer it — an HTMX request and a page navigation for a `GET`, an HTMX
+request for an opted-in mutation — and the placeholder and poller are followed
+to the final answer. Each transport runs twice, so that a follow-up finds the
+operation once still running and once finished (an opted-in mutation therefore
+runs twice more per transport). These requests carry a token only this
+process's server knows, which makes it defer every eligible operation at once
+instead of after the grace period; no other request is affected. On one thread
+— a precompile worker — every eligible route is therefore deferred and
+followed whatever its speed. With several threads, an operation that finishes
+while its first HTMX response is being assembled still answers at once. Rows
+then gain `transport` (`:plain`, `:htmx`, `:page`) and `requests`, the round
+trips of both runs: `2` means the route answered at once (a `@direct` or
+`:blocking` route, a declared final response, a server in another process,
+which does not know the token, or that race), `1` a plain request, and `0` a
+skipped route.
+
+```julia
+@compile_workload begin
+    route!(MyApp())
+    server = serve(; port=0, listenany=true, async=true)
+    try
+        prewarm_routes!(MyApp, "http://127.0.0.1:\$(HTTP.port(server))";
+                        operations=true)
+    finally
+        close(server)
+    end
+end
+```
 """
 function prewarm_routes!(base_url::AbstractString, coll;
-        include_post::Bool=false, timeout::Real=45)
+        include_post::Bool=false, timeout::Real=45, operations::Bool=false)
     base = _prewarm_base(base_url)
     # Concrete entries need no inventory: plain descriptors and URL strings.
     # Anything else names the Type-taking form explicitly.
@@ -10494,11 +10653,14 @@ function prewarm_routes!(base_url::AbstractString, coll;
             url = startswith(s, "http://") || startswith(s, "https://") ? s :
                   base * (startswith(s, "/") ? s : "/" * s)
             r = _prewarm_request(:GET, url, timeout)
-            push!(out, (; verb=:GET, path=_url_path_only(s), name=:index,
-                         url, status=r.status, error=r.error))
+            append!(out, _prewarm_rows((; verb=:GET, path=_url_path_only(s),
+                name=:index, url, status=r.status, error=r.error),
+                operations, timeout))
         elseif entry isa NamedTuple && (:verb in keys(entry)) &&
                 (:path in keys(entry)) && (:name in keys(entry))
-            push!(out, _prewarm_descriptor(base, entry, include_post, timeout))
+            append!(out, _prewarm_rows(
+                _prewarm_descriptor(base, entry, include_post, timeout),
+                operations, timeout))
         else
             throw(ArgumentError(
                 "prewarm_routes!(base_url, coll) takes reflect() descriptors " *
@@ -10511,10 +10673,16 @@ function prewarm_routes!(base_url::AbstractString, coll;
 end
 
 function prewarm_routes!(::Type{T}, base_url::AbstractString, coll=nothing;
-        include_post::Bool=false, timeout::Real=45) where {T}
+        include_post::Bool=false, timeout::Real=45,
+        operations::Bool=false) where {T}
     base = _prewarm_base(base_url)
-    [_prewarm_descriptor(base, route, include_post, timeout)
-     for (_owner, route) in _resolve_collection(T, coll)]
+    out = NamedTuple[]
+    for (_owner, route) in _resolve_collection(T, coll)
+        append!(out, _prewarm_rows(
+            _prewarm_descriptor(base, route, include_post, timeout),
+            operations, timeout))
+    end
+    out
 end
 
 function _prewarm_descriptor(base::AbstractString, route::NamedTuple,
