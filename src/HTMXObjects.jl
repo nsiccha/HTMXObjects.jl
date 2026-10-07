@@ -2242,18 +2242,23 @@ function _check_assets_mode(assets)
     return nothing
 end
 
+# The same-origin mount a vendor `assets` mode serves from.
+_vendor_prefix(assets) = assets === :vendor ? "/vendor" : rstrip(assets, '/')
+
 # One head-asset URL for the requested `assets` mode. `:cdn` keeps the
 # passed-through CDN URL untouched; `:vendor` (or a custom mount-prefix
 # string) serves the pinned file same-origin. A non-pinned version under
-# vendor mode is a loud error, never a silent CDN fallback.
-function _head_asset_src(pkg::Symbol, version, cdn_src, assets)
+# vendor mode is a loud error, never a silent CDN fallback. `versioned`
+# (a linked runtime) appends the pin, so the browser may cache the file
+# for good.
+function _head_asset_src(pkg::Symbol, version, cdn_src, assets; versioned::Bool=false)
     assets === :cdn && return cdn_src
     _check_assets_mode(assets)
-    prefix = assets === :vendor ? "/vendor" : rstrip(assets, '/')
     spec = _VENDOR_ASSETS[pkg]
     version == spec.version ||
         error("htmx(...; assets=:vendor): vendored $pkg is pinned at $(spec.version), got $version — pass the pinned version or stay on assets=:cdn.")
-    return prefix * "/" * spec.file
+    src = _vendor_prefix(assets) * "/" * spec.file
+    return versioned ? src * "?v=" * spec.version : src
 end
 
 # The head node for one asset: pico is a stylesheet, every other vendored
@@ -2293,19 +2298,56 @@ The first call downloads the pinned npm tarballs from Artifacts.toml (one
 are served with [`staticfiles`](@ref)-style content types. A custom
 `mountdir` (or a second mount elsewhere) pairs with the matching
 `assets="/<mountdir>"` prefix on [`htmx`](@ref)/[`pico_page`](@ref).
+
+The same mount also serves HTMXObjects' own page runtime at
+`/<mountdir>/htmxo/<name>.css|js`, which `htmx(...; runtime=:linked)` links
+instead of inlining it. Every response carries an `ETag`; a request whose
+`?v=` names the current version (the URLs a linked shell emits) is cacheable
+for a year as `immutable`, any other revalidates (`no-cache`). A
+`Cache-Control` in `headers` wins over both.
 """
 function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
     prefix = strip(mountdir, '/')
+    route(file) = isempty(prefix) ? "/$file" : "/$prefix/$file"
     for pkg in keys(_VENDOR_ASSETS)
         spec = _VENDOR_ASSETS[pkg]
         path = _vendor_file(pkg)
         body = read(path)
-        route = isempty(prefix) ? "/$(spec.file)" : "/$prefix/$(spec.file)"
-        handler = _ -> _file_response(path, body, headers)
-        _register_get_route!(route, handler)
+        handler = req -> _vendor_file_response(req, path, body, spec.version, headers)
+        _register_get_route!(route(spec.file), handler)
+    end
+    # The runtime is rendered per request, so a Revise edit or a Treebars
+    # extension loaded after this call is served as the shell links it.
+    for name in keys(_runtime_blocks())
+        file = _runtime_file(name)
+        handler = req -> let text = _runtime_text(name)
+            _vendor_file_response(req, file, text, _runtime_version(text), headers)
+        end
+        _register_get_route!(route("htmxo/" * file), handler)
     end
     return nothing
 end
+
+# One vendor-mount file. The version doubles as the ETag; `?v=<version>`
+# marks the URL as content-addressed, so the browser keeps it without
+# revalidating until the shell links a new version.
+function _vendor_file_response(req, path, body, version, headers)
+    etag = "\"$version\""
+    response = _etag_matches(HTTP.header(req, "If-None-Match", ""), etag) ?
+        HTTP.Response(304, headers; body=UInt8[]) : _file_response(path, body, headers)
+    HTTP.setheader(response, "ETag" => etag)
+    HTTP.hasheader(response, "Cache-Control") ||
+        HTTP.setheader(response, "Cache-Control" =>
+            _requested_version(req) == version ?
+                "public, max-age=31536000, immutable" : "no-cache")
+    return response
+end
+
+_requested_version(req) = get(HTTP.queryparams(HTTP.URI(req.target)), "v", nothing)
+
+_etag_matches(if_none_match, etag) =
+    any(t -> t == "*" || t == etag || t == "W/" * etag,
+        strip.(split(if_none_match, ',')))
 
 # The pinned file inside its (lazily downloaded) artifact.
 _vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[pkg].relpath)
@@ -2367,8 +2409,85 @@ function vendor_head(base::AbstractString="vendor"; packages=(:htmx,))
           for pkg in pkgs)
 end
 
+# --- Page runtime: inline, or linked from the vendor mount ---
+#
+# The `htmx()` shell carries HTMXObjects' own CSS/JS runtime, plus the
+# Treebars poll assets while that extension is loaded. Each block has a
+# stable name and a producer returning ONE attribute-free `<style>`/`<script>`
+# of `Raw` text, so the same bytes ship either inline (the default) or as the
+# file `vendorfiles` serves at `<mount>/htmxo/<name>.<ext>`. The shell decides
+# which blocks a page carries; this table only names them. Producers resolve
+# at call time, so the file may name functions defined further down.
+_runtime_blocks() = (
+    preload_runtime = (:js, preload_runtime_js),
+    theme = (:css, htmxo_theme),
+    pico_bridge = (:css, pico_bridge),
+    request_feedback_style = (:css, request_feedback_style),
+    request_feedback_script = (:js, request_feedback_script),
+    compose_box_styles = (:css, compose_box_styles),
+    compose_box_script = (:js, compose_box_script),
+    live_thread_styles = (:css, live_thread_styles),
+    live_thread_script = (:js, live_thread_script),
+    utility_styles = (:css, htmxo_utility_styles),
+    tabset_styles = (:css, tabset_styles),
+    comparison_styles = (:css, comparison_styles),
+    editor_styles = (:css, editor_styles),
+    comparison = (:js, comparison_js),
+    stream_probe = (:js, stream_probe_script),
+    live_region = (:js, live_region_script),
+    treebars_styles = (:css, () -> _polling_page_asset(1)),
+    treebars_script = (:js, () -> _polling_page_asset(2)),
+    live_refresh = (:js, live_refresh_script),
+    auto_terminal = (:js, auto_terminal_script),
+    mutation_poll = (:js, mutation_poll_script),
+)
+
+_runtime_block(name::Symbol) = last(getfield(_runtime_blocks(), name))()
+_runtime_file(name::Symbol) = string(name, '.', first(getfield(_runtime_blocks(), name)))
+
+_runtime_tag(::Val{:css}) = :style
+_runtime_tag(::Val{:js}) = :script
+
+# The block's text — exactly what the inline element holds. Any other shape
+# would render differently inline than linked, so it is refused loudly.
+function _runtime_text(name::Symbol)
+    node = _runtime_block(name)
+    expected = _runtime_tag(Val(first(getfield(_runtime_blocks(), name))))
+    node isa Node && HTMX.tag(node) === expected && isempty(HTMX.attrs(node)) &&
+        all(child -> child isa Raw, HTMX.children(node)) || throw(ArgumentError(
+            "page runtime block $(repr(name)) must be an attribute-free <$expected> of Raw text; got $(repr(MIME"text/html"(), node))"))
+    join(String(child) for child in HTMX.children(node))
+end
+
+# Content-addressed: any change to a block's text changes its URL.
+_runtime_version(text::AbstractString) = string(hash(text); base=16)
+
+# One block as the shell carries it: the element itself (inline), or a link
+# to its versioned file on the vendor mount. The marker lets a static export
+# put the element back (`_static_walk`), so exported pages stay standalone.
+_runtime_head(name::Symbol, ::Nothing) = _runtime_block(name)
+function _runtime_head(name::Symbol, mount::AbstractString)
+    src = string(mount, "/htmxo/", _runtime_file(name), "?v=", _runtime_version(_runtime_text(name)))
+    _runtime_link(Val(first(getfield(_runtime_blocks(), name))), src, name)
+end
+_runtime_link(::Val{:css}, src, name) = h.link(rel="stylesheet", href=src, data_htmxo_runtime=string(name))
+_runtime_link(::Val{:js}, src, name) = h.script(src=src, data_htmxo_runtime=string(name))
+
+_runtime_heads(mount, names...) = map(name -> _runtime_head(name, mount), names)
+
+# `runtime` → the mount the shell links its runtime from, or `nothing` to
+# inline it. Linking needs a same-origin mount, which `assets` names.
+_runtime_mount(runtime, assets) = _runtime_mount(Val(runtime), assets)
+_runtime_mount(::Val{:inline}, assets) = nothing
+function _runtime_mount(::Val{:linked}, assets)
+    assets === :cdn && error("htmx(...; runtime=:linked) serves the page runtime from the vendor mount, which `assets` names — pass assets=:vendor or a mount path (paired with vendorfiles), or keep runtime=:inline.")
+    _vendor_prefix(assets)
+end
+_runtime_mount(::Val{R}, assets) where {R} =
+    error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
+
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, feedback=true, thread=true, extra_head=())
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=())
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -2401,6 +2520,22 @@ A string mounts elsewhere: `assets="/static/vendor"` pairs with
 prefix (`assets="assets/vendor"`) addresses the files relative to the page —
 for a static bundle whose copies [`copy_vendorfiles`](@ref) wrote.
 
+`runtime=:linked` moves HTMXObjects' own page runtime — the CSS and JS the
+shell otherwise inlines into every page (request feedback, live threads,
+tabs, comparison/master-detail, stream probe, live regions, and the Treebars
+poll assets while that extension is loaded) — out of the page into files on
+the same vendor mount, e.g. `<mount>/htmxo/live_region.js?v=<hash>`. The
+`?v=` is the content version, and the vendored library URLs gain their pins
+the same way, so a browser keeps the whole head for good and a changed
+runtime is a new URL. It needs a vendor mount — `assets=:vendor` or a mount
+path, served by [`vendorfiles`](@ref) — and errors under `assets=:cdn`. Each
+block keeps its place and its own element, so load order and script
+isolation are unchanged. A static export or recording ([`static_transform`](@ref))
+puts the runtime back inline, so exported pages stay standalone. Behind a
+path-stripping proxy, pass the request mount with the prefix:
+`assets=__prefix__ * "/vendor"` in a root `__page__`. The default
+`runtime=:inline` leaves the page byte-identical.
+
 Returns an [`HTMLDocument`](@ref) — the `<html>` element together with the
 `<!DOCTYPE html>` preamble, so the page renders in standards mode.
 """
@@ -2414,6 +2549,7 @@ function htmx(args...;
     preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
     assets              = :cdn,
+    runtime             = :inline,
     feedback             = true,
     compose              = true,
     thread               = true,
@@ -2424,17 +2560,19 @@ function htmx(args...;
     treebars_assets     = true,
 )
     _check_assets_mode(assets)
+    mount = _runtime_mount(runtime, assets)
+    versioned = !isnothing(mount)
     cdn = []
-    isnothing(htmx_version)        || push!(cdn, _head_asset_node(Val(:htmx), _head_asset_src(:htmx, htmx_version, "https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js", assets)))
-    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, _head_asset_node(Val(:sse), _head_asset_src(:sse, sse_version, "https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js", assets)))
-    isnothing(htmx_version) || isnothing(ws_version) || push!(cdn, _head_asset_node(Val(:ws), _head_asset_src(:ws, ws_version, "https://cdn.jsdelivr.net/npm/htmx-ext-ws@$(ws_version)/dist/ws.min.js", assets)))
+    isnothing(htmx_version)        || push!(cdn, _head_asset_node(Val(:htmx), _head_asset_src(:htmx, htmx_version, "https://cdn.jsdelivr.net/npm/htmx.org@$(htmx_version)/dist/htmx.min.js", assets; versioned)))
+    isnothing(htmx_version) || isnothing(sse_version) || push!(cdn, _head_asset_node(Val(:sse), _head_asset_src(:sse, sse_version, "https://cdn.jsdelivr.net/npm/htmx-ext-sse@$(sse_version)/dist/sse.min.js", assets; versioned)))
+    isnothing(htmx_version) || isnothing(ws_version) || push!(cdn, _head_asset_node(Val(:ws), _head_asset_src(:ws, ws_version, "https://cdn.jsdelivr.net/npm/htmx-ext-ws@$(ws_version)/dist/ws.min.js", assets; versioned)))
     # The extension registers itself on load, so it must follow htmx.
     preload = !isnothing(htmx_version) && !isnothing(preload_version)
     preload && push!(cdn,
-        _head_asset_node(Val(:preload), _head_asset_src(:preload, preload_version, "https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js", assets)),
-        preload_runtime_js())
-    isnothing(hyperscript_version) || push!(cdn, _head_asset_node(Val(:hyperscript), _head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets)))
-    isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets)))
+        _head_asset_node(Val(:preload), _head_asset_src(:preload, preload_version, "https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js", assets; versioned)),
+        _runtime_head(:preload_runtime, mount))
+    isnothing(hyperscript_version) || push!(cdn, _head_asset_node(Val(:hyperscript), _head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets; versioned)))
+    isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html = preload ? h.html(; hx_ext="preload") : h.html
@@ -2447,34 +2585,32 @@ function htmx(args...;
             # Theme defaults: declared at zero specificity inside `@layer htmxo`
             # so any subsequent `:root { --htmxo-...: ... }` (host-supplied or
             # via `pico_bridge` / `vitepress_bridge`) wins automatically.
-            htmxo_theme(),
-            (isnothing(pico_version) ? () : (pico_bridge(),))...,
-            (feedback ? request_feedback() : ())...,
-            (compose ? compose_box_assets() : ())...,
-            (thread ? live_thread_assets() : ())...,
+            _runtime_head(:theme, mount),
+            (isnothing(pico_version) ? () : _runtime_heads(mount, :pico_bridge))...,
+            (feedback ? _runtime_heads(mount, :request_feedback_style, :request_feedback_script) : ())...,
+            (compose ? _runtime_heads(mount, :compose_box_styles, :compose_box_script) : ())...,
+            (thread ? _runtime_heads(mount, :live_thread_styles, :live_thread_script) : ())...,
             # Thin-hook bootstrap: load the relocated overlay bundle from
             # `KB_ORIGIN/overlay/bar.js` instead of inlining `<style>`+`<script>`.
             # The bar is `position:fixed`, so a deferred async load has no
             # layout-shift to guard (no skeleton/placeholder needed).
             (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
-            htmxo_utility_styles(),
-            tabset_styles(),
-            comparison_styles(),
-            editor_styles(),
-            # Comparison panes and master/detail rows share the lazy runtime.
-            comparison_js(),
-            # A refused stream hides its HTTP status: this probe lets an auth
-            # gateway's `HX-Refresh` reload the page instead of the stream
-            # retrying forever. Inert until a stream fails.
-            stream_probe_script(),
-            # Discover-mode live regions keep one reconnecting stream behind
-            # this runtime; inert on pages without one.
-            live_region_script(),
+            _runtime_heads(mount, :utility_styles, :tabset_styles,
+                :comparison_styles, :editor_styles,
+                # Comparison panes and master/detail rows share the lazy runtime.
+                :comparison,
+                # A refused stream hides its HTTP status: this probe lets an auth
+                # gateway's `HX-Refresh` reload the page instead of the stream
+                # retrying forever. Inert until a stream fails.
+                :stream_probe,
+                # Discover-mode live regions keep one reconnecting stream behind
+                # this runtime; inert on pages without one.
+                :live_region)...,
             # Poller quietness by default: the Treebars stylesheet + script
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
             # A manual install alongside stays harmless but redundant.
-            (_operation_page_assets(treebars_assets))...,
+            _runtime_heads(mount, _operation_page_blocks(treebars_assets)...)...,
             extra_head...,
         ),
         body(args...),
@@ -2482,7 +2618,7 @@ function htmx(args...;
 end
 
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn)
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -2496,12 +2632,13 @@ with
     # or with extras:
     __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
 
-`assets` forwards to [`htmx`](@ref): `pico_page(content; assets=:vendor,
-pico_version=HTMXObjects._PICO_VERSION)` renders the offline page (vendor
-mode needs pico at its exact pin, not the floating `"2"` default).
+`assets` and `runtime` forward to [`htmx`](@ref): `pico_page(content;
+assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
+page (vendor mode needs pico at its exact pin, not the floating `"2"`
+default), and adding `runtime=:linked` makes its whole head cacheable.
 """
-pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets)
+pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime)
 
 # --- Route registration and recording ---
 
@@ -4226,6 +4363,7 @@ Walk a Node tree and make it static-safe under `rules`:
   routes) or names one of `rules.unservable` (kwargs routes)
 - Mark affected elements with `data-static-disabled` and `disabled`, or —
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
+- Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline
 
 Non-Node values pass through unchanged.
 """
@@ -4265,6 +4403,10 @@ _rewrite_hx_url(url::AbstractString, record_base::AbstractString) =
     _rewrite_static_url(url, isempty(record_base) ? "" : (rstrip(record_base, '/') * "/hx"))
 
 function _static_walk(node::Node, rules::_StaticRules)
+    # A linked page-runtime block goes back inline, so an exported page needs
+    # nothing from the live vendor mount (`htmx(...; runtime=:linked)`).
+    runtime = get(HTMX.attrs(node), Symbol("data-htmxo-runtime"), nothing)
+    isnothing(runtime) || return _runtime_block(Symbol(runtime))
     spec = rules.spec
     new_attrs = copy(HTMX.attrs(node))
     # Set when the element carries a request a static server cannot answer.
@@ -8239,6 +8381,13 @@ function _polling_page_assets()
     impl = _polling_page_assets_impl[]
     isnothing(impl) && return ()
     impl()
+end
+
+# One of the extension's `(stylesheet, script)` poll assets, as a runtime block.
+function _polling_page_asset(i::Int)
+    assets = _polling_page_assets()
+    isempty(assets) && error("the Treebars poll assets are served only while the Treebars extension is loaded (`using Treebars`)")
+    assets[i]
 end
 
 # Extension seam: hang a route execution's progress subtree under a
@@ -15389,13 +15538,12 @@ auto_terminal_script() = h.script(Raw(raw"""
 # fallback answers bare already), and the shell must stay byte-for-byte
 # poller-free (the `treebars_assets=false` opt-out and every ext-absent shell
 # are unchanged, so `htmx page shells auto-install Treebars assets` still
-# holds).
-function _operation_page_assets(treebars_assets::Bool)
+# holds). Names `_runtime_blocks` entries, so the shell inlines or links them.
+function _operation_page_blocks(treebars_assets::Bool)
     treebars_assets || return ()
-    assets = _polling_page_assets()
-    isempty(assets) ? assets :
-        (assets..., live_refresh_script(), auto_terminal_script(),
-         mutation_poll_script())
+    isempty(_polling_page_assets()) ? () :
+        (:treebars_styles, :treebars_script, :live_refresh, :auto_terminal,
+         :mutation_poll)
 end
 
 """
