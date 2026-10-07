@@ -55,7 +55,7 @@ export Verb
 export OperationContext, RootProvider, RootRetention, OperationPolicy
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
-    invalidate_key!, live_fragment, live_region, live_region_script
+    invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
 export semantic_descriptor, operation_form, semantic_app, internal_input
 
 using DynamicObjects, HTTP, Tables
@@ -2371,7 +2371,9 @@ Pass `nothing` to any version kwarg to skip that library.
 loads only alongside the shell's own htmx (an extension must follow htmx).
 `ws_version` is htmx's WebSocket extension, which `@ws` routes need on the
 client (a `ws-connect` element); it loads only alongside the shell's own
-htmx for the same reason.
+htmx for the same reason. The shell always carries [`stream_probe_script`](@ref),
+so a ws or sse stream refused by an auth gateway reloads the page on the
+gateway's `HX-Refresh` instead of reconnecting forever.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
 Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
@@ -2456,6 +2458,10 @@ function htmx(args...;
             editor_styles(),
             # Comparison panes and master/detail rows share the lazy runtime.
             comparison_js(),
+            # A refused stream hides its HTTP status: this probe lets an auth
+            # gateway's `HX-Refresh` reload the page instead of the stream
+            # retrying forever. Inert until a stream fails.
+            stream_probe_script(),
             # Discover-mode live regions keep one reconnecting stream behind
             # this runtime; inert on pages without one.
             live_region_script(),
@@ -5152,12 +5158,22 @@ function _resume_only_plain_get(req, allow)
     response isa _NoGetRoute ? HTTP.Response(405, ["Allow" => allow]) : response
 end
 
+# The client's `stream_probe_script` asks a stream route whether the page's
+# credentials still reach it after a refused handshake. Only the response
+# headers matter (an auth gateway in front answers with `HX-Refresh`), so a
+# stream route answers the probe with an empty 204 before any upgrade,
+# argument parsing or stream start.
+const _STREAM_PROBE_HEADER = "X-HTMXO-Probe"
+_is_stream_probe(req) = !isempty(HTTP.header(req, _STREAM_PROBE_HEADER, ""))
+_stream_probe_response() = HTTP.Response(204, ["Cache-Control" => "no-store"])
+
 # A WebSocket route is a GET route that upgrades the connection, behind the same
 # Revise-error chokepoint as every other emitted route. `serve` puts the raw
 # stream in `req.context[:stream]`; once the session ends, `_WebSocketClosed`
 # tells the pipeline not to write an HTTP response on the upgraded connection.
 function _register_websocket_handler(path, handler)
     _register_handler("WEBSOCKET", path, function(req)
+        _is_stream_probe(req) && return _stream_probe_response()
         stream = get(req.context, :stream, nothing)
         if !HTTP.WebSockets.isupgrade(req) || stream === nothing
             # Explicit length: HTTP 1.x never chunks a response carrying `Upgrade`.
@@ -5432,6 +5448,7 @@ end
 # `__error__` renders a failure after the stream has started.
 function _register_sse_handler(path, prepare)
     _register_handler("SSE", path, function(req)
+        _is_stream_probe(req) && return _stream_probe_response()
         haskey(req.context, :stream) || return _route_error_response(req,
             ArgumentError("`@sse` route $(path) needs a live HTTP connection; " *
                           "in-process requests cannot consume an event stream"),
@@ -5871,7 +5888,15 @@ live_region_script() = h.script(Raw(raw"""
       state.sig = sig;
       closeState(state);
       // No fragments: hold no stream until one arrives.
-      if (keys.length) state.source = openSource(feedUrl(state.base, keys));
+      if (keys.length) {
+        var source = state.source = openSource(feedUrl(state.base, keys));
+        // A refused stream ends `CLOSED` with no status to read; the probe
+        // runtime asks whether the page's session still reaches it.
+        source.addEventListener('error', function () {
+          if (source.readyState === EventSource.CLOSED && window.htmxoStreamProbe)
+            window.htmxoStreamProbe.failed(source.url);
+        });
+      }
     }
     if (state.source) names.forEach(function (name) { listen(state, name); });
   }
@@ -5956,6 +5981,125 @@ live_region_script() = h.script(Raw(raw"""
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
+})();
+"""))
+
+"""
+    stream_probe_script()
+
+Client runtime that lets an auth gateway end a refused stream. A browser
+exposes no HTTP status for a refused WebSocket handshake (just `error` and
+`close` 1006) or a refused `EventSource` (it ends `CLOSED`), so a stream
+behind an expired login cannot tell a `401` from a transient failure: the
+htmx ws and sse extensions reconnect with backoff forever, and the page goes
+stale until a manual reload.
+
+When a stream fails before it opens — a ws-extension socket that closes
+without opening, an sse-extension or [`live_region`](@ref) discover source
+that ends `CLOSED` — the runtime sends one htmx-shaped GET (`HX-Request:
+true`, `X-HTMXO-Probe: stream`) to that stream's own URL and reads only the
+response headers, in htmx's order: `HX-Redirect` navigates, `HX-Refresh:
+true` reloads the page (an auth gateway's answer to an expired login,
+typically `401` plus `HX-Refresh`). Any other answer leaves the stream's own
+reconnect running. `@ws` and `@sse` routes answer the probe with an empty 204
+before upgrading or starting the stream; other endpoints answer however they
+answer a GET, and the probe aborts once the headers arrive.
+
+Probes are page-wide: at most one in flight and at most one per 5 seconds,
+only for same-origin streams. `window.htmxoStreamProbe.failed(url)` reports a
+failed stream the runtime does not see itself and returns the probe's
+promise (`'refresh'`, `'redirect'`, a status, `'redirected'` or
+`'unreachable'`), or `null` when no probe was sent. Safe to include more than
+once. Auto-included by [`htmx`](@ref); include it yourself only on pages
+built without the shell.
+"""
+stream_probe_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoStreamProbe) return;
+  // The gateway checks the page's session, so one answer covers every
+  // stream on the page, however many fail together.
+  var SPACING_MS = 5000;
+  var TIMEOUT_MS = 10000;
+  var inflight = null;
+  var last = -Infinity;
+
+  // The http(s) form of a stream URL, or null for another origin, whose
+  // auth is not the page's session.
+  function probeUrl(url) {
+    var u;
+    try { u = new URL(url, window.location.href); } catch (_) { return null; }
+    if (u.protocol === 'wss:') u.protocol = 'https:';
+    else if (u.protocol === 'ws:') u.protocol = 'http:';
+    return u.origin === window.location.origin ? u.href : null;
+  }
+
+  // One htmx-shaped GET; an auth gateway keys its htmx answer on
+  // `HX-Request`. Only the headers are read, and the request is aborted as
+  // soon as they arrive, so an endpoint that streams anyway never stays open.
+  // A redirect is not followed: only the stream URL's own answer counts.
+  function probe(url) {
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, TIMEOUT_MS);
+    return fetch(url, {
+      headers: { 'HX-Request': 'true', 'HX-Current-URL': window.location.href,
+                 'X-HTMXO-Probe': 'stream' },
+      credentials: 'same-origin', cache: 'no-store', redirect: 'manual',
+      signal: ctl.signal
+    }).then(function (r) {
+      var redirect = r.headers.get('HX-Redirect');
+      var refresh = r.headers.get('HX-Refresh') === 'true';
+      ctl.abort();
+      // htmx's own order for these two headers.
+      if (redirect) {
+        window.location.href = redirect;
+        if (refresh) window.location.reload();
+        return 'redirect';
+      }
+      if (refresh) { window.location.reload(); return 'refresh'; }
+      return r.type === 'opaqueredirect' ? 'redirected' : r.status;
+    }, function () {
+      return 'unreachable';
+    }).then(function (outcome) {
+      clearTimeout(timer);
+      return outcome;
+    });
+  }
+
+  function failed(url) {
+    var target = probeUrl(url);
+    if (!target || inflight) return null;
+    var now = Date.now();
+    if (now - last < SPACING_MS) return null;
+    last = now;
+    inflight = probe(target).then(function (outcome) {
+      inflight = null;
+      return outcome;
+    });
+    return inflight;
+  }
+
+  // ws extension: a socket that closes without having opened is a refused
+  // handshake. One that opened and later dropped is left to the extension's
+  // reconnect, whose new socket reports here if its handshake is refused.
+  var opened = new WeakSet();
+  function socketOf(e) { return e.detail && e.detail.event && e.detail.event.target; }
+  document.addEventListener('htmx:wsOpen', function (e) {
+    var socket = socketOf(e);
+    if (socket) opened.add(socket);
+  });
+  document.addEventListener('htmx:wsClose', function (e) {
+    var socket = socketOf(e);
+    if (socket && socket.url && !opened.has(socket)) failed(socket.url);
+  });
+  // sse extension: the browser gave up on the source (a dropped stream
+  // reconnects in CONNECTING and reports here only if that is refused).
+  document.addEventListener('htmx:sseError', function (e) {
+    var source = e.detail && e.detail.source;
+    if (source && source.readyState === EventSource.CLOSED) failed(source.url);
+  });
+
+  window.htmxoStreamProbe = { failed: failed };
 })();
 """))
 
