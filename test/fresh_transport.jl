@@ -8,7 +8,8 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h
 
-    export FreshReadApp, FreshPageApp, FreshMutationApp, SharedPathApp, FreshRetainedApp,
+    export FreshReadApp, FreshPageApp, FreshMutationApp, SharedPathApp, RenamedPathApp,
+        FreshRetainedApp,
         FreshFailureApp, FreshDirectApp, FreshBrowserApp, FreshGates,
         reset_fresh!, fresh_runs, release_fresh!, hx_get, hx_post, plain,
         poll_url, poll_token, running, settle, settle_response, body_text
@@ -75,6 +76,15 @@ using TestItemRunner
         @get shared_thing() = (fresh_hit!(:shared_get); h.p("shared-get"))
         "Change the shared thing"
         @post shared_thing() = gated(:shared_post, "shared-post")
+    end
+
+    # The same path shape under different parameter names: HTTP.jl files
+    # `/renamed_thing/{uid}` and `/renamed_thing/{path_uid}` under one router node.
+    @htmx struct RenamedPathApp
+        @get renamed_thing(uid::String) = (fresh_hit!(:renamed_get); h.p("renamed-get-$uid"))
+        "Change the renamed thing"
+        @post renamed_thing(path_uid::String="") =
+            gated(:renamed_post, "renamed-post-$path_uid")
     end
 
     @htmx struct FreshRetainedApp
@@ -385,6 +395,39 @@ end
     lost = String(hx_get(replace(target, poll_token(target) => "0"^64)).body)
     @test contains(lost, "Result unavailable")
     @test fresh_runs(:shared_get) == 1
+end
+
+@testitem "a GET route under other parameter names still serves its path" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars, Logging, Test
+    import HTMXObjects: _clear_operation_polls!
+
+    reset_fresh!()
+    _clear_operation_polls!()
+    # No resume-only GET replaces the declared GET at the shared router node.
+    logs, _ = Test.collect_test_logs(min_level=Logging.Warn) do
+        route!(RenamedPathApp())
+    end
+    @test !any(log -> contains(string(log.message), "replacing existing registered route"), logs)
+
+    @test contains(String(hx_get("/renamed_thing/abc").body), "renamed-get-abc")
+    @test fresh_runs(:renamed_get) == 1
+
+    submitted = String(hx_post("/renamed_thing/abc").body)
+    @test running(submitted)
+    target = poll_url(submitted)
+    @test contains(target, "__htmxo_verb=POST")
+    # The declared GET route resumes the submission without running itself.
+    @test running(String(hx_get(target).body))
+    @test fresh_runs(:renamed_get) == 1
+    release_fresh!(:renamed_post)
+    @test contains(settle(target), "renamed-post-abc:1")
+    @test fresh_runs(:renamed_post) == 1
+    @test fresh_runs(:renamed_get) == 1
+
+    # The shortened mutation path `/renamed_thing` declares no GET.
+    not_allowed = dispatch(:GET, "/renamed_thing")
+    @test not_allowed.status == 405
+    @test HTTP.header(not_allowed, "Allow") == "POST"
 end
 
 @testitem "fresh invocations on a retained root leave its caches alone" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin

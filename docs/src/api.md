@@ -1349,9 +1349,11 @@ the grace period is answered by the same poller a memoized route gets.
 - A read's lost token (process restart, expiry, drifted arguments) heals by
   recomputing, as for any read: a fresh GET of that URL computes the same.
 - A mutation's poller issues GETs of the submission's own path carrying the
-  token and `__htmxo_verb=<VERB>`, served by that path's GET route or, when the
-  type declares none, by a resume-only GET (a plain GET there still answers
-  `405`). The resume binds the route, types and provider scope — never the
+  token and `__htmxo_verb=<VERB>`, served by the GET route the type declares at
+  that path (under any parameter names: `@get section(uid)` serves the polls of
+  `@post section(path_uid)`) or, when it declares none, by a resume-only GET (a
+  plain GET there still answers `405`). The resume binds the route, types and
+  provider scope — never the
   submitted body, which no poll URL repeats. It **never re-runs the
   submission**: a token the server no longer holds answers
   `HTMXObjects.OperationResultUnavailable` (`410`; an HTMX poll receives its

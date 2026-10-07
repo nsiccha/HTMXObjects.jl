@@ -5076,7 +5076,7 @@ end
 function _register_handler(method, path, handler)
     http_method = get(_TRANSPORT_HTTP_METHODS, method, method)
     pass = _route_registration_pass()
-    pass === nothing || http_method != "GET" || push!(pass.get_paths, String(path))
+    pass === nothing || http_method != "GET" || push!(pass.get_shapes, _route_shape(path))
     wrapped = function(req)
         _runtime_note_route!(req, method, path)
         try
@@ -5089,20 +5089,34 @@ function _register_handler(method, path, handler)
     HTTP.register!(ROUTER, http_method, path, wrapped)
 end
 
+# The router node a path is filed under. HTTP.jl matches a `{name}` (or `*`)
+# segment as a nameless wildcard and a `{name:regex}` segment by its regex, so
+# `/a/{x}` and `/a/{y}` are one node and registering either replaces the
+# other's same-method handler.
+_route_shape(path) = join(map(_route_shape_segment, split(path, '/'; keepempty=false)), '/')
+
+function _route_shape_segment(segment)
+    segment == "*" && return "{}"
+    (startswith(segment, '{') && endswith(segment, '}')) || return String(segment)
+    colon = findfirst(':', segment)
+    colon === nothing ? "{}" : "{" * segment[colon:end]
+end
+
 # One `_register_routes` pass over a root type. Mutation routes poll through
-# GETs of their own path; a path whose type declares no GET there gets a
-# resume-only GET once the pass has seen every route, so a GET declared after
-# its mutation is never replaced by (or replaces) the resume handler.
+# GETs of their own path; a path whose type declares no GET at that router
+# node gets a resume-only GET once the pass has seen every route, so a GET
+# declared after its mutation is never replaced by (or replaces) the resume
+# handler.
 const _ROUTE_REGISTRATION_PASS = :htmxo_route_registration_pass
 
 _route_registration_pass() =
     get(task_local_storage(), _ROUTE_REGISTRATION_PASS, nothing)
 
 function _with_route_registration_pass(f)
-    pass = (; get_paths=Set{String}(), mutation_resumes=Dict{String,Any}())
+    pass = (; get_shapes=Set{String}(), mutation_resumes=Dict{String,Any}())
     task_local_storage(f, _ROUTE_REGISTRATION_PASS, pass)
-    for (path, resume) in pass.mutation_resumes
-        path in pass.get_paths && continue
+    for (shape, resume) in pass.mutation_resumes
+        shape in pass.get_shapes && continue
         resume.register(join(sort!(collect(resume.methods)), ", "))
     end
     nothing
@@ -8518,11 +8532,11 @@ _verb_mutation(method::AbstractString) = method in ("POST", "PUT", "PATCH", "DEL
 
 # Queue the resume-only GET for a mutation path on the active registration
 # pass (see `_with_route_registration_pass`); `register(allow)` installs it
-# with the `Allow` list of every mutation verb declared at that path.
+# with the `Allow` list of every mutation verb declared at that router node.
 function _register_mutation_resume!(register, path, method)
     pass = _route_registration_pass()
     pass === nothing && return register(String(method))
-    resume = get!(pass.mutation_resumes, String(path)) do
+    resume = get!(pass.mutation_resumes, _route_shape(path)) do
         (; register, methods=Set{String}())
     end
     push!(resume.methods, String(method))
