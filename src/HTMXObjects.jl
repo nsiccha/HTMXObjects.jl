@@ -5899,7 +5899,7 @@ live_region_script() = h.script(Raw(raw"""
 
   // A browser `EventSource` refused with any non-200 (a gateway's 502/503
   // while the app restarts, a 401) ends `CLOSED` and never retries by itself.
-  // Reopen after htmx-ext-sse's backoff for a static region (500 ms × 2^n,
+  // Reopen after the sse extension's backoff for a static region (500 ms × 2^n,
   // at most 64 s), counted across consecutive failures and reset on `open`.
   // The reopen is an ordinary `sync`, so it carries the key set present then.
   function retryLater(state) {
