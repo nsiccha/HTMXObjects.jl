@@ -1782,18 +1782,64 @@ only visible when reported through `track_job!`.
 By default every `@queued` computation starts at once, so many heavy requests all
 run concurrently on the `:default` pool. [`configure_job_queue!`](@ref) bounds
 that: with `max_running=n`, at most `n` `@queued` computations run at a time and
-the rest wait in FIFO order — memoized ones through DynamicObjects' `Deferred`
-executor hook, fresh ones as queued invocations. Waiting jobs show on the
-dashboard and on job boards as `:queued`, with their position ("queued · #3"),
-and start as earlier ones finish. A queued compute nobody has polled for
-`abandon_after` seconds is abandoned before it starts and recorded as a failed
-job ("abandoned"); the next request for it starts afresh. An inline (`@direct`,
-non-HTMX, `:blocking`) request to a `@queued` route waits for its turn too.
-Ordinary routes never queue.
+the rest wait in FIFO order. The queue is DynamicObjects': its `@queued` marker
+admits every computation of the marked property — a route's or any other —
+memoized or fresh, and `configure_job_queue!` sets its `max_running`. Waiting jobs
+show on the dashboard and on job boards as `:queued`, with their position
+("queued · #3"), and start as earlier ones finish. A route's queued compute
+nobody has polled for `abandon_after` seconds is abandoned before it starts and
+recorded as a failed job ("abandoned"); the next request for it starts afresh.
+An inline (`@direct`, non-HTMX, `:blocking`) request to a `@queued` route waits
+for its turn too, and is never abandoned. Ordinary routes never queue. `@queued`
+needs a DynamicObjects with its job queue (`pre-inference` ≥ `64aba0c`).
 
 ```julia
 configure_job_queue!(; max_running=2, abandon_after=60)
 ```
+
+#### Queued properties
+
+`@queued` also marks a property that is not a route. Each computation of it is
+then heavy work, admitted through the same queue and counted against the same
+`max_running`, whoever starts it: a route, another property's body, a
+`Threads.@threads` iteration, or code outside any request. It runs on `:default`,
+and the call blocks until the value is there. Callers with the same arguments share
+one computation, and a cached value never queues; on a `@fresh` property every call
+is admitted.
+
+```julia
+@htmx struct Batches
+    "Synthetic item"
+    @queued @progress item_result(id::String, i::Int) = run_item(id, i)   # heavy
+    @progress batch_result(id::String) = begin
+        Treebars.@progress "Items" Threads.@threads for i in 1:n_items(id)
+            item_result(id, i)
+        end
+        summarize(id)
+    end
+    @queued @get execute(id::String) = (batch_result(id); progress_view(id))
+end
+configure_job_queue!(; max_running=30, abandon_after=Inf)
+```
+
+- **Jobs.** Each computation is a job named after the property, with its progress
+  tree, on the runtime dashboard and on job boards. While it waits, its progress
+  node reads "queued · #k", so a caller that threads progress (the `Items` counter
+  above) shows which of its items wait. Nobody polls a property's computation, so
+  it is never abandoned.
+- **A waiting job gives its slot back.** When a queued computation, or any task it
+  spawned (such as a `Threads.@threads` iteration), blocks on another queued
+  computation, it gives back its slot for the rest of its run. `max_running` then
+  counts the item work rather than the coordinators waiting on it, and coordinators
+  that each wait on queued children cannot deadlock the queue. Heavy work a
+  coordinator does after such a wait runs outside the cap; put it in another
+  `@queued` property. A wait the queue cannot see keeps the slot: polling `isready`
+  in a loop, or waiting on in-flight work of an unmarked property — mark shared
+  heavy intermediates `@queued` too.
+- **Indexed properties only.** `@queued` on a bare property (`@queued x = …`) is an
+  error when the struct is defined. The marker, the queue and these rules are
+  DynamicObjects' (`do-use`); HTMXObjects records the jobs and abandons routes'
+  unwatched ones.
 
 #### App-owned background batches
 
@@ -1864,7 +1910,7 @@ POST body parameters must be passed as `query_url` overrides (§URL helpers).
 Check both the response status and `X-HTMXO-Error-Id`: an HTMX error fragment can
 have status 200. A successful progress response means submission, not batch
 completion. Omitting the HX header under `:auto`, requesting static export, or
-calling the heavy property directly does not select this queued transport.
+calling an unmarked heavy property directly does not select this queued transport.
 `track_job!` records independently started work; it does not admit it to the
 queue. A hand-shaped `polling_fetchindex` likewise does not by itself choose the
 app queue's executor.

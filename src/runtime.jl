@@ -855,40 +855,41 @@ end
 
 # --- job queue ---------------------------------------------------------------
 #
-# Opt-in bounded execution for `@queued` (heavy) computations
-# (`configure_job_queue!`). Without it, a `@queued` computation starts on
-# `:default` at once, so N heavy computes all run at once there. With it, the
-# operation layer hands memoized computes to DynamicObjects through
-# `Deferred(executor)` and fresh invocations as `_QueuedFresh` items: at most
-# `max_running` run at a time and the rest wait in FIFO order, listed as
-# `:queued` jobs with their position. A queued compute nobody has started,
-# joined or polled for `abandon_after` seconds is abandoned: its job fails with
-# reason "abandoned", and the next request for it starts afresh. Ordinary
-# (unmarked) operations never queue; they start on their request's pool.
+# `@queued` (heavy) computations wait their turn in DynamicObjects' process-wide
+# job queue: DynamicObjects' `@queued` marker declares the executor of every
+# property it marks, route properties included, so each memoized or fresh
+# computation of one is admitted there, on `:default`, whoever starts it.
+# `configure_job_queue!` forwards `max_running` to it. Ordinary (unmarked)
+# operations never queue; they start on their request's pool.
+#
+# What HTMXObjects adds is request-aware:
+#
+# - a route operation's job is recorded by the operation layer; an observer on
+#   the queue records every other queued computation — a `@queued` property's —
+#   as a job named after the property;
+# - a route's queued computation nobody has started, joined or polled for
+#   `abandon_after` seconds is abandoned (its page is gone): its job fails with
+#   reason "abandoned", and the next request for it starts afresh. A property's
+#   is never abandoned: its callers block on it;
+# - the ledger shows each queued job's position.
+#
+# The observer runs on the enqueuing task. The operation layer marks the tasks
+# that start a route's computation (`_route_queue_scope`), so the observer can
+# tell a route's item from a property's.
 
-mutable struct _QueuedCompute
-    compute::Any             # DynamicObjects.DeferredCompute, or a `_QueuedFresh`
-    key::Any                 # `_runtime_handle_key` of the compute's handle
-    tracker::RuntimeTracker
-    enqueued_ns::UInt64
-end
+# Seconds a route's queued computation may go unwatched before it is abandoned.
+const _QUEUE_ABANDON_AFTER = Ref(60.0)
 
-mutable struct _JobQueue
-    lock::ReentrantLock
-    ready::Threads.Condition
-    waiting::Vector{_QueuedCompute}
-    max_running::Int
-    abandon_after::Float64
-    workers::Int
-    reaping::Bool
-end
+# Waiting items HTMXObjects knows: item => (tracker, ledger key, reapable). The
+# key is a thunk for a fresh route invocation, whose operation exists only
+# once its task is spawned. Only a polled route's item is reapable.
+const _QUEUE_ITEMS = WeakKeyDict{Any,Tuple{RuntimeTracker,Any,Bool}}()
+const _QUEUE_REAPING = Threads.Atomic{Bool}(false)
 
-function _JobQueue()
-    lk = ReentrantLock()
-    _JobQueue(lk, Threads.Condition(lk), _QueuedCompute[], 0, 60.0, 0, false)
-end
+const _ROUTE_QUEUE_SCOPE = :htmxo_route_queue_scope
 
-const _JOB_QUEUE = _JobQueue()
+_has_job_queue() = isdefined(DynamicObjects, :job_queue)
+_dynamicobjects_queue(name::Symbol) = getproperty(DynamicObjects, name)
 
 """
     configure_job_queue!(; max_running=nothing, abandon_after=nothing) -> NamedTuple
@@ -896,226 +897,169 @@ const _JOB_QUEUE = _JobQueue()
 Bound how many `@queued` (heavy) computations run at once. Off by default
 (`max_running=0`): a `@queued` computation starts on `:default` immediately. With
 `max_running=n`, at most `n` such computations run at a time and the rest wait in
-FIFO order; the runtime dashboard and
-[`jobs_board`](@ref)s list them as `:queued` with their queue position ("queued
-· #3"), and they start as earlier ones finish. Concurrent requests for the same
-computation still share it, queued or running.
+FIFO order; the runtime dashboard and [`jobs_board`](@ref)s list them as
+`:queued` with their queue position ("queued · #3"), and they start as earlier
+ones finish. Concurrent requests for the same computation still share it, queued
+or running.
 
-A queued compute whose job nobody has started, joined or polled for
+Every `@queued` computation is admitted, whoever starts it. On a route that is all
+of them: memoized or fresh (`@fresh` routes and mutation verbs, which are never
+coalesced), polled or answered inline — an inline (`@direct`, non-HTMX,
+`:blocking`) request waits for its turn and its result. On an indexed property
+it is every computation, from any caller — a route, another property's body, a
+`Threads.@threads` iteration — and the caller blocks until it is done (see
+*Queued properties* in the API docs). A queued computation that blocks on
+another queued computation — itself, or any task it spawned — gives its slot
+back for the rest of its run, so the cap counts heavy work rather than the jobs
+waiting on it. Ordinary operations start at once on their request's pool.
+
+A route's queued computation nobody has started, joined or polled for
 `abandon_after` seconds (default 60) is abandoned instead of run — its page is
 gone. Its job is recorded as `:failed` with reason "abandoned", and the next
 request for it starts a fresh compute. `abandon_after=Inf` never abandons.
-Running computes are never interrupted.
+Running computes are never interrupted, and a property's computation is never
+abandoned: its callers are waiting for it.
 
-Only `@queued` routes are admitted, and all of their computations are: memoized
-or fresh (`@fresh` routes and mutation verbs, which are never coalesced), polled
-or answered inline — an inline (`@direct`, non-HTMX, `:blocking`) request waits
-for its turn and its result. Ordinary operations start at once on their
-request's pool. Mark heavy batch work `@queued` (see *App-owned background
-batches* in the API docs).
-Needs a DynamicObjects with `Deferred`. Returns the current settings; omitted
-settings are unchanged. Setting `max_running=0` starts everything still queued.
+The queue is DynamicObjects' (`DynamicObjects.configure_queue!`, which this
+forwards `max_running` to); `@queued` needs a DynamicObjects with it
+(`pre-inference` ≥ `64aba0c`). Returns the current settings; omitted settings
+are unchanged. Setting `max_running=0` starts everything still queued.
 """
 function configure_job_queue!(; max_running=nothing, abandon_after=nothing)
-    q = _JOB_QUEUE
     if max_running !== nothing
         max_running >= 0 || throw(ArgumentError("max_running must be non-negative"))
-        max_running > 0 && !isdefined(DynamicObjects, :Deferred) && throw(ArgumentError(
-            "configure_job_queue! needs a DynamicObjects with `Deferred`"))
+        max_running > 0 && !_has_job_queue() && throw(ArgumentError(
+            "configure_job_queue! needs a DynamicObjects with its job queue " *
+            "(pre-inference ≥ 64aba0c)"))
     end
     if abandon_after !== nothing
         abandon_after > 0 || throw(ArgumentError("abandon_after must be positive"))
+        _QUEUE_ABANDON_AFTER[] = Float64(abandon_after)
     end
-    released = lock(q.lock) do
-        abandon_after === nothing || (q.abandon_after = Float64(abandon_after))
-        max_running === nothing && return _QueuedCompute[]
-        q.max_running = Int(max_running)
-        _job_queue_staff!(q)
-        notify(q.ready)             # surplus workers retire
-        q.max_running == 0 || return _QueuedCompute[]
-        waiting = copy(q.waiting)
-        empty!(q.waiting)
-        waiting
-    end
-    # Queue switched off: nothing may be left waiting for a worker.
-    for item in released
-        errormonitor(Threads.@spawn _job_queue_run(item))
-    end
+    max_running === nothing || !_has_job_queue() ||
+        _dynamicobjects_queue(:configure_queue!)(; max_running=Int(max_running))
     job_queue_settings()
 end
 
-job_queue_settings(q::_JobQueue=_JOB_QUEUE) = lock(q.lock) do
-    (; max_running=q.max_running, abandon_after=q.abandon_after,
-       queued=length(q.waiting))
+function job_queue_settings()
+    queue = _has_job_queue() ? _dynamicobjects_queue(:queue_settings)() :
+        (; max_running=0, queued=0, running=0)
+    (; queue.max_running, abandon_after=_QUEUE_ABANDON_AFTER[], queue.queued,
+       queue.running)
 end
 
-# The `fetch` selector for a background compute started at `start`
-# (`_operation_start`): a queued start waits its turn in the job queue; any
-# other starts at once on its pool — `identity` is DynamicObjects' own
-# `:default` spawn.
-_operation_background_fetch(start) =
-    _operation_start_queued(start) ? _queue_fetch(start.tracker) :
-        _pool_fetch(Val(start.pool))
+# Run `f` as the start of a route's queued computation for `tracker`'s ledger:
+# what it enqueues is that route's, whose job the operation layer records.
+# `key` is the job's ledger key, or `nothing` when the queued item carries it
+# (a memoized computation's cache cell); `reapable` is whether nobody but a
+# poller waits for it. Task-local, so a property the route's body computes
+# later — on the queue's own task — stays a property's.
+_route_queue_scope(f, tracker::RuntimeTracker, key, reapable::Bool) =
+    task_local_storage(f, _ROUTE_QUEUE_SCOPE, (tracker, key, reapable))
 
-_queue_fetch(tracker::RuntimeTracker) = getproperty(DynamicObjects, :Deferred)(
-    d -> _job_queue_enqueue!(_JOB_QUEUE, d, tracker))
-
-_pool_fetch(::Val{:default}) = identity
-
-function _pool_fetch(::Val{:interactive})
-    if !isdefined(DynamicObjects, :Deferred)
-        @warn("This DynamicObjects has no `Deferred`, so memoized operations " *
-              "start on :default; upgrade DynamicObjects to keep them on the " *
-              "request's :interactive pool.", maxlog=1)
-        return identity
+# The queue observer (installed in `__init__`).
+function _observe_queued!(item)
+    route = get(task_local_storage(), _ROUTE_QUEUE_SCOPE, nothing)
+    if route !== nothing
+        tracker, key, reapable = route
+        _remember_queued!(item, tracker, something(key, _queued_work_key(item.work)),
+                          reapable)
+        reapable && _start_queue_reaper!()
+    elseif item.property !== nothing
+        tracker = runtime_tracker()
+        handle = _queued_watch_handle(item.work)
+        id = track_job!(handle; label=String(item.property),
+                        progress=_queued_status(item.work), tracker)
+        id == 0 || _remember_queued!(item, tracker, _runtime_handle_key(handle), false)
     end
-    run! = getproperty(DynamicObjects, :run!)
-    getproperty(DynamicObjects, :Deferred)(
-        d -> (_spawn_operation(() -> run!(d), :interactive); nothing))
-end
-
-# A fresh invocation waiting for a job-queue slot. No cache cell holds it, so
-# its `_FreshOperation`'s task waits on `result` for the worker that runs it.
-# Exactly one of running and abandoning takes effect, as for a
-# `DynamicObjects.DeferredCompute`.
-mutable struct _QueuedFresh
-    run::Any                            # () -> value
-    result::Channel{Tuple{Bool,Any}}    # (true, value) | (false, exception)
-    @atomic claimed::Bool
-end
-
-_QueuedFresh(run) = _QueuedFresh(run, Channel{Tuple{Bool,Any}}(1), false)
-
-_job_queue_claim!(f::_QueuedFresh) = (@atomicswap f.claimed = true) === false
-
-# Run or abandon one queued item, whichever kind it is.
-_job_queue_run!(d) = getproperty(DynamicObjects, :run!)(d)
-
-function _job_queue_run!(f::_QueuedFresh)
-    _job_queue_claim!(f) || return false
-    outcome = try
-        (true, f.run())
-    catch err
-        (false, err)
-    end
-    put!(f.result, outcome)
-    true
-end
-
-_job_queue_abandon!(d, reason) = getproperty(DynamicObjects, :abandon!)(d, reason)
-
-function _job_queue_abandon!(f::_QueuedFresh, reason)
-    _job_queue_claim!(f) || return false
-    put!(f.result,
-         (false, getproperty(DynamicObjects, :ComputeAbandoned)(String(reason))))
-    true
-end
-
-# Enqueue one fresh invocation as an operation the transport can follow like
-# any other: its task finishes when a worker has run (or the reaper abandoned)
-# the invocation, and the ledger keys it by the operation itself.
-function _enqueue_fresh_operation(run, root, tracker::RuntimeTracker)
-    queued = _QueuedFresh(run)
-    task = _spawn_operation(_request_pool()) do
-        ok, value = take!(queued.result)
-        ok ? value : throw(value)
-    end
-    op = _FreshOperation(task, root)
-    _job_queue_enqueue!(_JOB_QUEUE, queued, tracker; key=_runtime_handle_key(op))
-    op
-end
-
-_job_queue_key(d) = (objectid(getfield(d, :cache)), getfield(d, :key), UInt(0))
-
-function _job_queue_enqueue!(q::_JobQueue, d, tracker::RuntimeTracker;
-        key=_job_queue_key(d))
-    item = _QueuedCompute(d, key, tracker, time_ns())
-    reap = lock(q.lock) do
-        if q.max_running == 0
-            # Switched off since this operation chose its selector.
-            return nothing
-        end
-        push!(q.waiting, item)
-        _job_queue_staff!(q)
-        notify(q.ready; all=false)
-        start_reaper = !q.reaping
-        q.reaping = true
-        start_reaper
-    end
-    reap === nothing && return errormonitor(Threads.@spawn _job_queue_run(item))
-    reap && errormonitor(Threads.@spawn _job_queue_reaper(q))
     nothing
 end
 
-# Keep `max_running` workers. The caller holds `q.lock`.
-function _job_queue_staff!(q::_JobQueue)
-    while q.workers < q.max_running
-        q.workers += 1
-        # Literal pool symbol: `@spawn` only accepts a computed pool on newer Julia.
-        errormonitor(Threads.@spawn :default _job_queue_worker(q))
-    end
+_remember_queued!(item, tracker, key, reapable::Bool) =
+    lock(() -> (_QUEUE_ITEMS[item] = (tracker, key, reapable)), _QUEUE_ITEMS)
+
+# The ledger key of a queued memoized computation: its cache cell's, the same
+# as a `Pending` for it (`_runtime_handle_key`).
+_queued_work_key(work) = hasfield(typeof(work), :cache) ?
+    (objectid(getfield(work, :cache)), getfield(work, :key), UInt(0)) : objectid(work)
+
+_queued_status(work) = hasfield(typeof(work), :status) ? getfield(work, :status) : nothing
+
+# What the ledger's watcher waits on for a property's queued computation. It
+# must not count as a queued job waiting (which would give back the slot of
+# the queued computation the observer ran under): for a memoized one, a
+# `Pending` without the queue's executor; for a fresh one, its `QueuedCall`,
+# fetched only once ready.
+_queued_watch_handle(work) = hasfield(typeof(work), :cache) ?
+    DynamicObjects.Pending(getfield(work, :cache), getfield(work, :key), nothing) :
+    _QueuedCallWatch(work)
+
+struct _QueuedCallWatch
+    call::Any
 end
 
-_job_queue_run(item::_QueuedCompute) = _job_queue_run!(item.compute)
+function Base.fetch(w::_QueuedCallWatch)
+    while !isready(w.call)
+        sleep(0.05)
+    end
+    fetch(w.call)
+end
 
-function _job_queue_worker(q::_JobQueue)
-    while true
-        item = lock(q.lock) do
-            while q.workers <= q.max_running && isempty(q.waiting)
-                wait(q.ready)
-            end
-            if q.workers > q.max_running
-                q.workers -= 1          # the queue shrank: retire
-                return nothing
-            end
-            popfirst!(q.waiting)
+_queued_key(key) = key
+_queued_key(key::Function) = key()
+
+# Queue positions by ledger key, 1-based, from DynamicObjects' waiting list.
+function _job_queue_positions()
+    _has_job_queue() || return Dict{Any,Int}()
+    waiting = _dynamicobjects_queue(:queued_items)()
+    positions = Dict{Any,Int}()
+    lock(_QUEUE_ITEMS) do
+        for (position, item) in enumerate(waiting)
+            known = get(_QUEUE_ITEMS, item, nothing)
+            known === nothing && continue
+            positions[_queued_key(known[2])] = position
         end
-        item === nothing && return nothing
-        # `run!` records a compute's failure for its waiters; never rethrows.
-        _job_queue_run(item)
     end
+    positions
 end
 
-# Abandon queued computes nobody watches. Runs while anything is queued. The
-# ledger is read without the queue lock held (the ledger never takes it
-# either), so the two locks are never nested.
-function _job_queue_reaper(q::_JobQueue)
-    while true
-        interval = lock(q.lock) do
-            isempty(q.waiting) && (q.reaping = false; return nothing)
-            clamp(q.abandon_after / 4, 0.05, 1.0)
+# Abandon routes' queued computations nobody watches. Runs while any waits.
+function _start_queue_reaper!()
+    Threads.atomic_cas!(_QUEUE_REAPING, false, true) && return nothing
+    errormonitor(Threads.@spawn _job_queue_reaper())
+    nothing
+end
+
+# It stops after two idle passes: the observer remembers an item just before
+# DynamicObjects queues it, and one pass could fall in between.
+function _job_queue_reaper()
+    try
+        idle = 0
+        while idle < 2
+            sleep(clamp(_QUEUE_ABANDON_AFTER[] / 4, 0.05, 1.0))
+            idle = _job_queue_reap!() == :idle ? idle + 1 : 0
         end
-        interval === nothing && return nothing
-        sleep(interval)
-        _job_queue_reap!(q)
+    finally
+        _QUEUE_REAPING[] = false
     end
 end
 
-function _job_queue_reap!(q::_JobQueue, now_ns::UInt64=time_ns())
-    waiting, limit = lock(q.lock) do
-        copy(q.waiting), q.abandon_after
+function _job_queue_reap!(now_ns::UInt64=time_ns())
+    waiting = _dynamicobjects_queue(:queued_items)()
+    routes = lock(_QUEUE_ITEMS) do
+        [(item, _QUEUE_ITEMS[item]) for item in waiting
+         if haskey(_QUEUE_ITEMS, item) && _QUEUE_ITEMS[item][3]]
     end
-    isfinite(limit) || return 0
-    stale = filter(waiting) do item
-        _runtime_elapsed(_runtime_last_seen(item.tracker, item.key, item.enqueued_ns),
-                         now_ns) >= limit
-    end
-    isempty(stale) && return 0
-    lock(q.lock) do
-        filter!(item -> !any(s -> s === item, stale), q.waiting)
-    end
-    reason = "abandoned: unwatched for $(fmt_time(limit))"
-    for item in stale
-        _job_queue_abandon!(item.compute, reason)
-    end
-    length(stale)
-end
-
-# Queue positions by handle key, 1-based, read under the queue lock alone.
-function _job_queue_positions(q::_JobQueue=_JOB_QUEUE)
-    lock(q.lock) do
-        Dict(item.key => i for (i, item) in enumerate(q.waiting))
-    end
+    isempty(routes) && return :idle
+    limit = _QUEUE_ABANDON_AFTER[]
+    isfinite(limit) || return :watching
+    stale = [item for (item, (tracker, key, _)) in routes
+             if _runtime_elapsed(_runtime_last_seen(tracker, _queued_key(key),
+                                                    item.enqueued_ns), now_ns) >= limit]
+    isempty(stale) || _dynamicobjects_queue(:abandon_queued!)(
+        _dynamicobjects_queue(:job_queue)(), stale,
+        "abandoned: unwatched for $(fmt_time(limit))")
+    :watching
 end
 
 # --- snapshots -------------------------------------------------------------
