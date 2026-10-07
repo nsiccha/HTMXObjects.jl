@@ -1156,6 +1156,8 @@ end
             var target = event.detail.target;
             if (target && target.id === 'table') document.body.dataset.settled = 'yes';
             if (target && /^detail-slot-r[12]$/.test(target.id)) document.body.dataset[target.id.replace(/-/g, '')] = 'yes';
+            var source = event.detail.requestConfig && event.detail.requestConfig.elt;
+            if (source && /^probe[12]$/.test(source.id)) document.body.dataset['probed' + source.id.slice(5)] = 'yes';
           });
           document.body.addEventListener('htmx:afterSwap', function() {
             [1, 2].forEach(function(n) {
@@ -1190,6 +1192,21 @@ end
             await fetch('/release');
             await until(() => text(1).includes('slow:1') && text(2).includes('slow:2'), 'both slow results');
 
+            // A control that arrives in a host later resolves none of the
+            // row's wiring: it targets itself and includes nothing.
+            for (const n of [1, 2]) {
+              var probe = document.createElement('button');
+              probe.id = 'probe' + n;
+              probe.setAttribute('hx-get', '/probe?n=' + n);
+              host(n).appendChild(probe);
+              htmx.process(probe);
+              probe.click();
+              await until(() => document.body.dataset['probed' + n] === 'yes', 'probe ' + n);
+              require(document.getElementById('probe' + n) &&
+                      document.getElementById('probe' + n).textContent === 'probed',
+                      'probe ' + n + ' swapped into itself');
+            }
+
             // The row-name toggle loads the lazy detail, whose own controls
             // keep their own results.
             master(2).querySelector('[data-htmxo-detail-toggle]').click();
@@ -1210,6 +1227,7 @@ end
             end
             receipt = Channel{String}(1)
             requests = String[]
+            probes = String[]
             config = strict ? (h.meta(; name="htmx-config", content="{\"disableInheritance\":true}"),) : ()
             page = repr("text/html", htmx(
                 h.button("Load"; id="load", hx_get="/proxy/demo/tree?session_key=token",
@@ -1235,6 +1253,10 @@ end
                 if path == "/release"
                     foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
                     return HTTP.Response(204)
+                end
+                if path == "/probe"
+                    push!(probes, string(req.target, " HX-Target=", HTTP.header(req, "HX-Target", "")))
+                    return HTTP.Response(200, ["Content-Type" => "text/html"], "probed")
                 end
                 HTTP.header(req, "HX-Request", "") == "true" &&
                     push!(requests, string(req.method, " ", req.target))
@@ -1274,10 +1296,11 @@ end
                 foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
                 close(server)
             end
-            requests
+            requests, probes
         end
         for strict in (false, true)
-            requests = scenario(strict)
+            requests, probes = scenario(strict)
+            @test probes == ["/probe?n=1 HX-Target=probe1", "/probe?n=2 HX-Target=probe2"]
             # Each submission ran once; every poll resumed its own row; no
             # request carried a parameter twice (an inherited include would
             # add the row's inputs to a poll that already has them).
