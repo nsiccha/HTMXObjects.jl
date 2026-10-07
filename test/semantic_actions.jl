@@ -4,7 +4,7 @@ using TestItemRunner
     using HTMXObjects
     export ActionHost, ActionRow, ActionGraph, ActionGates, action_surface, OrderHost,
            shared_surface, row_cells, present, SelectHost, SelectStages, KeyedRow,
-           LabelHost, label_cells
+           LabelHost, label_cells, tree_row, semantic_tree
 
     const ActionGates = Dict{String,Channel{Nothing}}()
 
@@ -45,6 +45,23 @@ using TestItemRunner
     shared_surface(row; kwargs...) = action_surface(row; results=:shared,
         layout=row_cells, kwargs...)
 
+    # The same surface as one row of a hierarchical master/detail table. The
+    # layout returns the whole row, so the row keeps the buttons' shared
+    # wiring; the shared host sits in the row's last cell, isolated from it.
+    tree_row(parts) = h.tr(h.td("Row " * parts.object.label),
+        h.td(present(parts.context)..., parts.inputs...,
+             button_of(parts, :compile), button_of(parts, :source)),
+        h.td(button_of(parts, :reset), button_of(parts, :slow)),
+        h.td(parts.operations...),
+        h.td(parts.result; parts.result_attrs...); parts.action_attrs...)
+    semantic_tree(host) = master_detail_table(
+        ["Row", "Pipeline", "Checks", "Form", "Result"], (1,);
+        key=n -> "r$(n)",
+        master=n -> action_surface(host.rows(n); results=:shared, layout=tree_row),
+        children=n -> n == 1 ? (2,) : (),
+        detail_url=n -> query_url(host / "tree_detail", host; row=n),
+        detail_toggle=:label, searchable=true, id="tree")
+
     # Two surfaces of one row on one page: the table cells show two of its
     # operations, and the complementary selection renders below the table.
     in_cells(entry) = entry.name in (:compile, :slow)
@@ -64,6 +81,10 @@ using TestItemRunner
         @get shared_detail(; row::Int) = h.table(h.tbody(shared_surface(rows(row))...))
         @get shared_section(; row::Int) = action_surface(rows(row); results=:shared)
         @get split_detail(; row::Int) = split_surfaces(rows(row))
+        @get tree() = semantic_tree(__self__)
+        # A row's detail shows one of its operations again, on a surface of
+        # its own (`select` gives it ids of its own beside the row's).
+        @get tree_detail(; row::Int) = action_surface(rows(row); select=entry -> entry.name === :compile)
     end
 
     @htmx struct ActionChild
@@ -617,6 +638,7 @@ end
     each = html(semantic_app(graph; compact=true, layout=parts ->
         (captured[] = parts; HTMXObjects._default_semantic_layout(parts))))
     @test captured[].action_attrs == (;)
+    @test captured[].result_attrs == (;)
     @test container(each) == "<div class=\"htmxo-semantic-actions\">"
     @test count("hx-target=\"next .htmxo-semantic-operation-result\" hx-swap=\"innerHTML\"", each) == 2
     @test each == html(semantic_app(graph; compact=true))
@@ -670,6 +692,33 @@ end
     @test contains(error_text(() -> surface(parts -> lines(parts,
         h.td(h.span(; data_sse_swap="tick", hx_target="this")), h.td(buttons_of(parts)...)))),
         "<span sse-swap=\"tick\"> would inherit hx-include, hx-swap from")
+    # `hx-disinherit` isolates an element only while htmx inheritance is on: a
+    # page that sets `htmx.config.disableInheritance` ignores it, and the row's
+    # `hx-inherit` still passes the wiring down.
+    @test contains(error_text(() -> surface(parts -> lines(parts,
+        h.td(h.div(h.a("Details"; hx_get="/details"); hx_disinherit="*")),
+        h.td(buttons_of(parts)...)))),
+        "<a hx-get=\"/details\"> would inherit hx-include, hx-swap, hx-target from " *
+        "`parts.action_attrs` on a page that sets `htmx.config.disableInheritance`")
+    # So the shared host may share the buttons' row only inside an element
+    # that declares each shared attribute unset and inherited:
+    # `parts.result_attrs`, which isolates it in both modes.
+    in_row(parts, host_cell) = (h.tr(h.td(present(parts.context)..., parts.inputs...,
+        buttons_of(parts)..., parts.operations...), host_cell; parts.action_attrs...),)
+    message = error_text(() -> surface(parts -> in_row(parts,
+        h.td(parts.result; hx_disinherit="*"))))
+    @test contains(message, "the shared result host would inherit hx-include, hx-swap, " *
+        "hx-target from `parts.action_attrs` on a page that sets " *
+        "`htmx.config.disableInheritance`; place it outside that element, or splat " *
+        "`parts.result_attrs` onto an element around it")
+    isolated = Ref{Any}()
+    one_row = html(h.tbody(surface(parts -> (isolated[] = parts;
+        in_row(parts, h.td(parts.result; parts.result_attrs...))))...))
+    @test isolated[].result_attrs == (; hx_target="unset", hx_swap="unset",
+        hx_include="unset", hx_inherit="hx-target hx-swap hx-include")
+    @test contains(one_row, "<td hx-target=\"unset\" hx-swap=\"unset\" " *
+        "hx-include=\"unset\" hx-inherit=\"hx-target hx-swap hx-include\">" *
+        "<div id=\"htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f1\" ")
     # An element that declares all three itself inherits nothing; nor does a
     # remaining generated form, which declares its own; a plain element is not
     # a request at all.
@@ -694,6 +743,57 @@ end
     @test !contains(only(tags("form", cells)), "unset")
     @test !contains(html(semantic_app(labels.labelled("k1"); compact=true, values=(; key="k1"))),
                     "hx-include=\"unset\"")
+end
+
+@testitem "a master/detail table keeps a semantic row layout's wiring on its row" setup=[SemanticActionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    html(value) = repr("text/html", value)
+    tags(name, markup) = [m.match for m in eachmatch(Regex("<$(name)\\b[^>]*>"), markup)]
+    root = ActionHost(; __prefix__="/proxy/demo", __req__=HTTP.Request("GET", "/?session_key=token"),
+                      __cache_base__=mktempdir())
+
+    # Each layout returns its whole row; the table builds its own master row
+    # from it, keeping the buttons' shared wiring beside the row's id, toggle
+    # and place in the hierarchy.
+    markup = html(semantic_tree(root))
+    masters = [t for t in tags("tr", markup) if contains(t, " id=\"row-")]
+    @test length(masters) == 2
+    for (n, master) in enumerate(masters)
+        token = "_2fproxy_2fdemo_2frows_2f$(n)"
+        @test contains(master, " id=\"row-r$(n)\"")
+        @test contains(master, " aria-level=\"$(n)\"")
+        @test contains(master, "htmxoMdToggle(this,event,&#39;r$(n)&#39;,1)")
+        @test contains(master, " hx-target=\"#htmxo-semantic-result-$(token)\"")
+        @test contains(master, " hx-swap=\"innerHTML\"")
+        @test contains(master, " hx-include=\"#htmxo-semantic-actions-$(token), " *
+                               "#htmxo-semantic-context-actionrow-proxy-demo-rows-$(n)\"")
+        @test contains(master, " hx-inherit=\"hx-target hx-swap hx-include\"")
+    end
+    @test contains(masters[2], " data-htmxo-parent=\"row-r1\"")
+    # The wiring appears once per row and on each remaining form; the buttons
+    # carry only their URLs, and the only cells that declare anything are the
+    # hosts' cells, which declare the wiring unset.
+    @test count("hx-target=\"#htmxo-semantic-result-", markup) == 2 + 2
+    @test "<button title=\"Compile the model.\" aria-label=\"Compile the model.\" " *
+          "type=\"button\" hx-post=\"/proxy/demo/rows/1/compile\">" in tags("button", markup)
+    @test [t for t in tags("td", markup) if contains(t, "hx-")] == fill(
+        "<td hx-target=\"unset\" hx-swap=\"unset\" hx-include=\"unset\" " *
+        "hx-inherit=\"hx-target hx-swap hx-include\">", 2)
+    # The table's own features stay: label toggles, lazy details, search.
+    @test count("data-htmxo-detail-toggle=\"\" data-htmxo-label", markup) == 2
+    @test contains(markup, "hx-get=\"/proxy/demo/tree_detail?")
+    @test contains(markup, "type=\"search\"")
+
+    # The row the layout returned is the caller's: the table copies its cells
+    # and attributes and leaves it as it was.
+    returned = Ref{Any}()
+    action_surface(root.rows(1); results=:shared, layout=parts -> (returned[] = tree_row(parts)))
+    before = html(returned[])
+    master_detail_table(["Row", "Pipeline", "Checks", "Form", "Result"], (1,);
+        key=n -> "r$(n)", master=_ -> returned[], detail_url=_ -> "/detail",
+        detail_toggle=:label)
+    @test html(returned[]) == before
 end
 
 @testitem "select compiles only the chosen operations of a surface" setup=[SemanticActionFixtures] tags=[:unit, :semantic] begin
@@ -1015,6 +1115,187 @@ end
         finally
             foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
             close(server)
+        end
+    end
+end
+
+@testitem "a semantic master/detail table keeps each row's results in its own host in a browser" setup=[SemanticActionFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+
+        # Each table row declares its buttons' shared wiring once, and its
+        # shared host sits in the same row inside `parts.result_attrs`. Run with
+        # htmx inheritance on, and on a page that disables it, where only
+        # `hx-inherit` passes attributes down.
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+        route!(ActionHost(; __cache_base__=mktempdir());
+            operation_policy=OperationPolicy(:auto; keep_progress=false))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          function master(n) { return document.getElementById('row-r' + n); }
+          function host(n) {
+            return document.getElementById('htmxo-semantic-result-_2fproxy_2fdemo_2frows_2f' + n);
+          }
+          function button(n, verb, name) {
+            return master(n).querySelector('button[hx-' + verb + '$="/rows/' + n + '/' + name + '"]');
+          }
+          function text(n) { return host(n).textContent; }
+          async function until(check, label) {
+            var end = Date.now() + 15000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label);
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+          }
+          function require(value, label) { if (!value) throw new Error(label); }
+          document.body.addEventListener('htmx:afterSettle', function(event) {
+            var target = event.detail.target;
+            if (target && target.id === 'table') document.body.dataset.settled = 'yes';
+            if (target && /^detail-slot-r[12]$/.test(target.id)) document.body.dataset[target.id.replace(/-/g, '')] = 'yes';
+          });
+          document.body.addEventListener('htmx:afterSwap', function() {
+            [1, 2].forEach(function(n) {
+              if (host(n) && host(n).querySelector('.treebar-poller')) document.body.dataset['polled' + n] = 'yes';
+            });
+          });
+          try {
+            require(htmx.config.disableInheritance === STRICT, 'inheritance mode');
+            document.getElementById('load').click();
+            await until(() => document.body.dataset.settled === 'yes', 'table settled');
+            [1, 2].forEach(function(n) {
+              require(host(n).closest('tr') === master(n), 'host in its master row ' + n);
+              require(!button(n, 'post', 'compile').hasAttribute('hx-target'), 'lean button ' + n);
+            });
+            master(1).querySelector('[data-htmxo-tree-toggle]').click();
+            await until(() => !master(2).hidden, 'child row shown');
+
+            button(1, 'post', 'compile').click();
+            await until(() => text(1).includes('compile:1:token'), 'row 1 POST');
+            button(2, 'get', 'source').click();
+            await until(() => text(2).includes('source:2:token'), 'row 2 GET');
+            require(text(1).includes('compile:1:token'), 'row 2 changed row 1');
+            master(1).querySelector('form').requestSubmit();
+            await until(() => text(1).includes('seeded:1:1'), 'row 1 form into its host');
+
+            // A mutation's poller lives in the host; it must resolve none of
+            // the row's wiring, or its polls would carry the row's inputs.
+            button(1, 'post', 'slow').click();
+            button(2, 'post', 'slow').click();
+            await until(() => document.body.dataset.polled1 === 'yes' &&
+                              document.body.dataset.polled2 === 'yes', 'both mutation pollers');
+            await fetch('/release');
+            await until(() => text(1).includes('slow:1') && text(2).includes('slow:2'), 'both slow results');
+
+            // The row-name toggle loads the lazy detail, whose own controls
+            // keep their own results.
+            master(2).querySelector('[data-htmxo-detail-toggle]').click();
+            await until(() => document.body.dataset.detailslotr2 === 'yes', 'row 2 detail loaded');
+            var detail = document.getElementById('detail-r2');
+            detail.querySelector('button[hx-post$="/rows/2/compile"]').click();
+            await until(() => detail.textContent.includes('compile:2:token'), 'detail result');
+            require(text(2).includes('slow:2'), 'detail action changed the row host');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        function scenario(strict)
+            for n in 1:2
+                ActionGates[string(n)] = Channel{Nothing}(1)
+            end
+            receipt = Channel{String}(1)
+            requests = String[]
+            config = strict ? (h.meta(; name="htmx-config", content="{\"disableInheritance\":true}"),) : ()
+            page = repr("text/html", htmx(
+                h.button("Load"; id="load", hx_get="/proxy/demo/tree?session_key=token",
+                         hx_target="#table", hx_swap="innerHTML"),
+                h.div(; id="table"),
+                h.script(Raw("var STRICT = $(strict);")), driver;
+                assets="/test-assets", sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
+                feedback=false, compose=false, overlay=false,
+                extra_head=(config..., sortable_table_js(), sortable_table_styles())))
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+                path = HTTP.URI(req.target).path
+                path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+                path == "/test-assets/htmx.min.js" && return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+                path == "/favicon.ico" && return HTTP.Response(204)
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                if path == "/release"
+                    foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
+                    return HTTP.Response(204)
+                end
+                HTTP.header(req, "HX-Request", "") == "true" &&
+                    push!(requests, string(req.method, " ", req.target))
+                internal = replace(String(req.target), r"^/proxy/demo" => "")
+                dispatch(req.method, internal;
+                    headers=[collect(req.headers); "X-Forwarded-Prefix" => "/proxy/demo"],
+                    body=HTMXObjects._request_body_bytes(req))
+            end
+            try
+                for warm in ("tree?session_key=token", "tree_detail?row=2&session_key=token")
+                    response = HTTP.get("http://127.0.0.1:$port/proxy/demo/$(warm)";
+                                        retry=false, status_exception=false)
+                    @test response.status == 200
+                end
+                empty!(requests)
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                        @test isready(receipt)
+                        if isready(receipt)
+                            outcome = take!(receipt)
+                            @test outcome == "/complete?status=passed"
+                            outcome == "/complete?status=passed" ||
+                                @info "Browser requests" strict requests=join(requests, "\n")
+                        else
+                            @info "Browser diagnostics" strict requests=join(requests, "\n") log=read(browser_log, String)
+                        end
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                foreach(gate -> isready(gate) || put!(gate, nothing), values(ActionGates))
+                close(server)
+            end
+            requests
+        end
+        for strict in (false, true)
+            requests = scenario(strict)
+            # Each submission ran once; every poll resumed its own row; no
+            # request carried a parameter twice (an inherited include would
+            # add the row's inputs to a poll that already has them).
+            for n in 1:2
+                @test count(r -> startswith(r, "POST /proxy/demo/rows/$(n)/slow"), requests) == 1
+                @test any(r -> startswith(r, "GET /proxy/demo/rows/$(n)/slow?") &&
+                               contains(r, "__htmxo_poll=1"), requests)
+            end
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/1/seeded"), requests) == 1
+            @test count(r -> startswith(r, "GET /proxy/demo/tree_detail?"), requests) == 1
+            @test count(r -> startswith(r, "POST /proxy/demo/rows/2/compile"), requests) == 1
+            repeated = filter(requests) do r
+                query = something(HTTP.URI(split(r, ' '; limit=2)[2]).query, "")
+                names = first.(split.(filter(!isempty, split(query, '&')), '='))
+                length(names) != length(unique(names))
+            end
+            @test isempty(repeated)
+            isempty(repeated) || @info "Repeated parameters" strict repeated
         end
     end
 end

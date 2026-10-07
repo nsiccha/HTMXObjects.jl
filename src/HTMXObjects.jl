@@ -12381,6 +12381,43 @@ function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
         ph)
 end
 
+# The master row's cells may arrive as the row itself, `h.tr(cells...; attrs...)`,
+# when its attributes are computed together with its cells — a `semantic_app`
+# layout splatting `parts.action_attrs` onto the row. The helper keeps those
+# attributes on the row it builds. Its copy of the cells is its own, so
+# relabelling the first cell leaves the caller's row untouched.
+_md_master_row(row::Node) = HTMX.tag(row) === :tr ?
+    (collect(Any, HTMX.children(row)), HTMX.attrs(row)) :
+    throw(ArgumentError(string("master/detail: the master cells must be the row's ",
+        "cells or one <tr>, got <", HTMX.tag(row), ">")))
+_md_master_row(cells) = (collect(Any, cells), ())
+
+_md_attr_name(key) = Symbol(replace(string(key), '_' => '-'))
+
+# Attributes the helpers write on a master row: its pairing id, toggle,
+# expansion state and place in a hierarchy.
+const _MD_ROW_ATTRS = Symbol.(("id", "onclick", "aria-expanded", "aria-level", "hidden",
+    "data-htmxo-parent", "data-htmxo-tree-open", "data-htmxo-detail-open",
+    "data-htmxo-search"))
+
+# A row's own attributes join `attrs`, the row attributes `master_attrs` gave.
+# Neither may set what the other sets, nor what the helper writes itself:
+# whichever was applied last would silently win.
+function _md_merge_row_attrs!(attrs, row_attrs, master_class)
+    given = Set(_md_attr_name(key) for key in keys(attrs))
+    for (key, value) in pairs(row_attrs)
+        name = _md_attr_name(key)
+        name in _MD_ROW_ATTRS && throw(ArgumentError(string("master/detail: the ",
+            "master row's `", name, "` is the helper's; the <tr> from `master` may not set it")))
+        name === :class && !isnothing(master_class) && throw(ArgumentError(string(
+            "master/detail: both `master_class` and the <tr> from `master` set the row's class")))
+        name in given && throw(ArgumentError(string("master/detail: both `master_attrs` ",
+            "and the <tr> from `master` set the row's `", name, "`")))
+        attrs[name] = value
+    end
+    attrs
+end
+
 """
     master_detail_pair(key, master_cells, detail_body, ncols::Int;
                        master_class=nothing,
@@ -12400,7 +12437,9 @@ the master) — pass `initially_open=true` for rows whose body IS the content
 the user came to see (a question + answer brief, for example).
 
 # Arguments
-- `master_cells`: iterable of `<td>` nodes for the master row.
+- `master_cells`: iterable of `<td>` nodes for the master row, or one `<tr>`
+  holding them, whose attributes then stay on the master row (see
+  [`master_detail_table`](@ref)'s `master`).
 - `detail_body`: any content placed inside the detail row's spanning `<td>`.
   In lazy mode (`detail_url` set) this instead becomes the slot's pre-load
   **placeholder** (`nothing` → a default muted "Loading…").
@@ -12506,10 +12545,13 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     # workaround; that drop is now scoped to true boolean attrs.)
     tr_kwargs[:aria_expanded] = initially_open ? "true" : "false"
     isnothing(master_class) || (tr_kwargs[:class] = master_class)
-    for (k, v) in pairs(master_attrs)
-        tr_kwargs[Symbol(k)] = v
+    cells, row_attrs = _md_master_row(master_cells)
+    given = _md_merge_row_attrs!(Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(master_attrs)),
+                                 row_attrs, master_class)
+    for (k, v) in given
+        tr_kwargs[k] = v
     end
-    master = h.tr(; tr_kwargs...)(master_cells...)
+    master = h.tr(; tr_kwargs...)(cells...)
     detail_kwargs = Dict{Symbol,Any}(:id => "detail-$safe")
     initially_open || (detail_kwargs[:hidden] = true)
     isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
@@ -12546,7 +12588,16 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 # Keyword arguments
 - `key(item)`: function returning the row key (sanitised internally).
 - `master(item)`: function returning the master row's `<td>` cells
-  (vector or tuple of nodes).
+  (vector or tuple of nodes), or one `<tr>` holding them. A row's attributes
+  stay on the master row the helper builds, so attributes computed together
+  with the cells need no second callback: a [`semantic_app`](@ref) layout can
+  return `h.tr(cells...; parts.action_attrs...)`, with the shared result host
+  in a cell carrying `parts.result_attrs`. The row may not set what the helper
+  writes itself (`id`, `onclick`, `aria-expanded`, `aria-level`, `hidden`, the
+  `data-htmxo-*` hierarchy and search attributes), `class` when `master_class`
+  is given, or an attribute `master_attrs` also sets; each throws an
+  `ArgumentError`. The first cell is rebuilt for a hierarchy or
+  `detail_toggle=:label`; the row passed in is not modified.
 - `detail(item)`: function returning the detail row's body (placed
   inside one `<td colspan=ncols>`). Optional when `detail_url` is given —
   it then builds the per-row pre-load placeholder instead.
@@ -12629,7 +12680,8 @@ function master_detail_table(headers, items;
     max_level = Ref(1)
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
-        attrs = Dict{Symbol,Any}(pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
+        attrs = Dict{Symbol,Any}(Symbol(k) => v
+                                 for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
         descendants = isnothing(children) ? () : collect(children(item))
         branch = !isempty(descendants)
         open = _open(item)
@@ -12653,7 +12705,8 @@ function master_detail_table(headers, items;
         body = isnothing(detail) ? nothing : detail(item)
         url  = isnothing(_url) ? nothing : _url(item)
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
-        cells = collect(master(item))
+        cells, row_attrs = _md_master_row(master(item))
+        _md_merge_row_attrs!(attrs, row_attrs, master_class)
         if !isnothing(children) || detail_toggle === :label
             isempty(cells) && throw(ArgumentError("master_detail_table: controlled rows require at least one cell"))
             controls = Any[]
@@ -14273,6 +14326,16 @@ function _semantic_shared_action_attrs(target, includes)
     merge(attrs, (; hx_inherit=join((_htmx_attr_name(key) for key in keys(attrs)), " ")))
 end
 
+# A layout may keep the shared host inside the element that declares the
+# buttons' wiring, such as one table row holding both. An element around the
+# host then declares each of those attributes as `unset`, inherited, so content
+# swapped into the host resolves none of them. `hx-disinherit` alone would not
+# do: htmx ignores it on pages that set `htmx.config.disableInheritance`, where
+# the wiring still reaches the host through its `hx-inherit`.
+_semantic_result_isolation(attrs) = isempty(attrs) ? (;) :
+    merge(map(_ -> "unset", Base.structdiff(attrs, NamedTuple{(:hx_inherit,)})),
+          (; hx_inherit=attrs.hx_inherit))
+
 _htmx_attr_name(key::Symbol) = replace(string(key), '_' => '-')
 
 # A remaining form declares its own target and swap. One that includes no
@@ -14411,7 +14474,7 @@ function _check_semantic_layout(surface, parts)
         "semantic_app layout must place every compiled part exactly once, as given ",
         "(results=:each also keeps each result directly after its button; with a ",
         "shared result host, `parts.action_attrs` goes on an element that contains ",
-        "the buttons but not the host): ",
+        "the buttons, and the host sits outside it or inside `parts.result_attrs`): ",
         join(problems, "; "))))
     nothing
 end
@@ -14436,19 +14499,29 @@ const _HTMX_REQUEST_ATTRS = ("hx-get", "hx-post", "hx-put", "hx-patch", "hx-dele
 # With a shared result host the compact buttons declare no target, swap or
 # shared include of their own; they inherit `parts.action_attrs` from an element
 # the layout puts them in. Resolve inheritance through the placed nodes as htmx
-# does — nearest declaration wins, `hx-disinherit` stops it — and require that
-# every button resolves the compiler's values, while the result host and every
-# other requesting element (a remaining form, the application's own controls)
-# resolve none of them: results and unrelated controls must not start
-# submitting the holder or swapping into the host.
+# does, in both of its modes: by default the nearest declaration wins and
+# `hx-disinherit` stops it; on a page that sets
+# `htmx.config.disableInheritance`, only an ancestor whose `hx-inherit` names an
+# attribute passes it down, and `hx-disinherit` is ignored. Require that every
+# button resolves the compiler's values in both, while the result host and
+# every other requesting element (a remaining form, the application's own
+# controls) resolve none of them in either: results and unrelated controls must
+# not start submitting the holder or swapping into the host.
 function _check_semantic_inheritance!(problems, surface, parts)
     shared = Dict(_htmx_attr_name(key) => value
                   for (key, value) in pairs(parts.action_attrs) if key !== :hx_inherit)
     isempty(shared) && return problems
     buttons = IdDict{Any,Any}(action.button => action for action in parts.actions)
-    _walk_semantic_inheritance!(problems, surface, Dict{String,Any}(), shared, buttons,
-                                parts.result)
+    _walk_semantic_inheritance!(problems, surface,
+                                (; default=Dict{String,Any}(), strict=Dict{String,Any}()),
+                                shared, buttons, parts.result)
     problems
+end
+
+# The keys of one problem, noting when they arise only with inheritance disabled.
+function _inheritance_keys(default, strict)
+    names = join(sort!(union(default, strict)), ", ") * " from `parts.action_attrs`"
+    isempty(default) ? names * " on a page that sets `htmx.config.disableInheritance`" : names
 end
 
 function _walk_semantic_inheritance!(problems, value, inherited, shared, buttons, host)
@@ -14459,30 +14532,39 @@ function _walk_semantic_inheritance!(problems, value, inherited, shared, buttons
         return
     end
     declared = _htmx_declared_attrs(value)
-    inherits(key) = !haskey(declared, key) && isequal(get(inherited, key, nothing), shared[key])
-    leaked = sort!([key for key in keys(shared) if inherits(key)])
+    inherits(mode, key) = !haskey(declared, key) &&
+        isequal(get(inherited[mode], key, nothing), shared[key])
+    leaked(mode) = [key for key in keys(shared) if inherits(mode, key)]
+    absent(mode) = [key for key in keys(shared) if !haskey(declared, key) && !inherits(mode, key)]
     if haskey(buttons, value)
         action = buttons[value]
-        absent = sort!([key for key in keys(shared) if !haskey(declared, key) && !inherits(key)])
-        isempty(absent) || push!(problems, string(
+        lacking = (absent(:default), absent(:strict))
+        all(isempty, lacking) || push!(problems, string(
             "the $(action.verb) $(action.path) button does not inherit ",
-            join(absent, ", "), " from `parts.action_attrs`"))
+            _inheritance_keys(lacking...)))
     elseif value === host
-        isempty(leaked) || push!(problems, string(
-            "the shared result host would inherit ", join(leaked, ", "),
-            " from `parts.action_attrs`"))
-    elseif !isempty(leaked)
+        leaks = (leaked(:default), leaked(:strict))
+        all(isempty, leaks) || push!(problems, string(
+            "the shared result host would inherit ", _inheritance_keys(leaks...),
+            "; place it outside that element, or splat `parts.result_attrs` onto an ",
+            "element around it"))
+    else
+        leaks = (leaked(:default), leaked(:strict))
         request = findfirst(name -> haskey(declared, name), _HTMX_REQUEST_ATTRS)
-        isnothing(request) || push!(problems, string(
+        isnothing(request) || all(isempty, leaks) || push!(problems, string(
             "<", HTMX.tag(value), " ", _HTMX_REQUEST_ATTRS[request], "=",
             repr(string(declared[_HTMX_REQUEST_ATTRS[request]])), "> would inherit ",
-            join(leaked, ", "), " from `parts.action_attrs`"))
+            _inheritance_keys(leaks...)))
     end
-    passed = copy(inherited)
+    passed = (; default=copy(inherited.default), strict=copy(inherited.strict))
     disinherit = string(get(declared, "hx-disinherit", ""))
+    inherit = string(get(declared, "hx-inherit", ""))
     for key in keys(shared)
-        haskey(declared, key) && (passed[key] = declared[key])
-        (disinherit == "*" || key in split(disinherit)) && (passed[key] = "unset")
+        if haskey(declared, key)
+            passed.default[key] = declared[key]
+            (inherit == "*" || key in split(inherit)) && (passed.strict[key] = declared[key])
+        end
+        (disinherit == "*" || key in split(disinherit)) && (passed.default[key] = "unset")
     end
     for child in HTMX.children(value)
         _walk_semantic_inheritance!(problems, child, passed, shared, buttons, host)
@@ -14646,19 +14728,27 @@ renderable value, such as several table cells or rows. `parts` carries `object`,
 `title`, `context` (the shared context group or `nothing`), `inputs` (the
 hidden-context holders), `actions`, `action_attrs` (the buttons' shared
 attributes, empty with `results=:each`), `operations` (what `render_operation`
-returned, in order) and `result` (the shared host or `nothing`). Each action
-carries `object`, `route`, `name`, `verb`, `path`, `title`, `button`, and
-`result` (its own result, or `nothing` with `results=:shared`). A custom layout
-must place the context group, every holder, button and result, and the shared
-host exactly once, as the nodes it was given; with `results=:each` each result
-must directly follow its button. With `results=:shared` it splats
-`parts.action_attrs` onto an element that contains every button but not the
-host, such as the table row holding the button cells. The compiler resolves
-inheritance through the placed nodes as htmx does and requires that every
-button inherits those values, and that neither the host nor any other element
-that requests or swaps would. Anything else throws an `ArgumentError`. The
-default layout renders the `<section>` described above, with the shared host
-last.
+returned, in order), `result` (the shared host or `nothing`) and
+`result_attrs` (the host's isolation from `action_attrs`, empty with
+`results=:each`). Each action carries `object`, `route`, `name`, `verb`, `path`,
+`title`, `button`, and `result` (its own result, or `nothing` with
+`results=:shared`). A custom layout must place the context group, every holder,
+button and result, and the shared host exactly once, as the nodes it was given;
+with `results=:each` each result must directly follow its button. With
+`results=:shared` it splats `parts.action_attrs` onto an element that contains
+every button, such as the table row holding the button cells. The host either
+sits outside that element, or the layout splats `parts.result_attrs` onto an
+element around the host inside it, such as the host's own cell in that row:
+they declare each shared attribute `unset`, inherited, so content swapped into
+the host resolves none of the buttons' wiring. The compiler resolves
+inheritance through the placed nodes as htmx does, both by default and on a
+page that sets `htmx.config.disableInheritance` (where `hx-disinherit` is
+ignored), and requires that every button inherits those values, and that
+neither the host nor any other element that requests or swaps would. Anything
+else throws an `ArgumentError`. The default layout renders the `<section>`
+described above, with the shared host last. A layout may return one table row
+for [`master_detail_table`](@ref)'s `master` callback, which keeps the row's
+attributes.
 
 `select(entry)` chooses which discovered operations this surface compiles, for
 a page that shows only some of a mounted graph's operations. It is called once
@@ -14819,7 +14909,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
                actions=compiled.actions, action_attrs=compiled.attrs, operations,
                result=isnothing(host_id) ? nothing :
                    h.div(; id=host_id, class="htmxo-semantic-operation-result",
-                         aria_live="polite"))
+                         aria_live="polite"),
+               result_attrs=_semantic_result_isolation(compiled.attrs))
     surface = layout(parts)
     layout === _default_semantic_layout || _check_semantic_layout(surface, parts)
     surface

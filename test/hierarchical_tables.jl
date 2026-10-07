@@ -34,6 +34,56 @@
         key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children)
 end
 
+@testitem "master/detail rows keep the attributes of a <tr> from master" tags=[:unit] begin
+    using HTMXObjects
+    html(value) = repr("text/html", value)
+    tags(name, markup) = [m.match for m in eachmatch(Regex("<$(name)\\b[^>]*>"), markup)]
+    master_tag(markup) = only(t for t in tags("tr", markup) if contains(t, " id=\"row-"))
+
+    # A row computed together with its cells keeps its attributes on the
+    # master row the helper builds, beside the helper's own.
+    row = h.tr(h.td("Alpha"), h.td("ok"); hx_target="#out", data_status="ok")
+    before = html(row)
+    master, detail = master_detail_pair("a", row, "body", 2; master_attrs=(; data_kind="leaf"))
+    tag = master_tag(html(master))
+    for attr in ("id=\"row-a\"", "aria-expanded=\"false\"", "onclick=", "hx-target=\"#out\"",
+                 "data-status=\"ok\"", "data-kind=\"leaf\"")
+        @test contains(tag, attr)
+    end
+    @test count("<td>", html(master)) == 2
+    group = (; key="g", name="Group", children=((; key="l", name="Leaf", children=()),))
+    tree = html(master_detail_table(["Name", "State"], [group];
+        key=x -> x.key, master=x -> h.tr(h.td(x.name), h.td("ok"); data_status=x.key),
+        children=x -> x.children, detail_url=x -> "/detail/$(x.key)",
+        detail_toggle=:label, master_class="item", searchable=true))
+    leaf = only(t for t in tags("tr", tree) if contains(t, " id=\"row-l\""))
+    for attr in ("data-status=\"l\"", "data-htmxo-parent=\"row-g\"", "aria-level=\"2\"",
+                 "class=\"item\"")
+        @test contains(leaf, attr)
+    end
+    @test contains(tree, "data-htmxo-label")
+    # The helper rebuilt the first cell for its label toggle from its own copy.
+    @test html(row) == before
+
+    # Refused: an attribute set twice for one row would silently keep
+    # whichever was applied last (dev §1, no silent swallowing) — the helper's
+    # pairing id and toggle, `master_class`, or `master_attrs` against the row.
+    @test_throws "the master row's `id` is the helper's" master_detail_pair("a",
+        h.tr(h.td("x"); id="mine"), "body", 1)
+    @test_throws "`aria-level` is the helper's" master_detail_table(["Name"], [group];
+        key=x -> x.key, master=x -> h.tr(h.td(x.name); aria_level="9"),
+        children=x -> x.children)
+    @test_throws "both `master_attrs` and the <tr> from `master` set the row's `data-status`" master_detail_table(
+        ["Name"], [group]; key=x -> x.key, master=x -> h.tr(h.td(x.name); data_status="a"),
+        master_attrs=x -> (; data_status="b"), detail=x -> "body")
+    @test_throws "both `master_class` and the <tr> from `master` set the row's class" master_detail_pair(
+        "a", h.tr(h.td("x"); class="mine"), "body", 1; master_class="item")
+    # Refused: the master row is the helper's <tr>; another element in its
+    # place has no cells to keep.
+    @test_throws "must be the row's cells or one <tr>, got <td>" master_detail_pair(
+        "a", h.td("x"), "body", 1)
+end
+
 @testitem "hierarchical master detail browser" tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
