@@ -80,6 +80,12 @@ listens with it; [`dispatch`](@ref) and [`record!`](@ref) call it in-process.
 """
 const ROUTER = HTTP.Router()
 
+# The GET routes on `ROUTER` minus the resume-only GETs of mutation paths
+# (`_register_get_route!`), so a plain GET that reaches a resume-only GET is
+# answered by whatever `ROUTER` would have matched without it.
+struct _NoGetRoute end
+const _GET_ROUTER = HTTP.Router(_ -> _NoGetRoute(), _ -> _NoGetRoute())
+
 """
     Verb{V}
 
@@ -488,10 +494,10 @@ function _mount_files(handler_for, folder, mountdir)
         rel = join(splitpath(relpath(path, folder)), "/")
         route = isempty(prefix) ? "/$rel" : "/$prefix/$rel"
         handler = handler_for(path)
-        HTTP.register!(ROUTER, "GET", route, handler)
+        _register_get_route!(route, handler)
         if file == "index.html"
             dir_route = String(chopsuffix(route, "/index.html"))
-            HTTP.register!(ROUTER, "GET", isempty(dir_route) ? "/" : dir_route, handler)
+            _register_get_route!(isempty(dir_route) ? "/" : dir_route, handler)
         end
     end
     return nothing
@@ -2291,7 +2297,7 @@ function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
         body = read(path)
         route = isempty(prefix) ? "/$(spec.file)" : "/$prefix/$(spec.file)"
         handler = _ -> _file_response(path, body, headers)
-        HTTP.register!(ROUTER, "GET", route, handler)
+        _register_get_route!(route, handler)
     end
     return nothing
 end
@@ -5073,10 +5079,8 @@ end
 # framework's standard error article (see `_check_revise_errors!`) — this is
 # the single chokepoint for all HTTP route registrations, so the check
 # applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
-function _register_handler(method, path, handler)
+function _register_handler(method, path, handler; resume_only::Bool=false)
     http_method = get(_TRANSPORT_HTTP_METHODS, method, method)
-    pass = _route_registration_pass()
-    pass === nothing || http_method != "GET" || push!(pass.get_shapes, _route_shape(path))
     wrapped = function(req)
         _runtime_note_route!(req, method, path)
         try
@@ -5086,7 +5090,24 @@ function _register_handler(method, path, handler)
         end
         handler(req)
     end
-    HTTP.register!(ROUTER, http_method, path, wrapped)
+    if http_method == "GET" && !resume_only
+        _register_get_route!(path, wrapped)
+    else
+        HTTP.register!(ROUTER, http_method, path, wrapped)
+    end
+end
+
+# Every GET route goes on `ROUTER` and on its `_GET_ROUTER` mirror; the
+# resume-only GETs of mutation paths go on `ROUTER` alone. A GET route an app
+# registers on `ROUTER` directly is not mirrored.
+function _register_get_route!(path, handler)
+    pass = _route_registration_pass()
+    pass === nothing || push!(pass.get_shapes, _route_shape(path))
+    # Re-registering a route already warns once, from `ROUTER`.
+    Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
+        HTTP.register!(_GET_ROUTER, "GET", path, handler)
+    end
+    HTTP.register!(ROUTER, "GET", path, handler)
 end
 
 # The router node a path is filed under. HTTP.jl matches a `{name}` (or `*`)
@@ -5106,7 +5127,8 @@ end
 # GETs of their own path; a path whose type declares no GET at that router
 # node gets a resume-only GET once the pass has seen every route, so a GET
 # declared after its mutation is never replaced by (or replaces) the resume
-# handler.
+# handler. A plain GET reaching a resume-only GET is answered as if it were
+# not there (`_resume_only_plain_get`).
 const _ROUTE_REGISTRATION_PASS = :htmxo_route_registration_pass
 
 _route_registration_pass() =
@@ -5120,6 +5142,14 @@ function _with_route_registration_pass(f)
         resume.register(join(sort!(collect(resume.methods)), ", "))
     end
     nothing
+end
+
+# A plain GET of a mutation path gets the GET route `ROUTER` would have matched
+# without the path's resume-only GET (a `{param}` route covering the path,
+# say), or `405` with the path's mutation verbs as `Allow` when there is none.
+function _resume_only_plain_get(req, allow)
+    response = _GET_ROUTER(req)
+    response isa _NoGetRoute ? HTTP.Response(405, ["Allow" => allow]) : response
 end
 
 # A WebSocket route is a GET route that upgrades the connection, behind the same
@@ -8586,10 +8616,10 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
     verb_inst = Verb{Symbol(method)}()
     _register_handler(method, path, function(req)
         # The resume-only GET of a mutation path answers mutation polls and
-        # nothing else: a plain GET is still a method the path does not have.
+        # nothing else: a plain GET goes where it would have gone without it.
         if resume_only &&
                 get(queryparams(req), "__htmxo_verb", nothing) === nothing
-            return HTTP.Response(405, ["Allow" => allow])
+            return _resume_only_plain_get(req, allow)
         end
         # A speculative request does no work unless the route opted in with
         # `@preload` — decided before a root is constructed.
@@ -8660,7 +8690,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                 (_has_page(leaf) ? Any[leaf] : Any[])
             return _route_error_response(req, err, bt; error_obj=leaf, page_chain)
         end
-    end)
+    end; resume_only)
 end
 
 # Build the URL path for a route property. `prefix` is the enclosing mount

@@ -9,7 +9,7 @@ using TestItemRunner
     import HTMXObjects: h
 
     export FreshReadApp, FreshPageApp, FreshMutationApp, SharedPathApp, RenamedPathApp,
-        FreshRetainedApp,
+        CoveredPathApp, FreshRetainedApp,
         FreshFailureApp, FreshDirectApp, FreshBrowserApp, FreshGates,
         reset_fresh!, fresh_runs, release_fresh!, hx_get, hx_post, plain,
         poll_url, poll_token, running, settle, settle_response, body_text
@@ -85,6 +85,18 @@ using TestItemRunner
         "Change the renamed thing"
         @post renamed_thing(path_uid::String="") =
             gated(:renamed_post, "renamed-post-$path_uid")
+    end
+
+    # A mutation path that a less specific GET route covers: `/covered/patch`
+    # also matches `/covered/{uid}`.
+    @htmx struct CoveredChild
+        @get index(uid::String) = (fresh_hit!(:covered_get); h.p("covered-get-$uid"))
+        "Patch the covered thing"
+        @post patch() = gated(:covered_patch, "covered-patch")
+    end
+
+    @htmx struct CoveredPathApp
+        @include covered = CoveredChild()
     end
 
     @htmx struct FreshRetainedApp
@@ -428,6 +440,37 @@ end
     not_allowed = dispatch(:GET, "/renamed_thing")
     @test not_allowed.status == 405
     @test HTTP.header(not_allowed, "Allow") == "POST"
+end
+
+@testitem "a mutation path's resume-only GET leaves plain GETs to the route covering it" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!
+
+    reset_fresh!()
+    _clear_operation_polls!()
+    route!(CoveredPathApp())
+
+    # A plain GET of the mutation path is the covering GET route's request.
+    @test contains(String(hx_get("/covered/abc").body), "covered-get-abc")
+    covered = dispatch(:GET, "/covered/patch")
+    @test covered.status == 200
+    @test contains(body_text(covered), "covered-get-patch")
+    @test fresh_runs(:covered_get) == 2
+
+    # The mutation's polls still resume the submission, not the covering route.
+    submitted = String(hx_post("/covered/patch").body)
+    @test running(submitted)
+    target = poll_url(submitted)
+    @test startswith(target, "/covered/patch?")
+    @test contains(target, "__htmxo_verb=POST")
+    @test running(String(hx_get(target).body))
+    release_fresh!(:covered_patch)
+    @test contains(settle(target), "covered-patch:1")
+    @test fresh_runs(:covered_patch) == 1
+    @test fresh_runs(:covered_get) == 2
+    lost = String(hx_get(replace(target, poll_token(target) => "0"^64)).body)
+    @test contains(lost, "Result unavailable")
+    @test fresh_runs(:covered_get) == 2
 end
 
 @testitem "fresh invocations on a retained root leave its caches alone" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
