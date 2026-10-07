@@ -5739,7 +5739,10 @@ later by htmx, a poller, or a modal — opens one stream with `?key=…` for
 the union, and reconnects whenever the set changes. An event reaches the
 fragments present when it arrives, so a fragment's own `outerHTML`
 refresh and a late fragment on a key the stream already carries refresh
-like the fragments present at load, with no reconnect. Each reconnect is an
+like the fragments present at load, with no reconnect. A refused stream
+(any non-200, such as a gateway's `502`/`503` while the app restarts) is
+reopened with the sse extension's backoff for a static region — 500 ms,
+doubling to at most 64 s, reset once a stream opens. Each reconnect is an
 ordinary fresh subscription; the previous stream's server task
 unsubscribes when it notices the disconnect (within one `poll`
 interval), so a push landing in that window re-fetches its fragments
@@ -5769,8 +5772,11 @@ Each `[data-htmxo-live-discover]` region keeps one `EventSource` open on
 its base url with `?key=…` for the union of its descendant
 [`live_fragment`](@ref) `data-key`s — however they reach the DOM (page
 load, htmx swap, poller, modal) — and reconnects when the set changes. A
-reconnect is an ordinary fresh [`serve_key_feed!`](@ref) subscription; the
-previous stream's server task unsubscribes on disconnect. Each event is
+stream that ends `CLOSED` (refused with any non-200) reports to
+[`stream_probe_script`](@ref) and reopens after htmx-ext-sse's backoff
+(500 ms × 2^n, at most 64 s, reset on `open`); a teardown or key-set change
+cancels it. A reconnect is an ordinary fresh [`serve_key_feed!`](@ref)
+subscription; the previous stream's server task unsubscribes on disconnect. Each event is
 dispatched to the region's fragments for that event at arrival, through
 the fragment's own `hx-trigger="sse:<event>"` — the exact call the sse
 extension makes for a static region, so a fragment behaves identically
@@ -5842,6 +5848,35 @@ live_region_script() = h.script(Raw(raw"""
     state.names = new Set();
   }
 
+  // A browser `EventSource` refused with any non-200 (a gateway's 502/503
+  // while the app restarts, a 401) ends `CLOSED` and never retries by itself.
+  // Reopen after htmx-ext-sse's backoff for a static region (500 ms × 2^n,
+  // at most 64 s), counted across consecutive failures and reset on `open`.
+  // The reopen is an ordinary `sync`, so it carries the key set present then.
+  function retryLater(state) {
+    closeState(state);
+    state.retries = Math.max(Math.min(state.retries * 2, 128), 1);
+    state.retry = setTimeout(function () { state.retry = null; sync(state); },
+                             state.retries * 500);
+  }
+
+  function open(state, keys) {
+    var source = state.source = openSource(feedUrl(state.base, keys));
+    source.addEventListener('open', function () {
+      if (state.source === source) state.retries = 0;
+    });
+    source.addEventListener('error', function () {
+      // CONNECTING: the browser is re-establishing a dropped stream itself.
+      if (source.readyState !== EventSource.CLOSED) return;
+      // A refused stream ends `CLOSED` with no status to read; the probe
+      // runtime asks whether the page's session still reaches it.
+      if (window.htmxoStreamProbe) window.htmxoStreamProbe.failed(source.url);
+      // Only the region's current stream retries: one closed by a key-set
+      // change or a teardown is no longer `state.source`.
+      if (state.source === source) retryLater(state);
+    });
+  }
+
   // One listener per wire event name on the open stream. It reads the
   // region's fragments for that name when the event arrives, never a list
   // taken when the stream opened: a fragment's own outerHTML refresh and a
@@ -5870,7 +5905,8 @@ live_region_script() = h.script(Raw(raw"""
 
   // Reconcile the region's stream with the fragments present: close + reopen
   // on the new union when the sorted key set changed, then listen for any
-  // wire name not yet heard on the open stream.
+  // wire name not yet heard on the open stream. While a refused stream's
+  // backoff is pending, the reopen waits for it, whatever the key set.
   function sync(state) {
     if (!document.contains(state.region)) { teardown(state.region); return; }
     var keys = [];
@@ -5887,17 +5923,9 @@ live_region_script() = h.script(Raw(raw"""
     if (sig !== state.sig) {
       state.sig = sig;
       closeState(state);
-      // No fragments: hold no stream until one arrives.
-      if (keys.length) {
-        var source = state.source = openSource(feedUrl(state.base, keys));
-        // A refused stream ends `CLOSED` with no status to read; the probe
-        // runtime asks whether the page's session still reaches it.
-        source.addEventListener('error', function () {
-          if (source.readyState === EventSource.CLOSED && window.htmxoStreamProbe)
-            window.htmxoStreamProbe.failed(source.url);
-        });
-      }
     }
+    // No fragments: hold no stream until one arrives.
+    if (!state.source && keys.length && !state.retry) open(state, keys);
     if (state.source) names.forEach(function (name) { listen(state, name); });
   }
 
@@ -5912,7 +5940,7 @@ live_region_script() = h.script(Raw(raw"""
     var base = region.getAttribute(BASE);
     if (!base) return null;
     var state = { region: region, base: base, sig: null, source: null, names: new Set(),
-                  timer: null, mo: null };
+                  timer: null, mo: null, retry: null, retries: 0 };
     region.__htmxoLive = state;
     live.push(state);
     state.mo = new MutationObserver(function () { schedule(state); });
@@ -5931,6 +5959,7 @@ live_region_script() = h.script(Raw(raw"""
     var i = live.indexOf(state);
     if (i >= 0) live.splice(i, 1);
     if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    if (state.retry) { clearTimeout(state.retry); state.retry = null; }
     if (state.mo) { state.mo.disconnect(); state.mo = null; }
     closeState(state);
   }
