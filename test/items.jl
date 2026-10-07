@@ -11545,12 +11545,20 @@ end
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
+        # The board keeps a finished job listed for `recent` (3 s) of server time,
+        # but Chrome's virtual clock skips ahead whenever no fetch is pending: a
+        # warm board poll answers in milliseconds, so 30 virtual 1 s polls used
+        # to fit in under a second of real time and job 2 could never leave.
+        # Delaying each board poll keeps virtual time from outrunning the
+        # server's; the driver then finishes by about poll 16 of 30.
+        board_poll_delay = 0.25
         server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             path = HTTP.URI(req.target).path
             if startswith(path, "/__ctl/release/")
                 notify(dash_gates[parse(Int, last(split(path, '/')))])
                 return HTTP.Response(200, "released")
             end
+            startswith(path, "/runtime/jobs") && sleep(board_poll_delay)
             app(req)
         end
         try
