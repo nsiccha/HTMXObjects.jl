@@ -466,7 +466,7 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, and `layout(parts)` places the compiled parts |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
@@ -706,6 +706,45 @@ host exactly once, as the nodes given. Do not rebuild them, for example with
 call syntax. A layout that omits, repeats, or rebuilds one of these throws an
 `ArgumentError` naming it. Put holders inside a cell, since a `<div>` directly
 inside `<tr>` is moved out of the table by the browser.
+
+#### Showing some of a graph's operations
+
+A surface may show only part of a mounted graph: a table row's cells hold the
+stage buttons and a check, while the same row's other operations appear in its
+detail view. Pass `select`, a function of each operation entry returning
+`true` or `false`:
+
+```julia
+in_cells(entry) = entry.object isa StageActions || entry.name === :check
+
+h.tbody((semantic_app(app.rows(n); compact=true, results=:shared,
+                      layout=row_cells, select=in_cells) for n in indices)...)
+```
+
+`select` sees the entry that `values` and `submit` receive (`object`,
+`route`, `name`, `verb`, `path`, `title`, `target_id`), once per discovered
+operation. The compiler builds nothing for an operation it leaves out: no
+button, form, holder, context control or result, and no other callback is
+called for it. So the layout places only the selected parts, and the
+placement check requires exactly those. A selected operation compiles as on the
+full surface: it submits the same values to the same mounted URL and verb, with
+the same result target and transport; holders and the context group carry only
+what the selected operations need. Discovery and its fail-closed checks still
+cover the whole graph. A `@ws` or `@sse` route left out of the selection needs
+no `render_operation`.
+
+Choose by structure where you can, for example by mounted type: a route added
+to `StageActions` then appears in the cells with no further edit. Naming a few
+operations is fine too; the selection only decides where an operation is shown,
+and its URL, inputs and execution still come from the route.
+
+To show the rest elsewhere, compile the same mount again with the
+complementary selection, `select=!in_cells`. A surface that leaves operations
+out gives its holders, context group and shared result host ids of their own,
+so both surfaces can be on one page: each button includes its own surface's
+holder and swaps into its own surface's result host. Selecting the same
+operation on two surfaces of one page still repeats that operation's form
+result id, as rendering the full mount twice does.
 
 ### Reusing generated markup
 
