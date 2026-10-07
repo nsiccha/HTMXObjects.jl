@@ -11581,19 +11581,20 @@ end
     end
 end
 
-# `configure_job_queue!` puts background computes behind a bounded FIFO
+# `configure_job_queue!` puts `@queued` computes behind a bounded FIFO
 # (DynamicObjects' `Deferred`): the rest are queued jobs with a position, move
 # up as earlier ones finish, and are abandoned once nobody watches them.
 @testitem "configure_job_queue! queues background jobs and abandons unwatched ones" setup=[HTMXOTestImports] tags=[:integration, :semantic] begin
     import Treebars
-    import HTMXObjects: _clear_operation_polls!, _operation_background_fetch
+    import HTMXObjects: _clear_operation_polls!, _operation_background_fetch,
+        _operation_start
 
     const queue_gates = Dict(n => Base.Event() for n in 1:4)
     const queue_tracker = RuntimeTracker()
 
     @htmx struct QueuedJobsApp
         "Queued crunch"
-        @get queued_crunch(n::Int) = (wait(queue_gates[n]); h.p("crunched:$n"))
+        @queued @get queued_crunch(n::Int) = (wait(queue_gates[n]); h.p("crunched:$n"))
     end
     route!(QueuedJobsApp())
     router = HTMXObjects.ROUTER
@@ -11611,9 +11612,11 @@ end
 
     @test_throws ArgumentError configure_job_queue!(; max_running=-1)
     @test_throws ArgumentError configure_job_queue!(; abandon_after=0)
-    # Off by default: background computes start at once.
+    # Off by default: background computes start at once — a `@queued` one
+    # through DynamicObjects' own `:default` spawn.
     @test configure_job_queue!().max_running == 0
-    @test _operation_background_fetch(HTTP.Request("GET", "/")) === identity
+    @test _operation_background_fetch(
+        _operation_start(HTTP.Request("GET", "/"), true)) === identity
 
     _clear_operation_polls!()
     try

@@ -16,8 +16,10 @@ using HTMXObjects, DynamicObjects, HTTP
         computed
     end
 
+    # `@queued`: the batch is heavy compute, so it runs on `:default` through
+    # the job queue (`configure_job_queue!`), however the request is answered.
     "Read a batch result"
-    @get result(batch_id::Int) = h.p("batch:$batch_id result:", batch_result(batch_id))
+    @queued @get result(batch_id::Int) = h.p("batch:$batch_id result:", batch_result(batch_id))
 
     # POST accepts/identifies the request; the result GET owns background work.
     # `@direct`: its answer IS the dispatched GET's response (headers included),

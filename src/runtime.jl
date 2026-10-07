@@ -848,21 +848,20 @@ end
 
 # --- job queue ---------------------------------------------------------------
 #
-# Opt-in bounded execution for background operations
-# (`configure_job_queue!`). Without it, every operation that goes to the
-# background — the polling transport, a deferred direct-page load, a healed
-# poll, a `@preload` — starts its compute with `Threads.@spawn`, so N heavy
-# computes all run
-# at once on the `:default` pool. With it, the operation layer hands them to
-# DynamicObjects through `Deferred(executor)` instead: at most `max_running` run
-# at a time and the rest wait in FIFO order, listed as `:queued` jobs with their
-# position. A queued compute nobody has started, joined or polled for
-# `abandon_after` seconds is abandoned (`DynamicObjects.abandon!`): its job
-# fails with reason "abandoned", and the next request for it starts afresh.
+# Opt-in bounded execution for `@queued` (heavy) computations
+# (`configure_job_queue!`). Without it, a `@queued` computation starts on
+# `:default` at once, so N heavy computes all run at once there. With it, the
+# operation layer hands memoized computes to DynamicObjects through
+# `Deferred(executor)` and fresh invocations as `_QueuedFresh` items: at most
+# `max_running` run at a time and the rest wait in FIFO order, listed as
+# `:queued` jobs with their position. A queued compute nobody has started,
+# joined or polled for `abandon_after` seconds is abandoned: its job fails with
+# reason "abandoned", and the next request for it starts afresh. Ordinary
+# (unmarked) operations never queue; they start on their request's pool.
 
 mutable struct _QueuedCompute
-    compute::Any             # DynamicObjects.DeferredCompute
-    key::Any                 # `_runtime_handle_key` of the compute's Pending
+    compute::Any             # DynamicObjects.DeferredCompute, or a `_QueuedFresh`
+    key::Any                 # `_runtime_handle_key` of the compute's handle
     tracker::RuntimeTracker
     enqueued_ns::UInt64
 end
@@ -887,10 +886,10 @@ const _JOB_QUEUE = _JobQueue()
 """
     configure_job_queue!(; max_running=nothing, abandon_after=nothing) -> NamedTuple
 
-Bound how many background operations compute at once. Off by default
-(`max_running=0`): every operation that outlives the grace period starts its
-compute immediately. With `max_running=n`, at most `n` such computes run at a
-time and the rest wait in FIFO order; the runtime dashboard and
+Bound how many `@queued` (heavy) computations run at once. Off by default
+(`max_running=0`): a `@queued` computation starts on `:default` immediately. With
+`max_running=n`, at most `n` such computations run at a time and the rest wait in
+FIFO order; the runtime dashboard and
 [`jobs_board`](@ref)s list them as `:queued` with their queue position ("queued
 · #3"), and they start as earlier ones finish. Concurrent requests for the same
 computation still share it, queued or running.
@@ -901,14 +900,12 @@ gone. Its job is recorded as `:failed` with reason "abandoned", and the next
 request for it starts a fresh compute. `abandon_after=Inf` never abandons.
 Running computes are never interrupted.
 
-Only memoized background computes queue: direct executions (`@direct` routes,
-non-HTMX submissions, `:blocking` policies, …) answer inline, and fresh
-invocations (`@fresh` routes and mutation verbs) start at once — in the
-background when the polling transport answers them — because nothing can
-coalesce or abandon a computation no cache cell holds. `@interactive` routes
-start at once on the `:interactive` threadpool too: the queue's workers run on
-`:default`, behind the very work such a route must not wait for. Route heavy batch work
-through a memoized GET (see *App-owned background batches* in the API docs).
+Only `@queued` routes are admitted, and all of their computations are: memoized
+or fresh (`@fresh` routes and mutation verbs, which are never coalesced), polled
+or answered inline — an inline (`@direct`, non-HTMX, `:blocking`) request waits
+for its turn and its result. Ordinary operations start at once on their
+request's pool. Mark heavy batch work `@queued` (see *App-owned background
+batches* in the API docs).
 Needs a DynamicObjects with `Deferred`. Returns the current settings; omitted
 settings are unchanged. Setting `max_running=0` starts everything still queued.
 """
@@ -945,31 +942,87 @@ job_queue_settings(q::_JobQueue=_JOB_QUEUE) = lock(q.lock) do
        queued=length(q.waiting))
 end
 
-# The `fetch` selector for a background compute on `pool`: on `:default`,
-# `identity` spawns it at once and a `Deferred` hands it to the queue.
-_operation_background_fetch(req, pool::Symbol=:default) =
-    _operation_background_fetch(req, Val(pool))
+# The `fetch` selector for a background compute started at `start`
+# (`_operation_start`): a queued start waits its turn in the job queue; any
+# other starts at once on its pool — `identity` is DynamicObjects' own
+# `:default` spawn.
+_operation_background_fetch(start) =
+    _operation_start_queued(start) ? _queue_fetch(start.tracker) :
+        _pool_fetch(Val(start.pool))
 
-function _operation_background_fetch(req, ::Val{:default})
-    _JOB_QUEUE.max_running > 0 || return identity
-    tracker = _runtime_tracker_of(req)
-    getproperty(DynamicObjects, :Deferred)(d -> _job_queue_enqueue!(_JOB_QUEUE, d, tracker))
-end
+_queue_fetch(tracker::RuntimeTracker) = getproperty(DynamicObjects, :Deferred)(
+    d -> _job_queue_enqueue!(_JOB_QUEUE, d, tracker))
 
-# An `@interactive` route's compute starts at once on `:interactive`. The queue
-# bounds heavy `:default` work, and its workers live on that pool: admitting a
-# latency-critical compute through it would wait behind the very work the
-# marker exists to avoid.
-function _operation_background_fetch(req, ::Val{:interactive})
+_pool_fetch(::Val{:default}) = identity
+
+function _pool_fetch(::Val{:interactive})
+    if !isdefined(DynamicObjects, :Deferred)
+        @warn("This DynamicObjects has no `Deferred`, so memoized operations " *
+              "start on :default; upgrade DynamicObjects to keep them on the " *
+              "request's :interactive pool.", maxlog=1)
+        return identity
+    end
     run! = getproperty(DynamicObjects, :run!)
     getproperty(DynamicObjects, :Deferred)(
         d -> (_spawn_operation(() -> run!(d), :interactive); nothing))
 end
 
+# A fresh invocation waiting for a job-queue slot. No cache cell holds it, so
+# its `_FreshOperation`'s task waits on `result` for the worker that runs it.
+# Exactly one of running and abandoning takes effect, as for a
+# `DynamicObjects.DeferredCompute`.
+mutable struct _QueuedFresh
+    run::Any                            # () -> value
+    result::Channel{Tuple{Bool,Any}}    # (true, value) | (false, exception)
+    @atomic claimed::Bool
+end
+
+_QueuedFresh(run) = _QueuedFresh(run, Channel{Tuple{Bool,Any}}(1), false)
+
+_job_queue_claim!(f::_QueuedFresh) = (@atomicswap f.claimed = true) === false
+
+# Run or abandon one queued item, whichever kind it is.
+_job_queue_run!(d) = getproperty(DynamicObjects, :run!)(d)
+
+function _job_queue_run!(f::_QueuedFresh)
+    _job_queue_claim!(f) || return false
+    outcome = try
+        (true, f.run())
+    catch err
+        (false, err)
+    end
+    put!(f.result, outcome)
+    true
+end
+
+_job_queue_abandon!(d, reason) = getproperty(DynamicObjects, :abandon!)(d, reason)
+
+function _job_queue_abandon!(f::_QueuedFresh, reason)
+    _job_queue_claim!(f) || return false
+    put!(f.result,
+         (false, getproperty(DynamicObjects, :ComputeAbandoned)(String(reason))))
+    true
+end
+
+# Enqueue one fresh invocation as an operation the transport can follow like
+# any other: its task finishes when a worker has run (or the reaper abandoned)
+# the invocation, and the ledger keys it by the operation itself.
+function _enqueue_fresh_operation(run, root, tracker::RuntimeTracker)
+    queued = _QueuedFresh(run)
+    task = _spawn_operation(_request_pool()) do
+        ok, value = take!(queued.result)
+        ok ? value : throw(value)
+    end
+    op = _FreshOperation(task, root)
+    _job_queue_enqueue!(_JOB_QUEUE, queued, tracker; key=_runtime_handle_key(op))
+    op
+end
+
 _job_queue_key(d) = (objectid(getfield(d, :cache)), getfield(d, :key), UInt(0))
 
-function _job_queue_enqueue!(q::_JobQueue, d, tracker::RuntimeTracker)
-    item = _QueuedCompute(d, _job_queue_key(d), tracker, time_ns())
+function _job_queue_enqueue!(q::_JobQueue, d, tracker::RuntimeTracker;
+        key=_job_queue_key(d))
+    item = _QueuedCompute(d, key, tracker, time_ns())
     reap = lock(q.lock) do
         if q.max_running == 0
             # Switched off since this operation chose its selector.
@@ -996,8 +1049,7 @@ function _job_queue_staff!(q::_JobQueue)
     end
 end
 
-_job_queue_run(item::_QueuedCompute) =
-    getproperty(DynamicObjects, :run!)(item.compute)
+_job_queue_run(item::_QueuedCompute) = _job_queue_run!(item.compute)
 
 function _job_queue_worker(q::_JobQueue)
     while true
@@ -1047,7 +1099,7 @@ function _job_queue_reap!(q::_JobQueue, now_ns::UInt64=time_ns())
     end
     reason = "abandoned: unwatched for $(fmt_time(limit))"
     for item in stale
-        getproperty(DynamicObjects, :abandon!)(item.compute, reason)
+        _job_queue_abandon!(item.compute, reason)
     end
     length(stale)
 end
