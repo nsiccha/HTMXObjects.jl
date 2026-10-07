@@ -223,7 +223,10 @@ the descendant fragments, opens one stream with `?key=…` for the union,
 and reconnects whenever the set changes. Each event reaches the fragments
 present when it arrives, so a fragment's own `outerHTML` refresh and a
 late fragment on a key the stream already carries keep refreshing with no
-reconnect. Each reconnect is an ordinary
+reconnect. A refused stream — any non-200, such as a gateway's `502`/`503`
+while the app restarts or deploys — is reopened with the backoff the sse
+extension uses for a static region: 500 ms, doubling to at most 64 s,
+reset once a stream opens. Each reconnect is an ordinary
 fresh [`serve_key_feed!`](@ref) subscription — no server change is
 needed — and a push landing in the handover window re-fetches its
 fragments twice, idempotent. With no fragments present the region holds
