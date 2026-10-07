@@ -710,7 +710,8 @@ value: here two table rows. `parts` carries `object`, `title`, `context` (the
 shared context group, or `nothing`), `inputs` (the hidden-context holders),
 `actions` (each with `object`, `route`, `name`, `verb`, `path`, `title`,
 `button`, and `result`), `operations` (what `render_operation` returned), and
-`result` (the shared host, or `nothing`), and `action_attrs`. The compiler owns
+`result` (the shared host, or `nothing`), `action_attrs` and `result_attrs`
+(both empty without `results=:shared`). The compiler owns
 each button's URL, verb, included context, target, and polling; the layout only
 places it. Splat `parts.action_attrs` onto an element that contains every
 button but not the shared host, here the row of button cells. Holders and the
@@ -726,6 +727,51 @@ when the host or another element of the layout that sends requests, such as an
 that element. Content swapped into that element later inherits the values too,
 so the same applies to requesting controls it brings. Put holders inside a cell, since a `<div>` directly
 inside `<tr>` is moved out of the table by the browser.
+
+The host may also sit inside the element that carries `parts.action_attrs`,
+for example in the last cell of the buttons' own row. Splat
+`parts.result_attrs` onto an element around it, such as that cell: they declare
+each shared attribute `unset` and inherited, so whatever is swapped into the
+host, a poller or a control of the response, resolves none of the buttons'
+wiring. `hx-disinherit` alone is not enough: htmx ignores it on a page that sets
+`htmx.config.disableInheritance`, where `hx-inherit` still passes the wiring
+down, and the compiler checks the placement in both modes.
+
+#### Rows of a `master_detail_table` {#master-detail-rows}
+
+[`master_detail_table`](@ref) builds each master `<tr>` itself, since it owns
+the row's id, toggle, hierarchy and search attributes. Its `master` callback
+may return the whole row instead of its cells: the cells fill the master row,
+and the row's attributes stay on it. A semantic surface per row then declares
+its buttons' wiring once on that row:
+
+```julia
+row(parts) = h.tr(
+    h.td(row_label(parts.object)),
+    h.td(parts.inputs..., (a.button for a in parts.actions if a.object isa StageActions)...),
+    h.td(button(parts, :primal)),
+    h.td(button(parts, :gradient)),
+    h.td(parts.result; parts.result_attrs...);
+    parts.action_attrs...)
+
+master_detail_table(["Model", "Stages", "Primal", "Gradient", "Result"], roots;
+    key = item -> item.key,
+    master = item -> semantic_app(app.rows(item.key); compact=true,
+                                  results=:shared, layout=row),
+    children = item -> item.children,
+    detail_url = item -> query_url(app / "detail"; key=item.key),
+    detail_toggle = :label, searchable = true, id = "models")
+```
+
+`semantic_app` checks the row it returns, and the table keeps those attributes,
+so no button cell repeats them. Sorting, search, label toggles and lazy details
+work as for any table; a detail row is a sibling of the master row, so its
+controls inherit nothing from it. The row may not set what the table writes
+itself (`id`, `onclick`, `aria-expanded`, `aria-level`, `hidden`, and the
+`data-htmxo-*` hierarchy and search attributes), `class` when `master_class`
+is given, or an attribute that `master_attrs` also sets; each throws an
+`ArgumentError`. With `detail_toggle=:label` the first cell's content becomes
+the row's toggle button, so keep holders and buttons in other cells.
 
 #### Showing some of a graph's operations
 

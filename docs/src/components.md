@@ -219,6 +219,13 @@ a row's search text. Labels wrap without truncation. Without `children`, the
 existing flat master/detail behavior remains available; `searchable=true` also
 works on flat tables.
 
+`master` may also return the whole row, `h.tr(cells...; attrs...)`, when its
+attributes are computed together with its cells. The cells fill the master row
+and the attributes stay on it, beside the table's own id, toggle and hierarchy
+attributes, which the row may not set. A `semantic_app` layout uses this to
+declare its buttons' shared wiring once per row; see
+[Rows of a `master_detail_table`](api.md#master-detail-rows).
+
 Lazy detail controls are initialized before the slot's `htmx:afterSwap` event
 reaches page listeners. Generated forms can be submitted as soon as the detail
 appears, including concurrent actions with separate result targets. The normal
