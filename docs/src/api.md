@@ -1114,7 +1114,7 @@ faithful account of the generated signature, and the verb is reachable as
 | Operation card title | The route's **docstring** — first non-empty line; falls back to a humanised property name |
 | Control label | The param's doc as recorded by `reflect(T)` — for a route argument, its ``- `name`: Label`` entry under the route docstring's `# Arguments` heading; falls back to a humanised input name |
 | Control order | Shared context discovery order, then route parameter declaration order — there is no ordering key |
-| Which control is rendered | `domain` if present, else the declared Julia `type` — declare free-form prose as [`MultilineText`](@ref) for a `<textarea>` |
+| Which control is rendered | `domain` if present, else the declared Julia `type` — declare free-form prose as [`MultilineText`](@ref) for a `<textarea>`, a file as [`Upload`](@ref) for a file input |
 | Required marker / default | The declaration's own `required` / default value |
 | Units | Not modelled. Put them in the param doc or the label |
 | Execution transport | [`OperationPolicy`](@ref) at `route!` time — an app-level choice, not a per-operation descriptor key. Defaults to `:auto`; it governs every route under the app root, not just compiled operations; see [What the policy governs](#What-the-policy-governs) |
@@ -1179,8 +1179,9 @@ Given a resolved domain the control is picked by this rule, in order:
 `radio_max` options (default 4) → a radio `fieldset`; otherwise a `<select>`.
 Only with no domain, or `kind=:unrestricted`, does the input fall back to the
 type-driven control: `Bool` renders a checkbox, a `Number` a number input,
-[`MultilineText`](@ref) a `<textarea>`, and anything else — `String` included
-— a single-line text input.
+[`MultilineText`](@ref) a `<textarea>`, [`Upload`](@ref) a file input
+(`Vector{Upload}` a `multiple` one), and anything else — `String` included —
+a single-line text input.
 
 A `String` cannot carry a line break through a single-line input, so declare
 free-form prose as `MultilineText`. The documented argument below renders as a
@@ -1207,6 +1208,33 @@ blank submission uses the default.
 
 ```@docs
 MultilineText
+```
+
+A file argument is declared as `Upload`, or `Vector{Upload}` for several files.
+Its form submits `hx-encoding="multipart/form-data"`, and the body receives the
+uploaded part with its client file name, content type and bytes:
+
+```julia
+@htmx struct DrawImports
+    """
+    Import draws
+
+    # Arguments
+    - `file`: Draws file
+    """
+    @post import_draws(; file::Upload) = store_draws(file.filename, file.data)
+end
+```
+
+A file travels only in a request body, so `operation_form` rejects a GET or
+DELETE route with a file argument. A browser never lets a page prefill a file
+input, so a default or a previously submitted file is not shown. When the form
+also has a dependent-refresh control, file inputs sit after the refreshed
+region and are left out of the refresh request: changing the dependency neither
+clears nor re-uploads the chosen file.
+
+```@docs
+Upload
 ```
 
 `operation_form(...; presentation=:cards)` is an explicit rich-presentation
@@ -1649,6 +1677,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group` | Form input widgets (label, select, radio, number, checkbox, textarea, autocomplete, …) |
 | `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
 | `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |
+| `Upload`                        | Route-argument type for an uploaded file (`Vector{Upload}` for several); generated forms render a file input and submit multipart |
 | `tabset`, `tabset_styles`, `htmx_tabset` | Tab navigation widgets                            |
 | `comparison_view`, `comparison_js`, `comparison_styles` | Selectable comparison columns, either inline tabs with a Compare dialog or shown directly inline, independently loaded and scrolling; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
