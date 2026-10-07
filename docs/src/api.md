@@ -657,9 +657,10 @@ context is carried by one holder per distinct set of names and values: the
 operations of a row and of its mounted children share a holder when they carry
 the same values, in whatever order their mounts declare them, and a child mount
 with an extra `@param` gets a second holder rather than falling back to forms.
-Compact buttons carry no `target_id`. Their attributes are
-on the button itself rather than an ancestor, so result content inherits
-nothing from the action row. Like generated forms, the buttons need htmx.
+Compact buttons carry no `target_id`. With the default `results=:each` their
+attributes are on the button itself rather than an ancestor, so result content
+inherits nothing from the action row. Like generated forms, the buttons need
+htmx.
 
 Compact rows reduce the number of generated elements and bytes per operation;
 they do not change which operations exist or how they execute. Rendering many
@@ -679,7 +680,7 @@ row_cells(parts) = (
               button(parts, :lower), button(parts, :compile)),
          h.td(button(parts, :primal)),
          h.td(button(parts, :gradient)),
-         h.td(parts.operations...)),
+         h.td(parts.operations...); parts.action_attrs...),
     h.tr(h.td(parts.result; colspan="5")))
 
 h.tbody((semantic_app(app.rows(n); compact=true, results=:shared,
@@ -693,18 +694,37 @@ whatever the host showed before, including a running poll. Without
 `results=:shared`, each result stays a separate element that must directly
 follow its button.
 
+Since every button of a surface swaps into the same host, the buttons do not
+each repeat that wiring. `parts.action_attrs` holds it once: `hx-target` and
+`hx-swap` for the host, the `hx-include` of the holder most buttons use (only
+when every button includes one), and `hx-inherit`, so htmx applies them by
+inheritance even on a page that sets `htmx.config.disableInheritance`. Each
+button keeps only its URL and verb, plus an `hx-include` of its own when its
+holder differs. In a table of a few hundred rows the long ids then appear once
+per row rather than on every button. A form that remains declares its own
+target and swap, and `hx-include="unset"` when it includes no context, so it can
+sit in the same row.
+
 `layout(parts)` receives the compiled parts and may return any renderable
 value: here two table rows. `parts` carries `object`, `title`, `context` (the
 shared context group, or `nothing`), `inputs` (the hidden-context holders),
 `actions` (each with `object`, `route`, `name`, `verb`, `path`, `title`,
 `button`, and `result`), `operations` (what `render_operation` returned), and
-`result` (the shared host, or `nothing`). The compiler keeps the URL, verb,
-included context, target, and polling on each button; the layout only places
-it. Holders and the context group are included by id, so they can sit in any
-cell. Place the context group, every holder, button, and result, and the shared
+`result` (the shared host, or `nothing`), and `action_attrs`. The compiler owns
+each button's URL, verb, included context, target, and polling; the layout only
+places it. Splat `parts.action_attrs` onto an element that contains every
+button but not the shared host, here the row of button cells. Holders and the
+context group are included by id, so they can sit in any cell. Place the context group, every holder, button, and result, and the shared
 host exactly once, as the nodes given. Do not rebuild them, for example with
 call syntax. A layout that omits, repeats, or rebuilds one of these throws an
-`ArgumentError` naming it. Put holders inside a cell, since a `<div>` directly
+`ArgumentError` naming it. The compiler also resolves inheritance through the
+placed nodes as htmx does (the nearest declaration wins and `hx-disinherit`
+stops it), and throws when a button would not inherit `parts.action_attrs`, or
+when the host or another element of the layout that sends requests, such as an
+`hx-get` link in a neighbouring cell, would. Give such an element its own
+`hx-target`, `hx-swap` and `hx-include` (`"unset"` for none), or place it outside
+that element. Content swapped into that element later inherits the values too,
+so the same applies to requesting controls it brings. Put holders inside a cell, since a `<div>` directly
 inside `<tr>` is moved out of the table by the browser.
 
 #### Showing some of a graph's operations
