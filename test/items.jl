@@ -6904,6 +6904,66 @@ end
     @test any(m -> occursin(r"\"GET /echo\?suffix=! HTTP/1\.1\" 101 ", m), messages)
 end
 
+@testitem "serve check_origin validates the original WebSocket upgrade request" setup=[HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server, :ws] begin
+    using Sockets
+
+    @htmx struct OriginPolicyApp
+        @ws echo() = for msg in __ws__
+            HTTP.WebSockets.send(__ws__, msg)
+        end
+    end
+    route!(OriginPolicyApp())
+    port = free_port()
+    serve(; port, async=true, access_log=nothing,
+        check_origin=(request, origin) ->
+            origin == "https://app.example.com" &&
+            HTTP.header(request, "Host") == "app.example.com")
+
+    # A raw handshake preserves the public Host while connecting to loopback,
+    # just as a TLS-terminating proxy does. Read only the response head: a 101
+    # deliberately keeps the connection open until the client closes it.
+    function handshake(; origin=nothing, host="app.example.com")
+        socket = connect(ip"127.0.0.1", port)
+        try
+            headers = [
+                "GET /echo HTTP/1.1",
+                "Host: $host",
+                "Connection: Upgrade",
+                "Upgrade: websocket",
+                "Sec-WebSocket-Version: 13",
+                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+            ]
+            origin === nothing || push!(headers, "Origin: $origin")
+            write(socket, join(headers, "\r\n") * "\r\n\r\n")
+            return first(split(String(readuntil(socket, "\r\n\r\n")), "\r\n"))
+        finally
+            close(socket)
+        end
+    end
+
+    try
+        @test startswith(handshake(origin="https://app.example.com"), "HTTP/1.1 101")
+        @test startswith(handshake(origin="https://other.example.com"), "HTTP/1.1 403")
+        @test startswith(handshake(origin="http://app.example.com"), "HTTP/1.1 403")
+        @test startswith(handshake(origin="https://app.example.com", host="other.example.com"), "HTTP/1.1 403")
+        @test startswith(handshake(), "HTTP/1.1 403")
+    finally
+        terminate()
+    end
+
+    # HTTP.jl 2's default compares Origin with the backend's plain TCP
+    # scheme. The custom policy above is what permits the public HTTPS origin.
+    if pkgversion(HTTP) >= v"2"
+        port = free_port()
+        serve(; port, async=true, access_log=nothing)
+        try
+            @test startswith(handshake(origin="https://app.example.com"), "HTTP/1.1 403")
+        finally
+            terminate()
+        end
+    end
+end
+
 @testitem "application architecture composes declarations, routes, contributions and observations" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     ARCHITECTURE_COMPUTES[] = 0
 
