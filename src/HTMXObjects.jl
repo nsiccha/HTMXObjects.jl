@@ -2476,6 +2476,7 @@ _runtime_blocks() = (
     live_refresh = (:js, live_refresh_script),
     auto_terminal = (:js, auto_terminal_script),
     mutation_poll = (:js, mutation_poll_script),
+    semantic_refresh = (:js, semantic_refresh_script),
 )
 
 _runtime_block(name::Symbol) = last(getfield(_runtime_blocks(), name))()
@@ -2641,7 +2642,10 @@ function htmx(args...;
                 :stream_probe,
                 # Discover-mode live regions keep one reconnecting stream behind
                 # this runtime; inert on pages without one.
-                :live_region)...,
+                :live_region,
+                # Semantic shared context groups follow their live declared
+                # domains; inert on pages without a refreshable group.
+                :semantic_refresh)...,
             # Poller quietness by default: the Treebars stylesheet + script
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
@@ -14164,18 +14168,26 @@ refresh wiring; one that reads something names what it read, from the same
 `@options(dataset) = choices(cohort)` reads the property `choices` as well as
 the field `cohort` — so the caller intersects this with the form's own controls.
 """
-function _semantic_refresh_dependencies(route)
+_semantic_refresh_dependencies(route) = _semantic_refresh_dependencies(route.params)
+function _semantic_refresh_dependencies(params::AbstractVector)
     dependencies = Set{Symbol}()
-    for param in route.params
-        domain = get(param, :domain, nothing)
-        domain === nothing && continue
-        get(domain, :kind, :unrestricted) === :declared || continue
-        declaration = get(domain, :declaration, nothing)
-        declaration === nothing && continue
-        get(declaration, :static, true) && continue
-        union!(dependencies, Symbol.(get(declaration, :dependencies, Symbol[])))
+    for param in params
+        read = _semantic_param_dependencies(param)
+        isnothing(read) || union!(dependencies, read)
     end
     dependencies
+end
+
+# What one input's declared domain reads, or `nothing` when its options cannot
+# change for a given type: no declared domain, or a declaration reading nothing.
+function _semantic_param_dependencies(param)
+    domain = get(param, :domain, nothing)
+    domain === nothing && return nothing
+    get(domain, :kind, :unrestricted) === :declared || return nothing
+    declaration = get(domain, :declaration, nothing)
+    declaration === nothing && return nothing
+    get(declaration, :static, true) && return nothing
+    Set{Symbol}(Symbol.(get(declaration, :dependencies, Symbol[])))
 end
 
 function _semantic_refresh_attrs(route, action, settings=(;); context_selector=nothing)
@@ -14193,6 +14205,48 @@ function _semantic_refresh_attrs(route, action, settings=(;); context_selector=n
                          hx_target="closest .htmxo-semantic-controls", hx_swap="outerHTML"),
           params_attrs)
 end
+
+_semantic_names_attr(names, separator=' ') = join(sort!(string.(collect(names))), separator)
+
+# The HTTP verbs a controls-only refresh can be addressed to: the shared context
+# group re-resolves a control through an operation that carries it, and a
+# stream route (`@ws`, `@sse`) cannot answer a refresh.
+_semantic_refresh_carrier_rank(verb::Symbol) =
+    verb === :GET ? 0 : verb in (:POST, :PUT, :PATCH, :DELETE) ? 1 : nothing
+
+"""
+    _semantic_context_control(obj, route, param, current, action, shared_names)
+
+One control of `semantic_app`'s shared context group. A control whose declared
+domain reads node state — another control of the group, or anything an
+operation of the surface can change, such as the files an import writes — is
+wrapped in a `.htmxo-semantic-context-control` region that re-resolves itself
+through `route`, the operation carrying it, without running that operation.
+`data-htmxo-depends` names the group controls the domain reads; the page runtime
+(`semantic_refresh_script`) sends the region `htmxo-refresh` when one of them
+changes and after a mutation of the surface finishes. The request includes the
+whole group, and the operation's hidden request context rides the URL, so the
+domain is evaluated exactly as the operation's own form would evaluate it.
+"""
+function _semantic_context_control(obj, route, param, current, action, shared_names)
+    control = _semantic_control(obj, route.owner, param, current)
+    _semantic_context_refreshable(route, param) || return control
+    dependencies = _semantic_param_dependencies(param)
+    refresh_url = query_url(_operation_marker_url(string(action), "__htmxo_form");
+        __htmxo_context_control=param.name,
+        __htmxo_shared_context=_semantic_names_attr(shared_names, ','),
+        _semantic_hidden_values(route, current)...)
+    method_key = Symbol("hx_" * lowercase(string(route.verb)))
+    h.div(control; class="htmxo-semantic-context-control",
+          data_htmxo_depends=_semantic_names_attr(intersect(dependencies, shared_names)),
+          NamedTuple{(method_key,)}((refresh_url,))..., hx_trigger="htmxo-refresh",
+          hx_include="closest .htmxo-semantic-context", hx_target="this",
+          hx_swap="outerHTML")
+end
+
+_semantic_context_refreshable(route, param) =
+    !isnothing(_semantic_param_dependencies(param)) &&
+    !isnothing(_semantic_refresh_carrier_rank(route.verb))
 
 function _operation_form_setting(req, name, default=nothing)
     method = req.method
@@ -14251,7 +14305,19 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     shared_context = _semantic_context_names(
         _operation_form_setting(req, :__htmxo_shared_context, ""))
     controls_only = _operation_poll_marker(get(queryparams(req), "__htmxo_controls", nothing))
-    value = if controls_only
+    context_control = _operation_form_setting(req, :__htmxo_context_control)
+    value = if !isnothing(context_control)
+        # One control of a `semantic_app` shared context group, re-resolved
+        # through this operation, which carries it (`_semantic_context_control`).
+        name = Symbol(context_control)
+        index = findfirst(param -> param.name === name &&
+                                   get(param, :kind, nothing) === :context, route.params)
+        isnothing(index) && throw(ArgumentError(
+            "$(LeafT).$(name) carries no shared context input $(repr(name)) to refresh"))
+        current = _semantic_form_values(target.leaf, route, extracted.values)
+        _semantic_context_control(target.leaf, route, route.params[index], current,
+                                  request_path, shared_context)
+    elseif controls_only
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
             radio_max, presentation, shared_names=shared_context, context_selector,
@@ -14346,8 +14412,28 @@ function _operation_form_controls(obj, route, current, action;
     ]
     children = Any[local_context..., controls...]
     refreshable || return children
-    region = h.div(children...; class="htmxo-semantic-controls")
+    region = h.div(children...; class="htmxo-semantic-controls",
+        _semantic_lifted_refresh_attrs(route, action, settings, shared_names,
+                                       context_selector)...)
     fragment ? Any[region] : Any[region, file_controls...]
+end
+
+# A form whose controls read a value lifted into `semantic_app`'s shared context
+# group can no longer wire that control's `change` itself: the control sits in
+# the group, outside the form. The region instead names the group and what it
+# reads, and refreshes itself on `htmxo-refresh`, which the page runtime sends
+# when one of those group controls changes (`semantic_refresh_script`).
+function _semantic_lifted_refresh_attrs(route, action, settings, shared_names,
+        context_selector)
+    context_selector isa AbstractString && startswith(context_selector, '#') ||
+        return (;)
+    lifted = intersect(_semantic_refresh_dependencies(
+        _operation_control_params(route, shared_names)), shared_names)
+    isempty(lifted) && return (;)
+    merge(_semantic_refresh_attrs(route, action, settings; context_selector),
+          (hx_trigger="htmxo-refresh", hx_target="this",
+           data_htmxo_context=context_selector[2:end],
+           data_htmxo_depends=_semantic_names_attr(lifted)))
 end
 
 function _operation_submit_attributes(attributes)
@@ -14653,7 +14739,7 @@ end
 # the next result relatively (`own_result`). `wiring` is the include, target
 # and swap the button declares itself; with a shared result host the surface
 # declares them once instead (see `_semantic_shared_action_attrs`).
-function _semantic_action(spec, content, wiring, own_result)
+function _semantic_action(spec, content, wiring, own_result, result_attrs=(;))
     route = spec.runtime_route
     _check_mounted_include_child(spec.mounted, route)
     action = _operation_form_action(route, spec.current,
@@ -14666,7 +14752,8 @@ function _semantic_action(spec, content, wiring, own_result)
        path=entry.path, title=entry.title,
        button=h.button(content; attrs...),
        result=own_result ?
-           h.div(; class="htmxo-semantic-operation-result", aria_live="polite") :
+           h.div(; class="htmxo-semantic-operation-result", aria_live="polite",
+                 result_attrs...) :
            nothing)
 end
 
@@ -14715,7 +14802,8 @@ function _semantic_button_wiring(include, target, shared)
         (;) : (; hx_include=include)
 end
 
-function _semantic_actions(root_prefix, specs, plan, context_selector, target, suffix)
+function _semantic_actions(root_prefix, specs, plan, context_selector, target, suffix,
+        result_attrs=(;))
     base_id = "htmxo-semantic-actions-" * _semantic_id_token(root_prefix) * suffix
     inputs = Any[]
     includes = map(enumerate(plan.groups)) do (group, hidden)
@@ -14736,7 +14824,7 @@ function _semantic_actions(root_prefix, specs, plan, context_selector, target, s
     actions = Any[_semantic_action(specs[index],
                       something(specs[index].operation_submit, specs[index].base_entry.title),
                       _semantic_button_wiring(includes[plan.group_of[index]], target, attrs),
-                      isnothing(target))
+                      isnothing(target), result_attrs)
                   for index in compact]
     (; inputs, actions, attrs)
 end
@@ -15034,6 +15122,15 @@ descendants; request parameters continue through the request extractor, while
 route/prefix context uses same-type remounting. Unrelated retained caches remain
 shared.
 
+A shared control whose `@options` declaration reads node state follows its live
+domain: it re-resolves through an operation carrying it, without running that
+operation, when a group control it reads changes and after a mutation
+(`POST`/`PUT`/`PATCH`/`DELETE`) of the surface finishes, so a value the mutation
+made valid is offered without a reload. A generated form whose controls read a
+lifted value refreshes its controls when that value changes. Each result then
+carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
+(installed by the `htmx()` shell) sends the refreshes.
+
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` and `submit_attrs` may likewise be values or
 functions of that entry. `submit` supplies content inside the generated button
@@ -15207,33 +15304,49 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
                 "$(repr(param.name)); context control names must be unique within one graph")))
         end
         context_names[param.name] = identity
+        entry = (; object=spec.mounted, route=spec.runtime_route, param,
+                   current=spec.current)
         if haskey(context_indices, identity)
-            prior = context_entries[context_indices[identity]]
+            index = context_indices[identity]
+            prior = context_entries[index]
             isequal(get(prior.current, param.name, nothing),
                     get(spec.current, param.name, nothing)) ||
                 throw(ArgumentError(string(
                     "semantic_app received conflicting values for shared context input ",
                     "$(repr(param.name))")))
+            # Every carrier resolves the same source; the control refreshes
+            # through the first GET carrying it, else the first HTTP one.
+            something(_semantic_refresh_carrier_rank(spec.runtime_route.verb), 2) <
+                something(_semantic_refresh_carrier_rank(prior.route.verb), 2) &&
+                (context_entries[index] = entry)
             continue
         end
-        push!(context_entries, (; object=spec.mounted,
-                                  owner=spec.runtime_route.owner,
-                                  param, current=spec.current))
+        push!(context_entries, entry)
         context_indices[identity] = length(context_entries)
     end
 
     suffix = _semantic_selection_suffix(selected, length(descriptor.routes))
     context_id = _semantic_context_panel_id(obj) * suffix
     shared_context = Set(keys(context_names))
+    # A group with a control whose options can change marks every result of
+    # the surface, so the page runtime re-resolves it after a mutation.
+    refreshes = any(entry -> _semantic_context_refreshable(entry.route, entry.param),
+                    context_entries)
     context_panel = if isempty(context_entries)
         nothing
     else
-        controls = [_semantic_control(entry.object, entry.owner, entry.param,
-                                      entry.current)
+        controls = [_semantic_context_control(entry.object, entry.route, entry.param,
+                        entry.current,
+                        _semantic_context_refreshable(entry.route, entry.param) ?
+                            _operation_form_action(entry.route, entry.current,
+                                _operation_form_target(entry.object, entry.route)) :
+                            nothing,
+                        shared_context)
                     for entry in context_entries]
         h.fieldset(h.legend("Model inputs"), controls...;
                    id=context_id, class="htmxo-semantic-context")
     end
+    result_attrs = refreshes ? (; data_htmxo_refreshes=context_id) : (;)
 
     selector = isempty(context_entries) ? nothing : "#$(context_id)"
     host_id = results === :shared ? _semantic_result_host_id(root_prefix, suffix) : nothing
@@ -15242,7 +15355,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
                         groups=Vector{Pair{Symbol,Any}}[])
     compiled = isempty(plan.indices) ? (; inputs=Any[], actions=Any[], attrs=(;)) :
         _semantic_actions(root_prefix, specs, plan, selector,
-                          isnothing(host_id) ? nothing : "#" * host_id, suffix)
+                          isnothing(host_id) ? nothing : "#" * host_id, suffix,
+                          result_attrs)
     operations = Any[]
     for (index, spec) in enumerate(specs)
         index in plan.indices && continue
@@ -15261,7 +15375,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         )
         result = isnothing(host_id) ?
             h.div(; id=target_id, class="htmxo-semantic-operation-result",
-                  aria_live="polite") : nothing
+                  aria_live="polite", result_attrs...) : nothing
         entry = merge(base_entry, (; target_id, form, result))
         push!(operations, render_operation(entry))
     end
@@ -15271,7 +15385,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
                actions=compiled.actions, action_attrs=compiled.attrs, operations,
                result=isnothing(host_id) ? nothing :
                    h.div(; id=host_id, class="htmxo-semantic-operation-result",
-                         aria_live="polite"),
+                         aria_live="polite", result_attrs...),
                result_attrs=_semantic_result_isolation(compiled.attrs))
     surface = layout(parts)
     layout === _default_semantic_layout || _check_semantic_layout(surface, parts)
@@ -15792,6 +15906,84 @@ mutation_poll_script() = h.script(Raw(raw"""
     value = value || (window.htmx && htmx.config.defaultSwapStyle) || 'innerHTML';
     d.xhr.setRequestHeader('HTMXO-Swap', String(value).trim().split(/\s+/)[0]);
   });
+})();
+"""))
+
+"""
+    semantic_refresh_script()
+
+Keep [`semantic_app`](@ref)'s shared context group on its live declared
+domains. A group control whose `@options` declaration reads node state is
+rendered in a `.htmxo-semantic-context-control` region that re-resolves itself
+through an operation carrying it, without running that operation, when it
+receives `htmxo-refresh`. This script sends that event:
+
+- when a control of the group changes, to every region that reads it: the
+  group's own regions and the generated forms whose controls read it (each
+  names what it reads in `data-htmxo-depends`); and
+- when a mutation (`POST`/`PUT`/`PATCH`/`DELETE`) of the surface has finished,
+  to every region of the group: its result host carries
+  `data-htmxo-refreshes`, naming the group, and the refresh waits for the
+  final answer, so a slow `:auto` mutation's progress polls do not repeat it.
+
+A region keeps the current choice when it is still offered, so a value an
+import just made valid appears without a page reload. Automatic — no consumer
+wiring. The `htmx()` shell installs it; include it once per page when building
+a `<head>` by hand.
+"""
+semantic_refresh_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoSemanticRefresh) return;
+  window.__htmxoSemanticRefresh = true;
+  // A region swapped in moments ago gets its trigger listener when htmx
+  // settles it; processing it first (idempotent) keeps a change made during
+  // that settle from being dropped.
+  function send(el) {
+    if (!window.htmx || !el.isConnected) return;
+    window.htmx.process(el);
+    window.htmx.trigger(el, 'htmxo-refresh');
+  }
+  function quoted(value) {
+    return '"' + String(value).replace(/["\\]/g, '\\$&') + '"';
+  }
+  document.addEventListener('change', function(e) {
+    var t = e.target, name = t && t.name;
+    if (!name || !t.closest) return;
+    var group = t.closest('.htmxo-semantic-context[id]');
+    if (!group) return;
+    var reads = '[data-htmxo-depends~=' + quoted(name) + ']';
+    group.querySelectorAll('.htmxo-semantic-context-control' + reads).forEach(function(el) {
+      if (!el.contains(t)) send(el);
+    });
+    document.querySelectorAll('[data-htmxo-context=' + quoted(group.id) + ']' + reads)
+      .forEach(send);
+  });
+  // A mutation's answer lands in its result host, directly or through a
+  // progress poller whose polls are GETs naming the mutation verb. Only the
+  // final answer refreshes: once every afterSwap listener has run (the
+  // poller's terminalization and the :auto unwrap included), nothing in the
+  // host still polls (`__htmxo_poll`). Capture phase, so the host is found
+  // before the unwrap detaches the swapped node.
+  var pending = {};
+  function mutation(detail) {
+    var config = detail && detail.requestConfig;
+    if (!config || !config.verb) return false;
+    return config.verb !== 'get' || /[?&]__htmxo_verb=/.test(config.path || '');
+  }
+  document.addEventListener('htmx:afterSwap', function(e) {
+    if (!mutation(e.detail)) return;
+    var t = e.target, host = t && t.closest && t.closest('[data-htmxo-refreshes]');
+    if (!host) return;
+    var id = host.getAttribute('data-htmxo-refreshes');
+    if (pending[id]) return;
+    pending[id] = true;
+    setTimeout(function() {
+      delete pending[id];
+      if (!host.isConnected || host.querySelector('[hx-get*="__htmxo_poll"]')) return;
+      var group = document.getElementById(id);
+      if (group) group.querySelectorAll('.htmxo-semantic-context-control').forEach(send);
+    }, 0);
+  }, true);
 })();
 """))
 

@@ -422,6 +422,52 @@ selected mounts, including application and forwarded prefixes. Two selected
 children can therefore share a page; their forms, dependent refreshes, and
 polling continue to target their own results without manually assigned IDs.
 
+### The shared context group follows its live domains
+
+A shared control whose `@options` declaration reads node state renders inside a
+`.htmxo-semantic-context-control` region that re-resolves its options without
+running any operation:
+
+- **when a control it reads changes** — below, `draws_source` lists the files
+  of the selected `model`, so changing `model` refreshes it. A generated form
+  whose own controls read a lifted value (an argument's `@options` reading
+  `model`) refreshes its `.htmxo-semantic-controls` region the same way;
+- **when a mutation of the surface finishes** — once the final answer of a
+  `POST`/`PUT`/`PATCH`/`DELETE` operation lands in its result, directly or
+  through `:auto` polls, every such control of the group re-resolves. A value
+  the mutation just made valid, such as a newly imported file, is offered
+  without a page reload; a still-offered choice stays selected.
+
+```julia
+@htmx struct Ops
+    run_root::String = RUN_ROOT
+    @param model::String = "a"
+    @options(model) = option_domain(["a" => "A", "b" => "B"])
+    draw_files(key::String) = TrackedDirectory(mkpath(joinpath(run_root, key));
+        match = path -> endswith(path, ".json"), key = basename)
+    @param draws_source::String = "synthetic"
+    @options(draws_source) = option_domain(["synthetic" => "Synthetic";
+        ["$n" => "Imported: $n" for n in sort!(collect(keys(draw_files(model))))]])
+    @post import_draws(; file::Upload) = begin
+        write(joinpath(run_root, model, basename(file.filename)), file.data)
+        SemanticProse("Imported $(file.filename); choose it as the draw source.")
+    end
+    @get simulate(; draws::Int = 16) = simulate_from(draws_source, draws)
+end
+```
+
+Nothing is declared for this: the declaration already names what it reads, and
+any mutation may change node state. A domain that reads nothing (`model` above)
+renders exactly as before. The refresh is addressed to an operation that
+carries the control — a `GET` one when there is one — with the group's values
+and that operation's hidden request context, so it evaluates the domain as the
+operation's own form would, and it sees files the mutation wrote when they are
+tracked inputs of the retained root (see *Scoped root lifecycle*). Only the
+shared group refreshes after a mutation; operation forms are left alone so a
+form being filled in is never swapped. The `htmx()` shell installs the page
+runtime, `HTMXObjects.semantic_refresh_script()`; include it once in a
+hand-built `<head>`.
+
 For custom placement, `operation_form` renders its request/fixed context inside
 one local `.htmxo-semantic-context` fieldset. It does not need an external
 context selector; the selector/include wiring is only needed when
