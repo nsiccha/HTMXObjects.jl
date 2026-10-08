@@ -1064,6 +1064,12 @@ serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing
   is in `req.context[:response]`), or `access_log=nothing` to turn it off.
 - `runtime_tracking=true` records requests for the `RuntimeRoutes` dev
   dashboard (`false` skips it).
+- A response whose body is in memory (bytes or a string) goes out with a
+  `Content-Length`, computed after all middleware, so the client has the whole
+  response once the body is written. On HTTP.jl 1.x it would otherwise be
+  chunked, ending only when the connection task writes the last chunk. HEAD
+  answers, 1xx/204/304, already-framed responses and streamed (`IO`) bodies keep
+  HTTP.jl's framing.
 - `staticfiles(folder, "static")` / `dynamicfiles(folder, "static")` mount a
   folder's files as `GET` routes (read once vs. on every request).
 

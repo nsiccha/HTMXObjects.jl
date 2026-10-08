@@ -195,6 +195,14 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   need `using Revise` before the app is loaded.
 - Remaining keyword arguments are passed to `HTTP.listen!`.
 
+A response whose body is held in memory (bytes or a string) is sent with a
+`Content-Length` computed after every middleware ran, unless it already carries
+`Content-Length` or `Transfer-Encoding`, answers a HEAD request, or has a status
+without content (1xx, 204, 304). The client then has the complete response as
+soon as the body is written. On HTTP.jl 1.x such a response would otherwise go
+out chunked, and its last chunk is written only when the connection task
+resumes. A streamed body (an `IO`) keeps HTTP.jl's own framing.
+
 `parallel` chooses where each request is handled:
 - `false` (default) — on HTTP.jl's own connection task. HTTP.jl 2 spawns that
   task on the `:interactive` threadpool (Julia uses `:default` when there are no
@@ -347,7 +355,7 @@ function _stream_handler(app)
     function (stream::HTTP.Stream)
         handle = HTTP.streamhandler(function (req::HTTP.Request)
             req.context[:stream] = stream
-            return app(req)
+            return _frame_buffered!(req, app(req))
         end)
         try
             handle(stream)
@@ -357,6 +365,34 @@ function _stream_handler(app)
         return nothing
     end
 end
+
+# A buffered response leaves `serve` with an explicit `Content-Length`. Without
+# one, HTTP.jl 1.x frames it `Transfer-Encoding: chunked`: the handler task
+# writes the head and the body, and the terminating chunk follows only when the
+# connection task resumes after that task returns. A scheduler stall in between
+# leaves the client holding the whole body of a response that never ends. This
+# runs after every middleware, on the response HTTP.jl is about to write (and
+# would otherwise mark chunked itself), so the length is that of the body that
+# goes out. HTTP.jl 2 already frames these bodies with the same length. A
+# response that is already framed, a streamed body of unknown length, a HEAD
+# answer, and a status that carries no content (1xx, 204, 304) keep HTTP.jl's
+# own framing.
+function _frame_buffered!(req::HTTP.Request, response::HTTP.Response)
+    len = _buffered_length(response.body)
+    (len === nothing || req.method == "HEAD" || !_carries_content(response.status) ||
+     HTTP.hasheader(response, "Content-Length") ||
+     HTTP.hasheader(response, "Transfer-Encoding")) && return response
+    HTTP.setheader(response, "Content-Length" => string(len))
+    return response
+end
+# Not a response: HTTP.jl's adapter reports it.
+_frame_buffered!(req, response) = response
+
+_buffered_length(body::AbstractVector{UInt8}) = length(body)
+_buffered_length(body::AbstractString) = ncodeunits(body)
+_buffered_length(body) = nothing
+
+_carries_content(status::Integer) = !(100 <= status < 200 || status == 204 || status == 304)
 
 # `serve(; parallel)`: the threadpool each request is spawned on (`nothing`: it
 # runs on HTTP.jl's own connection task) and the startup warning for a setting
