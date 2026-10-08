@@ -174,7 +174,8 @@ _url_segment_escapes(b::UInt8) =
 
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
-          middleware=[], access_log=<timed default>, runtime_tracking=true, kwargs...)
+          middleware=[], check_origin=nothing, access_log=<timed default>,
+          runtime_tracking=true, kwargs...)
 
 Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 `async=false` (the default), blocks until interrupted and calls
@@ -182,6 +183,12 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 
 - `middleware` — request middleware (`handler -> (req -> response)`), applied
   outermost first.
+- `check_origin` — optional WebSocket handshake policy, called as
+  `(request, origin) -> Bool` (or `(request) -> Bool`) on the original upgrade
+  request. `origin` is `nothing` when the header is absent. With `nothing`,
+  HTTP.jl's default policy applies. A reverse proxy that terminates HTTPS can
+  supply a callback that accepts only its exact public origin; ordinary request
+  middleware cannot change the request used by the WebSocket upgrade.
 - `access_log` — an `(io, req) -> nothing` formatter written once per request
   (`req.context[:response]` holds the response), or `nothing` to disable the
   log. The default line is `time - ip:port - "GET /path HTTP/1.1" 200 12.3ms`.
@@ -231,7 +238,8 @@ with `auto`. To size both pools equally, compute shell-side:
 `julia -t\$(nproc),\$(nproc)`.
 """
 function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
-        revise=nothing, middleware=[], access_log=_timed_access_log,
+        revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
+        access_log=_timed_access_log,
         runtime_tracking::Bool=true, kwargs...)
     kwargs = _drop_oxygen_kwargs(kwargs)
     revise in (nothing, :none, :lazy, :eager) ||
@@ -241,7 +249,8 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
         error("`serve(; revise=$(repr(revise)))` needs Revise: run `using Revise` before loading the app.")
 
     tracker = runtime_tracking ? runtime_tracker() : nothing
-    handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker))
+    handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker),
+        check_origin)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
     warning === nothing || @warn warning
@@ -351,10 +360,11 @@ end
 
 # Stream-level entry point: exposes the raw stream to the request pipeline (a
 # WebSocket upgrade needs it) and hands off to HTTP.jl's request adapter.
-function _stream_handler(app)
+function _stream_handler(app, check_origin=nothing)
     function (stream::HTTP.Stream)
         handle = HTTP.streamhandler(function (req::HTTP.Request)
             req.context[:stream] = stream
+            req.context[:ws_check_origin] = check_origin
             return _frame_buffered!(req, app(req))
         end)
         try
@@ -5413,13 +5423,36 @@ function _register_websocket_handler(path, handler)
                 ["Upgrade" => "websocket", "Content-Type" => "text/plain; charset=utf-8",
                  "Content-Length" => string(sizeof(body))], body)
         end
+        check_origin = get(req.context, :ws_check_origin, nothing)
+        # HTTP.jl 1.x accepts upgrade keywords but does not check Origin.
+        # Apply an explicitly supplied policy to the original stream request
+        # before upgrading; HTTP.jl 2.x applies it during the handshake.
+        if check_origin !== nothing && pkgversion(HTTP) < v"2"
+            _ws_origin_allowed(check_origin, stream.message) ||
+                return HTTP.Response(403, ["Content-Type" => "text/plain; charset=utf-8"],
+                    "websocket origin rejected")
+        end
         try
-            HTTP.WebSockets.upgrade(ws -> _run_websocket(handler, ws, req), stream)
+            HTTP.WebSockets.upgrade(ws -> _run_websocket(handler, ws, req), stream;
+                check_origin)
         catch err
             @error "WebSocket session on $(req.target) failed" exception=(err, catch_backtrace())
         end
         throw(_WebSocketClosed())
     end)
+end
+
+function _ws_origin_allowed(checker::Function, request::HTTP.Request)::Bool
+    origin = HTTP.header(request, "Origin", nothing)
+    result = if applicable(checker, request, origin)
+        checker(request, origin)
+    elseif applicable(checker, request)
+        checker(request)
+    else
+        throw(ArgumentError("check_origin callback must accept (request) or (request, origin)"))
+    end
+    result isa Bool || throw(ArgumentError("check_origin callback must return Bool"))
+    return result
 end
 
 # Once the client has gone away (tab closed, element swapped out by HTMX), the

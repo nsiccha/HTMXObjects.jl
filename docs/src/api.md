@@ -160,6 +160,30 @@ copy_vendorfiles
 vendor_head
 ```
 
+## WebSockets behind an HTTPS proxy
+
+An `@ws` route uses HTTP.jl's WebSocket handshake. When a proxy terminates
+HTTPS and forwards plain HTTP to `serve`, the browser's `https://` `Origin`
+does not match the backend's plain HTTP connection. Pass `check_origin` to
+`serve` to validate the public origin on the original upgrade request:
+
+```julia
+serve(; check_origin=(request, origin) ->
+    origin == "https://app.example.com" &&
+    HTTP.header(request, "Host") == "app.example.com")
+```
+
+The callback may also accept just `request`; it must return `Bool`. It sees
+`origin === nothing` when the header is absent, so the example rejects clients
+without an Origin. Use the exact public scheme, host and port expected by the
+application. The proxy must preserve the public `Host` for the example above;
+if it does not, validate only trusted ingress metadata. With no callback,
+`serve` keeps HTTP.jl's default handshake behavior. HTMXObjects enforces an
+explicit callback on HTTP.jl 1, whose upgrade accepts but ignores that keyword;
+HTTP.jl 2 enforces it during the handshake. Ordinary `middleware`
+cannot replace this check because the upgrade uses the stream's original
+request. `check_origin` applies to every `@ws` route on that `serve` instance.
+
 ## Server-sent events
 
 `@sse` turns a property into a `text/event-stream` endpoint. The body receives
