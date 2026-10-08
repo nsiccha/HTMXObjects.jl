@@ -1640,9 +1640,9 @@ the grace period is answered by the same poller a memoized route gets.
 - A route whose answer is a finalized response — `hx_response(...; trigger=...)`,
   a redirect, a `204`, a `dispatch`ed sub-request — should stay direct: declare
   the return type (`::HTTP.Response`) or mark it `@direct`. If such an answer
-  arrives through a poller anyway, its headers are kept on the poll response
-  and its body becomes the terminal (an error article for a non-2xx status),
-  but its original status is not.
+  arrives through a poller anyway, including with `keep_terminal_tree=true`,
+  its headers are kept on the poll response and its body becomes the terminal
+  (an error article for a non-2xx status), but its original status is not.
 - A fresh invocation of a `@queued` route waits its turn in
   [`configure_job_queue!`](@ref) like a memoized one, but is never coalesced:
   identical requests are separate invocations.

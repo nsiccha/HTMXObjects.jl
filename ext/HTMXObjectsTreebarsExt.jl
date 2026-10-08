@@ -7,6 +7,7 @@ module HTMXObjectsTreebarsExt
 # Julia's precompile rules.
 
 import HTMXObjects
+import HTTP
 import Treebars
 
 function _grace_fetch(render_result, started, grace_period)
@@ -152,11 +153,22 @@ function __init__()
 
     HTMXObjects._operation_polling_impl[] =
         (render_result, started, ip, keys, call_kwargs, transport) -> begin
-            render_operation_result = value ->
-                _operation_render_result(render_result, value, transport)
             fast = HTMXObjects._operation_grace_fetch(
-                render_operation_result, started, transport.grace_period)
+                value -> _operation_render_result(render_result, value, transport),
+                started, transport.grace_period)
             fast.ready && return fast.value
+            finalized_terminal = Ref{Union{Nothing,HTTP.Response}}(nothing)
+            render_operation_result = value -> begin
+                rendered = _operation_render_result(render_result, value, transport)
+                transport.keep_terminal_tree || return rendered
+                finalized = HTMXObjects._finalized_response(rendered)
+                finalized === nothing && return rendered
+                # Treebars renders a kept terminal as HTML. Give it the
+                # finalized body, then attach the response headers to the
+                # whole terminal after Treebars has built its frozen tree.
+                finalized_terminal[] = finalized
+                HTMXObjects.Raw(HTMXObjects._operation_terminal_body(finalized))
+            end
             # Only retain operations that actually cross the grace boundary and
             # emit a poller. Fast values and test seams that replace this
             # extension never occupy the bounded operation registry.
@@ -195,6 +207,12 @@ function __init__()
                     HTMXObjects._operation_ready_terminal(
                         render_operation_result, started)
                 settled.ready && return settled.value
+            end
+            if finalized_terminal[] !== nothing
+                html = HTMXObjects.to_response(responded)
+                return HTTP.Response(200,
+                    HTMXObjects._operation_terminal_headers(finalized_terminal[]);
+                    body=HTMXObjects._message_body_bytes(html))
             end
             responded
         end
