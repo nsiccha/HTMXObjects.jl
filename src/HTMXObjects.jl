@@ -7789,20 +7789,27 @@ _operation_page_runtime(::HTTP.Request, value::HTTP.Response) = value
 # response) and hand its body to the poller — inside the `:auto` terminal node
 # for a 2xx answer, as an error article (which the poller also selects) for any
 # other status.
-function _operation_finalized_terminal(resp::HTTP.Response)
+function _operation_terminal_body(resp::HTTP.Response)
     body = String(_message_body_bytes(resp))
-    inner = if 200 <= resp.status < 300
-        "<div class=\"treebar-poller-inner treebar-terminal-content\" " *
-            "data-htmxo-auto-terminal=\"\">" * body * "</div>"
-    else
-        "<article aria-invalid=\"true\"><header>HTTP " *
-            string(resp.status) * "</header>" * body * "</article>"
-    end
+    200 <= resp.status < 300 && return body
+    "<article aria-invalid=\"true\"><header>HTTP " *
+        string(resp.status) * "</header>" * body * "</article>"
+end
+
+function _operation_terminal_headers(resp::HTTP.Response)
     headers = Pair{String,String}[String(name) => String(value)
         for (name, value) in resp.headers
         if !(lowercase(name) in ("content-type", "content-length"))]
     push!(headers, "Content-Type" => "text/html; charset=utf-8")
-    HTTP.Response(200, headers; body=inner)
+    headers
+end
+
+function _operation_finalized_terminal(resp::HTTP.Response)
+    body = _operation_terminal_body(resp)
+    inner = 200 <= resp.status < 300 ?
+        "<div class=\"treebar-poller-inner treebar-terminal-content\" " *
+            "data-htmxo-auto-terminal=\"\">" * body * "</div>" : body
+    HTTP.Response(200, _operation_terminal_headers(resp); body=inner)
 end
 
 function _operation_has_page_shell(target)
