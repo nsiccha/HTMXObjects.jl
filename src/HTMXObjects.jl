@@ -46,7 +46,7 @@ export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracke
     runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
     clear_runtime_history!, runtime_jobs, track_job!, jobs_board,
     configure_job_queue!
-export reflect, select_routes, precompile_routes!, prewarm_routes!, dispatch, dispatch_parent
+export reflect, select_routes, precompile_routes!, prewarm_routes!, prewarm_workload!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -10761,6 +10761,73 @@ function _prewarm_descriptor(base::AbstractString, route::NamedTuple,
     r = _prewarm_request(verb, url, timeout)
     (; verb, path=route.path, name=route.name, url, status=r.status, error=r.error)
 end
+
+function _require_prewarm_success(rows, kind::AbstractString)
+    for row in rows
+        _prewarm_ok(row) && continue
+        detail = row.error === nothing ? "HTTP $(row.status)" : row.error
+        error("prewarm_workload!: $kind $(row.verb) $(repr(row.url)) " *
+              "($(row.name), $(row.path)) failed: $detail")
+    end
+    rows
+end
+
+function _prewarm_workload!(root, streams; routes=nothing, urls=(),
+        operations::Bool=true, include_post::Bool=false, timeout::Real=45,
+        server_kwargs::NamedTuple=(;))
+    T = root isa Type ? root : typeof(root)
+    selected = routes === nothing ? select_routes(T; verb=:GET) : routes
+    checks = urls isa AbstractString ? [urls] : collect(urls)
+    settings = merge((; host="127.0.0.1", port=0, listenany=true,
+                       async=true, revise=nothing), server_kwargs)
+    settings.host == "127.0.0.1" && settings.port == 0 &&
+        settings.listenany === true && settings.async === true ||
+        throw(ArgumentError("prewarm_workload! requires a loopback, ephemeral, asynchronous server (host=\"127.0.0.1\", port=0, listenany=true, async=true)"))
+
+    server = serve(; settings...)
+    try
+        base = "http://127.0.0.1:$(HTTP.port(server))"
+        route_rows = _require_prewarm_success(
+            prewarm_routes!(T, base, selected; operations, include_post, timeout),
+            "route")
+        url_rows = _require_prewarm_success(
+            prewarm_routes!(base, checks; timeout), "URL")
+        streams === nothing || streams(base)
+        (; routes=route_rows, urls=url_rows)
+    finally
+        close(server)
+    end
+end
+
+"""
+    prewarm_workload!(root; routes=nothing, urls=(), operations=true,
+                      include_post=false, timeout=45, server_kwargs=(;))
+    prewarm_workload!(streams::Function, root; kwargs...)
+
+Run a strict startup workload against a temporary loopback server. Register
+the app's routes and static files before calling this function. It starts
+[`serve`](@ref) on an ephemeral port, warms selected routes through
+[`prewarm_routes!`](@ref), GETs each additional concrete health or asset URL,
+then closes the server even if a request fails. The default route selection
+includes every reflected GET route; `routes` takes the same collection as
+`prewarm_routes!(root, base, coll)`. `operations=true` includes deferred
+answers. Every attempted request must finish with a 2xx status; a skipped
+explicit route, transport error, or non-2xx response throws with its URL.
+
+The optional do-block `streams(base_url)` runs **after** HTTP routes and URLs.
+It can exercise bounded WebSocket or SSE sessions and should throw if its own
+assertions fail. Infinite streams must be bounded by the caller. `server_kwargs`
+passes application-specific [`serve`](@ref) settings such as `middleware` or
+`parallel`; the loopback host, ephemeral port, and async lifecycle are fixed.
+The result is `(; routes, urls)`, containing the successful prewarm rows.
+
+This function is suitable inside `PrecompileTools.@compile_workload`: a missing
+health asset or route then fails package precompilation instead of returning a
+failure row that a caller might overlook.
+"""
+prewarm_workload!(root; kwargs...) = _prewarm_workload!(root, nothing; kwargs...)
+prewarm_workload!(streams::Function, root; kwargs...) =
+    _prewarm_workload!(root, streams; kwargs...)
 
 function _semantic_request_context_param(param, SourceT)
     _reflect_local_param(SourceT, param.name) === nothing && return nothing

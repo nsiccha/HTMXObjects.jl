@@ -2250,6 +2250,7 @@ prewarm_routes!(base_url, warm)  # post-listen validation
 | `select_routes(routes; verb, prefix, names, pattern)` | Pure, stateless filter over the inventory (filters combine with AND); also accepts the app type directly. Returns the collection the two functions below consume |
 | `precompile_routes!(root, coll=nothing)` | Pre-listen: `Base.precompile` each resolved handler body + argument parser. Reports `(verb, path, name, precompiled)` per route; bodies never run |
 | `prewarm_routes!(base_url, coll; include_post=false, operations=false)` | Post-listen: one real request per resolved route. Reports `(verb, path, name, url, status, error)` per route; non-`GET` routes are skipped unless `include_post=true`, failures never throw. `operations=true` also drives each route's deferred answer (below) |
+| `prewarm_workload!(root; routes, urls, operations=true, …)` | Owns a temporary loopback server for a startup workload. Warms routes and concrete health/static URLs over HTTP, checks every attempted response for 2xx, and closes the server. An optional do-block runs bounded stream cases |
 
 Collections also accept ergonomic shorthands wherever they go: concrete
 `"/url"` strings (exact segments beat `{param}` placeholders), `:route_name`
@@ -2286,15 +2287,33 @@ that answers requests on an `:interactive` pool (`JULIA_NUM_THREADS=4,2`).
 ```julia
 @compile_workload begin
     route!(MyApp())
-    server = serve(; port=0, listenany=true, async=true)
-    try
-        prewarm_routes!(MyApp, "http://127.0.0.1:$(HTTP.port(server))";
-                        operations=true)
-    finally
-        close(server)
+    vendorfiles()  # if this app uses same-origin vendored assets
+    prewarm_workload!(MyApp;
+        routes=[:health, :index],
+        urls=["/vendor/htmx.min.js", "/vendor/htmxo/theme.css"],
+        operations=true, server_kwargs=(; revise=nothing)) do base_url
+        bounded_stream_cases(base_url)  # app-defined WebSocket/SSE exchanges
     end
 end
 ```
+
+Register the app, static files, and any vendored assets before calling the
+helper. It starts `serve` at `127.0.0.1` on port zero, uses the bound port for
+real requests, and closes the server in `finally`. `server_kwargs` forwards
+settings such as `middleware` and `parallel`; the loopback host, ephemeral
+port, `listenany=true`, and `async=true` are fixed. Without `routes`, the
+helper selects every reflected GET route. Extra `urls` are concrete GET paths
+for health/static assets that may not appear in the app's reflected inventory.
+Routes are warmed before URLs, then the optional do-block runs. The callback
+must bound its stream reads and raise on a failed exchange; the helper cannot
+infer when an application WebSocket/SSE stream is complete.
+
+`prewarm_routes!` retains its row-reporting, non-throwing contract. The
+workload helper checks those rows and throws on a transport error, skipped
+explicit route, or non-2xx status, including a missing asset's 404. Such a
+throw escapes `@compile_workload` and fails package precompilation. Use
+`include_post=true` only with deliberately safe mutation routes; those may
+run repeatedly when `operations=true`.
 
 Rows then also carry `transport` (`:plain`, `:htmx` or `:page`) and
 `requests`, the round trips of the two runs: `2` means the route answered at
