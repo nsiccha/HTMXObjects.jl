@@ -68,6 +68,15 @@ using TestItemRunner
         @post fresh_nocontent() = (wait(gate(:nocontent)); HTTP.Response(204))
         @post fresh_conflict() = (wait(gate(:conflict));
             HTTP.Response(409, ["Content-Type" => "text/html"], "<p>conflict</p>"))
+        @post fresh_redirect() = begin
+            fresh_hit!(:redirect)
+            wait(gate(:redirect))
+            HTTP.Response(200, ["Content-Type" => "text/plain",
+                                "HX-Redirect" => "/created"], "Created")
+        end
+        @direct @post direct_redirect() = (wait(gate(:direct_redirect));
+            HTTP.Response(200, ["Content-Type" => "text/plain",
+                                "HX-Redirect" => "/created"], "Created"))
     end
 
     # A mutation path that also declares a GET: the GET route serves the
@@ -379,6 +388,55 @@ end
     @test contains(conflict, "aria-invalid=\"true\"")
     @test contains(conflict, "HTTP 409")
     @test contains(conflict, "<p>conflict</p>")
+end
+
+@testitem "a kept mutation terminal preserves finalized response headers and body" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!
+
+    reset_fresh!()
+    _clear_operation_polls!()
+    route!(FreshMutationApp();
+        operation_policy=OperationPolicy(:auto; keep_terminal_tree=true))
+
+    submitted = String(hx_post("/fresh_redirect").body)
+    @test running(submitted)
+    @test fresh_runs(:redirect) == 1
+    target = poll_url(submitted)
+    release_fresh!(:redirect)
+    redirected = settle_response(target)
+    redirected_body = body_text(redirected)
+    @test redirected.status == 200
+    @test HTTP.header(redirected, "HX-Redirect") == "/created"
+    @test contains(redirected_body, "Created")
+    @test contains(redirected_body, "treebar-terminal")
+    @test !contains(redirected_body, "HTTP/1.1")
+    @test fresh_runs(:redirect) == 1
+
+    targets = Dict(key => poll_url(String(hx_post("/fresh_$(key)").body))
+                   for key in (:nocontent, :conflict))
+    foreach(release_fresh!, keys(targets))
+    nocontent = settle_response(targets[:nocontent])
+    @test nocontent.status == 200
+    @test contains(body_text(nocontent), "treebar-terminal-content")
+    @test !contains(body_text(nocontent), "HTTP/1.1")
+    conflict = settle_response(targets[:conflict])
+    @test conflict.status == 200
+    @test contains(body_text(conflict), "HTTP 409")
+    @test contains(body_text(conflict), "<p>conflict</p>")
+    @test !contains(body_text(conflict), "HTTP/1.1")
+
+    # A direct route returns the same finalized answer without a poller or
+    # retained tree; the kept terminal must retain its own transport benefits.
+    direct_task = @async hx_post("/direct_redirect")
+    @test timedwait(() -> istaskdone(direct_task), 0.2; pollint=0.01) === :timed_out
+    release_fresh!(:direct_redirect)
+    direct = fetch(direct_task)
+    @test direct.status == 200
+    @test HTTP.header(direct, "HX-Redirect") == "/created"
+    @test body_text(direct) == "Created"
+    @test !contains(body_text(direct), "treebar-terminal")
+    @test redirected_body != body_text(direct)
 end
 
 @testitem "a mutation path's own GET route serves its polls" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
