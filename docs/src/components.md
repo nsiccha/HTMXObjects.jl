@@ -217,8 +217,19 @@ the name when `predicate` is `null`) and filters again. A row is shown when
 every predicate returns `true`. `ctx` has `query` (normalised lower-case
 phrase), `input` (the field's raw value) and `text` (the row's lower-case
 search text, ancestor text included in a hierarchy). Each predicate runs for
-every row on every pass, also when the field is empty. Registrations live on
-the wrapper element, so content that swaps the table in registers again.
+every row on every pass, also when the field is empty.
+
+The query and the registered predicates are kept per table `id` and page path,
+like the [selection](#table-selection), so they survive a re-render of the
+table: after an `outerHTML` swap (a bulk action, a tab switch away and back)
+the re-rendered table's empty field takes the last query, and the table
+filters as it loads with the predicates still registered. A value the
+re-rendered field already holds wins. Registering a name again replaces it, so
+content that re-registers its predicates when swapped in keeps working.
+`htmxoTableSearch(target, query)` sets the query as if typed (`''` clears it)
+and filters, for example to "show rows like this one" or to start over after a
+bulk action; remove a predicate with `null`. A table without an `id` keeps this
+state on its wrapper element, so a swap that replaces the table drops it.
 
 Each pass fires a bubbling `htmxo:table-filtered` event on the wrapper. Its
 `detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
