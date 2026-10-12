@@ -5571,7 +5571,11 @@ end
         driver = raw"""
         (async function () {
           const R = document.body.dataset, wait = ms => new Promise(r => setTimeout(r, ms));
-          const until = async f => { for (let i = 0; i < 400 && !f(); i++) await wait(25); return f(); };
+          // Each check follows a rendered frame: the thread's paging runs from
+          // IntersectionObserver callbacks, which only fire in a rendering
+          // step, and timers alone can run ahead of rendering under load.
+          const frame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+          const until = async f => { for (let i = 0; i < 400 && !f(); i++) { await frame(); await wait(25); } return f(); };
           const root = document.getElementById('lt');
           await until(() => root.__htmxoThread);
           const sc = root.querySelector('.htmxo-thread-scroll');
