@@ -12429,10 +12429,13 @@ function downloadTableCsv(btn, filename) {
     };
     const headers = Array.from(table.querySelectorAll('thead th'))
         .map(th => esc(th.textContent.replace(/ [▲▼]$/, '').trim()));
+    // A master/detail first cell holds its row controls beside the content;
+    // export the content only, as sorting and search read it.
+    const text = td => (td.querySelector(':scope > [data-htmxo-row-label]') || td).textContent.trim();
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
         .map(tr =>
-            Array.from(tr.cells).map(td => esc(td.textContent.trim())).join(','));
+            Array.from(tr.cells).map(td => esc(text(td))).join(','));
     const csv = [headers.join(','), ...rows].join('\n');
     const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
     const url = URL.createObjectURL(blob);
@@ -12648,6 +12651,10 @@ master_detail_safe_key(key) = _md_safe_key(key)
 # (the slot's `hx-trigger` and the toggle's `htmx.trigger(...)` call).
 _md_lazy_event() = "htmxo-md-load"
 
+# The disclosure triangle a row control shows: ▾ open, ▸ closed. Server render
+# and the client runtime (`htmxoMdToggle`) take the glyphs from here.
+_md_disclosure_glyph(open::Bool) = open ? "▾" : "▸"
+
 # `htmx.trigger` dispatches a bubbling custom event. A nested lazy table lives
 # inside its ancestor's loaded slot, so without `consume` the inner event also
 # reaches the ancestor's hx-trigger listener and refetches the outer detail.
@@ -12691,7 +12698,11 @@ function htmxoMdToggle(row, event, key, slot) {
     if (row.dataset.htmxoDetailOpen !== undefined) row.dataset.htmxoDetailOpen = String(show);
     if (row.dataset.htmxoTreeOpen === undefined) row.setAttribute('aria-expanded', show);
     var control = row.querySelector('[data-htmxo-detail-toggle]');
-    if (control) control.setAttribute('aria-expanded', show);
+    if (control) {
+        control.setAttribute('aria-expanded', show);
+        if (control.hasAttribute('data-htmxo-disclosure'))
+            control.textContent = show ? '$(_md_disclosure_glyph(true))' : '$(_md_disclosure_glyph(false))';
+    }
     if (show && slot) {
         var s = document.getElementById(slot === 1 ? 'detail-slot-' + key : slot);
         htmxoLoadSlot(s);
@@ -12703,10 +12714,13 @@ function htmxoLoadSlot(s) {
         s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
     }
 }
+// A row's detail control activates exactly what a click on the row does, so
+// toggle extensions a caller concatenated onto the row handler run for it too.
 function htmxoMdControl(button, event) {
     event.stopPropagation();
     var row = button.closest('tr'), key = row.id.slice(4);
-    htmxoMdToggle(row, {target: row}, key, document.getElementById('detail-slot-' + key) ? 1 : 0);
+    if (row.onclick) row.onclick({target: row});
+    else htmxoMdToggle(row, {target: row}, key, document.getElementById('detail-slot-' + key) ? 1 : 0);
 }
 function htmxoMdBefore(s, event) {
     if (event.detail.requestConfig.elt !== s) return;
@@ -13069,8 +13083,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   writes itself (`id`, `onclick`, `aria-expanded`, `aria-level`, `hidden`, the
   `data-htmxo-*` hierarchy and search attributes), `class` when `master_class`
   is given, or an attribute `master_attrs` also sets; each throws an
-  `ArgumentError`. The first cell is rebuilt for a hierarchy or
-  `detail_toggle=:label`; the row passed in is not modified.
+  `ArgumentError`. The first cell (a `<td>` node) is rebuilt to hold the row's
+  controls, keeping its attributes; the row passed in is not modified.
 - `detail(item)`: function returning the detail row's body (placed
   inside one `<td colspan=ncols>`). Optional when `detail_url` is given —
   it then builds the per-row pre-load placeholder instead.
@@ -13094,12 +13108,20 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `branches_collapsible`: with `children`, default `true`. Set `false` to
   keep every branch expanded without disclosure controls. This overrides
   `initially_open` for branch visibility only; detail expansion stays independent.
-- `detail_toggle`: default `:button` keeps the hierarchical "Details" button
-  (flat tables retain row-click activation). `:label` uses the first master
-  cell's complete content as the native detail button instead, with no separate
-  "Details" label. Supply non-interactive label content in that cell; other
-  cells can contain links or controls. Group rows without details stay plain.
-  The button carries `data-htmxo-label`, so Markdown keeps the row's label.
+- `detail_toggle`: every row with a detail carries a native detail button
+  (`aria-controls`, `aria-expanded`, Enter/Space) in its first cell, beside
+  that cell's content, which may itself be a link. With the default `:button`,
+  a flat table's control is a compact disclosure triangle (▸ closed, ▾ open,
+  accessible name "Details"); a hierarchical table's is a "Details" button,
+  since its triangles expand child rows. Flat rows keep row-click activation
+  as a pointer shortcut, and the button runs the row's click handler (with any
+  `master_attrs` extension). `:label` uses the first master cell's complete
+  content as the native detail button instead, with no separate control.
+  Supply non-interactive label content in that cell; other cells can contain
+  links or controls. Group rows without details stay plain. The label button
+  carries `data-htmxo-label`, so Markdown keeps the row's label; the other
+  controls are dropped from Markdown. Sorting, search and CSV export read the
+  cell's own content, not the control.
 - `searchable`: include a labelled, client-side search field (default `false`).
   Search matches a case-insensitive phrase against master cells and ancestor
   text, retains matching paths, and reveals descendants of a matching group.
@@ -13112,7 +13134,7 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 
 With `children`, column sorting reorders siblings and moves whole subtrees,
 keeping each detail directly after its master and preserving loaded DOM.
-All labels remain complete. Branch and Details buttons support native keyboard
+All labels remain complete. Branch and detail buttons support native keyboard
 activation; tree levels and expansion state are represented by ARIA attributes.
 
 For **lazy** detail loading (fetch each row's detail on first expand rather
@@ -13180,35 +13202,45 @@ function master_detail_table(headers, items;
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
         cells, row_attrs = _md_master_row(master(item))
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
-        if !isnothing(children) || detail_toggle === :label
-            isempty(cells) && throw(ArgumentError("master_detail_table: controlled rows require at least one cell"))
-            controls = Any[]
-            if branch && branches_collapsible
-                child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
-                push!(controls, h.button(open ? "▾" : "▸"; type="button",
-                    data_htmxo_tree_toggle="", aria_label="Toggle child rows",
-                    aria_controls=child_ids, aria_expanded=string(open),
-                    onclick="htmxoTreeToggle(this); event.stopPropagation()"))
-            end
-            first_cell = first(cells)
-            label = Any[HTMX.children(first_cell)...]
-            if has_detail
-                isnothing(children) || (attrs[:data_htmxo_detail_open] = string(open))
-                toggle_label = detail_toggle === :label ? label : Any["Details"]
-                # A label toggle's content is the row's name, kept in Markdown.
-                label_attrs = detail_toggle === :label ? (; data_htmxo_label="") : (;)
-                toggle = h.button(toggle_label...; type="button",
-                    data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
-                    aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
-                if detail_toggle === :label
-                    label = Any[toggle]
-                else
-                    push!(controls, toggle)
-                end
-            end
-            cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
-                Any[controls..., h.span(; data_htmxo_row_label="")(label...)])
+        # Every expandable row carries a native detail control in its first
+        # cell, so keyboard and screen-reader users reach the detail too (the
+        # row click is a pointer-only shortcut). Sorting, search and CSV read
+        # the cell's own content from the `data-htmxo-row-label` span.
+        isempty(cells) && throw(ArgumentError("master_detail_table: rows require at least one cell"))
+        first_cell = first(cells)
+        first_cell isa Node || throw(ArgumentError(string("master_detail_table: the first ",
+            "master cell must be a <td> node, got ", typeof(first_cell))))
+        controls = Any[]
+        if branch && branches_collapsible
+            child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
+            push!(controls, h.button(_md_disclosure_glyph(open); type="button",
+                data_htmxo_tree_toggle="", aria_label="Toggle child rows",
+                aria_controls=child_ids, aria_expanded=string(open),
+                onclick="htmxoTreeToggle(this); event.stopPropagation()"))
         end
+        label = Any[HTMX.children(first_cell)...]
+        if has_detail
+            isnothing(children) || (attrs[:data_htmxo_detail_open] = string(open))
+            # A label toggle's content is the row's name, kept in Markdown. A
+            # flat table's default is a disclosure triangle beside the cell's
+            # content (which may be a link); in a hierarchy the triangle
+            # already means child rows, so details keep the "Details" label.
+            toggle_label, label_attrs =
+                detail_toggle === :label ? (label, (; data_htmxo_label="")) :
+                isnothing(children) ? (Any[_md_disclosure_glyph(open)],
+                                       (; data_htmxo_disclosure="", aria_label="Details")) :
+                (Any["Details"], (;))
+            toggle = h.button(toggle_label...; type="button",
+                data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
+                aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
+            if detail_toggle === :label
+                label = Any[toggle]
+            else
+                push!(controls, toggle)
+            end
+        end
+        cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
+            Any[controls..., h.span(; data_htmxo_row_label="")(label...)])
         if !isnothing(children) && isnothing(body) && isnothing(url)
             # Group rows need no placeholder or detail request. Their children
             # are ordinary rows in this same tbody, visible from first paint.
@@ -13231,18 +13263,20 @@ function master_detail_table(headers, items;
     end
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
     table = sortable_table(headers, rows; table_attrs..., kwargs...)
-    if !isnothing(children) || detail_toggle === :label
-        # Depth is semantic row metadata, not per-row inline styling. The
-        # stylesheet covers the actual depth and remains scoped to tree tables.
-        rules = """
-        [data-htmxo-hierarchy] > tbody > tr > td:first-child > button { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
-        [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
-        [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
-        [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
-        """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
-                      for level in 2:max_level[]), "\n")
-        table = h.div(h.style(Raw(rules)), table)
-    end
+    # Depth is semantic row metadata, not per-row inline styling. The
+    # stylesheet covers the actual depth; its other rules style the row
+    # controls every master/detail table now carries.
+    rules = """
+    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
+    [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
+    [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
+    [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
+    td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
+    td > button[data-htmxo-disclosure]:hover { color: var(--pico-primary, LinkText); }
+    td > button[data-htmxo-disclosure]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
+                  for level in 2:max_level[]), "\n")
+    table = h.div(h.style(Raw(rules)), table)
     # The search field and its empty state are client-side affordances: the
     # label would otherwise run into the Markdown table's header row.
     (searchable || !isnothing(children)) ? h.div(; class="htmxo-searchable-table")(
