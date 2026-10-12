@@ -66,6 +66,13 @@ end
             id="sel", selectable="rows", select_form="bulk", searchable=true)
         md = master_detail_table(["Item"], ["one", "two"]; key=x -> "md-$x", master=x -> (h.td(x),),
             detail=x -> h.p("detail $x"), selectable="items")
+        # Rows keyed only by `data-htmxo-select-key`, each with a row action
+        # that re-renders its own row, as an app's row route returns it.
+        flip_row(k, n=0) = h.tr(h.td(n == 0 ? k : "$k (flipped $n)"),
+            h.td(h.button("x"; type="button", hx_post="/flip/$k/$(n + 1)", hx_target="closest tr", hx_swap="outerHTML"));
+            data_htmxo_select_key=k)
+        flips = sortable_table(["Key", ""], [flip_row(k) for k in ("k1", "k2", "k3")];
+            id="flips", selectable="flips")
         bulk = h.form(; id="bulk", hx_post="/bulk", hx_target="#bulk-out", hx_swap="innerHTML")(
             h.button("Archive"; id="archive", data_htmxo_needs_selection="rows", disabled=true))
         driver = h.script(Raw(raw"""
@@ -161,11 +168,41 @@ end
             await wait(() => row('a') && row('a').cells[0].textContent === 'Alpha (new)');
             await wait(() => row('a').getAttribute('aria-selected') === 'true');
             check('row-swap-keeps-selection', row('a').getAttribute('aria-selected') === 'true' && selected() === 'a,c,d');
-            // A table re-render keeps keys still present and drops the rest.
+            // A table re-render keeps keys still present and drops the rest,
+            // and a focused row's replacement takes the focus.
+            row('a').focus();
             htmx.ajax('GET', '/table', {target: root(), swap: 'outerHTML'});
             await wait(() => !row('d'));
             await wait(() => inputs() === 'v-a@bulk,v-c@bulk');
             check('rerender-keeps-present', selected() === 'a,c' && count() === '2 selected');
+            await wait(() => document.activeElement === row('a'));
+            check('rerender-keeps-focus', document.activeElement === row('a'));
+            // A row action re-rendering its own row (the route returns only
+            // the key) keeps the row's selection, roving tabindex and focus.
+            const flipRow = k => document.querySelector('#flips > tr[data-htmxo-select-key="' + k + '"]');
+            const flipsSelected = () => htmxoSelectedKeys('#flips').join(',');
+            click(flipRow('k2').cells[0]);
+            check('flip-click', flipsSelected() === 'k2' && document.activeElement === flipRow('k2'));
+            flipRow('k2').querySelector('button').click();
+            await wait(() => flipRow('k2').cells[0].textContent === 'k2 (flipped 1)');
+            await wait(() => document.activeElement === flipRow('k2'));
+            check('row-action-keeps-selection', flipsSelected() === 'k2' && flipRow('k2').getAttribute('aria-selected') === 'true');
+            const roving = Array.from(document.querySelectorAll('#flips > tr[tabindex="0"]'));
+            check('row-action-keeps-tabindex', roving.length === 1 && roving[0] === flipRow('k2') && flipRow('k2').hasAttribute('data-htmxo-active'));
+            check('row-action-keeps-focus', document.activeElement === flipRow('k2'));
+            // A second action on the focused row acts on that same row.
+            document.activeElement.querySelector('button').click();
+            await wait(() => flipRow('k2').cells[0].textContent === 'k2 (flipped 2)');
+            await wait(() => document.activeElement === flipRow('k2'));
+            check('row-action-again', document.activeElement === flipRow('k2') && flipsSelected() === 'k2');
+            key(document.activeElement, 'j');
+            check('keys-continue-from-swapped-row', flipsSelected() === 'k3' && document.activeElement === flipRow('k3'));
+            // A swap does not take focus the user has moved elsewhere.
+            const field = root().querySelector('input[type="search"]');   // the re-rendered table's
+            field.focus();
+            flipRow('k3').querySelector('button').click();
+            await wait(() => flipRow('k3').cells[0].textContent === 'k3 (flipped 1)' && flipRow('k3').getAttribute('aria-selected') === 'true');
+            check('swap-keeps-focus-elsewhere', document.activeElement === field && flipsSelected() === 'k3');
             // master_detail_table: row click selects, Details opens without selecting.
             const mdRow = document.getElementById('row-md-two');
             click(mdRow.cells[0]);
@@ -179,7 +216,7 @@ end
             document.body.appendChild(result);
         });
         """))
-        page = repr("text/html", htmx(bulk, h.div(; id="bulk-out"), table(records), md, driver;
+        page = repr("text/html", htmx(bulk, h.div(; id="bulk-out"), table(records), md, flips, driver;
             extra_head=(sortable_table_js(), sortable_table_styles()),
             hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
         socket = listen(Sockets.localhost, 0)
@@ -194,10 +231,14 @@ end
                 HTTP.Response(200, ["Content-Type" => "text/html"],
                     "rows=" * join(sort([v for (k, v) in form if k == "rows"]), ","))
             elseif path == "/row/a"
+                # A row route renders the row alone, without the table's selection attributes.
                 html(h.tr(h.td("Alpha (new)"), h.td("3"), h.td(""); id="row-a",
-                    data_htmxo_select_key="a", data_htmxo_select_value="v-a", aria_selected="false", tabindex="-1"))
+                    data_htmxo_select_key="a", data_htmxo_select_value="v-a"))
             elseif path == "/table"
                 html(table(filter(r -> r[1] != "d", records)))
+            elseif startswith(path, "/flip/")
+                _, _, k, n = split(path, '/')
+                html(flip_row(k, parse(Int, n)))
             else
                 HTTP.Response(404)
             end
@@ -212,7 +253,7 @@ end
                 for line in split(checks[1], '\n')
                     @test endswith(line, ":true")
                 end
-                @test count(==('\n'), checks[1]) + 1 == 38
+                @test count(==('\n'), checks[1]) + 1 == 46
             end
         finally
             close(server)
