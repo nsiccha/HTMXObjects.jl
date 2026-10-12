@@ -320,6 +320,15 @@ works on flat tables. The count, app predicates and `htmxo:table-filtered`
 event are shared with every searchable table; see
 [Client-side search](#table-search).
 
+Deep collapsed trees get *Expand all* / *Collapse all* buttons with
+`expand_controls=true` (requires collapsible `children`). They open or close
+every branch; detail rows keep their own state and collapsed details stay
+lazy. While a search is active they act on the matching paths: *Collapse all*
+keeps only the matching rows and their ancestors (hiding what a matching group
+would reveal), *Expand all* shows every match again, and clearing the search
+restores the branches the user had open. The buttons carry `aria-controls`
+for the table body and are left out of Markdown.
+
 `master` may also return the whole row, `h.tr(cells...; attrs...)`, when its
 attributes are computed together with its cells. The cells fill the master row
 and the attributes stay on it, beside the table's own id, toggle and hierarchy

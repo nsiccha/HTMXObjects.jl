@@ -12332,6 +12332,12 @@ function htmxoFilterTable(target) {
         ...Array.from(registered).filter(([name]) => name !== 'search')];
     const visible = new Set();
     const rejectedBy = new Map();
+    // "Collapse all" during a search keeps only the matching rows and their
+    // ancestors, hiding the descendants a matching group would reveal. It
+    // lasts until the search is cleared; the stored branch state is untouched.
+    if (query.length === 0) delete root.dataset.htmxoSearchCollapsed;
+    const collapsed = query.length > 0 && 'htmxoSearchCollapsed' in root.dataset;
+    const direct = new Set();
     const text = r => (r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
     rows.forEach(row => {
         const path = [];
@@ -12342,16 +12348,21 @@ function htmxoFilterTable(target) {
         const failed = filters.find(([, keep]) => !keep(row, ctx));
         if (failed) rejectedBy.set(row, failed[0]);
         else path.forEach(r => visible.add(r));
+        const own = {query, input: raw, text: text(row)};
+        if (collapsed && !failed && filters.every(([, keep]) => keep(row, own))) path.forEach(r => direct.add(r));
     });
     rows.forEach(row => {
         let ancestorsOpen = true;
         for (let p = byId.get(row.dataset.htmxoParent); p; p = byId.get(p.dataset.htmxoParent)) {
             if (p.dataset.htmxoTreeOpen === 'false') ancestorsOpen = false;
         }
-        row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen);
+        row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen) || (collapsed && !direct.has(row));
+    });
+    const shownParents = new Set(rows.filter(r => !r.hidden).map(r => r.dataset.htmxoParent));
+    rows.forEach(row => {
         const branch = row.querySelector('[data-htmxo-tree-toggle]');
         if (branch) {
-            const open = query.length > 0 || row.dataset.htmxoTreeOpen === 'true';
+            const open = query.length > 0 ? !collapsed || shownParents.has(row.id) : row.dataset.htmxoTreeOpen === 'true';
             row.setAttribute('aria-expanded', open);
             branch.setAttribute('aria-expanded', open);
             branch.textContent = open ? '▾' : '▸';
@@ -12383,6 +12394,21 @@ function htmxoFilterTable(target) {
     if (count) count.textContent = detail.shown + ' of ' + detail.total + ' rows shown' +
         detail.notes.map(note => ' · ' + note).join('');
     root.querySelector(':scope > [data-htmxo-table-empty]').hidden = visible.size !== 0;
+}
+
+// "Expand all" / "Collapse all": every collapsible branch, or, while a
+// search is active, the matching paths (see `htmxoFilterTable`).
+function htmxoTreeAll(button, open) {
+    const root = htmxoSearchRoot(button);
+    const input = root.querySelector(':scope > label > input[type="search"]');
+    if (input && input.value.trim()) {
+        if (open) delete root.dataset.htmxoSearchCollapsed;
+        else root.dataset.htmxoSearchCollapsed = '';
+    } else {
+        root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-tree-open]')
+            .forEach(r => { r.dataset.htmxoTreeOpen = String(open); });
+    }
+    htmxoFilterTable(root);
 }
 
 function htmxoTreeToggle(button) {
@@ -13051,7 +13077,7 @@ _table_count_text(shown, total) = "$shown of $total rows shown"
 # (`html_only`): in Markdown the label would run into the table's header row.
 # `field=false` keeps a hidden scaffold that a hierarchy's branch toggles
 # filter through. The input's `aria-label` keeps the count out of its name.
-function _searchable_table(table, rows; field::Bool=true)
+function _searchable_table(table, rows; field::Bool=true, controls=nothing)
     masters = [row for row in rows if _is_master_row(row)]
     count_text = _table_count_text(count(!_row_hidden, masters), length(masters))
     h.div(; class="htmxo-searchable-table")(
@@ -13059,6 +13085,7 @@ function _searchable_table(table, rows; field::Bool=true)
             h.input(; type="search", aria_label="Search", oninput="htmxoFilterTable(this)"),
             h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
             hidden=!field)),
+        (isnothing(controls) ? () : (html_only(controls),))...,
         table,
         html_only(h.p("No matching rows"; hidden=true, data_htmxo_table_empty="")),
     )
@@ -13536,6 +13563,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `branches_collapsible`: with `children`, default `true`. Set `false` to
   keep every branch expanded without disclosure controls. This overrides
   `initially_open` for branch visibility only; detail expansion stays independent.
+- `expand_controls`: with collapsible `children`, add *Expand all* and
+  *Collapse all* buttons above the table (default `false`). They open or close
+  every branch at once; detail rows keep their own state and collapsed
+  details stay lazy. While a search is active they act on the matching paths
+  instead: *Collapse all* keeps only the matching rows and their ancestors,
+  *Expand all* shows every match again, and clearing the search restores the
+  branches as they were. The buttons carry `aria-controls` for the table body
+  (`id`, or one derived from the root keys) and are left out of `?plain`.
 - `detail_toggle`: default `:button` keeps the hierarchical "Details" button
   (flat tables retain row-click activation). `:label` uses the first master
   cell's complete content as the native detail button instead, with no separate
@@ -13595,9 +13630,13 @@ function master_detail_table(headers, items;
                              select_form=nothing,
                              select_value=nothing,
                              select_submit=nothing,
+                             expand_controls::Bool=false,
                              kwargs...)
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
+    # Refused: without collapsible branches there is nothing to expand.
+    expand_controls && (isnothing(children) || !branches_collapsible) && throw(ArgumentError(
+        "master_detail_table: expand_controls needs `children` with collapsible branches"))
     selecting = !isnothing(selectable)
     selecting || all(isnothing, (select_form, select_value, select_submit)) || throw(ArgumentError(
         "master_detail_table: select_form/select_value/select_submit require selectable=<input name>"))
@@ -13708,6 +13747,10 @@ function master_detail_table(headers, items;
     end
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
     selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
+    # The expand controls name the body they drive; a body without a caller id
+    # gets one from its root keys, which are unique on the page.
+    body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
+    expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
     table = sortable_table(headers, rows; table_attrs..., kwargs...)
     if !isnothing(children) || detail_toggle === :label || selecting
         # Depth is semantic row metadata, not per-row inline styling. The
@@ -13716,6 +13759,8 @@ function master_detail_table(headers, items;
         rules = """
         [data-htmxo-hierarchy] > tbody > tr > td:first-child > button, table[aria-multiselectable] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle] { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
         [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
+        .htmxo-tree-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
+        .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
         [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
         [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
         """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
@@ -13724,7 +13769,13 @@ function master_detail_table(headers, items;
     end
     # A hierarchy always carries the (possibly hidden) search scaffold: its
     # branch toggles and the search share one visibility pass.
-    searched = (searchable || !isnothing(children)) ? _searchable_table(table, rows; field=searchable) : table
+    controls = expand_controls ? h.p(; class="htmxo-tree-controls")(
+        h.button("Expand all"; type="button", class="secondary outline", aria_controls=body_id,
+            onclick="htmxoTreeAll(this, true)"),
+        h.button("Collapse all"; type="button", class="secondary outline", aria_controls=body_id,
+            onclick="htmxoTreeAll(this, false)")) : nothing
+    searched = (searchable || !isnothing(children)) ?
+        _searchable_table(table, rows; field=searchable, controls) : table
     selecting ? _selectable_table(searched, rows, selectable; form=select_form) : searched
 end
 
