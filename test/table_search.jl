@@ -162,7 +162,7 @@ end
     end
 end
 
-@testitem "table search survives a re-render browser" tags=[:unit, :browser] begin
+@testitem "table search survives a re-render browser" setup=[ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
         @test_skip false
@@ -281,7 +281,7 @@ end
         end
         try
             dom = mktempdir() do profile
-                read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; stderr=devnull), String)
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
             end
             checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
             @test !isnothing(checks)
