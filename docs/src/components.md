@@ -276,7 +276,8 @@ sortable_table(["Party", "Amount"],
   outside the form. `data-htmxo-select-submit="false"` (in `master_detail_table`,
   `select_submit(item) = false`) keeps a row selectable but unsubmitted.
 - **Feedback.** A live "N selected (M hidden by the filter)" count with
-  *Select all shown* and *Clear* sits above the table. Controls marked
+  *Select all shown* and *Clear* sits above the table; in a tree it also notes
+  selected rows inside collapsed groups ("3 selected (2 in collapsed groups)"). Controls marked
   `data-htmxo-needs-selection="<input name>"` are disabled while nothing would
   be submitted. Each change fires a bubbling `htmxo:selection-changed` event
   with `detail` `{name, keys, rows, submitted, hidden}`.
@@ -360,6 +361,77 @@ reaches page listeners. Generated forms can be submitted as soon as the detail
 appears, including concurrent actions with separate result targets. The normal
 `htmx:afterSettle` event still marks the end of visual settling; applications
 need no fixed pause or manual `htmx.process` call for the inserted controls.
+
+#### Regroupable tables {#table-regrouping}
+
+`groupings` lets the reader regroup one set of leaf rows. Each grouping is a
+name and a `leaf -> group key(s)` function; `nothing` is the flat view, and
+the first grouping is the default. One route renders the table, another a lazy
+group's rows, both through the same call:
+
+```julia
+groupings = ["None" => nothing,
+             "Counterparty" => t -> t.party,
+             "IBAN" => t -> t.iban,
+             "Rule" => t -> matching_rule_names(t)]   # several keys: listed under each
+
+transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_table(
+    ["Counterparty", "Date", "Amount"], transactions;
+    key = t -> t.id,
+    master = t -> (h.td(t.party), h.td(t.date), h.td(string(t.amount))),
+    detail = t -> h.p(t.memo),
+    groupings, group_by, group_rows,
+    group_by_url = self / "table",
+    group_rows_url = (key, members) -> length(members) > 200 ?
+        query_url(self / "rows"; group_by, key) : nothing,
+    group_master = (key, members) -> (h.td(h.strong(key)), h.td(""),
+        h.td(string(sum(m.amount for m in members)))),
+    searchable = true, search_query = q, expand_controls = group_by != "None",
+    selectable = "tx", select_form = "bulk")
+
+@get table(; group_by::String="Counterparty", q::String="") =
+    transactions_table(__self__, group_by, q)
+@get rows(; group_by::String="Counterparty", key::String="") =
+    transactions_table(__self__, group_by; group_rows=key)
+```
+
+- **Groups.** A grouping renders one collapsible branch per group key, in
+  first-appearance order, with its leaves below. `group_master(key, members)`
+  returns the group row's cells (default: the key and the member count).
+  Controls in it, such as a rule-mode select, keep their own behaviour: they
+  neither toggle nor select the group. Group rows sort among themselves by the
+  same columns; leaves sort within their group.
+- **The same leaves.** Leaf rows render through `master`, `detail` /
+  `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
+  (a shared IBAN, a rule matching several counterparties) gets one row per
+  group, each with its own id.
+- **Group by.** With `group_by_url`, a *Group by* select joins the tree
+  controls. A change GETs `group_by_url` with `group_by` and `q` (the current
+  search) and swaps the table for the response. With `select_form` the select
+  is associated with that form, so a bulk submission carries the active
+  grouping. An unknown `group_by` throws an `ArgumentError`; validate it in the
+  route.
+- **Selection.** Keys are per leaf. Selecting a leaf selects every copy, it is
+  submitted once, and the selection survives regrouping and the flat view.
+  Group rows are selectable too and submit their key under
+  `<selectable>_group` (here `tx_group=Shops`), so a bulk action can apply to
+  whole groups; a group selection ends when the grouping changes.
+- **Search.** A group row's text (its key and summary) is matched like any
+  ancestor's, so search finds groups and leaves. `search_query` pre-fills the
+  field after a regroup.
+- **Lazy groups.** When `group_rows_url(key, members)` returns a URL, the
+  group's leaves are not rendered. The group row carries the URL, its members'
+  search text and (when selectable) their keys and submitted values. The first
+  expand fetches the URL; the route renders the same call with
+  `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` holding just
+  that group's rows, and they join the current sort, search and selection.
+  Until then a search matching a member keeps the group shown, with its toggle
+  enabled so it can load; selected members stay selected and submitted; and
+  *Expand all* loads every lazy group.
+
+Markdown keeps the group and leaf rows and drops the controls. The
+HTMXObjectsWeb gallery's *Regroupable table demo* (`web/src/regroup_demo.jl`)
+runs this on synthetic transactions.
 
 ### `tabset` and `htmx_tabset` — tab navigation
 

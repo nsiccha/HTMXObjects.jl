@@ -17,6 +17,7 @@ include("markdown_demo.jl")
 include("semantic_demo.jl")
 include("decoration_demo.jl")
 include("push_demo.jl")
+include("regroup_demo.jl")
 
 @dynamicstruct struct AppData
     demo = DemoData()
@@ -31,6 +32,7 @@ include("push_demo.jl")
     semantic_demo = SemanticDemoData()
     decoration_demo = DecorationDemoData()
     push_demo = PushDemoData()
+    regroup_demo = RegroupDemoData()
 end
 
 const APPDATA = AppData()
@@ -57,6 +59,7 @@ const TEST_PROJECT = normpath(joinpath(@__DIR__, "..", ".."))
             h.li(h.a(href=__self__/"semantic_demo")("Semantic links and alternatives demo")),
             h.li(h.a(href=__self__/"decoration_demo")("Deferred decoration demo")),
             h.li(h.a(href=__self__/"push_demo")("Server-push refresh demo")),
+            h.li(h.a(href=__self__/"regroup_demo")("Regroupable table demo")),
             h.li(h.a(href=__self__/"schema")("App schema (JSON)")),
         ),
     )
@@ -73,6 +76,7 @@ const TEST_PROJECT = normpath(joinpath(@__DIR__, "..", ".."))
     @include semantic_demo = SemanticDemoRoutes()
     @include decoration_demo = DecorationDemoRoutes()
     @include push_demo = PushDemoRoutes()
+    @include regroup_demo = RegroupDemoRoutes()
     @include tests = TestRoutes(; project=TEST_PROJECT)
     @include schema = SchemaRoutes(; root=AppRoutes)
 end
