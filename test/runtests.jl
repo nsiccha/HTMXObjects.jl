@@ -1,4 +1,5 @@
 using TestItemRunner
+import Dates, Test
 
 const _HTMXO_TEST_PREFIX = "--htmxo-test="
 const _HTMXO_NAME_PREFIX = "--name="
@@ -46,7 +47,19 @@ function _htmxo_test_filter(item)
     !_HTMXO_LIST_ONLY && selected
 end
 
-@run_package_tests filter=_htmxo_test_filter verbose=true
+# `HTMXO_TEST_PROGRESS=1` (set in CI) prints each test item as it starts,
+# so a run that hangs or is cut off by a timeout names the item it was in;
+# the summary table alone only appears once every item has finished.
+const _HTMXO_PROGRESS = get(ENV, "HTMXO_TEST_PROGRESS", "") == "1"
+function _htmxo_testset(description; verbose=false)
+    if _HTMXO_PROGRESS
+        println(stdout, "[", Dates.format(Dates.now(), "HH:MM:SS"), "] ▶ ", description)
+        flush(stdout)
+    end
+    Test.DefaultTestSet(description; verbose)
+end
+
+@run_package_tests filter=_htmxo_test_filter verbose=true testset=_htmxo_testset
 
 function _htmxo_require_known(label, requested, available)
     missing = setdiff(requested, available)
