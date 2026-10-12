@@ -3624,7 +3624,7 @@ end
     @test String(blocked.body) == body
 end
 
-@testitem "mounted direct-page polling completes in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser, :semantic] begin
+@testitem "mounted direct-page polling completes in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser, :semantic] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -3688,7 +3688,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port$prefix/slow?count=9"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=12000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             @test contains(dom, "data-first-shell=\"1\"")
             @test contains(dom, "data-first-poller=\"1\"")
@@ -3732,7 +3732,7 @@ end
     @test contains(html, "morph:innerHTML")
 end
 
-@testitem "auto terminal unwrap keeps bare single-run live content" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "auto terminal unwrap keeps bare single-run live content" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -3765,7 +3765,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             # Driver control: the full flow (swap, unwrap, ping click,
             # second swap) ran to completion.
@@ -3793,7 +3793,7 @@ end
     end
 end
 
-@testitem "unwrap resolution settles compose boxes" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "unwrap resolution settles compose boxes" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -3825,7 +3825,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             # Driver control: the resolution swap ran, the box bound, and the
             # wrapper unwrapped to the bare fragment.
@@ -3848,7 +3848,7 @@ end
     end
 end
 
-@testitem "live-refresh morph:outerHTML terminal morphs in place" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "live-refresh morph:outerHTML terminal morphs in place" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -3888,7 +3888,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             # Driver controls: the fast settle plus both slow divert cycles
             # ran to completion.
@@ -3910,7 +3910,7 @@ end
     end
 end
 
-@testitem "live-refresh morph terminal replaces without the morph engine" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "live-refresh morph terminal replaces without the morph engine" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -3950,7 +3950,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             @test contains(dom, "data-live-morph-done=\"1\"")
             @test contains(dom, "rows n=2")
@@ -3998,7 +3998,7 @@ end
     @test contains(html, "=== 'none'")
 end
 
-@testitem "live-refresh event-driven marker holds content plus progress" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "live-refresh event-driven marker holds content plus progress" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -4039,7 +4039,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             # Driver controls: the marked target settled at load, both event
             # cycles (button click, then htmx.ajax) held rows without ever
@@ -4998,7 +4998,7 @@ end
     @test contains(open_html, "hx-trigger=\"htmxo-md-load consume, load\"")
 end
 
-@testitem "nested lazy master/detail browser requests stay isolated" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "nested lazy master/detail browser requests stay isolated" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -5068,7 +5068,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             @test contains(dom, "data-nested-done=\"1\"")
             @test contains(dom, "id=\"inner-loaded\"")
@@ -5097,7 +5097,7 @@ end
     @test contains(html, "hx-on--after-request=")
 end
 
-@testitem "lazy master/detail failed slot reloads on click" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "lazy master/detail failed slot reloads on click" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -5159,7 +5159,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             # The 500 must set the retry state...
             @test contains(dom, "data-failed-seen=\"1\"")
@@ -5208,7 +5208,7 @@ end
     @test contains(runtime, "a,button,input,textarea,select,form")
 end
 
-@testitem "master/detail shared runtime keeps toggle and extension semantics" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "master/detail shared runtime keeps toggle and extension semantics" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -5279,7 +5279,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             @test contains(dom, "data-done=\"1\"")
             # Button click skipped; three row clicks → open, close, open.
@@ -5555,7 +5555,7 @@ end
     @test contains(String(hx("/older?before=6").body), "data-done=\"true\"")
 end
 
-@testitem "live_thread pages, updates and holds the viewport in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser] begin
+@testitem "live_thread pages, updates and holds the viewport in a real browser" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -5616,7 +5616,7 @@ end
             try
                 dom = mktempdir() do profile
                     cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=800,600 --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`
-                    read(pipeline(cmd; stderr=devnull), String)
+                    dump_dom(cmd)
                 end
                 @test contains(dom, "data-done=\"true\"")
                 @test contains(dom, "data-bottom=\"true\"")
@@ -9060,7 +9060,7 @@ end
     @test contains(String(stale.body), "Bad Request")
 end
 
-@testitem "rich semantic card surface selects its native radio in a browser" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:browser, :semantic] begin
+@testitem "rich semantic card surface selects its native radio in a browser" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser, :semantic] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -9113,7 +9113,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             @test contains(dom, "data-card-hit-target=\"label\"")
             @test contains(dom, "data-card-checked=\"true\"")
@@ -11827,7 +11827,7 @@ end
 # and leaves alone, durations tick, and Pause freezes the board. The page's
 # driver starts and releases gated jobs through the test server and writes what
 # it saw into #board-result, which `--dump-dom` returns.
-@testitem "runtime dashboard board updates in place in a real browser" setup=[HTMXOTestImports] tags=[:browser, :integration] begin
+@testitem "runtime dashboard board updates in place in a real browser" setup=[HTMXOTestImports, ChromeDump] tags=[:browser, :integration] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -11937,7 +11937,7 @@ end
             dom = mktempdir() do profile
                 url = "http://127.0.0.1:$port/runtime"
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile $url`
-                read(pipeline(cmd; stderr=devnull), String)
+                dump_dom(cmd)
             end
             m = match(r"<pre id=\"board-result\">([^<]*)</pre>", dom)
             @test m !== nothing

@@ -128,7 +128,7 @@ end
     @test contains(repr("text/html", HTMXObjects.pico_page(table)), rule)
 end
 
-@testitem "sort header controls render as heading text under Pico" tags=[:browser] begin
+@testitem "sort header controls render as heading text under Pico" setup=[ChromeDump] tags=[:browser] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
@@ -165,7 +165,7 @@ end
                 extra_head=(sortable_table_js(),))))
             profile = joinpath(directory, "profile")
             cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`
-            read(pipeline(cmd; stderr=devnull), String)
+            dump_dom(cmd)
         end
         @test contains(dom, "data-done=\"1\"")
         for marker in ("pico-fills-buttons", "transparent", "heading-color", "heading-font",

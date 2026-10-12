@@ -28,7 +28,7 @@
     @test contains(html, "facts.csv")
 end
 
-@testitem "unaddressed tables keep sorting and CSV local" setup=[HTMXOTestImports] tags=[:browser] begin
+@testitem "unaddressed tables keep sorting and CSV local" setup=[HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -73,7 +73,7 @@ end
             write(fixture, page)
             profile = joinpath(directory, "profile")
             cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`
-            read(pipeline(cmd; stderr=devnull), String)
+            dump_dom(cmd)
         end
         @test contains(dom, "data-done=\"1\"")
         for marker in ("id-control", "unique-ids", "left-sort", "right-sort", "csv-local", "csv-names")
