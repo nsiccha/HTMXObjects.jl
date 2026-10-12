@@ -251,13 +251,14 @@ sortable_table(["Party", "Amount"],
   `id`); `detail-<key>` companions never are. `master_detail_table` keys every
   master row and submits its `key` unless `select_value(item)` says otherwise.
 - **Interaction.** Click selects one row; Ctrl/Cmd-click toggles; Shift-click
-  and Shift+↑/↓ select the shown range from the anchor; ↑/↓ move; Ctrl/Cmd+A
-  selects every shown row; Escape collapses to the focused row; Space/Enter
-  toggle it. Shift-click does not select text, and clicks on a row's own links,
-  buttons, inputs, labels or forms keep their behaviour. "Shown" excludes rows
-  the search hides. In a `master_detail_table` a row click selects, so the
-  detail opens from the row's native detail control (the ▸ disclosure in a
-  flat table, *Details* in a hierarchy, or the label with `detail_toggle=:label`).
+  and Shift+↑/↓ (or Shift+J/K) select the shown range from the anchor; ↑/↓ or
+  j/k move; Ctrl/Cmd+A selects every shown row; Escape collapses to the focused
+  row; Space/Enter toggle it. Shift-click does not select text, and clicks on a
+  row's own links, buttons, inputs, labels or forms keep their behaviour.
+  "Shown" excludes rows the search hides. In a `master_detail_table` a row
+  click selects, so the detail opens from the row's native detail control (the
+  ▸ disclosure in a flat table, *Details* in a hierarchy, or the label with
+  `detail_toggle=:label`).
 - **Submission.** One hidden `<input name=...>` per selected row, valued by
   its `data-htmxo-select-value` (else the key) and associated with
   `select_form` through the HTML `form` attribute, so the table may live
