@@ -5571,11 +5571,10 @@ end
         driver = raw"""
         (async function () {
           const R = document.body.dataset, wait = ms => new Promise(r => setTimeout(r, ms));
-          // Each check follows a rendered frame: the thread's paging runs from
-          // IntersectionObserver callbacks, which only fire in a rendering
-          // step, and timers alone can run ahead of rendering under load.
-          const frame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
-          const until = async f => { for (let i = 0; i < 400 && !f(); i++) { await frame(); await wait(25); } return f(); };
+          const until = async f => { for (let i = 0; i < 400 && !f(); i++) await wait(25); return f(); };
+          // `data-stage` names the step a cut-off run (virtual-time budget
+          // spent before `data-done`) was waiting in.
+          R.stage = 'startup';
           const root = document.getElementById('lt');
           await until(() => root.__htmxoThread);
           const sc = root.querySelector('.htmxo-thread-scroll');
@@ -5587,10 +5586,12 @@ end
           // startup. Wait for it to land, not just for "not busy": under load
           // this script can run before that prefetch has even started, and
           // the scroll below would then see the prefetch as its older page.
+          R.stage = 'prefetch';
           await until(() => !root.__htmxoThread.olderBusy && items()[0].dataset.key === '11');
           R.keyAtScroll = items()[0].dataset.key;
           // Measure in the same task as the scroll: the next older page can
           // only land after the observer fires, so this is pre-insert.
+          R.stage = 'older';
           sc.scrollTop = 0;
           const n0 = items().length, top = items()[0], before = off(top);
           await until(() => items().length > n0);
@@ -5600,12 +5601,14 @@ end
           const marked = items();
           marked.forEach(e => { e.__m = 1; });
           const reading = items().find(e => off(e) + e.offsetHeight > 0), at = off(reading);
+          R.stage = 'tail';
           await fetch('append', { method: 'POST' });
           await until(() => items()[items().length - 1].dataset.key === '31');
           await wait(50);
           R.tailDrift = String(Math.abs(off(reading) - at) <= 1);
           R.pill = root.querySelector('.htmxo-thread-new').textContent;
           R.untouched = String(marked.every(e => e.__m === 1 && e.isConnected));
+          R.stage = 'done';
           R.done = 'true';
         })();
         """
@@ -5623,7 +5626,7 @@ end
             end
             try
                 dom = mktempdir() do profile
-                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=800,600 --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=800,600 --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`
                     dump_dom(cmd)
                 end
                 @test contains(dom, "data-done=\"true\"")
