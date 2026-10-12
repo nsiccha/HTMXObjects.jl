@@ -5571,7 +5571,11 @@ end
         driver = raw"""
         (async function () {
           const R = document.body.dataset, wait = ms => new Promise(r => setTimeout(r, ms));
-          const until = async f => { for (let i = 0; i < 400 && !f(); i++) await wait(25); return f(); };
+          // Each check follows a rendered frame: the thread's paging runs from
+          // IntersectionObserver callbacks, which only fire in a rendering
+          // step, and timers alone can run ahead of rendering under load.
+          const frame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+          const until = async f => { for (let i = 0; i < 400 && !f(); i++) { await frame(); await wait(25); } return f(); };
           const root = document.getElementById('lt');
           await until(() => root.__htmxoThread);
           const sc = root.querySelector('.htmxo-thread-scroll');
@@ -5579,8 +5583,12 @@ end
           const dist = () => sc.scrollHeight - sc.scrollTop - sc.clientHeight;
           const off = el => el.getBoundingClientRect().top - sc.getBoundingClientRect().top;
           R.bottom = String(dist() <= 2);
-          // (A short box prefetches one older page on its own at startup.)
-          await until(() => !root.__htmxoThread.olderBusy);
+          // A short box prefetches one older page (11-20) on its own at
+          // startup. Wait for it to land, not just for "not busy": under load
+          // this script can run before that prefetch has even started, and
+          // the scroll below would then see the prefetch as its older page.
+          await until(() => !root.__htmxoThread.olderBusy && items()[0].dataset.key === '11');
+          R.keyAtScroll = items()[0].dataset.key;
           // Measure in the same task as the scroll: the next older page can
           // only land after the observer fires, so this is pre-insert.
           sc.scrollTop = 0;
@@ -5620,6 +5628,7 @@ end
                 end
                 @test contains(dom, "data-done=\"true\"")
                 @test contains(dom, "data-bottom=\"true\"")
+                @test contains(dom, "data-key-at-scroll=\"11\"")
                 @test contains(dom, "data-older-paged=\"true\"")
                 @test contains(dom, "data-older-drift=\"true\"")
                 @test contains(dom, "data-tail-drift=\"true\"")
