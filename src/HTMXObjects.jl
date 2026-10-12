@@ -12617,10 +12617,13 @@ function htmxoSelectionKeydown(root, row, e) {
         htmxoSelectionClick(root, row, {shiftKey: e.shiftKey, ctrlKey: true});
         e.preventDefault();
         return;
-    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    } else if (['ArrowDown', 'ArrowUp', 'j', 'J', 'k', 'K'].includes(e.key)) {
+        // j/k alias ↓/↑ as in mail and review lists; Shift (not the letter's
+        // case, which Caps Lock also flips) extends the range.
         const shown = htmxoSelectionShown(root);
         const at = shown.indexOf(row);
-        const next = shown[e.key === 'ArrowDown' ? Math.min(at + 1, shown.length - 1) : Math.max(at - 1, 0)];
+        const down = e.key === 'ArrowDown' || e.key === 'j' || e.key === 'J';
+        const next = shown[down ? Math.min(at + 1, shown.length - 1) : Math.max(at - 1, 0)];
         if (!next) return;
         if (e.shiftKey) {
             if (state.anchor === null) state.anchor = key;
@@ -12974,10 +12977,11 @@ With `selectable=name`, every keyed row (`data-htmxo-select-key`, else its
 `id`; `detail-<key>` companions excluded) becomes a selectable grid row:
 `aria-selected` on rows, `aria-multiselectable` on the table, and one roving
 `tabindex="0"`. A click selects one row, Ctrl/Cmd-click toggles one,
-Shift-click and Shift+↑/↓ select the shown range from the anchor, ↑/↓ move,
-Ctrl/Cmd+A selects every shown row, Escape collapses to the focused row and
-Space/Enter toggle it. Shift-click does not select page text. Clicks on a
-row's own links, buttons, inputs, labels and forms keep their behaviour.
+Shift-click and Shift+↑/↓ (or Shift+J/K) select the shown range from the
+anchor, ↑/↓ or j/k move, Ctrl/Cmd+A selects every shown row, Escape collapses
+to the focused row and Space/Enter toggle it. Shift-click does not select page
+text. Clicks on a row's own links, buttons, inputs, labels and forms keep their
+behaviour.
 "Shown" means not hidden, e.g. by the search.
 
 The selection is submitted as one hidden `<input name=name>` per selected row,

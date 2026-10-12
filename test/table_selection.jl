@@ -108,6 +108,20 @@ end
             check('arrow-moves', selected() === 'b' && document.activeElement === row('b'));
             key(row('b'), 'ArrowDown', {shiftKey: true});
             check('shift-arrow-range', selected() === 'b,c');
+            // j/k alias ↓/↑; Shift extends whatever the letter's case.
+            key(row('c'), 'k');
+            check('k-moves', selected() === 'b' && document.activeElement === row('b'));
+            key(row('b'), 'j');
+            check('j-moves', selected() === 'c' && document.activeElement === row('c'));
+            key(row('c'), 'J', {shiftKey: true});
+            check('shift-j-range', selected() === 'c,d' && document.activeElement === row('d'));
+            key(row('d'), 'K', {shiftKey: true});
+            key(row('c'), 'K', {shiftKey: true});
+            check('shift-k-range', selected() === 'b,c' && document.activeElement === row('b'));
+            key(row('b'), 'J');
+            check('caps-lock-j-moves', selected() === 'c');
+            key(row('c'), 'j', {ctrlKey: true});
+            check('ctrl-j-ignored', selected() === 'c' && document.activeElement === row('c'));
             key(row('c'), 'a', {ctrlKey: true});
             check('ctrl-a-all-shown', selected() === 'a,b,c,d,e');
             key(row('c'), 'Escape');
@@ -198,7 +212,7 @@ end
                 for line in split(checks[1], '\n')
                     @test endswith(line, ":true")
                 end
-                @test count(==('\n'), checks[1]) + 1 == 32
+                @test count(==('\n'), checks[1]) + 1 == 38
             end
         finally
             close(server)
