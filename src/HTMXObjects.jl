@@ -16545,14 +16545,9 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
     opacity: 0.7;
 }
 
-/* A `sortable_table` header's label is a native `<button>` (keyboard sort),
-   so the header must read as heading text, not as a host-theme button. This
-   lives here rather than in `sortable_table_styles()` because every page
-   shell carries this block: a table whose page never added that opt-in block
-   still gets plain headers. INTENTIONALLY UNLAYERED to beat Pico's unlayered
-   `button` rule, and it names no `--pico-*` colour token — Pico rewrites
-   `--pico-background-color` / `--pico-color` / `--pico-border-color` on the
-   button itself (htmxo-semantic-styling cracked pattern 9). */
+/* sortable_table header labels are native <button>s: read as heading text on
+   every shell. Unlayered to beat Pico's `button`; no --pico-* colour tokens
+   (Pico rewrites them on buttons — htmxo-semantic-styling pattern 9). */
 .htmxo-sortable-table thead th > .htmxo-sort-control {
     width: auto; margin: 0; padding: 0; border: none; background: transparent;
     color: inherit; font: inherit; text-align: inherit; box-shadow: none;
