@@ -12299,17 +12299,39 @@ function htmxoSearchRoot(target) {
     return root;
 }
 
-// A table's search state: the field's query and the named predicates. Like
-// the selection it is keyed per table (its body id) and page path, so a
-// re-render of the table keeps the user's search and the app's filters; a
-// table without an id keeps its state on the wrapper element.
+// A table's search state: the field's query, the named predicates and the
+// branches the user opened or closed (row id -> 'true'/'false'). Like the
+// selection it is keyed per table (its body id) and page path, so a
+// re-render of the table keeps the user's search, the app's filters and the
+// open groups; a table without an id keeps its state on the wrapper element.
 window.htmxoSearchState = window.htmxoSearchState || new Map();
 function htmxoSearchOf(root) {
     const id = root.querySelector('table').tBodies[0].id;
-    if (!id) return root.htmxoSearch || (root.htmxoSearch = {input: '', filters: new Map()});
+    const fresh = () => ({input: '', filters: new Map(), open: new Map()});
+    if (!id) return root.htmxoSearch || (root.htmxoSearch = fresh());
     const scope = id + '|' + location.pathname;
-    if (!window.htmxoSearchState.has(scope)) window.htmxoSearchState.set(scope, {input: '', filters: new Map()});
+    if (!window.htmxoSearchState.has(scope)) window.htmxoSearchState.set(scope, fresh());
     return window.htmxoSearchState.get(scope);
+}
+
+// Note a branch the user opened or closed (see `htmxoSearchOf`).
+function htmxoTreeRemember(row) {
+    const root = row.closest('.htmxo-searchable-table');
+    if (root) htmxoSearchOf(root).open.set(row.id, row.dataset.htmxoTreeOpen);
+}
+
+// Re-open (or close) the remembered branches of a rendered table; a lazy
+// group the user had open loads its rows again. True when a branch changed.
+function htmxoTreeRestore(root, state) {
+    let changed = false;
+    if (!state.open.size) return changed;
+    root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-tree-open]').forEach(r => {
+        const open = state.open.get(r.id);
+        if (open === undefined) return;
+        if ('htmxoLazyRows' in r.dataset) { if (open === 'true') htmxoLoadRows(r); return; }
+        if (r.dataset.htmxoTreeOpen !== open) { r.dataset.htmxoTreeOpen = open; changed = true; }
+    });
+    return changed;
 }
 
 // Register (or, with a null predicate, remove) a named row predicate on a
@@ -12445,7 +12467,7 @@ function htmxoTreeAll(button, open) {
         else root.dataset.htmxoSearchCollapsed = '';
     } else {
         root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-tree-open]')
-            .forEach(r => { r.dataset.htmxoTreeOpen = String(open); });
+            .forEach(r => { r.dataset.htmxoTreeOpen = String(open); htmxoTreeRemember(r); });
     }
     if (open) root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-lazy-rows]')
         .forEach(r => htmxoLoadRows(r));
@@ -12474,6 +12496,7 @@ function htmxoLoadRows(row) {
                 rows.filter(r => r.dataset.htmxoParent === row.id).map(r => r.id).join(' '));
             if (window.htmx) rows.forEach(r => htmx.process(r));
             row.dataset.htmxoTreeOpen = 'true';
+            htmxoTreeRemember(row);
             htmxoResort(row.closest('table'));
             htmxoFilterTable(row);
         })
@@ -12497,20 +12520,195 @@ function htmxoTreeToggle(button) {
     const row = button.closest('tr');
     if ('htmxoLazyRows' in row.dataset) { htmxoLoadRows(row); return; }
     row.dataset.htmxoTreeOpen = row.dataset.htmxoTreeOpen === 'true' ? 'false' : 'true';
+    htmxoTreeRemember(row);
     // Hierarchical tables always have a search scaffold, even when its field
     // is hidden. One visibility pass owns both collapse and filtering.
     htmxoFilterTable(row);
 }
 
-// A swapped-in table with a stored query or predicates filters as it loads.
+// --- Row updates: `master_detail_table(...; update_rows, update_groups)` ---
+// An action route answers with the rows it changed, rendered by the table's
+// own call: a <tbody data-htmxo-row-update>. Each row replaces its namesake
+// in place and keeps what the user did to it (open branch and detail,
+// selection, search, focus); a row new to the table joins the end of its
+// group, or of the table, unless its group is not loaded; a row in the
+// update's scope that it no longer lists leaves, with its detail and child
+// rows. Any htmx response holding such a body is applied this way, whatever
+// the requesting element's hx-target; `htmxoUpdateRows(html)` applies one
+// fetched by other means.
+function htmxoUpdateRows(update, origin) {
+    if (typeof update === 'string') {
+        const template = document.createElement('template');
+        template.innerHTML = update;
+        update = template.content.querySelector('tbody[data-htmxo-row-update]');
+    }
+    if (!update) throw new Error('htmxoUpdateRows: no <tbody data-htmxo-row-update> to apply');
+    const isDetail = r => r.id.startsWith('detail-');
+    const detailId = r => 'detail-' + r.id.slice(r.id.indexOf('-') + 1);
+    const incoming = Array.from(update.rows);
+    const list = name => JSON.parse(update.getAttribute(name) || '[]');
+    const ids = new Set(list('data-htmxo-update-ids'));
+    const leaves = new Set(list('data-htmxo-update-leaves'));
+    const groups = new Set(list('data-htmxo-update-groups'));
+    // The table: by its body id, else the one holding a row the update
+    // names, else the one around the element that asked for it.
+    const bodyOf = id => { const el = id && document.getElementById(id); return el && el.parentElement && el.parentElement.tagName === 'TBODY' ? el.parentElement : null; };
+    let tbody = update.dataset.htmxoRowUpdate ? document.getElementById(update.dataset.htmxoRowUpdate) : null;
+    const named = [...incoming.flatMap(r => [r.id, r.dataset.htmxoParent]), ...ids, ...groups];
+    for (let i = 0; !tbody && i < named.length; i++) tbody = bodyOf(named[i]);
+    if (!tbody && origin && origin.closest) { const t = origin.closest('table'); tbody = t && t.tBodies[0]; }
+    if (!tbody) throw new Error('htmxoUpdateRows: no table on the page holds these rows');
+    // Rows rendered for another grouping than the table shows would land
+    // under the wrong groups: refuse them.
+    if ('htmxoGrouped' in update.dataset) {
+        const wrapper = tbody.closest('[data-htmxo-grouped]');
+        const shown = wrapper ? wrapper.dataset.htmxoGrouped : null;
+        if (shown !== update.dataset.htmxoGrouped) throw new Error('htmxoUpdateRows: the rows are grouped by ' +
+            JSON.stringify(update.dataset.htmxoGrouped) + ' but the table by ' + JSON.stringify(shown));
+    }
+    const table = tbody.closest('table');
+    const masters = () => Array.from(tbody.rows).filter(r => !isDetail(r));
+    const byId = new Map(masters().map(r => [r.id, r]));
+    const own = id => { const el = document.getElementById(id); return el && el.parentElement === tbody ? el : null; };
+    const under = (r, set) => { for (let p = r; p; p = byId.get(p.dataset.htmxoParent)) if (set.has(p.id)) return true; return false; };
+    // Focus in a row being replaced returns to the same control (or the row)
+    // in its replacement.
+    const active = document.activeElement;
+    let focusRow = active && active.closest ? active.closest('tr') : null;
+    while (focusRow && focusRow.parentElement !== tbody) focusRow = focusRow.parentElement && focusRow.parentElement.closest('tr');
+    const focus = focusRow ?
+        {id: focusRow.id, index: htmxoFocusables(focusRow).indexOf(active)} : null;
+    // Rows of the scope that the update no longer lists leave, with their
+    // detail rows and child rows; their parents' toggles name fewer rows.
+    const listed = new Set(incoming.filter(r => !isDetail(r)).map(r => r.id));
+    const scoped = r => ids.has(r.id) || ('htmxoLeaf' in r.dataset && leaves.has(r.dataset.htmxoLeaf)) || under(r, groups);
+    const removed = new Set(masters().filter(r => scoped(r) && !listed.has(r.id)).map(r => r.id));
+    const doomed = masters().filter(r => under(r, removed));
+    const touched = new Set(doomed.map(r => byId.get(r.dataset.htmxoParent)).filter(p => p && !under(p, removed)));
+    doomed.forEach(r => {
+        const d = own(detailId(r));
+        htmxoRowDiscard(r);
+        if (d) htmxoRowDiscard(d);
+        byId.delete(r.id);
+    });
+    const details = new Map(incoming.filter(isDetail).map(r => [r.id, r]));
+    const fresh = [];
+    let inserted = false;
+    incoming.filter(r => !isDetail(r)).forEach(row => {
+        const detail = details.get(detailId(row)) || null;
+        const old = byId.get(row.id);
+        if (old) {
+            const oldDetail = own(detailId(old));
+            htmxoCarryRow(old, row, oldDetail, detail);
+            old.before(row);
+            if (detail) row.after(detail);
+            htmxoRowDiscard(old);
+            if (oldDetail) htmxoRowDiscard(oldDetail);
+        } else {
+            const parentId = row.dataset.htmxoParent;
+            const parent = parentId ? byId.get(parentId) : null;
+            // A row whose group is not on the page, or not loaded, waits for it.
+            if (parentId && (!parent || 'htmxoLazyRows' in parent.dataset)) return;
+            let last = parent || tbody.lastElementChild;
+            const self = parent && new Set([parent.id]);
+            if (parent) for (let n = last.nextElementSibling; n && (isDetail(n) || under(n, self)); n = n.nextElementSibling) last = n;
+            if (last) last.after(row); else tbody.append(row);
+            if (detail) row.after(detail);
+            if (parent) touched.add(parent);
+            inserted = true;
+        }
+        byId.set(row.id, row);
+        touched.add(row);
+        fresh.push(row);
+        if (detail) fresh.push(detail);
+    });
+    // The new rows are htmx content like any swapped in: processed, then
+    // announced with htmx:load (the table's own restore runs once, below).
+    if (window.htmx) {
+        fresh.forEach(el => htmx.process(el));
+        window.htmxoRowsUpdating = true;
+        try { fresh.forEach(el => htmx.trigger(el, 'htmx:load')); } finally { window.htmxoRowsUpdating = false; }
+    }
+    // A branch toggle names the child rows the branch now has.
+    touched.forEach(b => {
+        const toggle = b.isConnected && b.querySelector(':scope > td > [data-htmxo-tree-toggle]');
+        if (!toggle) return;
+        const kids = masters().filter(r => r.dataset.htmxoParent === b.id).map(r => r.id);
+        if (kids.length) toggle.setAttribute('aria-controls', kids.join(' '));
+        else toggle.removeAttribute('aria-controls');
+    });
+    if (focus && (!document.activeElement || document.activeElement === document.body)) {
+        const row = own(focus.id);
+        const target = row && (focus.index >= 0 ? htmxoFocusables(row)[focus.index] : row);
+        if (target && (target !== row || row.hasAttribute('tabindex'))) target.focus({preventScroll: true});
+    }
+    if (inserted) htmxoResort(table);
+    const root = tbody.closest('.htmxo-searchable-table');
+    const select = tbody.closest('[data-htmxo-select]');
+    if (root && root.querySelector('table') === table) htmxoFilterTable(root);
+    else if (select && select.querySelector('table') === table) htmxoSelectionUpdate(select);
+    fresh.forEach(d => { if (isDetail(d) && !d.hidden) htmxoLoadSlot(d.querySelector('[data-loaded]')); });
+}
+
+// What a replaced row keeps from the one it replaces: the state the user
+// gave it, which the server does not know.
+function htmxoCarryRow(old, row, oldDetail, detail) {
+    if ('htmxoTreeOpen' in old.dataset && 'htmxoTreeOpen' in row.dataset) row.dataset.htmxoTreeOpen = old.dataset.htmxoTreeOpen;
+    // A lazy group stays lazy until the table loads it; once loaded, its rows
+    // are on the page and the update's lazy marks no longer apply.
+    if (!('htmxoLazyRows' in old.dataset))
+        ['htmxoLazyRows', 'htmxoLazyCount', 'htmxoSearchMembers', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
+    row.hidden = old.hidden;
+    if ('htmxoFiltered' in old.dataset) row.dataset.htmxoFiltered = ''; else delete row.dataset.htmxoFiltered;
+    ['aria-selected', 'tabindex'].forEach(a => { if (old.hasAttribute(a)) row.setAttribute(a, old.getAttribute(a)); });
+    if ('htmxoActive' in old.dataset) row.dataset.htmxoActive = '';
+    if (oldDetail && detail) {
+        htmxoMdShow(row, detail, (old.dataset.htmxoDetailOpen ?? old.getAttribute('aria-expanded')) === 'true');
+        if (row.hidden) detail.hidden = true;
+    }
+}
+
+function htmxoFocusables(row) {
+    return Array.from(row.querySelectorAll('a[href],button,input,select,textarea,summary,[tabindex]'));
+}
+
+// Remove a row as an htmx swap would, so htmx releases what it bound there.
+function htmxoRowDiscard(el) {
+    if (window.htmx && htmx.swap) htmx.swap(el, '', {swapStyle: 'delete', swapDelay: 0, settleDelay: 0});
+    else el.remove();
+}
+
+if (!window.htmxoRowUpdateBound) {
+    window.htmxoRowUpdateBound = true;
+    document.addEventListener('htmx:beforeSwap', e => {
+        const d = e.detail;
+        if (!d.shouldSwap || typeof d.serverResponse !== 'string' || !d.serverResponse.includes('data-htmxo-row-update')) return;
+        const template = document.createElement('template');
+        template.innerHTML = d.serverResponse;
+        const update = template.content.querySelector('tbody[data-htmxo-row-update]');
+        if (!update) return;
+        d.shouldSwap = false;
+        try {
+            htmxoUpdateRows(update, d.requestConfig && d.requestConfig.elt);
+        } catch (err) {
+            if (window.htmxoToast) window.htmxoToast(err.message, 'error');
+            throw err;
+        }
+    });
+}
+
+// A swapped-in table with a stored query, predicates or open branches
+// filters as it loads. A row update (`htmxoUpdateRows`) makes its own pass
+// over the table its rows join.
 function htmxoSearchRestore(elt) {
     if (!elt || !elt.querySelectorAll) return;
     const roots = new Set(elt.querySelectorAll('.htmxo-searchable-table'));
-    const around = elt.closest && elt.closest('.htmxo-searchable-table');
+    const around = !window.htmxoRowsUpdating && elt.closest && elt.closest('.htmxo-searchable-table');
     if (around) roots.add(around);
     roots.forEach(root => {
         const state = htmxoSearchOf(root);
-        if (state.input || state.filters.size) htmxoFilterTable(root);
+        const reopened = htmxoTreeRestore(root, state);
+        if (state.input || state.filters.size || reopened) htmxoFilterTable(root);
     });
 }
 if (!window.htmxoSearchBound) {
@@ -12736,14 +12934,15 @@ function htmxoSelectionRestore(elt) {
     if (!elt || !elt.querySelectorAll) return;
     // A table rendered with a prefilled query filters as soon as it loads.
     const searches = Array.from(elt.querySelectorAll('.htmxo-searchable-table'));
-    const aroundSearch = elt.closest && elt.closest('.htmxo-searchable-table');
+    // A row update makes its own pass over the table its rows join.
+    const aroundSearch = !window.htmxoRowsUpdating && elt.closest && elt.closest('.htmxo-searchable-table');
     if (aroundSearch) searches.push(aroundSearch);
     searches.forEach(r => {
         const input = r.querySelector(':scope > label > input[type="search"]');
         if (input && input.value.trim()) htmxoFilterTable(r);
     });
     const roots = new Set(elt.querySelectorAll('[data-htmxo-select]'));
-    const around = elt.closest && elt.closest('[data-htmxo-select]');
+    const around = !window.htmxoRowsUpdating && elt.closest && elt.closest('[data-htmxo-select]');
     if (around) roots.add(around);
     roots.forEach(htmxoSelectionUpdate);
 }
@@ -13350,6 +13549,16 @@ function htmxoMdToggle(row, event, key, slot) {
     if (event.target.closest('a,button,input,textarea,select,form')) return;
     var d = document.getElementById('detail-' + key); if (!d) return;
     var show = row.dataset.htmxoDetailOpen === undefined ? d.hidden : row.dataset.htmxoDetailOpen !== 'true';
+    htmxoMdShow(row, d, show);
+    if (show && slot) {
+        var s = document.getElementById(slot === 1 ? 'detail-slot-' + key : slot);
+        htmxoLoadSlot(s);
+    }
+    return show;
+}
+// Open or close a row's detail `d`, mirroring the state on the row and on its
+// detail control. A row update re-applies it to the rows it replaces.
+function htmxoMdShow(row, d, show) {
     d.hidden = !show;
     if (row.dataset.htmxoDetailOpen !== undefined) row.dataset.htmxoDetailOpen = String(show);
     if (row.dataset.htmxoTreeOpen === undefined) row.setAttribute('aria-expanded', show);
@@ -13359,11 +13568,6 @@ function htmxoMdToggle(row, event, key, slot) {
         if (control.hasAttribute('data-htmxo-disclosure'))
             control.textContent = show ? '$(_md_disclosure_glyph(true))' : '$(_md_disclosure_glyph(false))';
     }
-    if (show && slot) {
-        var s = document.getElementById(slot === 1 ? 'detail-slot-' + key : slot);
-        htmxoLoadSlot(s);
-    }
-    return show;
 }
 function htmxoLoadSlot(s) {
     if (s && s.dataset.loaded !== '1' && s.dataset.loading !== '1') {
@@ -13826,6 +14030,19 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   with `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` of just
   that group's rows. Until then the group row carries its members' search text
   and selection keys.
+- `update_rows`: one key or several. Instead of the table, return the rows of
+  those items as the same call renders them, in a `<tbody data-htmxo-row-update>`
+  that the table runtime puts in place of the rows on the page, whatever the
+  requesting element's `hx-target`. In a regroupable table that is every copy
+  of each leaf in the active grouping, with the rows of the groups it is in
+  (their summaries depend on it); in a tree, the item's own row. Rows keep what
+  the user did to them: open branches and details, selection, search, focus.
+  A key no longer among `items` removes its rows. Use it from the route of a
+  per-row action: it renders the same call with `update_rows=key`.
+- `update_groups` (with `groupings`): one group key or several. Adds each group
+  row of the active grouping and all its rows to the update: rows the group no
+  longer has leave, new ones join it, and a group that no longer exists leaves
+  with its rows. For a leaf that changed groups, name the group it left too.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
@@ -13869,6 +14086,8 @@ function master_detail_table(headers, items;
                              group_by_url=nothing,
                              group_rows_url=nothing,
                              group_rows=nothing,
+                             update_rows=nothing,
+                             update_groups=nothing,
                              _rows_only::Bool=false,
                              _toolbar=(),
                              kwargs...)
@@ -13877,9 +14096,9 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, kwargs...)
-    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows require `groupings`"))
+        group_rows_url, group_rows, update_rows, update_groups, kwargs...)
+    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, update_groups)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -13898,10 +14117,12 @@ function master_detail_table(headers, items;
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     seen = Set{String}()
     max_level = Ref(1)
+    # `update_rows`: render only these items' rows (see `_md_row_update`); the
+    # walk still visits every item, so levels and parents stay those of the
+    # full table.
+    update = isnothing(update_rows) ? nothing : Set(_md_update_keys(update_rows))
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
-        attrs = Dict{Symbol,Any}(Symbol(k) => v
-                                 for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
         descendants = isnothing(children) ? () : children(item)
         # A branch whose rows load on first expand (see `group_rows_url`).
         lazy_rows = descendants isa _MDLazyRows ? descendants : nothing
@@ -13914,6 +14135,12 @@ function master_detail_table(headers, items;
             safe in seen && throw(ArgumentError(
                 "master_detail_table: hierarchy keys must be unique after sanitisation; repeated $(repr(item_key))"))
             push!(seen, safe)
+        end
+        isnothing(update) || string(item_key) in update ||
+            return visit_children(descendants, safe, level, ancestors_open && branch_open)
+        attrs = Dict{Symbol,Any}(Symbol(k) => v
+                                 for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
+        if !isnothing(children)
             attrs[:data_htmxo_parent] = parent
             attrs[:aria_level] = string(level)
             ancestors_open || (attrs[:hidden] = true)
@@ -14001,16 +14228,19 @@ function master_detail_table(headers, items;
                                     row_toggle=!selecting)
             push!(rows, m, d)
         end
-        if !isnothing(children)
-            for child in descendants
-                visit(child, "row-$safe", level + 1, ancestors_open && branch_open)
-            end
+        visit_children(descendants, safe, level, ancestors_open && branch_open)
+    end
+    function visit_children(descendants, safe, level, open)
+        for child in descendants
+            visit(child, "row-$safe", level + 1, open)
         end
     end
     for item in items
         visit(item, "", 1, true)
     end
     _rows_only && return rows
+    isnothing(update) || return _md_row_update(rows, get(kwargs, :id, nothing);
+        ids=["row-" * _md_safe_key(k) for k in update])
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
     selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
     # The expand controls name the body they drive; a body without a caller id
@@ -14119,8 +14349,8 @@ end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
-        group_by_url, group_rows_url, group_rows, selectable, select_form, select_value,
-        select_submit, search_text, kwargs...)
+        group_by_url, group_rows_url, group_rows, update_rows, update_groups, selectable,
+        select_form, select_value, select_submit, search_text, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
     names = String[string(first(g)) for g in groupings]
@@ -14132,6 +14362,9 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     grouping = last(groupings[findfirst(==(active), names)])
     isnothing(grouping) && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows needs a grouping, but $(repr(active)) is ungrouped"))
+    update = !isnothing(update_rows) || !isnothing(update_groups)
+    update && !isnothing(group_rows) && throw(ArgumentError(
+        "master_detail_table: group_rows loads a lazy group; update_rows/update_groups are a separate response"))
     _attrs(item) = isnothing(master_attrs) ? (;) : master_attrs(item)
     leaf_value(item) = string(isnothing(select_value) ? key(item) : select_value(item))
     leaf_select(item) = _md_group_select_attrs(selectable, string(key(item)), leaf_value(item), nothing)
@@ -14143,13 +14376,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             hx_vals="js:{q: htmxoGroupedQuery(this)}",
             (isnothing(select_form) ? (;) : (; form=select_form))...)(
             (h.option(n; value=n, (n == active ? (; selected=true) : (;))...) for n in names)...)),)
+    leaf_keys = _md_update_keys(update_rows)
     table = if isnothing(grouping)
         # The flat view: the leaves themselves, keyed and selected as in any
         # other grouping so a selection survives switching to and from it.
         flat_kwargs = (; (k => v for (k, v) in pairs(kwargs) if k !== :expand_controls)...)
-        master_detail_table(headers, items; key, master, detail, detail_url,
+        built = master_detail_table(headers, items; key, master, detail, detail_url,
             master_attrs=item -> _md_attr_union(leaf_select(item), _attrs(item)), initially_open,
-            selectable, select_form, select_submit, search_text, _toolbar=toolbar, flat_kwargs...)
+            selectable, select_form, select_submit, search_text, _toolbar=toolbar,
+            update_rows=update ? leaf_keys : nothing, _rows_only=update, flat_kwargs...)
+        # This view has no groups: `update_groups` names none of its rows.
+        update && return _md_row_update(built, get(kwargs, :id, nothing); grouped=active,
+            ids=["row-" * _md_safe_key(k) for k in leaf_keys])
+        built
     else
         ncols = length(headers)
         gmaster = something(group_master, _md_default_group_master(ncols))
@@ -14158,6 +14397,14 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             groups = filter(g -> g.key == string(group_rows), groups)
         end
         gid(g) = "group:" * g.key
+        # The leaves each group renders: all of them, or for an update the
+        # updated leaves plus every leaf of an updated group. An update keeps
+        # only those groups, and the group rows of the updated leaves, whose
+        # summaries their members feed.
+        group_keys, leaf_set = Set(_md_update_keys(update_groups)), Set(leaf_keys)
+        shown = Dict(g.key => (!update || g.key in group_keys ? g.members :
+            filter(m -> string(key(m)) in leaf_set, g.members)) for g in groups)
+        update && (groups = filter(g -> g.key in group_keys || !isempty(shown[g.key]), groups))
         _open = initially_open isa Function ? initially_open : (_ -> initially_open)
         # `group_rows` renders one group's leaf rows, eagerly, for the lazy load.
         lazy = Dict{String,String}()
@@ -14172,6 +14419,12 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             attrs = _md_attr_union((; data_htmxo_group=""),
                 _md_group_select_attrs(selectable, gid(g), g.key, string(selectable, "_group")))
             haskey(lazy, g.key) || return attrs
+            # An update renders a lazy group's rows too, for a table that has
+            # loaded them; the row keeps its lazy marks for one that has not.
+            if update
+                attrs[:data_htmxo_lazy_rows] = lazy[g.key]
+                attrs[:data_htmxo_lazy_count] = string(length(g.members))
+            end
             # Leaves not loaded yet still count: search reaches their text,
             # and a selection keeps their keys (and submits their values).
             attrs[:data_htmxo_search_members] = join((leaf_text(m) for m in g.members), " ")
@@ -14182,30 +14435,56 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             end
             attrs
         end
+        # Every copy of a leaf names it, so an update finds them all.
+        leaf_attrs(item) = merge(_md_attr_union(leaf_select(item), _attrs(item)),
+            Dict{Symbol,Any}(:data_htmxo_leaf => string(key(item))))
         built = master_detail_table(headers, groups;
             key = x -> x isa _MDGroup ? gid(x) : "group:" * x.group * "/" * string(key(x.item)),
             master = x -> x isa _MDGroup ? gmaster(x.key, x.members) : master(x.item),
             children = x -> !(x isa _MDGroup) ? () :
-                haskey(lazy, x.key) ? _MDLazyRows(lazy[x.key], length(x.members)) :
-                Any[_MDGroupLeaf(x.key, m) for m in x.members],
+                !update && haskey(lazy, x.key) ? _MDLazyRows(lazy[x.key], length(x.members)) :
+                Any[_MDGroupLeaf(x.key, m) for m in shown[x.key]],
             detail = isnothing(detail) ? nothing : (x -> x isa _MDGroup ? nothing : detail(x.item)),
             detail_url = isnothing(detail_url) ? nothing :
                 (x -> x isa _MDGroup ? nothing :
                       detail_url isa Function ? detail_url(x.item) : detail_url),
-            master_attrs = x -> x isa _MDGroup ? group_attrs(x) :
-                _md_attr_union(leaf_select(x.item), _attrs(x.item)),
+            master_attrs = x -> x isa _MDGroup ? group_attrs(x) : leaf_attrs(x.item),
             initially_open = x -> x isa _MDGroup ? (!isnothing(group_rows) || initially_open === true) :
                 _open(x.item),
             search_text = isnothing(search_text) ? nothing :
                 (x -> x isa _MDGroup ? x.key : search_text(x.item)),
             selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
                 (x -> x isa _MDGroup ? true : select_submit(x.item)),
-            _rows_only = !isnothing(group_rows), _toolbar = toolbar, kwargs...)
+            _rows_only = !isnothing(group_rows) || update, _toolbar = toolbar, kwargs...)
         # The lazy-load response: the group's leaf rows (its own row dropped).
         isnothing(group_rows) || return h.tbody(; data_htmxo_group_rows=string(group_rows))(built[2:end]...)
+        update && return _md_row_update(built, get(kwargs, :id, nothing); grouped=active,
+            leaves=leaf_keys, groups=["row-" * _md_safe_key("group:" * k) for k in _md_update_keys(update_groups)])
         built
     end
     h.div(; data_htmxo_grouped=active)(table)
+end
+
+# Keys an update names: one key or a collection of them, as strings.
+_md_update_keys(::Nothing) = String[]
+_md_update_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = unique!([string(k) for k in keys])
+_md_update_keys(k) = [string(k)]
+
+_md_json_list(xs) = "[" * join((_md_json_string(string(x)) for x in xs), ",") * "]"
+
+# A row update: the rows `master_detail_table(...; update_rows, update_groups)`
+# renders for an action route, in a marked <tbody> that the table runtime
+# (`htmxoUpdateRows`) merges into the table on the page, whatever the action's
+# hx-target. Its scope says which of the table's rows the update speaks for,
+# so it can remove those it no longer lists: rows by id, every copy of a
+# leaf (`data-htmxo-leaf`), and a group row with all its rows.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[])
+    attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
+    isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
+    isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
+    isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
+    isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
+    h.tbody(; attrs...)(rows...)
 end
 
 # --- Formatting helpers ---
