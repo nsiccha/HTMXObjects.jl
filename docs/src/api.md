@@ -910,6 +910,11 @@ is given, or an attribute that `master_attrs` also sets; each throws an
 `ArgumentError`. With `detail_toggle=:label` the first cell's content becomes
 the row's toggle button, so keep holders and buttons in other cells.
 
+Because the table writes those attributes, a route that re-renders one row
+after an action does not return `master(item)`: it returns the same table call
+with `update_rows=key`, whose rows the table runtime puts in place of the ones
+on the page (see [Row updates](components.md#table-row-updates)).
+
 #### Showing some of a graph's operations
 
 A surface may show only part of a mounted graph: a table row's cells hold the

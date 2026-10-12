@@ -353,6 +353,10 @@ would reveal), *Expand all* shows every match again, and clearing the search
 restores the branches the user had open. The buttons carry `aria-controls`
 for the table body and are left out of Markdown.
 
+The branches the reader opened or closed are kept per table `id` and page path,
+like the [search](#table-search) and the selection, so a re-render of the table
+opens them again (a lazy branch loads its rows again).
+
 `master` may also return the whole row, `h.tr(cells...; attrs...)`, when its
 attributes are computed together with its cells. The cells fill the master row
 and the attributes stay on it, beside the table's own id, toggle and hierarchy
@@ -432,6 +436,72 @@ transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_tab
   Until then a search matching a member keeps the group shown, with its toggle
   enabled so it can load; selected members stay selected and submitted; and
   *Expand all* loads every lazy group.
+- **Open groups.** The groups the reader opened or closed are kept per table
+  `id` and page path, like the search and the selection, so a re-render of the
+  table (a regroup and back, a bulk action) opens them again; a lazy group that
+  was open loads its rows again.
+- **Row actions.** A route that changes rows renders the same call with
+  `update_rows` / `update_groups` instead of the whole table; see
+  [Row updates](#table-row-updates).
+
+##### Row updates {#table-row-updates}
+
+`master_detail_table` writes each row's id, controls, hierarchy, search and
+selection attributes itself, and a regroupable table lists a leaf once per
+group it belongs to, so a per-row action cannot return `master(item)` for the
+row it changed. It returns the rows the table itself would render, and only
+those, by calling the table with `update_rows` (items, by `key`) and, in a
+regroupable table, `update_groups` (group keys):
+
+```julia
+transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, transactions;
+    key = t -> t.id,
+    master = t -> (h.td(t.party), h.td(t.category),
+        h.td(h.button("Flag"; hx_post=query_url(self / "flag"; id=t.id, group_by),
+                      hx_target="closest tr", hx_swap="outerHTML"))),
+    group_master = (key, members) -> (h.td(h.strong(key)),
+        h.td(rule_mode_select(self, key, group_by)), h.td(count_flagged(members))),
+    groupings, group_by, searchable = true, search_query = q, id = "transactions", kw...)
+
+@direct @post flag(; id::String, group_by::String) =
+    (toggle_flag!(id); transactions_table(__self__, group_by; update_rows=id))
+@direct @post rule_mode(; group::String, mode::String, group_by::String) =
+    hx_response(transactions_table(__self__, group_by; update_groups=group);
+                toast="Rule for $group: $mode")
+```
+
+- **What comes back.** A `<tbody data-htmxo-row-update>` with each copy of the
+  leaf in the active grouping, its detail row, and the rows of the groups it is
+  in (their summaries are computed from their members); for `update_groups`,
+  each group row with all its rows. A lazy group's rows come too, for a table
+  that has loaded them. In a tree or a flat table, `update_rows` returns the
+  item's own row and detail.
+- **How it lands.** The table runtime applies any htmx response holding that
+  body, whatever the requesting element's `hx-target` and `hx-swap`, so a
+  row's existing `hx-target="closest tr"` keeps working. Each row replaces the
+  row with its id in place and keeps what the reader did to it: an open
+  branch, an open detail (a lazy one loads again), the selection, the search
+  and its predicates, and the focus, which returns to the same control. The
+  new rows get `htmx:load`. A row new to the table joins the end of its group
+  (in a lazy group the reader has not opened, it arrives with the group's other
+  rows when the group loads), a new group joins the end of the table, and a
+  sorted table re-applies its sort when rows were added. `htmxoUpdateRows(html)` applies a row update fetched by other means.
+- **What leaves.** The update speaks for the copies of each leaf in
+  `update_rows` and for each group in `update_groups` with all its rows: those
+  it no longer lists leave, with their detail rows. A key no longer among the
+  items removes its rows; a group that no longer exists leaves with its rows.
+  When an action moves a leaf to another group, name both groups:
+  `update_rows=id, update_groups=[old, new]`.
+- **The grouping.** Render the update for the grouping the reader sees: pass
+  `group_by` into the action URLs that `master` and `group_master` build, as
+  above. An update rendered for another grouping is refused with an error
+  toast, and the table is left as it was. In the flat view `update_groups`
+  names no rows.
+- **Transport and toasts.** Like any route whose response is table rows,
+  declare the action `@direct` (see `OperationPolicy`): an interim poller
+  cannot stand in a table row. The response body is rows, so name a success
+  toast on the route (`hx_response(...; toast=...)`) rather than with
+  `data-htmxo-toast="body"`. Give the table an `id`.
 
 Markdown keeps the group and leaf rows and drops the controls. The
 HTMXObjectsWeb gallery's *Regroupable table demo* (`web/src/regroup_demo.jl`)
