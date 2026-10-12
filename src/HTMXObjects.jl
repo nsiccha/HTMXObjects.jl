@@ -12378,6 +12378,10 @@ and `<td>` unlayered and an unlayered rule beats any `@layer`-ed rule
 regardless of specificity (htmxo-semantic-styling cracked pattern 9), so
 wrapping them in `@layer htmxo` would leave them ineffective against
 Pico's defaults. Pair with [`sortable_table_js`](@ref).
+
+The header's sort `<button>` does not depend on this block: its plain-heading
+reset ships in [`htmxo_utility_styles`](@ref), which every [`htmx`](@ref) page
+carries.
 """
 function sortable_table_styles()
     h.style(Raw("""
@@ -12387,14 +12391,6 @@ function sortable_table_styles()
 /* Body cells with a hyperscript handler are clickable too (htmx-attr cells
    already get cursor:pointer from the global rule in htmxo_utility_styles). */
 .htmxo-sortable-table tbody td[_] { cursor: pointer; }
-}
-/* Native sort controls keep header text and focus visible in host themes. */
-.htmxo-sortable-table thead th > .htmxo-sort-control {
-    width: auto; margin: 0; padding: 0; border: none; background: transparent;
-    color: inherit; font: inherit; text-align: inherit; box-shadow: none;
-}
-.htmxo-sortable-table thead th > .htmxo-sort-control:focus-visible {
-    outline: 2px solid var(--htmxo-accent); outline-offset: .15em;
 }
 /* Master/detail paired-row rules — INTENTIONALLY UNLAYERED so they beat
    Pico's unlayered tr/td defaults. The sortable_table_js convention pairs
@@ -16276,9 +16272,11 @@ vitepress_proxy_config(; prefix::AbstractString="/live-htmxo",
 `<style>` block with HTMXO's small utility-class set. Replaces inline
 `style="..."` on common patterns: visibility, cursor, flex/grid layout,
 spacing, typography, and theme-aware text colors. All classes are scoped
-under `@layer htmxo` so host stylesheets always win on conflict. The one
-exception is the generic in-flight `.htmx-request` rule, intentionally
-unlayered so `cursor: progress` beats Pico's unlayered button cursor.
+under `@layer htmxo` so host stylesheets always win on conflict. Two rules
+are intentionally unlayered so they beat Pico's unlayered `button` rule: the
+generic in-flight `.htmx-request` rule (`cursor: progress`), and the reset
+that renders a [`sortable_table`](@ref) header's sort `<button>` as plain
+heading text with a focus ring.
 
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
@@ -16545,6 +16543,17 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 [hx-delete]:not([hx-trigger*="every"]).htmx-request {
     cursor: progress;
     opacity: 0.7;
+}
+
+/* sortable_table header labels are native <button>s: read as heading text on
+   every shell. Unlayered to beat Pico's `button`; no --pico-* colour tokens
+   (Pico rewrites them on buttons — htmxo-semantic-styling pattern 9). */
+.htmxo-sortable-table thead th > .htmxo-sort-control {
+    width: auto; margin: 0; padding: 0; border: none; background: transparent;
+    color: inherit; font: inherit; text-align: inherit; box-shadow: none;
+}
+.htmxo-sortable-table thead th > .htmxo-sort-control:focus-visible {
+    outline: 2px solid var(--htmxo-accent, currentColor); outline-offset: .15em;
 }
 """))
 
