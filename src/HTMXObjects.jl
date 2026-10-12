@@ -12338,7 +12338,9 @@ function htmxoFilterTable(target) {
     if (query.length === 0) delete root.dataset.htmxoSearchCollapsed;
     const collapsed = query.length > 0 && 'htmxoSearchCollapsed' in root.dataset;
     const direct = new Set();
-    const text = r => (r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
+    // A branch whose rows have not loaded yet also matches its rows' text.
+    const text = r => ((r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')) +
+        (r.dataset.htmxoSearchMembers ? ' ' + r.dataset.htmxoSearchMembers : '')).toLocaleLowerCase();
     rows.forEach(row => {
         const path = [];
         for (let r = row; r; r = byId.get(r.dataset.htmxoParent)) path.push(r);
@@ -12357,16 +12359,20 @@ function htmxoFilterTable(target) {
             if (p.dataset.htmxoTreeOpen === 'false') ancestorsOpen = false;
         }
         row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen) || (collapsed && !direct.has(row));
+        if (visible.has(row)) delete row.dataset.htmxoFiltered; else row.dataset.htmxoFiltered = '';
     });
     const shownParents = new Set(rows.filter(r => !r.hidden).map(r => r.dataset.htmxoParent));
     rows.forEach(row => {
         const branch = row.querySelector('[data-htmxo-tree-toggle]');
         if (branch) {
-            const open = query.length > 0 ? !collapsed || shownParents.has(row.id) : row.dataset.htmxoTreeOpen === 'true';
+            // An unloaded branch stays expandable during a search: loading it
+            // reveals the rows that matched.
+            const pending = 'htmxoLazyRows' in row.dataset;
+            const open = pending ? false : query.length > 0 ? !collapsed || shownParents.has(row.id) : row.dataset.htmxoTreeOpen === 'true';
             row.setAttribute('aria-expanded', open);
             branch.setAttribute('aria-expanded', open);
             branch.textContent = open ? '▾' : '▸';
-            branch.disabled = query.length > 0;
+            branch.disabled = query.length > 0 && !pending;
         }
         const detail = companions.get(row.id);
         if (detail) {
@@ -12388,7 +12394,9 @@ function htmxoFilterTable(target) {
     // listeners may push short notes that the count line appends.
     const hiddenBy = {};
     rejectedBy.forEach((name, row) => { if (row.hidden) hiddenBy[name] = (hiddenBy[name] || 0) + 1; });
-    const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length, query, hiddenBy, notes: []};
+    // Rows of a branch that has not loaded yet count toward the total.
+    const pending = rows.reduce((n, r) => n + (Number(r.dataset.htmxoLazyCount) || 0), 0);
+    const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length + pending, query, hiddenBy, notes: []};
     root.dispatchEvent(new CustomEvent('htmxo:table-filtered', {bubbles: true, detail}));
     const count = root.querySelector(':scope > label > [data-htmxo-table-count]');
     if (count) count.textContent = detail.shown + ' of ' + detail.total + ' rows shown' +
@@ -12408,11 +12416,55 @@ function htmxoTreeAll(button, open) {
         root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-tree-open]')
             .forEach(r => { r.dataset.htmxoTreeOpen = String(open); });
     }
+    if (open) root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-lazy-rows]')
+        .forEach(r => htmxoLoadRows(r));
     htmxoFilterTable(root);
+}
+
+// A branch rendered with `data-htmxo-lazy-rows` fetches its rows on first
+// expand: the response's <tbody data-htmxo-group-rows> rows go in after the
+// branch row, then the current sort, search and selection apply to them.
+function htmxoLoadRows(row) {
+    if (row.htmxoLoading) return row.htmxoLoading;
+    row.setAttribute('aria-busy', 'true');
+    row.htmxoLoading = fetch(row.dataset.htmxoLazyRows, {headers: {'HX-Request': 'true'}})
+        .then(r => r.ok ? r.text() : Promise.reject(new Error('Loading rows failed (' + r.status + ')')))
+        .then(html => {
+            const template = document.createElement('template');
+            template.innerHTML = html;
+            const body = template.content.querySelector('tbody[data-htmxo-group-rows]');
+            if (!body) throw new Error('Loading rows failed: no rows in the response');
+            const rows = Array.from(body.rows);
+            row.after(...rows);
+            ['htmxoLazyRows', 'htmxoLazyCount', 'htmxoSearchMembers', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
+            delete row.htmxoMembers;
+            row.removeAttribute('aria-busy');
+            row.querySelector('[data-htmxo-tree-toggle]').setAttribute('aria-controls',
+                rows.filter(r => r.dataset.htmxoParent === row.id).map(r => r.id).join(' '));
+            if (window.htmx) rows.forEach(r => htmx.process(r));
+            row.dataset.htmxoTreeOpen = 'true';
+            htmxoResort(row.closest('table'));
+            htmxoFilterTable(row);
+        })
+        .catch(err => {
+            row.removeAttribute('aria-busy');
+            row.htmxoLoading = null;
+            if (window.htmxoToast) window.htmxoToast(err.message, 'error');
+        });
+    return row.htmxoLoading;
+}
+
+// Re-apply the table's current client-side sort (after rows were added).
+function htmxoResort(table) {
+    const th = table.querySelector('thead th[data-sort-dir]');
+    if (!th) return;
+    th.dataset.sortDir = th.dataset.sortDir === 'asc' ? 'desc' : 'asc';
+    sortTable(th);
 }
 
 function htmxoTreeToggle(button) {
     const row = button.closest('tr');
+    if ('htmxoLazyRows' in row.dataset) { htmxoLoadRows(row); return; }
     row.dataset.htmxoTreeOpen = row.dataset.htmxoTreeOpen === 'true' ? 'false' : 'true';
     // Hierarchical tables always have a search scaffold, even when its field
     // is hidden. One visibility pass owns both collapse and filtering.
@@ -12455,8 +12507,16 @@ function htmxoSelectionUpdate(root) {
     const state = htmxoSelectionOf(root);
     const rows = htmxoSelectionRows(root);
     const present = new Set(rows.map(htmxoSelectionKey));
+    // Rows of a branch that has not loaded yet: present, never shown. Their
+    // value (null: not submitted) comes from the branch row.
+    const pending = new Map();
+    rows.forEach(r => {
+        if (!r.dataset.htmxoSelectMembers) return;
+        r.htmxoMembers = r.htmxoMembers || JSON.parse(r.dataset.htmxoSelectMembers);
+        Object.entries(r.htmxoMembers).forEach(([k, v]) => { if (!present.has(k)) pending.set(k, v); });
+    });
     // A key whose row left the table (deleted, re-rendered away) is dropped.
-    state.keys = new Set(Array.from(state.keys).filter(k => present.has(k)));
+    state.keys = new Set(Array.from(state.keys).filter(k => present.has(k) || pending.has(k)));
     if (!present.has(state.anchor)) state.anchor = null;
     if (!present.has(state.active)) state.active = null;
     const focusable = rows.find(r => htmxoSelectionKey(r) === state.active) || rows.find(r => !r.hidden) || rows[0];
@@ -12466,25 +12526,44 @@ function htmxoSelectionUpdate(root) {
         if (key === state.active) r.dataset.htmxoActive = ''; else delete r.dataset.htmxoActive;
         r.tabIndex = r === focusable ? 0 : -1;
     });
-    const selected = rows.filter(r => state.keys.has(htmxoSelectionKey(r)));
+    // A key may label several rows (a leaf listed under several groups): the
+    // selection, its inputs and its counts are per key, one row standing in.
+    const selectedRows = rows.filter(r => state.keys.has(htmxoSelectionKey(r)));
+    const byKey = new Map();
+    selectedRows.forEach(r => {
+        const k = htmxoSelectionKey(r);
+        if (!byKey.has(k)) byKey.set(k, []);
+        byKey.get(k).push(r);
+    });
+    // Shown first, then hidden only by a collapsed branch, then filtered out.
+    const why = r => !r.hidden ? 0 : !('htmxoFiltered' in r.dataset) && r.dataset.htmxoParent ? 1 : 2;
+    const selected = Array.from(byKey.values(), copies => copies.reduce((a, b) => why(b) < why(a) ? b : a));
     const submitted = selected.filter(r => r.dataset.htmxoSelectSubmit !== 'false');
+    const unloaded = Array.from(state.keys).filter(k => !present.has(k));
     const name = root.dataset.htmxoSelect, form = root.dataset.htmxoSelectForm;
-    root.querySelector(':scope > [data-htmxo-selection-inputs]').replaceChildren(...submitted.map(r => {
+    const input = (inputName, value) => {
         const input = document.createElement('input');
         input.type = 'hidden';
-        input.name = name;
-        input.value = r.dataset.htmxoSelectValue ?? htmxoSelectionKey(r);
+        input.name = inputName;
+        input.value = value;
         if (form) input.setAttribute('form', form);
         return input;
-    }));
-    const hidden = selected.filter(r => r.hidden).length;
+    };
+    root.querySelector(':scope > [data-htmxo-selection-inputs]').replaceChildren(
+        ...submitted.map(r => input(r.dataset.htmxoSelectName || name, r.dataset.htmxoSelectValue ?? htmxoSelectionKey(r))),
+        ...unloaded.filter(k => pending.get(k) !== null).map(k => input(name, pending.get(k))));
+    const filtered = selected.filter(r => why(r) === 2).length;
+    const folded = selected.filter(r => why(r) === 1).length + unloaded.length;
+    const hidden = filtered + folded;
+    const notes = [filtered && filtered + ' hidden by the filter', folded && folded + ' in collapsed groups'].filter(Boolean);
     const count = root.querySelector(':scope > div > .htmxo-selection-bar > [data-htmxo-selection-count]');
-    if (count) count.textContent = selected.length + ' selected' + (hidden ? ' (' + hidden + ' hidden by the filter)' : '');
+    if (count) count.textContent = (selected.length + unloaded.length) + ' selected' + (notes.length ? ' (' + notes.join(', ') + ')' : '');
     document.querySelectorAll('[data-htmxo-needs-selection]').forEach(control => {
-        if (control.dataset.htmxoNeedsSelection === name) control.disabled = submitted.length === 0;
+        if (control.dataset.htmxoNeedsSelection === name)
+            control.disabled = submitted.length === 0 && !unloaded.some(k => pending.get(k) !== null);
     });
     root.dispatchEvent(new CustomEvent('htmxo:selection-changed', {bubbles: true,
-        detail: {name, keys: selected.map(htmxoSelectionKey), rows: selected, submitted, hidden}}));
+        detail: {name, keys: [...selected.map(htmxoSelectionKey), ...unloaded], rows: selectedRows, submitted, hidden}}));
 }
 
 // Select exactly `keys` (row keys; [] clears), e.g. after a bulk action.
@@ -12495,7 +12574,12 @@ function htmxoSelectRows(target, keys) {
 }
 function htmxoSelectedKeys(target) {
     const root = htmxoSelectionRoot(target);
-    return htmxoSelectionRows(root).filter(r => r.getAttribute('aria-selected') === 'true').map(htmxoSelectionKey);
+    const rows = htmxoSelectionRows(root);
+    const present = new Set(rows.map(htmxoSelectionKey));
+    // Once per key (a leaf may be listed under several groups), plus selected
+    // rows of a branch that has not loaded yet.
+    return Array.from(new Set([...rows.filter(r => r.getAttribute('aria-selected') === 'true').map(htmxoSelectionKey),
+        ...Array.from(htmxoSelectionOf(root).keys).filter(k => !present.has(k))]));
 }
 
 function htmxoSelectionShown(root) { return htmxoSelectionRows(root).filter(r => !r.hidden); }
@@ -12578,8 +12662,21 @@ function htmxoSelectionTarget(e) {
     const control = e.target.closest('a,button,input,textarea,select,label,form,summary,[contenteditable]');
     return control && row.contains(control) ? null : [root, row];
 }
+// The search query a regroup carries to the re-rendered table.
+function htmxoGroupedQuery(el) {
+    const input = el.closest('[data-htmxo-grouped]').querySelector('.htmxo-searchable-table > label > input[type="search"]');
+    return input ? input.value : '';
+}
 function htmxoSelectionRestore(elt) {
     if (!elt || !elt.querySelectorAll) return;
+    // A table rendered with a prefilled query filters as soon as it loads.
+    const searches = Array.from(elt.querySelectorAll('.htmxo-searchable-table'));
+    const aroundSearch = elt.closest && elt.closest('.htmxo-searchable-table');
+    if (aroundSearch) searches.push(aroundSearch);
+    searches.forEach(r => {
+        const input = r.querySelector(':scope > label > input[type="search"]');
+        if (input && input.value.trim()) htmxoFilterTable(r);
+    });
     const roots = new Set(elt.querySelectorAll('[data-htmxo-select]'));
     const around = elt.closest && elt.closest('[data-htmxo-select]');
     if (around) roots.add(around);
@@ -12948,8 +13045,8 @@ function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
                         caption=nothing, default_sort=nothing, role="grid",
-                        searchable::Bool=false, selectable=nothing, select_form=nothing,
-                        kwargs...)
+                        searchable::Bool=false, search_query::AbstractString="",
+                        selectable=nothing, select_form=nothing, kwargs...)
     if !isnothing(default_sort) && !sortable
         error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
     end
@@ -13008,7 +13105,7 @@ function sortable_table(headers, rows;
     else
         table_wrap
     end
-    searched = searchable ? _searchable_table(framed, rows) : framed
+    searched = searchable ? _searchable_table(framed, rows; query=search_query) : framed
     isnothing(selectable) ? searched : _selectable_table(searched, rows, selectable; form=select_form)
 end
 
@@ -13071,6 +13168,8 @@ end
 # `detail-<key>` companion, which follows its master's visibility.
 _is_master_row(row) = !(row isa Node && startswith(string(get(HTMX.attrs(row), :id, "")), "detail-"))
 _row_hidden(row) = row isa Node && get(HTMX.attrs(row), :hidden, false) ∉ (false, nothing)
+# Rows of a lazy branch that are not loaded yet count toward the total.
+_row_lazy_count(row) = row isa Node ? parse(Int, string(get(HTMX.attrs(row), Symbol("data-htmxo-lazy-count"), "0"))) : 0
 # One wording for the server's first paint and `htmxoFilterTable`'s updates.
 _table_count_text(shown, total) = "$shown of $total rows shown"
 
@@ -13080,12 +13179,15 @@ _table_count_text(shown, total) = "$shown of $total rows shown"
 # (`html_only`): in Markdown the label would run into the table's header row.
 # `field=false` keeps a hidden scaffold that a hierarchy's branch toggles
 # filter through. The input's `aria-label` keeps the count out of its name.
-function _searchable_table(table, rows; field::Bool=true, controls=nothing)
+function _searchable_table(table, rows; field::Bool=true, controls=nothing, query::AbstractString="")
     masters = [row for row in rows if _is_master_row(row)]
-    count_text = _table_count_text(count(!_row_hidden, masters), length(masters))
+    count_text = _table_count_text(count(!_row_hidden, masters), length(masters) + sum(_row_lazy_count, masters; init=0))
+    # A prefilled query (e.g. carried across a regroup) is applied by the
+    # runtime when the table loads; the server's count is the unfiltered one.
+    value_attrs = isempty(query) ? (;) : (; value=query)
     h.div(; class="htmxo-searchable-table")(
         html_only(h.label("Search",
-            h.input(; type="search", aria_label="Search", oninput="htmxoFilterTable(this)"),
+            h.input(; type="search", aria_label="Search", oninput="htmxoFilterTable(this)", value_attrs...),
             h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
             hidden=!field)),
         (isnothing(controls) ? () : (html_only(controls),))...,
@@ -13529,6 +13631,7 @@ end
                         master_attrs=nothing,
                         master_class=nothing,
                         detail_class=nothing,
+                        groupings=nothing, group_by=nothing,
                         kwargs...)
 
 Render a `sortable_table` whose primary rows expand into paired,
@@ -13616,6 +13719,27 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `select_value(item)`: the submitted value for a row (default: its `key`).
 - `select_submit(item)`: return `false` to keep a row selectable but leave it
   out of the submitted inputs.
+- `search_query`: pre-fill the search field; the runtime applies it on load.
+- `groupings`: a regroupable table over the same leaf rows (`items`), as a
+  vector of `name => grouping` pairs where `grouping(item)` returns a group key
+  or several (the leaf is then listed under each) and `nothing` means the flat
+  view. Replaces `children`. Each group is a collapsible branch, in
+  first-appearance order. Leaves keep their own selection key in every group,
+  so selecting one selects all its copies, and the selection survives
+  regrouping; selectable group rows submit their key under `<selectable>_group`.
+  See *Regroupable tables* in `docs/src/components.md`.
+- `group_by`: the active grouping's name (default: the first). An unknown name
+  throws an `ArgumentError`.
+- `group_master(key, members)`: the group row's cells (default: the key in
+  bold and the member count). Controls in it keep their own behaviour.
+- `group_by_url`: adds a *Group by* select to the tree controls. A change GETs
+  this URL with `group_by` and `q` (the current search) and swaps the table for
+  the response; with `select_form` the select is also submitted with that form.
+- `group_rows_url(key, members)`: return a URL to load that group's rows on
+  first expand (or `nothing` to render them). The route renders the same call
+  with `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` of just
+  that group's rows. Until then the group row carries its members' search text
+  and selection keys.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
@@ -13652,7 +13776,24 @@ function master_detail_table(headers, items;
                              select_value=nothing,
                              select_submit=nothing,
                              expand_controls::Bool=false,
+                             search_query::AbstractString="",
+                             groupings=nothing,
+                             group_by=nothing,
+                             group_master=nothing,
+                             group_by_url=nothing,
+                             group_rows_url=nothing,
+                             group_rows=nothing,
+                             _rows_only::Bool=false,
+                             _toolbar=(),
                              kwargs...)
+    isnothing(groupings) || return _grouped_master_detail_table(headers, items;
+        key, master, detail, detail_url, master_attrs, master_class, detail_class,
+        initially_open, children, branches_collapsible, detail_toggle, searchable,
+        search_text, selectable, select_form, select_value, select_submit,
+        expand_controls, search_query, groupings, group_by, group_master, group_by_url,
+        group_rows_url, group_rows, kwargs...)
+    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -13675,9 +13816,12 @@ function master_detail_table(headers, items;
         item_key = key(item)
         attrs = Dict{Symbol,Any}(Symbol(k) => v
                                  for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
-        descendants = isnothing(children) ? () : collect(children(item))
-        branch = !isempty(descendants)
-        open = _open(item)
+        descendants = isnothing(children) ? () : children(item)
+        # A branch whose rows load on first expand (see `group_rows_url`).
+        lazy_rows = descendants isa _MDLazyRows ? descendants : nothing
+        descendants = isnothing(lazy_rows) ? collect(descendants) : ()
+        branch = !isnothing(lazy_rows) || !isempty(descendants)
+        open = isnothing(lazy_rows) && _open(item)
         branch_open = branch && (!branches_collapsible || open)
         safe = _md_safe_key(item_key)
         if !isnothing(children)
@@ -13690,6 +13834,10 @@ function master_detail_table(headers, items;
             if branch && branches_collapsible
                 attrs[:data_htmxo_tree_open] = string(open)
                 attrs[:aria_expanded] = string(open)
+            end
+            if !isnothing(lazy_rows)
+                attrs[:data_htmxo_lazy_rows] = lazy_rows.url
+                attrs[:data_htmxo_lazy_count] = string(lazy_rows.count)
             end
             max_level[] = max(max_level[], level)
         end
@@ -13729,7 +13877,7 @@ function master_detail_table(headers, items;
             child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
             push!(controls, h.button(_md_disclosure_glyph(open); type="button",
                 data_htmxo_tree_toggle="", aria_label="Toggle child rows",
-                aria_controls=child_ids, aria_expanded=string(open),
+                (isempty(child_ids) ? (;) : (; aria_controls=child_ids))..., aria_expanded=string(open),
                 onclick="htmxoTreeToggle(this); event.stopPropagation()"))
         end
         label = Any[HTMX.children(first_cell)...]
@@ -13776,6 +13924,7 @@ function master_detail_table(headers, items;
     for item in items
         visit(item, "", 1, true)
     end
+    _rows_only && return rows
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
     selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
     # The expand controls name the body they drive; a body without a caller id
@@ -13791,6 +13940,11 @@ function master_detail_table(headers, items;
     [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
     .htmxo-tree-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
     .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
+    .htmxo-tree-controls > label { display: inline-flex; align-items: baseline; gap: .5rem; margin: 0 .5rem 0 0; font-size: .875em; }
+    .htmxo-tree-controls > label > select { width: auto; margin: 0; padding-block: .15em; font-size: inherit; }
+    [data-htmxo-group] > td:first-child { white-space: nowrap; }
+    [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
+    tr[aria-busy="true"] [data-htmxo-tree-toggle] { cursor: progress; opacity: .6; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
@@ -13801,14 +13955,171 @@ function master_detail_table(headers, items;
     table = h.div(h.style(Raw(rules)), table)
     # A hierarchy always carries the (possibly hidden) search scaffold: its
     # branch toggles and the search share one visibility pass.
-    controls = expand_controls ? h.p(; class="htmxo-tree-controls")(
+    tools = Any[_toolbar...]
+    expand_controls && push!(tools,
         h.button("Expand all"; type="button", class="secondary outline", aria_controls=body_id,
             onclick="htmxoTreeAll(this, true)"),
         h.button("Collapse all"; type="button", class="secondary outline", aria_controls=body_id,
-            onclick="htmxoTreeAll(this, false)")) : nothing
-    searched = (searchable || !isnothing(children)) ?
-        _searchable_table(table, rows; field=searchable, controls) : table
+            onclick="htmxoTreeAll(this, false)"))
+    controls = isempty(tools) ? nothing : h.p(; class="htmxo-tree-controls")(tools...)
+    searched = (searchable || !isnothing(children) || !isnothing(controls)) ?
+        _searchable_table(table, rows; field=searchable, controls, query=search_query) : table
     selecting ? _selectable_table(searched, rows, selectable; form=select_form) : searched
+end
+
+# --- Regroupable master/detail tables ---
+
+# One leaf may belong to several groups (`groupings` callbacks may return a
+# vector of keys); each copy is its own row, but every copy carries the leaf's
+# own selection key, so selection, inputs and counts stay per leaf.
+struct _MDGroup
+    key::String
+    members::Vector{Any}
+end
+struct _MDGroupLeaf
+    group::String
+    item::Any
+end
+# `children` result for a branch whose rows load on first expand.
+struct _MDLazyRows
+    url::String
+    count::Int
+end
+
+_md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = [string(k) for k in keys if !isnothing(k)]
+_md_group_keys(::Nothing) = String[]
+_md_group_keys(k) = [string(k)]
+
+function _md_groups(items, grouping)
+    order = String[]
+    members = Dict{String,Vector{Any}}()
+    for item in items, k in _md_group_keys(grouping(item))
+        haskey(members, k) || (push!(order, k); members[k] = Any[])
+        push!(members[k], item)
+    end
+    [_MDGroup(k, members[k]) for k in order]
+end
+
+# Default group summary: the group key and member count, blank cells beside it.
+_md_default_group_master(ncols) = (key, members) ->
+    Any[h.td(h.strong(key), " ", h.small("($(length(members)))")),
+        (h.td("") for _ in 2:ncols)...]
+
+# The helper's selection attributes first; the caller's `master_attrs` win.
+_md_attr_union(a, b) = merge(Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(a)),
+                             Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(b)))
+
+_md_group_select_attrs(selectable, kind_key, value, name) = isnothing(selectable) ? (;) :
+    (; data_htmxo_select_key=kind_key, data_htmxo_select_value=value,
+       (isnothing(name) ? (;) : (; data_htmxo_select_name=name))...)
+
+# Plain text of rendered cells, for searching leaves that are not loaded yet.
+_md_text(x::Node) = join((_md_text(c) for c in HTMX.children(x)), " ")
+_md_text(x::Union{Tuple,AbstractVector}) = join((_md_text(c) for c in x), " ")
+_md_text(x::Raw) = replace(x.html, r"<[^>]*>" => " ")
+_md_text(::Nothing) = ""
+_md_text(x) = string(x)
+
+function _md_json_string(s::AbstractString)
+    io = IOBuffer()
+    print(io, '"')
+    for c in s
+        c == '"' ? print(io, "\\\"") : c == '\\' ? print(io, "\\\\") :
+        c < ' ' ? print(io, "\\u", string(UInt16(c); base=16, pad=4)) : print(io, c)
+    end
+    print(io, '"')
+    String(take!(io))
+end
+
+function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
+        master_attrs, initially_open, children, groupings, group_by, group_master,
+        group_by_url, group_rows_url, group_rows, selectable, select_form, select_value,
+        select_submit, search_text, kwargs...)
+    isnothing(children) || throw(ArgumentError(
+        "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
+    names = String[string(first(g)) for g in groupings]
+    isempty(names) && throw(ArgumentError("master_detail_table: `groupings` is empty"))
+    allunique(names) || throw(ArgumentError("master_detail_table: grouping names must be unique"))
+    active = isnothing(group_by) ? first(names) : string(group_by)
+    active in names || throw(ArgumentError(string("master_detail_table: unknown group_by ",
+        repr(active), "; groupings are ", join(repr.(names), ", "))))
+    grouping = last(groupings[findfirst(==(active), names)])
+    isnothing(grouping) && !isnothing(group_rows) && throw(ArgumentError(
+        "master_detail_table: group_rows needs a grouping, but $(repr(active)) is ungrouped"))
+    _attrs(item) = isnothing(master_attrs) ? (;) : master_attrs(item)
+    leaf_value(item) = string(isnothing(select_value) ? key(item) : select_value(item))
+    leaf_select(item) = _md_group_select_attrs(selectable, string(key(item)), leaf_value(item), nothing)
+    # The Group by control joins the tree controls; with a bulk form it is
+    # also submitted there, so a group selection arrives with its grouping.
+    toolbar = isnothing(group_by_url) || !isnothing(group_rows) ? () : (h.label("Group by",
+        h.select(; name="group_by", hx_get=string(group_by_url),
+            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
+            hx_vals="js:{q: htmxoGroupedQuery(this)}",
+            (isnothing(select_form) ? (;) : (; form=select_form))...)(
+            (h.option(n; value=n, (n == active ? (; selected=true) : (;))...) for n in names)...)),)
+    table = if isnothing(grouping)
+        # The flat view: the leaves themselves, keyed and selected as in any
+        # other grouping so a selection survives switching to and from it.
+        flat_kwargs = (; (k => v for (k, v) in pairs(kwargs) if k !== :expand_controls)...)
+        master_detail_table(headers, items; key, master, detail, detail_url,
+            master_attrs=item -> _md_attr_union(leaf_select(item), _attrs(item)), initially_open,
+            selectable, select_form, select_submit, search_text, _toolbar=toolbar, flat_kwargs...)
+    else
+        ncols = length(headers)
+        gmaster = something(group_master, _md_default_group_master(ncols))
+        groups = _md_groups(items, grouping)
+        if !isnothing(group_rows)
+            groups = filter(g -> g.key == string(group_rows), groups)
+        end
+        gid(g) = "group:" * g.key
+        _open = initially_open isa Function ? initially_open : (_ -> initially_open)
+        # `group_rows` renders one group's leaf rows, eagerly, for the lazy load.
+        lazy = Dict{String,String}()
+        if isnothing(group_rows) && !isnothing(group_rows_url)
+            for g in groups
+                url = group_rows_url(g.key, g.members)
+                isnothing(url) || (lazy[g.key] = string(url))
+            end
+        end
+        leaf_text(item) = isnothing(search_text) ? _md_text(master(item)) : string(search_text(item))
+        function group_attrs(g)
+            attrs = _md_attr_union((; data_htmxo_group=""),
+                _md_group_select_attrs(selectable, gid(g), g.key, string(selectable, "_group")))
+            haskey(lazy, g.key) || return attrs
+            # Leaves not loaded yet still count: search reaches their text,
+            # and a selection keeps their keys (and submits their values).
+            attrs[:data_htmxo_search_members] = join((leaf_text(m) for m in g.members), " ")
+            if !isnothing(selectable)
+                attrs[:data_htmxo_select_members] = "{" * join((string(_md_json_string(string(key(m))), ":",
+                    isnothing(select_submit) || select_submit(m) ? _md_json_string(leaf_value(m)) : "null")
+                    for m in g.members), ",") * "}"
+            end
+            attrs
+        end
+        built = master_detail_table(headers, groups;
+            key = x -> x isa _MDGroup ? gid(x) : "group:" * x.group * "/" * string(key(x.item)),
+            master = x -> x isa _MDGroup ? gmaster(x.key, x.members) : master(x.item),
+            children = x -> !(x isa _MDGroup) ? () :
+                haskey(lazy, x.key) ? _MDLazyRows(lazy[x.key], length(x.members)) :
+                Any[_MDGroupLeaf(x.key, m) for m in x.members],
+            detail = isnothing(detail) ? nothing : (x -> x isa _MDGroup ? nothing : detail(x.item)),
+            detail_url = isnothing(detail_url) ? nothing :
+                (x -> x isa _MDGroup ? nothing :
+                      detail_url isa Function ? detail_url(x.item) : detail_url),
+            master_attrs = x -> x isa _MDGroup ? group_attrs(x) :
+                _md_attr_union(leaf_select(x.item), _attrs(x.item)),
+            initially_open = x -> x isa _MDGroup ? (!isnothing(group_rows) || initially_open === true) :
+                _open(x.item),
+            search_text = isnothing(search_text) ? nothing :
+                (x -> x isa _MDGroup ? x.key : search_text(x.item)),
+            selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
+                (x -> x isa _MDGroup ? true : select_submit(x.item)),
+            _rows_only = !isnothing(group_rows), _toolbar = toolbar, kwargs...)
+        # The lazy-load response: the group's leaf rows (its own row dropped).
+        isnothing(group_rows) || return h.tbody(; data_htmxo_group_rows=string(group_rows))(built[2:end]...)
+        built
+    end
+    h.div(; data_htmxo_grouped=active)(table)
 end
 
 # --- Formatting helpers ---
