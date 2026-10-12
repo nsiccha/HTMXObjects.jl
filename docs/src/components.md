@@ -255,8 +255,9 @@ sortable_table(["Party", "Amount"],
   selects every shown row; Escape collapses to the focused row; Space/Enter
   toggle it. Shift-click does not select text, and clicks on a row's own links,
   buttons, inputs, labels or forms keep their behaviour. "Shown" excludes rows
-  the search hides. In a `master_detail_table` a row click selects, so flat
-  tables get the native Details control (or use `detail_toggle=:label`).
+  the search hides. In a `master_detail_table` a row click selects, so the
+  detail opens from the row's native detail control (the ▸ disclosure in a
+  flat table, *Details* in a hierarchy, or the label with `detail_toggle=:label`).
 - **Submission.** One hidden `<input name=...>` per selected row, valued by
   its `data-htmxo-select-value` (else the key) and associated with
   `select_form` through the HTML `form` attribute, so the table may live
