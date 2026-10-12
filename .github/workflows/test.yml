@@ -10,6 +10,9 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # A passing job takes ~17 min; a hung one used to hold its runner for
+    # GitHub's 6 h default. HTMXO_TEST_PROGRESS names the item it hung in.
+    timeout-minutes: 60
     strategy:
       matrix:
         julia-version: ['lts', '1', 'pre']
@@ -32,6 +35,8 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run tests
         shell: bash
+        env:
+          HTMXO_TEST_PROGRESS: "1"
         run: |
           set +e
           julia --project=. --color=no -e 'using Pkg; Pkg.test(; coverage=true)' 2>&1 | tee test-output.log
