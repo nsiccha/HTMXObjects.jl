@@ -62,6 +62,56 @@ end
     @test all(contains(html, "hx-get=\"$(url)\"") for url in urls)
 end
 
+@testitem "flat master detail rows carry a native disclosure control" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string
+    # The first cell is a link, which a `detail_toggle=:label` button cannot wrap.
+    link = h.td(h.a("0001"; href="/invoice/1"), h.small(" (credit)"); data_sort_value="1")
+    before = repr("text/html", link)
+    items = [(; id="1", cell=link), (; id="2", cell=h.td(h.a("0002"; href="/invoice/2")))]
+    table(; kw...) = master_detail_table(["Invoice", "Amount"], items;
+        key=x -> "invoice-$(x.id)", master=x -> (x.cell, h.td("10")),
+        detail=x -> h.p("Detail $(x.id)"), kw...)
+    html = repr("text/html", table(; initially_open=x -> x.id == "1"))
+    @test repr("text/html", link) == before
+    controls = [m.match for m in eachmatch(r"<button[^>]*data-htmxo-detail-toggle[^>]*>[^<]*</button>", html)]
+    @test length(controls) == 2
+    for (id, open, glyph) in (("1", "true", "▾"), ("2", "false", "▸"))
+        control = only(c for c in controls if contains(c, "aria-controls=\"detail-invoice-$id\""))
+        @test contains(control, "type=\"button\"")
+        @test contains(control, "data-htmxo-disclosure=\"\"")
+        @test contains(control, "aria-label=\"Details\"")
+        @test contains(control, "aria-expanded=\"$open\"")
+        @test endswith(control, ">$glyph</button>")
+    end
+    # The control sits beside the cell's own content, never around the link,
+    # and the cell keeps its attributes; the row click stays.
+    @test contains(html, "<td data-sort-value=\"1\"><button")
+    @test contains(html, "</button><span data-htmxo-row-label=\"\"><a href=\"/invoice/1\">0001</a><small> (credit)</small></span></td>")
+    masters = [m.match for m in eachmatch(r"<tr[^>]*id=\"row-[^\"]*\"[^>]*>", html)]
+    @test length(masters) == 2 && all(contains(t, "onclick=") for t in masters)
+    @test contains(html, "button[data-htmxo-disclosure]")
+    # Markdown keeps the cell content and drops the control.
+    md = to_markdown_string(table())
+    @test contains(md, "0001") && contains(md, "0002")
+    @test !contains(md, "▸") && !contains(md, "Details")
+    # Lazy rows and searchable tables carry the same control.
+    lazy = repr("text/html", table(; detail=nothing, detail_url=x -> "/detail/$(x.id)", searchable=true))
+    @test count("data-htmxo-disclosure=\"\"", lazy) == 2
+    @test contains(lazy, "hx-get=\"/detail/1\"")
+    # In a hierarchy the triangle means child rows, so details keep "Details".
+    leaf = (; key="leaf", name="Leaf", children=())
+    tree = repr("text/html", master_detail_table(["Name"], [(; key="g", name="G", children=(leaf,))];
+        key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children,
+        detail=x -> isempty(x.children) ? h.p("d") : nothing))
+    @test contains(tree, ">Details</button>")
+    @test !contains(tree, "data-htmxo-disclosure=\"\"")
+    # Refused: the first cell hosts the row's detail control, so it must be an
+    # element; bare text would otherwise surface as a MethodError (dev §1).
+    @test_throws "the first master cell must be a <td> node" master_detail_table(["A"], [1];
+        key=identity, master=_ -> ("text",), detail=_ -> "d")
+end
+
 @testitem "sort header controls are plain headings on every page shell" tags=[:unit] begin
     using HTMXObjects
     # The reporting measurement, inverted. The header label is a native

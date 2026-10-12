@@ -303,8 +303,14 @@ complete first-cell label becomes a native button. Supply non-interactive label
 content in that cell; links or inputs can live in the other cells. Markdown
 keeps that label and the column names; it drops the search field. Detail
 expansion still follows `initially_open`; search and sort retain loaded DOM.
-The defaults keep the existing branch and Details controls. Native branch and Details
-buttons and auto-wired sort headers support keyboard activation. `initially_open` accepts a Boolean or
+The defaults keep the branch triangles and a Details button on each row with a
+detail. A flat table (no `children`) instead gives each such row a compact
+disclosure triangle (▸ closed, ▾ open, named "Details") in its first cell,
+beside the cell's content, which may be a link; the row click remains a pointer
+shortcut. Every branch and detail control is a native button carrying
+`aria-controls`/`aria-expanded`, so it supports keyboard activation, as do
+auto-wired sort headers. Sorting, search and CSV export read the cell's content,
+not its controls. `initially_open` accepts a Boolean or
 predicate and controls both branch expansion and leaf detail expansion. Groups
 without a detail body or URL have no companion or request. Keys must be unique
 after sanitisation throughout the tree and page.
