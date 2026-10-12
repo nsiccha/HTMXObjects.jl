@@ -12382,6 +12382,202 @@ function htmxoTreeToggle(button) {
     htmxoFilterTable(row);
 }
 
+// --- Row selection: `selectable` on sortable_table / master_detail_table ---
+// State is keyed per selection (input name, form, page path) and per row key,
+// never held by row elements, so it survives sorting, filtering, a row's
+// outerHTML swap and a full table re-render. This file may be included more
+// than once per page: top-level code declares only functions and guards its
+// listeners.
+window.htmxoSelectionState = window.htmxoSelectionState || new Map();
+
+function htmxoSelectionRoot(target) {
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    const root = el && (el.closest('[data-htmxo-select]') || el.querySelector('[data-htmxo-select]'));
+    if (!root) throw new Error('htmxoSelectionRoot: no selectable table at ' + target);
+    return root;
+}
+function htmxoSelectionRows(root) {
+    return Array.from(root.querySelector('table').tBodies[0].rows).filter(r => r.hasAttribute('aria-selected'));
+}
+function htmxoSelectionKey(row) { return row.dataset.htmxoSelectKey ?? row.id; }
+function htmxoSelectionOf(root) {
+    const scope = [root.dataset.htmxoSelect, root.dataset.htmxoSelectForm || '', location.pathname].join('|');
+    let state = window.htmxoSelectionState.get(scope);
+    if (!state) {
+        // First sight of this selection: rows the server rendered selected.
+        state = {keys: new Set(htmxoSelectionRows(root).filter(r => r.getAttribute('aria-selected') === 'true').map(htmxoSelectionKey)),
+                 anchor: null, active: null};
+        window.htmxoSelectionState.set(scope, state);
+    }
+    return state;
+}
+
+// Apply the keyed state to the current rows; rebuild the submitted inputs,
+// the count and `data-htmxo-needs-selection` controls; announce the change.
+function htmxoSelectionUpdate(root) {
+    const state = htmxoSelectionOf(root);
+    const rows = htmxoSelectionRows(root);
+    const present = new Set(rows.map(htmxoSelectionKey));
+    // A key whose row left the table (deleted, re-rendered away) is dropped.
+    state.keys = new Set(Array.from(state.keys).filter(k => present.has(k)));
+    if (!present.has(state.anchor)) state.anchor = null;
+    if (!present.has(state.active)) state.active = null;
+    const focusable = rows.find(r => htmxoSelectionKey(r) === state.active) || rows.find(r => !r.hidden) || rows[0];
+    rows.forEach(r => {
+        const key = htmxoSelectionKey(r);
+        r.setAttribute('aria-selected', state.keys.has(key) ? 'true' : 'false');
+        if (key === state.active) r.dataset.htmxoActive = ''; else delete r.dataset.htmxoActive;
+        r.tabIndex = r === focusable ? 0 : -1;
+    });
+    const selected = rows.filter(r => state.keys.has(htmxoSelectionKey(r)));
+    const submitted = selected.filter(r => r.dataset.htmxoSelectSubmit !== 'false');
+    const name = root.dataset.htmxoSelect, form = root.dataset.htmxoSelectForm;
+    root.querySelector(':scope > [data-htmxo-selection-inputs]').replaceChildren(...submitted.map(r => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = name;
+        input.value = r.dataset.htmxoSelectValue ?? htmxoSelectionKey(r);
+        if (form) input.setAttribute('form', form);
+        return input;
+    }));
+    const hidden = selected.filter(r => r.hidden).length;
+    const count = root.querySelector(':scope > div > .htmxo-selection-bar > [data-htmxo-selection-count]');
+    if (count) count.textContent = selected.length + ' selected' + (hidden ? ' (' + hidden + ' hidden by the filter)' : '');
+    document.querySelectorAll('[data-htmxo-needs-selection]').forEach(control => {
+        if (control.dataset.htmxoNeedsSelection === name) control.disabled = submitted.length === 0;
+    });
+    root.dispatchEvent(new CustomEvent('htmxo:selection-changed', {bubbles: true,
+        detail: {name, keys: selected.map(htmxoSelectionKey), rows: selected, submitted, hidden}}));
+}
+
+// Select exactly `keys` (row keys; [] clears), e.g. after a bulk action.
+function htmxoSelectRows(target, keys) {
+    const root = htmxoSelectionRoot(target);
+    htmxoSelectionOf(root).keys = new Set(keys);
+    htmxoSelectionUpdate(root);
+}
+function htmxoSelectedKeys(target) {
+    const root = htmxoSelectionRoot(target);
+    return htmxoSelectionRows(root).filter(r => r.getAttribute('aria-selected') === 'true').map(htmxoSelectionKey);
+}
+
+function htmxoSelectionShown(root) { return htmxoSelectionRows(root).filter(r => !r.hidden); }
+function htmxoSelectionRange(root, from, to) {
+    const shown = htmxoSelectionShown(root);
+    const a = shown.indexOf(from), b = shown.indexOf(to);
+    return a < 0 || b < 0 ? [to] : shown.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+// A click (or Space/Enter, as a toggle) on `row`: plain selects only it,
+// Ctrl/Cmd toggles it, Shift selects the shown range from the anchor.
+function htmxoSelectionClick(root, row, mods) {
+    const state = htmxoSelectionOf(root);
+    const key = htmxoSelectionKey(row);
+    const anchor = htmxoSelectionRows(root).find(r => htmxoSelectionKey(r) === state.anchor);
+    if (mods.shiftKey && anchor) {
+        state.keys = new Set(htmxoSelectionRange(root, anchor, row).map(htmxoSelectionKey));
+    } else {
+        if (mods.ctrlKey || mods.metaKey) {
+            if (state.keys.has(key)) state.keys.delete(key); else state.keys.add(key);
+        } else {
+            state.keys = new Set([key]);
+        }
+        state.anchor = key;
+    }
+    state.active = key;
+    htmxoSelectionUpdate(root);
+    row.focus({preventScroll: true});
+}
+function htmxoSelectionKeydown(root, row, e) {
+    const state = htmxoSelectionOf(root);
+    const key = htmxoSelectionKey(row);
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        state.keys = new Set(htmxoSelectionShown(root).map(htmxoSelectionKey));
+    } else if (e.ctrlKey || e.metaKey || e.altKey) {
+        return;
+    } else if (e.key === ' ' || e.key === 'Enter') {
+        htmxoSelectionClick(root, row, {shiftKey: e.shiftKey, ctrlKey: true});
+        e.preventDefault();
+        return;
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const shown = htmxoSelectionShown(root);
+        const at = shown.indexOf(row);
+        const next = shown[e.key === 'ArrowDown' ? Math.min(at + 1, shown.length - 1) : Math.max(at - 1, 0)];
+        if (!next) return;
+        if (e.shiftKey) {
+            if (state.anchor === null) state.anchor = key;
+            const anchor = shown.find(r => htmxoSelectionKey(r) === state.anchor) || row;
+            state.keys = new Set(htmxoSelectionRange(root, anchor, next).map(htmxoSelectionKey));
+        } else {
+            state.keys = new Set([htmxoSelectionKey(next)]);
+            state.anchor = htmxoSelectionKey(next);
+        }
+        state.active = htmxoSelectionKey(next);
+        htmxoSelectionUpdate(root);
+        next.focus({preventScroll: true});
+        next.scrollIntoView({block: 'nearest', inline: 'nearest'});
+        e.preventDefault();
+        return;
+    } else if (e.key === 'Escape') {
+        state.keys = new Set([key]);
+        state.anchor = key;
+    } else {
+        return;
+    }
+    state.active = key;
+    htmxoSelectionUpdate(root);
+    e.preventDefault();
+}
+
+// The selectable row an event targets, unless it lands on a control of its
+// own (a link, button, input, label, per-row form, …), which keeps its own
+// behaviour. Returns [root, row] or null.
+function htmxoSelectionTarget(e) {
+    const row = e.target.closest && e.target.closest('tr[aria-selected]');
+    const root = row && row.closest('[data-htmxo-select]');
+    if (!root || !htmxoSelectionRows(root).includes(row)) return null;
+    const control = e.target.closest('a,button,input,textarea,select,label,form,summary,[contenteditable]');
+    return control && row.contains(control) ? null : [root, row];
+}
+function htmxoSelectionRestore(elt) {
+    if (!elt || !elt.querySelectorAll) return;
+    const roots = new Set(elt.querySelectorAll('[data-htmxo-select]'));
+    const around = elt.closest && elt.closest('[data-htmxo-select]');
+    if (around) roots.add(around);
+    roots.forEach(htmxoSelectionUpdate);
+}
+if (!window.htmxoSelectionBound) {
+    window.htmxoSelectionBound = true;
+    // Shift-click extends a range; it must not select page text.
+    document.addEventListener('mousedown', e => {
+        if (e.shiftKey && htmxoSelectionTarget(e)) e.preventDefault();
+    });
+    document.addEventListener('click', e => {
+        const control = e.target.closest && e.target.closest('[data-htmxo-select-all],[data-htmxo-select-clear]');
+        if (control) {
+            const root = control.closest('[data-htmxo-select]');
+            htmxoSelectRows(root, 'htmxoSelectAll' in control.dataset ? htmxoSelectionShown(root).map(htmxoSelectionKey) : []);
+            return;
+        }
+        const hit = htmxoSelectionTarget(e);
+        if (hit) htmxoSelectionClick(hit[0], hit[1], e);
+    });
+    document.addEventListener('keydown', e => {
+        const hit = !e.defaultPrevented && e.target.matches && e.target.matches('tr[aria-selected]') && htmxoSelectionTarget(e);
+        if (hit) htmxoSelectionKeydown(hit[0], hit[1], e);
+    });
+    document.addEventListener('htmxo:table-filtered', e => {
+        const root = e.target.closest('[data-htmxo-select]');
+        if (root) htmxoSelectionUpdate(root);
+    });
+    // htmx announces every processed root (the body, then each swap) with a
+    // bubbling htmx:load; a page without htmx restores once, on load.
+    document.addEventListener('htmx:load', e => htmxoSelectionRestore(e.target));
+    document.addEventListener('DOMContentLoaded', () => htmxoSelectionRestore(document.body));
+}
+// Included inside swapped-in content, this script runs after that content's
+// htmx load event: restore what is already in the document.
+if (document.body) htmxoSelectionRestore(document.body);
+
 // Read a table's CURRENT client-side sort state. `target` is a CSS selector
 // or an element (the <table>, or any node inside or around it). Returns
 // {sort_col, sort_dir} — 1-based column index, 'asc'|'desc' — or {} when the
@@ -12556,7 +12752,8 @@ end
 """
     sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
                    download=false, download_filename=nothing, caption=nothing,
-                   default_sort=nothing, searchable=false, kwargs...)
+                   default_sort=nothing, searchable=false, selectable=nothing,
+                   select_form=nothing, kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -12595,6 +12792,10 @@ wrapper instead of widening the page.
 - `searchable`: add a labelled client-side search field above the table
   (default `false`), with a live "N of M rows shown" count as its helper text
   and a "No matching rows" state below. See *Client-side search* below.
+- `selectable`: opt in to multi-row selection, naming the hidden inputs the
+  selection submits (e.g. `selectable="rows"`). See *Row selection* below.
+- `select_form`: the `id` of the form those inputs submit with; they carry
+  the HTML `form` attribute, so the table need not sit inside the form.
 
 Other keyword arguments behave the same as in [`render_table`](@ref).
 
@@ -12637,6 +12838,43 @@ document.addEventListener('htmxo:table-filtered', e => {
 });
 ```
 
+# Row selection
+With `selectable=name`, every keyed row (`data-htmxo-select-key`, else its
+`id`; `detail-<key>` companions excluded) becomes a selectable grid row:
+`aria-selected` on rows, `aria-multiselectable` on the table, and one roving
+`tabindex="0"`. A click selects one row, Ctrl/Cmd-click toggles one,
+Shift-click and Shift+↑/↓ select the shown range from the anchor, ↑/↓ move,
+Ctrl/Cmd+A selects every shown row, Escape collapses to the focused row and
+Space/Enter toggle it. Shift-click does not select page text. Clicks on a
+row's own links, buttons, inputs, labels and forms keep their behaviour.
+"Shown" means not hidden, e.g. by the search.
+
+The selection is submitted as one hidden `<input name=name>` per selected row,
+with the row's `data-htmxo-select-value` (else its key) as the value, inside
+the selectable wrapper and associated with `select_form`. A row with
+`data-htmxo-select-submit="false"` is selectable but not submitted. Above the
+table, a live count ("3 selected (1 hidden by the filter)") sits beside
+*Select all shown* and *Clear* buttons. A control carrying
+`data-htmxo-needs-selection=name` is disabled while nothing would be
+submitted, so a bulk form needs no script:
+
+```julia
+h.form(; id="bulk", hx_post="/bulk")(h.button("Archive"; data_htmxo_needs_selection="rows", disabled=true))
+sortable_table(headers, [h.tr(cells...; data_htmxo_select_key=r.id) for r in records];
+    selectable="rows", select_form="bulk", searchable=true)
+```
+
+State is keyed per selection (input name, form and page path) and per row key,
+not per element, so it survives sorting, filtering, a row's `outerHTML` swap
+and a re-render of the table; rows that leave the table leave the selection.
+Rows rendered `aria_selected="true"` are the initial selection. Each change
+fires a bubbling `htmxo:selection-changed` event on the wrapper with `detail`
+`{name, keys, rows, submitted, hidden}`. `htmxoSelectRows(target, keys)` sets
+the selection (`[]` clears) and `htmxoSelectedKeys(target)` reads it. The
+selected row is tinted and the active row marked with `--htmxo-accent`
+(override the tint with `--htmxo-selected-row`). Selection needs
+[`sortable_table_js`](@ref) on the page.
+
 # Example
 ```julia
 rows = [h.tr(h.td(h.code(name)),
@@ -12670,9 +12908,16 @@ function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
                         caption=nothing, default_sort=nothing, role="grid",
-                        searchable::Bool=false, kwargs...)
+                        searchable::Bool=false, selectable=nothing, select_form=nothing,
+                        kwargs...)
     if !isnothing(default_sort) && !sortable
         error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
+    end
+    isnothing(select_form) || !isnothing(selectable) || throw(ArgumentError(
+        "sortable_table: select_form requires selectable=<input name>"))
+    if !isnothing(selectable)
+        rows = Any[_selectable_row(row) for row in rows]
+        kwargs = (; aria_multiselectable="true", kwargs...)
     end
     ds = _resolve_default_sort(default_sort, headers)
 
@@ -12723,7 +12968,63 @@ function sortable_table(headers, rows;
     else
         table_wrap
     end
-    searchable ? _searchable_table(framed, rows) : framed
+    searched = searchable ? _searchable_table(framed, rows) : framed
+    isnothing(selectable) ? searched : _selectable_table(searched, rows, selectable; form=select_form)
+end
+
+# A selectable row's key: `data-htmxo-select-key`, else its id. Keyed state
+# survives sorting, filtering and swaps that replace the row's element.
+# Node attribute keys are stored dashed (`HTMX._attr_symbol`).
+_select_key(row) = row isa Node ?
+    get(HTMX.attrs(row), Symbol("data-htmxo-select-key"), get(HTMX.attrs(row), :id, nothing)) : nothing
+
+# A copy of a keyed master row carrying the grid row semantics; the caller's
+# node is left untouched and a caller-set `aria-selected` preselects it. The
+# runtime moves the single `tabindex="0"` (roving focus) onto the active row.
+function _selectable_row(row)
+    (_is_master_row(row) && !isnothing(_select_key(row)) && HTMX.tag(row) === :tr) || return row
+    attrs = copy(HTMX.attrs(row))
+    get!(attrs, Symbol("aria-selected"), "false")
+    get!(attrs, :tabindex, "-1")
+    Node(HTMX.tag(row), attrs, HTMX.children(row))
+end
+
+_is_selected_row(row) = row isa Node && string(get(HTMX.attrs(row), Symbol("aria-selected"), "false")) == "true"
+
+# Selection tint, active-row marker and focus ring. Box shadows tint the cells
+# over any striped/hover background without moving layout, and
+# `--htmxo-accent` follows the light/dark theme. Unlayered, so the compact
+# bar buttons beat Pico's unlayered button rule.
+_selection_css() = """
+.htmxo-selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
+.htmxo-selection-bar > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
+.htmxo-selectable-table tbody > tr[aria-selected] { cursor: default; }
+.htmxo-selectable-table tbody > tr[aria-selected="true"] > td { box-shadow: inset 0 0 0 100vmax var(--htmxo-selected-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 22%, transparent)); }
+.htmxo-selectable-table tbody > tr[data-htmxo-active] > td:first-child { box-shadow: inset 3px 0 0 var(--htmxo-accent, Highlight); }
+.htmxo-selectable-table tbody > tr[aria-selected="true"][data-htmxo-active] > td:first-child { box-shadow: inset 3px 0 0 var(--htmxo-accent, Highlight), inset 0 0 0 100vmax var(--htmxo-selected-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 22%, transparent)); }
+.htmxo-selectable-table tbody > tr[aria-selected]:focus-visible { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: -2px; }
+"""
+
+# The opt-in row selection shared by `sortable_table` and
+# `master_detail_table`: a live count with select-all-shown / clear controls,
+# the (possibly searchable) table, and a holder for the hidden inputs the
+# runtime keeps in step with the selection. `form` names the form those
+# inputs submit with (the HTML `form` attribute), so the table need not sit
+# inside it. The bar is client-side only, like the search field.
+function _selectable_table(inner, rows, name; form=nothing)
+    name isa AbstractString && !isempty(name) || throw(ArgumentError(
+        "selectable must be the non-empty name of the submitted inputs; got $(repr(name))"))
+    form_attrs = isnothing(form) ? (;) : (; data_htmxo_select_form=string(form))
+    h.div(; class="htmxo-selectable-table", data_htmxo_select=name, form_attrs...)(
+        html_only(h.div(h.style(Raw(_selection_css())),
+            h.p(; class="htmxo-selection-bar")(
+                h.small("$(count(_is_selected_row, rows)) selected";
+                    data_htmxo_selection_count="", role="status", aria_live="polite"),
+                h.button("Select all shown"; type="button", class="secondary outline", data_htmxo_select_all=""),
+                h.button("Clear"; type="button", class="secondary outline", data_htmxo_select_clear="")))),
+        inner,
+        html_only(h.div(; hidden=true, data_htmxo_selection_inputs="")),
+    )
 end
 
 # A master row, as the client-side search counts it: every body row except a
@@ -13128,15 +13429,16 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             detail_class=nothing,
                             master_attrs=(),
                             initially_open::Bool=false,
-                            detail_url=nothing)
+                            detail_url=nothing,
+                            row_toggle::Bool=true)
     safe = _md_safe_key(key)
     lazy = !isnothing(detail_url)
-    tr_kwargs = Dict{Symbol,Any}(
-        :id      => "row-$safe",
-        :onclick => lazy ?
-            master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
-            master_detail_toggle_js(safe),
-    )
+    tr_kwargs = Dict{Symbol,Any}(:id => "row-$safe")
+    # A selectable table's row click selects; its native detail control opens
+    # the detail instead (`master_detail_table(...; selectable)`).
+    row_toggle && (tr_kwargs[:onclick] = lazy ?
+        master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
+        master_detail_toggle_js(safe))
     # Every master row is expandable, so it always carries aria-expanded
     # reflecting state: "true" open, "false" collapsed. This matches what
     # master_detail_toggle_js sets on click (so the initial render and the
@@ -13239,6 +13541,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   [`sortable_table`](@ref)`(...; searchable=true)`; see its *Client-side search*.
 - `search_text(item)`: optional replacement for a row's searchable text; useful
   for metadata absent from its visible cells. It does not affect sorting.
+- `selectable`, `select_form`: multi-row selection submitted as hidden inputs
+  named `selectable`; see *Row selection* in [`sortable_table`](@ref). Every
+  master row is keyed by its row id. A row click then selects instead of
+  toggling the detail: flat tables get the native Details button (or use
+  `detail_toggle=:label`).
+- `select_value(item)`: the submitted value for a row (default: its `key`).
+- `select_submit(item)`: return `false` to keep a row selectable but leave it
+  out of the submitted inputs.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
@@ -13270,9 +13580,16 @@ function master_detail_table(headers, items;
                              detail_toggle::Symbol=:button,
                              searchable::Bool=false,
                              search_text=nothing,
+                             selectable=nothing,
+                             select_form=nothing,
+                             select_value=nothing,
+                             select_submit=nothing,
                              kwargs...)
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
+    selecting = !isnothing(selectable)
+    selecting || all(isnothing, (select_form, select_value, select_submit)) || throw(ArgumentError(
+        "master_detail_table: select_form/select_value/select_submit require selectable=<input name>"))
     ncols = length(headers)
     (!isnothing(children) || !isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
         "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
@@ -13312,7 +13629,23 @@ function master_detail_table(headers, items;
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
         cells, row_attrs = _md_master_row(master(item))
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
-        if !isnothing(children) || detail_toggle === :label
+        if selecting
+            # `master_attrs` or the master <tr> may preselect a row or give its
+            # value. The submitted value defaults to the caller's own key, not
+            # the sanitised row id the runtime keys its state by.
+            given = Set(_md_attr_name(k) for k in keys(attrs))
+            Symbol("aria-selected") in given || (attrs[Symbol("aria-selected")] = "false")
+            attrs[:tabindex] = "-1"
+            value = Symbol("data-htmxo-select-value")
+            if !isnothing(select_value)
+                attrs[value] = string(select_value(item))
+            elseif !(value in given)
+                attrs[value] = string(item_key)
+            end
+            isnothing(select_submit) || select_submit(item) ||
+                (attrs[Symbol("data-htmxo-select-submit")] = "false")
+        end
+        if !isnothing(children) || detail_toggle === :label || selecting
             isempty(cells) && throw(ArgumentError("master_detail_table: controlled rows require at least one cell"))
             controls = Any[]
             if branch && branches_collapsible
@@ -13349,7 +13682,8 @@ function master_detail_table(headers, items;
         else
             (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
-                                    initially_open=open && ancestors_open, detail_url=url)
+                                    initially_open=open && ancestors_open, detail_url=url,
+                                    row_toggle=!selecting)
             push!(rows, m, d)
         end
         if !isnothing(children)
@@ -13362,12 +13696,14 @@ function master_detail_table(headers, items;
         visit(item, "", 1, true)
     end
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
+    selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
     table = sortable_table(headers, rows; table_attrs..., kwargs...)
-    if !isnothing(children) || detail_toggle === :label
+    if !isnothing(children) || detail_toggle === :label || selecting
         # Depth is semantic row metadata, not per-row inline styling. The
-        # stylesheet covers the actual depth and remains scoped to tree tables.
+        # stylesheet covers the actual depth and remains scoped to tree tables;
+        # a flat selectable table's Details control is as compact.
         rules = """
-        [data-htmxo-hierarchy] > tbody > tr > td:first-child > button { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
+        [data-htmxo-hierarchy] > tbody > tr > td:first-child > button, table[aria-multiselectable] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle] { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
         [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
         [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
         [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
@@ -13377,7 +13713,8 @@ function master_detail_table(headers, items;
     end
     # A hierarchy always carries the (possibly hidden) search scaffold: its
     # branch toggles and the search share one visibility pass.
-    (searchable || !isnothing(children)) ? _searchable_table(table, rows; field=searchable) : table
+    searched = (searchable || !isnothing(children)) ? _searchable_table(table, rows; field=searchable) : table
+    selecting ? _selectable_table(searched, rows, selectable; form=select_form) : searched
 end
 
 # --- Formatting helpers ---

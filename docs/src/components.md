@@ -232,6 +232,51 @@ document.addEventListener('htmxo:table-filtered', e => {
 });
 ```
 
+#### Row selection {#table-selection}
+
+`selectable="<input name>"` on `sortable_table`, `render_table` or
+`master_detail_table` turns keyed rows into a multi-select grid whose
+selection a bulk form submits with no application script:
+
+```julia
+h.form(; id="bulk", hx_post=string(__self__ / "archive"))(
+    h.button("Archive selected"; data_htmxo_needs_selection="rows", disabled=true))
+sortable_table(["Party", "Amount"],
+    [h.tr(h.td(t.party), h.td(t.amount); data_htmxo_select_key=t.id) for t in transactions];
+    selectable="rows", select_form="bulk", searchable=true)
+# The archive route receives one `rows` value per selected row.
+```
+
+- **Keys.** A row is selectable when it has `data-htmxo-select-key` (else its
+  `id`); `detail-<key>` companions never are. `master_detail_table` keys every
+  master row and submits its `key` unless `select_value(item)` says otherwise.
+- **Interaction.** Click selects one row; Ctrl/Cmd-click toggles; Shift-click
+  and Shift+↑/↓ select the shown range from the anchor; ↑/↓ move; Ctrl/Cmd+A
+  selects every shown row; Escape collapses to the focused row; Space/Enter
+  toggle it. Shift-click does not select text, and clicks on a row's own links,
+  buttons, inputs, labels or forms keep their behaviour. "Shown" excludes rows
+  the search hides. In a `master_detail_table` a row click selects, so flat
+  tables get the native Details control (or use `detail_toggle=:label`).
+- **Submission.** One hidden `<input name=...>` per selected row, valued by
+  its `data-htmxo-select-value` (else the key) and associated with
+  `select_form` through the HTML `form` attribute, so the table may live
+  outside the form. `data-htmxo-select-submit="false"` (in `master_detail_table`,
+  `select_submit(item) = false`) keeps a row selectable but unsubmitted.
+- **Feedback.** A live "N selected (M hidden by the filter)" count with
+  *Select all shown* and *Clear* sits above the table. Controls marked
+  `data-htmxo-needs-selection="<input name>"` are disabled while nothing would
+  be submitted. Each change fires a bubbling `htmxo:selection-changed` event
+  with `detail` `{name, keys, rows, submitted, hidden}`.
+- **State.** Selection is keyed per input name, form and page path, not held
+  by DOM nodes: it survives sorting, filtering, a row's `outerHTML` swap and a
+  table re-render, and rows that leave the table leave the selection. Rows
+  rendered `aria_selected="true"` start selected. `htmxoSelectRows(target, keys)`
+  replaces the selection (`[]` clears); `htmxoSelectedKeys(target)` reads it.
+- **Semantics and theme.** `aria-multiselectable` on the table, `aria-selected`
+  on rows, one roving `tabindex="0"`. Selected rows are tinted and the active
+  row marked from `--htmxo-accent` in light and dark; set
+  `--htmxo-selected-row` to change the tint.
+
 ## Layout / widgets
 
 ### Hierarchical master/detail tables
