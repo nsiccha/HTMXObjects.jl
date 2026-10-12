@@ -32,7 +32,7 @@ export wants_markdown, wants_errors, markdown_response, e, filter_errors, render
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
@@ -2472,6 +2472,8 @@ _runtime_blocks() = (
     request_feedback_script = (:js, request_feedback_script),
     compose_box_styles = (:css, compose_box_styles),
     compose_box_script = (:js, compose_box_script),
+    toast_styles = (:css, toast_styles),
+    toast_script = (:js, toast_script),
     live_thread_styles = (:css, live_thread_styles),
     live_thread_script = (:js, live_thread_script),
     utility_styles = (:css, htmxo_utility_styles),
@@ -2644,6 +2646,9 @@ function htmx(args...;
             (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
             _runtime_heads(mount, :utility_styles, :tabset_styles,
                 :comparison_styles, :editor_styles,
+                # Route-named success toasts and `window.htmxoToast`; inert
+                # until a response or a script raises one.
+                :toast_styles, :toast_script,
                 # Comparison panes and master/detail rows share the lazy runtime.
                 :comparison,
                 # A refused stream hides its HTTP status: this probe lets an auth
@@ -4644,15 +4649,20 @@ hx_current_url(req::HTTP.Request)= HTTP.header(req, "HX-Current-URL",   "")
 hx_prompt(req::HTTP.Request)     = HTTP.header(req, "HX-Prompt",        "")
 
 """
-    hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location)
+    hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location, toast)
 
 Wrap any value (via `to_response`) and attach HX-* response headers that
 instruct the HTMX client to perform additional actions after swap.
+
+`toast` names the success toast the [`htmx`](@ref) page shell shows once the
+request completes (the percent-encoded `X-HTMXO-Toast` header read by
+[`toast_script`](@ref)), e.g. `hx_response(row; toast="Invoice saved")`. It
+survives a polled `:auto` answer: the terminal poll response carries it.
 """
 function hx_response(val;
     trigger=nothing, push_url=nothing, replace_url=nothing,
     redirect=nothing, refresh=false,
-    retarget=nothing, reswap=nothing, location=nothing,
+    retarget=nothing, reswap=nothing, location=nothing, toast=nothing,
 )
     resp = to_response(val)
     hdrs = copy(resp.headers)
@@ -4664,6 +4674,7 @@ function hx_response(val;
     isnothing(retarget)    || push!(hdrs, "HX-Retarget"    => retarget)
     isnothing(reswap)      || push!(hdrs, "HX-Reswap"      => reswap)
     isnothing(location)    || push!(hdrs, "HX-Location"    => location)
+    isnothing(toast)       || push!(hdrs, "X-HTMXO-Toast"  => HTTP.escapeuri(toast))
     HTTP.Response(resp.status, hdrs; body=resp.body)
 end
 
@@ -17706,8 +17717,9 @@ overlay_bar() = (overlay_bar_style(), overlay_bar_script())
 """
     compose_box_styles()
 
-CSS for the [`compose_box`](@ref) auto-growing compose textarea + the toast it
-raises on a failed submit. Deliberately **unlayered** (not inside
+CSS for the [`compose_box`](@ref) auto-growing compose textarea. The toast it
+raises on a failed submit is styled by [`toast_styles`](@ref). Deliberately
+**unlayered** (not inside
 `@layer htmxo`) so the `.htmxo-compose-textarea` class beats Pico's unlayered
 `textarea { resize: … }` rule — a layered rule would lose regardless of
 specificity and the drag-handle/scrollbar would reappear.
@@ -17716,18 +17728,6 @@ compose_box_styles() = h.style(Raw(raw"""
 .htmxo-compose-textarea {
     resize: none; overflow: hidden; field-sizing: content; line-height: 1.4;
 }
-.htmxo-toast {
-    position: fixed; bottom: 1rem; right: 1rem; z-index: 9999;
-    padding: 0.5rem 0.85rem; border-radius: 0.3rem; font-size: 0.85em;
-    background: var(--pico-card-background-color, #fff);
-    border: 1px solid var(--pico-muted-border-color, #ccc);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15); max-width: 28rem;
-    opacity: 0; transform: translateY(0.5rem);
-    transition: opacity 0.3s ease, transform 0.3s ease;
-}
-.htmxo-toast-show { opacity: 1; transform: translateY(0); }
-.htmxo-toast-error { border-color: var(--pico-color-red-500, #d32f2f); color: var(--pico-color-red-500, #d32f2f); }
-.htmxo-toast-info { color: var(--pico-color, inherit); }
 """))
 
 """
@@ -17738,12 +17738,13 @@ JS driving [`compose_box`](@ref): auto-grow (no-op when the browser supports
 Shift+Enter-newline, localStorage draft persistence for `.htmxo-compose-draft`
 elements (keyed by `data-draft-key`), and a submit guard on
 `.htmxo-compose-form` forms (clear drafts + reset on 2xx, toast on
-failure / network error). Re-binds on `htmx:afterSwap` and
+failure / network error, through [`toast_script`](@ref)'s `window.htmxoToast`).
+Re-binds on `htmx:afterSwap` and
 `htmx:afterSettle`; idempotent per element. The swap pass covers swaps
 that never settle (one whose nodes an `afterSwap` listener detaches —
 the `:auto` terminal unwrap — fires afterSwap but never afterSettle;
-snag compose-afterswa-9ae50ac9). Exposes `window.htmxoToast(text,
-status)` and `window.htmxoComposeRebind(root)` for reuse. Body-listener
+snag compose-afterswa-9ae50ac9). Exposes `window.htmxoComposeRebind(root)`
+for reuse. Body-listener
 attachment is deferred to `DOMContentLoaded` so the script is safe to
 inject in `<head>`.
 """
@@ -17794,19 +17795,7 @@ compose_box_script() = h.script(Raw(raw"""
             try { localStorage.removeItem(k); } catch (e) {}
         });
     }
-    function toast(text, status) {
-        var t = document.createElement('div');
-        t.className = 'htmxo-toast htmxo-toast-' + (status || 'info');
-        t.textContent = text;
-        document.body.appendChild(t);
-        void t.offsetWidth;
-        t.classList.add('htmxo-toast-show');
-        setTimeout(function() {
-            t.classList.remove('htmxo-toast-show');
-            setTimeout(function() { t.remove(); }, 350);
-        }, 4000);
-    }
-    window.htmxoToast = toast;
+    function toast(text, status) { window.htmxoToast(text, status); }
     window.htmxoComposeRebind = function(root) { restoreDrafts(root); bindTextareas(root); };
     function init() {
         restoreDrafts(document);
@@ -17856,7 +17845,164 @@ Combined style + script nodes for [`compose_box`](@ref). Injected into the
 page head by `htmx(...)` when `compose=true` (the default), mirroring
 [`request_feedback`](@ref).
 """
-compose_box_assets() = (compose_box_styles(), compose_box_script())
+compose_box_assets() = (toast_styles(), toast_script(), compose_box_styles(), compose_box_script())
+
+# --- Toasts ---
+
+"""
+    toast_styles()
+
+CSS for the [`toast_script`](@ref) notifications: a fixed stack in the
+bottom-right corner (no layout shift), each toast a card with a status edge
+from `--htmxo-success` / `--htmxo-accent` / `--htmxo-error` and a dismiss
+button. Light and dark follow Pico's card colours, else the system
+`Canvas`/`CanvasText` of the page's colour scheme. Unlayered, so the dismiss
+button beats Pico's unlayered `button` rule. [`htmx`](@ref) includes it.
+"""
+toast_styles() = h.style(Raw(raw"""
+.htmxo-toasts {
+    position: fixed; inset-block-end: 1rem; inset-inline-end: 1rem; z-index: 9999;
+    display: flex; flex-direction: column; align-items: flex-end; gap: .5rem;
+    max-width: min(28rem, calc(100vw - 2rem)); pointer-events: none;
+}
+.htmxo-toast {
+    pointer-events: auto; display: flex; align-items: flex-start; gap: .5rem;
+    padding: .5rem .4rem .5rem .85rem; border-radius: .3rem; font-size: .9em; line-height: 1.4;
+    background: var(--pico-card-background-color, Canvas); color: var(--pico-color, CanvasText);
+    border: 1px solid var(--pico-muted-border-color, color-mix(in srgb, currentColor 25%, transparent));
+    border-inline-start: .25rem solid var(--htmxo-accent, Highlight);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .2);
+    opacity: 0; transform: translateY(.5rem); transition: opacity .25s ease, transform .25s ease;
+}
+.htmxo-toast-show { opacity: 1; transform: none; }
+.htmxo-toast-success { border-inline-start-color: var(--htmxo-success, #2a9d8f); }
+.htmxo-toast-error { border-inline-start-color: var(--htmxo-error, #e76f51); }
+.htmxo-toast > span { flex: 1; overflow-wrap: anywhere; }
+.htmxo-toast > .htmxo-toast-close {
+    width: auto; margin: 0; padding: 0 .3rem; border: none; border-radius: .2rem;
+    background: transparent; color: inherit; font: inherit; line-height: 1.4;
+    box-shadow: none; cursor: pointer; opacity: .7;
+}
+.htmxo-toast > .htmxo-toast-close:hover, .htmxo-toast > .htmxo-toast-close:focus-visible { opacity: 1; }
+.htmxo-toast > .htmxo-toast-close:focus-visible { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) { .htmxo-toast { transition: none; transform: none; } }
+"""))
+
+"""
+    toast_script()
+
+The page shell's notification runtime, which [`htmx`](@ref) includes:
+
+- `window.htmxoToast(text, status)` shows a toast (`status` `"success"`,
+  `"info"` (default) or `"error"`). Toasts stack in one polite live region
+  (`role="status"`); an error toast is also `role="alert"`. Each has a
+  Dismiss button and leaves after 4 s (8 s for an error), paused while
+  hovered or focused.
+- **A route names its success toast** with the `X-HTMXO-Toast` response header
+  (percent-encoded text; [`hx_response`](@ref)`(value; toast="Saved")` sets
+  it). It is shown once, after a successful request: a polled `:auto` mutation
+  carries it on its terminal response only. A failed request shows no success
+  toast; its error presentation is unchanged.
+- **An element can toast its own response.** On a requesting element (or an
+  ancestor), `data-htmxo-toast="body"` (or an empty value) toasts the
+  response's text on success, and any other value is the success text itself.
+  On failure such an element shows an error toast: a short `text/plain` body,
+  else "Request failed (HTTP <status>)". This suits `hx-swap="none"` actions
+  whose response is their outcome message. A route's header text wins.
+"""
+toast_script() = h.script(Raw(raw"""
+(function() {
+    if (window.__htmxoToastBound) return;
+    window.__htmxoToastBound = true;
+    var DURATION = { success: 4000, info: 4000, error: 8000 };
+    // The live region exists before the first message, so screen readers
+    // announce it; a swap that replaced the body gets a fresh one.
+    function region() {
+        var r = document.getElementById('htmxo-toasts');
+        if (!r && document.body) {
+            r = document.createElement('div');
+            r.id = 'htmxo-toasts';
+            r.className = 'htmxo-toasts';
+            r.setAttribute('role', 'status');
+            r.setAttribute('aria-live', 'polite');
+            document.body.appendChild(r);
+        }
+        return r;
+    }
+    function toast(text, status) {
+        status = status || 'info';
+        var t = document.createElement('div');
+        t.className = 'htmxo-toast htmxo-toast-' + status;
+        if (status === 'error') t.setAttribute('role', 'alert');
+        var msg = document.createElement('span');
+        msg.textContent = text;
+        var close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'htmxo-toast-close';
+        close.setAttribute('aria-label', 'Dismiss');
+        close.textContent = '×';
+        t.appendChild(msg);
+        t.appendChild(close);
+        var timer = null;
+        function dismiss() {
+            clearTimeout(timer);
+            t.classList.remove('htmxo-toast-show');
+            setTimeout(function() { t.remove(); }, 300);
+        }
+        function arm() { clearTimeout(timer); timer = setTimeout(dismiss, DURATION[status] || 4000); }
+        function hold() { clearTimeout(timer); }
+        close.addEventListener('click', dismiss);
+        t.addEventListener('mouseenter', hold);
+        t.addEventListener('mouseleave', arm);
+        t.addEventListener('focusin', hold);
+        t.addEventListener('focusout', arm);
+        region().appendChild(t);
+        void t.offsetWidth;
+        t.classList.add('htmxo-toast-show');
+        arm();
+        return t;
+    }
+    window.htmxoToast = toast;
+
+    function header(xhr, name) {
+        try { return xhr.getResponseHeader(name); } catch (e) { return null; }
+    }
+    function routeText(xhr) {
+        var raw = header(xhr, 'X-HTMXO-Toast');
+        if (!raw) return null;
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+    }
+    function bodyText(xhr) {
+        var body = xhr.responseText || '';
+        if ((header(xhr, 'Content-Type') || '').indexOf('text/plain') >= 0) return body.trim();
+        var doc = new DOMParser().parseFromString(body, 'text/html');
+        return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+    function failureText(xhr) {
+        var body = (xhr.responseText || '').trim();
+        if (body && body.length <= 300 && (header(xhr, 'Content-Type') || '').indexOf('text/plain') >= 0) return body;
+        return xhr.status ? 'Request failed (HTTP ' + xhr.status + ')' : 'Request failed: no response';
+    }
+    document.addEventListener('htmx:afterRequest', function(evt) {
+        var d = evt.detail || {}, xhr = d.xhr;
+        if (!xhr) return;
+        var elt = (d.requestConfig && d.requestConfig.elt) || d.elt;
+        var own = elt && elt.closest ? elt.closest('[data-htmxo-toast]') : null;
+        if (d.successful) {
+            var text = routeText(xhr);
+            if (text === null && own) {
+                var given = own.getAttribute('data-htmxo-toast');
+                text = given && given !== 'body' ? given : bodyText(xhr);
+            }
+            if (text) toast(text, 'success');
+        } else if (own) {
+            toast(failureText(xhr), 'error');
+        }
+    });
+    if (document.body) region();
+    else document.addEventListener('DOMContentLoaded', region);
+})();
+"""))
 
 """
     compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="")
