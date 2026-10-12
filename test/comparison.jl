@@ -1,5 +1,6 @@
 @testmodule ComparisonBrowserFixtures begin
     using HTMXObjects, HTTP, Sockets
+    include(joinpath(@__DIR__, "support", "chrome.jl"))
     export browser_driver, browser_checks, pane_response
 
     # Page script: `body` runs after load with `check(name, ok)` in scope; the
@@ -27,7 +28,7 @@
         size = isnothing(window_size) ? String[] : ["--window-size=$window_size"]
         try
             dom = mktempdir() do profile
-                read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage $size --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; stderr=devnull), String)
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage $size --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
             end
             checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
             isnothing(checks) ? nothing : split(checks[1], '\n')
