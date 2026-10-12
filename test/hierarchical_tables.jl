@@ -110,6 +110,14 @@ end
             id="plain")
         flat = master_detail_table(["Name"], ["Z", "A"];
             key=x -> "flat-$x", master=x -> (h.td(x),), detail=x -> h.p(x), id="flat")
+        # A flat table whose first cell is a link, with a caller's extension
+        # concatenated onto the row toggle.
+        linked = master_detail_table(["Invoice", "Amount"], ["B", "A"];
+            key=x -> "linked-$x", master=x -> (h.td(h.a("$x-link"; href="#inv-$x")), h.td(x == "A" ? "1" : "2")),
+            detail=x -> h.p("detail $x"), initially_open=x -> x == "A",
+            master_attrs=x -> (; onclick=HTMXObjects.master_detail_toggle_js("linked-$x") *
+                "window.__ext=(window.__ext||0)+1;"),
+            id="linked", download=true)
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function() {
             const checks = [];
@@ -163,6 +171,33 @@ end
             const flat = document.getElementById('flat');
             flat.closest('table').tHead.rows[0].cells[0].click();
             check('flat-pair-sort', Array.from(flat.rows).map(r=>r.id).join(',') === 'row-flat-A,detail-flat-A,row-flat-Z,detail-flat-Z');
+            const linked = document.getElementById('linked');
+            const detailB = document.getElementById('detail-linked-B');
+            const control = row('linked-B').querySelector('[data-htmxo-detail-toggle]');
+            check('linked-controls', linked.querySelectorAll('[aria-controls]').length === 2);
+            check('linked-open-glyph', row('linked-A').querySelector('[data-htmxo-detail-toggle]').textContent === '▾');
+            // An open row's ▾ must not reorder it: the sort key is the cell's content.
+            linked.closest('table').tHead.rows[0].cells[0].querySelector('.htmxo-sort-control').click();
+            check('linked-sort-label', Array.from(linked.rows).map(r=>r.id).join(',') === 'row-linked-A,detail-linked-A,row-linked-B,detail-linked-B');
+            control.focus();
+            check('linked-control-focus', document.activeElement === control && control.tabIndex === 0 && control.tagName === 'BUTTON');
+            check('linked-control-closed', detailB.hidden && control.getAttribute('aria-expanded') === 'false' && control.textContent === '▸');
+            control.click();
+            check('linked-control-opens', !detailB.hidden && control.getAttribute('aria-expanded') === 'true' && row('linked-B').getAttribute('aria-expanded') === 'true' && control.textContent === '▾');
+            check('linked-control-extension', window.__ext === 1);
+            row('linked-B').querySelector('a').click();
+            check('linked-link-keeps-detail', !detailB.hidden && window.__ext === 1);
+            row('linked-B').click();
+            check('linked-row-click', detailB.hidden && control.getAttribute('aria-expanded') === 'false' && control.textContent === '▸' && window.__ext === 2);
+            const createURL = URL.createObjectURL, anchorClick = HTMLAnchorElement.prototype.click;
+            let blob = null;
+            URL.createObjectURL = b => { blob = b; return 'blob:test'; };
+            HTMLAnchorElement.prototype.click = function() {};
+            try { downloadTableCsv(linked, 'linked.csv'); } finally {
+                URL.createObjectURL = createURL; HTMLAnchorElement.prototype.click = anchorClick;
+            }
+            const csv = blob ? await blob.text() : '';
+            check('linked-csv-content', csv.split('\n').slice(1).join('|') === 'A-link,1|B-link,2');
             check('sort-state', htmxoSortState(tree).sort_col === 2 && htmxoSortState(tree).sort_dir === 'desc');
             const plain = document.getElementById('plain');
             const masters = Array.from(plain.rows).filter(r=>r.id.startsWith('row-'));
@@ -192,8 +227,8 @@ end
             document.body.appendChild(result);
         });
         """))
-        page = repr("text/html", htmx(tree, plain, flat, driver;
-            extra_head=(sortable_table_js(), sortable_table_styles()),
+        page = repr("text/html", htmx(tree, plain, flat, linked, driver;
+            extra_head=(sortable_table_js(), sortable_table_styles(), download_table_js()),
             hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
         requests = Dict{String,Int}()
         socket = listen(Sockets.localhost, 0)
