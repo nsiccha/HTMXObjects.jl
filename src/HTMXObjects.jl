@@ -12279,23 +12279,58 @@ function htmxoTableCompanions(rows) {
     return companions;
 }
 
-function htmxoFilterTable(input) {
-    const root = input.closest('.htmxo-searchable-table');
+// The searchable wrapper around a table, from an element inside it (the
+// search input, a row) or a selector/element naming the wrapper or the table.
+function htmxoSearchRoot(target) {
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    const root = el && (el.closest('.htmxo-searchable-table') || el.querySelector('.htmxo-searchable-table'));
+    if (!root) throw new Error('htmxoSearchRoot: no searchable table at ' + target);
+    return root;
+}
+
+// Register (or, with a null predicate, remove) a named row predicate on a
+// searchable table and re-filter it. A row is shown when every predicate
+// returns true; `predicate(row, ctx)` gets ctx = {query, input, text}: the
+// normalised lower-case phrase, the field's raw value, and the row's
+// lower-case search text (ancestor text included in a hierarchy). The
+// built-in phrase match is the predicate named 'search', so registering
+// 'search' replaces it (e.g. a regex mode) while other names compose with it.
+// Registrations live on the wrapper element: a swap that replaces the table
+// drops them, so register again from the swapped-in content.
+function htmxoTableFilter(target, name, predicate) {
+    const root = htmxoSearchRoot(target);
+    root.htmxoFilters = root.htmxoFilters || new Map();
+    if (predicate) root.htmxoFilters.set(name, predicate);
+    else root.htmxoFilters.delete(name);
+    htmxoFilterTable(root);
+}
+
+function htmxoFilterTable(target) {
+    const root = htmxoSearchRoot(target);
+    const input = root.querySelector(':scope > label > input[type="search"]');
     const table = root.querySelector('table');
     const all = Array.from(table.tBodies[0].rows);
     const rows = all.filter(r => !r.id.startsWith('detail-'));
-    const byId = new Map(rows.map(r => [r.id, r]));
+    const byId = new Map(rows.filter(r => r.id).map(r => [r.id, r]));
     const companions = htmxoTableCompanions(all);
-    const query = input.value.toLocaleLowerCase().trim().replace(/\s+/g, ' ');
+    const raw = input ? input.value : '';
+    const query = raw.toLocaleLowerCase().trim().replace(/\s+/g, ' ');
+    const registered = root.htmxoFilters || new Map();
+    const phrase = (row, ctx) => ctx.text.includes(ctx.query);
+    const filters = [['search', registered.get('search') || phrase],
+        ...Array.from(registered).filter(([name]) => name !== 'search')];
     const visible = new Set();
+    const rejectedBy = new Map();
     const text = r => (r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
     rows.forEach(row => {
         const path = [];
         for (let r = row; r; r = byId.get(r.dataset.htmxoParent)) path.push(r);
         // Ancestor text participates: a group match includes its descendants,
         // and a leaf match retains the entire path needed to understand it.
-        const haystack = path.reverse().map(text).join(' ').replace(/\s+/g, ' ');
-        if (haystack.includes(query)) path.forEach(r => visible.add(r));
+        const ctx = {query, input: raw, text: path.reverse().map(text).join(' ').replace(/\s+/g, ' ')};
+        const failed = filters.find(([, keep]) => !keep(row, ctx));
+        if (failed) rejectedBy.set(row, failed[0]);
+        else path.forEach(r => visible.add(r));
     });
     rows.forEach(row => {
         let ancestorsOpen = true;
@@ -12313,19 +12348,38 @@ function htmxoFilterTable(input) {
         }
         const detail = companions.get(row.id);
         if (detail) {
-            detail.hidden = row.hidden || (row.dataset.htmxoDetailOpen ?? row.getAttribute('aria-expanded')) !== 'true';
+            const state = row.dataset.htmxoDetailOpen ?? row.getAttribute('aria-expanded');
+            if (state !== null) {
+                detail.hidden = row.hidden || state !== 'true';
+            } else if (row.hidden) {
+                // A hand-built pair records no open state: remember that the
+                // filter hid an open detail, and reopen it when the row returns.
+                if (!detail.hidden) { detail.hidden = true; detail.dataset.htmxoFilterHidden = ''; }
+            } else if ('htmxoFilterHidden' in detail.dataset) {
+                detail.hidden = false;
+                delete detail.dataset.htmxoFilterHidden;
+            }
             if (!detail.hidden) htmxoLoadSlot(detail.querySelector('[data-loaded]'));
         }
     });
+    // hiddenBy counts the hidden rows per predicate that first rejected them;
+    // listeners may push short notes that the count line appends.
+    const hiddenBy = {};
+    rejectedBy.forEach((name, row) => { if (row.hidden) hiddenBy[name] = (hiddenBy[name] || 0) + 1; });
+    const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length, query, hiddenBy, notes: []};
+    root.dispatchEvent(new CustomEvent('htmxo:table-filtered', {bubbles: true, detail}));
+    const count = root.querySelector(':scope > label > [data-htmxo-table-count]');
+    if (count) count.textContent = detail.shown + ' of ' + detail.total + ' rows shown' +
+        detail.notes.map(note => ' · ' + note).join('');
     root.querySelector(':scope > [data-htmxo-table-empty]').hidden = visible.size !== 0;
 }
 
 function htmxoTreeToggle(button) {
     const row = button.closest('tr');
     row.dataset.htmxoTreeOpen = row.dataset.htmxoTreeOpen === 'true' ? 'false' : 'true';
-    // Hierarchical tables always have a scoped search input, even when the
-    // input is hidden. One visibility path owns both collapse and filtering.
-    htmxoFilterTable(row.closest('.htmxo-searchable-table').querySelector(':scope > label > input[type="search"]'));
+    // Hierarchical tables always have a search scaffold, even when its field
+    // is hidden. One visibility pass owns both collapse and filtering.
+    htmxoFilterTable(row);
 }
 
 // Read a table's CURRENT client-side sort state. `target` is a CSS selector
@@ -12448,7 +12502,7 @@ function downloadTableCsv(btn, filename) {
 end
 
 """
-    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
+    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
@@ -12466,6 +12520,10 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 - `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
 - `cell(value, column_name, row_index)`: custom cell renderer (default: `string(value)`)
 - `class`: table CSS class (default `"striped"`)
+- `searchable`: client-side search over the rows (default `false`); see
+  [`sortable_table`](@ref)
+- `search_text(row)`: optional replacement for a row's searchable text, called
+  with each Tables.jl row
 - Extra kwargs are forwarded to `h.table()`
 
 # Example
@@ -12481,12 +12539,13 @@ page = htmx(
 )
 ```
 """
-function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
+function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, kwargs...)
     cols = Tables.columnnames(Tables.columns(table))
 
     body_rows = [
         h.tr([h.td(isnothing(cell) ? string(Tables.getcolumn(row, c)) : cell(Tables.getcolumn(row, c), c, ri))
-              for c in cols]...)
+              for c in cols]...;
+             (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
@@ -12497,7 +12556,7 @@ end
 """
     sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
                    download=false, download_filename=nothing, caption=nothing,
-                   default_sort=nothing, kwargs...)
+                   default_sort=nothing, searchable=false, kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -12533,8 +12592,50 @@ wrapper instead of widening the page.
   It **declares** the order, it does not perform it: `sortable_table` receives
   pre-built row nodes, so the caller must emit `rows` in that order. Requires
   `sortable=true` and a `String` header at `col`.
+- `searchable`: add a labelled client-side search field above the table
+  (default `false`), with a live "N of M rows shown" count as its helper text
+  and a "No matching rows" state below. See *Client-side search* below.
 
 Other keyword arguments behave the same as in [`render_table`](@ref).
+
+# Client-side search
+The search matches a case-insensitive phrase against a row's visible cell text,
+or against its `data-htmxo-search` attribute when the row sets one (for
+metadata absent from its cells; it does not affect sorting). A `detail-<key>`
+companion row is never matched or counted; it hides with its master and keeps
+its place through a sort, and sorting a filtered table keeps the filter. The
+field, count and empty state are client-side affordances and are left out of
+`?plain`/Markdown. Search needs [`sortable_table_js`](@ref) on the page.
+[`master_detail_table`](@ref)`(...; searchable=true)` shares this search.
+
+App filters compose with the phrase search through named row predicates:
+
+```js
+htmxoTableFilter('#entries', 'unassigned', row => row.dataset.tac === 'Unassigned');
+htmxoTableFilter('#entries', 'unassigned', null);   // remove it again
+```
+
+`htmxoTableFilter(target, name, predicate)` takes the table, its wrapper or an
+element inside it (or a selector), registers `predicate(row, ctx)` and filters
+again. A row is shown only when every predicate returns `true`. `ctx` holds
+`query` (the normalised lower-case phrase), `input` (the field's raw value) and
+`text` (the row's lower-case search text). The built-in phrase match is the
+predicate named `'search'`; registering that name replaces it, e.g. with a
+regular-expression mode. Every predicate runs for every row on every pass,
+including when the field is empty. Registrations live on the table's wrapper
+element, so content that swaps the table in registers them again.
+
+After each pass the wrapper fires a bubbling `htmxo:table-filtered` event whose
+`detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
+name that first rejected them) and `notes`, an array a listener may push short
+strings into; the count line appends them after ` · `:
+
+```js
+document.addEventListener('htmxo:table-filtered', e => {
+    const n = e.detail.hiddenBy.unassigned;
+    if (n) e.detail.notes.push(n + ' already categorized hidden');
+});
+```
 
 # Example
 ```julia
@@ -12568,7 +12669,8 @@ Pair with [`sortable_table_js`](@ref) (which ships `htmxoSortState`) and
 function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
-                        caption=nothing, default_sort=nothing, role="grid", kwargs...)
+                        caption=nothing, default_sort=nothing, role="grid",
+                        searchable::Bool=false, kwargs...)
     if !isnothing(default_sort) && !sortable
         error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
     end
@@ -12605,7 +12707,7 @@ function sortable_table(headers, rows;
             onclick="downloadTableCsv(this, '$(fname)')") :
         nothing
 
-    if !isnothing(caption)
+    framed = if !isnothing(caption)
         actions = download ? (download_btn,) : ()
         fig_id = isnothing(id) ? nothing : "tbl-$id"
         with_caption(caption, table_wrap; actions, id=fig_id)
@@ -12621,6 +12723,33 @@ function sortable_table(headers, rows;
     else
         table_wrap
     end
+    searchable ? _searchable_table(framed, rows) : framed
+end
+
+# A master row, as the client-side search counts it: every body row except a
+# `detail-<key>` companion, which follows its master's visibility.
+_is_master_row(row) = !(row isa Node && startswith(string(get(HTMX.attrs(row), :id, "")), "detail-"))
+_row_hidden(row) = row isa Node && get(HTMX.attrs(row), :hidden, false) ∉ (false, nothing)
+# One wording for the server's first paint and `htmxoFilterTable`'s updates.
+_table_count_text(shown, total) = "$shown of $total rows shown"
+
+# The client-side search shared by `sortable_table` and `master_detail_table`:
+# a labelled field with a live shown-count as its helper text, the table, and
+# an empty state. The field and its texts are client-side affordances
+# (`html_only`): in Markdown the label would run into the table's header row.
+# `field=false` keeps a hidden scaffold that a hierarchy's branch toggles
+# filter through. The input's `aria-label` keeps the count out of its name.
+function _searchable_table(table, rows; field::Bool=true)
+    masters = [row for row in rows if _is_master_row(row)]
+    count_text = _table_count_text(count(!_row_hidden, masters), length(masters))
+    h.div(; class="htmxo-searchable-table")(
+        html_only(h.label("Search",
+            h.input(; type="search", aria_label="Search", oninput="htmxoFilterTable(this)"),
+            h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
+            hidden=!field)),
+        table,
+        html_only(h.p("No matching rows"; hidden=true, data_htmxo_table_empty="")),
+    )
 end
 
 # --- Master / detail tables ---
@@ -13105,6 +13234,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   text, retains matching paths, and reveals descendants of a matching group.
   It temporarily reveals matching branches; clearing restores branch and
   detail state. Collapsed details stay lazy. Only master text is searched.
+  The live "N of M rows shown" count, app predicates (`htmxoTableFilter`) and
+  the `htmxo:table-filtered` event are shared with
+  [`sortable_table`](@ref)`(...; searchable=true)`; see its *Client-side search*.
 - `search_text(item)`: optional replacement for a row's searchable text; useful
   for metadata absent from its visible cells. It does not affect sorting.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
@@ -13243,13 +13375,9 @@ function master_detail_table(headers, items;
                       for level in 2:max_level[]), "\n")
         table = h.div(h.style(Raw(rules)), table)
     end
-    # The search field and its empty state are client-side affordances: the
-    # label would otherwise run into the Markdown table's header row.
-    (searchable || !isnothing(children)) ? h.div(; class="htmxo-searchable-table")(
-        html_only(h.label("Search", h.input(; type="search", oninput="htmxoFilterTable(this)"); hidden=!searchable)),
-        table,
-        html_only(h.p("No matching rows"; hidden=true, data_htmxo_table_empty="", role="status")),
-    ) : table
+    # A hierarchy always carries the (possibly hidden) search scaffold: its
+    # branch toggles and the search share one visibility pass.
+    (searchable || !isnothing(children)) ? _searchable_table(table, rows; field=searchable) : table
 end
 
 # --- Formatting helpers ---

@@ -178,6 +178,60 @@ it spreads cleanly into an htmx `hx-vals`.
     `aria-sort` / the caret on that header); it does not sort `rows` for you.
     It forwards through `render_table` and `master_detail_table` too.
 
+#### Client-side search {#table-search}
+
+`searchable=true` on `sortable_table`, `render_table` or `master_detail_table`
+adds a labelled search field above the table, a live "N of M rows shown" count
+as the field's helper text (`role="status"`, `aria-live="polite"`) and a "No
+matching rows" state below it:
+
+```julia
+sortable_table(["Party", "Category", "Amount"], rows; id="entries", searchable=true)
+render_table(df; searchable=true, search_text=row -> "$(row.party) $(row.iban)")
+```
+
+The search matches a case-insensitive phrase against a row's visible cell text.
+A row can replace that text with a `data-htmxo-search` attribute (in
+`render_table`, with `search_text(row)`), for example to make metadata absent
+from its cells searchable; it does not change sorting. `detail-<key>` companion
+rows are neither matched nor counted: one hides with its master and reopens
+when the master returns, and sorting a filtered table keeps the filter. The
+field, count and empty state are left out of `?plain`/Markdown. Search needs
+`sortable_table_js()` on the page.
+
+App filters compose with the phrase search as named row predicates:
+
+```js
+// Checkbox: show only uncategorised rows, on top of the phrase search.
+htmxoTableFilter('#entries', 'unassigned',
+    checkbox.checked ? row => row.dataset.tac === 'Unassigned' : null);
+
+// Regex mode: 'search' names the built-in phrase match, so this replaces it.
+htmxoTableFilter('#entries', 'search', (row, ctx) =>
+    !ctx.input || new RegExp(ctx.input, 'i').test(ctx.text));
+```
+
+`htmxoTableFilter(target, name, predicate)` accepts the table, its wrapper, an
+element inside it or a selector; it registers `predicate(row, ctx)` (or removes
+the name when `predicate` is `null`) and filters again. A row is shown when
+every predicate returns `true`. `ctx` has `query` (normalised lower-case
+phrase), `input` (the field's raw value) and `text` (the row's lower-case
+search text, ancestor text included in a hierarchy). Each predicate runs for
+every row on every pass, also when the field is empty. Registrations live on
+the wrapper element, so content that swaps the table in registers again.
+
+Each pass fires a bubbling `htmxo:table-filtered` event on the wrapper. Its
+`detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
+that first rejected them) and `notes`, which a listener may extend; the count
+line appends each note after ` · `:
+
+```js
+document.addEventListener('htmxo:table-filtered', e => {
+    const n = e.detail.hiddenBy.unassigned;
+    if (n) e.detail.notes.push(`${n} already categorized hidden`);
+});
+```
+
 ## Layout / widgets
 
 ### Hierarchical master/detail tables
@@ -217,7 +271,9 @@ branch/detail state when cleared. Collapsed details stay lazy, and detail-body
 text is excluded. Use `search_text = item -> item.searchable_metadata` to replace
 a row's search text. Labels wrap without truncation. Without `children`, the
 existing flat master/detail behavior remains available; `searchable=true` also
-works on flat tables.
+works on flat tables. The count, app predicates and `htmxo:table-filtered`
+event are shared with every searchable table; see
+[Client-side search](#table-search).
 
 `master` may also return the whole row, `h.tr(cells...; attrs...)`, when its
 attributes are computed together with its cells. The cells fill the master row
