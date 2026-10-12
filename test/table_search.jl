@@ -161,3 +161,138 @@ end
         end
     end
 end
+
+@testitem "table search survives a re-render browser" tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        recs = [("rewe", "REWE Markt", "Groceries"), ("aldi", "ALDI Süd", "Groceries"),
+                ("db", "Deutsche Bahn", "Travel"), ("ikea", "IKEA", "Home")]
+        row(k, name, cat) = h.tr(h.td(name), h.td(cat); id="row-$k", data_htmxo_select_key=k, data_cat=cat)
+        rules(; script=nothing) = h.div(; id="rules-panel")(
+            sortable_table(["Name", "Category"], [row(r...) for r in recs];
+                id="rules", searchable=true, selectable="selected_rules"),
+            (isnothing(script) ? () : (h.script(Raw(script)),))...)
+        anon() = h.div(; id="anon-panel")(sortable_table(["Name", "Category"], [row("a" * r[1], r[2], r[3]) for r in recs]; searchable=true))
+        tree() = master_detail_table(["Name"], ["Groceries", "Travel"]; key=x -> "g-$x",
+            master=x -> (h.td(x),), children=x -> x == "Groceries" ? ["REWE", "ALDI"] : x == "Travel" ? ["DB"] : String[],
+            searchable=true, id="tree")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const wait = async cond => { for (let n = 0; n < 200 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const root = id => document.getElementById(id).closest('.htmxo-searchable-table');
+            const input = id => root(id).querySelector('input[type="search"]');
+            const count = id => root(id).querySelector('[data-htmxo-table-count]').textContent;
+            const shown = id => Array.from(document.getElementById(id).rows).filter(r => !r.hidden).map(r => r.id).join(',');
+            const type = (id, v) => { input(id).value = v; input(id).dispatchEvent(new Event('input', {bubbles: true})); };
+            const rerender = async (url, target, id) => {
+                const old = document.getElementById(id);
+                htmx.ajax('GET', url, {target, swap: 'outerHTML'});
+                await wait(() => document.getElementById(id) && document.getElementById(id) !== old);
+                await new Promise(r => setTimeout(r, 50));
+            };
+            // The user's query survives the re-render, as the selection does.
+            type('rules', 'rewe');
+            htmxoSelectRows('#rules', ['rewe', 'db']);
+            check('typed', shown('rules') === 'row-rewe' && count('rules') === '1 of 4 rows shown');
+            await rerender('/rules', '#rules-panel', 'rules');
+            check('query-restored', input('rules').value === 'rewe');
+            check('filter-reapplied', shown('rules') === 'row-rewe' && count('rules') === '1 of 4 rows shown');
+            check('selection-with-filter', htmxoSelectedKeys('#rules').join(',') === 'rewe,db' &&
+                root('rules').closest('[data-htmxo-select]').querySelector('[data-htmxo-selection-count]').textContent === '2 selected (1 hidden by the filter)');
+            // An app predicate registered outside the swapped region survives too.
+            type('rules', '');
+            htmxoTableFilter('#rules', 'cat', r => r.dataset.cat === 'Groceries');
+            check('predicate', shown('rules') === 'row-rewe,row-aldi');
+            await rerender('/rules', '#rules-panel', 'rules');
+            check('predicate-restored', input('rules').value === '' && shown('rules') === 'row-rewe,row-aldi' && count('rules') === '2 of 4 rows shown');
+            // Content that registers the same name when swapped in replaces it.
+            await rerender('/rules?script=1', '#rules-panel', 'rules');
+            check('reregister-replaces', shown('rules') === 'row-db');
+            htmxoTableFilter('#rules', 'cat', null);
+            check('predicate-removed', shown('rules') === 'row-rewe,row-aldi,row-db,row-ikea');
+            // A value the re-rendered field already holds wins over the stored query.
+            type('rules', 'ikea');
+            await rerender('/rules?value=aldi', '#rules-panel', 'rules');
+            check('rendered-value-wins', input('rules').value === 'aldi' && shown('rules') === 'row-aldi');
+            await rerender('/rules', '#rules-panel', 'rules');
+            check('rendered-value-stored', input('rules').value === 'aldi');
+            // Clearing the field clears what a re-render restores.
+            type('rules', '');
+            await rerender('/rules', '#rules-panel', 'rules');
+            check('cleared-stays-clear', input('rules').value === '' && count('rules') === '4 of 4 rows shown');
+            // htmxoTableSearch sets the query; swapped-in content can use it to start over.
+            htmxoTableSearch('#rules', 'deutsche');
+            check('set-query', input('rules').value === 'deutsche' && shown('rules') === 'row-db');
+            await rerender('/rules?clear=1', '#rules-panel', 'rules');
+            check('swapped-in-clear', input('rules').value === '' && count('rules') === '4 of 4 rows shown');
+            await rerender('/rules', '#rules-panel', 'rules');
+            check('clear-stored', input('rules').value === '');
+            // A table without an id keeps the state on its wrapper: a swap drops it.
+            const anonInput = () => document.querySelector('#anon-panel input[type="search"]');
+            anonInput().value = 'rewe'; anonInput().dispatchEvent(new Event('input', {bubbles: true}));
+            const oldAnon = document.querySelector('#anon-panel table');
+            htmx.ajax('GET', '/anon', {target: '#anon-panel', swap: 'outerHTML'});
+            await wait(() => document.querySelector('#anon-panel table') !== oldAnon);
+            await new Promise(r => setTimeout(r, 50));
+            check('no-id-not-kept', anonInput().value === '');
+            // A hierarchy keeps its query and matching path.
+            type('tree', 'aldi');
+            check('tree-typed', shown('tree') === 'row-g-Groceries,row-g-ALDI');
+            await rerender('/tree', root('tree'), 'tree');
+            check('tree-restored', input('tree').value === 'aldi' && shown('tree') === 'row-g-Groceries,row-g-ALDI');
+            // The state is per page path.
+            type('rules', 'rewe');
+            history.replaceState(null, '', '/elsewhere');
+            await rerender('/rules', '#rules-panel', 'rules');
+            check('other-path-fresh', input('rules').value === '' && count('rules') === '4 of 4 rows shown');
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(rules(), anon(), tree(), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            q = HTTP.queryparams(uri)
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], x isa String ? x : repr("text/html", x))
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/rules"
+                body = repr("text/html", rules(; script=haskey(q, "script") ?
+                    "htmxoTableFilter('#rules', 'cat', r => r.dataset.cat === 'Travel');" :
+                    haskey(q, "clear") ? "htmxoTableSearch('#rules', '');" : nothing))
+                html(haskey(q, "value") ? replace(body, "<input type=\"search\"" => "<input type=\"search\" value=\"$(q["value"])\"") : body)
+            elseif uri.path == "/anon"
+                html(anon())
+            elseif uri.path == "/tree"
+                html(tree())
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; stderr=devnull), String)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 18
+            end
+        finally
+            close(server)
+        end
+    end
+end

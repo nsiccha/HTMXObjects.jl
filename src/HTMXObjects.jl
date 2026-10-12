@@ -12299,6 +12299,19 @@ function htmxoSearchRoot(target) {
     return root;
 }
 
+// A table's search state: the field's query and the named predicates. Like
+// the selection it is keyed per table (its body id) and page path, so a
+// re-render of the table keeps the user's search and the app's filters; a
+// table without an id keeps its state on the wrapper element.
+window.htmxoSearchState = window.htmxoSearchState || new Map();
+function htmxoSearchOf(root) {
+    const id = root.querySelector('table').tBodies[0].id;
+    if (!id) return root.htmxoSearch || (root.htmxoSearch = {input: '', filters: new Map()});
+    const scope = id + '|' + location.pathname;
+    if (!window.htmxoSearchState.has(scope)) window.htmxoSearchState.set(scope, {input: '', filters: new Map()});
+    return window.htmxoSearchState.get(scope);
+}
+
 // Register (or, with a null predicate, remove) a named row predicate on a
 // searchable table and re-filter it. A row is shown when every predicate
 // returns true; `predicate(row, ctx)` gets ctx = {query, input, text}: the
@@ -12306,13 +12319,22 @@ function htmxoSearchRoot(target) {
 // lower-case search text (ancestor text included in a hierarchy). The
 // built-in phrase match is the predicate named 'search', so registering
 // 'search' replaces it (e.g. a regex mode) while other names compose with it.
-// Registrations live on the wrapper element: a swap that replaces the table
-// drops them, so register again from the swapped-in content.
+// Registrations belong to the table's search state (see `htmxoSearchOf`), so
+// registering a name again replaces it.
 function htmxoTableFilter(target, name, predicate) {
     const root = htmxoSearchRoot(target);
-    root.htmxoFilters = root.htmxoFilters || new Map();
-    if (predicate) root.htmxoFilters.set(name, predicate);
-    else root.htmxoFilters.delete(name);
+    const filters = htmxoSearchOf(root).filters;
+    if (predicate) filters.set(name, predicate);
+    else filters.delete(name);
+    htmxoFilterTable(root);
+}
+
+// Set a table's query as if typed ('' clears it) and filter.
+function htmxoTableSearch(target, query) {
+    const root = htmxoSearchRoot(target);
+    const input = root.querySelector(':scope > label > input[type="search"]');
+    root.htmxoSearchSeen = true;
+    if (input) input.value = query;
     htmxoFilterTable(root);
 }
 
@@ -12324,9 +12346,18 @@ function htmxoFilterTable(target) {
     const rows = all.filter(r => !r.id.startsWith('detail-'));
     const byId = new Map(rows.filter(r => r.id).map(r => [r.id, r]));
     const companions = htmxoTableCompanions(all);
+    const state = htmxoSearchOf(root);
+    // On a re-rendered table's first pass, an empty field takes the user's
+    // last query; a value the field already holds (rendered by the server,
+    // typed by the user) wins.
+    if (input && !root.htmxoSearchSeen) {
+        root.htmxoSearchSeen = true;
+        if (!input.value) input.value = state.input;
+    }
     const raw = input ? input.value : '';
+    state.input = raw;
     const query = raw.toLocaleLowerCase().trim().replace(/\s+/g, ' ');
-    const registered = root.htmxoFilters || new Map();
+    const registered = state.filters;
     const phrase = (row, ctx) => ctx.text.includes(ctx.query);
     const filters = [['search', registered.get('search') || phrase],
         ...Array.from(registered).filter(([name]) => name !== 'search')];
@@ -12418,6 +12449,25 @@ function htmxoTreeToggle(button) {
     // is hidden. One visibility pass owns both collapse and filtering.
     htmxoFilterTable(row);
 }
+
+// A swapped-in table with a stored query or predicates filters as it loads.
+function htmxoSearchRestore(elt) {
+    if (!elt || !elt.querySelectorAll) return;
+    const roots = new Set(elt.querySelectorAll('.htmxo-searchable-table'));
+    const around = elt.closest && elt.closest('.htmxo-searchable-table');
+    if (around) roots.add(around);
+    roots.forEach(root => {
+        const state = htmxoSearchOf(root);
+        if (state.input || state.filters.size) htmxoFilterTable(root);
+    });
+}
+if (!window.htmxoSearchBound) {
+    window.htmxoSearchBound = true;
+    document.addEventListener('htmx:load', e => htmxoSearchRestore(e.target));
+}
+// Included inside swapped-in content, this script runs after that content's
+// htmx load event: restore what is already in the document.
+if (document.body) htmxoSearchRestore(document.body);
 
 // --- Row selection: `selectable` on sortable_table / master_detail_table ---
 // State is keyed per selection (input name, form, page path) and per row key,
@@ -12862,8 +12912,17 @@ again. A row is shown only when every predicate returns `true`. `ctx` holds
 `text` (the row's lower-case search text). The built-in phrase match is the
 predicate named `'search'`; registering that name replaces it, e.g. with a
 regular-expression mode. Every predicate runs for every row on every pass,
-including when the field is empty. Registrations live on the table's wrapper
-element, so content that swaps the table in registers them again.
+including when the field is empty.
+
+The query and the registered predicates are kept per table `id` and page path,
+like the selection, so they survive a re-render of the table (an `outerHTML`
+swap after a bulk action, a tab switch away and back): the re-rendered table's
+empty field takes the last query and the table filters as it loads. A value the
+re-rendered field already holds wins. Registering a name again replaces it, so
+content that re-registers its predicates when swapped in keeps working.
+`htmxoTableSearch(target, query)` sets the query as if typed (`''` clears it)
+and filters; remove a predicate with `null`. A table without an `id` keeps
+this state on its wrapper element, so a swap that replaces the table drops it.
 
 After each pass the wrapper fires a bubbling `htmxo:table-filtered` event whose
 `detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
