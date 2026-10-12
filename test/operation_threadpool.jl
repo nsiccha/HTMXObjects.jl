@@ -282,9 +282,12 @@ end
         # records why it failed.
         @test contains(settle(poll_url(unwatched)), "aria-invalid")
         @test !pool_started(:heavy_fresh5)
-        abandoned = [r for r in runtime_jobs(runtime_tracker(); states=(:failed,))
-                     if r.target == "/heavy_fresh?n=5"]
-        @test !isempty(abandoned) && contains(last(abandoned).error, "abandoned")
+        # The ledger's :failed stamp comes from the job's own watcher task,
+        # which may run after the poller has already answered: wait for it.
+        abandoned() = [r for r in runtime_jobs(runtime_tracker(); states=(:failed,))
+                       if r.target == "/heavy_fresh?n=5"]
+        @test timedwait(() -> !isempty(abandoned()), 10.0; pollint=0.02) === :ok
+        @test !isempty(abandoned()) && contains(last(abandoned()).error, "abandoned")
         pool_release!(:heavy_read5)
         @test contains(settle(poll_url(blocker)), "pool:heavy_read5")
     finally
