@@ -12535,8 +12535,13 @@ function htmxoSelectionRoot(target) {
     if (!root) throw new Error('htmxoSelectionRoot: no selectable table at ' + target);
     return root;
 }
+// A selectable row is a keyed body row (`data-htmxo-select-key`, else an id)
+// that is not a `detail-<key>` companion: the rule `_selectable_row` renders
+// by. Rows are recognised by their key, not by the `aria-selected` the table
+// render adds, so a row an app re-renders on its own rejoins its key's state.
 function htmxoSelectionRows(root) {
-    return Array.from(root.querySelector('table').tBodies[0].rows).filter(r => r.hasAttribute('aria-selected'));
+    return Array.from(root.querySelector('table').tBodies[0].rows)
+        .filter(r => 'htmxoSelectKey' in r.dataset || (r.id !== '' && !r.id.startsWith('detail-')));
 }
 function htmxoSelectionKey(row) { return row.dataset.htmxoSelectKey ?? row.id; }
 function htmxoSelectionOf(root) {
@@ -12545,7 +12550,7 @@ function htmxoSelectionOf(root) {
     if (!state) {
         // First sight of this selection: rows the server rendered selected.
         state = {keys: new Set(htmxoSelectionRows(root).filter(r => r.getAttribute('aria-selected') === 'true').map(htmxoSelectionKey)),
-                 anchor: null, active: null};
+                 anchor: null, active: null, refocus: null};
         window.htmxoSelectionState.set(scope, state);
     }
     return state;
@@ -12576,6 +12581,16 @@ function htmxoSelectionUpdate(root) {
         if (key === state.active) r.dataset.htmxoActive = ''; else delete r.dataset.htmxoActive;
         r.tabIndex = r === focusable ? 0 : -1;
     });
+    // A swap removed the focused row (noted on its cleanup): its replacement
+    // takes the focus, unless the user has put it somewhere else meanwhile.
+    if (state.refocus != null) {
+        const key = state.refocus;
+        state.refocus = null;
+        const replacement = focusable && htmxoSelectionKey(focusable) === key ? focusable :
+            rows.find(r => htmxoSelectionKey(r) === key && !r.hidden);
+        const lost = !document.activeElement || document.activeElement === document.body;
+        if (replacement && lost) replacement.focus({preventScroll: true});
+    }
     // A key may label several rows (a leaf listed under several groups): the
     // selection, its inputs and its counts are per key, one row standing in.
     const selectedRows = rows.filter(r => state.keys.has(htmxoSelectionKey(r)));
@@ -12755,6 +12770,15 @@ if (!window.htmxoSelectionBound) {
     document.addEventListener('htmxo:table-filtered', e => {
         const root = e.target.closest('[data-htmxo-select]');
         if (root) htmxoSelectionUpdate(root);
+    });
+    // htmx cleans up each element it swaps out while it is still in the
+    // document: note the key of a row that holds the focus (itself or one of
+    // its controls), which removing it would drop to the page body.
+    document.addEventListener('htmx:beforeCleanupElement', e => {
+        const row = e.target;
+        if (!(row instanceof HTMLTableRowElement) || !row.contains(document.activeElement)) return;
+        const root = row.closest('[data-htmxo-select]');
+        if (root && htmxoSelectionRows(root).includes(row)) htmxoSelectionOf(root).refocus = htmxoSelectionKey(row);
     });
     // htmx announces every processed root (the body, then each swap) with a
     // bubbling htmx:load; a page without htmx restores once, on load.
@@ -13063,7 +13087,10 @@ sortable_table(headers, [h.tr(cells...; data_htmxo_select_key=r.id) for r in rec
 State is keyed per selection (input name, form and page path) and per row key,
 not per element, so it survives sorting, filtering, a row's `outerHTML` swap
 and a re-render of the table; rows that leave the table leave the selection.
-Rows rendered `aria_selected="true"` are the initial selection. Each change
+A row re-rendered on its own needs only its key: the replacement takes over the
+key's selection and roving `tabindex`, and the focus when the replaced row (or
+a control in it) had the focus. Rows rendered `aria_selected="true"` are the
+initial selection. Each change
 fires a bubbling `htmxo:selection-changed` event on the wrapper with `detail`
 `{name, keys, rows, submitted, hidden}`. `htmxoSelectRows(target, keys)` sets
 the selection (`[]` clears) and `htmxoSelectedKeys(target)` reads it. The

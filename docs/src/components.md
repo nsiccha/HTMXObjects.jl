@@ -283,7 +283,11 @@ sortable_table(["Party", "Amount"],
   with `detail` `{name, keys, rows, submitted, hidden}`.
 - **State.** Selection is keyed per input name, form and page path, not held
   by DOM nodes: it survives sorting, filtering, a row's `outerHTML` swap and a
-  table re-render, and rows that leave the table leave the selection. Rows
+  table re-render, and rows that leave the table leave the selection. A row an
+  app re-renders on its own (a row action with `hx-target="closest tr"`) needs
+  only its key: the replacement takes over that key's selection and the
+  roving `tabindex`, and the focus when the row it replaced, or a control in
+  it, had the focus. Rows
   rendered `aria_selected="true"` start selected. `htmxoSelectRows(target, keys)`
   replaces the selection (`[]` clears); `htmxoSelectedKeys(target)` reads it.
 - **Semantics and theme.** `aria-multiselectable` on the table, `aria-selected`
