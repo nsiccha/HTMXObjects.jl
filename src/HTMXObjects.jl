@@ -12394,7 +12394,9 @@ function htmxoFilterTable(target) {
     // listeners may push short notes that the count line appends.
     const hiddenBy = {};
     rejectedBy.forEach((name, row) => { if (row.hidden) hiddenBy[name] = (hiddenBy[name] || 0) + 1; });
-    const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length, query, hiddenBy, notes: []};
+    // Rows of a branch that has not loaded yet count toward the total.
+    const pending = rows.reduce((n, r) => n + (Number(r.dataset.htmxoLazyCount) || 0), 0);
+    const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length + pending, query, hiddenBy, notes: []};
     root.dispatchEvent(new CustomEvent('htmxo:table-filtered', {bubbles: true, detail}));
     const count = root.querySelector(':scope > label > [data-htmxo-table-count]');
     if (count) count.textContent = detail.shown + ' of ' + detail.total + ' rows shown' +
@@ -12434,7 +12436,7 @@ function htmxoLoadRows(row) {
             if (!body) throw new Error('Loading rows failed: no rows in the response');
             const rows = Array.from(body.rows);
             row.after(...rows);
-            ['htmxoLazyRows', 'htmxoSearchMembers', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
+            ['htmxoLazyRows', 'htmxoLazyCount', 'htmxoSearchMembers', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
             delete row.htmxoMembers;
             row.removeAttribute('aria-busy');
             row.querySelector('[data-htmxo-tree-toggle]').setAttribute('aria-controls',
@@ -13166,6 +13168,8 @@ end
 # `detail-<key>` companion, which follows its master's visibility.
 _is_master_row(row) = !(row isa Node && startswith(string(get(HTMX.attrs(row), :id, "")), "detail-"))
 _row_hidden(row) = row isa Node && get(HTMX.attrs(row), :hidden, false) ∉ (false, nothing)
+# Rows of a lazy branch that are not loaded yet count toward the total.
+_row_lazy_count(row) = row isa Node ? parse(Int, string(get(HTMX.attrs(row), Symbol("data-htmxo-lazy-count"), "0"))) : 0
 # One wording for the server's first paint and `htmxoFilterTable`'s updates.
 _table_count_text(shown, total) = "$shown of $total rows shown"
 
@@ -13177,7 +13181,7 @@ _table_count_text(shown, total) = "$shown of $total rows shown"
 # filter through. The input's `aria-label` keeps the count out of its name.
 function _searchable_table(table, rows; field::Bool=true, controls=nothing, query::AbstractString="")
     masters = [row for row in rows if _is_master_row(row)]
-    count_text = _table_count_text(count(!_row_hidden, masters), length(masters))
+    count_text = _table_count_text(count(!_row_hidden, masters), length(masters) + sum(_row_lazy_count, masters; init=0))
     # A prefilled query (e.g. carried across a regroup) is applied by the
     # runtime when the table loads; the server's count is the unfiltered one.
     value_attrs = isempty(query) ? (;) : (; value=query)
@@ -13814,7 +13818,7 @@ function master_detail_table(headers, items;
                                  for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
         descendants = isnothing(children) ? () : children(item)
         # A branch whose rows load on first expand (see `group_rows_url`).
-        lazy_rows = descendants isa _MDLazyRows ? descendants.url : nothing
+        lazy_rows = descendants isa _MDLazyRows ? descendants : nothing
         descendants = isnothing(lazy_rows) ? collect(descendants) : ()
         branch = !isnothing(lazy_rows) || !isempty(descendants)
         open = isnothing(lazy_rows) && _open(item)
@@ -13831,7 +13835,10 @@ function master_detail_table(headers, items;
                 attrs[:data_htmxo_tree_open] = string(open)
                 attrs[:aria_expanded] = string(open)
             end
-            isnothing(lazy_rows) || (attrs[:data_htmxo_lazy_rows] = string(lazy_rows))
+            if !isnothing(lazy_rows)
+                attrs[:data_htmxo_lazy_rows] = lazy_rows.url
+                attrs[:data_htmxo_lazy_count] = string(lazy_rows.count)
+            end
             max_level[] = max(max_level[], level)
         end
         isnothing(search_text) || (attrs[:data_htmxo_search] = string(search_text(item)))
@@ -13976,6 +13983,7 @@ end
 # `children` result for a branch whose rows load on first expand.
 struct _MDLazyRows
     url::String
+    count::Int
 end
 
 _md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = [string(k) for k in keys if !isnothing(k)]
@@ -14092,7 +14100,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             key = x -> x isa _MDGroup ? gid(x) : "group:" * x.group * "/" * string(key(x.item)),
             master = x -> x isa _MDGroup ? gmaster(x.key, x.members) : master(x.item),
             children = x -> !(x isa _MDGroup) ? () :
-                haskey(lazy, x.key) ? _MDLazyRows(lazy[x.key]) :
+                haskey(lazy, x.key) ? _MDLazyRows(lazy[x.key], length(x.members)) :
                 Any[_MDGroupLeaf(x.key, m) for m in x.members],
             detail = isnothing(detail) ? nothing : (x -> x isa _MDGroup ? nothing : detail(x.item)),
             detail_url = isnothing(detail_url) ? nothing :

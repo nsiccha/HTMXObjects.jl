@@ -71,7 +71,9 @@ end
     page = html(grouped(group_by="party", selectable="tx", group_rows_url=lazy_url,
         select_submit=t -> t.id != "p7"))
     # "Acme" (3 rows) loads lazily; "Bakery" (2 rows) is eager.
-    @test contains(page, "data-htmxo-lazy-rows=\"/rows?key=Acme\"")
+    @test contains(page, "data-htmxo-lazy-rows=\"/rows?key=Acme\"") && contains(page, "data-htmxo-lazy-count=\"3\"")
+    # Unloaded rows count toward the total: 4 groups + 4 eager leaves + 3 lazy.
+    @test contains(page, "4 of 11 rows shown")
     @test !contains(page, "id=\"row-group--Acme--p1\"") && contains(page, "id=\"row-group--Bakery--p4\"")
     @test contains(page, "data-htmxo-search-members=\"Acme DE01 -10.0 Acme DE02 -20.0 Acme DE01 -70.0\"")
     @test contains(page, "data-htmxo-select-members=\"{&quot;p1&quot;:&quot;p1&quot;,&quot;p2&quot;:&quot;p2&quot;,&quot;p7&quot;:null}\"")
@@ -129,13 +131,15 @@ end
                 await wait(() => g().dataset.htmxoGrouped === v);
                 await new Promise(r => setTimeout(r, 50));
             };
-            check('initial', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video');
+            const total = () => g().querySelector('[data-htmxo-table-count]').textContent;
+            check('initial', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '4 of 11 rows shown');
             check('lazy-placeholder', row('group--Acme').dataset.htmxoLazyRows && !row('group--Acme--p1'));
             // Expanding a lazy group fetches its rows once and opens it.
             toggle('group--Acme');
             await wait(() => row('group--Acme--p1'));
             check('lazy-loaded', shown() === 'group--Acme,group--Acme--p1,group--Acme--p2,group--Acme--p7,group--Acme--Prime,group--Bakery,group--Prime--Video' &&
                 row('group--Acme').getAttribute('aria-expanded') === 'true' && !('htmxoLazyRows' in row('group--Acme').dataset));
+            check('lazy-count', total() === '7 of 11 rows shown');
             check('lazy-aria-controls', row('group--Acme').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Acme--p1 row-group--Acme--p2 row-group--Acme--p7');
             click(row('group--Acme--p1').cells[2]);
             click(row('group--Acme--p2').cells[2], {ctrlKey: true});
@@ -229,7 +233,7 @@ end
                 for line in split(checks[1], '\n')
                     @test endswith(line, ":true")
                 end
-                @test count(==('\n'), checks[1]) + 1 == 21
+                @test count(==('\n'), checks[1]) + 1 == 22
             end
         finally
             close(server)
