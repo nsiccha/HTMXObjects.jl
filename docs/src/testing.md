@@ -71,6 +71,18 @@ Repeated values select any value within that category; different categories
 combine, so `--file=… --tag=…` means tests matching both. Unknown names, tags,
 files, and exact selectors fail loudly instead of silently reporting success.
 
+In a fresh HTMXObjects checkout, `pkg> test` cannot instantiate yet: HTMX and
+Treebars are not registered, General's DynamicObjects is older than the
+`[compat]` bound, and `Manifest.toml` is not committed. Before forwarding its
+arguments, `test/select.jl` runs `test/provision.jl`, which adds whichever of
+those packages the manifest lacks by git URL and leaves `Project.toml`
+unchanged. Packages the manifest already has, such as developed local
+checkouts, are kept. So `julia --project=. test/select.jl` runs the whole suite
+from a clean checkout, including on Julia 1.10, which ignores `[sources]`; after
+one `julia --project=. test/provision.jl`, `pkg> test` works too. A package whose
+dependencies all come from a registry needs only the `Pkg.test` line of
+`test/select.jl`.
+
 Programmatic callers can use the same contract directly:
 
 ```julia
