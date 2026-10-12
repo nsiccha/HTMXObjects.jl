@@ -43,26 +43,38 @@ const _REGROUP_GROUPINGS = [
 
 _regroup_amount(x) = h.td(string(round(x; digits=2)); data_sort_value=string(x))
 
-function _regroup_table(self, group_by, q; group_rows=nothing)
-    master_detail_table(["Counterparty", "Date", "IBAN", "Category", "Amount"], _REGROUP_TX;
+# What the row and group actions change, in this process only: a review mark
+# per transaction and a rule mode per group of a grouping.
+const _REGROUP_REVIEWED = Set{String}()
+const _REGROUP_MODES = Dict{Tuple{String,String},String}()
+
+function _regroup_table(self, group_by, q; kw...)
+    master_detail_table(["Counterparty", "Date", "IBAN", "Category", "Amount", "Review"], _REGROUP_TX;
         key=t -> t.id,
         master=t -> (h.td(t.party), h.td(t.date), h.td(h.code(t.iban; style="white-space: nowrap")),
-                     h.td(t.category), _regroup_amount(t.amount)),
+                     h.td(t.category), _regroup_amount(t.amount),
+                     # A row action: the route answers with this row's copies
+                     # and their groups' summaries (`update_rows`).
+                     h.td(h.button(t.id in _REGROUP_REVIEWED ? "✓ reviewed" : "mark reviewed"; type="button",
+                         class="secondary outline", hx_post=query_url(self / "review"; id=t.id, group_by),
+                         hx_target="closest tr", hx_swap="outerHTML"))),
         detail=t -> h.p(t.memo; style="margin: 0; padding: .5rem 1rem"), detail_toggle=:label,
         groupings=_REGROUP_GROUPINGS, group_by, group_by_url=self / "table",
         # Groups over 30 rows load their rows when first expanded.
         group_rows_url=(key, members) -> length(members) > 30 ?
             query_url(self / "rows"; group_by, key) : nothing,
-        group_rows,
-        # A group row hosts a caller control: changing it never toggles the group.
+        # A group row hosts a caller control: changing it never toggles the
+        # group, and its route answers with the group's rows (`update_groups`).
         group_master=(key, members) -> (
             h.td(h.strong(key), " ", h.small("($(length(members)))")), h.td(""), h.td(""),
             h.td(h.select(; name="mode", aria_label="Rule mode for $key",
-                hx_post=query_url(self / "rule_mode"; group=key), hx_swap="none",
-                data_htmxo_toast="body")(h.option("off"), h.option("suggest"), h.option("auto"))),
-            _regroup_amount(sum(m.amount for m in members))),
+                hx_post=query_url(self / "rule_mode"; group=key, group_by))(
+                (h.option(m; selected=m == get(_REGROUP_MODES, (group_by, key), "off"))
+                 for m in ("off", "suggest", "auto"))...)),
+            _regroup_amount(sum(m.amount for m in members)),
+            h.td(h.small("$(count(m -> m.id in _REGROUP_REVIEWED, members)) of $(length(members)) reviewed"))),
         searchable=true, search_query=q, expand_controls=group_by != "None",
-        selectable="rows", select_form="regroup-bulk", id="regroup")
+        selectable="rows", select_form="regroup-bulk", id="regroup", kw...)
 end
 
 @htmx struct RegroupDemoRoutes
@@ -72,7 +84,8 @@ end
             h.em("Group by"), " control. Selection is keyed by transaction, so it survives regrouping; ",
             "search matches group and row text; in ", h.em("Rule"), " grouping one payment can belong ",
             "to several groups. Groups over 30 rows load when first expanded. Select group rows to act ",
-            "on whole groups."),
+            "on whole groups. Marking a row reviewed or changing a group's rule mode re-renders only ",
+            "the rows it changed, keeping the open groups, the selection and the search."),
         h.form(; id="regroup-bulk", hx_post=__self__ / "bulk", hx_swap="none", data_htmxo_toast="body")(
             h.fieldset(; role="group")(
                 h.select(; name="category", aria_label="Category")(
@@ -86,11 +99,17 @@ end
     @get rows(; group_by::String="Counterparty", key::String="") =
         _regroup_table(__self__, group_by, ""; group_rows=key)
 
+    @direct @post review(; id::String="", group_by::String="Counterparty") =
+        (id in _REGROUP_REVIEWED ? delete!(_REGROUP_REVIEWED, id) : push!(_REGROUP_REVIEWED, id);
+         _regroup_table(__self__, group_by, ""; update_rows=id))
+
     @post bulk(; category::String="", group_by::String="", rows::Vector{String}=String[],
                rows_group::Vector{String}=String[]) =
         string("Would categorize $(length(rows)) transaction(s)",
                isempty(rows_group) ? "" : " and $(length(rows_group)) $(lowercase(group_by)) group(s)",
                " as $category.")
 
-    @post rule_mode(; group::String="", mode::String="") = "Rule mode for $group: $mode."
+    @direct @post rule_mode(; group::String="", mode::String="", group_by::String="Counterparty") =
+        (_REGROUP_MODES[(group_by, group)] = mode;
+         hx_response(_regroup_table(__self__, group_by, ""; update_groups=group); toast="Rule mode for $group: $mode."))
 end
