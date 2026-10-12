@@ -184,6 +184,17 @@ end
             await regroup('none');
             check('flat', rows().length === 7 && count() === '3 selected' && inputs() === 'p1,p2,p3' &&
                 g().querySelector('input[type="search"]').value === 'acme' && shown() === 'p1,p2,p3,p7');
+            // j/k move across group and leaf rows alike.
+            search('');
+            await regroup('rule');
+            toggle('group--Media');
+            const press = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}));
+            row('group--Media').focus();
+            press(row('group--Media'), 'j');
+            check('j-group-to-leaf', document.activeElement === row('group--Media--p3') && htmxoSelectedKeys('#g').join(',') === 'p3');
+            press(document.activeElement, 'k');
+            press(document.activeElement, 'k');
+            check('k-leaf-to-groups', document.activeElement === row('group--Shops') && htmxoSelectedKeys('#g').join(',') === 'group:Shops');
             const result = document.createElement('pre'); result.id = 'checks';
             result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
             document.body.appendChild(result);
@@ -218,7 +229,7 @@ end
                 for line in split(checks[1], '\n')
                     @test endswith(line, ":true")
                 end
-                @test count(==('\n'), checks[1]) + 1 == 19
+                @test count(==('\n'), checks[1]) + 1 == 21
             end
         finally
             close(server)
