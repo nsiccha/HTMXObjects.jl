@@ -32,7 +32,7 @@ export wants_markdown, wants_errors, markdown_response, e, filter_errors, render
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
@@ -2472,6 +2472,8 @@ _runtime_blocks() = (
     request_feedback_script = (:js, request_feedback_script),
     compose_box_styles = (:css, compose_box_styles),
     compose_box_script = (:js, compose_box_script),
+    toast_styles = (:css, toast_styles),
+    toast_script = (:js, toast_script),
     live_thread_styles = (:css, live_thread_styles),
     live_thread_script = (:js, live_thread_script),
     utility_styles = (:css, htmxo_utility_styles),
@@ -2644,6 +2646,9 @@ function htmx(args...;
             (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
             _runtime_heads(mount, :utility_styles, :tabset_styles,
                 :comparison_styles, :editor_styles,
+                # Route-named success toasts and `window.htmxoToast`; inert
+                # until a response or a script raises one.
+                :toast_styles, :toast_script,
                 # Comparison panes and master/detail rows share the lazy runtime.
                 :comparison,
                 # A refused stream hides its HTTP status: this probe lets an auth
@@ -4644,15 +4649,20 @@ hx_current_url(req::HTTP.Request)= HTTP.header(req, "HX-Current-URL",   "")
 hx_prompt(req::HTTP.Request)     = HTTP.header(req, "HX-Prompt",        "")
 
 """
-    hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location)
+    hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location, toast)
 
 Wrap any value (via `to_response`) and attach HX-* response headers that
 instruct the HTMX client to perform additional actions after swap.
+
+`toast` names the success toast the [`htmx`](@ref) page shell shows once the
+request completes (the percent-encoded `X-HTMXO-Toast` header read by
+[`toast_script`](@ref)), e.g. `hx_response(row; toast="Invoice saved")`. It
+survives a polled `:auto` answer: the terminal poll response carries it.
 """
 function hx_response(val;
     trigger=nothing, push_url=nothing, replace_url=nothing,
     redirect=nothing, refresh=false,
-    retarget=nothing, reswap=nothing, location=nothing,
+    retarget=nothing, reswap=nothing, location=nothing, toast=nothing,
 )
     resp = to_response(val)
     hdrs = copy(resp.headers)
@@ -4664,6 +4674,7 @@ function hx_response(val;
     isnothing(retarget)    || push!(hdrs, "HX-Retarget"    => retarget)
     isnothing(reswap)      || push!(hdrs, "HX-Reswap"      => reswap)
     isnothing(location)    || push!(hdrs, "HX-Location"    => location)
+    isnothing(toast)       || push!(hdrs, "X-HTMXO-Toast"  => HTTP.escapeuri(toast))
     HTTP.Response(resp.status, hdrs; body=resp.body)
 end
 
@@ -12279,33 +12290,79 @@ function htmxoTableCompanions(rows) {
     return companions;
 }
 
-function htmxoFilterTable(input) {
-    const root = input.closest('.htmxo-searchable-table');
+// The searchable wrapper around a table, from an element inside it (the
+// search input, a row) or a selector/element naming the wrapper or the table.
+function htmxoSearchRoot(target) {
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    const root = el && (el.closest('.htmxo-searchable-table') || el.querySelector('.htmxo-searchable-table'));
+    if (!root) throw new Error('htmxoSearchRoot: no searchable table at ' + target);
+    return root;
+}
+
+// Register (or, with a null predicate, remove) a named row predicate on a
+// searchable table and re-filter it. A row is shown when every predicate
+// returns true; `predicate(row, ctx)` gets ctx = {query, input, text}: the
+// normalised lower-case phrase, the field's raw value, and the row's
+// lower-case search text (ancestor text included in a hierarchy). The
+// built-in phrase match is the predicate named 'search', so registering
+// 'search' replaces it (e.g. a regex mode) while other names compose with it.
+// Registrations live on the wrapper element: a swap that replaces the table
+// drops them, so register again from the swapped-in content.
+function htmxoTableFilter(target, name, predicate) {
+    const root = htmxoSearchRoot(target);
+    root.htmxoFilters = root.htmxoFilters || new Map();
+    if (predicate) root.htmxoFilters.set(name, predicate);
+    else root.htmxoFilters.delete(name);
+    htmxoFilterTable(root);
+}
+
+function htmxoFilterTable(target) {
+    const root = htmxoSearchRoot(target);
+    const input = root.querySelector(':scope > label > input[type="search"]');
     const table = root.querySelector('table');
     const all = Array.from(table.tBodies[0].rows);
     const rows = all.filter(r => !r.id.startsWith('detail-'));
-    const byId = new Map(rows.map(r => [r.id, r]));
+    const byId = new Map(rows.filter(r => r.id).map(r => [r.id, r]));
     const companions = htmxoTableCompanions(all);
-    const query = input.value.toLocaleLowerCase().trim().replace(/\s+/g, ' ');
+    const raw = input ? input.value : '';
+    const query = raw.toLocaleLowerCase().trim().replace(/\s+/g, ' ');
+    const registered = root.htmxoFilters || new Map();
+    const phrase = (row, ctx) => ctx.text.includes(ctx.query);
+    const filters = [['search', registered.get('search') || phrase],
+        ...Array.from(registered).filter(([name]) => name !== 'search')];
     const visible = new Set();
+    const rejectedBy = new Map();
+    // "Collapse all" during a search keeps only the matching rows and their
+    // ancestors, hiding the descendants a matching group would reveal. It
+    // lasts until the search is cleared; the stored branch state is untouched.
+    if (query.length === 0) delete root.dataset.htmxoSearchCollapsed;
+    const collapsed = query.length > 0 && 'htmxoSearchCollapsed' in root.dataset;
+    const direct = new Set();
     const text = r => (r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
     rows.forEach(row => {
         const path = [];
         for (let r = row; r; r = byId.get(r.dataset.htmxoParent)) path.push(r);
         // Ancestor text participates: a group match includes its descendants,
         // and a leaf match retains the entire path needed to understand it.
-        const haystack = path.reverse().map(text).join(' ').replace(/\s+/g, ' ');
-        if (haystack.includes(query)) path.forEach(r => visible.add(r));
+        const ctx = {query, input: raw, text: path.reverse().map(text).join(' ').replace(/\s+/g, ' ')};
+        const failed = filters.find(([, keep]) => !keep(row, ctx));
+        if (failed) rejectedBy.set(row, failed[0]);
+        else path.forEach(r => visible.add(r));
+        const own = {query, input: raw, text: text(row)};
+        if (collapsed && !failed && filters.every(([, keep]) => keep(row, own))) path.forEach(r => direct.add(r));
     });
     rows.forEach(row => {
         let ancestorsOpen = true;
         for (let p = byId.get(row.dataset.htmxoParent); p; p = byId.get(p.dataset.htmxoParent)) {
             if (p.dataset.htmxoTreeOpen === 'false') ancestorsOpen = false;
         }
-        row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen);
+        row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen) || (collapsed && !direct.has(row));
+    });
+    const shownParents = new Set(rows.filter(r => !r.hidden).map(r => r.dataset.htmxoParent));
+    rows.forEach(row => {
         const branch = row.querySelector('[data-htmxo-tree-toggle]');
         if (branch) {
-            const open = query.length > 0 || row.dataset.htmxoTreeOpen === 'true';
+            const open = query.length > 0 ? !collapsed || shownParents.has(row.id) : row.dataset.htmxoTreeOpen === 'true';
             row.setAttribute('aria-expanded', open);
             branch.setAttribute('aria-expanded', open);
             branch.textContent = open ? '▾' : '▸';
@@ -12313,20 +12370,250 @@ function htmxoFilterTable(input) {
         }
         const detail = companions.get(row.id);
         if (detail) {
-            detail.hidden = row.hidden || (row.dataset.htmxoDetailOpen ?? row.getAttribute('aria-expanded')) !== 'true';
+            const state = row.dataset.htmxoDetailOpen ?? row.getAttribute('aria-expanded');
+            if (state !== null) {
+                detail.hidden = row.hidden || state !== 'true';
+            } else if (row.hidden) {
+                // A hand-built pair records no open state: remember that the
+                // filter hid an open detail, and reopen it when the row returns.
+                if (!detail.hidden) { detail.hidden = true; detail.dataset.htmxoFilterHidden = ''; }
+            } else if ('htmxoFilterHidden' in detail.dataset) {
+                detail.hidden = false;
+                delete detail.dataset.htmxoFilterHidden;
+            }
             if (!detail.hidden) htmxoLoadSlot(detail.querySelector('[data-loaded]'));
         }
     });
+    // hiddenBy counts the hidden rows per predicate that first rejected them;
+    // listeners may push short notes that the count line appends.
+    const hiddenBy = {};
+    rejectedBy.forEach((name, row) => { if (row.hidden) hiddenBy[name] = (hiddenBy[name] || 0) + 1; });
+    const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length, query, hiddenBy, notes: []};
+    root.dispatchEvent(new CustomEvent('htmxo:table-filtered', {bubbles: true, detail}));
+    const count = root.querySelector(':scope > label > [data-htmxo-table-count]');
+    if (count) count.textContent = detail.shown + ' of ' + detail.total + ' rows shown' +
+        detail.notes.map(note => ' · ' + note).join('');
     root.querySelector(':scope > [data-htmxo-table-empty]').hidden = visible.size !== 0;
+}
+
+// "Expand all" / "Collapse all": every collapsible branch, or, while a
+// search is active, the matching paths (see `htmxoFilterTable`).
+function htmxoTreeAll(button, open) {
+    const root = htmxoSearchRoot(button);
+    const input = root.querySelector(':scope > label > input[type="search"]');
+    if (input && input.value.trim()) {
+        if (open) delete root.dataset.htmxoSearchCollapsed;
+        else root.dataset.htmxoSearchCollapsed = '';
+    } else {
+        root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-tree-open]')
+            .forEach(r => { r.dataset.htmxoTreeOpen = String(open); });
+    }
+    htmxoFilterTable(root);
 }
 
 function htmxoTreeToggle(button) {
     const row = button.closest('tr');
     row.dataset.htmxoTreeOpen = row.dataset.htmxoTreeOpen === 'true' ? 'false' : 'true';
-    // Hierarchical tables always have a scoped search input, even when the
-    // input is hidden. One visibility path owns both collapse and filtering.
-    htmxoFilterTable(row.closest('.htmxo-searchable-table').querySelector(':scope > label > input[type="search"]'));
+    // Hierarchical tables always have a search scaffold, even when its field
+    // is hidden. One visibility pass owns both collapse and filtering.
+    htmxoFilterTable(row);
 }
+
+// --- Row selection: `selectable` on sortable_table / master_detail_table ---
+// State is keyed per selection (input name, form, page path) and per row key,
+// never held by row elements, so it survives sorting, filtering, a row's
+// outerHTML swap and a full table re-render. This file may be included more
+// than once per page: top-level code declares only functions and guards its
+// listeners.
+window.htmxoSelectionState = window.htmxoSelectionState || new Map();
+
+function htmxoSelectionRoot(target) {
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    const root = el && (el.closest('[data-htmxo-select]') || el.querySelector('[data-htmxo-select]'));
+    if (!root) throw new Error('htmxoSelectionRoot: no selectable table at ' + target);
+    return root;
+}
+function htmxoSelectionRows(root) {
+    return Array.from(root.querySelector('table').tBodies[0].rows).filter(r => r.hasAttribute('aria-selected'));
+}
+function htmxoSelectionKey(row) { return row.dataset.htmxoSelectKey ?? row.id; }
+function htmxoSelectionOf(root) {
+    const scope = [root.dataset.htmxoSelect, root.dataset.htmxoSelectForm || '', location.pathname].join('|');
+    let state = window.htmxoSelectionState.get(scope);
+    if (!state) {
+        // First sight of this selection: rows the server rendered selected.
+        state = {keys: new Set(htmxoSelectionRows(root).filter(r => r.getAttribute('aria-selected') === 'true').map(htmxoSelectionKey)),
+                 anchor: null, active: null};
+        window.htmxoSelectionState.set(scope, state);
+    }
+    return state;
+}
+
+// Apply the keyed state to the current rows; rebuild the submitted inputs,
+// the count and `data-htmxo-needs-selection` controls; announce the change.
+function htmxoSelectionUpdate(root) {
+    const state = htmxoSelectionOf(root);
+    const rows = htmxoSelectionRows(root);
+    const present = new Set(rows.map(htmxoSelectionKey));
+    // A key whose row left the table (deleted, re-rendered away) is dropped.
+    state.keys = new Set(Array.from(state.keys).filter(k => present.has(k)));
+    if (!present.has(state.anchor)) state.anchor = null;
+    if (!present.has(state.active)) state.active = null;
+    const focusable = rows.find(r => htmxoSelectionKey(r) === state.active) || rows.find(r => !r.hidden) || rows[0];
+    rows.forEach(r => {
+        const key = htmxoSelectionKey(r);
+        r.setAttribute('aria-selected', state.keys.has(key) ? 'true' : 'false');
+        if (key === state.active) r.dataset.htmxoActive = ''; else delete r.dataset.htmxoActive;
+        r.tabIndex = r === focusable ? 0 : -1;
+    });
+    const selected = rows.filter(r => state.keys.has(htmxoSelectionKey(r)));
+    const submitted = selected.filter(r => r.dataset.htmxoSelectSubmit !== 'false');
+    const name = root.dataset.htmxoSelect, form = root.dataset.htmxoSelectForm;
+    root.querySelector(':scope > [data-htmxo-selection-inputs]').replaceChildren(...submitted.map(r => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = name;
+        input.value = r.dataset.htmxoSelectValue ?? htmxoSelectionKey(r);
+        if (form) input.setAttribute('form', form);
+        return input;
+    }));
+    const hidden = selected.filter(r => r.hidden).length;
+    const count = root.querySelector(':scope > div > .htmxo-selection-bar > [data-htmxo-selection-count]');
+    if (count) count.textContent = selected.length + ' selected' + (hidden ? ' (' + hidden + ' hidden by the filter)' : '');
+    document.querySelectorAll('[data-htmxo-needs-selection]').forEach(control => {
+        if (control.dataset.htmxoNeedsSelection === name) control.disabled = submitted.length === 0;
+    });
+    root.dispatchEvent(new CustomEvent('htmxo:selection-changed', {bubbles: true,
+        detail: {name, keys: selected.map(htmxoSelectionKey), rows: selected, submitted, hidden}}));
+}
+
+// Select exactly `keys` (row keys; [] clears), e.g. after a bulk action.
+function htmxoSelectRows(target, keys) {
+    const root = htmxoSelectionRoot(target);
+    htmxoSelectionOf(root).keys = new Set(keys);
+    htmxoSelectionUpdate(root);
+}
+function htmxoSelectedKeys(target) {
+    const root = htmxoSelectionRoot(target);
+    return htmxoSelectionRows(root).filter(r => r.getAttribute('aria-selected') === 'true').map(htmxoSelectionKey);
+}
+
+function htmxoSelectionShown(root) { return htmxoSelectionRows(root).filter(r => !r.hidden); }
+function htmxoSelectionRange(root, from, to) {
+    const shown = htmxoSelectionShown(root);
+    const a = shown.indexOf(from), b = shown.indexOf(to);
+    return a < 0 || b < 0 ? [to] : shown.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+// A click (or Space/Enter, as a toggle) on `row`: plain selects only it,
+// Ctrl/Cmd toggles it, Shift selects the shown range from the anchor.
+function htmxoSelectionClick(root, row, mods) {
+    const state = htmxoSelectionOf(root);
+    const key = htmxoSelectionKey(row);
+    const anchor = htmxoSelectionRows(root).find(r => htmxoSelectionKey(r) === state.anchor);
+    if (mods.shiftKey && anchor) {
+        state.keys = new Set(htmxoSelectionRange(root, anchor, row).map(htmxoSelectionKey));
+    } else {
+        if (mods.ctrlKey || mods.metaKey) {
+            if (state.keys.has(key)) state.keys.delete(key); else state.keys.add(key);
+        } else {
+            state.keys = new Set([key]);
+        }
+        state.anchor = key;
+    }
+    state.active = key;
+    htmxoSelectionUpdate(root);
+    row.focus({preventScroll: true});
+}
+function htmxoSelectionKeydown(root, row, e) {
+    const state = htmxoSelectionOf(root);
+    const key = htmxoSelectionKey(row);
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        state.keys = new Set(htmxoSelectionShown(root).map(htmxoSelectionKey));
+    } else if (e.ctrlKey || e.metaKey || e.altKey) {
+        return;
+    } else if (e.key === ' ' || e.key === 'Enter') {
+        htmxoSelectionClick(root, row, {shiftKey: e.shiftKey, ctrlKey: true});
+        e.preventDefault();
+        return;
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const shown = htmxoSelectionShown(root);
+        const at = shown.indexOf(row);
+        const next = shown[e.key === 'ArrowDown' ? Math.min(at + 1, shown.length - 1) : Math.max(at - 1, 0)];
+        if (!next) return;
+        if (e.shiftKey) {
+            if (state.anchor === null) state.anchor = key;
+            const anchor = shown.find(r => htmxoSelectionKey(r) === state.anchor) || row;
+            state.keys = new Set(htmxoSelectionRange(root, anchor, next).map(htmxoSelectionKey));
+        } else {
+            state.keys = new Set([htmxoSelectionKey(next)]);
+            state.anchor = htmxoSelectionKey(next);
+        }
+        state.active = htmxoSelectionKey(next);
+        htmxoSelectionUpdate(root);
+        next.focus({preventScroll: true});
+        next.scrollIntoView({block: 'nearest', inline: 'nearest'});
+        e.preventDefault();
+        return;
+    } else if (e.key === 'Escape') {
+        state.keys = new Set([key]);
+        state.anchor = key;
+    } else {
+        return;
+    }
+    state.active = key;
+    htmxoSelectionUpdate(root);
+    e.preventDefault();
+}
+
+// The selectable row an event targets, unless it lands on a control of its
+// own (a link, button, input, label, per-row form, …), which keeps its own
+// behaviour. Returns [root, row] or null.
+function htmxoSelectionTarget(e) {
+    const row = e.target.closest && e.target.closest('tr[aria-selected]');
+    const root = row && row.closest('[data-htmxo-select]');
+    if (!root || !htmxoSelectionRows(root).includes(row)) return null;
+    const control = e.target.closest('a,button,input,textarea,select,label,form,summary,[contenteditable]');
+    return control && row.contains(control) ? null : [root, row];
+}
+function htmxoSelectionRestore(elt) {
+    if (!elt || !elt.querySelectorAll) return;
+    const roots = new Set(elt.querySelectorAll('[data-htmxo-select]'));
+    const around = elt.closest && elt.closest('[data-htmxo-select]');
+    if (around) roots.add(around);
+    roots.forEach(htmxoSelectionUpdate);
+}
+if (!window.htmxoSelectionBound) {
+    window.htmxoSelectionBound = true;
+    // Shift-click extends a range; it must not select page text.
+    document.addEventListener('mousedown', e => {
+        if (e.shiftKey && htmxoSelectionTarget(e)) e.preventDefault();
+    });
+    document.addEventListener('click', e => {
+        const control = e.target.closest && e.target.closest('[data-htmxo-select-all],[data-htmxo-select-clear]');
+        if (control) {
+            const root = control.closest('[data-htmxo-select]');
+            htmxoSelectRows(root, 'htmxoSelectAll' in control.dataset ? htmxoSelectionShown(root).map(htmxoSelectionKey) : []);
+            return;
+        }
+        const hit = htmxoSelectionTarget(e);
+        if (hit) htmxoSelectionClick(hit[0], hit[1], e);
+    });
+    document.addEventListener('keydown', e => {
+        const hit = !e.defaultPrevented && e.target.matches && e.target.matches('tr[aria-selected]') && htmxoSelectionTarget(e);
+        if (hit) htmxoSelectionKeydown(hit[0], hit[1], e);
+    });
+    document.addEventListener('htmxo:table-filtered', e => {
+        const root = e.target.closest('[data-htmxo-select]');
+        if (root) htmxoSelectionUpdate(root);
+    });
+    // htmx announces every processed root (the body, then each swap) with a
+    // bubbling htmx:load; a page without htmx restores once, on load.
+    document.addEventListener('htmx:load', e => htmxoSelectionRestore(e.target));
+    document.addEventListener('DOMContentLoaded', () => htmxoSelectionRestore(document.body));
+}
+// Included inside swapped-in content, this script runs after that content's
+// htmx load event: restore what is already in the document.
+if (document.body) htmxoSelectionRestore(document.body);
 
 // Read a table's CURRENT client-side sort state. `target` is a CSS selector
 // or an element (the <table>, or any node inside or around it). Returns
@@ -12447,7 +12734,7 @@ function downloadTableCsv(btn, filename) {
 end
 
 """
-    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
+    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
@@ -12465,6 +12752,10 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 - `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
 - `cell(value, column_name, row_index)`: custom cell renderer (default: `string(value)`)
 - `class`: table CSS class (default `"striped"`)
+- `searchable`: client-side search over the rows (default `false`); see
+  [`sortable_table`](@ref)
+- `search_text(row)`: optional replacement for a row's searchable text, called
+  with each Tables.jl row
 - Extra kwargs are forwarded to `h.table()`
 
 # Example
@@ -12480,12 +12771,13 @@ page = htmx(
 )
 ```
 """
-function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", kwargs...)
+function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, kwargs...)
     cols = Tables.columnnames(Tables.columns(table))
 
     body_rows = [
         h.tr([h.td(isnothing(cell) ? string(Tables.getcolumn(row, c)) : cell(Tables.getcolumn(row, c), c, ri))
-              for c in cols]...)
+              for c in cols]...;
+             (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
@@ -12496,7 +12788,8 @@ end
 """
     sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
                    download=false, download_filename=nothing, caption=nothing,
-                   default_sort=nothing, kwargs...)
+                   default_sort=nothing, searchable=false, selectable=nothing,
+                   select_form=nothing, kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -12532,8 +12825,91 @@ wrapper instead of widening the page.
   It **declares** the order, it does not perform it: `sortable_table` receives
   pre-built row nodes, so the caller must emit `rows` in that order. Requires
   `sortable=true` and a `String` header at `col`.
+- `searchable`: add a labelled client-side search field above the table
+  (default `false`), with a live "N of M rows shown" count as its helper text
+  and a "No matching rows" state below. See *Client-side search* below.
+- `selectable`: opt in to multi-row selection, naming the hidden inputs the
+  selection submits (e.g. `selectable="rows"`). See *Row selection* below.
+- `select_form`: the `id` of the form those inputs submit with; they carry
+  the HTML `form` attribute, so the table need not sit inside the form.
 
 Other keyword arguments behave the same as in [`render_table`](@ref).
+
+# Client-side search
+The search matches a case-insensitive phrase against a row's visible cell text,
+or against its `data-htmxo-search` attribute when the row sets one (for
+metadata absent from its cells; it does not affect sorting). A `detail-<key>`
+companion row is never matched or counted; it hides with its master and keeps
+its place through a sort, and sorting a filtered table keeps the filter. The
+field, count and empty state are client-side affordances and are left out of
+`?plain`/Markdown. Search needs [`sortable_table_js`](@ref) on the page.
+[`master_detail_table`](@ref)`(...; searchable=true)` shares this search.
+
+App filters compose with the phrase search through named row predicates:
+
+```js
+htmxoTableFilter('#entries', 'unassigned', row => row.dataset.tac === 'Unassigned');
+htmxoTableFilter('#entries', 'unassigned', null);   // remove it again
+```
+
+`htmxoTableFilter(target, name, predicate)` takes the table, its wrapper or an
+element inside it (or a selector), registers `predicate(row, ctx)` and filters
+again. A row is shown only when every predicate returns `true`. `ctx` holds
+`query` (the normalised lower-case phrase), `input` (the field's raw value) and
+`text` (the row's lower-case search text). The built-in phrase match is the
+predicate named `'search'`; registering that name replaces it, e.g. with a
+regular-expression mode. Every predicate runs for every row on every pass,
+including when the field is empty. Registrations live on the table's wrapper
+element, so content that swaps the table in registers them again.
+
+After each pass the wrapper fires a bubbling `htmxo:table-filtered` event whose
+`detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
+name that first rejected them) and `notes`, an array a listener may push short
+strings into; the count line appends them after ` · `:
+
+```js
+document.addEventListener('htmxo:table-filtered', e => {
+    const n = e.detail.hiddenBy.unassigned;
+    if (n) e.detail.notes.push(n + ' already categorized hidden');
+});
+```
+
+# Row selection
+With `selectable=name`, every keyed row (`data-htmxo-select-key`, else its
+`id`; `detail-<key>` companions excluded) becomes a selectable grid row:
+`aria-selected` on rows, `aria-multiselectable` on the table, and one roving
+`tabindex="0"`. A click selects one row, Ctrl/Cmd-click toggles one,
+Shift-click and Shift+↑/↓ select the shown range from the anchor, ↑/↓ move,
+Ctrl/Cmd+A selects every shown row, Escape collapses to the focused row and
+Space/Enter toggle it. Shift-click does not select page text. Clicks on a
+row's own links, buttons, inputs, labels and forms keep their behaviour.
+"Shown" means not hidden, e.g. by the search.
+
+The selection is submitted as one hidden `<input name=name>` per selected row,
+with the row's `data-htmxo-select-value` (else its key) as the value, inside
+the selectable wrapper and associated with `select_form`. A row with
+`data-htmxo-select-submit="false"` is selectable but not submitted. Above the
+table, a live count ("3 selected (1 hidden by the filter)") sits beside
+*Select all shown* and *Clear* buttons. A control carrying
+`data-htmxo-needs-selection=name` is disabled while nothing would be
+submitted, so a bulk form needs no script:
+
+```julia
+h.form(; id="bulk", hx_post="/bulk")(h.button("Archive"; data_htmxo_needs_selection="rows", disabled=true))
+sortable_table(headers, [h.tr(cells...; data_htmxo_select_key=r.id) for r in records];
+    selectable="rows", select_form="bulk", searchable=true)
+```
+
+State is keyed per selection (input name, form and page path) and per row key,
+not per element, so it survives sorting, filtering, a row's `outerHTML` swap
+and a re-render of the table; rows that leave the table leave the selection.
+Rows rendered `aria_selected="true"` are the initial selection. Each change
+fires a bubbling `htmxo:selection-changed` event on the wrapper with `detail`
+`{name, keys, rows, submitted, hidden}`. `htmxoSelectRows(target, keys)` sets
+the selection (`[]` clears) and `htmxoSelectedKeys(target)` reads it. The
+selected row is tinted and the active row marked with `--htmxo-accent`
+(override the tint with `--htmxo-selected-row`). Selection needs
+[`sortable_table_js`](@ref) on the page.
 
 # Example
 ```julia
@@ -12567,9 +12943,17 @@ Pair with [`sortable_table_js`](@ref) (which ships `htmxoSortState`) and
 function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
-                        caption=nothing, default_sort=nothing, role="grid", kwargs...)
+                        caption=nothing, default_sort=nothing, role="grid",
+                        searchable::Bool=false, selectable=nothing, select_form=nothing,
+                        kwargs...)
     if !isnothing(default_sort) && !sortable
         error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
+    end
+    isnothing(select_form) || !isnothing(selectable) || throw(ArgumentError(
+        "sortable_table: select_form requires selectable=<input name>"))
+    if !isnothing(selectable)
+        rows = Any[_selectable_row(row) for row in rows]
+        kwargs = (; aria_multiselectable="true", kwargs...)
     end
     ds = _resolve_default_sort(default_sort, headers)
 
@@ -12604,7 +12988,7 @@ function sortable_table(headers, rows;
             onclick="downloadTableCsv(this, '$(fname)')") :
         nothing
 
-    if !isnothing(caption)
+    framed = if !isnothing(caption)
         actions = download ? (download_btn,) : ()
         fig_id = isnothing(id) ? nothing : "tbl-$id"
         with_caption(caption, table_wrap; actions, id=fig_id)
@@ -12620,6 +13004,90 @@ function sortable_table(headers, rows;
     else
         table_wrap
     end
+    searched = searchable ? _searchable_table(framed, rows) : framed
+    isnothing(selectable) ? searched : _selectable_table(searched, rows, selectable; form=select_form)
+end
+
+# A selectable row's key: `data-htmxo-select-key`, else its id. Keyed state
+# survives sorting, filtering and swaps that replace the row's element.
+# Node attribute keys are stored dashed (`HTMX._attr_symbol`).
+_select_key(row) = row isa Node ?
+    get(HTMX.attrs(row), Symbol("data-htmxo-select-key"), get(HTMX.attrs(row), :id, nothing)) : nothing
+
+# A copy of a keyed master row carrying the grid row semantics; the caller's
+# node is left untouched and a caller-set `aria-selected` preselects it. The
+# runtime moves the single `tabindex="0"` (roving focus) onto the active row.
+function _selectable_row(row)
+    (_is_master_row(row) && !isnothing(_select_key(row)) && HTMX.tag(row) === :tr) || return row
+    attrs = copy(HTMX.attrs(row))
+    get!(attrs, Symbol("aria-selected"), "false")
+    get!(attrs, :tabindex, "-1")
+    Node(HTMX.tag(row), attrs, HTMX.children(row))
+end
+
+_is_selected_row(row) = row isa Node && string(get(HTMX.attrs(row), Symbol("aria-selected"), "false")) == "true"
+
+# Selection tint, active-row marker and focus ring. Box shadows tint the cells
+# over any striped/hover background without moving layout, and
+# `--htmxo-accent` follows the light/dark theme. Unlayered, so the compact
+# bar buttons beat Pico's unlayered button rule.
+_selection_css() = """
+.htmxo-selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
+.htmxo-selection-bar > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
+.htmxo-selectable-table tbody > tr[aria-selected] { cursor: default; }
+.htmxo-selectable-table tbody > tr[aria-selected="true"] > td { box-shadow: inset 0 0 0 100vmax var(--htmxo-selected-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 22%, transparent)); }
+.htmxo-selectable-table tbody > tr[data-htmxo-active] > td:first-child { box-shadow: inset 3px 0 0 var(--htmxo-accent, Highlight); }
+.htmxo-selectable-table tbody > tr[aria-selected="true"][data-htmxo-active] > td:first-child { box-shadow: inset 3px 0 0 var(--htmxo-accent, Highlight), inset 0 0 0 100vmax var(--htmxo-selected-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 22%, transparent)); }
+.htmxo-selectable-table tbody > tr[aria-selected]:focus-visible { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: -2px; }
+"""
+
+# The opt-in row selection shared by `sortable_table` and
+# `master_detail_table`: a live count with select-all-shown / clear controls,
+# the (possibly searchable) table, and a holder for the hidden inputs the
+# runtime keeps in step with the selection. `form` names the form those
+# inputs submit with (the HTML `form` attribute), so the table need not sit
+# inside it. The bar is client-side only, like the search field.
+function _selectable_table(inner, rows, name; form=nothing)
+    name isa AbstractString && !isempty(name) || throw(ArgumentError(
+        "selectable must be the non-empty name of the submitted inputs; got $(repr(name))"))
+    form_attrs = isnothing(form) ? (;) : (; data_htmxo_select_form=string(form))
+    h.div(; class="htmxo-selectable-table", data_htmxo_select=name, form_attrs...)(
+        html_only(h.div(h.style(Raw(_selection_css())),
+            h.p(; class="htmxo-selection-bar")(
+                h.small("$(count(_is_selected_row, rows)) selected";
+                    data_htmxo_selection_count="", role="status", aria_live="polite"),
+                h.button("Select all shown"; type="button", class="secondary outline", data_htmxo_select_all=""),
+                h.button("Clear"; type="button", class="secondary outline", data_htmxo_select_clear="")))),
+        inner,
+        html_only(h.div(; hidden=true, data_htmxo_selection_inputs="")),
+    )
+end
+
+# A master row, as the client-side search counts it: every body row except a
+# `detail-<key>` companion, which follows its master's visibility.
+_is_master_row(row) = !(row isa Node && startswith(string(get(HTMX.attrs(row), :id, "")), "detail-"))
+_row_hidden(row) = row isa Node && get(HTMX.attrs(row), :hidden, false) ∉ (false, nothing)
+# One wording for the server's first paint and `htmxoFilterTable`'s updates.
+_table_count_text(shown, total) = "$shown of $total rows shown"
+
+# The client-side search shared by `sortable_table` and `master_detail_table`:
+# a labelled field with a live shown-count as its helper text, the table, and
+# an empty state. The field and its texts are client-side affordances
+# (`html_only`): in Markdown the label would run into the table's header row.
+# `field=false` keeps a hidden scaffold that a hierarchy's branch toggles
+# filter through. The input's `aria-label` keeps the count out of its name.
+function _searchable_table(table, rows; field::Bool=true, controls=nothing)
+    masters = [row for row in rows if _is_master_row(row)]
+    count_text = _table_count_text(count(!_row_hidden, masters), length(masters))
+    h.div(; class="htmxo-searchable-table")(
+        html_only(h.label("Search",
+            h.input(; type="search", aria_label="Search", oninput="htmxoFilterTable(this)"),
+            h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
+            hidden=!field)),
+        (isnothing(controls) ? () : (html_only(controls),))...,
+        table,
+        html_only(h.p("No matching rows"; hidden=true, data_htmxo_table_empty="")),
+    )
 end
 
 # --- Master / detail tables ---
@@ -13009,15 +13477,16 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             detail_class=nothing,
                             master_attrs=(),
                             initially_open::Bool=false,
-                            detail_url=nothing)
+                            detail_url=nothing,
+                            row_toggle::Bool=true)
     safe = _md_safe_key(key)
     lazy = !isnothing(detail_url)
-    tr_kwargs = Dict{Symbol,Any}(
-        :id      => "row-$safe",
-        :onclick => lazy ?
-            master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
-            master_detail_toggle_js(safe),
-    )
+    tr_kwargs = Dict{Symbol,Any}(:id => "row-$safe")
+    # A selectable table's row click selects; its native detail control opens
+    # the detail instead (`master_detail_table(...; selectable)`).
+    row_toggle && (tr_kwargs[:onclick] = lazy ?
+        master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
+        master_detail_toggle_js(safe))
     # Every master row is expandable, so it always carries aria-expanded
     # reflecting state: "true" open, "false" collapsed. This matches what
     # master_detail_toggle_js sets on click (so the initial render and the
@@ -13104,6 +13573,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `branches_collapsible`: with `children`, default `true`. Set `false` to
   keep every branch expanded without disclosure controls. This overrides
   `initially_open` for branch visibility only; detail expansion stays independent.
+- `expand_controls`: with collapsible `children`, add *Expand all* and
+  *Collapse all* buttons above the table (default `false`). They open or close
+  every branch at once; detail rows keep their own state and collapsed
+  details stay lazy. While a search is active they act on the matching paths
+  instead: *Collapse all* keeps only the matching rows and their ancestors,
+  *Expand all* shows every match again, and clearing the search restores the
+  branches as they were. The buttons carry `aria-controls` for the table body
+  (`id`, or one derived from the root keys) and are left out of `?plain`.
 - `detail_toggle`: every row with a detail carries a native detail button
   (`aria-controls`, `aria-expanded`, Enter/Space) in its first cell, beside
   that cell's content, which may itself be a link. With the default `:button`,
@@ -13123,8 +13600,18 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   text, retains matching paths, and reveals descendants of a matching group.
   It temporarily reveals matching branches; clearing restores branch and
   detail state. Collapsed details stay lazy. Only master text is searched.
+  The live "N of M rows shown" count, app predicates (`htmxoTableFilter`) and
+  the `htmxo:table-filtered` event are shared with
+  [`sortable_table`](@ref)`(...; searchable=true)`; see its *Client-side search*.
 - `search_text(item)`: optional replacement for a row's searchable text; useful
   for metadata absent from its visible cells. It does not affect sorting.
+- `selectable`, `select_form`: multi-row selection submitted as hidden inputs
+  named `selectable`; see *Row selection* in [`sortable_table`](@ref). Every
+  master row is keyed by its row id. A row click then selects instead of
+  toggling the detail; the row's native detail control opens it.
+- `select_value(item)`: the submitted value for a row (default: its `key`).
+- `select_submit(item)`: return `false` to keep a row selectable but leave it
+  out of the submitted inputs.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
@@ -13156,9 +13643,20 @@ function master_detail_table(headers, items;
                              detail_toggle::Symbol=:button,
                              searchable::Bool=false,
                              search_text=nothing,
+                             selectable=nothing,
+                             select_form=nothing,
+                             select_value=nothing,
+                             select_submit=nothing,
+                             expand_controls::Bool=false,
                              kwargs...)
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
+    # Refused: without collapsible branches there is nothing to expand.
+    expand_controls && (isnothing(children) || !branches_collapsible) && throw(ArgumentError(
+        "master_detail_table: expand_controls needs `children` with collapsible branches"))
+    selecting = !isnothing(selectable)
+    selecting || all(isnothing, (select_form, select_value, select_submit)) || throw(ArgumentError(
+        "master_detail_table: select_form/select_value/select_submit require selectable=<input name>"))
     ncols = length(headers)
     (!isnothing(children) || !isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
         "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
@@ -13198,6 +13696,22 @@ function master_detail_table(headers, items;
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
         cells, row_attrs = _md_master_row(master(item))
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
+        if selecting
+            # `master_attrs` or the master <tr> may preselect a row or give its
+            # value. The submitted value defaults to the caller's own key, not
+            # the sanitised row id the runtime keys its state by.
+            given = Set(_md_attr_name(k) for k in keys(attrs))
+            Symbol("aria-selected") in given || (attrs[Symbol("aria-selected")] = "false")
+            attrs[:tabindex] = "-1"
+            value = Symbol("data-htmxo-select-value")
+            if !isnothing(select_value)
+                attrs[value] = string(select_value(item))
+            elseif !(value in given)
+                attrs[value] = string(item_key)
+            end
+            isnothing(select_submit) || select_submit(item) ||
+                (attrs[Symbol("data-htmxo-select-submit")] = "false")
+        end
         # Every expandable row carries a native detail control in its first
         # cell, so keyboard and screen-reader users reach the detail too (the
         # row click is a pointer-only shortcut). Sorting, search and CSV read
@@ -13245,7 +13759,8 @@ function master_detail_table(headers, items;
         else
             (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
-                                    initially_open=open && ancestors_open, detail_url=url)
+                                    initially_open=open && ancestors_open, detail_url=url,
+                                    row_toggle=!selecting)
             push!(rows, m, d)
         end
         if !isnothing(children)
@@ -13258,6 +13773,11 @@ function master_detail_table(headers, items;
         visit(item, "", 1, true)
     end
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
+    selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
+    # The expand controls name the body they drive; a body without a caller id
+    # gets one from its root keys, which are unique on the page.
+    body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
+    expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
     table = sortable_table(headers, rows; table_attrs..., kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
@@ -13265,6 +13785,8 @@ function master_detail_table(headers, items;
     rules = """
     [data-htmxo-hierarchy] > tbody > tr > td:first-child > button { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
     [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
+    .htmxo-tree-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
+    .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
@@ -13273,13 +13795,16 @@ function master_detail_table(headers, items;
     """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
                   for level in 2:max_level[]), "\n")
     table = h.div(h.style(Raw(rules)), table)
-    # The search field and its empty state are client-side affordances: the
-    # label would otherwise run into the Markdown table's header row.
-    (searchable || !isnothing(children)) ? h.div(; class="htmxo-searchable-table")(
-        html_only(h.label("Search", h.input(; type="search", oninput="htmxoFilterTable(this)"); hidden=!searchable)),
-        table,
-        html_only(h.p("No matching rows"; hidden=true, data_htmxo_table_empty="", role="status")),
-    ) : table
+    # A hierarchy always carries the (possibly hidden) search scaffold: its
+    # branch toggles and the search share one visibility pass.
+    controls = expand_controls ? h.p(; class="htmxo-tree-controls")(
+        h.button("Expand all"; type="button", class="secondary outline", aria_controls=body_id,
+            onclick="htmxoTreeAll(this, true)"),
+        h.button("Collapse all"; type="button", class="secondary outline", aria_controls=body_id,
+            onclick="htmxoTreeAll(this, false)")) : nothing
+    searched = (searchable || !isnothing(children)) ?
+        _searchable_table(table, rows; field=searchable, controls) : table
+    selecting ? _selectable_table(searched, rows, selectable; form=select_form) : searched
 end
 
 # --- Formatting helpers ---
@@ -17284,8 +17809,9 @@ overlay_bar() = (overlay_bar_style(), overlay_bar_script())
 """
     compose_box_styles()
 
-CSS for the [`compose_box`](@ref) auto-growing compose textarea + the toast it
-raises on a failed submit. Deliberately **unlayered** (not inside
+CSS for the [`compose_box`](@ref) auto-growing compose textarea. The toast it
+raises on a failed submit is styled by [`toast_styles`](@ref). Deliberately
+**unlayered** (not inside
 `@layer htmxo`) so the `.htmxo-compose-textarea` class beats Pico's unlayered
 `textarea { resize: … }` rule — a layered rule would lose regardless of
 specificity and the drag-handle/scrollbar would reappear.
@@ -17294,18 +17820,6 @@ compose_box_styles() = h.style(Raw(raw"""
 .htmxo-compose-textarea {
     resize: none; overflow: hidden; field-sizing: content; line-height: 1.4;
 }
-.htmxo-toast {
-    position: fixed; bottom: 1rem; right: 1rem; z-index: 9999;
-    padding: 0.5rem 0.85rem; border-radius: 0.3rem; font-size: 0.85em;
-    background: var(--pico-card-background-color, #fff);
-    border: 1px solid var(--pico-muted-border-color, #ccc);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15); max-width: 28rem;
-    opacity: 0; transform: translateY(0.5rem);
-    transition: opacity 0.3s ease, transform 0.3s ease;
-}
-.htmxo-toast-show { opacity: 1; transform: translateY(0); }
-.htmxo-toast-error { border-color: var(--pico-color-red-500, #d32f2f); color: var(--pico-color-red-500, #d32f2f); }
-.htmxo-toast-info { color: var(--pico-color, inherit); }
 """))
 
 """
@@ -17316,12 +17830,13 @@ JS driving [`compose_box`](@ref): auto-grow (no-op when the browser supports
 Shift+Enter-newline, localStorage draft persistence for `.htmxo-compose-draft`
 elements (keyed by `data-draft-key`), and a submit guard on
 `.htmxo-compose-form` forms (clear drafts + reset on 2xx, toast on
-failure / network error). Re-binds on `htmx:afterSwap` and
+failure / network error, through [`toast_script`](@ref)'s `window.htmxoToast`).
+Re-binds on `htmx:afterSwap` and
 `htmx:afterSettle`; idempotent per element. The swap pass covers swaps
 that never settle (one whose nodes an `afterSwap` listener detaches —
 the `:auto` terminal unwrap — fires afterSwap but never afterSettle;
-snag compose-afterswa-9ae50ac9). Exposes `window.htmxoToast(text,
-status)` and `window.htmxoComposeRebind(root)` for reuse. Body-listener
+snag compose-afterswa-9ae50ac9). Exposes `window.htmxoComposeRebind(root)`
+for reuse. Body-listener
 attachment is deferred to `DOMContentLoaded` so the script is safe to
 inject in `<head>`.
 """
@@ -17372,19 +17887,7 @@ compose_box_script() = h.script(Raw(raw"""
             try { localStorage.removeItem(k); } catch (e) {}
         });
     }
-    function toast(text, status) {
-        var t = document.createElement('div');
-        t.className = 'htmxo-toast htmxo-toast-' + (status || 'info');
-        t.textContent = text;
-        document.body.appendChild(t);
-        void t.offsetWidth;
-        t.classList.add('htmxo-toast-show');
-        setTimeout(function() {
-            t.classList.remove('htmxo-toast-show');
-            setTimeout(function() { t.remove(); }, 350);
-        }, 4000);
-    }
-    window.htmxoToast = toast;
+    function toast(text, status) { window.htmxoToast(text, status); }
     window.htmxoComposeRebind = function(root) { restoreDrafts(root); bindTextareas(root); };
     function init() {
         restoreDrafts(document);
@@ -17434,7 +17937,164 @@ Combined style + script nodes for [`compose_box`](@ref). Injected into the
 page head by `htmx(...)` when `compose=true` (the default), mirroring
 [`request_feedback`](@ref).
 """
-compose_box_assets() = (compose_box_styles(), compose_box_script())
+compose_box_assets() = (toast_styles(), toast_script(), compose_box_styles(), compose_box_script())
+
+# --- Toasts ---
+
+"""
+    toast_styles()
+
+CSS for the [`toast_script`](@ref) notifications: a fixed stack in the
+bottom-right corner (no layout shift), each toast a card with a status edge
+from `--htmxo-success` / `--htmxo-accent` / `--htmxo-error` and a dismiss
+button. Light and dark follow Pico's card colours, else the system
+`Canvas`/`CanvasText` of the page's colour scheme. Unlayered, so the dismiss
+button beats Pico's unlayered `button` rule. [`htmx`](@ref) includes it.
+"""
+toast_styles() = h.style(Raw(raw"""
+.htmxo-toasts {
+    position: fixed; inset-block-end: 1rem; inset-inline-end: 1rem; z-index: 9999;
+    display: flex; flex-direction: column; align-items: flex-end; gap: .5rem;
+    max-width: min(28rem, calc(100vw - 2rem)); pointer-events: none;
+}
+.htmxo-toast {
+    pointer-events: auto; display: flex; align-items: flex-start; gap: .5rem;
+    padding: .5rem .4rem .5rem .85rem; border-radius: .3rem; font-size: .9em; line-height: 1.4;
+    background: var(--pico-card-background-color, Canvas); color: var(--pico-color, CanvasText);
+    border: 1px solid var(--pico-muted-border-color, color-mix(in srgb, currentColor 25%, transparent));
+    border-inline-start: .25rem solid var(--htmxo-accent, Highlight);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .2);
+    opacity: 0; transform: translateY(.5rem); transition: opacity .25s ease, transform .25s ease;
+}
+.htmxo-toast-show { opacity: 1; transform: none; }
+.htmxo-toast-success { border-inline-start-color: var(--htmxo-success, #2a9d8f); }
+.htmxo-toast-error { border-inline-start-color: var(--htmxo-error, #e76f51); }
+.htmxo-toast > span { flex: 1; overflow-wrap: anywhere; }
+.htmxo-toast > .htmxo-toast-close {
+    width: auto; margin: 0; padding: 0 .3rem; border: none; border-radius: .2rem;
+    background: transparent; color: inherit; font: inherit; line-height: 1.4;
+    box-shadow: none; cursor: pointer; opacity: .7;
+}
+.htmxo-toast > .htmxo-toast-close:hover, .htmxo-toast > .htmxo-toast-close:focus-visible { opacity: 1; }
+.htmxo-toast > .htmxo-toast-close:focus-visible { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) { .htmxo-toast { transition: none; transform: none; } }
+"""))
+
+"""
+    toast_script()
+
+The page shell's notification runtime, which [`htmx`](@ref) includes:
+
+- `window.htmxoToast(text, status)` shows a toast (`status` `"success"`,
+  `"info"` (default) or `"error"`). Toasts stack in one polite live region
+  (`role="status"`); an error toast is also `role="alert"`. Each has a
+  Dismiss button and leaves after 4 s (8 s for an error), paused while
+  hovered or focused.
+- **A route names its success toast** with the `X-HTMXO-Toast` response header
+  (percent-encoded text; [`hx_response`](@ref)`(value; toast="Saved")` sets
+  it). It is shown once, after a successful request: a polled `:auto` mutation
+  carries it on its terminal response only. A failed request shows no success
+  toast; its error presentation is unchanged.
+- **An element can toast its own response.** On a requesting element (or an
+  ancestor), `data-htmxo-toast="body"` (or an empty value) toasts the
+  response's text on success, and any other value is the success text itself.
+  On failure such an element shows an error toast: a short `text/plain` body,
+  else "Request failed (HTTP <status>)". This suits `hx-swap="none"` actions
+  whose response is their outcome message. A route's header text wins.
+"""
+toast_script() = h.script(Raw(raw"""
+(function() {
+    if (window.__htmxoToastBound) return;
+    window.__htmxoToastBound = true;
+    var DURATION = { success: 4000, info: 4000, error: 8000 };
+    // The live region exists before the first message, so screen readers
+    // announce it; a swap that replaced the body gets a fresh one.
+    function region() {
+        var r = document.getElementById('htmxo-toasts');
+        if (!r && document.body) {
+            r = document.createElement('div');
+            r.id = 'htmxo-toasts';
+            r.className = 'htmxo-toasts';
+            r.setAttribute('role', 'status');
+            r.setAttribute('aria-live', 'polite');
+            document.body.appendChild(r);
+        }
+        return r;
+    }
+    function toast(text, status) {
+        status = status || 'info';
+        var t = document.createElement('div');
+        t.className = 'htmxo-toast htmxo-toast-' + status;
+        if (status === 'error') t.setAttribute('role', 'alert');
+        var msg = document.createElement('span');
+        msg.textContent = text;
+        var close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'htmxo-toast-close';
+        close.setAttribute('aria-label', 'Dismiss');
+        close.textContent = '×';
+        t.appendChild(msg);
+        t.appendChild(close);
+        var timer = null;
+        function dismiss() {
+            clearTimeout(timer);
+            t.classList.remove('htmxo-toast-show');
+            setTimeout(function() { t.remove(); }, 300);
+        }
+        function arm() { clearTimeout(timer); timer = setTimeout(dismiss, DURATION[status] || 4000); }
+        function hold() { clearTimeout(timer); }
+        close.addEventListener('click', dismiss);
+        t.addEventListener('mouseenter', hold);
+        t.addEventListener('mouseleave', arm);
+        t.addEventListener('focusin', hold);
+        t.addEventListener('focusout', arm);
+        region().appendChild(t);
+        void t.offsetWidth;
+        t.classList.add('htmxo-toast-show');
+        arm();
+        return t;
+    }
+    window.htmxoToast = toast;
+
+    function header(xhr, name) {
+        try { return xhr.getResponseHeader(name); } catch (e) { return null; }
+    }
+    function routeText(xhr) {
+        var raw = header(xhr, 'X-HTMXO-Toast');
+        if (!raw) return null;
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+    }
+    function bodyText(xhr) {
+        var body = xhr.responseText || '';
+        if ((header(xhr, 'Content-Type') || '').indexOf('text/plain') >= 0) return body.trim();
+        var doc = new DOMParser().parseFromString(body, 'text/html');
+        return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+    function failureText(xhr) {
+        var body = (xhr.responseText || '').trim();
+        if (body && body.length <= 300 && (header(xhr, 'Content-Type') || '').indexOf('text/plain') >= 0) return body;
+        return xhr.status ? 'Request failed (HTTP ' + xhr.status + ')' : 'Request failed: no response';
+    }
+    document.addEventListener('htmx:afterRequest', function(evt) {
+        var d = evt.detail || {}, xhr = d.xhr;
+        if (!xhr) return;
+        var elt = (d.requestConfig && d.requestConfig.elt) || d.elt;
+        var own = elt && elt.closest ? elt.closest('[data-htmxo-toast]') : null;
+        if (d.successful) {
+            var text = routeText(xhr);
+            if (text === null && own) {
+                var given = own.getAttribute('data-htmxo-toast');
+                text = given && given !== 'body' ? given : bodyText(xhr);
+            }
+            if (text) toast(text, 'success');
+        } else if (own) {
+            toast(failureText(xhr), 'error');
+        }
+    });
+    if (document.body) region();
+    else document.addEventListener('DOMContentLoaded', region);
+})();
+"""))
 
 """
     compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="")

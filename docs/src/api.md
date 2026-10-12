@@ -59,7 +59,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `static_transform(...)` | Convert dynamic responses to static-friendly form (`static_transform(val; record_base)` for recording, `static_transform(val, spec::StaticExport)` for a request-scoped export) |
 | `StaticExport(; url_map, controls, record_base)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
-| `hx_response(...)` | Build a response with HTMX-specific response headers (HX-Trigger, HX-Redirect, HX-Push-Url, HX-Refresh, HX-Reswap, HX-Retarget, HX-Reselect, HX-Location) |
+| `hx_response(...)` | Build a response with HTMX-specific response headers (HX-Trigger, HX-Redirect, HX-Push-Url, HX-Refresh, HX-Reswap, HX-Retarget, HX-Reselect, HX-Location), and the page shell's success toast (`toast=`, see [Success toasts](#success-toasts)) |
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
@@ -89,6 +89,46 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 `throwOnError: false` does not suppress it).
 
 Fragments are not documents and never carry a doctype.
+
+### Success toasts {#success-toasts}
+
+The shell confirms a completed action with one short toast whose text the
+route chooses. Name it on the response:
+
+```julia
+@post save_invoice(; number::String, amount::Float64) =
+    hx_response(invoice_row(store!(number, amount)); toast="Invoice $number saved")
+```
+
+`toast=` sets the `X-HTMXO-Toast` response header (percent-encoded, so any
+text is safe). The shell shows it once, after the request succeeds: inline for
+a fast answer, on the terminal poll response for a polled `:auto` mutation,
+never on the intermediate polls. A failed request shows no success toast; its
+error article and `X-HTMXO-Error-Id` behave as before. A route that names no
+toast stays silent: there is no default text.
+
+For an action whose response *is* its outcome message, typically an
+`hx-swap="none"` button, put `data-htmxo-toast` on the button (or an ancestor):
+
+```julia
+h.button("Stop"; hx_post="/agents/x/interrupt", hx_swap="none", data_htmxo_toast="body")
+```
+
+`"body"` (or an empty value) toasts the response text on success; any other
+value is the success text itself. On failure such an element shows an error
+toast: a short `text/plain` body, else "Request failed (HTTP <status>)". A
+route's `X-HTMXO-Toast` text takes precedence over the element's.
+
+Toasts stack bottom-right in one `role="status"` / `aria-live="polite"` region
+(an error toast is also `role="alert"`), so they cause no layout shift. Each
+has a Dismiss button and leaves after 4 s, 8 s for an error, paused while
+hovered or focused. Colours follow Pico's card tokens or the system colours of
+the page's scheme, with a status edge from `--htmxo-success`,
+`--htmxo-accent` and `--htmxo-error`. Scripts raise the same toast with
+`window.htmxoToast(text, status)` (`"success"`, `"info"`, `"error"`). The
+runtime is [`toast_styles`](@ref) + [`toast_script`](@ref), which every
+`htmx()` shell carries and [`compose_box_assets`](@ref) also includes for
+hand-built heads. `?plain`/Markdown and static export are unaffected.
 
 ### Offline pages — `assets=:vendor`
 

@@ -178,6 +178,106 @@ it spreads cleanly into an htmx `hx-vals`.
     `aria-sort` / the caret on that header); it does not sort `rows` for you.
     It forwards through `render_table` and `master_detail_table` too.
 
+#### Client-side search {#table-search}
+
+`searchable=true` on `sortable_table`, `render_table` or `master_detail_table`
+adds a labelled search field above the table, a live "N of M rows shown" count
+as the field's helper text (`role="status"`, `aria-live="polite"`) and a "No
+matching rows" state below it:
+
+```julia
+sortable_table(["Party", "Category", "Amount"], rows; id="entries", searchable=true)
+render_table(df; searchable=true, search_text=row -> "$(row.party) $(row.iban)")
+```
+
+The search matches a case-insensitive phrase against a row's visible cell text.
+A row can replace that text with a `data-htmxo-search` attribute (in
+`render_table`, with `search_text(row)`), for example to make metadata absent
+from its cells searchable; it does not change sorting. `detail-<key>` companion
+rows are neither matched nor counted: one hides with its master and reopens
+when the master returns, and sorting a filtered table keeps the filter. The
+field, count and empty state are left out of `?plain`/Markdown. Search needs
+`sortable_table_js()` on the page.
+
+App filters compose with the phrase search as named row predicates:
+
+```js
+// Checkbox: show only uncategorised rows, on top of the phrase search.
+htmxoTableFilter('#entries', 'unassigned',
+    checkbox.checked ? row => row.dataset.tac === 'Unassigned' : null);
+
+// Regex mode: 'search' names the built-in phrase match, so this replaces it.
+htmxoTableFilter('#entries', 'search', (row, ctx) =>
+    !ctx.input || new RegExp(ctx.input, 'i').test(ctx.text));
+```
+
+`htmxoTableFilter(target, name, predicate)` accepts the table, its wrapper, an
+element inside it or a selector; it registers `predicate(row, ctx)` (or removes
+the name when `predicate` is `null`) and filters again. A row is shown when
+every predicate returns `true`. `ctx` has `query` (normalised lower-case
+phrase), `input` (the field's raw value) and `text` (the row's lower-case
+search text, ancestor text included in a hierarchy). Each predicate runs for
+every row on every pass, also when the field is empty. Registrations live on
+the wrapper element, so content that swaps the table in registers again.
+
+Each pass fires a bubbling `htmxo:table-filtered` event on the wrapper. Its
+`detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
+that first rejected them) and `notes`, which a listener may extend; the count
+line appends each note after ` · `:
+
+```js
+document.addEventListener('htmxo:table-filtered', e => {
+    const n = e.detail.hiddenBy.unassigned;
+    if (n) e.detail.notes.push(`${n} already categorized hidden`);
+});
+```
+
+#### Row selection {#table-selection}
+
+`selectable="<input name>"` on `sortable_table`, `render_table` or
+`master_detail_table` turns keyed rows into a multi-select grid whose
+selection a bulk form submits with no application script:
+
+```julia
+h.form(; id="bulk", hx_post=string(__self__ / "archive"))(
+    h.button("Archive selected"; data_htmxo_needs_selection="rows", disabled=true))
+sortable_table(["Party", "Amount"],
+    [h.tr(h.td(t.party), h.td(t.amount); data_htmxo_select_key=t.id) for t in transactions];
+    selectable="rows", select_form="bulk", searchable=true)
+# The archive route receives one `rows` value per selected row.
+```
+
+- **Keys.** A row is selectable when it has `data-htmxo-select-key` (else its
+  `id`); `detail-<key>` companions never are. `master_detail_table` keys every
+  master row and submits its `key` unless `select_value(item)` says otherwise.
+- **Interaction.** Click selects one row; Ctrl/Cmd-click toggles; Shift-click
+  and Shift+↑/↓ select the shown range from the anchor; ↑/↓ move; Ctrl/Cmd+A
+  selects every shown row; Escape collapses to the focused row; Space/Enter
+  toggle it. Shift-click does not select text, and clicks on a row's own links,
+  buttons, inputs, labels or forms keep their behaviour. "Shown" excludes rows
+  the search hides. In a `master_detail_table` a row click selects, so the
+  detail opens from the row's native detail control (the ▸ disclosure in a
+  flat table, *Details* in a hierarchy, or the label with `detail_toggle=:label`).
+- **Submission.** One hidden `<input name=...>` per selected row, valued by
+  its `data-htmxo-select-value` (else the key) and associated with
+  `select_form` through the HTML `form` attribute, so the table may live
+  outside the form. `data-htmxo-select-submit="false"` (in `master_detail_table`,
+  `select_submit(item) = false`) keeps a row selectable but unsubmitted.
+- **Feedback.** A live "N selected (M hidden by the filter)" count with
+  *Select all shown* and *Clear* sits above the table. Controls marked
+  `data-htmxo-needs-selection="<input name>"` are disabled while nothing would
+  be submitted. Each change fires a bubbling `htmxo:selection-changed` event
+  with `detail` `{name, keys, rows, submitted, hidden}`.
+- **State.** Selection is keyed per input name, form and page path, not held
+  by DOM nodes: it survives sorting, filtering, a row's `outerHTML` swap and a
+  table re-render, and rows that leave the table leave the selection. Rows
+  rendered `aria_selected="true"` start selected. `htmxoSelectRows(target, keys)`
+  replaces the selection (`[]` clears); `htmxoSelectedKeys(target)` reads it.
+- **Semantics and theme.** `aria-multiselectable` on the table, `aria-selected`
+  on rows, one roving `tabindex="0"`. Selected rows are tinted and the active
+  row marked from `--htmxo-accent` in light and dark; set
+  `--htmxo-selected-row` to change the tint.
+
 ## Layout / widgets
 
 ### Hierarchical master/detail tables
@@ -223,7 +323,18 @@ branch/detail state when cleared. Collapsed details stay lazy, and detail-body
 text is excluded. Use `search_text = item -> item.searchable_metadata` to replace
 a row's search text. Labels wrap without truncation. Without `children`, the
 existing flat master/detail behavior remains available; `searchable=true` also
-works on flat tables.
+works on flat tables. The count, app predicates and `htmxo:table-filtered`
+event are shared with every searchable table; see
+[Client-side search](#table-search).
+
+Deep collapsed trees get *Expand all* / *Collapse all* buttons with
+`expand_controls=true` (requires collapsible `children`). They open or close
+every branch; detail rows keep their own state and collapsed details stay
+lazy. While a search is active they act on the matching paths: *Collapse all*
+keeps only the matching rows and their ancestors (hiding what a matching group
+would reveal), *Expand all* shows every match again, and clearing the search
+restores the branches the user had open. The buttons carry `aria-controls`
+for the table body and are left out of Markdown.
 
 `master` may also return the whole row, `h.tr(cells...; attrs...)`, when its
 attributes are computed together with its cells. The cells fill the master row
