@@ -1386,8 +1386,10 @@ Given a resolved domain the control is picked by this rule, in order:
 `allow_custom` → `sinput_custom`; otherwise not `multiple` and at most
 `radio_max` options (default 4) → a radio `fieldset`; otherwise a `<select>`.
 Only with no domain, or `kind=:unrestricted`, does the input fall back to the
-type-driven control: `Bool` renders a checkbox, a `Number` a number input,
-[`MultilineText`](@ref) a `<textarea>`, [`Upload`](@ref) a file input
+type-driven control: `Bool` renders a checkbox, a `Number` a number input
+(an `Integer` keeps the browser's whole-number step; any other number, such as
+`Float64`, renders `step="any"` so a fractional value passes the browser's
+validation), [`MultilineText`](@ref) a `<textarea>`, [`Upload`](@ref) a file input
 (`Vector{Upload}` a `multiple` one), and anything else — `String` included —
 a single-line text input.
 
