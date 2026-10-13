@@ -48,15 +48,16 @@ end
     # workload fails (the 404 fixture) has hung after reaching its exit hooks
     # (lts passes; todo 0f1uahf). A later run with an early exit hook did not
     # hang, so compare the original fixture with an early hook, a 5 s pause,
-    # and an exit hook that calls Reseau's poller shutdown explicitly. A
-    # further probe brackets Reseau's registered hook in place. Exit
+    # and an exit hook that calls Reseau's poller shutdown explicitly. The
+    # HTTP-only 404 control tests the same precompile error without loading
+    # HTMXObjects. A further probe brackets Reseau's registered hook. Exit
     # hooks run last-registered first: "exit hooks reached" runs before
     # Reseau's `atexit(shutdown!)` (registered when HTTP.jl loads), and an
     # optional "exit hooks done" runs after it. The log is a pipe, not a
     # file: a file-backed stderr is buffered, so a stopped worker would lose
     # its output.
     function compile_fixture(name, url; early_hook=false, explicit_shutdown=false,
-            wrap_shutdown_hook=false, settle=0, timeout=300)
+            wrap_shutdown_hook=false, http_only=false, settle=0, timeout=300)
         mktempdir() do dir
             early_exit_hook = early_hook ?
                 "atexit(() -> println(stderr, \"[fixture] exit hooks done\"))" : ""
@@ -85,20 +86,40 @@ end
             """ : ""
             # Even sleep(0) can yield, so omit it from the no-delay control.
             settle_delay = settle > 0 ? "sleep($settle)" : ""
-            write(joinpath(dir, "$name.jl"), """
-            module $name
-            $early_exit_hook
-            using HTMXObjects
-            using PrecompileTools: @compile_workload
-            $shutdown_exit_hook
-            $wrapped_shutdown_hook
+            package_import = http_only ? "using HTTP" : "using HTMXObjects"
+            route_setup = http_only ? "" : """
             @htmx struct HealthApp
                 @direct @get health() = "healthy"
             end
-            @compile_workload begin
-                route!(HealthApp())
+            """
+            workload = http_only ? """
+                server = HTTP.serve!("127.0.0.1", 0; verbose=false) do _
+                    HTTP.Response(404, "missing")
+                end
                 try
-                    prewarm_workload!(HealthApp; routes=[:health], urls=[$(repr(url))])
+                    response = HTTP.request("GET",
+                        "http://127.0.0.1:\$(HTTP.port(server))/missing-health.css";
+                        status_exception=false, retry=false)
+                    response.status == 404 || error("expected HTTP 404, got \$(response.status)")
+                    error("expected HTTP 404")
+                finally
+                    close(server)
+                end
+            """ : """
+                route!(HealthApp())
+                prewarm_workload!(HealthApp; routes=[:health], urls=[$(repr(url))])
+            """
+            write(joinpath(dir, "$name.jl"), """
+            module $name
+            $early_exit_hook
+            $package_import
+            using PrecompileTools: @compile_workload
+            $shutdown_exit_hook
+            $wrapped_shutdown_hook
+            $route_setup
+            @compile_workload begin
+                try
+                    $workload
                 finally
                     println(stderr, "[fixture] workload finished")
                     atexit(() -> println(stderr, "[fixture] exit hooks reached"))
@@ -137,17 +158,19 @@ end
     deadline = Sys.iswindows() ? 180 : 300
     good = compile_fixture("PrewarmHealthPresent", "/health"; timeout=deadline)
     bad = compile_fixture("PrewarmHealthMissing", "/missing-health.css"; timeout=deadline)
+    http_only = compile_fixture("PrewarmHTTPOnly404", "/missing-health.css";
+                                http_only=true, timeout=deadline)
     explicit = compile_fixture("PrewarmHealthMissingWithPollerShutdown", "/missing-health.css"; explicit_shutdown=true, timeout=deadline)
     wrapped = compile_fixture("PrewarmHealthMissingWithWrappedPollerHook", "/missing-health.css"; wrap_shutdown_hook=true, timeout=deadline)
     if Sys.iswindows()
         hooked = compile_fixture("PrewarmHealthMissingWithEarlyHook", "/missing-health.css"; early_hook=true, timeout=deadline)
         settled = compile_fixture("PrewarmHealthMissingSettled", "/missing-health.css"; settle=5, timeout=deadline)
-        @info "Windows precompile exit probes" good.finished bad.finished hooked.finished settled.finished explicit.finished wrapped.finished hooked_exit_hooks_done=contains(hooked.log, "[fixture] exit hooks done") explicit_shutdown_done=contains(explicit.log, "[fixture] poller shutdown done") wrapped_hook_found=contains(wrapped.log, "[fixture] poller exit hook wrapped") wrapped_hook_done=contains(wrapped.log, "[fixture] poller exit hook done")
+        @info "Windows precompile exit probes" good.finished bad.finished http_only.finished hooked.finished settled.finished explicit.finished wrapped.finished hooked_exit_hooks_done=contains(hooked.log, "[fixture] exit hooks done") explicit_shutdown_done=contains(explicit.log, "[fixture] poller shutdown done") wrapped_hook_found=contains(wrapped.log, "[fixture] poller exit hook wrapped") wrapped_hook_done=contains(wrapped.log, "[fixture] poller exit hook done")
     end
-    if Sys.iswindows() && !(good.finished && bad.finished && hooked.finished && settled.finished && explicit.finished && wrapped.finished)
+    if Sys.iswindows() && !(good.finished && bad.finished && http_only.finished && hooked.finished && settled.finished && explicit.finished && wrapped.finished)
         # Keep the failing shape visible until its upstream cause is fixed.
-        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log) hooked.finished hooked.drained hooked_log=Text(hooked.log) settled.finished settled.drained settled_log=Text(settled.log) explicit.finished explicit.drained explicit_log=Text(explicit.log) wrapped.finished wrapped.drained wrapped_log=Text(wrapped.log)
-        @test_broken good.finished && bad.finished && hooked.finished && settled.finished && explicit.finished && wrapped.finished
+        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log) http_only.finished http_only.drained http_only_log=Text(http_only.log) hooked.finished hooked.drained hooked_log=Text(hooked.log) settled.finished settled.drained settled_log=Text(settled.log) explicit.finished explicit.drained explicit_log=Text(explicit.log) wrapped.finished wrapped.drained wrapped_log=Text(wrapped.log)
+        @test_broken good.finished && bad.finished && http_only.finished && hooked.finished && settled.finished && explicit.finished && wrapped.finished
     else
         good.ok && !bad.ok ||
             @info "Fixture precompile logs" good_log=Text(good.log) bad_log=Text(bad.log)
@@ -159,6 +182,9 @@ end
         @test !bad.ok
         @test contains(bad.log, "/missing-health.css")
         @test contains(bad.log, "HTTP 404")
+        @test http_only.finished
+        @test !http_only.ok
+        @test contains(http_only.log, "expected HTTP 404")
         @test explicit.finished
         @test !explicit.ok
         @test contains(explicit.log, "[fixture] poller shutdown done")
