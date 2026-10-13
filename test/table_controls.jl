@@ -174,3 +174,89 @@ end
         end
     end
 end
+
+@testitem "explained column headers stay sortable" tags=[:unit] begin
+    using HTMXObjects
+    rows = [h.tr(h.td("2"), h.td("b")), h.tr(h.td("1"), h.td("a"))]
+    help = "RK / Stan log-density time; below 1× RK is faster."
+    # The reported shape: a pre-built header node is the caller's own header,
+    # used as-is, so it carries no sort wiring.
+    node = repr("text/html", sortable_table([h.th(h.span("Primal")), "Name"], rows))
+    @test count("htmxo-sort-control", node) == 1
+    table = sortable_table([ColumnSpec("Primal"; help), "Name"], rows; id="t", default_sort="Primal")
+    html = repr("text/html", table)
+    @test count("htmxo-sort-control", html) == 2
+    th = match(r"<th[^>]*>.*?</th>"s, html).match
+    @test contains(th, "onclick=\"sortTable(0, this)\"")
+    @test contains(th, "data-sort-dir=\"asc\"") && contains(th, "aria-sort=\"ascending\"")
+    @test contains(th, "title=\"$help\"")
+    @test contains(th, ">Primal<span class=\"htmxo-column-help\" aria-hidden=\"true\"> ⓘ</span></button>")
+    # Markdown keeps the column name only.
+    md = HTMXObjects.to_markdown_string(table)
+    @test contains(md, "Primal") && contains(md, "Name")
+    @test !contains(md, "ⓘ") && !contains(md, "log-density")
+    # Without an explanation it is the String header, byte for byte.
+    for spec in (ColumnSpec("Primal"), ColumnSpec("Primal"; help=" "))
+        @test repr("text/html", sortable_table([spec, "Name"], rows)) ==
+              repr("text/html", sortable_table(["Primal", "Name"], rows))
+    end
+    plain = repr("text/html", sortable_table([ColumnSpec("Primal"; help), "Name"], rows; sortable=false))
+    @test contains(plain, "<th title=\"$help\">Primal<span class=\"htmxo-column-help\" aria-hidden=\"true\"> ⓘ</span></th>")
+    @test !contains(plain, "htmxo-sort-control")
+    # master_detail_table forwards its headers.
+    tree = repr("text/html", master_detail_table([ColumnSpec("Model"; help="Pick one."), "Score"], [(; id="a")];
+        key=x -> x.id, master=x -> (h.td("A"), h.td("1")), detail=x -> h.p("Detail")))
+    @test contains(tree, "title=\"Pick one.\"") && count("htmxo-sort-control", tree) == 2
+    @test_throws ErrorException sortable_table([h.th("Primal"), "Name"], rows; default_sort="Primal")
+end
+
+@testitem "explained column headers sort and export their label" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', async function() {
+                const out = document.body.dataset;
+                const body = document.getElementById('explained'), table = body.closest('table');
+                const control = table.tHead.rows[0].cells[0].querySelector('.htmxo-sort-control');
+                const order = () => Array.from(body.rows).map(r => r.cells[1].textContent).join(',');
+                out.title = String(control.title === 'Log-density time.');
+                out.initial = String(order() === 'b,a,c');
+                control.click();
+                out.ascending = String(order() === 'a,b,c');
+                control.click();
+                out.descending = String(order() === 'c,b,a' &&
+                    table.tHead.rows[0].cells[0].getAttribute('aria-sort') === 'descending');
+                const createURL = URL.createObjectURL, anchorClick = HTMLAnchorElement.prototype.click;
+                let blob = null;
+                URL.createObjectURL = b => { blob = b; return 'blob:test'; };
+                HTMLAnchorElement.prototype.click = function() {};
+                try { downloadTableCsv(body, 'explained.csv'); } finally {
+                    URL.createObjectURL = createURL; HTMLAnchorElement.prototype.click = anchorClick;
+                }
+                const csv = blob ? await blob.text() : '';
+                out.csvHeader = String(csv.split('\n')[0] === 'Primal,Name');
+                out.done = '1';
+            });
+            """))
+        table = sortable_table([ColumnSpec("Primal"; help="Log-density time."), "Name"],
+            [h.tr(h.td("2"), h.td("b")), h.tr(h.td("1"), h.td("a")), h.tr(h.td("3"), h.td("c"))];
+            id="explained")
+        page = string("<!doctype html><html><head>", repr("text/html", sortable_table_js()),
+            repr("text/html", download_table_js()), "</head><body>", repr("text/html", table),
+            repr("text/html", driver), "</body></html>")
+        dom = mktempdir() do directory
+            fixture = joinpath(directory, "page.html")
+            write(fixture, page)
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        @test contains(dom, "data-done=\"1\"")
+        for marker in ("title", "initial", "ascending", "descending", "csv-header")
+            @test contains(dom, "data-$marker=\"true\"")
+        end
+    end
+end
