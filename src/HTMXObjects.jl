@@ -15349,8 +15349,14 @@ _typed_control(T, name, label, value, required_attrs) =
     linput(name; label, value=something(value, ""), required_attrs...)
 _typed_control(::Type{Bool}, name, label, value, required_attrs) =
     cinput(name; label, checked=something(value, false), required_attrs...)
-_typed_control(::Type{<:Number}, name, label, value, required_attrs) =
-    ninput(name; label, value=something(value, 0), required_attrs...)
+_typed_control(::Type{T}, name, label, value, required_attrs) where {T<:Number} =
+    ninput(name; label, value=something(value, 0), step=_number_step(T), required_attrs...)
+
+# The `step` a number input needs to accept every value of its declared type.
+# Without one the browser applies step 1 and blocks a fractional entry before
+# submit, so only integers keep that implicit step.
+_number_step(::Type{<:Integer}) = nothing
+_number_step(::Type{<:Number}) = "any"
 _typed_control(::Type{MultilineText}, name, label, value, required_attrs) =
     tinput(name; label, value=_multiline_text_value(value), required_attrs...)
 # A file argument binds from a multipart part. A browser never lets a page set
