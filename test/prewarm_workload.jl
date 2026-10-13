@@ -57,6 +57,8 @@ end
         mktempdir() do dir
             early_exit_hook = early_hook ?
                 "atexit(() -> println(stderr, \"[fixture] exit hooks done\"))" : ""
+            # Even sleep(0) can yield, so omit it from the no-delay control.
+            settle_delay = settle > 0 ? "sleep($settle)" : ""
             write(joinpath(dir, "$name.jl"), """
             module $name
             $early_exit_hook
@@ -72,7 +74,7 @@ end
                 finally
                     println(stderr, "[fixture] workload finished")
                     atexit(() -> println(stderr, "[fixture] exit hooks reached"))
-                    sleep($settle)
+                    $settle_delay
                 end
             end
             end
