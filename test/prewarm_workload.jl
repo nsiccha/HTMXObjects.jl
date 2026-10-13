@@ -48,14 +48,15 @@ end
     # workload fails (the 404 fixture) has hung after reaching its exit hooks
     # (lts passes; todo 0f1uahf). A later run with an early exit hook did not
     # hang, so compare the original fixture with an early hook, a 5 s pause,
-    # and an exit hook that calls Reseau's poller shutdown explicitly. Exit
+    # and an exit hook that calls Reseau's poller shutdown explicitly. A
+    # further probe brackets Reseau's registered hook in place. Exit
     # hooks run last-registered first: "exit hooks reached" runs before
     # Reseau's `atexit(shutdown!)` (registered when HTTP.jl loads), and an
     # optional "exit hooks done" runs after it. The log is a pipe, not a
     # file: a file-backed stderr is buffered, so a stopped worker would lose
     # its output.
     function compile_fixture(name, url; early_hook=false, explicit_shutdown=false,
-            settle=0, timeout=300)
+            wrap_shutdown_hook=false, settle=0, timeout=300)
         mktempdir() do dir
             early_exit_hook = early_hook ?
                 "atexit(() -> println(stderr, \"[fixture] exit hooks done\"))" : ""
@@ -66,6 +67,22 @@ end
                 println(stderr, "[fixture] poller shutdown done")
             end)
             """ : ""
+            wrapped_shutdown_hook = wrap_shutdown_hook ? """
+            let target = HTMXObjects.HTTP.IOPoll.shutdown!
+                hooks = Base.atexit_hooks
+                idx = findfirst(h -> h === target, hooks)
+                if idx === nothing
+                    println(stderr, "[fixture] poller exit hook missing")
+                else
+                    hooks[idx] = () -> begin
+                        println(stderr, "[fixture] poller exit hook begin")
+                        target()
+                        println(stderr, "[fixture] poller exit hook done")
+                    end
+                    println(stderr, "[fixture] poller exit hook wrapped")
+                end
+            end
+            """ : ""
             # Even sleep(0) can yield, so omit it from the no-delay control.
             settle_delay = settle > 0 ? "sleep($settle)" : ""
             write(joinpath(dir, "$name.jl"), """
@@ -74,6 +91,7 @@ end
             using HTMXObjects
             using PrecompileTools: @compile_workload
             $shutdown_exit_hook
+            $wrapped_shutdown_hook
             @htmx struct HealthApp
                 @direct @get health() = "healthy"
             end
@@ -120,15 +138,16 @@ end
     good = compile_fixture("PrewarmHealthPresent", "/health"; timeout=deadline)
     bad = compile_fixture("PrewarmHealthMissing", "/missing-health.css"; timeout=deadline)
     explicit = compile_fixture("PrewarmHealthMissingWithPollerShutdown", "/missing-health.css"; explicit_shutdown=true, timeout=deadline)
+    wrapped = compile_fixture("PrewarmHealthMissingWithWrappedPollerHook", "/missing-health.css"; wrap_shutdown_hook=true, timeout=deadline)
     if Sys.iswindows()
         hooked = compile_fixture("PrewarmHealthMissingWithEarlyHook", "/missing-health.css"; early_hook=true, timeout=deadline)
         settled = compile_fixture("PrewarmHealthMissingSettled", "/missing-health.css"; settle=5, timeout=deadline)
-        @info "Windows precompile exit probes" good.finished bad.finished hooked.finished settled.finished explicit.finished hooked_exit_hooks_done=contains(hooked.log, "[fixture] exit hooks done") explicit_shutdown_done=contains(explicit.log, "[fixture] poller shutdown done")
+        @info "Windows precompile exit probes" good.finished bad.finished hooked.finished settled.finished explicit.finished wrapped.finished hooked_exit_hooks_done=contains(hooked.log, "[fixture] exit hooks done") explicit_shutdown_done=contains(explicit.log, "[fixture] poller shutdown done") wrapped_hook_found=contains(wrapped.log, "[fixture] poller exit hook wrapped") wrapped_hook_done=contains(wrapped.log, "[fixture] poller exit hook done")
     end
-    if Sys.iswindows() && !(good.finished && bad.finished && hooked.finished && settled.finished && explicit.finished)
+    if Sys.iswindows() && !(good.finished && bad.finished && hooked.finished && settled.finished && explicit.finished && wrapped.finished)
         # Keep the failing shape visible until its upstream cause is fixed.
-        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log) hooked.finished hooked.drained hooked_log=Text(hooked.log) settled.finished settled.drained settled_log=Text(settled.log) explicit.finished explicit.drained explicit_log=Text(explicit.log)
-        @test_broken good.finished && bad.finished && hooked.finished && settled.finished && explicit.finished
+        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log) hooked.finished hooked.drained hooked_log=Text(hooked.log) settled.finished settled.drained settled_log=Text(settled.log) explicit.finished explicit.drained explicit_log=Text(explicit.log) wrapped.finished wrapped.drained wrapped_log=Text(wrapped.log)
+        @test_broken good.finished && bad.finished && hooked.finished && settled.finished && explicit.finished && wrapped.finished
     else
         good.ok && !bad.ok ||
             @info "Fixture precompile logs" good_log=Text(good.log) bad_log=Text(bad.log)
@@ -143,6 +162,10 @@ end
         @test explicit.finished
         @test !explicit.ok
         @test contains(explicit.log, "[fixture] poller shutdown done")
+        @test wrapped.finished
+        @test !wrapped.ok
+        @test contains(wrapped.log, "[fixture] poller exit hook wrapped") ||
+              contains(wrapped.log, "[fixture] poller exit hook missing")
         if Sys.iswindows()
             @test !hooked.ok
             @test contains(hooked.log, "[fixture] exit hooks done")
