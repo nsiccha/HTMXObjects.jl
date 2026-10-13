@@ -178,6 +178,27 @@ it spreads cleanly into an htmx `hx-vals`.
     `aria-sort` / the caret on that header); it does not sort `rows` for you.
     It forwards through `render_table` and `master_detail_table` too.
 
+#### Column explanations {#column-explanations}
+
+A `String` header is wired for sorting: a header button that sorts by click or
+keyboard, `default_sort` by its label, the column name in `?plain`. A pre-built
+`h.th(...)` node is used as-is and gets none of that. To explain a column
+without giving up sorting, pass a `ColumnSpec` where the `String` would go:
+
+```julia
+master_detail_table([ColumnSpec("Model"; help="Select a model to compare its sources."),
+                     ColumnSpec("Primal"; help="RK / Stan log-density time; below 1× RK is faster."),
+                     "Flags"],
+    roots; key, master, children, searchable=true, default_sort="Primal")
+```
+
+`help` becomes the header button's `title`, so it shows on hover and assistive
+technology reads it as the button's description; a `ⓘ` marker after the label
+shows that the column has one. The marker is HTML-only: `?plain` and the CSV
+export keep the label alone. With `sortable=false` the explanation stays, as
+the `<th>`'s `title`. `ColumnSpec` works in every `headers` vector of
+`sortable_table` and `master_detail_table`.
+
 #### Client-side search {#table-search}
 
 `searchable=true` on `sortable_table`, `render_table` or `master_detail_table`

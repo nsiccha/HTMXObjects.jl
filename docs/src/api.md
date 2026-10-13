@@ -1386,8 +1386,10 @@ Given a resolved domain the control is picked by this rule, in order:
 `allow_custom` → `sinput_custom`; otherwise not `multiple` and at most
 `radio_max` options (default 4) → a radio `fieldset`; otherwise a `<select>`.
 Only with no domain, or `kind=:unrestricted`, does the input fall back to the
-type-driven control: `Bool` renders a checkbox, a `Number` a number input,
-[`MultilineText`](@ref) a `<textarea>`, [`Upload`](@ref) a file input
+type-driven control: `Bool` renders a checkbox, a `Number` a number input
+(an `Integer` keeps the browser's whole-number step; any other number, such as
+`Float64`, renders `step="any"` so a fractional value passes the browser's
+validation), [`MultilineText`](@ref) a `<textarea>`, [`Upload`](@ref) a file input
 (`Vector{Upload}` a `multiple` one), and anything else — `String` included —
 a single-line text input.
 
@@ -1899,6 +1901,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `sortable_table_js`, `download_table_js` | Companion scripts for `render_table`         |
 | `master_detail_js` | Shared runtime for `master_detail_table`/`master_detail_pair` rows; auto-included by `htmx`, also carried by `sortable_table_js` |
 | `master_detail_table(headers, roots; children, searchable, …)` | Hierarchical sibling sorting, ancestor-preserving search, keyboard branch/detail controls, and lazy details; see [components](components.md#hierarchical-master-detail-tables) |
+| `ColumnSpec(label; help)` | A `sortable_table`/`master_detail_table` header with an explanation that stays sortable; see [components](components.md#column-explanations) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 
 ## Formatting
