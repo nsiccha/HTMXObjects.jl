@@ -45,20 +45,21 @@ end
 @testitem "missing health asset fails an actual PrecompileTools workload" setup=[HTMXOTestImports] tags=[:integration, :precompile] begin
     # Each fixture is precompiled by `using` it in a child `julia`, with a
     # deadline. On GitHub's Windows runners with Julia 1/pre, the worker whose
-    # workload fails (the 404 fixture) reaches its exit hooks and then never
-    # exits (lts passes; todo 0f1uahf). That used to hang the whole job until
-    # its 60-min cap. The deadline stops the process tree, and the log shows
-    # how far the worker got. Exit hooks run last-registered first: "exit hooks
+    # workload fails (the 404 fixture) has hung after reaching its exit hooks
+    # (lts passes; todo 0f1uahf). A later run with an early exit hook did not
+    # hang, so compare the original fixture with that hook and with a 5 s pause
+    # before the error. Exit hooks run last-registered first: "exit hooks
     # reached" runs before Reseau's `atexit(shutdown!)` (registered when
-    # HTTP.jl loads), and "exit hooks done" runs after it. `settle` pauses
-    # between the workload's server close and its error. The log is a pipe,
-    # not a file: a file-backed stderr is buffered, so a stopped worker would
-    # lose its output.
-    function compile_fixture(name, url; settle=0, timeout=300)
+    # HTTP.jl loads), and an optional "exit hooks done" runs after it. The
+    # log is a pipe, not a file: a file-backed stderr is buffered, so a
+    # stopped worker would lose its output.
+    function compile_fixture(name, url; early_hook=false, settle=0, timeout=300)
         mktempdir() do dir
+            early_exit_hook = early_hook ?
+                "atexit(() -> println(stderr, \"[fixture] exit hooks done\"))" : ""
             write(joinpath(dir, "$name.jl"), """
             module $name
-            atexit(() -> println(stderr, "[fixture] exit hooks done"))
+            $early_exit_hook
             using HTMXObjects
             using PrecompileTools: @compile_workload
             @htmx struct HealthApp
@@ -103,13 +104,15 @@ end
 
     good = compile_fixture("PrewarmHealthPresent", "/health")
     bad = compile_fixture("PrewarmHealthMissing", "/missing-health.css")
-    if Sys.iswindows() && !(good.finished && bad.finished)
-        # Known Windows hang (todo 0f1uahf): record it and show where it
-        # stopped. A failing worker that settles for 5 s before its error shows
-        # whether the hang needs exit to follow the server close closely.
+    if Sys.iswindows()
+        hooked = compile_fixture("PrewarmHealthMissingWithEarlyHook", "/missing-health.css"; early_hook=true)
         settled = compile_fixture("PrewarmHealthMissingSettled", "/missing-health.css"; settle=5)
-        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log) settled.finished settled.drained settled_log=Text(settled.log)
-        @test_broken good.finished && bad.finished
+        @info "Windows precompile exit probes" good.finished bad.finished hooked.finished settled.finished hooked_exit_hooks_done=contains(hooked.log, "[fixture] exit hooks done")
+    end
+    if Sys.iswindows() && !(good.finished && bad.finished && hooked.finished && settled.finished)
+        # Keep the failing shape visible until its upstream cause is fixed.
+        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log) hooked.finished hooked.drained hooked_log=Text(hooked.log) settled.finished settled.drained settled_log=Text(settled.log)
+        @test_broken good.finished && bad.finished && hooked.finished && settled.finished
     else
         good.ok && !bad.ok ||
             @info "Fixture precompile logs" good_log=Text(good.log) bad_log=Text(bad.log)
@@ -121,6 +124,12 @@ end
         @test !bad.ok
         @test contains(bad.log, "/missing-health.css")
         @test contains(bad.log, "HTTP 404")
+        if Sys.iswindows()
+            @test !hooked.ok
+            @test contains(hooked.log, "[fixture] exit hooks done")
+            @test !settled.ok
+            @test contains(settled.log, "HTTP 404")
+        end
     end
 end
 
