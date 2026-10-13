@@ -28,7 +28,7 @@ export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, ColumnSpec, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
@@ -12107,9 +12107,53 @@ function _sort_dir_token(dir)
     error("sortable_table: default_sort direction must be :asc or :desc, got $(repr(dir))")
 end
 
+"""
+    ColumnSpec(label; help=nothing)
+
+A table column header that carries an explanation. Use it among the `headers`
+of [`sortable_table`](@ref) (and so of [`master_detail_table`](@ref)) wherever a
+`String` header would go: the column stays auto-wired exactly like a `String` —
+the sort button with keyboard sorting, `default_sort` by `label`, the column
+name in Markdown — and `help` adds the explanation. It becomes the header
+button's `title`, so it shows on hover and assistive technology reads it as
+the button's description, and a `ⓘ` marker follows the label to show that the
+column has one. The marker is HTML-only: Markdown and CSV export keep `label`
+alone. A blank or absent `help` renders the same header as the `String` label.
+
+```julia
+master_detail_table([ColumnSpec("Model"; help="Select a model to compare its sources."),
+                     ColumnSpec("Primal"; help="RK / Stan log-density time; below 1× RK is faster.")],
+    roots; key, master, children, searchable=true)
+```
+"""
+struct ColumnSpec
+    label::String
+    help::Union{Nothing,String}
+end
+ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing) =
+    ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help))
+
+# Header entries: a `String` or a `ColumnSpec` is auto-wired; any other value
+# (a pre-built `<th>` node) is the caller's own header, used as-is.
+_header_label(hdr::AbstractString) = String(hdr)
+_header_label(col::ColumnSpec) = col.label
+_header_label(_) = nothing
+
+# The label plus, for an explained column, its HTML-only marker; and the
+# attributes that carry the explanation itself.
+_header_content(hdr::AbstractString) = (String(hdr),)
+_header_content(col::ColumnSpec) = isnothing(col.help) ? (col.label,) :
+    (col.label, html_only(h.span(" ⓘ"; class="htmxo-column-help", aria_hidden="true")))
+_header_help_attrs(::AbstractString) = (;)
+_header_help_attrs(col::ColumnSpec) = isnothing(col.help) ? (;) : (; title=col.help)
+
+_table_th(hdr, i, ds, sortable) = hdr
+_table_th(hdr::Union{AbstractString,ColumnSpec}, i, ds, sortable) = sortable ?
+    _sortable_th(hdr, i, ds) : h.th(_header_content(hdr)...; _header_help_attrs(hdr)...)
+
 # Resolve `default_sort` to a `(1-based column index, "asc"|"desc")` pair.
-# Accepts `col`, `col => dir`, where `col` is a 1-based `Integer` or a header
-# label matching one of the `String` headers.
+# Accepts `col`, `col => dir`, where `col` is a 1-based `Integer` or the label
+# of one of the auto-wired (`String` or `ColumnSpec`) headers.
 function _resolve_default_sort(default_sort, headers)
     isnothing(default_sort) && return nothing
     col, dir = default_sort isa Pair ?
@@ -12118,16 +12162,16 @@ function _resolve_default_sort(default_sort, headers)
         Int(col)
     else
         label = string(col)
-        found = findfirst(hdr -> hdr isa AbstractString && string(hdr) == label, headers)
+        found = findfirst(hdr -> _header_label(hdr) == label, headers)
         isnothing(found) && error(
-            "sortable_table: default_sort column $(repr(label)) does not match any String header")
+            "sortable_table: default_sort column $(repr(label)) does not match any String or ColumnSpec header")
         found
     end
     1 <= idx <= length(headers) || error(
         "sortable_table: default_sort column index $idx out of range 1:$(length(headers))")
-    headers[idx] isa AbstractString || error(
+    isnothing(_header_label(headers[idx])) && error(
         "sortable_table: default_sort column $idx is a pre-built header node. Only " *
-        "auto-wired String headers can be stamped; wire the marker yourself with " *
+        "auto-wired String or ColumnSpec headers can be stamped; wire the marker yourself with " *
         "`data_sort_dir=` + `aria_sort=` if the header is a custom node.")
     (idx, _sort_dir_token(dir))
 end
@@ -12138,9 +12182,10 @@ end
 # `morph:` swap re-impose the sorted state rather than wipe it, keeps the caret
 # consistent with the rows the server actually emitted, and lets the next click
 # toggle from the right direction (`sortTable` reads `data-sort-dir`).
-function _sortable_th(label, i, ds)
+function _sortable_th(hdr, i, ds)
     onclick = "sortTable($(i-1), this)"
-    control = h.button(label; type="button", class="htmxo-sort-control", data_htmxo_label="",
+    control = h.button(_header_content(hdr)...; type="button", class="htmxo-sort-control",
+        data_htmxo_label="", _header_help_attrs(hdr)...,
         onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))")
     if !isnothing(ds) && first(ds) == i
         dir = last(ds)
@@ -13071,8 +13116,8 @@ used by `render_table(...; download=true)`. Include this once per page (e.g. in 
 
 The JS reads the closest `<table>` relative to the clicked button, serializes the
 visible header cells and body rows to CSV (escaping `"`, `,`, and newlines), and
-triggers a Blob download. Sort indicator arrows (` ▲`/` ▼`) added by
-`sortable_table_js()` are stripped from header text.
+triggers a Blob download. A header exports its column name only: the sort
+indicator arrows (` ▲`/` ▼`) and a [`ColumnSpec`](@ref)'s `ⓘ` marker are left out.
 """
 function download_table_js()
     h.script(Raw(raw"""
@@ -13083,8 +13128,14 @@ function downloadTableCsv(btn, filename) {
         s = String(s);
         return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
-    const headers = Array.from(table.querySelectorAll('thead th'))
-        .map(th => esc(th.textContent.replace(/ [▲▼]$/, '').trim()));
+    // A header's column name: its sort caret and explanation marker are
+    // presentation, not part of the name.
+    const name = th => {
+        const copy = th.cloneNode(true);
+        copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help').forEach(e => e.remove());
+        return copy.textContent.trim();
+    };
+    const headers = Array.from(table.querySelectorAll('thead th')).map(th => esc(name(th)));
     // A master/detail first cell holds its row controls beside the content;
     // export the content only, as sorting and search read it.
     const text = td => (td.querySelector(':scope > [data-htmxo-row-label]') || td).textContent.trim();
@@ -13178,6 +13229,10 @@ wrapper instead of widening the page.
 - `headers`: `Vector` of header entries. Each entry is either:
     - a `String` — auto-wired into `h.th(label; onclick="sortTable(i, this)", class="u-pointer")`
       when `sortable=true`, or a plain `h.th(label)` otherwise.
+    - a [`ColumnSpec`](@ref)`(label; help)` — auto-wired exactly like its `label`,
+      plus an explanation: `help` becomes the header button's `title` (hover
+      text and accessible description) with an HTML-only `ⓘ` marker after the
+      label. Use it rather than a hand-built node to explain a column.
     - any HTML node (e.g. `h.th("")`, `h.th("Actions")`) — used as-is.
       That's the per-column opt-out: pass a node and the auto-wiring is skipped.
       To make a RICH header sortable anyway (e.g. one holding a button), wire
@@ -13189,15 +13244,17 @@ wrapper instead of widening the page.
   every `<td>`, including `data-sort-value` for semantic sort keys (see
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
   `id="detail-X"` for the paired-row pattern.
-- `sortable`: master toggle for the auto-wiring of String headers (default `true`).
-  Pre-built `h.th` headers are unaffected.
+- `sortable`: master toggle for the auto-wiring of `String` and `ColumnSpec`
+  headers (default `true`); with `false` a `ColumnSpec` keeps its explanation
+  as the `<th>`'s `title`. Pre-built `h.th` headers are unaffected.
 - `default_sort`: declare the order `rows` are ALREADY in, as `col` or
-  `col => dir` — `col` a 1-based column index or a `String` header label, `dir`
+  `col => dir` — `col` a 1-based column index or the label of a `String` or
+  `ColumnSpec` header, `dir`
   `:asc` (default) or `:desc`. Stamps `data-sort-dir` / `aria-sort` / the sort
   caret on that header, exactly as a client-side `sortTable` click would.
   It **declares** the order, it does not perform it: `sortable_table` receives
   pre-built row nodes, so the caller must emit `rows` in that order. Requires
-  `sortable=true` and a `String` header at `col`.
+  `sortable=true` and a `String` or `ColumnSpec` header at `col`.
 - `searchable`: add a labelled client-side search field above the table
   (default `false`), with a live "N of M rows shown" count as its helper text
   and a "No matching rows" state below. See *Client-side search* below.
@@ -13343,14 +13400,7 @@ function sortable_table(headers, rows;
     end
     ds = _resolve_default_sort(default_sort, headers)
 
-    th_nodes = [
-        hdr isa AbstractString ?
-            (sortable ?
-                _sortable_th(string(hdr), i, ds) :
-                h.th(string(hdr))) :
-            hdr
-        for (i, hdr) in enumerate(headers)
-    ]
+    th_nodes = [_table_th(hdr, i, ds, sortable) for (i, hdr) in enumerate(headers)]
 
     # Always include `htmxo-sortable-table` when sorting is on — that's
     # the hook `sortable_table_styles()` reads, and it makes call sites
