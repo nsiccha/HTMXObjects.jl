@@ -43,9 +43,17 @@ using TestItemRunner
 end
 
 @testitem "missing health asset fails an actual PrecompileTools workload" setup=[HTMXOTestImports] tags=[:integration, :precompile] begin
-    function compile_fixture(name, url)
+    # Each fixture is precompiled by `using` it in a child `julia`, with a
+    # deadline. On GitHub's Windows runners with Julia 1/pre the precompile
+    # worker never exits after this workload (lts passes), which used to hang
+    # the whole job until its 60-min cap (todo 0f1uahf). The deadline stops the
+    # process tree, and the log shows how far the worker got: the fixture
+    # prints when its workload ends and when the worker reaches its exit hooks.
+    # The log is a pipe, not a file: a file-backed stderr is buffered, so a
+    # stopped worker would lose its output.
+    function compile_fixture(name, url; timeout=300)
         mktempdir() do dir
-            source = """
+            write(joinpath(dir, "$name.jl"), """
             module $name
             using HTMXObjects
             using PrecompileTools: @compile_workload
@@ -54,31 +62,58 @@ end
             end
             @compile_workload begin
                 route!(HealthApp())
-                prewarm_workload!(HealthApp; routes=[:health], urls=[$(repr(url))])
+                try
+                    prewarm_workload!(HealthApp; routes=[:health], urls=[$(repr(url))])
+                finally
+                    println(stderr, "[fixture] workload finished")
+                    atexit(() -> println(stderr, "[fixture] exit hooks reached"))
+                end
             end
             end
-            """
-            path = joinpath(dir, "$name.jl")
-            write(path, source)
-            capture = IOBuffer()
-            result = try
-                Base.compilecache(Base.PkgId(name), path,
-                                  capture, capture)
-            catch err
-                err
+            """)
+            code = "pushfirst!(LOAD_PATH, $(repr(dir))); using $name"
+            # `detach` makes the child a process-group leader on Unix, so the
+            # deadline can stop the precompile worker it spawns as well.
+            cmd = detach(`$(Base.julia_cmd()) --startup-file=no
+                          --project=$(Base.active_project()) -e $code`)
+            out = Pipe()
+            process = run(pipeline(cmd; stdout=out, stderr=out); wait=false)
+            close(out.in)
+            log = IOBuffer()
+            reader = @async while !eof(out)
+                write(log, readavailable(out))
             end
-            result, String(take!(capture))
+            finished = timedwait(() -> process_exited(process), timeout; pollint=1) === :ok
+            if !finished
+                pid = getpid(process)
+                run(Sys.iswindows() ? `taskkill /F /T /PID $pid` : `kill -KILL -- -$pid`)
+            end
+            # The pipe reaches EOF once every process holding it has exited.
+            drained = timedwait(() -> istaskdone(reader), 30; pollint=0.5) === :ok
+            drained || close(out)
+            (; finished, ok=finished && success(process), drained,
+               log=String(take!(log)))
         end
     end
 
-    good, good_log = compile_fixture("PrewarmHealthPresent", "/health")
-    @test !(good isa Exception)
-    @test !contains(good_log, "failed to precompile")
-
-    bad, bad_log = compile_fixture("PrewarmHealthMissing", "/missing-health.css")
-    @test bad isa Exception
-    @test contains(bad_log, "/missing-health.css")
-    @test contains(bad_log, "HTTP 404")
+    good = compile_fixture("PrewarmHealthPresent", "/health")
+    bad = compile_fixture("PrewarmHealthMissing", "/missing-health.css")
+    if Sys.iswindows() && !(good.finished && bad.finished)
+        # Known Windows hang (todo 0f1uahf): record it and show where it stopped.
+        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log)
+        @test_broken good.finished && bad.finished
+    else
+        good.ok && !bad.ok ||
+            @info "Fixture precompile logs" good_log=Text(good.log) bad_log=Text(bad.log)
+        @test good.finished
+        @test good.ok
+        @test !contains(lowercase(good.log), "failed to precompile")
+        @test contains(good.log, "[fixture] workload finished")
+        @test bad.finished
+        @test !bad.ok
+        @test contains(bad.log, "/missing-health.css")
+        @test contains(bad.log, "HTTP 404")
+    end
 end
 
 @testitem "startup workload refuses skipped routes and non-loopback servers" setup=[HTMXOTestImports] tags=[:integration, :server] begin
