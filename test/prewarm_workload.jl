@@ -44,17 +44,21 @@ end
 
 @testitem "missing health asset fails an actual PrecompileTools workload" setup=[HTMXOTestImports] tags=[:integration, :precompile] begin
     # Each fixture is precompiled by `using` it in a child `julia`, with a
-    # deadline. On GitHub's Windows runners with Julia 1/pre the precompile
-    # worker never exits after this workload (lts passes), which used to hang
-    # the whole job until its 60-min cap (todo 0f1uahf). The deadline stops the
-    # process tree, and the log shows how far the worker got: the fixture
-    # prints when its workload ends and when the worker reaches its exit hooks.
-    # The log is a pipe, not a file: a file-backed stderr is buffered, so a
-    # stopped worker would lose its output.
-    function compile_fixture(name, url; timeout=300)
+    # deadline. On GitHub's Windows runners with Julia 1/pre, the worker whose
+    # workload fails (the 404 fixture) reaches its exit hooks and then never
+    # exits (lts passes; todo 0f1uahf). That used to hang the whole job until
+    # its 60-min cap. The deadline stops the process tree, and the log shows
+    # how far the worker got. Exit hooks run last-registered first: "exit hooks
+    # reached" runs before Reseau's `atexit(shutdown!)` (registered when
+    # HTTP.jl loads), and "exit hooks done" runs after it. `settle` pauses
+    # between the workload's server close and its error. The log is a pipe,
+    # not a file: a file-backed stderr is buffered, so a stopped worker would
+    # lose its output.
+    function compile_fixture(name, url; settle=0, timeout=300)
         mktempdir() do dir
             write(joinpath(dir, "$name.jl"), """
             module $name
+            atexit(() -> println(stderr, "[fixture] exit hooks done"))
             using HTMXObjects
             using PrecompileTools: @compile_workload
             @htmx struct HealthApp
@@ -67,6 +71,7 @@ end
                 finally
                     println(stderr, "[fixture] workload finished")
                     atexit(() -> println(stderr, "[fixture] exit hooks reached"))
+                    sleep($settle)
                 end
             end
             end
@@ -99,8 +104,11 @@ end
     good = compile_fixture("PrewarmHealthPresent", "/health")
     bad = compile_fixture("PrewarmHealthMissing", "/missing-health.css")
     if Sys.iswindows() && !(good.finished && bad.finished)
-        # Known Windows hang (todo 0f1uahf): record it and show where it stopped.
-        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log)
+        # Known Windows hang (todo 0f1uahf): record it and show where it
+        # stopped. A failing worker that settles for 5 s before its error shows
+        # whether the hang needs exit to follow the server close closely.
+        settled = compile_fixture("PrewarmHealthMissingSettled", "/missing-health.css"; settle=5)
+        @info "Precompile worker did not exit" good.finished good.drained good_log=Text(good.log) bad.finished bad.drained bad_log=Text(bad.log) settled.finished settled.drained settled_log=Text(settled.log)
         @test_broken good.finished && bad.finished
     else
         good.ok && !bad.ok ||
