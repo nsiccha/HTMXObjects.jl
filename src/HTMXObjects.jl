@@ -8117,7 +8117,7 @@ const _operation_polls = Dict{String,_OperationPollEntry}()
 
 mutable struct _MutationTerminal
     signature::Any
-    value::Any
+    response::HTTP.Response
     touched_at::Float64
 end
 
@@ -8125,6 +8125,14 @@ const _mutation_terminals = Dict{String,_MutationTerminal}()
 
 _mutation_poll_entry(entry::_OperationPollEntry) =
     get(entry.signature, :verb, nothing) in (:POST, :PUT, :PATCH, :DELETE)
+
+# Never hand the same mutable HTTP response to two requests. The cache owns
+# copied bytes and headers; each replay gets its own response object.
+_copy_mutation_terminal(response::HTTP.Response) =
+    HTTP.Response(response.status,
+        Pair{String,String}[String(name) => String(value)
+            for (name, value) in response.headers];
+        body=_message_body_bytes(response))
 
 _operation_poll_now() = _root_retention_time()
 
@@ -8238,7 +8246,9 @@ end
 
 function _cache_mutation_terminal!(entry::_OperationPollEntry, value;
         now::Real=_operation_poll_now())
-    _mutation_poll_entry(entry) || return value
+    (_mutation_poll_entry(entry) && entry.terminal_ready) || return value
+    response = to_response(value)
+    stored = _copy_mutation_terminal(response)
     lock(_operation_poll_lock)
     try
         if entry.terminal_ready &&
@@ -8248,13 +8258,13 @@ function _cache_mutation_terminal!(entry::_OperationPollEntry, value;
                 _evict_oldest_mutation_terminal!()
             end
             _mutation_terminals[entry.token] =
-                _MutationTerminal(entry.signature, value, Float64(now))
+                _MutationTerminal(entry.signature, stored, Float64(now))
             delete!(_operation_polls, entry.token)
         end
     finally
         unlock(_operation_poll_lock)
     end
-    value
+    response
 end
 
 function _delete_operation_poll!(token::AbstractString)
@@ -8895,7 +8905,7 @@ function _execute_mutation_resume(policy::OperationPolicy, target, LeafT,
     entry = isnothing(token) ? nothing :
         _lookup_mutation_poll(token, signature)
     _runtime_note_mode!(req, :polling)
-    entry isa _MutationTerminal && return entry.value
+    entry isa _MutationTerminal && return _copy_mutation_terminal(entry.response)
     entry isa _OperationPollEntry ||
         throw(OperationResultUnavailable(name, _verb_symbol(verb_inst)))
     descriptor = _property_descriptor(LeafT, name, _verb_symbol(verb_inst))

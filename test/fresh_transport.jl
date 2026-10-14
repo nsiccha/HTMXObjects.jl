@@ -519,6 +519,8 @@ end
     replayed_headers = hx_get(targets[:headers])
     @test HTTP.header(replayed_headers, "HX-Trigger") == "fresh-done"
     @test body_text(replayed_headers) == body
+    empty!(replayed_headers.headers)
+    @test HTTP.header(hx_get(targets[:headers]), "HX-Trigger") == "fresh-done"
 
     # A 204 would not swap: the poller still receives its (empty) terminal.
     nocontent = settle_response(targets[:nocontent])
