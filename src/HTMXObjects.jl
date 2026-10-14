@@ -26,7 +26,7 @@ export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
 export decorated_link
 export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
-export hx_response
+export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, ColumnSpec, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
@@ -2482,6 +2482,7 @@ _runtime_blocks() = (
     editor_styles = (:css, editor_styles),
     comparison = (:js, comparison_js),
     stream_probe = (:js, stream_probe_script),
+    redirect_history = (:js, redirect_history_script),
     live_region = (:js, live_region_script),
     treebars_styles = (:css, () -> _polling_page_asset(1)),
     treebars_script = (:js, () -> _polling_page_asset(2)),
@@ -2655,6 +2656,9 @@ function htmx(args...;
                 # gateway's `HX-Refresh` reload the page instead of the stream
                 # retrying forever. Inert until a stream fails.
                 :stream_probe,
+                # A followed redirect records its destination where an
+                # `hx-push-url` names the requested page; inert otherwise.
+                :redirect_history,
                 # Discover-mode live regions keep one reconnecting stream behind
                 # this runtime; inert on pages without one.
                 :live_region,
@@ -4678,6 +4682,77 @@ function hx_response(val;
     HTTP.Response(resp.status, hdrs; body=resp.body)
 end
 
+const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+"""
+    redirect_to(req, location; status=303, query=true) -> HTTP.Response
+
+Answer `req` with an HTTP redirect to `location`, typically a moved or aliased
+route sending every visitor to its canonical URL:
+
+    @get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
+
+Build `location` with `__self__/"…"`: that URL carries the mount prefix,
+including one a reverse proxy announces through `X-Forwarded-Prefix`, so the
+redirect stays inside the app behind the KB's `/p/<App>` proxy. A bare
+`"/name"` addresses the server root.
+
+The same answer serves every kind of request. A browser follows the
+`Location` for a direct load. htmx's request follows it as well and swaps the
+new route's fragment into the original target with the original swap. When
+that request records history, the [`htmx`](@ref) shell's
+[`redirect_history_script`](@ref) records the new URL, so the address bar
+and bookmarks show the canonical URL. `?plain`/Markdown and `?error`
+requests keep those parameters and are redirected too.
+
+- `status`: `303` (See Other, the default) or `302`, `307`, `301`, `308`.
+  `307`/`308` keep the request method; `301`/`308` are permanent, so browsers
+  may cache them. Any other status is an `ArgumentError`.
+- `query=true` carries the request's query string over (`?year=2025` reaches
+  the new route); parameters `location` already names keep `location`'s
+  values. `query=false` sends exactly `location`.
+
+The body is a one-line `text/plain` note naming the new URL. A redirect
+answers inline; one that reaches an `:auto` poller instead navigates the page
+with `HX-Redirect`.
+"""
+function redirect_to(req::HTTP.Request, location::AbstractString;
+        status::Integer=303, query::Bool=true)
+    status in _REDIRECT_STATUSES || throw(ArgumentError(
+        "redirect_to: status must be one of $(join(_REDIRECT_STATUSES, ", ")); got $status"))
+    isempty(location) && throw(ArgumentError("redirect_to: location is empty"))
+    target = query ? _carry_query(location, HTTP.URI(req.target).query) :
+                     String(location)
+    any(c -> c in ('\r', '\n'), target) && throw(ArgumentError(
+        "redirect_to: location contains a line break: $(repr(target))"))
+    HTTP.Response(status,
+        ["Location" => target, "Content-Type" => "text/plain; charset=utf-8"];
+        body="Moved to " * target * "\n")
+end
+
+# A query parameter's decoded name, for comparing names across encodings.
+_query_param_name(pair) =
+    HTTP.URIs.unescapeuri(replace(first(split(pair, '='; limit=2)), '+' => ' '))
+
+# `location` with the request's raw `query` appended ahead of any `#fragment`.
+# Pairs keep their encoding byte for byte; a name `location` already carries
+# keeps `location`'s value.
+function _carry_query(location::AbstractString, query::AbstractString)
+    isempty(query) && return String(location)
+    hash_at = findfirst('#', location)
+    base = isnothing(hash_at) ? location : location[1:prevind(location, hash_at)]
+    fragment = isnothing(hash_at) ? "" : location[hash_at:end]
+    query_at = findfirst('?', base)
+    own = isnothing(query_at) ? "" : base[nextind(base, query_at):end]
+    taken = Set(_query_param_name(p) for p in split(own, '&'; keepempty=false))
+    carried = [p for p in split(query, '&'; keepempty=false)
+               if !(_query_param_name(p) in taken)]
+    isempty(carried) && return String(location)
+    joiner = isnothing(query_at) ? "?" :
+             (isempty(own) || endswith(own, '&')) ? "" : "&"
+    string(base, joiner, join(carried, '&'), fragment)
+end
+
 """
     route!(obj; prefix="", record_dir=nothing)
 
@@ -6407,6 +6482,49 @@ stream_probe_script() = h.script(Raw(raw"""
 })();
 """))
 
+"""
+    redirect_history_script()
+
+Client runtime that records a redirect's destination in the browser history.
+htmx's request follows a redirect ([`redirect_to`](@ref)) and swaps the new
+route's fragment, but a link whose `hx-push-url` (or `hx-replace-url`) names
+the requested URL itself — as [`nav_sidebar`](@ref)'s links do — would still
+record the old URL. When htmx is about to record such a URL for a request
+that was redirected within the same origin, this runtime records the
+destination instead: its path, and its query unless the recorded URL carried
+a query of its own different from the request's. Any other history entry —
+`hx-push-url="true"` and boosted links, which htmx already points at the
+destination, or a URL naming another page — is left as it is.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+redirect_history_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoRedirectHistory) return;
+  window.htmxoRedirectHistory = true;
+  function parse(href) {
+    try { return new URL(href, document.baseURI); } catch (_) { return null; }
+  }
+  document.addEventListener('htmx:beforeHistoryUpdate', function (e) {
+    var d = e.detail || {};
+    var info = d.pathInfo, history = d.history, xhr = d.xhr;
+    if (!info || !history || !history.path || !xhr || !xhr.responseURL) return;
+    var requested = parse(info.finalRequestPath);
+    var landed = parse(xhr.responseURL);
+    var recorded = parse(history.path);
+    if (!requested || !landed || !recorded) return;
+    // Only a same-origin redirect, and only an entry naming the requested page.
+    if (landed.origin !== requested.origin || recorded.origin !== requested.origin) return;
+    if (landed.pathname + landed.search === requested.pathname + requested.search) return;
+    if (recorded.pathname !== requested.pathname) return;
+    var search = recorded.search === requested.search ? landed.search : recorded.search;
+    history.path = landed.pathname + search + recorded.hash;
+  });
+})();
+"""))
+
 # --- Error handling ---
 
 """
@@ -7832,8 +7950,12 @@ _operation_page_runtime(::HTTP.Request, value::HTTP.Response) = value
 # Keep its headers (`HX-Trigger`, `HX-Redirect`, … take effect on this
 # response) and hand its body to the poller — inside the `:auto` terminal node
 # for a 2xx answer, as an error article (which the poller also selects) for any
-# other status.
+# other status. A redirect (`redirect_to`) cannot be followed from a 200 poll
+# reply, so it becomes `HX-Redirect` to its `Location`: htmx navigates there.
 function _operation_terminal_body(resp::HTTP.Response)
+    location = _redirect_location(resp)
+    isnothing(location) || return "<p>Moved to <a href=\"" *
+        escape_html(location) * "\">" * escape_html(location) * "</a></p>"
     body = String(_message_body_bytes(resp))
     200 <= resp.status < 300 && return body
     "<article aria-invalid=\"true\"><header>HTTP " *
@@ -7841,16 +7963,27 @@ function _operation_terminal_body(resp::HTTP.Response)
 end
 
 function _operation_terminal_headers(resp::HTTP.Response)
+    location = _redirect_location(resp)
+    dropped = isnothing(location) ? ("content-type", "content-length") :
+                                    ("content-type", "content-length", "location")
     headers = Pair{String,String}[String(name) => String(value)
-        for (name, value) in resp.headers
-        if !(lowercase(name) in ("content-type", "content-length"))]
+        for (name, value) in resp.headers if !(lowercase(name) in dropped)]
+    isnothing(location) || push!(headers, "HX-Redirect" => location)
     push!(headers, "Content-Type" => "text/html; charset=utf-8")
     headers
 end
 
+# The `Location` of a redirect answer, or `nothing` for any other response.
+_redirect_location(resp::HTTP.Response) =
+    resp.status in _REDIRECT_STATUSES && HTTP.hasheader(resp, "Location") ?
+        String(HTTP.header(resp, "Location")) : nothing
+
+_operation_terminal_ok(resp::HTTP.Response) =
+    200 <= resp.status < 300 || !isnothing(_redirect_location(resp))
+
 function _operation_finalized_terminal(resp::HTTP.Response)
     body = _operation_terminal_body(resp)
-    inner = 200 <= resp.status < 300 ?
+    inner = _operation_terminal_ok(resp) ?
         "<div class=\"treebar-poller-inner treebar-terminal-content\" " *
             "data-htmxo-auto-terminal=\"\">" * body * "</div>" : body
     HTTP.Response(200, _operation_terminal_headers(resp); body=inner)
