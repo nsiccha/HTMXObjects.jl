@@ -14555,6 +14555,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   first-appearance order. Leaves keep their own selection key in every group,
   so selecting one selects all its copies, and the selection survives
   regrouping; selectable group rows submit their key under `<selectable>_group`.
+  An `initially_open` predicate is called with leaves only; each group holding
+  a leaf it opens, at every level, renders open (and its rows eagerly, even
+  with `group_rows_url`), so that leaf and its detail show on first paint. With
+  `initially_open=true` every rendered group is open and lazy groups stay lazy.
   See *Regroupable tables* in `docs/src/components.md`.
 - `group_by`: the active grouping's name (default: the first), or an ordered
   list of names that nests the groups level by level, the first outermost
@@ -15136,10 +15140,15 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         keep(g) = !isnothing(target) ? isprefix(g.path, target) || isprefix(target, g.path) :
             !update || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
                 any(m -> string(key(m)) in leaf_set, g.members)
+        # A predicate sees leaves only: a group holding a leaf it opens (its
+        # members are every leaf below it) renders open, and eagerly rather
+        # than lazily, so that leaf shows on first paint.
+        revealed = Dict{String,Bool}()
+        reveals(g) = initially_open isa Function && get!(() -> any(_open, g.members), revealed, g.key)
         # `group_rows_url` once per group; a lazy load renders its target's
         # rows, but the groups below it may load lazily in turn.
         lazy = Dict{String,Union{Nothing,String}}()
-        lazy_url(g) = isnothing(group_rows_url) ||
+        lazy_url(g) = isnothing(group_rows_url) || reveals(g) ||
             !isnothing(target) && length(g.path) <= length(target) ? nothing :
             get!(lazy, g.key) do
                 url = group_rows_url(g.key, g.members)
@@ -15209,7 +15218,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             master_attrs = x -> x isa _MDGroup ? group_attrs(x) : leaf_attrs(x.item),
             # A lazy load's rows show below its (open) target.
             initially_open = x -> x isa _MDGroup ?
-                (!isnothing(target) && isprefix(x.path, target) || initially_open === true) : _open(x.item),
+                (!isnothing(target) && isprefix(x.path, target) || initially_open === true || reveals(x)) :
+                _open(x.item),
             search_text = isnothing(search_text) ? nothing :
                 (x -> x isa _MDGroup ? last(x.path) : search_text(x.item)),
             selectable, select_form, select_submit = isnothing(select_submit) ? nothing :

@@ -490,6 +490,15 @@ transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_tab
   `id` and page path, like the search and the selection, so a re-render of the
   table (a regroup and back, a bulk action) opens them again; a lazy group that
   was open loads its rows again.
+- **Initially open.** `initially_open = true` opens every rendered group and
+  leaf detail; lazy groups still load on first expand. A predicate is called
+  with leaves only, never with group rows: each group holding a leaf it opens
+  renders open, at every [level](#table-grouping-levels), so that leaf and its
+  detail show on first paint (every copy of a leaf in several groups). Such a
+  group renders its rows eagerly even when `group_rows_url` would make it
+  lazy. A page reached from "open this document" passes
+  `initially_open = t -> t.id == open_id`; it needs no script to open the
+  group.
 - **Row actions.** A route that changes rows renders the same call with
   `update_rows` / `update_groups` instead of the whole table; see
   [Row updates](#table-row-updates).

@@ -98,6 +98,62 @@ end
     @test contains(custom, "data-htmxo-search-members=\"tx p1 tx p2 tx p7\"")
 end
 
+@testitem "initially_open: a predicate opens the groups of the leaves it opens" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    tr(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>"), page).match
+    calls = Any[]
+    page = html(grouped(group_by="rule", initially_open=t -> (push!(calls, t); t.id == "p3")))
+    # The predicate sees leaves only, never a group row.
+    @test !isempty(calls) && all(c -> c in TX, calls)
+    # p3 is in both rule groups: each opens, and each copy shows with its detail open.
+    for g in ("Shops", "Media")
+        @test contains(tr(page, "row-group--$g"), "data-htmxo-tree-open=\"true\"")
+        @test contains(tr(page, "row-group--$g"), "aria-expanded=\"true\"")
+        leaf = tr(page, "row-group--$g--p3")
+        @test contains(leaf, "data-htmxo-detail-open=\"true\"") && !contains(leaf, "hidden")
+        @test !contains(tr(page, "detail-group--$g--p3"), "hidden")
+    end
+    # Groups without an opened leaf stay closed, their rows hidden.
+    party = html(grouped(group_by="party", initially_open=t -> t.id == "p1"))
+    @test contains(tr(party, "row-group--Acme"), "data-htmxo-tree-open=\"true\"")
+    @test !contains(tr(party, "row-group--Acme--p1"), "hidden") && !contains(tr(party, "detail-group--Acme--p1"), "hidden")
+    # Its siblings show too, with their details closed.
+    @test !contains(tr(party, "row-group--Acme--p2"), "hidden") && contains(tr(party, "detail-group--Acme--p2"), "hidden")
+    @test contains(tr(party, "row-group--Bakery"), "data-htmxo-tree-open=\"false\"")
+    @test contains(tr(party, "row-group--Bakery--p4"), "hidden")
+    # A lazy group holding an opened leaf renders its rows eagerly; the others stay lazy.
+    lazy_url = (k, ms) -> length(ms) > 1 ? "/rows?key=$k" : nothing
+    lazy = html(grouped(group_by="party", group_rows_url=lazy_url, initially_open=t -> t.id == "p1"))
+    @test !contains(tr(lazy, "row-group--Acme"), "data-htmxo-lazy-rows") &&
+        contains(tr(lazy, "row-group--Acme"), "data-htmxo-tree-open=\"true\"")
+    @test all(contains(lazy, "id=\"row-group--Acme--$id\"") for id in ("p1", "p2", "p7"))
+    @test contains(tr(lazy, "row-group--Bakery"), "data-htmxo-lazy-rows=\"/rows?key=Bakery\"")
+    # `true` keeps its meaning: every rendered group open, lazy groups lazy.
+    all_open = html(grouped(group_by="party", group_rows_url=lazy_url, initially_open=true))
+    @test contains(tr(all_open, "row-group--Acme"), "data-htmxo-lazy-rows=\"/rows?key=Acme\"")
+    @test contains(tr(all_open, "row-group--Acme--Prime"), "data-htmxo-tree-open=\"true\"")
+    # A predicate that opens nothing changes nothing.
+    @test html(grouped(group_by="party", group_rows_url=lazy_url, initially_open=_ -> false)) ==
+        html(grouped(group_by="party", group_rows_url=lazy_url))
+    # Nested levels: every group on an opened leaf's path opens (eagerly), at every level.
+    by = ["rule", "party"]
+    nested = html(grouped(group_by=by, group_rows_url=lazy_url, initially_open=t -> t.id == "p1"))
+    for g in ("Shops", "Shops--Acme")
+        @test contains(tr(nested, "row-group--$g"), "data-htmxo-tree-open=\"true\"") &&
+            !contains(tr(nested, "row-group--$g"), "data-htmxo-lazy-rows")
+    end
+    @test !contains(tr(nested, "row-group--Shops--Acme--p1"), "hidden") &&
+        !contains(tr(nested, "detail-group--Shops--Acme--p1"), "hidden")
+    # Groups off that path stay closed, and lazy ones lazy, inside an opened group too.
+    @test contains(tr(nested, "row-group--Shops--Bakery"), "data-htmxo-tree-open=\"false\"") &&
+        contains(tr(nested, "row-group--Shops--Bakery"), "data-htmxo-lazy-rows=")
+    @test contains(tr(nested, "row-group--Media"), "data-htmxo-tree-open=\"false\"") &&
+        contains(tr(nested, "row-group--Media"), "data-htmxo-lazy-rows=")
+    @test html(grouped(group_by=by, group_rows_url=lazy_url, initially_open=_ -> false)) ==
+        html(grouped(group_by=by, group_rows_url=lazy_url))
+end
+
 @testitem "row updates: the rows of a leaf or a group, as the table renders them" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
@@ -812,6 +868,92 @@ end
             @test any(startswith("/table?group_by=none&q="), requests)
             @test any(r -> startswith(r, "/rows?group_by=rule&group_by=iban&group_by=party&key=") &&
                 contains(r, HTTP.escapeuri("[\"Shops\",\"DE01\"]")), requests)
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "initially_open groups browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # The reported shape: lazy details, label toggles, search, one leaf opened.
+        table(group_by, open_id) = master_detail_table(["Party", "IBAN", "Amount"], TX;
+            key=t -> t.id, master=t -> (h.td(t.party), h.td(t.iban), h.td(string(t.amount))),
+            detail_url=t -> "/detail?id=$(t.id)", detail_toggle=:label, groupings=GROUPINGS, group_by,
+            group_rows_url=(k, ms) -> length(ms) > 2 ? "/rows?key=$(HTTP.escapeuri(k))" : nothing,
+            initially_open=t -> t.id == open_id, searchable=true, id="g-$group_by")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const wait = async cond => { for (let n = 0; n < 200 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const row = id => document.getElementById('row-' + id);
+            const detail = id => document.getElementById('detail-' + id);
+            try {
+            // The table `id` names its <tbody>.
+            const shown = t => Array.from(document.getElementById(t).rows)
+                .filter(r => !r.id.startsWith('detail-') && !r.hidden).map(r => r.id.slice(4)).join(',');
+            // Rule grouping, p3 opened: it is in both groups, so both open.
+            const rule = shown('g-rule');
+            check('rule-shown ' + rule, rule === 'group--Shops,group--Shops--p1,group--Shops--p2,group--Shops--p3,group--Shops--p4,' +
+                'group--Shops--p6,group--Shops--p7,group--Media,group--Media--p3,group--Media--p5');
+            await wait(() => detail('group--Shops--p3').textContent.includes('memo 3') && detail('group--Media--p3').textContent.includes('memo 3'));
+            check('rule-details', !detail('group--Shops--p3').hidden && detail('group--Shops--p3').textContent.includes('memo 3') &&
+                !detail('group--Media--p3').hidden && detail('group--Media--p3').textContent.includes('memo 3'));
+            check('rule-aria', row('group--Shops').getAttribute('aria-expanded') === 'true' &&
+                row('group--Shops--p3').querySelector('[data-htmxo-detail-toggle]').getAttribute('aria-expanded') === 'true');
+            check('rule-others-closed', detail('group--Shops--p1').hidden);
+            // Party grouping, p1 opened: lazy-sized Acme renders eagerly and open.
+            const party = shown('g-party');
+            check('party-shown ' + party, party === 'group--Acme,group--Acme--p1,group--Acme--p2,group--Acme--p7,group--Acme--Prime,group--Bakery,group--Prime--Video');
+            check('party-not-lazy', !('htmxoLazyRows' in row('group--Acme').dataset));
+            await wait(() => detail('group--Acme--p1').textContent.includes('memo 1'));
+            check('party-detail', !detail('group--Acme--p1').hidden && detail('group--Acme--p1').textContent.includes('memo 1'));
+            // The user's own toggles still work on a group opened by the predicate.
+            row('group--Acme').querySelector('[data-htmxo-tree-toggle]').click();
+            const collapsed = shown('g-party');
+            check('party-collapse ' + collapsed, collapsed === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' &&
+                detail('group--Acme--p1').hidden);
+            } catch (e) { check('threw ' + e, false); }
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(table("rule", "p3"), table("party", "p1"), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            q = HTTP.queryparams(uri)
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/detail"
+                HTTP.Response(200, ["Content-Type" => "text/html"],
+                    repr("text/html", h.p(only(t.memo for t in TX if t.id == q["id"]))))
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 8
+            end
         finally
             close(server)
         end
