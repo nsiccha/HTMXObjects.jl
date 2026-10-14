@@ -153,6 +153,147 @@ end
     @test_throws ArgumentError grouped(group_by="party", group_rows="Acme", update_rows="p1")
 end
 
+@testitem "ordered grouping: nested levels, path keys and grouping pills" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string, group_path
+    html(x) = repr("text/html", x)
+    row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
+    attr(tr, name) = match(Regex("$name=\"([^\"]*)\""), match(r"<tr[^>]*>"s, tr).match)
+    page = html(grouped(group_by=["rule", "party"], group_by_url="/table", selectable="tx", select_form="bulk", id="g"))
+    # What the rows are grouped by, and what a request sends to render them again.
+    @test contains(page, "data-htmxo-grouped=\"[&quot;rule&quot;,&quot;party&quot;]\" data-htmxo-group-by=\"[&quot;rule&quot;,&quot;party&quot;]\"")
+    # Level 2 nests inside level 1; leaves sit at level 3 under their innermost group.
+    acme = row(page, "row-group--Shops--Acme")
+    @test attr(acme, "data-htmxo-parent")[1] == "row-group--Shops" && attr(acme, "aria-level")[1] == "2"
+    @test contains(acme, "<strong>Acme</strong> <small>(3)</small>")
+    leaf = row(page, "row-group--Shops--Acme--p1")
+    @test attr(leaf, "data-htmxo-parent")[1] == "row-group--Shops--Acme" && attr(leaf, "aria-level")[1] == "3"
+    @test attr(leaf, "data-htmxo-select-key")[1] == "p1" && attr(leaf, "data-htmxo-leaf")[1] == "p1"
+    # Groups are named by their path, as a JSON array: their selection value and key.
+    @test attr(acme, "data-htmxo-select-value")[1] == "[&quot;Shops&quot;,&quot;Acme&quot;]"
+    @test attr(acme, "data-htmxo-select-key")[1] == "group:Shops/Acme"
+    @test attr(row(page, "row-group--Shops"), "data-htmxo-select-value")[1] == "[&quot;Shops&quot;]"
+    # A vector-valued grouping lists a leaf under each of its groups, at every level.
+    @test count("data-htmxo-leaf=\"p3\"", page) == 2 &&
+        contains(page, "id=\"row-group--Shops--Acme--Prime--p3\"") && contains(page, "id=\"row-group--Media--Acme--Prime--p3\"")
+    by_party = html(grouped(group_by=["party", "rule"]))
+    @test contains(by_party, "id=\"row-group--Acme--Prime--Shops--p3\"") && contains(by_party, "id=\"row-group--Acme--Prime--Media--p3\"")
+    # The pills: active levels first, in order, each with ‹ › (disabled at the ends); then the rest.
+    pills = match(r"<span class=\"htmxo-group-pills\".*?</p>"s, page).match
+    @test !contains(page, "<select name=\"group_by\"")
+    @test contains(pills, "hx-get=\"/table\" hx-trigger=\"htmxo-regroup\" hx-target=\"closest [data-htmxo-grouped]\" hx-swap=\"outerHTML\"")
+    @test contains(pills, "data-htmxo-group-flat=\"none\"")
+    @test [m[1] for m in eachmatch(r"data-htmxo-group-name=\"([^\"]*)\"", pills)] == ["rule", "party", "iban"]
+    @test contains(pills, "data-htmxo-group-name=\"rule\" data-htmxo-group-level=\"1\"") &&
+        contains(pills, "data-htmxo-group-name=\"party\" data-htmxo-group-level=\"2\"") &&
+        !contains(pills, "data-htmxo-group-name=\"iban\" data-htmxo-group-level")
+    @test count("aria-pressed=\"true\"", pills) == 2 && count("aria-pressed=\"false\"", pills) == 1
+    @test contains(pills, "id=\"g-group-rule-earlier\" class=\"htmxo-group-move\" aria-label=\"Move rule earlier\" onclick=\"htmxoGroupMove(this,-1)\" disabled=\"true\"")
+    @test contains(pills, "id=\"g-group-party-later\" class=\"htmxo-group-move\" aria-label=\"Move party later\" onclick=\"htmxoGroupMove(this,1)\" disabled=\"true\"")
+    @test count("<button type=\"button\" id=\"g-group-party-earlier\"", pills) == 1 && !contains(pills, "id=\"g-group-iban-earlier\"")
+    # With a bulk form, the levels are submitted with it.
+    @test contains(page, "<input type=\"hidden\" name=\"group_by\" value=\"rule\" form=\"bulk\"><input type=\"hidden\" name=\"group_by\" value=\"party\" form=\"bulk\">")
+    # One level: no move buttons or level numbers; plain ordered keys are still paths.
+    one = html(grouped(group_by=["party"], group_by_url="/table", id="g"))
+    @test !contains(one, "class=\"htmxo-group-move\"") && !contains(one, "class=\"htmxo-group-level\"") &&
+        contains(one, "data-htmxo-grouped=\"[&quot;party&quot;]\"")
+    seen = String[]
+    html(grouped(group_by=["rule", "party"], group_master=(k, ms) -> (push!(seen, k); (h.td(k), h.td(""), h.td("")))))
+    @test seen[1:2] == ["[\"Shops\"]", "[\"Shops\",\"Acme\"]"] && all(k -> group_path(k)[1] in ("Shops", "Media"), seen)
+    # The flat view, spelled any way, renders the leaves and asks for the flat grouping again.
+    flat = html(grouped(group_by=String[], group_by_url="/table", id="g"))
+    @test flat == html(grouped(group_by=[""], group_by_url="/table", id="g")) ==
+        html(grouped(group_by=["none"], group_by_url="/table", id="g"))
+    @test contains(flat, "data-htmxo-grouped=\"[]\" data-htmxo-group-by=\"[&quot;none&quot;]\"") &&
+        !contains(flat, "data-htmxo-group=\"\"") && count("aria-pressed=\"false\"", flat) == 3
+    # Without a flat grouping the last level stays on (no request could ask
+    # for none); rendered directly, an empty list is still the flat view.
+    nonflat(group_by) = html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),),
+        detail=t -> "", groupings=GROUPINGS[2:end], group_by, group_by_url="/table", id="n"))
+    @test contains(nonflat(String[]), "data-htmxo-group-by=\"[&quot;&quot;]\"") && !contains(nonflat(String[]), "data-htmxo-group-flat")
+    @test contains(nonflat(["party"]), "id=\"n-group-party\" aria-pressed=\"true\" title=\"Grouped by party; add another grouping to change it\" aria-disabled=\"true\"")
+    @test !contains(nonflat(["party", "iban"]), " aria-disabled=") && !contains(one, " aria-disabled=")
+    # A member with no key at an inner level stays in its outer group, directly.
+    gaps = html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),), detail=t -> "",
+        groupings=["party" => t -> t.party, "big" => t -> t.amount < -40 ? "big" : nothing], group_by=["party", "big"]))
+    @test contains(gaps, "id=\"row-group--Bakery--big--p6\"") &&
+        attr(row(gaps, "row-group--Bakery--p4"), "data-htmxo-parent")[1] == "row-group--Bakery"
+    # Markdown has no indentation: a mark per level keeps the nesting readable.
+    md = to_markdown_string(grouped(group_by=["rule", "party"], group_by_url="/table"))
+    @test contains(md, "| **Shops** (6) |") && contains(md, "| › **Acme** (3) |") && contains(md, "| › › Acme | DE01 | -10.0 |")
+    @test !contains(md, "Group by") && !contains(md, "‹")
+    @test !contains(to_markdown_string(grouped(group_by=["party"])), "›")
+    # Group keys: a JSON array of strings, escapes included.
+    @test group_path("[\"Open\", \"a\\\"b\\\\c\\u00e9\\ud83d\\ude00\"]") == ["Open", "a\"b\\cé😀"]
+    @test group_path(" [ ] ") == String[]
+    for bad in ("Open", "[\"a\"", "[\"a\",]", "[1]", "[\"a\"] x", "[\"\\x\"]", "[\"\\ud83d\"]")
+        @test_throws ArgumentError group_path(bad)
+    end
+    @test_throws ArgumentError grouped(group_by=["party", "party"])
+    @test_throws ArgumentError grouped(group_by=["none", "party"])
+    @test_throws ArgumentError grouped(group_by=["nope"])
+    @test_throws ArgumentError grouped(group_by="")
+    @test_throws ArgumentError grouped(group_by=["party"], group_rows="[\"Acme\",\"x\"]")
+end
+
+@testitem "ordered grouping: lazy nested groups and row updates" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h, group_path
+    html(x) = repr("text/html", x)
+    row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
+    ids(page) = [m[1] for m in eachmatch(r"<tr[^>]*? id=\"(row-[^\"]*)\""s, replace(page, r"<tr id=" => "<tr  id="))]
+    lazy_url = (k, ms) -> length(ms) > 2 ? "/rows?key=$(HTMXObjects.HTTP.escapeuri(k))" : nothing
+    by = ["rule", "party"]
+    page = html(grouped(group_by=by, group_rows_url=lazy_url, selectable="tx"))
+    # "Shops" (6) loads lazily; its rows count toward the total as if loaded:
+    # 2 groups, Media's 2 subgroups and 2 leaves, Shops' 3 subgroups and 6 leaves.
+    shops = row(page, "row-group--Shops")
+    @test contains(shops, "data-htmxo-lazy-count=\"9\"") && contains(page, "2 of 15 rows shown")
+    @test contains(shops, "data-htmxo-lazy-rows=\"/rows?key=%5B%22Shops%22%5D\"")
+    # Search reaches the unloaded rows and the keys of the levels below.
+    @test contains(shops, "data-htmxo-search-members=\"Acme DE01 -10.0 Acme DE02 -20.0 Acme Prime DE01 -30.0 Bakery DE03 -40.0 Bakery DE03 -60.0 Acme DE01 -70.0 Acme Acme Prime Bakery\"")
+    @test !contains(page, "row-group--Shops--Acme\"")
+    # The lazy load: the group's rows as an eager render gives them; a big
+    # subgroup inside loads lazily in turn.
+    rows = html(grouped(group_by=by, group_rows_url=lazy_url, selectable="tx", group_rows="[\"Shops\"]", initially_open=true))
+    @test startswith(rows, "<tbody data-htmxo-group-rows=\"[&quot;Shops&quot;]\"><tr id=\"row-group--Shops--Acme\"")
+    @test contains(row(rows, "row-group--Shops--Acme"), "data-htmxo-lazy-rows=\"/rows?key=%5B%22Shops%22%2C%22Acme%22%5D\"")
+    eager = html(grouped(group_by=by, selectable="tx", initially_open=true))
+    for id in ("row-group--Shops--Bakery", "row-group--Shops--Bakery--p4", "row-group--Shops--Acme--Prime--p3", "detail-group--Shops--Bakery--p6")
+        @test row(rows, id) == row(eager, id)
+    end
+    @test !contains(rows, "id=\"row-group--Shops\"") && !contains(rows, "Media")
+    inner = html(grouped(group_by=by, group_rows_url=lazy_url, selectable="tx", group_rows="[\"Shops\",\"Acme\"]", initially_open=true))
+    @test startswith(inner, "<tbody data-htmxo-group-rows=\"[&quot;Shops&quot;,&quot;Acme&quot;]\"><tr data-htmxo-leaf=\"p1\"")
+    @test all(row(inner, "row-group--Shops--Acme--$id") == row(eager, "row-group--Shops--Acme--$id") for id in ("p1", "p2", "p7"))
+    @test count("<tr", inner) == 6
+    # A leaf update: every copy of the leaf, and the rows of every group it is in.
+    full = html(grouped(group_by=by, id="g"))
+    upd = html(grouped(group_by=by, id="g", update_rows="p3"))
+    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;rule&quot;,&quot;party&quot;]\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\">")
+    @test ids(upd) == ["row-group--Shops", "row-group--Shops--Acme--Prime", "row-group--Shops--Acme--Prime--p3",
+        "row-group--Media", "row-group--Media--Acme--Prime", "row-group--Media--Acme--Prime--p3"]
+    @test row(upd, "row-group--Media--Acme--Prime--p3") == row(full, "row-group--Media--Acme--Prime--p3")
+    @test contains(row(upd, "row-group--Shops"), "<strong>Shops</strong> <small>(6)</small>")
+    # A group update, by path: the group whole, with the rows on its path.
+    bakery = html(grouped(group_by=by, id="g", update_groups="[\"Shops\",\"Bakery\"]"))
+    @test contains(bakery, "data-htmxo-update-groups=\"[&quot;row-group--Shops--Bakery&quot;]\"")
+    @test ids(bakery) == ["row-group--Shops", "row-group--Shops--Bakery", "row-group--Shops--Bakery--p4", "row-group--Shops--Bakery--p6"]
+    # A named group that is gone: the outermost level of its path that no
+    # longer exists leaves, and a group shown for its summary stays a branch.
+    gone = html(grouped(group_by=by, id="g", update_groups=["[\"Shops\",\"Gone\"]", "[\"Nope\",\"x\"]"]))
+    @test contains(gone, "data-htmxo-update-groups=\"[&quot;row-group--Shops--Gone&quot;,&quot;row-group--Nope&quot;]\"")
+    @test ids(gone) == ["row-group--Shops"] && contains(gone, "data-htmxo-tree-toggle") &&
+        contains(gone, "data-htmxo-tree-open=\"false\"") && !contains(gone, "aria-controls")
+    # A lazy group in an update keeps its marks, and its rows come along.
+    lz = html(grouped(group_by=by, id="g", group_rows_url=lazy_url, update_rows="p1"))
+    @test contains(row(lz, "row-group--Shops"), "data-htmxo-lazy-count=\"9\"") && contains(lz, "id=\"row-group--Shops--Acme--p1\"")
+    # The flat view of an ordered grouping names its rows by id.
+    @test contains(html(grouped(group_by=String[], update_rows="p1", id="g")), "data-htmxo-grouped=\"[]\" data-htmxo-update-ids=")
+    @test_throws ArgumentError grouped(group_by=by, update_groups="[]")
+    @test_throws ArgumentError grouped(group_by=by, update_groups="Shops")
+end
+
 @testitem "regroupable table browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
@@ -501,6 +642,176 @@ end
                 end
                 @test count(==('\n'), checks[1]) + 1 == 20
             end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "grouping pills browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        esc = HTTP.escapeuri
+        query(group_by) = join(("group_by=$(esc(g))" for g in group_by), "&")
+        table(group_by, q="", group_rows=nothing) = grouped(; group_by, search_query=q, group_rows,
+            group_by_url="/table",
+            group_rows_url=(k, ms) -> length(ms) > 2 ? "/rows?$(query(group_by))&key=$(esc(k))" : nothing,
+            selectable="tx", select_form="bulk", searchable=true, expand_controls=true, id="g")
+        bulk = h.form(; id="bulk")(h.button("Apply"; id="apply", data_htmxo_needs_selection="tx", disabled=true))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const stage = name => { document.body.dataset.stage = name; };
+            const wait = async cond => { for (let n = 0; n < 250 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const g = () => document.querySelector('[data-htmxo-grouped]');
+            const row = id => document.getElementById('row-' + id);
+            const rows = () => Array.from(g().querySelector('tbody').rows).filter(r => !r.id.startsWith('detail-'));
+            const shown = () => rows().filter(r => !r.hidden).map(r => r.id.slice(4)).join(',');
+            const pill = n => g().querySelector('.htmxo-group-pill[data-htmxo-group-name="' + n + '"]');
+            const toggle = n => pill(n).querySelector('button');
+            const levels = () => JSON.parse(g().dataset.htmxoGrouped);
+            const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+            const regrouped = async want => { const ok = await wait(() => same(levels(), want)); await new Promise(r => setTimeout(r, 60)); return ok; };
+            const pressed = () => Array.from(g().querySelectorAll('.htmxo-group-pill')).map(p =>
+                p.dataset.htmxoGroupName + (p.querySelector('button').getAttribute('aria-pressed') === 'true' ? '+' : '-')).join(',');
+            const form = name => new FormData(document.getElementById('bulk')).getAll(name).join(',');
+            const click = (el, mods = {}) => el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, ...mods}));
+            const total = () => g().querySelector('[data-htmxo-table-count]').textContent;
+            const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}));
+            const drag = (from, onto, after) => {
+                const dt = new DataTransfer();
+                pill(from).dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+                const box = pill(onto).getBoundingClientRect();
+                const at = {bubbles: true, cancelable: true, dataTransfer: dt,
+                    clientX: after ? box.right - 2 : box.left + 2, clientY: box.top + box.height / 2};
+                toggle(onto).dispatchEvent(new DragEvent('dragover', at));
+                const marked = pill(onto).dataset.htmxoDrop;
+                toggle(onto).dispatchEvent(new DragEvent('drop', at));
+                pill(from).dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+                return marked;
+            };
+            stage('initial');
+            check('initial', same(levels(), ['party']) && pressed() === 'party+,iban-,rule-' &&
+                same(htmxoGroupBy('#g'), ['party']) && form('group_by') === 'party' && !g().querySelector('select[name="group_by"]'));
+            // A pill adds its level as the innermost one; focus stays on it.
+            stage('add-iban');
+            toggle('iban').focus();
+            toggle('iban').click();
+            check('add-level', await regrouped(['party', 'iban']));
+            check('add-pills', pressed() === 'party+,iban+,rule-' && document.activeElement && document.activeElement.id === 'g-group-iban');
+            check('nested-rows', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '4 of 16 rows shown');
+            row('group--Bakery').querySelector('[data-htmxo-tree-toggle]').click();
+            row('group--Bakery--DE03').querySelector('[data-htmxo-tree-toggle]').click();
+            check('open-nested', shown().includes('group--Bakery,group--Bakery--DE03,group--Bakery--DE03--p4,group--Bakery--DE03--p6') &&
+                row('group--Bakery--DE03').getAttribute('aria-level') === '2' && row('group--Bakery--DE03--p4').getAttribute('aria-level') === '3');
+            // ←/→ on a focused active pill reorders it, keeping the focus.
+            stage('arrow');
+            key(document.activeElement, 'ArrowLeft');
+            check('arrow-reorder', await regrouped(['iban', 'party']));
+            check('arrow-focus', document.activeElement && document.activeElement.id === 'g-group-iban' && pressed() === 'iban+,party+,rule-');
+            // ‹ moves a level outward; at the end of the bar the focus moves to the pill itself.
+            stage('move');
+            const earlier = document.getElementById('g-group-party-earlier');
+            earlier.focus();
+            earlier.click();
+            check('move-reorder', await regrouped(['party', 'iban']));
+            check('move-focus', document.getElementById('g-group-party-earlier').disabled && document.activeElement &&
+                document.activeElement.id === 'g-group-party');
+            // Dragging an inactive pill before an active one adds it at that level.
+            stage('drag-add');
+            check('drag-marker', drag('rule', 'party', false) === 'before');
+            check('drag-add', await regrouped(['rule', 'party', 'iban']) && !g().querySelector('[data-htmxo-drop]'));
+            // Dragging an active pill after another reorders.
+            stage('drag-move');
+            check('drag-marker-after', drag('party', 'iban', true) === 'after');
+            check('drag-move', await regrouped(['rule', 'iban', 'party']));
+            check('three-levels', shown() === 'group--Shops,group--Media' && total() === '2 of 21 rows shown' &&
+                'htmxoLazyRows' in row('group--Shops').dataset);
+            // A selected nested group submits its path, with the grouping.
+            stage('select');
+            row('group--Media').querySelector('[data-htmxo-tree-toggle]').click();
+            click(row('group--Media--DE01').cells[2], {ctrlKey: true});
+            check('select-path', form('tx_group') === '["Media","DE01"]' && form('group_by') === 'rule,iban,party');
+            click(row('group--Media').cells[2], {ctrlKey: true});
+            check('select-outer-path', form('tx_group').split(',["').length === 2 && form('tx_group').includes('["Media"]'));
+            // Expand all loads the lazy group and, inside it, its own lazy subgroup.
+            stage('expand');
+            g().querySelector('.htmxo-tree-controls > button').click();
+            check('expand-nested-lazy', await wait(() => rows().length === 21 && !rows().some(r => 'htmxoLazyRows' in r.dataset)));
+            await new Promise(r => setTimeout(r, 60));
+            check('expand-all-open', rows().every(r => !r.hidden) && total() === '21 of 21 rows shown' &&
+                row('group--Shops--DE01--Acme--p7').getAttribute('aria-level') === '4');
+            // A regroup carries the search; removing a level keeps the others' order.
+            stage('search');
+            const input = g().querySelector('input[type="search"]');
+            input.value = 'bakery';
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            toggle('iban').click();
+            check('remove-level', await regrouped(['rule', 'party']));
+            check('search-kept', g().querySelector('input[type="search"]').value === 'bakery' && same(htmxoGroupBy('#g'), ['rule', 'party']));
+            // No pill is the flat view: the leaves, with the selection kept.
+            stage('flat');
+            input.value = '';
+            g().querySelector('input[type="search"]').value = '';
+            toggle('rule').click();
+            await regrouped(['party']);
+            toggle('party').click();
+            check('flat', await regrouped([]));
+            check('flat-rows', rows().length === 7 && same(htmxoGroupBy('#g'), ['none']) && pressed() === 'party-,iban-,rule-' &&
+                form('group_by') === 'none');
+            stage('done');
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(bulk, table(["party"]), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        requests = String[]
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            pairs = HTTP.URIs.queryparampairs(uri)
+            group_by = [v for (k, v) in pairs if k == "group_by"]
+            param(name) = something((v for (k, v) in pairs if k == name)..., "")
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            uri.path == "/" || push!(requests, req.target)
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/table"
+                html(table(group_by, param("q")))
+            elseif uri.path == "/rows"
+                html(table(group_by, "", param("key")))
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if isnothing(checks)
+                @info "grouping pills browser: no checks" stage=match(r"data-stage=\"([^\"]*)\"", dom) requests
+            else
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 22
+            end
+            # The levels travel as repeated group_by values; none sends the flat grouping.
+            @test any(startswith("/table?group_by=party&group_by=iban&q="), requests)
+            @test any(startswith("/table?group_by=none&q="), requests)
+            @test any(r -> startswith(r, "/rows?group_by=rule&group_by=iban&group_by=party&key=") &&
+                contains(r, HTTP.escapeuri("[\"Shops\",\"DE01\"]")), requests)
         finally
             close(server)
         end

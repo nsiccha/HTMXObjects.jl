@@ -12814,7 +12814,8 @@ function htmxoFilterTable(target) {
 function htmxoTreeAll(button, open) {
     const root = htmxoSearchRoot(button);
     const input = root.querySelector(':scope > label > input[type="search"]');
-    if (input && input.value.trim()) {
+    const searching = Boolean(input && input.value.trim());
+    if (searching) {
         if (open) delete root.dataset.htmxoSearchCollapsed;
         else root.dataset.htmxoSearchCollapsed = '';
     } else {
@@ -12822,14 +12823,16 @@ function htmxoTreeAll(button, open) {
             .forEach(r => { r.dataset.htmxoTreeOpen = String(open); htmxoTreeRemember(r); });
     }
     if (open) root.querySelector('table').tBodies[0].querySelectorAll(':scope > tr[data-htmxo-lazy-rows]')
-        .forEach(r => htmxoLoadRows(r));
+        .forEach(r => htmxoLoadRows(r, !searching));
     htmxoFilterTable(root);
 }
 
 // A branch rendered with `data-htmxo-lazy-rows` fetches its rows on first
 // expand: the response's <tbody data-htmxo-group-rows> rows go in after the
 // branch row, then the current sort, search and selection apply to them.
-function htmxoLoadRows(row) {
+// With `expand` (Expand all), the branches among them open as well, and the
+// lazy ones load in turn.
+function htmxoLoadRows(row, expand) {
     if (row.htmxoLoading) return row.htmxoLoading;
     row.setAttribute('aria-busy', 'true');
     row.htmxoLoading = fetch(row.dataset.htmxoLazyRows, {headers: {'HX-Request': 'true'}})
@@ -12849,6 +12852,10 @@ function htmxoLoadRows(row) {
             if (window.htmx) rows.forEach(r => htmx.process(r));
             row.dataset.htmxoTreeOpen = 'true';
             htmxoTreeRemember(row);
+            if (expand) rows.forEach(r => {
+                if ('htmxoLazyRows' in r.dataset) htmxoLoadRows(r, true);
+                else if ('htmxoTreeOpen' in r.dataset) { r.dataset.htmxoTreeOpen = 'true'; htmxoTreeRemember(r); }
+            });
             htmxoResort(row.closest('table'));
             htmxoFilterTable(row);
         })
@@ -13286,6 +13293,124 @@ function htmxoSelectionTarget(e) {
 function htmxoGroupedQuery(el) {
     const input = el.closest('[data-htmxo-grouped]').querySelector('.htmxo-searchable-table > label > input[type="search"]');
     return input ? input.value : '';
+}
+// The `group_by` values that render a regroupable table's current grouping
+// again (repeated values for an ordered grouping), e.g. for an action's
+// `hx-vals`: `js:{group_by: htmxoGroupBy('#tx')}`. `target` is a selector or
+// an element in or around the table.
+function htmxoGroupBy(target) {
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    const wrapper = el && ((el.closest && el.closest('[data-htmxo-group-by]')) ||
+        (el.querySelector && el.querySelector('[data-htmxo-group-by]')));
+    if (!wrapper) throw new Error('htmxoGroupBy: no regroupable table at ' + target);
+    return JSON.parse(wrapper.dataset.htmxoGroupBy);
+}
+
+// --- Grouping pills: master_detail_table(...; groupings, group_by=[...]) ---
+// The active pills name the grouping levels, outermost first. A change sets
+// the pending levels and fires `htmxo-regroup`, which the pills' own hx-get
+// answers by re-rendering the table (`htmxoGroupPending` supplies the values).
+function htmxoGroupLevels(pills) {
+    return Array.from(pills.querySelectorAll(':scope > [data-htmxo-group-level]'), p => p.dataset.htmxoGroupName);
+}
+function htmxoGroupPending(pills) {
+    const names = pills.htmxoPending || htmxoGroupLevels(pills);
+    // No level is the flat view: its grouping's name, else an empty value
+    // (an empty list would send nothing and leave the route's default).
+    return names.length ? names : [pills.dataset.htmxoGroupFlat ?? ''];
+}
+function htmxoGroupRequest(pills, names, focusId) {
+    if (names.join('\u0000') === htmxoGroupLevels(pills).join('\u0000')) return;
+    pills.htmxoPending = names;
+    window.htmxoGroupFocus = focusId ? {id: focusId, pills} : null;
+    htmx.trigger(pills, 'htmxo-regroup');
+}
+function htmxoGroupToggle(button) {
+    // The last level of a table without a flat grouping stays on.
+    if (button.getAttribute('aria-disabled') === 'true') return;
+    const pill = button.closest('.htmxo-group-pill'), pills = pill.parentElement, name = pill.dataset.htmxoGroupName;
+    const names = htmxoGroupLevels(pills);
+    htmxoGroupRequest(pills, names.includes(name) ? names.filter(n => n !== name) : [...names, name], button.id);
+}
+// Move an active pill `by` levels (-1: outward, 1: inward).
+function htmxoGroupShift(pill, by, focusId) {
+    const pills = pill.parentElement, names = htmxoGroupLevels(pills);
+    const from = names.indexOf(pill.dataset.htmxoGroupName), to = from + by;
+    if (from < 0 || to < 0 || to >= names.length) return;
+    names.splice(to, 0, names.splice(from, 1)[0]);
+    htmxoGroupRequest(pills, names, focusId);
+}
+function htmxoGroupMove(button, by) { htmxoGroupShift(button.closest('.htmxo-group-pill'), by, button.id); }
+function htmxoGroupKey(button, e) {
+    const by = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+    if (!by || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    e.preventDefault();
+    htmxoGroupShift(button.closest('.htmxo-group-pill'), by, button.id);
+}
+// Dragging a pill onto an active one puts it at that level (before or after
+// it, by the pointer); dropping an inactive pill elsewhere on the bar adds
+// it as the innermost level.
+function htmxoGroupDrag(e) {
+    const pill = e.target.closest && e.target.closest('.htmxo-group-pill');
+    if (!pill) return;
+    window.htmxoGroupDragged = pill;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', pill.dataset.htmxoGroupName);
+}
+function htmxoGroupDropSpot(e) {
+    const dragged = window.htmxoGroupDragged, pills = e.currentTarget;
+    if (!dragged || dragged.parentElement !== pills) return null;
+    const over = e.target.closest && e.target.closest('.htmxo-group-pill[data-htmxo-group-level]');
+    if (over === dragged) return null;
+    if (over) {
+        const box = over.getBoundingClientRect();
+        return {pill: over, after: e.clientX > box.left + box.width / 2};
+    }
+    return 'htmxoGroupLevel' in dragged.dataset ? null : {pill: null, after: true};
+}
+function htmxoGroupMark(pills, spot) {
+    pills.querySelectorAll('[data-htmxo-drop]').forEach(p => delete p.dataset.htmxoDrop);
+    if (spot && spot.pill) spot.pill.dataset.htmxoDrop = spot.after ? 'after' : 'before';
+}
+function htmxoGroupDragOver(e) {
+    const spot = htmxoGroupDropSpot(e);
+    htmxoGroupMark(e.currentTarget, spot);
+    if (!spot) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+}
+function htmxoGroupDragLeave(e) {
+    if (!e.currentTarget.contains(e.relatedTarget)) htmxoGroupMark(e.currentTarget, null);
+}
+function htmxoGroupDrop(e) {
+    const pills = e.currentTarget, spot = htmxoGroupDropSpot(e), dragged = window.htmxoGroupDragged;
+    htmxoGroupMark(pills, null);
+    if (!spot) return;
+    e.preventDefault();
+    const name = dragged.dataset.htmxoGroupName;
+    const names = htmxoGroupLevels(pills).filter(n => n !== name);
+    names.splice(spot.pill ? names.indexOf(spot.pill.dataset.htmxoGroupName) + (spot.after ? 1 : 0) : names.length, 0, name);
+    htmxoGroupRequest(pills, names, null);
+}
+function htmxoGroupDragEnd(e) {
+    window.htmxoGroupDragged = null;
+    htmxoGroupMark(e.currentTarget, null);
+}
+// htmx returns focus to the pill control the user pressed (same id) after
+// the table is re-rendered; one that is now disabled (a ‹/› at the end of
+// the bar) hands it to its pill's toggle.
+if (!window.htmxoGroupFocusBound) {
+    window.htmxoGroupFocusBound = true;
+    document.addEventListener('htmx:afterSettle', () => {
+        const f = window.htmxoGroupFocus;
+        if (!f || f.pills.isConnected) return;
+        window.htmxoGroupFocus = null;
+        const active = document.activeElement;
+        if (active && active !== document.body && active.isConnected && !active.disabled) return;
+        const el = document.getElementById(f.id), pill = el && el.closest('.htmxo-group-pill');
+        const target = el && !el.disabled ? el : pill && pill.querySelector('button');
+        if (target) target.focus();
+    });
 }
 function htmxoSelectionRestore(elt) {
     if (!elt || !elt.querySelectorAll) return;
@@ -14431,18 +14556,36 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   so selecting one selects all its copies, and the selection survives
   regrouping; selectable group rows submit their key under `<selectable>_group`.
   See *Regroupable tables* in `docs/src/components.md`.
-- `group_by`: the active grouping's name (default: the first). An unknown name
-  throws an `ArgumentError`.
-- `group_master(key, members)`: the group row's cells (default: the key in
-  bold and the member count). Controls in it keep their own behaviour.
-- `group_by_url`: adds a *Group by* select to the tree controls. A change GETs
-  this URL with `group_by` and `q` (the current search) and swaps the table for
-  the response; with `select_form` the select is also submitted with that form.
+- `group_by`: the active grouping's name (default: the first), or an ordered
+  list of names that nests the groups level by level, the first outermost
+  (`["Review stage", "Document type"]`). A member with no key at an inner
+  level is listed directly in its outer group. A list names each group by its
+  path, a JSON array of its level keys (`["Open","Invoice"]`, decoded by
+  `HTMXObjects.group_path`): the `key` the group callbacks
+  receive, the value a selected group row submits, and what `group_rows` and
+  `update_groups` take. In a list, the flat grouping's name or `""` (alone)
+  means no levels. An unknown or repeated name throws an `ArgumentError`.
+- `group_master(key, members)`: the group row's cells (default: the group's
+  own key in bold and the member count); `members` are all the leaves under
+  the group. Controls in it keep their own behaviour.
+- `group_by_url`: adds a *Group by* control to the tree controls and re-renders
+  the table through this URL, with `group_by` and `q` (the current search),
+  swapping the table for the response. A single `group_by` name gets a select.
+  A list gets one pill per grouping: a pill turns its level on (as the
+  innermost) or off, and the active pills reorder by drag, by their ‹ ›
+  buttons or with ←/→. The pills send the levels as repeated `group_by` values,
+  or for none the flat grouping's name, so declare the route's
+  `group_by::Vector{String}`; without a flat grouping the last level stays on. With `select_form` the
+  grouping is also submitted with that form. In the browser,
+  `htmxoGroupBy(target)` returns the `group_by` values of the table's current
+  grouping, e.g. for an action's `hx-vals`.
 - `group_rows_url(key, members)`: return a URL to load that group's rows on
   first expand (or `nothing` to render them). The route renders the same call
   with `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` of just
   that group's rows. Until then the group row carries its members' search text
-  and selection keys.
+  and selection keys. With nested levels, a group at any level can load
+  lazily, and the groups inside a loaded group in turn; *Expand all* loads them
+  all.
 - `update_rows`: one key or several. Instead of the table, return the rows of
   those items as the same call renders them, in a `<tbody data-htmxo-row-update>`
   that the table runtime puts in place of the rows on the page, whatever the
@@ -14455,7 +14598,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `update_groups` (with `groupings`): one group key or several. Adds each group
   row of the active grouping and all its rows to the update: rows the group no
   longer has leave, new ones join it, and a group that no longer exists leaves
-  with its rows. For a leaf that changed groups, name the group it left too.
+  with its rows (with nested levels, from the outermost level of its path that
+  no longer exists; the groups on its path refresh their own rows). For a leaf
+  that changed groups, name the group it left too.
 - Remaining `kwargs...` forward to [`sortable_table`](@ref) (`id`,
   `caption`, `download`, `class`, …).
 
@@ -14503,6 +14648,7 @@ function master_detail_table(headers, items;
                              update_groups=nothing,
                              _rows_only::Bool=false,
                              _toolbar=(),
+                             _level_marks::Bool=false,
                              kwargs...)
     isnothing(groupings) || return _grouped_master_detail_table(headers, items;
         key, master, detail, detail_url, master_attrs, master_class, detail_class,
@@ -14537,10 +14683,12 @@ function master_detail_table(headers, items;
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
         descendants = isnothing(children) ? () : children(item)
-        # A branch whose rows load on first expand (see `group_rows_url`).
+        # A branch whose rows load on first expand (see `group_rows_url`), or
+        # whose rows a row update leaves alone.
         lazy_rows = descendants isa _MDLazyRows ? descendants : nothing
-        descendants = isnothing(lazy_rows) ? collect(descendants) : ()
-        branch = !isnothing(lazy_rows) || !isempty(descendants)
+        elsewhere = descendants isa _MDRowsElsewhere
+        descendants = isnothing(lazy_rows) && !elsewhere ? collect(descendants) : ()
+        branch = !isnothing(lazy_rows) || elsewhere || !isempty(descendants)
         open = isnothing(lazy_rows) && _open(item)
         branch_open = branch && (!branches_collapsible || open)
         safe = _md_safe_key(item_key)
@@ -14641,8 +14789,11 @@ function master_detail_table(headers, items;
                 push!(isnothing(children) ? controls : trailing_controls, toggle)
             end
         end
+        # Markdown has no indentation: with several grouping levels, a mark
+        # per level keeps the nesting readable there.
+        marks = _level_marks && level > 1 ? (markdown_only("› "^(level - 1)),) : ()
         cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
-            Any[controls..., h.span(; data_htmxo_row_label="")(label...), trailing_controls...])
+            Any[controls..., marks..., h.span(; data_htmxo_row_label="")(label...), trailing_controls...])
         if !isnothing(children) && isnothing(body) && isnothing(url)
             # Group rows need no placeholder or detail request. Their children
             # are ordinary rows in this same tbody, visible from first paint.
@@ -14688,6 +14839,19 @@ function master_detail_table(headers, items;
     .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
     .htmxo-tree-controls > label { display: inline-flex; align-items: baseline; gap: .5rem; margin: 0 .5rem 0 0; font-size: .875em; }
     .htmxo-tree-controls > label > select { width: auto; margin: 0; padding-block: .15em; font-size: inherit; }
+    .htmxo-tree-controls > .htmxo-group-pills[role="group"] { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem; width: auto; margin: 0 .5rem 0 0; border-radius: 0; box-shadow: none; font-size: .875em; }
+    .htmxo-group-pills[role="group"] > * { flex: none; margin: 0; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill { display: inline-flex; align-items: center; border: 1px solid var(--pico-muted-border-color, GrayText); border-radius: 1em; color: inherit; cursor: grab; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-group-level] { border-color: var(--pico-primary-border, Highlight); background: var(--pico-primary-background, Highlight); color: var(--pico-primary-inverse, HighlightText); }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button { width: auto; margin: 0; padding: .1em .65em; border: 0; border-radius: 1em; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: 1.5; cursor: pointer; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button.htmxo-group-move { padding-inline: .3em; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button.htmxo-group-move:last-child { padding-inline-end: .6em; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button:disabled { opacity: .35; cursor: default; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button[aria-disabled="true"] { cursor: default; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-drop="before"] { box-shadow: -3px 0 0 var(--pico-primary, Highlight); }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-drop="after"] { box-shadow: 3px 0 0 var(--pico-primary, Highlight); }
+    .htmxo-group-pills .htmxo-group-level { margin-inline-end: .35em; font-size: .85em; opacity: .8; }
     [data-htmxo-group] > td:first-child { white-space: nowrap; }
     [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
     tr[aria-busy="true"] [data-htmxo-tree-toggle] { cursor: progress; opacity: .6; }
@@ -14724,13 +14888,16 @@ end
 
 # One leaf may belong to several groups (`groupings` callbacks may return a
 # vector of keys); each copy is its own row, but every copy carries the leaf's
-# own selection key, so selection, inputs and counts stay per leaf.
+# own selection key, so selection, inputs and counts stay per leaf. With
+# several levels a group sits inside the groups of the levels above it: its
+# `path` holds one key per level, outermost first.
 struct _MDGroup
-    key::String
+    key::String           # as callbacks, selections and requests name the group
+    path::Vector{String}
     members::Vector{Any}
 end
 struct _MDGroupLeaf
-    group::String
+    group::String         # the row key of the group the copy is listed under
     item::Any
 end
 # `children` result for a branch whose rows load on first expand.
@@ -14738,11 +14905,16 @@ struct _MDLazyRows
     url::String
     count::Int
 end
+# `children` result, in a row update, for a branch rendered for its own row
+# alone: it stays a branch, and its rows on the page stay as they are.
+struct _MDRowsElsewhere end
 
 _md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = [string(k) for k in keys if !isnothing(k)]
 _md_group_keys(::Nothing) = String[]
 _md_group_keys(k) = [string(k)]
 
+# The groups `grouping` sorts `items` into, as `key => members` in
+# first-appearance order.
 function _md_groups(items, grouping)
     order = String[]
     members = Dict{String,Vector{Any}}()
@@ -14750,12 +14922,97 @@ function _md_groups(items, grouping)
         haskey(members, k) || (push!(order, k); members[k] = Any[])
         push!(members[k], item)
     end
-    [_MDGroup(k, members[k]) for k in order]
+    [k => members[k] for k in order]
 end
 
-# Default group summary: the group key and member count, blank cells beside it.
-_md_default_group_master(ncols) = (key, members) ->
-    Any[h.td(h.strong(key), " ", h.small("($(length(members)))")),
+"""
+    HTMXObjects.group_path(key) -> Vector{String}
+
+The level keys, outermost first, of a group in a [`master_detail_table`](@ref)
+grouped by an ordered `group_by` list. Such a table names each group by its
+path, encoded as a JSON array of strings (`["Open","Invoice"]`): the `key` its
+`group_master` and `group_rows_url` callbacks receive, the value a selected
+group row submits, and what `group_rows` and `update_groups` take. A table
+grouped by a single name keeps plain keys and needs no decoding. Malformed
+input throws an `ArgumentError`.
+"""
+function group_path(key::AbstractString)
+    s = String(key)
+    bad() = throw(ArgumentError("group_path: not a JSON array of strings: $(repr(s))"))
+    out = String[]
+    i = _md_json_skip(s, 1)
+    i <= ncodeunits(s) && s[i] == '[' || bad()
+    i = _md_json_skip(s, i + 1)
+    i <= ncodeunits(s) || bad()
+    if s[i] != ']'
+        while true
+            str, i = _md_json_read_string(s, i, bad)
+            push!(out, str)
+            i = _md_json_skip(s, i)
+            i <= ncodeunits(s) || bad()
+            s[i] == ']' && break
+            s[i] == ',' || bad()
+            i = _md_json_skip(s, i + 1)
+        end
+    end
+    _md_json_skip(s, i + 1) > ncodeunits(s) || bad()
+    out
+end
+
+# Whitespace, quotes, brackets and commas are ASCII, so stepping a byte at a
+# time over them is safe; string contents go through `nextind`.
+_md_json_skip(s, i) = (while i <= ncodeunits(s) && s[i] in (' ', '\t', '\n', '\r'); i += 1; end; i)
+
+const _MD_JSON_ESCAPES = Dict('"' => '"', '\\' => '\\', '/' => '/', 'b' => '\b',
+    'f' => '\f', 'n' => '\n', 'r' => '\r', 't' => '\t')
+
+# One JSON string literal starting at `i` (its opening quote): its value and
+# the index after its closing quote.
+function _md_json_read_string(s, i, bad)
+    i <= ncodeunits(s) && s[i] == '"' || bad()
+    io = IOBuffer()
+    i += 1
+    while true
+        i <= ncodeunits(s) || bad()
+        c = s[i]
+        if c == '"'
+            return String(take!(io)), i + 1
+        elseif c == '\\'
+            i += 1
+            i <= ncodeunits(s) || bad()
+            e = s[i]
+            if e == 'u'
+                u = _md_json_hex4(s, i, bad)
+                i += 4
+                if 0xd800 <= u <= 0xdbff
+                    i + 6 <= ncodeunits(s) && s[i+1] == '\\' && s[i+2] == 'u' || bad()
+                    lo = _md_json_hex4(s, i + 2, bad)
+                    0xdc00 <= lo <= 0xdfff || bad()
+                    print(io, Char(0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00)))
+                    i += 6
+                else
+                    0xdc00 <= u <= 0xdfff && bad()
+                    print(io, Char(u))
+                end
+            else
+                print(io, get(bad, _MD_JSON_ESCAPES, e))
+            end
+        else
+            c < ' ' && bad()
+            print(io, c)
+        end
+        i = nextind(s, i)
+    end
+end
+# The four hex digits after the `u` at `i`.
+_md_json_hex4(s, i, bad) = i + 4 <= ncodeunits(s) && all(j -> isxdigit(Char(codeunit(s, j))), i+1:i+4) ?
+    parse(UInt32, s[i+1:i+4]; base=16) : bad()
+
+# Default group summary: the group's own key and member count, blank cells
+# beside it. Nested groups show the key of their level; the indentation
+# shows where they sit.
+_md_default_group_master(ncols, label) = (key, members) ->
+    Any[h.td(h.strong(label(key)), " ", h.small("($(length(members)))")),
         (h.td("") for _ in 2:ncols)...]
 
 # The helper's selection attributes first; the caller's `master_attrs` win.
@@ -14793,12 +15050,31 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     names = String[string(first(g)) for g in groupings]
     isempty(names) && throw(ArgumentError("master_detail_table: `groupings` is empty"))
     allunique(names) || throw(ArgumentError("master_detail_table: grouping names must be unique"))
-    active = isnothing(group_by) ? first(names) : string(group_by)
-    active in names || throw(ArgumentError(string("master_detail_table: unknown group_by ",
-        repr(active), "; groupings are ", join(repr.(names), ", "))))
-    grouping = last(groupings[findfirst(==(active), names)])
-    isnothing(grouping) && !isnothing(group_rows) && throw(ArgumentError(
-        "master_detail_table: group_rows needs a grouping, but $(repr(active)) is ungrouped"))
+    by_name = Dict(n => last(g) for (n, g) in zip(names, groupings))
+    flat = findfirst(n -> isnothing(by_name[n]), names)
+    flat_name = isnothing(flat) ? nothing : names[flat]
+    # A list of names orders several levels, outermost first, and names each
+    # group by its path (`group_path`); a single name keeps one level and
+    # plain group keys. In a list, the flat grouping or "" means no levels.
+    ordered = group_by isa Union{AbstractVector,Tuple}
+    requested = ordered ? String[string(n) for n in group_by] :
+        String[isnothing(group_by) ? first(names) : string(group_by)]
+    for n in requested
+        ordered && isempty(n) || n in names || throw(ArgumentError(string("master_detail_table: unknown group_by ",
+            repr(n), "; groupings are ", join(repr.(names), ", "))))
+    end
+    levels = String[n for n in requested if !isempty(n) && !isnothing(by_name[n])]
+    length(levels) == length(requested) || length(requested) == 1 || throw(ArgumentError(
+        "master_detail_table: group_by lists the flat view among several levels: $(repr(requested))"))
+    allunique(levels) || throw(ArgumentError("master_detail_table: group_by lists a grouping twice: $(repr(levels))"))
+    nlevels = length(levels)
+    fns = [by_name[n] for n in levels]
+    # What the rows are grouped by (a row update must match it), and the
+    # `group_by` values a request sends to render this grouping again.
+    grouped_by = ordered ? _md_json_list(levels) : only(requested)
+    group_by_values = !ordered ? requested : isempty(levels) ? [something(flat_name, "")] : levels
+    nlevels == 0 && !isnothing(group_rows) && throw(ArgumentError(
+        "master_detail_table: group_rows needs a grouping, but $(repr(ordered ? requested : only(requested))) is ungrouped"))
     update = !isnothing(update_rows) || !isnothing(update_groups)
     update && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows loads a lazy group; update_rows/update_groups are a separate response"))
@@ -14807,14 +15083,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     leaf_select(item) = _md_group_select_attrs(selectable, string(key(item)), leaf_value(item), nothing)
     # The Group by control joins the tree controls; with a bulk form it is
     # also submitted there, so a group selection arrives with its grouping.
-    toolbar = isnothing(group_by_url) || !isnothing(group_rows) ? () : (h.label("Group by",
-        h.select(; name="group_by", hx_get=string(group_by_url),
-            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
-            hx_vals="js:{q: htmxoGroupedQuery(this)}",
-            (isnothing(select_form) ? (;) : (; form=select_form))...)(
-            (h.option(n; value=n, (n == active ? (; selected=true) : (;))...) for n in names)...)),)
+    # An ordered `group_by` gets pills that turn levels on and off and
+    # reorder them; a single name, the select.
+    toolbar = isnothing(group_by_url) || !isnothing(group_rows) ? () :
+        ordered ? (_md_group_pills(names, by_name, levels, flat_name, group_by_values, group_by_url, select_form,
+            string(get(kwargs, :id, "htmxo-grouped-" * string(hash(names); base=36)))),) :
+        (h.label("Group by",
+            h.select(; name="group_by", hx_get=string(group_by_url),
+                hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
+                hx_vals="js:{q: htmxoGroupedQuery(this)}",
+                (isnothing(select_form) ? (;) : (; form=select_form))...)(
+                (h.option(n; value=n, (n == grouped_by ? (; selected=true) : (;))...) for n in names)...)),)
     leaf_keys = _md_update_keys(update_rows)
-    table = if isnothing(grouping)
+    table = if nlevels == 0
         # The flat view: the leaves themselves, keyed and selected as in any
         # other grouping so a selection survives switching to and from it.
         flat_kwargs = (; (k => v for (k, v) in pairs(kwargs) if k !== :expand_controls)...)
@@ -14823,48 +15104,87 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             selectable, select_form, select_submit, search_text, _toolbar=toolbar,
             update_rows=update ? leaf_keys : nothing, _rows_only=update, flat_kwargs...)
         # This view has no groups: `update_groups` names none of its rows.
-        update && return _md_row_update(built, get(kwargs, :id, nothing); grouped=active,
+        update && return _md_row_update(built, get(kwargs, :id, nothing); grouped=grouped_by,
             ids=["row-" * _md_safe_key(k) for k in leaf_keys])
         built
     else
         ncols = length(headers)
-        gmaster = something(group_master, _md_default_group_master(ncols))
-        groups = _md_groups(items, grouping)
-        if !isnothing(group_rows)
-            groups = filter(g -> g.key == string(group_rows), groups)
-        end
-        gid(g) = "group:" * g.key
-        # The leaves each group renders: all of them, or for an update the
-        # updated leaves plus every leaf of an updated group. An update keeps
-        # only those groups, and the group rows of the updated leaves, whose
-        # summaries their members feed.
-        group_keys, leaf_set = Set(_md_update_keys(update_groups)), Set(leaf_keys)
-        shown = Dict(g.key => (!update || g.key in group_keys ? g.members :
-            filter(m -> string(key(m)) in leaf_set, g.members)) for g in groups)
-        update && (groups = filter(g -> g.key in group_keys || !isempty(shown[g.key]), groups))
         _open = initially_open isa Function ? initially_open : (_ -> initially_open)
-        # `group_rows` renders one group's leaf rows, eagerly, for the lazy load.
-        lazy = Dict{String,String}()
-        if isnothing(group_rows) && !isnothing(group_rows_url)
-            for g in groups
+        # A group's key names it in callbacks, selections and requests; its
+        # row key (and so its row id) joins its level keys.
+        gkey(path) = ordered ? _md_json_list(path) : only(path)
+        gpath(k) = ordered ? group_path(string(k)) : [string(k)]
+        gid(path) = "group:" * join(path, "/")
+        gmaster = something(group_master, _md_default_group_master(ncols, k -> last(gpath(k))))
+        subgroups(members, depth, prefix) =
+            [let path = String[prefix..., k]; _MDGroup(gkey(path), path, ms) end
+             for (k, ms) in _md_groups(members, fns[depth])]
+        isprefix(a, b) = length(a) <= length(b) && view(b, 1:length(a)) == a
+        target = isnothing(group_rows) ? nothing : gpath(group_rows)
+        named = [gpath(k) for k in _md_update_keys(update_groups)]
+        for p in (isnothing(target) ? named : [target])
+            1 <= length(p) <= nlevels || throw(ArgumentError(
+                "master_detail_table: $(repr(gkey(p))) names no group of a $(nlevels)-level grouping"))
+        end
+        leaf_set = Set(leaf_keys)
+        # The groups and leaves a render shows: all of them; for a lazy load,
+        # the target group whole (and the path to it); for an update, the
+        # named groups whole, the groups on their paths and those holding an
+        # updated leaf. Summaries always see a group's full membership.
+        whole(path) = !isnothing(target) ? isprefix(target, path) :
+            !update || any(n -> isprefix(n, path), named)
+        keep(g) = !isnothing(target) ? isprefix(g.path, target) || isprefix(target, g.path) :
+            !update || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
+                any(m -> string(key(m)) in leaf_set, g.members)
+        # `group_rows_url` once per group; a lazy load renders its target's
+        # rows, but the groups below it may load lazily in turn.
+        lazy = Dict{String,Union{Nothing,String}}()
+        lazy_url(g) = isnothing(group_rows_url) ||
+            !isnothing(target) && length(g.path) <= length(target) ? nothing :
+            get!(lazy, g.key) do
                 url = group_rows_url(g.key, g.members)
-                isnothing(url) || (lazy[g.key] = string(url))
+                isnothing(url) ? nothing : string(url)
             end
+        # A group's subgroups at the next level, and the members listed in it
+        # directly: those with no key at the next level (or all of them at
+        # the innermost level), so none drops out of the group it counts in.
+        function contents(g)
+            depth = length(g.path)
+            depth == nlevels && return (_MDGroup[], g.members)
+            (subgroups(g.members, depth + 1, g.path),
+             [m for m in g.members if isempty(_md_group_keys(fns[depth+1](m)))])
+        end
+        # The rows a group adds below its own row, nested lazy groups counted
+        # as loaded: "N of M rows shown" counts rows not loaded yet.
+        row_count(g) = let (subs, direct) = contents(g)
+            sum((1 + row_count(s) for s in subs); init=0) + length(direct)
+        end
+        function group_children(g)
+            subs, direct = contents(g)
+            shown = Any[filter(keep, subs)...,
+                (_MDGroupLeaf(gid(g.path), m) for m in direct if whole(g.path) || string(key(m)) in leaf_set)...]
+            # An update can show a group for its summary alone (it lies on the
+            # path to a named group that is gone): it stays a branch, and its
+            # rows on the page stay as they are.
+            update && isempty(shown) ? _MDRowsElsewhere() : shown
         end
         leaf_text(item) = isnothing(search_text) ? _md_text(master(item)) : string(search_text(item))
         function group_attrs(g)
             attrs = _md_attr_union((; data_htmxo_group=""),
-                _md_group_select_attrs(selectable, gid(g), g.key, string(selectable, "_group")))
-            haskey(lazy, g.key) || return attrs
+                _md_group_select_attrs(selectable, gid(g.path), g.key, string(selectable, "_group")))
+            url = lazy_url(g)
+            isnothing(url) && return attrs
             # An update renders a lazy group's rows too, for a table that has
             # loaded them; the row keeps its lazy marks for one that has not.
             if update
-                attrs[:data_htmxo_lazy_rows] = lazy[g.key]
-                attrs[:data_htmxo_lazy_count] = string(length(g.members))
+                attrs[:data_htmxo_lazy_rows] = url
+                attrs[:data_htmxo_lazy_count] = string(row_count(g))
             end
-            # Leaves not loaded yet still count: search reaches their text,
-            # and a selection keeps their keys (and submits their values).
-            attrs[:data_htmxo_search_members] = join((leaf_text(m) for m in g.members), " ")
+            # Rows not loaded yet still count: search reaches their text (and
+            # the keys of the levels below), and a selection keeps their keys
+            # (and submits their values).
+            below = unique!(String[k for d in length(g.path)+1:nlevels for m in g.members for k in _md_group_keys(fns[d](m))])
+            attrs[:data_htmxo_search_members] = join([[leaf_text(m) for m in g.members]; below], " ")
             if !isnothing(selectable)
                 attrs[:data_htmxo_select_members] = "{" * join((string(_md_json_string(string(key(m))), ":",
                     isnothing(select_submit) || select_submit(m) ? _md_json_string(leaf_value(m)) : "null")
@@ -14875,31 +15195,95 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         # Every copy of a leaf names it, so an update finds them all.
         leaf_attrs(item) = merge(_md_attr_union(leaf_select(item), _attrs(item)),
             Dict{Symbol,Any}(:data_htmxo_leaf => string(key(item))))
-        built = master_detail_table(headers, groups;
-            key = x -> x isa _MDGroup ? gid(x) : "group:" * x.group * "/" * string(key(x.item)),
+        built = master_detail_table(headers, filter(keep, subgroups(items, 1, String[]));
+            key = x -> x isa _MDGroup ? gid(x.path) : x.group * "/" * string(key(x.item)),
             master = x -> x isa _MDGroup ? gmaster(x.key, x.members) : master(x.item),
             children = x -> !(x isa _MDGroup) ? () :
-                !update && haskey(lazy, x.key) ? _MDLazyRows(lazy[x.key], length(x.members)) :
-                Any[_MDGroupLeaf(x.key, m) for m in shown[x.key]],
+                let url = lazy_url(x)
+                    !update && !isnothing(url) ? _MDLazyRows(url, row_count(x)) : group_children(x)
+                end,
             detail = isnothing(detail) ? nothing : (x -> x isa _MDGroup ? nothing : detail(x.item)),
             detail_url = isnothing(detail_url) ? nothing :
                 (x -> x isa _MDGroup ? nothing :
                       detail_url isa Function ? detail_url(x.item) : detail_url),
             master_attrs = x -> x isa _MDGroup ? group_attrs(x) : leaf_attrs(x.item),
-            initially_open = x -> x isa _MDGroup ? (!isnothing(group_rows) || initially_open === true) :
-                _open(x.item),
+            # A lazy load's rows show below its (open) target.
+            initially_open = x -> x isa _MDGroup ?
+                (!isnothing(target) && isprefix(x.path, target) || initially_open === true) : _open(x.item),
             search_text = isnothing(search_text) ? nothing :
-                (x -> x isa _MDGroup ? x.key : search_text(x.item)),
+                (x -> x isa _MDGroup ? last(x.path) : search_text(x.item)),
             selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
                 (x -> x isa _MDGroup ? true : select_submit(x.item)),
+            _level_marks = nlevels > 1,
             _rows_only = !isnothing(group_rows) || update, _toolbar = toolbar, kwargs...)
-        # The lazy-load response: the group's leaf rows (its own row dropped).
-        isnothing(group_rows) || return h.tbody(; data_htmxo_group_rows=string(group_rows))(built[2:end]...)
-        update && return _md_row_update(built, get(kwargs, :id, nothing); grouped=active,
-            leaves=leaf_keys, groups=["row-" * _md_safe_key("group:" * k) for k in _md_update_keys(update_groups)])
+        # The lazy-load response: the target group's rows (the rows of its
+        # path and its own row dropped: each is one <tr>).
+        isnothing(target) || return h.tbody(; data_htmxo_group_rows=string(group_rows))(built[length(target)+1:end]...)
+        if update
+            # A named group that is gone takes its rows with it: the update's
+            # scope is the outermost group of its path that no longer exists.
+            scope = map(named) do path
+                members = items
+                for d in eachindex(path)
+                    groups = _md_groups(members, fns[d])
+                    i = findfirst(g -> first(g) == path[d], groups)
+                    isnothing(i) && return path[1:d]
+                    members = last(groups[i])
+                end
+                path
+            end
+            return _md_row_update(built, get(kwargs, :id, nothing); grouped=grouped_by,
+                leaves=leaf_keys, groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]))
+        end
         built
     end
-    h.div(; data_htmxo_grouped=active)(table)
+    h.div(; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values))(table)
+end
+
+# The ordered Group by control: one pill per grouping, the active ones first
+# in level order. A pill toggles its level (on as the innermost one); the
+# active pills reorder by drag, by their ‹ › buttons or by ←/→. Each change
+# re-renders the table through the pills' hx-get, with the levels as repeated
+# `group_by` values (`htmxoGroupPending`). With a bulk form, hidden inputs
+# submit the grouping alongside the selection. Without a flat grouping there
+# is no view without levels to ask for (an empty `group_by` reaches a
+# `Vector{String}` route as no values at all), so the last level stays on.
+function _md_group_pills(names, by_name, levels, flat_name, values, url, form, id)
+    nactive = length(levels)
+    keep_last = isnothing(flat_name) && nactive == 1
+    order = [levels; [n for n in names if !isnothing(by_name[n]) && !(n in levels)]]
+    function pill(n)
+        level = findfirst(==(n), levels)
+        safe = _md_safe_key(n)
+        if isnothing(level)
+            return h.span(; class="htmxo-group-pill", data_htmxo_group_name=n, draggable="true")(
+                h.button(n; type="button", id="$id-group-$safe", aria_pressed="false",
+                    title=nactive == 0 ? "Group by $n" : "Also group by $n, as the innermost level",
+                    onclick="htmxoGroupToggle(this)"))
+        end
+        move(glyph, by, edge, where) = h.button(glyph; type="button", id="$id-group-$safe-$where",
+            class="htmxo-group-move", aria_label="Move $n $where", onclick="htmxoGroupMove(this,$by)",
+            (edge ? (; disabled=true) : (;))...)
+        h.span(; class="htmxo-group-pill", data_htmxo_group_name=n, data_htmxo_group_level=string(level),
+                draggable="true")(
+            h.button((nactive > 1 ? (h.span(string(level); class="htmxo-group-level", aria_hidden="true"),) : ())...,
+                n; type="button", id="$id-group-$safe", aria_pressed="true",
+                title=nactive > 1 ? "Level $level: stop grouping by $n; drag or press ←/→ to reorder" :
+                    keep_last ? "Grouped by $n; add another grouping to change it" : "Stop grouping by $n",
+                (keep_last ? (; aria_disabled="true") : (;))...,
+                onclick="htmxoGroupToggle(this)", onkeydown="htmxoGroupKey(this,event)"),
+            (nactive > 1 ? (move("‹", -1, level == 1, "earlier"), move("›", 1, level == nactive, "later")) : ())...)
+    end
+    h.span(; class="htmxo-group-pills", role="group", aria_label="Group by",
+            hx_get=string(url), hx_trigger="htmxo-regroup", hx_target="closest [data-htmxo-grouped]",
+            hx_swap="outerHTML", hx_vals="js:{group_by: htmxoGroupPending(this), q: htmxoGroupedQuery(this)}",
+            (isnothing(flat_name) ? (;) : (; data_htmxo_group_flat=flat_name))...,
+            ondragstart="htmxoGroupDrag(event)", ondragover="htmxoGroupDragOver(event)",
+            ondragleave="htmxoGroupDragLeave(event)", ondrop="htmxoGroupDrop(event)",
+            ondragend="htmxoGroupDragEnd(event)")(
+        h.span("Group by"; class="htmxo-group-pills-label", aria_hidden="true"),
+        (pill(n) for n in order)...,
+        (isnothing(form) ? () : (h.input(; type="hidden", name="group_by", value=v, form) for v in values))...)
 end
 
 # Keys an update names: one key or a collection of them, as strings.
