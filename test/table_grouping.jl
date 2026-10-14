@@ -1164,3 +1164,158 @@ end
         end
     end
 end
+
+@testitem "a row update keeps a moved leaf the reader has open in view browser" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        esc = HTTP.escapeuri
+        # Documents under review: an action in a document's (lazy) detail or
+        # row moves it to another stage, so its rows change groups.
+        docs = [(; id="a1", stage="Review", kind="Invoice"), (; id="a2", stage="Review", kind="Receipt"),
+                (; id="a3", stage="Review", kind="Invoice")]
+        nest = [(; id="b1", stage="Todo", kind="Invoice"), (; id="b2", stage="Done", kind="Receipt")]
+        stages = Dict(d.id => d.stage for d in [docs; nest])
+        kinds = Dict(d.id => d.kind for d in [docs; nest])
+        groupings = ["Stage" => d -> stages[d.id], "Kind" => d -> kinds[d.id], "None" => nothing]
+        move_url(id, to, gb) = "/move?id=$id&to=$to&gb=$gb"
+        # One level, eager groups, all closed at first.
+        single(; kw...) = master_detail_table(["Document", "Act"], docs; key=d -> d.id,
+            master=d -> (h.td(d.id), h.td(h.button("exclude"; type="button", data_exclude=d.id,
+                hx_post=move_url(d.id, "Excluded", "single"), hx_target="closest tr", hx_swap="outerHTML"))),
+            detail_url=d -> "/detail?id=$(d.id)&gb=single", detail_toggle=:label,
+            groupings, group_by="Stage", searchable=true, id="docs", kw...)
+        # Two levels, every group lazy.
+        nested(; kw...) = master_detail_table(["Document"], nest; key=d -> d.id, master=d -> (h.td(d.id),),
+            detail_url=d -> "/detail?id=$(d.id)&gb=nested", detail_toggle=:label,
+            groupings, group_by=["Stage", "Kind"],
+            group_rows_url=(k, ms) -> "/rows?key=$(esc(k))", searchable=true, id="nest", kw...)
+        # A tree: a child moves to a closed parent.
+        parents = Dict("c1" => "P1", "c2" => "P1", "c3" => "P2")
+        roots() = [(; id=p, kids=[(; id=c, kids=[]) for c in sort([c for (c, q) in parents if q == p])]) for p in ("P1", "P2")]
+        tree(; kw...) = master_detail_table(["Item"], roots(); key=n -> n.id, master=n -> (h.td(n.id),),
+            children=n -> n.kids, initially_open=n -> n.id == "P1",
+            detail=n -> startswith(n.id, "c") ? h.div(h.p("child $(n.id) of $(parents[n.id])"),
+                h.button("move"; type="button", data_move=n.id, hx_post="/cmove?id=$(n.id)",
+                    hx_target="closest tr", hx_swap="outerHTML")) : nothing,
+            id="tree", kw...)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const wait = async cond => { for (let n = 0; n < 200 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const settle = () => new Promise(r => setTimeout(r, 50));
+            const row = id => document.getElementById('row-' + id);
+            const detail = id => document.getElementById('detail-' + id);
+            const toggle = id => row(id).querySelector('[data-htmxo-tree-toggle]').click();
+            const control = id => row(id).querySelector('[data-htmxo-detail-toggle]');
+            const openDetail = async id => { control(id).click(); await wait(() => detail(id).querySelector('[data-approve]')); };
+            const act = async (button, gone) => { button.focus(); button.click(); await wait(() => !gone.isConnected); await settle(); };
+            const shownOpen = id => row(id) && !row(id).hidden && !detail(id).hidden && control(id).getAttribute('aria-expanded') === 'true';
+            try {
+            // A document whose detail is open, the focus in it, moves to a
+            // group the update creates: the group opens, the detail stays
+            // open (and loads again), the focus goes to the row's control.
+            toggle('group--Review');
+            await openDetail('group--Review--a1');
+            await act(detail('group--Review--a1').querySelector('[data-approve]'), row('group--Review--a1'));
+            check('new-group-opens', row('group--Approved') && row('group--Approved').dataset.htmxoTreeOpen === 'true' &&
+                row('group--Approved').getAttribute('aria-expanded') === 'true' && !row('group--Review--a1'));
+            check('new-group-detail', shownOpen('group--Approved--a1'));
+            check('new-group-focus', document.activeElement === control('group--Approved--a1'));
+            await wait(() => detail('group--Approved--a1').textContent.includes('a1 Approved'));
+            check('new-group-detail-loads', detail('group--Approved--a1').textContent.includes('a1 Approved'));
+            // The same into a group the reader closed.
+            toggle('group--Approved');
+            await openDetail('group--Review--a2');
+            await act(detail('group--Review--a2').querySelector('[data-approve]'), row('group--Review--a2'));
+            check('closed-group-opens', row('group--Approved').dataset.htmxoTreeOpen === 'true' &&
+                shownOpen('group--Approved--a2') && !row('group--Approved--a1').hidden);
+            check('closed-group-focus', document.activeElement === control('group--Approved--a2'));
+            // A document whose detail is closed: its new group stays as it
+            // is, and the focus goes to the group row that now holds it.
+            await act(row('group--Review--a3').querySelector('[data-exclude]'), row('group--Review--a3'));
+            check('closed-detail-stays', row('group--Excluded').dataset.htmxoTreeOpen === 'false' && row('group--Excluded--a3').hidden &&
+                detail('group--Excluded--a3').hidden);
+            check('closed-detail-focus', document.activeElement === row('group--Excluded').querySelector('[data-htmxo-tree-toggle]'));
+            // Two levels of lazy groups: Done and its new subgroup load and
+            // open on the way to the document; Done's other subgroup stays as it is.
+            toggle('group--Todo');
+            await wait(() => row('group--Todo--Invoice'));
+            toggle('group--Todo--Invoice');
+            await wait(() => row('group--Todo--Invoice--b1'));
+            await openDetail('group--Todo--Invoice--b1');
+            check('lazy-setup', 'htmxoLazyRows' in row('group--Done').dataset && !row('group--Done--Invoice'));
+            await act(detail('group--Todo--Invoice--b1').querySelector('[data-approve]'), row('group--Todo--Invoice--b1'));
+            await wait(() => row('group--Done--Invoice--b1') && document.activeElement === control('group--Done--Invoice--b1'));
+            check('lazy-groups-open', !row('group--Todo') && !('htmxoLazyRows' in row('group--Done').dataset) &&
+                row('group--Done').dataset.htmxoTreeOpen === 'true' && row('group--Done--Invoice').dataset.htmxoTreeOpen === 'true' &&
+                'htmxoLazyRows' in row('group--Done--Receipt').dataset);
+            check('lazy-detail', shownOpen('group--Done--Invoice--b1'));
+            check('lazy-focus', document.activeElement === control('group--Done--Invoice--b1'));
+            // A tree: a child moves under a closed parent with its (eager)
+            // detail open and the focus in it, which returns to the same control.
+            control('c1').click();
+            await act(detail('c1').querySelector('[data-move]'), row('c1'));
+            check('tree-parent-opens', row('P2').dataset.htmxoTreeOpen === 'true' && row('c1').dataset.htmxoParent === 'row-P2' &&
+                !row('c1').hidden && !detail('c1').hidden && detail('c1').textContent.includes('of P2'));
+            check('tree-focus', document.activeElement === detail('c1').querySelector('[data-move]'));
+            check('no-leaks', document.querySelectorAll('tbody[data-htmxo-row-update], tr tr').length === 0);
+            } catch (e) { check('threw ' + e, false); }
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(single(), nested(), tree(), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            q = HTTP.queryparams(uri)
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/detail"
+                id = q["id"]
+                html(h.div(h.p("doc $id $(stages[id])"), h.button("approve"; type="button", data_approve=id,
+                    hx_post=move_url(id, q["gb"] == "single" ? "Approved" : "Done", q["gb"]),
+                    hx_target="closest tr", hx_swap="outerHTML")))
+            elseif uri.path == "/rows"
+                html(nested(; group_rows=q["key"]))
+            elseif uri.path == "/move"
+                id, from, to = q["id"], stages[q["id"]], q["to"]
+                stages[id] = to
+                html(q["gb"] == "single" ? single(; update_rows=id, update_groups=[from, to]) :
+                    nested(; update_rows=id, update_groups=["[\"$from\"]", "[\"$to\"]"]))
+            elseif uri.path == "/cmove"
+                id = q["id"]
+                from = parents[id]
+                parents[id] = from == "P1" ? "P2" : "P1"
+                html(tree(; update_rows=[id, from, parents[id]]))
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 15
+            end
+        finally
+            close(server)
+        end
+    end
+end

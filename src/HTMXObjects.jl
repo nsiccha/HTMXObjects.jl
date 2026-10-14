@@ -12894,7 +12894,9 @@ function htmxoTreeRow(row, event) {
 // An action route answers with the rows it changed, rendered by the table's
 // own call: a <tbody data-htmxo-row-update>. Each row replaces its namesake
 // in place and keeps what the user did to it (open branch and detail,
-// selection, search, focus); a row new to the table, or whose place among its
+// selection, search, focus), and a leaf that moves to another group takes
+// its open detail and the focus along, its new groups opening if the reader
+// had it open in view; a row new to the table, or whose place among its
 // siblings changed, goes where the table's own render puts it, unless its
 // group is not loaded, and a sorted table re-applies its sort; a row in the
 // update's scope that it no longer lists leaves, with its detail and child
@@ -12936,13 +12938,18 @@ function htmxoUpdateRows(update, origin) {
     const byId = new Map(masters().map(r => [r.id, r]));
     const own = id => { const el = document.getElementById(id); return el && el.parentElement === tbody ? el : null; };
     const under = (r, set) => { for (let p = r; p; p = byId.get(p.dataset.htmxoParent)) if (set.has(p.id)) return true; return false; };
+    const parentOf = r => r.dataset.htmxoParent || '';
+    const detailOpen = r => Boolean(own(detailId(r))) && (r.dataset.htmxoDetailOpen ?? r.getAttribute('aria-expanded')) === 'true';
+    // A row the reader has open in view: shown, with its detail open.
+    const openInView = r => !r.hidden && detailOpen(r);
     // Focus in a row being replaced returns to the same control (or the row)
-    // in its replacement.
+    // in its replacement, in the row itself or in its detail.
     const active = document.activeElement;
     let focusRow = active && active.closest ? active.closest('tr') : null;
     while (focusRow && focusRow.parentElement !== tbody) focusRow = focusRow.parentElement && focusRow.parentElement.closest('tr');
-    const focus = focusRow ?
-        {id: focusRow.id, index: htmxoFocusables(focusRow).indexOf(active)} : null;
+    const focusMaster = focusRow && isDetail(focusRow) ? masters().find(m => detailId(m) === focusRow.id) : focusRow;
+    const focus = focusRow ? {id: (focusMaster || focusRow).id, inDetail: Boolean(focusMaster) && focusMaster !== focusRow,
+        index: htmxoFocusables(focusRow).indexOf(active)} : null;
     // Rows of the scope that the update no longer lists leave, with their
     // detail rows and child rows; their parents' toggles name fewer rows.
     const listed = new Set(incoming.filter(r => !isDetail(r)).map(r => r.id));
@@ -12950,6 +12957,16 @@ function htmxoUpdateRows(update, origin) {
     const removed = new Set(masters().filter(r => scoped(r) && !listed.has(r.id)).map(r => r.id));
     const doomed = masters().filter(r => under(r, removed));
     const touched = new Set(doomed.map(r => byId.get(r.dataset.htmxoParent)).filter(p => p && !under(p, removed)));
+    // A leaf that moves to another group leaves as one row and arrives as
+    // another (a leaf's row id names its group): what the reader did to the
+    // copy that leaves goes to the copy that arrives.
+    const leaving = new Map();
+    doomed.forEach(r => {
+        if (!('htmxoLeaf' in r.dataset)) return;
+        const was = leaving.get(r.dataset.htmxoLeaf) || {open: false, inView: false, focus: false};
+        leaving.set(r.dataset.htmxoLeaf, {open: was.open || detailOpen(r), inView: was.inView || openInView(r),
+            focus: was.focus || (focus !== null && focus.id === r.id)});
+    });
     doomed.forEach(r => {
         const d = own(detailId(r));
         htmxoRowDiscard(r);
@@ -12957,7 +12974,6 @@ function htmxoUpdateRows(update, origin) {
         byId.delete(r.id);
     });
     const details = new Map(incoming.filter(isDetail).map(r => [r.id, r]));
-    const parentOf = r => r.dataset.htmxoParent || '';
     // The last row of `r` with its detail and child rows.
     const end = r => {
         const self = new Set([r.id]);
@@ -12992,12 +13008,31 @@ function htmxoUpdateRows(update, origin) {
         return true;
     };
     const fresh = [];
+    // The rows to keep in view, with whether to open their detail; the row
+    // the focus returns to, and whether it moved to another group.
+    const follow = [];
+    let focusTo = focus && focus.id, focusMoved = false;
+    const incomingById = new Map(incoming.map(r => [r.id, r]));
     incoming.filter(r => !isDetail(r)).forEach(row => {
         const detail = details.get(detailId(row)) || null;
         const old = byId.get(row.id);
         const at = placeOf(row);
+        // The copy a moved leaf arrives as (the first, for a leaf listed in
+        // several groups) takes its open detail and the focus, and stays in
+        // view if the reader had the leaf open in view.
+        const handed = !old && 'htmxoLeaf' in row.dataset ? leaving.get(row.dataset.htmxoLeaf) : null;
+        if (handed) {
+            leaving.delete(row.dataset.htmxoLeaf);
+            if (handed.inView) follow.push({id: row.id, open: handed.open});
+            if (handed.focus) { focusTo = row.id; focusMoved = true; }
+        }
         if (old) {
             const oldDetail = own(detailId(old));
+            // So does a row that moves to another parent (in a tree).
+            if (parentOf(old) !== parentOf(row)) {
+                if (openInView(old)) follow.push({id: row.id, open: true});
+                if (focusTo === row.id) focusMoved = true;
+            }
             htmxoCarryRow(old, row, oldDetail, detail);
             old.before(row);
             if (detail) row.after(detail);
@@ -13011,6 +13046,7 @@ function htmxoUpdateRows(update, origin) {
             const last = parent ? end(parent) : tbody.lastElementChild;
             if (last) last.after(row); else tbody.append(row);
             if (detail) row.after(detail);
+            if (handed && handed.open && detail) htmxoMdShow(row, detail, true);
         }
         byId.set(row.id, row);
         const shifted = Boolean(at) && place(row, at);
@@ -13037,16 +13073,63 @@ function htmxoUpdateRows(update, origin) {
         if (kids.length) toggle.setAttribute('aria-controls', kids.join(' '));
         else toggle.removeAttribute('aria-controls');
     });
-    if (focus && (!document.activeElement || document.activeElement === document.body)) {
-        const row = own(focus.id);
-        const target = row && (focus.index >= 0 ? htmxoFocusables(row)[focus.index] : row);
-        if (target && (target !== row || row.hasAttribute('tabindex'))) target.focus({preventScroll: true});
-    }
+    // A row kept in view opens the groups above it, outermost first; at a
+    // group that has not loaded its rows the rest waits for them (below).
+    const parentId = id => { const r = byId.get(id) || incomingById.get(id); return r ? parentOf(r) : ''; };
+    const above = id => { const path = []; for (let p = parentId(id); p; p = parentId(p)) path.unshift(p); return path; };
+    const openGroup = r => { if (r.dataset.htmxoTreeOpen === 'false') { r.dataset.htmxoTreeOpen = 'true'; htmxoTreeRemember(r); } };
+    const later = follow.filter(f => {
+        for (const p of above(f.id)) {
+            const r = own(p);
+            if (!r) return false;
+            if ('htmxoLazyRows' in r.dataset) return true;
+            openGroup(r);
+        }
+        return false;
+    });
     const root = tbody.closest('.htmxo-searchable-table');
     const select = tbody.closest('[data-htmxo-select]');
-    if (root && root.querySelector('table') === table) htmxoFilterTable(root);
-    else if (select && select.querySelector('table') === table) htmxoSelectionUpdate(select);
+    const ownRoot = root && root.querySelector('table') === table, ownSelect = select && select.querySelector('table') === table;
+    // The focus returns below, once the rows show, in place of the
+    // selection's return to the row (noted as its row left).
+    if (focus && ownSelect) htmxoSelectionOf(select).refocus = null;
+    if (ownRoot) htmxoFilterTable(root);
+    else if (ownSelect) htmxoSelectionUpdate(select);
     fresh.forEach(d => { if (isDetail(d) && !d.hidden) htmxoLoadSlot(d.querySelector('[data-loaded]')); });
+    // To the same control, in the row's replacement or in the copy a moved
+    // leaf arrived as, scrolled into view if it moved to another group; while
+    // that control is not there (a lazy detail loads again), to the row or its
+    // detail control; while the row does not show, to the nearest group row
+    // above it that does.
+    const lost = () => !document.activeElement || document.activeElement === document.body;
+    const shown = el => Boolean(el) && el.getClientRects().length > 0;
+    const focusAt = (id, scroll) => {
+        const row = own(id);
+        const holder = row && (focus.inDetail ? own(detailId(row)) : row);
+        let target = holder && (focus.index >= 0 ? htmxoFocusables(holder)[focus.index] : holder.hasAttribute('tabindex') ? holder : null);
+        for (let r = row, rid = id; !shown(target) && rid; rid = parentId(rid), r = own(rid)) {
+            target = !shown(r) ? null : r.hasAttribute('tabindex') ? r :
+                (r === row && r.querySelector('[data-htmxo-detail-toggle]')) || r.querySelector('[data-htmxo-tree-toggle]');
+        }
+        if (!shown(target)) return null;
+        target.focus({preventScroll: true});
+        if (scroll) target.scrollIntoView({block: 'nearest'});
+        return target;
+    };
+    const placed = focus && lost() ? focusAt(focusTo, focusMoved) : null;
+    later.forEach(f => (async () => {
+        for (const p of above(f.id)) {
+            const r = own(p);
+            if (!r) return;
+            if ('htmxoLazyRows' in r.dataset) await htmxoLoadRows(r);
+            else openGroup(r);
+        }
+        const row = own(f.id), d = row && own(detailId(row));
+        if (!row) return;
+        if (d && f.open) htmxoMdShow(row, d, true);
+        if (ownRoot) htmxoFilterTable(root);
+        if (focusTo === f.id && (lost() || (placed && document.activeElement === placed))) focusAt(f.id, true);
+    })());
 }
 
 // What a replaced row keeps from the one it replaces: the state the user
@@ -14632,6 +14715,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   of each leaf in the active grouping, with the rows of the groups it is in
   (their summaries depend on it); in a tree, the item's own row. Rows keep what
   the user did to them: open branches and details, selection, search, focus.
+  A leaf that moves to another group (or parent) takes its open detail and the
+  focus along, and if its detail was open in view the groups above it open.
   A row new to the page, or whose place among its siblings changed, goes where
   the full table puts it, and a sorted table re-applies its sort.
   A key no longer among `items` removes its rows. Use it from the route of a

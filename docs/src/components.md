@@ -601,17 +601,25 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
   row's existing `hx-target="closest tr"` keeps working. Each row replaces the
   row with its id in place and keeps what the reader did to it: an open
   branch, an open detail (a lazy one loads again), the selection, the search
-  and its predicates, and the focus, which returns to the same control. The
-  new rows get `htmx:load`. A row new to the table, a new group, or a row whose
-  place among its siblings changed (a group that a moved leaf now opens first,
-  a child row whose date was edited) goes where a full render of the table
-  puts it: after the row before it among its siblings, or before the row after
-  it when only that one is on the page. The update carries those neighbours
-  for each row whose preceding sibling it does not list
-  (`data-htmxo-update-places`); with neither neighbour on the page, a new row
-  joins the end of its group or table and an existing row stays put. In a lazy
-  group the reader has not opened, a new row arrives with the group's other
-  rows when the group loads. A sorted table then re-applies its sort.
+  and its predicates, and the focus, which returns to the same control. A leaf
+  that moves to another group arrives as another row, since a leaf's row id
+  names its group; it takes its open detail and the focus along, and the page
+  scrolls to the focus. If the reader had its detail open in view, the groups
+  above it open at every level, so it stays in view: a group the update
+  creates, one the reader closed, and a lazy one, which loads its rows first.
+  A tree row that moves to another parent does the same. Focus that cannot
+  return to its control goes to the row's detail control while a lazy detail
+  loads again, and to the nearest group row that shows while the row is in a
+  closed group. The new rows get `htmx:load`. A row new to the table, a new
+  group, or a row whose place among its siblings changed (a group that a moved
+  leaf now opens first, a child row whose date was edited) goes where a full
+  render of the table puts it: after the row before it among its siblings, or
+  before the row after it when only that one is on the page. The update
+  carries those neighbours for each row whose preceding sibling it does not
+  list (`data-htmxo-update-places`); with neither neighbour on the page, a new
+  row joins the end of its group or table and an existing row stays put. In a
+  lazy group the reader has not opened, a new row arrives with the group's
+  other rows when the group loads. A sorted table then re-applies its sort.
   `htmxoUpdateRows(html)` applies a row update fetched by other means.
 - **What leaves.** The update speaks for the copies of each leaf in
   `update_rows` and for each group in `update_groups` with all its rows: those
