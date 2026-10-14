@@ -394,7 +394,8 @@ end
 
 @testitem "slow mutations poll by token and never replay a submission" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP, Treebars
-    import HTMXObjects: _clear_operation_polls!, _operation_poll_snapshot
+    import HTMXObjects: _clear_operation_polls!, _operation_poll_snapshot,
+        _lookup_mutation_poll, _MUTATION_TERMINAL_TTL, _mutation_terminals
 
     reset_fresh!()
     _clear_operation_polls!()
@@ -427,9 +428,17 @@ end
     @test first_done != second_done
     @test fresh_runs(:order) == 2
 
-    # A finished submission's token is spent; a lost or foreign one never
-    # re-runs the submission — it answers "result unavailable".
-    for target in (first_url, replace(first_url, poll_token(first_url) => "0"^64))
+    # The browser can miss the first terminal reply or have an overlapping
+    # poll already in flight. Repeating that token replays the same terminal
+    # without re-running the POST or replacing success with a 410 article.
+    @test String(hx_get(first_url).body) == first_done
+    @test String(hx_get(second_url).body) == second_done
+    @test fresh_runs(:order) == 2
+    @test isempty(filter(entry -> entry.signature.name === :fresh_order,
+                         collect(values(_operation_poll_snapshot()))))
+
+    # A foreign token still fails closed, with no replay of the submission.
+    for target in (replace(first_url, poll_token(first_url) => "0"^64),)
         gone = hx_get(target)
         @test gone.status == 200
         gone_body = String(gone.body)
@@ -439,6 +448,15 @@ end
         unavailable = dispatch(:GET, target)
         @test unavailable.status == 410
     end
+    @test fresh_runs(:order) == 2
+
+    # Replayed terminals have a finite idle lifetime. After that bound, a
+    # mutation still fails closed instead of repeating the side effect.
+    first_terminal = _mutation_terminals[poll_token(first_url)]
+    future = first_terminal.touched_at + _MUTATION_TERMINAL_TTL + 1
+    @test _lookup_mutation_poll(poll_token(first_url),
+        first_terminal.signature; now=future) === nothing
+    @test dispatch(:GET, first_url).status == 410
     @test fresh_runs(:order) == 2
 
     # The mutation path's resume-only GET is not a GET route.
@@ -498,6 +516,9 @@ end
     @test contains(body, "treebar-terminal-content")
     @test contains(body, "<p>with-headers</p>")
     @test !contains(body, "HTTP/1.1")
+    replayed_headers = hx_get(targets[:headers])
+    @test HTTP.header(replayed_headers, "HX-Trigger") == "fresh-done"
+    @test body_text(replayed_headers) == body
 
     # A 204 would not swap: the poller still receives its (empty) terminal.
     nocontent = settle_response(targets[:nocontent])
@@ -532,6 +553,10 @@ end
     @test contains(redirected_body, "Created")
     @test contains(redirected_body, "treebar-terminal")
     @test !contains(redirected_body, "HTTP/1.1")
+    @test fresh_runs(:redirect) == 1
+    replayed_redirect = hx_get(target)
+    @test HTTP.header(replayed_redirect, "HX-Redirect") == "/created"
+    @test body_text(replayed_redirect) == redirected_body
     @test fresh_runs(:redirect) == 1
 
     targets = Dict(key => poll_url(String(hx_post("/fresh_$(key)").body))
