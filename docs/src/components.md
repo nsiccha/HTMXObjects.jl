@@ -463,8 +463,9 @@ transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_tab
   (a shared IBAN, a rule matching several counterparties) gets one row per
   group, each with its own id.
 - **Group by.** With `group_by_url`, a *Group by* select joins the tree
-  controls. A change GETs `group_by_url` with `group_by` and `q` (the current
-  search) and swaps the table for the response. With `select_form` the select
+  controls (for a `group_by` list, pills: see
+  [Nested levels](#table-grouping-levels)). A change GETs `group_by_url` with
+  `group_by` and `q` (the current search) and swaps the table for the response. With `select_form` the select
   is associated with that form, so a bulk submission carries the active
   grouping. An unknown `group_by` throws an `ArgumentError`; validate it in the
   route.
@@ -492,6 +493,59 @@ transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_tab
 - **Row actions.** A route that changes rows renders the same call with
   `update_rows` / `update_groups` instead of the whole table; see
   [Row updates](#table-row-updates).
+
+##### Nested levels and grouping pills {#table-grouping-levels}
+
+Pass `group_by` as an ordered list to nest the groups level by level, the
+first outermost. The *Group by* control is then a row of pills, one per
+grouping: a pill turns its level on (as the innermost) or off, and the active
+pills reorder by dragging, by their ‹ › buttons, or with ←/→ on a focused pill.
+No active pill is the flat view. Each change re-renders the table through
+`group_by_url` as before, sending the levels as repeated `group_by` values, so
+the route takes a vector:
+
+```julia
+document_table(self, group_by, q=""; kw...) = master_detail_table(headers, documents;
+    key = d -> d.id, master = d -> cells(d),
+    detail_url = d -> query_url(self / "detail"; id=d.id),
+    groupings = ["None" => nothing, "Review stage" => d -> d.stage, "Document type" => d -> d.kind],
+    group_by, group_by_url = self / "table",
+    group_master = (key, members) -> (
+        h.td(h.strong(last(HTMXObjects.group_path(key))), " ($(length(members)))"),
+        (h.td("") for _ in 2:length(headers))...),
+    searchable = true, search_query = q, expand_controls = true, id = "documents", kw...)
+
+@get table(; group_by::Vector{String}=["Review stage", "Document type"], q::String="") =
+    document_table(__self__, group_by, q)
+```
+
+- **Levels.** Each group row is a branch of the group above it; leaves sit
+  under their innermost group, and a leaf with no key at an inner level is
+  listed directly in its outer group. A grouping that returns several keys
+  lists the leaf under each, at any level. Counts, sorting, search ("N of M
+  rows shown", ancestor paths), open groups, *Expand all* and selection work as
+  with one level.
+- **Group keys are paths.** With a list, each group is named by its path, a
+  JSON array of its level keys, outermost first (`["Open","Invoice"]`): the
+  `key` that `group_master` and `group_rows_url` receive, the value a selected
+  group row submits (`tx_group=["Open","Invoice"]`), and what `group_rows` and
+  `update_groups` take. `HTMXObjects.group_path(key)` decodes it. The default
+  group row shows the group's own key; indentation shows the level. A single
+  `group_by` name keeps one level, plain keys and the select.
+- **The flat view.** With no active pill the pills send the flat grouping's
+  name (here `None`), or an empty value if there is none; a `group_by` list of
+  `[]`, `[""]` or `["None"]` renders the leaves.
+- **The grouping elsewhere.** A bulk form named by `select_form` receives the
+  levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
+  returns the `group_by` values of the table's current grouping, for either
+  form of `group_by`, e.g. for an action's `hx-vals`
+  (`js:{group_by: htmxoGroupBy('#documents')}`).
+- **Lazy groups** load at any level. The subgroups of a loaded group can be
+  lazy in turn, and *Expand all* loads and opens them all.
+- **Row updates** name groups by path in `update_groups`. A named group that
+  no longer exists leaves from the outermost level of its path that is gone.
+- **Markdown** marks each level below the first with `›`, since it has no
+  indentation; the pills are left out like the other controls.
 
 ##### Row updates {#table-row-updates}
 
