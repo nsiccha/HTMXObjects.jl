@@ -206,10 +206,13 @@ end
         html(grouped(group_by=["none"], group_by_url="/table", id="g"))
     @test contains(flat, "data-htmxo-grouped=\"[]\" data-htmxo-group-by=\"[&quot;none&quot;]\"") &&
         !contains(flat, "data-htmxo-group=\"\"") && count("aria-pressed=\"false\"", flat) == 3
-    # Without a flat grouping, no pill sends an empty value.
-    nonflat = html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),),
-        detail=t -> "", groupings=GROUPINGS[2:end], group_by=String[], group_by_url="/table"))
-    @test contains(nonflat, "data-htmxo-group-by=\"[&quot;&quot;]\"") && !contains(nonflat, "data-htmxo-group-flat")
+    # Without a flat grouping the last level stays on (no request could ask
+    # for none); rendered directly, an empty list is still the flat view.
+    nonflat(group_by) = html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),),
+        detail=t -> "", groupings=GROUPINGS[2:end], group_by, group_by_url="/table", id="n"))
+    @test contains(nonflat(String[]), "data-htmxo-group-by=\"[&quot;&quot;]\"") && !contains(nonflat(String[]), "data-htmxo-group-flat")
+    @test contains(nonflat(["party"]), "id=\"n-group-party\" aria-pressed=\"true\" title=\"Grouped by party; add another grouping to change it\" aria-disabled=\"true\"")
+    @test !contains(nonflat(["party", "iban"]), " aria-disabled=") && !contains(one, " aria-disabled=")
     # A member with no key at an inner level stays in its outer group, directly.
     gaps = html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),), detail=t -> "",
         groupings=["party" => t -> t.party, "big" => t -> t.amount < -40 ? "big" : nothing], group_by=["party", "big"]))

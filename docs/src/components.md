@@ -533,8 +533,11 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
   group row shows the group's own key; indentation shows the level. A single
   `group_by` name keeps one level, plain keys and the select.
 - **The flat view.** With no active pill the pills send the flat grouping's
-  name (here `None`), or an empty value if there is none; a `group_by` list of
-  `[]`, `[""]` or `["None"]` renders the leaves.
+  name (here `None`); a `group_by` list of `[]`, `[""]` or `["None"]` renders
+  the leaves. Without a flat grouping the last active pill stays on, as the
+  select offers only the declared groupings: an empty `group_by` would reach a
+  `Vector{String}` route as no values, and `query_url` would drop it from the
+  action URLs.
 - **The grouping elsewhere.** A bulk form named by `select_form` receives the
   levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
   returns the `group_by` values of the table's current grouping, for either

@@ -13193,6 +13193,8 @@ function htmxoGroupRequest(pills, names, focusId) {
     htmx.trigger(pills, 'htmxo-regroup');
 }
 function htmxoGroupToggle(button) {
+    // The last level of a table without a flat grouping stays on.
+    if (button.getAttribute('aria-disabled') === 'true') return;
     const pill = button.closest('.htmxo-group-pill'), pills = pill.parentElement, name = pill.dataset.htmxoGroupName;
     const names = htmxoGroupLevels(pills);
     htmxoGroupRequest(pills, names.includes(name) ? names.filter(n => n !== name) : [...names, name], button.id);
@@ -14439,8 +14441,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   A list gets one pill per grouping: a pill turns its level on (as the
   innermost) or off, and the active pills reorder by drag, by their ‹ ›
   buttons or with ←/→. The pills send the levels as repeated `group_by` values,
-  or for none the flat grouping's name (an empty value if there is none), so
-  declare the route's `group_by::Vector{String}`. With `select_form` the
+  or for none the flat grouping's name, so declare the route's
+  `group_by::Vector{String}`; without a flat grouping the last level stays on. With `select_form` the
   grouping is also submitted with that form. In the browser,
   `htmxoGroupBy(target)` returns the `group_by` values of the table's current
   grouping, e.g. for an action's `hx-vals`.
@@ -14711,6 +14713,7 @@ function master_detail_table(headers, items;
     .htmxo-group-pills > .htmxo-group-pill > button.htmxo-group-move { padding-inline: .3em; }
     .htmxo-group-pills > .htmxo-group-pill > button.htmxo-group-move:last-child { padding-inline-end: .6em; }
     .htmxo-group-pills > .htmxo-group-pill > button:disabled { opacity: .35; cursor: default; }
+    .htmxo-group-pills > .htmxo-group-pill > button[aria-disabled="true"] { cursor: default; }
     .htmxo-group-pills > .htmxo-group-pill > button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
     .htmxo-group-pills > .htmxo-group-pill[data-htmxo-drop="before"] { box-shadow: -3px 0 0 var(--pico-primary, Highlight); }
     .htmxo-group-pills > .htmxo-group-pill[data-htmxo-drop="after"] { box-shadow: 3px 0 0 var(--pico-primary, Highlight); }
@@ -15108,9 +15111,12 @@ end
 # active pills reorder by drag, by their ‹ › buttons or by ←/→. Each change
 # re-renders the table through the pills' hx-get, with the levels as repeated
 # `group_by` values (`htmxoGroupPending`). With a bulk form, hidden inputs
-# submit the grouping alongside the selection.
+# submit the grouping alongside the selection. Without a flat grouping there
+# is no view without levels to ask for (an empty `group_by` reaches a
+# `Vector{String}` route as no values at all), so the last level stays on.
 function _md_group_pills(names, by_name, levels, flat_name, values, url, form, id)
     nactive = length(levels)
+    keep_last = isnothing(flat_name) && nactive == 1
     order = [levels; [n for n in names if !isnothing(by_name[n]) && !(n in levels)]]
     function pill(n)
         level = findfirst(==(n), levels)
@@ -15128,7 +15134,9 @@ function _md_group_pills(names, by_name, levels, flat_name, values, url, form, i
                 draggable="true")(
             h.button((nactive > 1 ? (h.span(string(level); class="htmxo-group-level", aria_hidden="true"),) : ())...,
                 n; type="button", id="$id-group-$safe", aria_pressed="true",
-                title=nactive > 1 ? "Level $level: stop grouping by $n; drag or press ←/→ to reorder" : "Stop grouping by $n",
+                title=nactive > 1 ? "Level $level: stop grouping by $n; drag or press ←/→ to reorder" :
+                    keep_last ? "Grouped by $n; add another grouping to change it" : "Stop grouping by $n",
+                (keep_last ? (; aria_disabled="true") : (;))...,
                 onclick="htmxoGroupToggle(this)", onkeydown="htmxoGroupKey(this,event)"),
             (nactive > 1 ? (move("‹", -1, level == 1, "earlier"), move("›", 1, level == nactive, "later")) : ())...)
     end
