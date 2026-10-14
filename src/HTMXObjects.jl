@@ -12894,8 +12894,9 @@ function htmxoTreeRow(row, event) {
 // An action route answers with the rows it changed, rendered by the table's
 // own call: a <tbody data-htmxo-row-update>. Each row replaces its namesake
 // in place and keeps what the user did to it (open branch and detail,
-// selection, search, focus); a row new to the table joins the end of its
-// group, or of the table, unless its group is not loaded; a row in the
+// selection, search, focus); a row new to the table, or whose place among its
+// siblings changed, goes where the table's own render puts it, unless its
+// group is not loaded, and a sorted table re-applies its sort; a row in the
 // update's scope that it no longer lists leaves, with its detail and child
 // rows. Any htmx response holding such a body is applied this way, whatever
 // the requesting element's hx-target; `htmxoUpdateRows(html)` applies one
@@ -12956,11 +12957,45 @@ function htmxoUpdateRows(update, origin) {
         byId.delete(r.id);
     });
     const details = new Map(incoming.filter(isDetail).map(r => [r.id, r]));
+    const parentOf = r => r.dataset.htmxoParent || '';
+    // The last row of `r` with its detail and child rows.
+    const end = r => {
+        const self = new Set([r.id]);
+        let last = r;
+        for (let n = r.nextElementSibling; n && (isDetail(n) || under(n, self)); n = n.nextElementSibling) last = n;
+        return last;
+    };
+    // Where the full table has each row among its siblings: the update names
+    // the siblings around each row whose preceding sibling it does not list
+    // ('' at either end); any other row follows the listed one before it.
+    const places = JSON.parse(update.getAttribute('data-htmxo-update-places') || '{}');
+    const lastListed = new Map();
+    const placeOf = row => {
+        const prev = lastListed.get(parentOf(row));
+        lastListed.set(parentOf(row), row.id);
+        return places[row.id] || (prev ? [prev, null] : null);
+    };
+    // Move a row, with its detail and child rows, there: after the sibling
+    // before it, else first, else before the sibling after it. With neither
+    // sibling on the page the row stays where it is.
+    const place = (row, [prev, next]) => {
+        const sibling = id => { const r = id ? byId.get(id) : null; return r && r !== row && parentOf(r) === parentOf(row) ? r : null; };
+        const parent = byId.get(parentOf(row));
+        let after = sibling(prev), before = null;
+        if (after) after = end(after);
+        else if (prev === '') { after = parent ? own(detailId(parent)) || parent : null; if (!after) before = tbody.firstElementChild; }
+        else if (!(before = sibling(next))) return false;
+        const block = [];
+        for (let n = row, last = end(row); n; n = n === last ? null : n.nextElementSibling) block.push(n);
+        if (after ? after.nextElementSibling === row : before === row || block[block.length - 1].nextElementSibling === before) return false;
+        if (after) after.after(...block); else before.before(...block);
+        return true;
+    };
     const fresh = [];
-    let inserted = false;
     incoming.filter(r => !isDetail(r)).forEach(row => {
         const detail = details.get(detailId(row)) || null;
         const old = byId.get(row.id);
+        const at = placeOf(row);
         if (old) {
             const oldDetail = own(detailId(old));
             htmxoCarryRow(old, row, oldDetail, detail);
@@ -12973,15 +13008,13 @@ function htmxoUpdateRows(update, origin) {
             const parent = parentId ? byId.get(parentId) : null;
             // A row whose group is not on the page, or not loaded, waits for it.
             if (parentId && (!parent || 'htmxoLazyRows' in parent.dataset)) return;
-            let last = parent || tbody.lastElementChild;
-            const self = parent && new Set([parent.id]);
-            if (parent) for (let n = last.nextElementSibling; n && (isDetail(n) || under(n, self)); n = n.nextElementSibling) last = n;
+            const last = parent ? end(parent) : tbody.lastElementChild;
             if (last) last.after(row); else tbody.append(row);
             if (detail) row.after(detail);
-            if (parent) touched.add(parent);
-            inserted = true;
         }
         byId.set(row.id, row);
+        const shifted = Boolean(at) && place(row, at);
+        if (!old || shifted) { const parent = byId.get(parentOf(row)); if (parent) touched.add(parent); }
         touched.add(row);
         fresh.push(row);
         if (detail) fresh.push(detail);
@@ -12993,6 +13026,9 @@ function htmxoUpdateRows(update, origin) {
         window.htmxoRowsUpdating = true;
         try { fresh.forEach(el => htmx.trigger(el, 'htmx:load')); } finally { window.htmxoRowsUpdating = false; }
     }
+    // A sorted table re-applies its sort to the rows the update placed or
+    // changed, before focus returns (moving a row drops its focus).
+    if (fresh.length) htmxoResort(table);
     // A branch toggle names the child rows the branch now has.
     touched.forEach(b => {
         const toggle = b.isConnected && b.querySelector(':scope > td [data-htmxo-tree-toggle]');
@@ -13006,7 +13042,6 @@ function htmxoUpdateRows(update, origin) {
         const target = row && (focus.index >= 0 ? htmxoFocusables(row)[focus.index] : row);
         if (target && (target !== row || row.hasAttribute('tabindex'))) target.focus({preventScroll: true});
     }
-    if (inserted) htmxoResort(table);
     const root = tbody.closest('.htmxo-searchable-table');
     const select = tbody.closest('[data-htmxo-select]');
     if (root && root.querySelector('table') === table) htmxoFilterTable(root);
@@ -14597,6 +14632,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   of each leaf in the active grouping, with the rows of the groups it is in
   (their summaries depend on it); in a tree, the item's own row. Rows keep what
   the user did to them: open branches and details, selection, search, focus.
+  A row new to the page, or whose place among its siblings changed, goes where
+  the full table puts it, and a sorted table re-applies its sort.
   A key no longer among `items` removes its rows. Use it from the route of a
   per-row action: it renders the same call with `update_rows=key`.
 - `update_groups` (with `groupings`): one group key or several. Adds each group
@@ -14653,6 +14690,7 @@ function master_detail_table(headers, items;
                              _rows_only::Bool=false,
                              _toolbar=(),
                              _level_marks::Bool=false,
+                             _update_scope=nothing,
                              kwargs...)
     isnothing(groupings) || return _grouped_master_detail_table(headers, items;
         key, master, detail, detail_url, master_attrs, master_class, detail_class,
@@ -14681,18 +14719,18 @@ function master_detail_table(headers, items;
     seen = Set{String}()
     max_level = Ref(1)
     # `update_rows`: render only these items' rows (see `_md_row_update`); the
-    # walk still visits every item, so levels and parents stay those of the
-    # full table.
-    update = isnothing(update_rows) ? nothing : Set(_md_update_keys(update_rows))
+    # walk still visits every item, so levels, parents and each row's place
+    # among its siblings (`placed`) stay those of the full table.
+    update_keys = _md_update_keys(update_rows)
+    update = isnothing(update_rows) ? nothing : Set(update_keys)
+    placed = Pair{String,Tuple{String,String}}[]
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
         descendants = isnothing(children) ? () : children(item)
-        # A branch whose rows load on first expand (see `group_rows_url`), or
-        # whose rows a row update leaves alone.
+        # A branch whose rows load on first expand (see `group_rows_url`).
         lazy_rows = descendants isa _MDLazyRows ? descendants : nothing
-        elsewhere = descendants isa _MDRowsElsewhere
-        descendants = isnothing(lazy_rows) && !elsewhere ? collect(descendants) : ()
-        branch = !isnothing(lazy_rows) || elsewhere || !isempty(descendants)
+        descendants = isnothing(lazy_rows) ? collect(descendants) : ()
+        branch = !isnothing(lazy_rows) || !isempty(descendants)
         open = isnothing(lazy_rows) && _open(item)
         branch_open = branch && (!branches_collapsible || open)
         safe = _md_safe_key(item_key)
@@ -14758,7 +14796,10 @@ function master_detail_table(headers, items;
         trailing_controls = Any[]
         label = Any[HTMX.children(first_cell)...]
         if branch && branches_collapsible
-            child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
+            # An update names the child rows it renders; the runtime then
+            # recomputes the list from the rows on the page.
+            child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants
+                              if isnothing(update) || string(key(child)) in update), " ")
             branch_attrs = (; type="button", data_htmxo_tree_toggle="",
                 (isempty(child_ids) ? (;) : (; aria_controls=child_ids))...,
                 aria_expanded=string(open),
@@ -14812,17 +14853,19 @@ function master_detail_table(headers, items;
         end
         visit_children(descendants, safe, level, ancestors_open && branch_open)
     end
-    function visit_children(descendants, safe, level, open)
-        for child in descendants
-            visit(child, "row-$safe", level + 1, open)
+    visit_children(descendants, safe, level, open) =
+        visit_siblings(descendants, "row-$safe", level + 1, open)
+    function visit_siblings(siblings, parent, level, open)
+        isnothing(update) || _md_record_places!(placed, [string(key(s)) for s in siblings], update)
+        for item in siblings
+            visit(item, parent, level, open)
         end
     end
-    for item in items
-        visit(item, "", 1, true)
-    end
+    visit_siblings(items, "", 1, true)
     _rows_only && return rows
     isnothing(update) || return _md_row_update(rows, get(kwargs, :id, nothing);
-        ids=["row-" * _md_safe_key(k) for k in update])
+        something(_update_scope, (; ids=["row-" * _md_safe_key(k) for k in update_keys]))...,
+        places=placed)
     table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
     selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
     # The expand controls name the body they drive; a body without a caller id
@@ -14909,9 +14952,6 @@ struct _MDLazyRows
     url::String
     count::Int
 end
-# `children` result, in a row update, for a branch rendered for its own row
-# alone: it stays a branch, and its rows on the page stay as they are.
-struct _MDRowsElsewhere end
 
 _md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = [string(k) for k in keys if !isnothing(k)]
 _md_group_keys(::Nothing) = String[]
@@ -15106,10 +15146,10 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         built = master_detail_table(headers, items; key, master, detail, detail_url,
             master_attrs=item -> _md_attr_union(leaf_select(item), _attrs(item)), initially_open,
             selectable, select_form, select_submit, search_text, _toolbar=toolbar,
-            update_rows=update ? leaf_keys : nothing, _rows_only=update, flat_kwargs...)
-        # This view has no groups: `update_groups` names none of its rows.
-        update && return _md_row_update(built, get(kwargs, :id, nothing); grouped=grouped_by,
-            ids=["row-" * _md_safe_key(k) for k in leaf_keys])
+            update_rows=update ? leaf_keys : nothing, flat_kwargs...,
+            # This view has no groups: `update_groups` names none of its rows.
+            _update_scope=(; grouped=grouped_by, ids=["row-" * _md_safe_key(k) for k in leaf_keys]))
+        update && return built
         built
     else
         ncols = length(headers)
@@ -15168,15 +15208,25 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         row_count(g) = let (subs, direct) = contents(g)
             sum((1 + row_count(s) for s in subs); init=0) + length(direct)
         end
+        shown_leaf(g, m) = whole(g.path) || string(key(m)) in leaf_set
+        # An update walks every group and leaf, so each row's place among its
+        # siblings is the full table's, and renders only the rows `keep` and
+        # `shown_leaf` select (`rendered`). A group shown for its summary
+        # alone keeps its rows on the page as they are.
         function group_children(g)
             subs, direct = contents(g)
-            shown = Any[filter(keep, subs)...,
-                (_MDGroupLeaf(gid(g.path), m) for m in direct if whole(g.path) || string(key(m)) in leaf_set)...]
-            # An update can show a group for its summary alone (it lies on the
-            # path to a named group that is gone): it stays a branch, and its
-            # rows on the page stay as they are.
-            update && isempty(shown) ? _MDRowsElsewhere() : shown
+            update && return Any[subs..., (_MDGroupLeaf(gid(g.path), m) for m in direct)...]
+            Any[filter(keep, subs)..., (_MDGroupLeaf(gid(g.path), m) for m in direct if shown_leaf(g, m))...]
         end
+        rendered = String[]
+        function render!(g)
+            keep(g) || return
+            push!(rendered, gid(g.path))
+            subs, direct = contents(g)
+            foreach(render!, subs)
+            append!(rendered, [gid(g.path) * "/" * string(key(m)) for m in direct if shown_leaf(g, m)])
+        end
+        update && foreach(render!, subgroups(items, 1, String[]))
         leaf_text(item) = isnothing(search_text) ? _md_text(master(item)) : string(search_text(item))
         function group_attrs(g)
             attrs = _md_attr_union((; data_htmxo_group=""),
@@ -15204,7 +15254,20 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         # Every copy of a leaf names it, so an update finds them all.
         leaf_attrs(item) = merge(_md_attr_union(leaf_select(item), _attrs(item)),
             Dict{Symbol,Any}(:data_htmxo_leaf => string(key(item))))
-        built = master_detail_table(headers, filter(keep, subgroups(items, 1, String[]));
+        # A named group that is gone takes its rows with it: the update's
+        # scope is the outermost group of its path that no longer exists.
+        scope = map(named) do path
+            members = items
+            for d in eachindex(path)
+                groups = _md_groups(members, fns[d])
+                i = findfirst(g -> first(g) == path[d], groups)
+                isnothing(i) && return path[1:d]
+                members = last(groups[i])
+            end
+            path
+        end
+        roots = subgroups(items, 1, String[])
+        built = master_detail_table(headers, update ? roots : filter(keep, roots);
             key = x -> x isa _MDGroup ? gid(x.path) : x.group * "/" * string(key(x.item)),
             master = x -> x isa _MDGroup ? gmaster(x.key, x.members) : master(x.item),
             children = x -> !(x isa _MDGroup) ? () :
@@ -15225,26 +15288,14 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
                 (x -> x isa _MDGroup ? true : select_submit(x.item)),
             _level_marks = nlevels > 1,
-            _rows_only = !isnothing(group_rows) || update, _toolbar = toolbar, kwargs...)
+            update_rows = update ? rendered : nothing,
+            _rows_only = !isnothing(group_rows), _toolbar = toolbar, kwargs...,
+            _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
+                groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
         # The lazy-load response: the target group's rows (the rows of its
         # path and its own row dropped: each is one <tr>).
         isnothing(target) || return h.tbody(; data_htmxo_group_rows=string(group_rows))(built[length(target)+1:end]...)
-        if update
-            # A named group that is gone takes its rows with it: the update's
-            # scope is the outermost group of its path that no longer exists.
-            scope = map(named) do path
-                members = items
-                for d in eachindex(path)
-                    groups = _md_groups(members, fns[d])
-                    i = findfirst(g -> first(g) == path[d], groups)
-                    isnothing(i) && return path[1:d]
-                    members = last(groups[i])
-                end
-                path
-            end
-            return _md_row_update(built, get(kwargs, :id, nothing); grouped=grouped_by,
-                leaves=leaf_keys, groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]))
-        end
+        update && return built
         built
     end
     h.div(; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values))(table)
@@ -15303,18 +15354,36 @@ _md_update_keys(k) = [string(k)]
 
 _md_json_list(xs) = "[" * join((_md_json_string(string(x)) for x in xs), ",") * "]"
 
+# Where an update's rows sit among their siblings in the full table, for the
+# runtime to put a row that is new to the page, or has moved, where a full
+# render would: for each listed row whose preceding sibling is not listed, the
+# row ids of its preceding and following siblings ("" at either end). A listed
+# row whose preceding sibling is listed follows that row, which the update
+# renders before it.
+function _md_record_places!(out, sibling_keys, listed)
+    id(i) = 1 <= i <= length(sibling_keys) ? "row-" * _md_safe_key(sibling_keys[i]) : ""
+    for (i, k) in enumerate(sibling_keys)
+        k in listed && !(i > 1 && sibling_keys[i - 1] in listed) &&
+            push!(out, id(i) => (id(i - 1), id(i + 1)))
+    end
+    out
+end
+
 # A row update: the rows `master_detail_table(...; update_rows, update_groups)`
 # renders for an action route, in a marked <tbody> that the table runtime
 # (`htmxoUpdateRows`) merges into the table on the page, whatever the action's
 # hx-target. Its scope says which of the table's rows the update speaks for,
 # so it can remove those it no longer lists: rows by id, every copy of a
-# leaf (`data-htmxo-leaf`), and a group row with all its rows.
-function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[])
+# leaf (`data-htmxo-leaf`), and a group row with all its rows. `places` (see
+# `_md_record_places!`) says where its rows go.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=())
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
     isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
+    isempty(places) || push!(attrs, :data_htmxo_update_places =>
+        "{" * join((_md_json_string(row) * ":" * _md_json_list(around) for (row, around) in places), ",") * "}")
     h.tbody(; attrs...)(rows...)
 end
 
