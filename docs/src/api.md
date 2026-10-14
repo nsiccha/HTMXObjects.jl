@@ -1764,6 +1764,17 @@ the grace period is answered by the same poller a memoized route gets.
   arrives through a poller anyway, including with `keep_terminal_tree=true`,
   its headers are kept on the poll response and its body becomes the terminal
   (an error article for a non-2xx status), but its original status is not.
+  Headers that send the answer away from the poller (`HX-Retarget`,
+  `HX-Reswap`, `HX-Reselect`) or swap nothing (`HX-Location`) end the polling
+  instead. That terminal answers htmx's stop-polling status `286` and never
+  carries a kept tree. The `htmx()` shell's `auto_terminal_script()` then
+  applies it as the original request would have applied a direct answer. It
+  puts back the content the poller displaced, applies the headers to the bare
+  body, and removes the spent poller. The page ends as it would with `@direct`,
+  except that a relative `HX-Retarget` (`closest …`, `next …`) resolves from
+  the poller's place rather than from the requesting element. A hand-built
+  `<head>` needs `auto_terminal_script()` for this, as it already does for the
+  bare `:auto` terminal.
 - A fresh invocation of a `@queued` route waits its turn in
   [`configure_job_queue!`](@ref) like a memoized one, but is never coalesced:
   identical requests are separate invocations.

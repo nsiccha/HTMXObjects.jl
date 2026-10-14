@@ -4662,6 +4662,9 @@ instruct the HTMX client to perform additional actions after swap.
 request completes (the percent-encoded `X-HTMXO-Toast` header read by
 [`toast_script`](@ref)), e.g. `hx_response(row; toast="Invoice saved")`. It
 survives a polled `:auto` answer: the terminal poll response carries it.
+`retarget`, `reswap` and `location` survive one too: the page shell applies
+them when the operation finishes, as on a direct answer (see
+`auto_terminal_script()`).
 """
 function hx_response(val;
     trigger=nothing, push_url=nothing, replace_url=nothing,
