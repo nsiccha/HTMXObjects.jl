@@ -644,3 +644,173 @@ end
         end
     end
 end
+
+@testitem "grouping pills browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        esc = HTTP.escapeuri
+        query(group_by) = join(("group_by=$(esc(g))" for g in group_by), "&")
+        table(group_by, q="", group_rows=nothing) = grouped(; group_by, search_query=q, group_rows,
+            group_by_url="/table",
+            group_rows_url=(k, ms) -> length(ms) > 2 ? "/rows?$(query(group_by))&key=$(esc(k))" : nothing,
+            selectable="tx", select_form="bulk", searchable=true, expand_controls=true, id="g")
+        bulk = h.form(; id="bulk")(h.button("Apply"; id="apply", data_htmxo_needs_selection="tx", disabled=true))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const stage = name => { document.body.dataset.stage = name; };
+            const wait = async cond => { for (let n = 0; n < 250 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const g = () => document.querySelector('[data-htmxo-grouped]');
+            const row = id => document.getElementById('row-' + id);
+            const rows = () => Array.from(g().querySelector('tbody').rows).filter(r => !r.id.startsWith('detail-'));
+            const shown = () => rows().filter(r => !r.hidden).map(r => r.id.slice(4)).join(',');
+            const pill = n => g().querySelector('.htmxo-group-pill[data-htmxo-group-name="' + n + '"]');
+            const toggle = n => pill(n).querySelector('button');
+            const levels = () => JSON.parse(g().dataset.htmxoGrouped);
+            const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+            const regrouped = async want => { const ok = await wait(() => same(levels(), want)); await new Promise(r => setTimeout(r, 60)); return ok; };
+            const pressed = () => Array.from(g().querySelectorAll('.htmxo-group-pill')).map(p =>
+                p.dataset.htmxoGroupName + (p.querySelector('button').getAttribute('aria-pressed') === 'true' ? '+' : '-')).join(',');
+            const form = name => new FormData(document.getElementById('bulk')).getAll(name).join(',');
+            const click = (el, mods = {}) => el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, ...mods}));
+            const total = () => g().querySelector('[data-htmxo-table-count]').textContent;
+            const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}));
+            const drag = (from, onto, after) => {
+                const dt = new DataTransfer();
+                pill(from).dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+                const box = pill(onto).getBoundingClientRect();
+                const at = {bubbles: true, cancelable: true, dataTransfer: dt,
+                    clientX: after ? box.right - 2 : box.left + 2, clientY: box.top + box.height / 2};
+                toggle(onto).dispatchEvent(new DragEvent('dragover', at));
+                const marked = pill(onto).dataset.htmxoDrop;
+                toggle(onto).dispatchEvent(new DragEvent('drop', at));
+                pill(from).dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+                return marked;
+            };
+            stage('initial');
+            check('initial', same(levels(), ['party']) && pressed() === 'party+,iban-,rule-' &&
+                same(htmxoGroupBy('#g'), ['party']) && form('group_by') === 'party' && !g().querySelector('select[name="group_by"]'));
+            // A pill adds its level as the innermost one; focus stays on it.
+            stage('add-iban');
+            toggle('iban').focus();
+            toggle('iban').click();
+            check('add-level', await regrouped(['party', 'iban']));
+            check('add-pills', pressed() === 'party+,iban+,rule-' && document.activeElement && document.activeElement.id === 'g-group-iban');
+            check('nested-rows', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '4 of 16 rows shown');
+            row('group--Bakery').querySelector('[data-htmxo-tree-toggle]').click();
+            row('group--Bakery--DE03').querySelector('[data-htmxo-tree-toggle]').click();
+            check('open-nested', shown().includes('group--Bakery,group--Bakery--DE03,group--Bakery--DE03--p4,group--Bakery--DE03--p6') &&
+                row('group--Bakery--DE03').getAttribute('aria-level') === '2' && row('group--Bakery--DE03--p4').getAttribute('aria-level') === '3');
+            // ←/→ on a focused active pill reorders it, keeping the focus.
+            stage('arrow');
+            key(document.activeElement, 'ArrowLeft');
+            check('arrow-reorder', await regrouped(['iban', 'party']));
+            check('arrow-focus', document.activeElement && document.activeElement.id === 'g-group-iban' && pressed() === 'iban+,party+,rule-');
+            // ‹ moves a level outward; at the end of the bar the focus moves to the pill itself.
+            stage('move');
+            const earlier = document.getElementById('g-group-party-earlier');
+            earlier.focus();
+            earlier.click();
+            check('move-reorder', await regrouped(['party', 'iban']));
+            check('move-focus', document.getElementById('g-group-party-earlier').disabled && document.activeElement &&
+                document.activeElement.id === 'g-group-party');
+            // Dragging an inactive pill before an active one adds it at that level.
+            stage('drag-add');
+            check('drag-marker', drag('rule', 'party', false) === 'before');
+            check('drag-add', await regrouped(['rule', 'party', 'iban']) && !g().querySelector('[data-htmxo-drop]'));
+            // Dragging an active pill after another reorders.
+            stage('drag-move');
+            check('drag-marker-after', drag('party', 'iban', true) === 'after');
+            check('drag-move', await regrouped(['rule', 'iban', 'party']));
+            check('three-levels', shown() === 'group--Shops,group--Media' && total() === '2 of 21 rows shown' &&
+                'htmxoLazyRows' in row('group--Shops').dataset);
+            // A selected nested group submits its path, with the grouping.
+            stage('select');
+            row('group--Media').querySelector('[data-htmxo-tree-toggle]').click();
+            click(row('group--Media--DE01').cells[2], {ctrlKey: true});
+            check('select-path', form('tx_group') === '["Media","DE01"]' && form('group_by') === 'rule,iban,party');
+            click(row('group--Media').cells[2], {ctrlKey: true});
+            check('select-outer-path', form('tx_group').split(',["').length === 2 && form('tx_group').includes('["Media"]'));
+            // Expand all loads the lazy group and, inside it, its own lazy subgroup.
+            stage('expand');
+            g().querySelector('.htmxo-tree-controls > button').click();
+            check('expand-nested-lazy', await wait(() => rows().length === 21 && !rows().some(r => 'htmxoLazyRows' in r.dataset)));
+            await new Promise(r => setTimeout(r, 60));
+            check('expand-all-open', rows().every(r => !r.hidden) && total() === '21 of 21 rows shown' &&
+                row('group--Shops--DE01--Acme--p7').getAttribute('aria-level') === '4');
+            // A regroup carries the search; removing a level keeps the others' order.
+            stage('search');
+            const input = g().querySelector('input[type="search"]');
+            input.value = 'bakery';
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            toggle('iban').click();
+            check('remove-level', await regrouped(['rule', 'party']));
+            check('search-kept', g().querySelector('input[type="search"]').value === 'bakery' && same(htmxoGroupBy('#g'), ['rule', 'party']));
+            // No pill is the flat view: the leaves, with the selection kept.
+            stage('flat');
+            input.value = '';
+            g().querySelector('input[type="search"]').value = '';
+            toggle('rule').click();
+            await regrouped(['party']);
+            toggle('party').click();
+            check('flat', await regrouped([]));
+            check('flat-rows', rows().length === 7 && same(htmxoGroupBy('#g'), ['none']) && pressed() === 'party-,iban-,rule-' &&
+                form('group_by') === 'none');
+            stage('done');
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(bulk, table(["party"]), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        requests = String[]
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            pairs = HTTP.URIs.queryparampairs(uri)
+            group_by = [v for (k, v) in pairs if k == "group_by"]
+            param(name) = something((v for (k, v) in pairs if k == name)..., "")
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            uri.path == "/" || push!(requests, req.target)
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/table"
+                html(table(group_by, param("q")))
+            elseif uri.path == "/rows"
+                html(table(group_by, "", param("key")))
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if isnothing(checks)
+                @info "grouping pills browser: no checks" stage=match(r"data-stage=\"([^\"]*)\"", dom) requests
+            else
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 22
+            end
+            # The levels travel as repeated group_by values; none sends the flat grouping.
+            @test any(startswith("/table?group_by=party&group_by=iban&q="), requests)
+            @test any(startswith("/table?group_by=none&q="), requests)
+            @test any(r -> startswith(r, "/rows?group_by=rule&group_by=iban&group_by=party&key=") &&
+                contains(r, HTTP.escapeuri("[\"Shops\",\"DE01\"]")), requests)
+        finally
+            close(server)
+        end
+    end
+end
