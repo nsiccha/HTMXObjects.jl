@@ -8076,10 +8076,14 @@ end
 # non-enumerable token authorizes polling one operation; it is also bound to the
 # routed root/leaf types, route, typed args, and provider scope/key, so a token
 # presented to another mount, operation, session, or job is rejected.
-# Successful terminal rendering deletes the entry immediately; abandoned or
-# failed pollers fall out through TTL/LRU pruning.
+# Read terminals delete their entry immediately. Mutation terminals move to a
+# separate bounded replay cache so a lost or overlapping terminal response
+# cannot turn a successful one-time submission into "Result unavailable".
+# Abandoned or failed pollers fall out through TTL/LRU pruning.
 const _OPERATION_POLL_LIMIT = 256
 const _OPERATION_POLL_TTL = 600.0
+const _MUTATION_TERMINAL_LIMIT = 256
+const _MUTATION_TERMINAL_TTL = 600.0
 const _operation_poll_lock = ReentrantLock()
 
 mutable struct _OperationPollEntry
@@ -8096,7 +8100,13 @@ mutable struct _OperationPollEntry
     # The runtime job registered when this execution started (see
     # `_runtime_operation_started!`); retaining hands it to a watcher.
     job::Any
+    terminal_ready::Bool
 end
+
+_OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
+        error_obj, request, created_at, touched_at, job) =
+    _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
+        error_obj, request, created_at, touched_at, job, false)
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at) =
@@ -8104,6 +8114,25 @@ _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, nothing)
 
 const _operation_polls = Dict{String,_OperationPollEntry}()
+
+mutable struct _MutationTerminal
+    signature::Any
+    response::HTTP.Response
+    touched_at::Float64
+end
+
+const _mutation_terminals = Dict{String,_MutationTerminal}()
+
+_mutation_poll_entry(entry::_OperationPollEntry) =
+    get(entry.signature, :verb, nothing) in (:POST, :PUT, :PATCH, :DELETE)
+
+# Never hand the same mutable HTTP response to two requests. The cache owns
+# copied bytes and headers; each replay gets its own response object.
+_copy_mutation_terminal(response::HTTP.Response) =
+    HTTP.Response(response.status,
+        Pair{String,String}[String(name) => String(value)
+            for (name, value) in response.headers];
+        body=_message_body_bytes(response))
 
 _operation_poll_now() = _root_retention_time()
 
@@ -8117,6 +8146,30 @@ function _prune_operation_polls!(now::Real=_operation_poll_now())
         now - entry.touched_at >= _OPERATION_POLL_TTL && push!(expired, token)
     end
     foreach(token -> delete!(_operation_polls, token), expired)
+    nothing
+end
+
+function _prune_mutation_terminals!(now::Real=_operation_poll_now())
+    expired = String[]
+    for (token, terminal) in _mutation_terminals
+        now - terminal.touched_at >= _MUTATION_TERMINAL_TTL &&
+            push!(expired, token)
+    end
+    foreach(token -> delete!(_mutation_terminals, token), expired)
+    nothing
+end
+
+function _evict_oldest_mutation_terminal!()
+    isempty(_mutation_terminals) && return nothing
+    token = first(keys(_mutation_terminals))
+    touched = _mutation_terminals[token].touched_at
+    for (candidate, terminal) in _mutation_terminals
+        if terminal.touched_at < touched
+            token = candidate
+            touched = terminal.touched_at
+        end
+    end
+    delete!(_mutation_terminals, token)
     nothing
 end
 
@@ -8165,6 +8218,55 @@ function _lookup_operation_poll(token::AbstractString, signature;
     end
 end
 
+# Inspect both registries under one lock. A terminal may move from the active
+# registry between two separate lookups, so a mutation resume must not observe
+# that handoff as a missing token.
+function _lookup_mutation_poll(token::AbstractString, signature;
+        now::Real=_operation_poll_now())
+    lock(_operation_poll_lock)
+    try
+        _prune_operation_polls!(now)
+        _prune_mutation_terminals!(now)
+        key = String(token)
+        entry = get(_operation_polls, key, nothing)
+        if entry isa _OperationPollEntry
+            isequal(entry.signature, signature) || return nothing
+            entry.touched_at = Float64(now)
+            return entry
+        end
+        terminal = get(_mutation_terminals, key, nothing)
+        terminal isa _MutationTerminal || return nothing
+        isequal(terminal.signature, signature) || return nothing
+        terminal.touched_at = Float64(now)
+        terminal
+    finally
+        unlock(_operation_poll_lock)
+    end
+end
+
+function _cache_mutation_terminal!(entry::_OperationPollEntry, value;
+        now::Real=_operation_poll_now())
+    (_mutation_poll_entry(entry) && entry.terminal_ready) || return value
+    response = to_response(value)
+    stored = _copy_mutation_terminal(response)
+    lock(_operation_poll_lock)
+    try
+        if entry.terminal_ready &&
+                get(_operation_polls, entry.token, nothing) === entry
+            _prune_mutation_terminals!(now)
+            while length(_mutation_terminals) >= _MUTATION_TERMINAL_LIMIT
+                _evict_oldest_mutation_terminal!()
+            end
+            _mutation_terminals[entry.token] =
+                _MutationTerminal(entry.signature, stored, Float64(now))
+            delete!(_operation_polls, entry.token)
+        end
+    finally
+        unlock(_operation_poll_lock)
+    end
+    response
+end
+
 function _delete_operation_poll!(token::AbstractString)
     lock(_operation_poll_lock)
     try
@@ -8179,6 +8281,7 @@ function _clear_operation_polls!()
     lock(_operation_poll_lock)
     try
         empty!(_operation_polls)
+        empty!(_mutation_terminals)
     finally
         unlock(_operation_poll_lock)
     end
@@ -8225,11 +8328,26 @@ _operation_bound_args(::Verb, idx_vals, kw_pairs) =
 _operation_bound_args(::_MutationVerb, _idx_vals, _kw_pairs) = ((), (;))
 
 function _finish_operation_poll(token::AbstractString, value)
-    try
+    resolved = try
         _resolve_operation_value(value)
-    finally
+    catch
         _delete_operation_poll!(token)
+        rethrow()
     end
+    lock(_operation_poll_lock)
+    try
+        entry = get(_operation_polls, String(token), nothing)
+        if entry isa _OperationPollEntry && _mutation_poll_entry(entry)
+            # The enclosing poll path caches the fully rendered response. Do
+            # not spend the token before that response reaches the caller.
+            entry.terminal_ready = true
+        else
+            delete!(_operation_polls, String(token))
+        end
+    finally
+        unlock(_operation_poll_lock)
+    end
+    resolved
 end
 
 # A DO compute-at-most-once handle is CONTROL FLOW, never response content: the
@@ -8773,12 +8891,10 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
 end
 
 # A GET carrying `__htmxo_verb=<mutation>` polls a mutation submission. It
-# resumes exactly the retained invocation its token names, through the same
-# resume path a read's poll takes. It never heals: re-executing a submission to
-# recover its response would run the side effect twice, so a token the
-# registry no longer holds (a restart, TTL/LRU expiry, another route's token)
-# fails closed as `OperationResultUnavailable` — whose error article the live
-# poller selects, retiring it.
+# resumes exactly the retained invocation its token names, then replays its
+# terminal if the first answer was lost. It never heals by re-executing the
+# submission: a token absent from both bounded registries fails closed as
+# `OperationResultUnavailable`.
 function _execute_mutation_resume(policy::OperationPolicy, target, LeafT,
         name::Symbol, verb_inst::_MutationVerb, req::HTTP.Request)
     context = get(target, :context, nothing)
@@ -8787,13 +8903,15 @@ function _execute_mutation_resume(policy::OperationPolicy, target, LeafT,
     signature = _operation_poll_signature(
         target, LeafT, name, verb_inst, (), ())
     entry = isnothing(token) ? nothing :
-        _lookup_operation_poll(token, signature)
+        _lookup_mutation_poll(token, signature)
+    _runtime_note_mode!(req, :polling)
+    entry isa _MutationTerminal && return _copy_mutation_terminal(entry.response)
     entry isa _OperationPollEntry ||
         throw(OperationResultUnavailable(name, _verb_symbol(verb_inst)))
-    _runtime_note_mode!(req, :polling)
     descriptor = _property_descriptor(LeafT, name, _verb_symbol(verb_inst))
-    _execute_operation_resume(policy, descriptor, target, name, verb_inst,
-        (), (), req, prefix, token, entry)
+    value = _execute_operation_resume(policy, descriptor, target, name,
+        verb_inst, (), (), req, prefix, token, entry)
+    _cache_mutation_terminal!(entry, value)
 end
 
 function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
@@ -9003,9 +9121,10 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      retain=() -> _retain_operation!(entry, descriptor, name;
                                                  track=queued),
                      cleanup=() -> _delete_operation_poll!(token))
-        return _operation_page_runtime(req, _operation_polling(
+        value = _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
             started, prop, keys, call_kwargs, transport))
+        return _cache_mutation_terminal!(entry, value)
     end
     if _operation_poll_request(req)
         # A poll-marked request that landed on `:blocking` (the descriptor

@@ -1704,7 +1704,10 @@ the grace period is answered by the same poller a memoized route gets.
   would match it anyway (a covering `@get index(uid)`, say), and answers `405`
   with an `Allow` header only when none does. The resume binds the route, types
   and provider scope — never the submitted body, which no poll URL repeats. It
-  **never re-runs the submission**: a token the server no longer holds answers
+  **never re-runs the submission**. After success, the token replays the same
+  terminal fragment from a bounded, process-local cache, so a lost reply or
+  overlapping poll cannot replace success with an unavailable article. A token
+  the server no longer holds (restart, idle expiry, or eviction) answers
   `HTMXObjects.OperationResultUnavailable` (`410`; an HTMX poll receives its
   "Result unavailable" article, which retires the poller).
 - A mutation's poller lives in the submission's swap target, so a slow
@@ -1770,8 +1773,10 @@ token after a process restart, an expired entry, drifted arguments, or a
 missing token — heals by re-executing a fresh operation with the poll
 request's current args instead of failing: the token is a resumption hint,
 and a healed request computes exactly what a fresh GET would. Successful
-terminal rendering removes the retained operation immediately; a bounded
-process-local registry expires abandoned or failed pollers.
+terminal rendering removes a read's retained operation immediately. A mutation
+releases its operation after rendering and retains the terminal response for
+replay, bounded to 256 entries and 600 seconds since the last matching poll.
+Both registries are process-local; abandoned or failed operations expire.
 
 A resolved `:auto` poll answers the result fragment in a select-matching
 terminal node — no kept progress tree, no inspection chrome — and the
