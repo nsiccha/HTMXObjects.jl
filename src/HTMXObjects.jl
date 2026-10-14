@@ -17709,7 +17709,9 @@ auto_terminal_script() = h.script(Raw(raw"""
       (window.htmx && htmx.config.defaultSwapStyle) || 'innerHTML';
     var style = String(swap).trim().split(/\s+/)[0];
     var displaced = [];
-    if (!(req && req.hasAttribute && req.hasAttribute('data-htmxo-operation-load'))) {
+    // The dataset spelling keeps the placeholder's marker attribute out of the
+    // shell's own text, where pages are searched for a placeholder.
+    if (!(req && req.dataset && req.dataset.htmxoOperationLoad !== undefined)) {
       if (style === 'innerHTML' || style === 'textContent') {
         displaced = Array.prototype.slice.call(target.childNodes);
       } else if (style === 'outerHTML') {
