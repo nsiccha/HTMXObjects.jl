@@ -4662,6 +4662,9 @@ instruct the HTMX client to perform additional actions after swap.
 request completes (the percent-encoded `X-HTMXO-Toast` header read by
 [`toast_script`](@ref)), e.g. `hx_response(row; toast="Invoice saved")`. It
 survives a polled `:auto` answer: the terminal poll response carries it.
+`retarget`, `reswap` and `location` survive one too: the page shell applies
+them when the operation finishes, as on a direct answer (see
+`auto_terminal_script()`).
 """
 function hx_response(val;
     trigger=nothing, push_url=nothing, replace_url=nothing,
@@ -7952,6 +7955,7 @@ _operation_page_runtime(::HTTP.Request, value::HTTP.Response) = value
 # for a 2xx answer, as an error article (which the poller also selects) for any
 # other status. A redirect (`redirect_to`) cannot be followed from a 200 poll
 # reply, so it becomes `HX-Redirect` to its `Location`: htmx navigates there.
+# Headers that send the answer elsewhere are the exception below.
 function _operation_terminal_body(resp::HTTP.Response)
     location = _redirect_location(resp)
     isnothing(location) || return "<p>Moved to <a href=\"" *
@@ -7981,12 +7985,27 @@ _redirect_location(resp::HTTP.Response) =
 _operation_terminal_ok(resp::HTTP.Response) =
     200 <= resp.status < 300 || !isnothing(_redirect_location(resp))
 
+# Headers that make htmx apply an answer somewhere other than the element that
+# requested it (`HX-Retarget`, `HX-Reswap`, `HX-Reselect`), or not swap it at
+# all (`HX-Location`). On a poll terminal they move the answer away from the
+# poller, so the poller and its `every` trigger would stay in place and poll
+# the spent token forever. Such a terminal answers htmx's stop-polling status
+# 286 (still a swapping 2xx), and the shell's `auto_terminal_script` applies it
+# the way the original request would have.
+const _OPERATION_SWAP_REDIRECT_HEADERS =
+    ("hx-retarget", "hx-reswap", "hx-reselect", "hx-location")
+
+_operation_redirects_swap(resp::HTTP.Response) =
+    any(((name, _),) -> lowercase(name) in _OPERATION_SWAP_REDIRECT_HEADERS,
+        resp.headers)
+
 function _operation_finalized_terminal(resp::HTTP.Response)
     body = _operation_terminal_body(resp)
     inner = _operation_terminal_ok(resp) ?
         "<div class=\"treebar-poller-inner treebar-terminal-content\" " *
             "data-htmxo-auto-terminal=\"\">" * body * "</div>" : body
-    HTTP.Response(200, _operation_terminal_headers(resp); body=inner)
+    status = _operation_redirects_swap(resp) ? 286 : 200
+    HTTP.Response(status, _operation_terminal_headers(resp); body=inner)
 end
 
 function _operation_has_page_shell(target)
@@ -18016,6 +18035,17 @@ in the same pass. Runs in either listener order
 against Treebars' `terminalizePoller` (the wrapper may already be renamed
 to `.treebar-terminal` when this fires).
 
+It also applies a finalized answer (`hx_response`, a `dispatch`ed
+sub-request) whose headers move it away from the poller: `HX-Retarget`,
+`HX-Reswap`, `HX-Reselect`, or `HX-Location`. Such a terminal arrives with
+htmx's stop-polling status 286, and the script handles it as the original
+request would have handled a direct answer. It records what the operation's
+poller displaced when the poller arrived. When the terminal arrives, it puts
+that content back before htmx resolves the headers. The bare answer then lands
+where the headers say, or in the original target with the original swap, and
+the spent poller is removed. An `HX-Retarget` that matches nothing raises
+htmx's `htmx:targetError` and leaves the page as it was before the request.
+
 Automatic — no consumer wiring. Include once per page; the `htmx()` shell
 installs it alongside the Treebars assets.
 """
@@ -18104,6 +18134,132 @@ auto_terminal_script() = h.script(Raw(raw"""
       });
     }
   });
+
+  // A poll terminal whose headers send the answer away from the poller
+  // (HX-Retarget, HX-Reswap, HX-Reselect) or nowhere (HX-Location) arrives
+  // with htmx's stop-polling status 286. Apply it as the original request
+  // would have applied a direct answer: the content the poller displaced goes
+  // back before htmx resolves those headers, the bare answer lands where they
+  // say (else where the original request was going), and the spent poller is
+  // removed.
+  function firstElement(html) {
+    if (typeof html !== 'string') return null;
+    var t = document.createElement('template');
+    t.innerHTML = html;
+    return t.content.firstElementChild;
+  }
+  function closestSwap(elt) {
+    var source = elt && elt.closest && elt.closest('[hx-swap],[data-hx-swap]');
+    return source && (source.getAttribute('hx-swap') ||
+                      source.getAttribute('data-hx-swap'));
+  }
+  function pollRequest(elt) {
+    return !!(elt && elt.classList && elt.classList.contains('treebar-poller-inner') &&
+              (elt.getAttribute('hx-get') || '').indexOf('__htmxo_poll') !== -1);
+  }
+  // Where the original request was going, and what its poller displaced.
+  // Recorded on the answer that starts an operation poller and kept on the
+  // poller wrapper. The direct-page load placeholder is never put back: it
+  // would load the operation again.
+  function recordOrigin(d) {
+    var req = d.requestConfig && d.requestConfig.elt, target = d.target;
+    if (!d.shouldSwap || !d.xhr || !target || pollRequest(req)) return;
+    var first = firstElement(d.serverResponse);
+    var inner = first && first.classList.contains('treebar-poller') &&
+      first.querySelector(':scope > .treebar-poller-inner[hx-get*="__htmxo_poll"]');
+    if (!inner) return;
+    var swap = d.swapOverride || closestSwap(req) ||
+      (window.htmx && htmx.config.defaultSwapStyle) || 'innerHTML';
+    var style = String(swap).trim().split(/\s+/)[0];
+    var displaced = [];
+    // The dataset spelling keeps the placeholder's marker attribute out of the
+    // shell's own text, where pages are searched for a placeholder.
+    if (!(req && req.dataset && req.dataset.htmxoOperationLoad !== undefined)) {
+      if (style === 'innerHTML' || style === 'textContent') {
+        displaced = Array.prototype.slice.call(target.childNodes);
+      } else if (style === 'outerHTML') {
+        displaced = [target];
+      }
+    }
+    d.xhr.__htmxoOrigin = { elt: req, target: target, swap: swap, displaced: displaced,
+                            url: inner.getAttribute('hx-get') };
+  }
+  // htmx fires afterSwap on the swap target (innerHTML) or on the inserted
+  // nodes (outerHTML): find the new poller below either by its poll URL.
+  document.addEventListener('htmx:afterSwap', function(evt) {
+    var d = (evt && evt.detail) || {}, origin = d.xhr && d.xhr.__htmxoOrigin;
+    if (!origin || !d.elt || !d.elt.querySelectorAll) return;
+    var inners = d.elt.querySelectorAll('.treebar-poller-inner');
+    for (var i = 0; i < inners.length; i++) {
+      var wrapper = inners[i].closest('.treebar-poller');
+      if (wrapper && inners[i].getAttribute('hx-get') === origin.url) {
+        wrapper.__htmxoOrigin = origin;
+        d.xhr.__htmxoOrigin = null;
+        return;
+      }
+    }
+  });
+  document.addEventListener('htmx:beforeOnLoad', function(evt) {
+    var d = (evt && evt.detail) || {}, xhr = d.xhr, poll = d.elt;
+    if (!xhr || xhr.status !== 286 || !pollRequest(poll)) return;
+    if (!/^(hx-retarget|hx-reswap|hx-reselect|hx-location):/im
+          .test(xhr.getAllResponseHeaders() || '')) return;
+    var wrapper = (poll.closest && poll.closest('.treebar-poller')) || poll;
+    var origin = wrapper.__htmxoOrigin || null;
+    wrapper.__htmxoOrigin = null;
+    if (origin && wrapper.parentNode) {
+      origin.displaced.forEach(function(n) { wrapper.parentNode.insertBefore(n, wrapper); });
+      // htmx cleaned these nodes up when the poller displaced them.
+      origin.displaced.forEach(function(n) {
+        if (n.nodeType === 1 && window.htmx) htmx.process(n);
+      });
+    }
+    xhr.__htmxoRetire = { origin: origin, poll: poll, wrapper: wrapper,
+      retarget: !!xhr.getResponseHeader('HX-Retarget'),
+      reswap: !!xhr.getResponseHeader('HX-Reswap') };
+  });
+  document.addEventListener('htmx:beforeSwap', function(evt) {
+    var d = (evt && evt.detail) || {}, r = d.xhr && d.xhr.__htmxoRetire;
+    if (!r) { recordOrigin(d); return; }
+    var term = firstElement(d.serverResponse);
+    if (marked(term)) d.serverResponse = term.innerHTML;
+    // HX-Reselect, which htmx reads after this event, still applies.
+    d.selectOverride = 'unset';
+    var origin = r.origin;
+    var original = origin && origin.target && origin.target.isConnected;
+    if (r.retarget) {
+      // `HX-Retarget: this` names the requester, which was the original one.
+      if (d.target === r.poll && origin && origin.elt && origin.elt.isConnected) {
+        d.target = origin.elt;
+      }
+    } else {
+      d.target = original ? origin.target : r.wrapper;
+    }
+    if (!r.retarget && !original) {
+      // No original target to apply HX-Reswap to: the wrapper stands in.
+      d.swapOverride = 'outerHTML';
+    } else if (!r.reswap) {
+      d.swapOverride = origin ? origin.swap :
+        ((window.htmx && htmx.config.defaultSwapStyle) || 'innerHTML');
+    }
+  });
+  function retire(evt) {
+    var r = evt && evt.detail && evt.detail.xhr && evt.detail.xhr.__htmxoRetire;
+    if (!r || r.done) return;
+    r.done = true;
+    // Once htmx has finished this response: a requester removed during
+    // afterRequest makes htmx fire afterRequest again on an ancestor, which
+    // would run every listener (success toasts included) twice.
+    Promise.resolve().then(function() {
+      var w = r.wrapper, parent = w && w.parentNode;
+      if (!w || !w.isConnected || !parent) return;
+      parent.removeChild(w);
+      if (parent.classList && parent.classList.contains('htmxo-live-reporter') &&
+          !parent.firstElementChild) parent.hidden = true;
+    });
+  }
+  document.addEventListener('htmx:afterRequest', retire);
+  document.addEventListener('htmx:onLoadError', retire);
 })();
 """))
 
