@@ -440,6 +440,24 @@ data_htmxo_label="")`): Markdown drops the control and keeps that label in its
 place. Sortable column headers and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
 
+A control that shows the reader a state keeps that state in Markdown, with no
+annotation:
+
+| Control | Markdown |
+|---------|----------|
+| toggle with `aria-pressed` (any element) | `label (pressed)`, `label (not pressed)`, `label (mixed)` |
+| toggle with `aria-checked` (any element) | `label (checked)`, `label (not checked)`, `label (mixed)` |
+| `<select>` | the chosen option's label; several are comma-separated |
+| checkbox / radio `<input>` | `☑` / `☐`, `◉` / `○` |
+| value `<input>` (text, number, date, search, …) | its `value` |
+
+The state words are what a screen reader announces, so a toggle whose label
+names its state reads correctly either way: a row's
+`h.button(ineligible ? "ineligible" : "eligible"; aria_pressed=…)` becomes
+`ineligible (pressed)` or `eligible (not pressed)`. A `<textarea>`, a `hidden`,
+`password` or `file` input and an action input stay dropped, and a `<form>`
+still drops with everything in it.
+
 For authoring Markdown that renders to HTML — the reverse direction:
 
 | Export | Purpose |

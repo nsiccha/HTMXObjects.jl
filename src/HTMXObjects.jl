@@ -12135,8 +12135,9 @@ end
 # Interactive elements counted as "chrome" and dropped from markdown output.
 # Dropping the node drops its whole subtree, so children of a `<form>` go with
 # it; standalone `<button>`/`<input>`/`<textarea>` are dropped wherever they
-# appear (form-wrapped or not). Extend this set (e.g. select/option/label) only
-# via the open design decisions — see the markdown-read contract in `htmxo-use`.
+# appear (form-wrapped or not), unless they show a state (`_md_control`). Extend
+# this set (e.g. select/option/label) only via the open design decisions — see
+# the markdown-read contract in `htmxo-use`.
 const _MD_CHROME_TAGS = Set{Symbol}((:form, :input, :textarea, :button))
 
 _is_md_chrome(tag) = Symbol(lowercase(string(tag))) in _MD_CHROME_TAGS
@@ -12159,6 +12160,12 @@ A chrome element carrying the presence-only `data-htmxo-label` attribute is a
 labelled control: the element is dropped but its (stripped) children stay where
 it stood. `sortable_table` header buttons and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
+
+A control that shows the reader a state projects to that state as text instead
+(see [`_md_control`](@ref)): a toggle keeps its label and says whether it is
+pressed or checked, a `<select>` shows its chosen option, a checkbox or radio
+button its mark, and a value field its value. Inside a dropped `<form>` nothing
+is projected; the form still goes whole.
 
 Applied automatically by [`to_markdown_string`](@ref) so every
 `?plain` / `?markdown` / `Accept: text/markdown` read drops form chrome with no
@@ -12261,7 +12268,97 @@ end
 # Markdown drops the control and keeps that label in its place.
 _is_md_label(node::Node) = haskey(HTMX.attrs(node), Symbol("data-htmxo-label"))
 
+_md_tag(node::Node) = Symbol(lowercase(string(HTMX.tag(node))))
+# An attribute as the HTML carries it: `nothing` when absent (a `false` or
+# `nothing` keyword is omitted when the node is built).
+_md_attr(node::Node, name) = let v = get(HTMX.attrs(node), Symbol(name), nothing)
+    isnothing(v) ? nothing : string(v)
+end
+_md_has(node::Node, name) = !isnothing(_md_attr(node, name))
+
+"""
+    _md_control(node, ::Val{tag})
+
+Project a control onto the state a sighted reader sees in it, or `nothing` when
+`node` shows no state (it is then stripped like any other node). A projection
+starts with a space, so a value never runs into the label before it.
+
+| Control | Markdown |
+|:--|:--|
+| toggle: `aria-pressed` | `label (pressed)`, `label (not pressed)`, `label (mixed)` |
+| toggle: `aria-checked` | `label (checked)`, `label (not checked)`, `label (mixed)` |
+| `<select>` | the chosen option's label (several: comma-separated) |
+| checkbox / radio `<input>` | `☑` / `☐`, `◉` / `○` |
+| value `<input>` (text, number, date, search, …) | its `value` |
+
+The words are what a screen reader announces, so a toggle whose label already
+names its state (`eligible` / `ineligible`) still reads correctly. A
+`<textarea>`, a `hidden`, `password` or `file` input and an action input
+(`submit`, `reset`, `button`, `image`) show no state and are dropped.
+"""
+_md_control(node::Node, ::Val) = _md_toggle(node)
+_md_control(node::Node, ::Union{Val{:form}, Val{:textarea}}) = nothing
+_md_control(node::Node, ::Val{:input}) =
+    _md_input(node, Val(Symbol(lowercase(something(_md_attr(node, "type"), "text")))))
+
+# The state words of each ARIA toggle attribute, by attribute value.
+const _MD_TOGGLE_WORDS = (
+    "aria-pressed" => Dict("true" => "pressed", "false" => "not pressed", "mixed" => "mixed"),
+    "aria-checked" => Dict("true" => "checked", "false" => "not checked", "mixed" => "mixed"))
+
+function _md_toggle(node::Node)
+    for (name, words) in _MD_TOGGLE_WORDS
+        word = get(words, lowercase(strip(something(_md_attr(node, name), ""))), nothing)
+        isnothing(word) && continue
+        label = _strip_md_chrome_children(HTMX.children(node))
+        # A chrome control gives way to its label; any other element keeps its
+        # own tag and attributes.
+        _is_md_chrome(HTMX.tag(node)) || return Node(HTMX.tag(node), copy(HTMX.attrs(node)),
+            Any[label..., " ($word)"])
+        return Node(:span, empty(HTMX.attrs(node)), Any[" ", label..., " ($word)"])
+    end
+    nothing
+end
+
+_md_mark(text) = h.span(text)
+_md_input(node::Node, ::Val{:checkbox}) = _md_mark(_md_has(node, "checked") ? "☑ " : "☐ ")
+_md_input(node::Node, ::Val{:radio}) = _md_mark(_md_has(node, "checked") ? "◉ " : "○ ")
+_md_input(node::Node, ::Union{Val{:hidden}, Val{:password}, Val{:file}, Val{:submit},
+    Val{:reset}, Val{:button}, Val{:image}}) = nothing
+# Any other type is a value field, as browsers treat an unknown type as text.
+_md_input(node::Node, ::Val) = let value = something(_md_attr(node, "value"), "")
+    isempty(value) ? nothing : _md_mark(" " * value)
+end
+
+# The options of a `<select>`, through any `<optgroup>`, in document order.
+_md_options!(out, child) = out
+_md_options!(out, child::Node) = _md_options!(out, child, Val(_md_tag(child)))
+_md_options!(out, child::Node, ::Val) = out
+_md_options!(out, child::Node, ::Val{:option}) = push!(out, child)
+_md_options!(out, child::Node, ::Val{:optgroup}) =
+    (foreach(c -> _md_options!(out, c), HTMX.children(child)); out)
+
+_md_option_label(option::Node) = something(_md_attr(option, "label"),
+    strip(to_markdown_string(Any[HTMX.children(option)...])))
+
+# A browser shows the selected options; with none selected, a single select
+# shows its first enabled option and a multiple select shows nothing.
+function _md_control(node::Node, ::Val{:select})
+    options = Node[]
+    foreach(c -> _md_options!(options, c), HTMX.children(node))
+    isempty(options) && return nothing
+    chosen = filter(o -> _md_has(o, "selected"), options)
+    if isempty(chosen) && !_md_has(node, "multiple")
+        first_enabled = findfirst(o -> !_md_has(o, "disabled"), options)
+        isnothing(first_enabled) || push!(chosen, options[first_enabled])
+    end
+    isempty(chosen) && return h.span()
+    _md_mark(" " * join(_md_option_label.(chosen), ", "))
+end
+
 function _strip_md_chrome(node::Node)
+    projected = _md_control(node, Val(_md_tag(node)))
+    isnothing(projected) || return projected
     if _is_md_chrome(HTMX.tag(node))
         _is_md_label(node) || return _rescued_md_run(node)
         return Node(:span, empty(HTMX.attrs(node)), _strip_md_chrome_children(HTMX.children(node)))
