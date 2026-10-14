@@ -12469,7 +12469,8 @@ function htmxoFilterTable(target) {
             const open = pending ? false : query.length > 0 ? !collapsed || shownParents.has(row.id) : row.dataset.htmxoTreeOpen === 'true';
             row.setAttribute('aria-expanded', open);
             branch.setAttribute('aria-expanded', open);
-            branch.textContent = open ? '▾' : '▸';
+            if (!branch.hasAttribute('data-htmxo-tree-label'))
+                branch.textContent = open ? '▾' : '▸';
             branch.disabled = query.length > 0 && !pending;
         }
         const detail = companions.get(row.id);
@@ -12569,6 +12570,11 @@ function htmxoTreeToggle(button) {
     // Hierarchical tables always have a search scaffold, even when its field
     // is hidden. One visibility pass owns both collapse and filtering.
     htmxoFilterTable(row);
+}
+function htmxoTreeRow(row, event) {
+    if (event.target.closest('a,button,input,textarea,select,form')) return;
+    const button = row.querySelector('[data-htmxo-tree-toggle]');
+    if (button && !button.disabled) htmxoTreeToggle(button);
 }
 
 // --- Row updates: `master_detail_table(...; update_rows, update_groups)` ---
@@ -12676,7 +12682,7 @@ function htmxoUpdateRows(update, origin) {
     }
     // A branch toggle names the child rows the branch now has.
     touched.forEach(b => {
-        const toggle = b.isConnected && b.querySelector(':scope > td > [data-htmxo-tree-toggle]');
+        const toggle = b.isConnected && b.querySelector(':scope > td [data-htmxo-tree-toggle]');
         if (!toggle) return;
         const kids = masters().filter(r => r.dataset.htmxoParent === b.id).map(r => r.id);
         if (kids.length) toggle.setAttribute('aria-controls', kids.join(' '));
@@ -13629,7 +13635,9 @@ function htmxoLoadSlot(s) {
 function htmxoMdControl(button, event) {
     event.stopPropagation();
     var row = button.closest('tr'), key = row.id.slice(4);
-    if (row.onclick) row.onclick({target: row});
+    if (row.hasAttribute('data-htmxo-tree-row-toggle'))
+        htmxoMdToggle(row, {target: row}, key, document.getElementById('detail-slot-' + key) ? 1 : 0);
+    else if (row.onclick) row.onclick({target: row});
     else htmxoMdToggle(row, {target: row}, key, document.getElementById('detail-slot-' + key) ? 1 : 0);
 }
 function htmxoMdBefore(s, event) {
@@ -13789,13 +13797,19 @@ _md_master_row(row::Node) = HTMX.tag(row) === :tr ?
         "cells or one <tr>, got <", HTMX.tag(row), ">")))
 _md_master_row(cells) = (collect(Any, cells), ())
 
+_md_interactive_label(::Any) = false
+_md_interactive_label(::Raw) = true
+_md_interactive_label(node::Node) =
+    HTMX.tag(node) in (:a, :button, :input, :textarea, :select, :form) ||
+    any(_md_interactive_label, HTMX.children(node))
+
 _md_attr_name(key) = Symbol(replace(string(key), '_' => '-'))
 
 # Attributes the helpers write on a master row: its pairing id, toggle,
 # expansion state and place in a hierarchy.
 const _MD_ROW_ATTRS = Symbol.(("id", "onclick", "aria-expanded", "aria-level", "hidden",
     "data-htmxo-parent", "data-htmxo-tree-open", "data-htmxo-detail-open",
-    "data-htmxo-search"))
+    "data-htmxo-search", "data-htmxo-tree-row-toggle"))
 
 # A row's own attributes join `attrs`, the row attributes `master_attrs` gave.
 # Neither may set what the other sets, nor what the helper writes itself:
@@ -14014,9 +14028,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   Defaults to `false` (all rows collapsed initially).
 - `children(item)`: optional callback returning child items. `items` then
   contains roots; the helper emits a single tree table in preorder. Keys must
-  be unique after sanitisation, including across levels. Native branch buttons
-  expand children; `initially_open` controls branches and leaf details. A group
-  with neither a detail body nor URL has no companion or detail request.
+  be unique after sanitisation, including across levels. Clicking a branch row
+  toggles its immediate child rows; nested branches work the same way. Its label
+  is a native keyboard button when the first cell is non-interactive. A separate
+  triangle remains when that cell contains a link/control or `detail_toggle=:label`
+  reserves the label for a detail. A selectable row click still selects, while
+  its branch control opens children. `initially_open` controls branches and leaf
+  details. A group with neither a detail body nor URL has no companion or detail
+  request.
 - `branches_collapsible`: with `children`, default `true`. Set `false` to
   keep every branch expanded without disclosure controls. This overrides
   `initially_open` for branch visibility only; detail expansion stays independent.
@@ -14033,9 +14052,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   that cell's content, which may itself be a link. With the default `:button`,
   a flat table's control is a compact disclosure triangle (▸ closed, ▾ open,
   accessible name "Details"); a hierarchical table's is a "Details" button,
-  since its triangles expand child rows. Flat rows keep row-click activation
+  distinct from opening its children. Flat rows keep row-click activation
   as a pointer shortcut, and the button runs the row's click handler (with any
-  `master_attrs` extension). `:label` uses the first master cell's complete
+  `master_attrs` extension). A branch row click opens children and its detail
+  button opens only its detail. `:label` uses the first master cell's complete
   content as the native detail button instead, with no separate control.
   Supply non-interactive label content in that cell; other cells can contain
   links or controls. Group rows without details stay plain. The label button
@@ -14211,6 +14231,10 @@ function master_detail_table(headers, items;
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
         cells, row_attrs = _md_master_row(master(item))
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
+        if branch && branches_collapsible && !selecting && !haskey(attrs, :onclick)
+            attrs[:onclick] = "htmxoTreeRow(this,event)"
+            attrs[:data_htmxo_tree_row_toggle] = ""
+        end
         if selecting
             # `master_attrs` or the master <tr> may preselect a row or give its
             # value. The submitted value defaults to the caller's own key, not
@@ -14236,14 +14260,21 @@ function master_detail_table(headers, items;
         first_cell isa Node || throw(ArgumentError(string("master_detail_table: the first ",
             "master cell must be a <td> node, got ", typeof(first_cell))))
         controls = Any[]
+        label = Any[HTMX.children(first_cell)...]
         if branch && branches_collapsible
             child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
-            push!(controls, h.button(_md_disclosure_glyph(open); type="button",
-                data_htmxo_tree_toggle="", aria_label="Toggle child rows",
-                (isempty(child_ids) ? (;) : (; aria_controls=child_ids))..., aria_expanded=string(open),
-                onclick="htmxoTreeToggle(this); event.stopPropagation()"))
+            branch_attrs = (; type="button", data_htmxo_tree_toggle="",
+                (isempty(child_ids) ? (;) : (; aria_controls=child_ids))...,
+                aria_expanded=string(open),
+                onclick="htmxoTreeToggle(this); event.stopPropagation()")
+            if !(has_detail && detail_toggle === :label) && !any(_md_interactive_label, label)
+                label = Any[h.button(label...; branch_attrs...,
+                    data_htmxo_tree_label="", data_htmxo_label="")]
+            else
+                push!(controls, h.button(_md_disclosure_glyph(open); branch_attrs...,
+                    aria_label="Toggle child rows"))
+            end
         end
-        label = Any[HTMX.children(first_cell)...]
         if has_detail
             isnothing(children) || (attrs[:data_htmxo_detail_open] = string(open))
             # A label toggle's content is the row's name, kept in Markdown. A
@@ -14311,6 +14342,10 @@ function master_detail_table(headers, items;
     [data-htmxo-group] > td:first-child { white-space: nowrap; }
     [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
     tr[aria-busy="true"] [data-htmxo-tree-toggle] { cursor: progress; opacity: .6; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; text-align: start; white-space: normal; font: inherit; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸"; display: inline-block; margin-right: .35em; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾"; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }

@@ -342,8 +342,16 @@ complete first-cell label becomes a native button. Supply non-interactive label
 content in that cell; links or inputs can live in the other cells. Markdown
 keeps that label and the column names; it drops the search field. Detail
 expansion still follows `initially_open`; search and sort retain loaded DOM.
-The defaults keep the branch triangles and a Details button on each row with a
-detail. A flat table (no `children`) instead gives each such row a compact
+By default, clicking a branch row opens or closes its immediate children;
+clicking a nested branch does the same at the next level. A non-interactive
+branch label is a native button for keyboard use, with the disclosure glyph
+inside that label rather than in a separate button. A branch whose first cell
+contains a link or other control keeps a separate triangle, so that control
+retains its action. A branch with its own detail keeps a separate Details
+button: row clicks open children, while Details opens the paired detail.
+In a selectable table, row clicks select and the branch control opens children.
+An app-provided `master_attrs.onclick` continues to override the row shortcut.
+A flat table (no `children`) gives each detail row a compact
 disclosure triangle (▸ closed, ▾ open, named "Details") in its first cell,
 beside the cell's content, which may be a link; the row click remains a pointer
 shortcut. Every branch and detail control is a native button carrying

@@ -15,6 +15,8 @@
     @test !isnothing(body_id) && contains(derived, "aria-controls=\"$(body_id[1])\"")
     @test derived == repr("text/html", tree(expand_controls=true))
     @test !contains(repr("text/html", tree()), "Expand all")
+    @test contains(html, "data-htmxo-tree-label=\"\"")
+    @test contains(html, "onclick=\"htmxoTreeRow(this,event)\"")
     md = to_markdown_string(tree(expand_controls=true, searchable=true))
     @test !contains(md, "Expand all") && !contains(md, "Collapse all")
     # Refused: no collapsible branches means nothing for the buttons to drive.
@@ -65,8 +67,8 @@ end
             check('search-reveals', shown() === 'all,fam-a,grp-a,m1,m2');
             button('Collapse all').click();
             check('search-collapse-keeps-matches', shown() === 'all,fam-a,grp-a');
-            check('search-collapse-glyph', row('grp-a').querySelector('[data-htmxo-tree-toggle]').textContent === '▸' &&
-                row('fam-a').querySelector('[data-htmxo-tree-toggle]').textContent === '▾');
+            check('search-collapse-state', row('grp-a').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-expanded') === 'false' &&
+                row('fam-a').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-expanded') === 'true');
             check('count-follows', root.querySelector('[data-htmxo-table-count]').textContent === '3 of 7 rows shown');
             button('Expand all').click();
             check('search-expand', shown() === 'all,fam-a,grp-a,m1,m2');
