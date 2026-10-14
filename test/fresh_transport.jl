@@ -51,6 +51,8 @@ using TestItemRunner
         "Render the fresh report"
         @fresh @get fresh_report(; n::Int=1) = gated(:read, "report-$n")
         @fresh @get fresh_quick() = (fresh_hit!(:quick); h.p("quick"))
+        @fresh @get fresh_retarget_read() = (wait(gate(:retarget_read));
+            hx_response(h.p("read-retargeted"); retarget="#card"))
     end
 
     @htmx struct FreshPageApp
@@ -77,6 +79,12 @@ using TestItemRunner
         @direct @post direct_redirect() = (wait(gate(:direct_redirect));
             HTTP.Response(200, ["Content-Type" => "text/plain",
                                 "HX-Redirect" => "/created"], "Created"))
+        # Finalized answers whose headers send them away from the poller.
+        @post fresh_retarget() = (wait(gate(:retarget));
+            hx_response(h.p("retargeted"); retarget="#card", reswap="outerHTML",
+                        trigger="card-changed"))
+        @post fresh_location() = (wait(gate(:location));
+            hx_response(""; location="/elsewhere"))
     end
 
     # A mutation path that also declares a GET: the GET route serves the
@@ -150,7 +158,16 @@ using TestItemRunner
             gated(:browser_grouped, "grouped-$group_by-$review_scope-$focus_year")
         "Save the slow form"
         @post browser_save(; note::String="") = gated(:browser_post, "saved-$note")
+        "Save the card"
+        @post browser_card(; which::String="") =
+            (wait(gate(:browser_card)); card_answer(which))
+        @direct @post browser_card_direct(; which::String="") =
+            (wait(gate(:browser_card)); card_answer(which))
     end
+
+    card_answer(which) = hx_response(h.div(; id="card-$which")(h.p("card:$which"));
+        retarget="#card-$which", reswap="outerHTML", trigger="card-changed",
+        toast="Card saved")
 
     const hx = ["HX-Request" => "true"]
     const form = "Content-Type" => "application/x-www-form-urlencoded"
@@ -587,6 +604,56 @@ end
     @test redirected_body != body_text(direct)
 end
 
+# `HX-Retarget`/`HX-Reswap`/`HX-Reselect` move a poll terminal away from the
+# poller and `HX-Location` swaps nothing, so the poller and its `every` trigger
+# would stay and poll the spent token forever (snag auto-poller-endl-28fd6ff6).
+# Such a terminal answers htmx's stop-polling status 286 with its headers; the
+# browser side is the "retarget headers apply like a direct answer" item.
+@testitem "a poll terminal its headers send elsewhere stops polling with 286" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!
+
+    for keep_terminal_tree in (false, true)
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(FreshMutationApp();
+            operation_policy=OperationPolicy(:auto; keep_terminal_tree))
+        targets = Dict(key => poll_url(String(hx_post("/fresh_$(key)").body))
+                       for key in (:retarget, :location, :headers))
+        foreach(release_fresh!, keys(targets))
+
+        retargeted = settle_response(targets[:retarget])
+        @test retargeted.status == 286
+        @test HTTP.header(retargeted, "HX-Retarget") == "#card"
+        @test HTTP.header(retargeted, "HX-Reswap") == "outerHTML"
+        @test HTTP.header(retargeted, "HX-Trigger") == "card-changed"
+        body = body_text(retargeted)
+        # The bare terminal, whatever the tree policy: the answer leaves the
+        # poller, so no kept tree can stand in its place.
+        @test contains(body, "data-htmxo-auto-terminal")
+        @test contains(body, "<p>retargeted</p>")
+        @test !contains(body, "class=\"treebar-terminal\"")
+        replayed = hx_get(targets[:retarget])
+        @test replayed.status == 286
+        @test body_text(replayed) == body
+
+        located = settle_response(targets[:location])
+        @test located.status == 286
+        @test HTTP.header(located, "HX-Location") == "/elsewhere"
+
+        # Headers that leave the swap alone keep the ordinary terminal status.
+        @test settle_response(targets[:headers]).status == 200
+    end
+
+    route!(FreshReadApp())
+    read = poll_url(String(hx_get("/fresh_retarget_read").body))
+    release_fresh!(:retarget_read)
+    answered = settle_response(read)
+    @test answered.status == 286
+    @test HTTP.header(answered, "HX-Retarget") == "#card"
+    @test contains(body_text(answered), "<p>read-retargeted</p>")
+end
+
 @testitem "a mutation path's own GET route serves its polls" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP, Treebars
     import HTMXObjects: _clear_operation_polls!
@@ -872,6 +939,149 @@ end
         finally
             release_fresh!(:browser_read)
             release_fresh!(:browser_post)
+            close(server)
+        end
+    end
+end
+
+# The browser half of the 286 item above: a slow answer whose headers retarget
+# it must end exactly as its `@direct` twin does. Each pair submits into
+# `#content-<which>` and answers into `#card-<which>`, once with the card
+# outside the submission's target and once inside it (the poller displaces the
+# card there, so it has to come back before the retarget resolves).
+@testitem "retarget headers on a poll terminal apply like a direct answer" setup=[FreshTransportFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+        import HTMXObjects: _clear_operation_polls!, h, Raw
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(FreshBrowserApp())
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        requests = Pair{String,Int}[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+        });
+        var changed = 0;
+        document.body.addEventListener('card-changed', function() { changed++; });
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(predicate, label) {
+            for (let i = 0; i < 400; i++) {
+              if (predicate()) return;
+              await sleep(25);
+            }
+            throw new Error('timed out: ' + label);
+          }
+          const pairs = [['polled', 'direct'], ['polled-in', 'direct-in']];
+          // Settled section markup, with the variant's name taken out.
+          const settled = which => {
+            const copy = document.getElementById('section-' + which).cloneNode(true);
+            copy.querySelector('form').remove();
+            return copy.innerHTML.split(which).join('X').replace(/ class=""/g, '');
+          };
+          try {
+            ['polled', 'polled-in', 'direct', 'direct-in'].forEach(which =>
+              htmx.trigger(document.getElementById('form-' + which), 'submit'));
+            await until(() => ['polled', 'polled-in'].every(which =>
+              document.querySelector('#content-' + which + ' .treebar-poller')), 'pollers');
+            await fetch('/release');
+            await until(() => ['polled', 'polled-in', 'direct', 'direct-in'].every(which =>
+              (document.getElementById('card-' + which) || {}).textContent === 'card:' + which),
+              'cards');
+            await sleep(1000);   // no further poll may change anything
+            const toasts = document.querySelectorAll('.htmxo-toast').length;
+            for (const [polled, direct] of pairs) {
+              if (settled(polled) !== settled(direct)) {
+                throw new Error(polled + ' differs: ' + settled(polled) + ' vs ' + settled(direct));
+              }
+            }
+            if (document.querySelector('.treebar-poller')) throw new Error('poller left behind');
+            if (changed !== 4) throw new Error('card-changed fired ' + changed + ' times');
+            if (toasts !== 4) throw new Error(toasts + ' toasts');
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)));
+          }
+        });
+        """))
+        section(which; inside) = h.section(; id="section-$which")(
+            h.form(; id="form-$which",
+                   hx_post=(startswith(which, "direct") ? "/browser_card_direct" : "/browser_card"),
+                   hx_target="#content-$which")(
+                h.input(; type="hidden", name="which", value=which)),
+            inside ?
+                h.div(; id="content-$which")(h.div(; id="card-$which")(h.p("old"))) :
+                h.div(h.div(; id="content-$which")(h.p("content")),
+                      h.div(; id="card-$which")(h.p("old"))))
+        page = repr("text/html", htmx(h.main(
+                h.div(; hx_vals="{\"ctx\":\"1\"}")(
+                    section("polled"; inside=false), section("direct"; inside=false),
+                    section("polled-in"; inside=true), section("direct-in"; inside=true)),
+                driver);
+                assets="/test-assets", sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, hyperscript_version=nothing,
+                pico_version=nothing, feedback=false, compose=false,
+                overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" &&
+                return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, HTTP.unescapeuri(String(req.target)))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                release_fresh!(:browser_card)
+                return HTTP.Response(204)
+            end
+            response = dispatch(req.method, String(req.target);
+                headers=collect(req.headers),
+                body=HTMXObjects._request_body_bytes(req))
+            push!(requests, string(req.method, " ", req.target) => response.status)
+            response
+        end
+        try
+            # Compile the poller paths before the browser's clock starts.
+            warm = poll_url(String(hx_post("/browser_card", "which=warm").body))
+            release_fresh!(:browser_card)
+            settle(warm)
+            reset_fresh!()
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                    @test outcome == "/complete?status=passed"
+                    outcome == "/complete?status=passed" ||
+                        @info "Browser requests" outcome requests=join(string.(requests), "\n")
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            polls = filter(r -> contains(r.first, "__htmxo_poll=1"), requests)
+            # Each polled submission's terminal is its operation's last poll.
+            for token in unique(poll_token(r.first) for r in polls)
+                mine = filter(r -> poll_token(r.first) == token, polls)
+                @test last(mine).second == 286
+                @test count(r -> r.second == 286, mine) == 1
+            end
+            @test length(unique(poll_token(r.first) for r in polls)) == 2
+        finally
+            release_fresh!(:browser_card)
             close(server)
         end
     end
