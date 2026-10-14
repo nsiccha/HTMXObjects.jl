@@ -144,6 +144,10 @@ using TestItemRunner
     @htmx struct FreshBrowserApp
         "Render the slow fresh panel"
         @fresh @get browser_panel() = gated(:browser_read, "panel")
+        "Render the captured grouping"
+        @fresh @get browser_grouped(; group_by::String="None",
+                review_scope::String="all", focus_year::Int=0) =
+            gated(:browser_grouped, "grouped-$group_by-$review_scope-$focus_year")
         "Save the slow form"
         @post browser_save(; note::String="") = gated(:browser_post, "saved-$note")
     end
@@ -185,6 +189,123 @@ using TestItemRunner
     end
     settle(target) = body_text(settle_response(target))
     body_text(response) = String(HTMXObjects._message_body_bytes(response))
+end
+
+@testitem "auto polls keep their captured query under inherited form values" setup=[FreshTransportFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+        import HTMXObjects: _clear_operation_polls!, h, Raw
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(FreshBrowserApp())
+        captured = "/browser_grouped?group_by=Counterparty&review_scope=all&focus_year=0"
+        poller = body_text(hx_get(captured))
+        @test running(poller)
+        @test fresh_runs(:browser_grouped) == 1
+
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        requests = String[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('error', event => {
+          fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+        });
+        window.addEventListener('load', async () => {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(predicate, label) {
+            for (let i = 0; i < 400; i++) {
+              if (predicate()) return;
+              await sleep(25);
+            }
+            throw new Error('timed out: ' + label);
+          }
+          try {
+            // The live grouping changes after the operation was captured.
+            // The auto poll must still fetch the Counterparty result.
+            document.getElementById('live-group').value = 'None';
+            await sleep(450);
+            await fetch('/release');
+            const result = document.getElementById('grouped-result');
+            await until(() => result.textContent.includes('grouped-Counterparty-all-0') &&
+                              !result.querySelector('.treebar-poller'), 'captured result');
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)));
+          }
+        });
+        """))
+        page = repr("text/html", htmx(h.main(
+            h.form(; id="settings",
+                    hx_vals="js:{review_scope:'changed',group_by:document.getElementById('live-group').value}",
+                    hx_include="#included")(
+                h.select(h.option("None"; value="None"),
+                         h.option("Counterparty"; value="Counterparty", selected=true);
+                         id="live-group", name="group_by"),
+                h.input(; id="included", name="focus_year", value="999"),
+                h.div(Raw(poller); id="grouped-result")),
+            driver);
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false,
+            overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                release_fresh!(:browser_grouped)
+                return HTTP.Response(204)
+            end
+            push!(requests, String(req.target))
+            dispatch(req.method, String(req.target); headers=collect(req.headers))
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 30; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                    @test outcome == "/complete?status=passed"
+                    outcome == "/complete?status=passed" ||
+                        @info "Browser requests" outcome requests=join(requests, "\n")
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            polls = filter(target -> contains(target, "__htmxo_poll=1"), requests)
+            @test !isempty(polls)
+            for target in polls
+                uri = HTTP.URI(target)
+                fields = split(uri.query, '&')
+                for key in ("group_by", "review_scope", "focus_year")
+                    @test count(field -> startswith(field, key * "="), fields) == 1
+                end
+                params = HTTP.queryparams(uri)
+                @test params["group_by"] == "Counterparty"
+                @test params["review_scope"] == "all"
+                @test params["focus_year"] == "0"
+            end
+            @test fresh_runs(:browser_grouped) == 1
+        finally
+            release_fresh!(:browser_grouped)
+            close(server)
+        end
+    end
 end
 
 @testitem "slow fresh reads poll, resume their own invocation and never memoize" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin

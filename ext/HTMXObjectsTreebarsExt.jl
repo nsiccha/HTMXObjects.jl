@@ -101,6 +101,17 @@ function _operation_treebars_kwargs(call_kwargs, transport,
     treebars_tracks_jobs ? merge(kwargs, (; track_job=false)) : kwargs
 end
 
+# The framework-generated auto poll URL already holds the operation's captured
+# arguments. Keep htmx from adding ancestor hx-vals, hx-include, or form fields
+# to that URL on each poll. Hand-shaped Treebars pollers retain their normal
+# inheritance, including their current-arguments recovery behavior.
+function _isolate_auto_poll_params(node::HTMXObjects.Node)
+    get(HTMXObjects.HTMX.attrs(node), :class, nothing) == "treebar-poller" ||
+        return node
+    node(; hx_params="none")
+end
+_isolate_auto_poll_params(response) = response
+
 function _operation_render_result(render_result, value, transport)
     rendered = render_result(value)
     transport.replace_page_load || return rendered
@@ -214,7 +225,7 @@ function __init__()
                     HTMXObjects._operation_terminal_headers(finalized_terminal[]);
                     body=HTMXObjects._message_body_bytes(html))
             end
-            responded
+            _isolate_auto_poll_params(responded)
         end
 
     # Job boards (`jobs_board`, the runtime dashboard): a keyed Treebars board,

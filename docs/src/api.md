@@ -673,6 +673,13 @@ without repeating that page-level installation.
 | `hx_on__…`, `hx_on_click` | Ancestor that receives bubbling events | The handler is installed on that ancestor; `this` is the ancestor and `event.target` identifies the originating node. These are event delegation, not inherited attributes. |
 | Appearance | One wrapper class and a stylesheet selector | HTML `class`, `title`, and `aria-label` are not inherited. A generated submit button's accessible name remains on that button via `submit_attrs`. |
 
+An operation's framework-generated `:auto` poller keeps the arguments captured
+in its poll URL. Its follow-up requests exclude inherited `hx-vals`,
+`hx-include`, and successful form inputs, so a setting changed while the
+operation runs cannot duplicate or override the captured arguments. The
+original request still uses shared settings normally. Hand-shaped Treebars
+pollers retain ordinary htmx inheritance.
+
 Request URLs, request triggers, operation result addresses, and successful form
 inputs keep their local identities. In particular, `hx_get`, `hx_post`, and
 `hx_trigger` are not inherited. Sharing a callback or NamedTuple avoids
