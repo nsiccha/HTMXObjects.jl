@@ -167,10 +167,19 @@ end
     # the full table's, with its detail, plus the summary row of each group it
     # is in (computed over all members).
     upd = html(grouped(group_by="rule", selectable="tx", id="g", update_rows="p3"))
-    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"rule\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\">")
+    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"rule\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\"")
     for id in ("row-group--Shops--p3", "row-group--Media--p3", "detail-group--Shops--p3")
         @test row(upd, id) == row(full, id)
     end
+    # A group row names the child rows the update renders (the runtime
+    # recomputes the list from the page), not the group's other members.
+    @test contains(row(upd, "row-group--Shops"), "aria-controls=\"row-group--Shops--p3\"")
+    # Where each row sits in the full table: its neighbours among its siblings
+    # ("" at either end), for a row that is new to the page or has moved.
+    places(page) = replace(match(r"data-htmxo-update-places=\"([^\"]*)\"", page)[1], "&quot;" => "'")
+    @test places(upd) == "{'row-group--Shops':['','row-group--Media']," *
+        "'row-group--Shops--p3':['row-group--Shops--p2','row-group--Shops--p4']," *
+        "'row-group--Media--p3':['','row-group--Media--p5']}"
     @test contains(upd, "id=\"row-group--Shops\"") && contains(upd, "<strong>Shops</strong> <small>(6)</small>")
     @test !contains(upd, "--p1\"") && count("<tr", upd) == 6
     # A group update: the group row and all its rows; a lazy group's row keeps
@@ -178,6 +187,9 @@ end
     lazy_url = (k, ms) -> length(ms) > 2 ? "/rows?key=$k" : nothing
     acme = html(grouped(group_by="party", id="g", group_rows_url=lazy_url, update_groups="Acme"))
     @test contains(acme, "data-htmxo-update-groups=\"[&quot;row-group--Acme&quot;]\"")
+    # A run of listed siblings names the neighbours of its first row only;
+    # the others follow the row before them in the update.
+    @test places(acme) == "{'row-group--Acme':['','row-group--Acme--Prime'],'row-group--Acme--p1':['','row-group--Acme--p2']}"
     @test contains(acme, "data-htmxo-lazy-rows=\"/rows?key=Acme\"") && contains(acme, "data-htmxo-lazy-count=\"3\"")
     @test all(contains(acme, "id=\"row-group--Acme--$id\"") for id in ("p1", "p2", "p7"))
     @test !contains(acme, "Bakery")
@@ -186,7 +198,7 @@ end
     @test contains(both, "data-htmxo-update-leaves=\"[&quot;p4&quot;,&quot;p1&quot;]\"") &&
         contains(both, "data-htmxo-update-groups=\"[&quot;row-group--Gone&quot;]\"")
     @test contains(both, "id=\"row-group--Acme--p1\"") && contains(both, "id=\"row-group--Bakery--p4\"") &&
-        !contains(both, "row-group--Bakery--p6")
+        !contains(both, "id=\"row-group--Bakery--p6\"")
     @test html(grouped(group_by="party", update_groups="Gone", id="g")) ==
         "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"party\" data-htmxo-update-groups=\"[&quot;row-group--Gone&quot;]\"></tbody>"
     # The flat view names its rows by id; it has no groups to update.
@@ -198,12 +210,20 @@ end
     # place (parent and level) without rendering the other rows.
     plain = html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),),
         detail=t -> h.p(t.memo), update_rows="p2", id="t"))
-    @test startswith(plain, "<tbody data-htmxo-row-update=\"t\" data-htmxo-update-ids=\"[&quot;row-p2&quot;]\"><tr id=\"row-p2\"")
+    @test startswith(plain, "<tbody data-htmxo-row-update=\"t\" data-htmxo-update-ids=\"[&quot;row-p2&quot;]\" " *
+        "data-htmxo-update-places=\"{&quot;row-p2&quot;:[&quot;row-p1&quot;,&quot;row-p3&quot;]}\"><tr id=\"row-p2\"")
+    @test places(html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),),
+        detail=t -> h.p(t.memo), update_rows=["p7", "p3", "p2"]))) ==
+        "{'row-p2':['row-p1','row-p3'],'row-p7':['row-p6','']}"
     tree = [(; id="a", kids=[(; id="b", kids=[(; id="c", kids=[])])])]
     treeargs = (; key=n -> n.id, master=n -> (h.td(n.id),), children=n -> n.kids, detail=n -> "d")
     deep = html(master_detail_table(["Id"], tree; treeargs..., update_rows="c"))
     @test row(deep, "row-c") == row(html(master_detail_table(["Id"], tree; treeargs...)), "row-c")
     @test contains(deep, "data-htmxo-parent=\"row-b\"") && contains(deep, "aria-level=\"3\"") && count("<tr", deep) == 2
+    @test places(deep) == "{'row-c':['','']}"
+    wide = [(; id="a", kids=[(; id="b", kids=[]), (; id="c", kids=[])]), (; id="d", kids=[])]
+    @test places(html(master_detail_table(["Id"], wide; treeargs..., update_rows=["c", "d"]))) ==
+        "{'row-d':['row-a',''],'row-c':['row-b','']}"
     @test_throws ArgumentError master_detail_table(["A"], TX; key=t -> t.id, master=t -> (h.td(t.id),),
         detail=t -> "", update_groups="Acme")
     @test_throws ArgumentError grouped(group_by="party", group_rows="Acme", update_rows="p1")
@@ -326,7 +346,15 @@ end
     # A leaf update: every copy of the leaf, and the rows of every group it is in.
     full = html(grouped(group_by=by, id="g"))
     upd = html(grouped(group_by=by, id="g", update_rows="p3"))
-    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;rule&quot;,&quot;party&quot;]\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\">")
+    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;rule&quot;,&quot;party&quot;]\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\"")
+    # Places come from the full grouping at every level: Acme Prime follows
+    # Acme in Shops, and comes first in Media.
+    @test replace(match(r"data-htmxo-update-places=\"([^\"]*)\"", upd)[1], "&quot;" => "'") ==
+        "{'row-group--Shops':['','row-group--Media']," *
+        "'row-group--Shops--Acme--Prime':['row-group--Shops--Acme','row-group--Shops--Bakery']," *
+        "'row-group--Shops--Acme--Prime--p3':['','']," *
+        "'row-group--Media--Acme--Prime':['','row-group--Media--Prime--Video']," *
+        "'row-group--Media--Acme--Prime--p3':['','']}"
     @test ids(upd) == ["row-group--Shops", "row-group--Shops--Acme--Prime", "row-group--Shops--Acme--Prime--p3",
         "row-group--Media", "row-group--Media--Acme--Prime", "row-group--Media--Acme--Prime--p3"]
     @test row(upd, "row-group--Media--Acme--Prime--p3") == row(full, "row-group--Media--Acme--Prime--p3")
@@ -602,20 +630,23 @@ end
             check('group-stays-closed', row('group--Bakery').dataset.htmxoTreeOpen === 'false' && under('group--Bakery') === 'group--Bakery--p4,group--Bakery--p6' &&
                 row('group--Bakery--p4').hidden && order() === layout);
             // A leaf that moves (update_rows + both groups): it leaves Acme and
-            // joins the end of Bakery, still selected; both summaries follow.
+            // joins Bakery where a full render has it (first: p2 comes before
+            // p4 and p6), still selected; both summaries follow, and Bakery,
+            // which p2 now opens, moves up behind Acme.
             await post('/move?id=p2&to=Bakery&group_by=party', row('group--Acme--p2'));
-            check('moved', !row('group--Acme--p2') && !detail('group--Acme--p2') && under('group--Bakery') === 'group--Bakery--p4,group--Bakery--p6,group--Bakery--p2' &&
+            check('moved', !row('group--Acme--p2') && !detail('group--Acme--p2') && under('group--Bakery') === 'group--Bakery--p2,group--Bakery--p4,group--Bakery--p6' &&
                 row('group--Acme').cells[0].textContent.includes('(2)') && row('group--Bakery').cells[0].textContent.includes('(3)'));
             check('moved-selection', inputs() === 'p1,p2' && count() === '2 selected (1 in collapsed groups)');
             check('moved-controls', row('group--Acme').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Acme--p1 row-group--Acme--p7' &&
-                row('group--Bakery').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Bakery--p4 row-group--Bakery--p6 row-group--Bakery--p2');
-            // A deleted leaf leaves; a group that empties leaves; a new group joins the end.
+                row('group--Bakery').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Bakery--p2 row-group--Bakery--p4 row-group--Bakery--p6');
+            // A deleted leaf leaves; a group that empties leaves; a new group
+            // joins where a full render has it (here, last).
             await post('/delete?id=p7&group_by=party', row('group--Acme--p7'));
             check('deleted', !row('group--Acme--p7') && !detail('group--Acme--p7') && under('group--Acme') === 'group--Acme--p1');
             await post('/move?id=p5&to=Zed&group_by=party', row('group--Prime--Video'));
             const groups = rows().filter(r => 'htmxoGroup' in r.dataset).map(r => r.id.slice(4)).join(',');
             check('groups-follow', !row('group--Prime--Video') && !row('group--Prime--Video--p5') && row('group--Zed--p5') &&
-                groups === 'group--Acme,group--Acme--Prime,group--Bakery,group--Zed');
+                groups === 'group--Acme,group--Bakery,group--Acme--Prime,group--Zed');
             check('no-leaks', leaked() === 0 && document.querySelectorAll('tbody[data-htmxo-row-update]').length === 0);
             // Rows rendered for another grouping are refused, loudly, and change
             // nothing (htmx leaves an empty class on the row it sent the request from).
@@ -868,6 +899,180 @@ end
             @test any(startswith("/table?group_by=none&q="), requests)
             @test any(r -> startswith(r, "/rows?group_by=rule&group_by=iban&group_by=party&key=") &&
                 contains(r, HTTP.escapeuri("[\"Shops\",\"DE01\"]")), requests)
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "row updates put new and moved rows where the table renders them browser" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # A form in its own line order: a line shows once it has a value, and
+        # two review groups follow the lines. Receipts sit under their line,
+        # by date, or under "Needs a VAT treatment" until they have one.
+        form = ["10", "81", "93", "46", "48", "49", "66"]
+        values = Dict("81" => 100.0, "93" => 50.0, "66" => 20.0)
+        receipts = [(; id="r1", line="93", date="2026-01-10"), (; id="r2", line="93", date="2026-03-01"),
+                    (; id="r3", line="", date="2026-02-01")]
+        node(id, label, kids) = (; id, label, kids)
+        under(line) = [node(r.id, r.date, []) for r in sort(filter(r -> r.line == line, receipts); by=r -> r.date)]
+        roots() = [[node("kz$c", "Kz $c", under(c)) for c in form if get(values, c, 0.0) != 0];
+                   node("needs", "Needs a VAT treatment", under("")); node("none", "No VAT effect", [])]
+        vat(; kw...) = master_detail_table(["Item", "Edit"], roots();
+            key=n -> n.id, master=n -> (h.td(n.label), h.td(h.button("edit"; type="button", data_edit=n.id))),
+            children=n -> n.kids, detail=n -> startswith(n.id, "r") ? h.p("receipt $(n.id)") : nothing,
+            initially_open=n -> !startswith(n.id, "r"), id="vat", kw...)
+        # A flat table, unsorted and then sorted by the reader.
+        flat = [(; id="f1", amount=10.0), (; id="f2", amount=20.0), (; id="f3", amount=30.0)]
+        flats(; kw...) = master_detail_table(["Name", "Amount"], flat; key=f -> f.id,
+            master=f -> (h.td(f.id), h.td(string(f.amount))), detail=f -> h.p(f.id), id="flat", kw...)
+        # Two grouping levels: n4 moves from B/y into A, where its new
+        # subgroup y belongs between w and z.
+        nest = [(; id="n1", cat="A", party="w"), (; id="n4", cat="B", party="y"),
+                (; id="n2", cat="A", party="z"), (; id="n3", cat="B", party="x")]
+        nested(; kw...) = master_detail_table(["Name"], nest; key=t -> t.id, master=t -> (h.td(t.id),),
+            detail=t -> h.p(t.id), groupings=["cat" => t -> t.cat, "party" => t -> t.party],
+            group_by=["cat", "party"], initially_open=true, id="nest", kw...)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const settle = () => new Promise(r => setTimeout(r, 50));
+            const row = id => document.getElementById('row-' + id);
+            const detail = id => document.getElementById('detail-' + id);
+            const masters = body => Array.from(document.getElementById(body).rows).filter(r => !r.id.startsWith('detail-'));
+            const kids = (parent = '') => masters('vat').filter(r => (r.dataset.htmxoParent || '') === (parent && 'row-' + parent)).map(r => r.id.slice(4)).join(',');
+            const order = body => Array.from(document.getElementById(body).rows).map(r => r.id).join(',');
+            const post = async (url, source) => { await htmx.ajax('POST', url, {source, target: source, swap: 'outerHTML'}); await settle(); };
+            const paired = body => Array.from(document.getElementById(body).rows).every(r =>
+                !r.id.startsWith('detail-') || (r.previousElementSibling && r.previousElementSibling.id === 'row-' + r.id.slice(7)));
+
+            check('setup', kids() === 'kz81,kz93,kz66,needs,none' && kids('kz93') === 'r1,r2' && detail('r1').hidden);
+            // A line that gains a value joins between its form neighbours, not
+            // after the review groups.
+            await post('/value?line=46&v=5', row('kz81'));
+            check('form-order', kids() === 'kz81,kz93,kz46,kz66,needs,none');
+            await post('/value?line=10&v=1', row('kz81'));
+            check('first', kids() === 'kz10,kz81,kz93,kz46,kz66,needs,none');
+            // Kz 48 shows on the server but its update never came: Kz 49 still
+            // lands in order, before the line after it.
+            await fetch('/value?line=48&v=1&quiet=1', {method: 'POST'});
+            await post('/value?line=49&v=1', row('kz81'));
+            check('before-next', kids() === 'kz10,kz81,kz93,kz46,kz49,kz66,needs,none');
+            // A new receipt joins its line at its date.
+            await post('/add?id=r9&line=93&date=2026-02-15', row('kz93'));
+            check('child-date', kids('kz93') === 'r1,r9,r2' && paired('vat'));
+            // An edited date moves the receipt, with its open detail and the focus.
+            row('r1').querySelector('[data-htmxo-detail-toggle]').click();
+            const edit = row('r1').querySelector('[data-edit]');
+            edit.focus();
+            const old = row('r1');
+            await post('/date?id=r1&date=2026-04-01', edit);
+            check('moved-child', row('r1') !== old && kids('kz93') === 'r9,r2,r1' && paired('vat') &&
+                detail('r1').previousElementSibling === row('r1'));
+            check('moved-keeps-detail', detail('r1').hidden === false && row('r1').querySelector('[data-htmxo-detail-toggle]').getAttribute('aria-expanded') === 'true');
+            check('moved-keeps-focus', document.activeElement === row('r1').querySelector('[data-edit]'));
+            // A receipt that gets its line moves there from the review group.
+            await post('/line?id=r3&line=46', row('r3'));
+            check('reparented', kids('kz46') === 'r3' && kids('needs') === '' && row('r3').previousElementSibling === row('kz46') &&
+                kids() === 'kz10,kz81,kz93,kz46,kz49,kz66,needs,none' && paired('vat'));
+            check('reparented-controls', row('kz46').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-r3' &&
+                row('r3').getAttribute('aria-level') === '2');
+            // A parent's key re-renders the parent row alone; a named child
+            // that is gone leaves with its detail.
+            const r9 = row('r9'), kz93 = row('kz93');
+            await post('/value?line=93&v=60', row('kz93'));
+            check('parent-only', row('kz93') !== kz93 && row('r9') === r9 && kids('kz93') === 'r9,r2,r1');
+            await post('/delete?id=r9&line=93', row('r9'));
+            check('child-deleted', !row('r9') && !detail('r9') && kids('kz93') === 'r2,r1' && paired('vat') &&
+                row('kz93').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-r2 row-r1');
+            // A flat table: a new row joins at its place; once the reader
+            // sorts, an update keeps the sort, for changed and new rows alike.
+            await post('/flat?id=f5&amount=25&after=f2', row('f1'));
+            check('flat-insert', order('flat') === 'row-f1,detail-f1,row-f2,detail-f2,row-f5,detail-f5,row-f3,detail-f3');
+            sortTable(document.getElementById('flat').closest('table').querySelectorAll('thead th')[1]);
+            await post('/flat?id=f2&amount=999', row('f2'));
+            check('sorted-change', masters('flat').map(r => r.id.slice(4)).join(',') === 'f1,f5,f3,f2' && paired('flat'));
+            await post('/flat?id=f9&amount=15', row('f1'));
+            check('sorted-insert', masters('flat').map(r => r.id.slice(4)).join(',') === 'f1,f9,f5,f3,f2' && paired('flat'));
+            // Nested groups: the new subgroup A/y lands between A/w and A/z,
+            // and B/y, now empty, leaves.
+            const nkids = parent => masters('nest').filter(r => r.dataset.htmxoParent === 'row-' + parent).map(r => r.id.slice(4)).join(',');
+            check('nested-setup', nkids('group--A') === 'group--A--w,group--A--z' && nkids('group--B') === 'group--B--y,group--B--x');
+            await post('/nmove?id=n4&cat=A', row('group--B--y--n4'));
+            check('nested-place', nkids('group--A') === 'group--A--w,group--A--y,group--A--z' && nkids('group--A--y') === 'group--A--y--n4' &&
+                nkids('group--B') === 'group--B--x' && !row('group--B--y') && paired('nest'));
+            check('no-leaks', document.querySelectorAll('tbody[data-htmxo-row-update], tr tr').length === 0);
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(vat(), flats(), nested(), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            q = HTTP.queryparams(uri)
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            replace_receipt!(id; kw...) = (i = findfirst(r -> r.id == id, receipts); receipts[i] = (; receipts[i]..., kw...))
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/value"
+                values[q["line"]] = parse(Float64, q["v"])
+                haskey(q, "quiet") ? HTTP.Response(204) : html(vat(; update_rows="kz" * q["line"]))
+            elseif uri.path == "/add"
+                push!(receipts, (; id=q["id"], line=q["line"], date=q["date"]))
+                html(vat(; update_rows=[q["id"], "kz" * q["line"]]))
+            elseif uri.path == "/date"
+                replace_receipt!(q["id"]; date=q["date"])
+                html(vat(; update_rows=q["id"]))
+            elseif uri.path == "/delete"
+                filter!(r -> r.id != q["id"], receipts)
+                html(vat(; update_rows=[q["id"], "kz" * q["line"]]))
+            elseif uri.path == "/line"
+                replace_receipt!(q["id"]; line=q["line"])
+                html(vat(; update_rows=[q["id"], "kz" * q["line"], "needs"]))
+            elseif uri.path == "/nmove"
+                i = findfirst(t -> t.id == q["id"], nest)
+                old = nest[i]
+                nest[i] = (; old..., cat=q["cat"])
+                html(nested(; update_rows=old.id, update_groups=[
+                    "[\"$(old.cat)\",\"$(old.party)\"]", "[\"$(q["cat"])\",\"$(old.party)\"]"]))
+            elseif uri.path == "/flat"
+                f = (; id=q["id"], amount=parse(Float64, q["amount"]))
+                i = findfirst(x -> x.id == f.id, flat)
+                if !isnothing(i)
+                    flat[i] = f
+                elseif haskey(q, "after")
+                    insert!(flat, findfirst(x -> x.id == q["after"], flat) + 1, f)
+                else
+                    push!(flat, f)
+                end
+                html(flats(; update_rows=f.id))
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 18
+            end
         finally
             close(server)
         end
