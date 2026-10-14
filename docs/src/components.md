@@ -463,8 +463,9 @@ transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_tab
   (a shared IBAN, a rule matching several counterparties) gets one row per
   group, each with its own id.
 - **Group by.** With `group_by_url`, a *Group by* select joins the tree
-  controls. A change GETs `group_by_url` with `group_by` and `q` (the current
-  search) and swaps the table for the response. With `select_form` the select
+  controls (for a `group_by` list, pills: see
+  [Nested levels](#table-grouping-levels)). A change GETs `group_by_url` with
+  `group_by` and `q` (the current search) and swaps the table for the response. With `select_form` the select
   is associated with that form, so a bulk submission carries the active
   grouping. An unknown `group_by` throws an `ArgumentError`; validate it in the
   route.
@@ -489,9 +490,74 @@ transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_tab
   `id` and page path, like the search and the selection, so a re-render of the
   table (a regroup and back, a bulk action) opens them again; a lazy group that
   was open loads its rows again.
+- **Initially open.** `initially_open = true` opens every rendered group and
+  leaf detail; lazy groups still load on first expand. A predicate is called
+  with leaves only, never with group rows: each group holding a leaf it opens
+  renders open, at every [level](#table-grouping-levels), so that leaf and its
+  detail show on first paint (every copy of a leaf in several groups). Such a
+  group renders its rows eagerly even when `group_rows_url` would make it
+  lazy. A page reached from "open this document" passes
+  `initially_open = t -> t.id == open_id`; it needs no script to open the
+  group.
 - **Row actions.** A route that changes rows renders the same call with
   `update_rows` / `update_groups` instead of the whole table; see
   [Row updates](#table-row-updates).
+
+##### Nested levels and grouping pills {#table-grouping-levels}
+
+Pass `group_by` as an ordered list to nest the groups level by level, the
+first outermost. The *Group by* control is then a row of pills, one per
+grouping: a pill turns its level on (as the innermost) or off, and the active
+pills reorder by dragging, by their ‹ › buttons, or with ←/→ on a focused pill.
+No active pill is the flat view. Each change re-renders the table through
+`group_by_url` as before, sending the levels as repeated `group_by` values, so
+the route takes a vector:
+
+```julia
+document_table(self, group_by, q=""; kw...) = master_detail_table(headers, documents;
+    key = d -> d.id, master = d -> cells(d),
+    detail_url = d -> query_url(self / "detail"; id=d.id),
+    groupings = ["None" => nothing, "Review stage" => d -> d.stage, "Document type" => d -> d.kind],
+    group_by, group_by_url = self / "table",
+    group_master = (key, members) -> (
+        h.td(h.strong(last(HTMXObjects.group_path(key))), " ($(length(members)))"),
+        (h.td("") for _ in 2:length(headers))...),
+    searchable = true, search_query = q, expand_controls = true, id = "documents", kw...)
+
+@get table(; group_by::Vector{String}=["Review stage", "Document type"], q::String="") =
+    document_table(__self__, group_by, q)
+```
+
+- **Levels.** Each group row is a branch of the group above it; leaves sit
+  under their innermost group, and a leaf with no key at an inner level is
+  listed directly in its outer group. A grouping that returns several keys
+  lists the leaf under each, at any level. Counts, sorting, search ("N of M
+  rows shown", ancestor paths), open groups, *Expand all* and selection work as
+  with one level.
+- **Group keys are paths.** With a list, each group is named by its path, a
+  JSON array of its level keys, outermost first (`["Open","Invoice"]`): the
+  `key` that `group_master` and `group_rows_url` receive, the value a selected
+  group row submits (`tx_group=["Open","Invoice"]`), and what `group_rows` and
+  `update_groups` take. `HTMXObjects.group_path(key)` decodes it. The default
+  group row shows the group's own key; indentation shows the level. A single
+  `group_by` name keeps one level, plain keys and the select.
+- **The flat view.** With no active pill the pills send the flat grouping's
+  name (here `None`); a `group_by` list of `[]`, `[""]` or `["None"]` renders
+  the leaves. Without a flat grouping the last active pill stays on, as the
+  select offers only the declared groupings: an empty `group_by` would reach a
+  `Vector{String}` route as no values, and `query_url` would drop it from the
+  action URLs.
+- **The grouping elsewhere.** A bulk form named by `select_form` receives the
+  levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
+  returns the `group_by` values of the table's current grouping, for either
+  form of `group_by`, e.g. for an action's `hx-vals`
+  (`js:{group_by: htmxoGroupBy('#documents')}`).
+- **Lazy groups** load at any level. The subgroups of a loaded group can be
+  lazy in turn, and *Expand all* loads and opens them all.
+- **Row updates** name groups by path in `update_groups`. A named group that
+  no longer exists leaves from the outermost level of its path that is gone.
+- **Markdown** marks each level below the first with `›`, since it has no
+  indentation; the pills are left out like the other controls.
 
 ##### Row updates {#table-row-updates}
 
@@ -524,22 +590,36 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
   in (their summaries are computed from their members); for `update_groups`,
   each group row with all its rows. A lazy group's rows come too, for a table
   that has loaded them. In a tree or a flat table, `update_rows` returns the
-  item's own row and detail.
+  item's own row and detail. In a tree that is not its child rows: a parent's
+  key re-renders the parent row alone, so an action that changes which
+  children a parent has names those child keys too (`update_rows=[parent,
+  child]`, and the old parent's key when a child moves, since its summary
+  changes). A child that moves to another parent keeps its key and row; the
+  update renders it under the new parent and it moves there.
 - **How it lands.** The table runtime applies any htmx response holding that
   body, whatever the requesting element's `hx-target` and `hx-swap`, so a
   row's existing `hx-target="closest tr"` keeps working. Each row replaces the
   row with its id in place and keeps what the reader did to it: an open
   branch, an open detail (a lazy one loads again), the selection, the search
   and its predicates, and the focus, which returns to the same control. The
-  new rows get `htmx:load`. A row new to the table joins the end of its group
-  (in a lazy group the reader has not opened, it arrives with the group's other
-  rows when the group loads), a new group joins the end of the table, and a
-  sorted table re-applies its sort when rows were added. `htmxoUpdateRows(html)` applies a row update fetched by other means.
+  new rows get `htmx:load`. A row new to the table, a new group, or a row whose
+  place among its siblings changed (a group that a moved leaf now opens first,
+  a child row whose date was edited) goes where a full render of the table
+  puts it: after the row before it among its siblings, or before the row after
+  it when only that one is on the page. The update carries those neighbours
+  for each row whose preceding sibling it does not list
+  (`data-htmxo-update-places`); with neither neighbour on the page, a new row
+  joins the end of its group or table and an existing row stays put. In a lazy
+  group the reader has not opened, a new row arrives with the group's other
+  rows when the group loads. A sorted table then re-applies its sort.
+  `htmxoUpdateRows(html)` applies a row update fetched by other means.
 - **What leaves.** The update speaks for the copies of each leaf in
   `update_rows` and for each group in `update_groups` with all its rows: those
   it no longer lists leave, with their detail rows. A key no longer among the
   items removes its rows; a group that no longer exists leaves with its rows.
-  When an action moves a leaf to another group, name both groups:
+  In a tree that holds at any depth: a named key no longer among the items,
+  or the children of the items, removes its row with its detail and child
+  rows. When an action moves a leaf to another group, name both groups:
   `update_rows=id, update_groups=[old, new]`.
 - **The grouping.** Render the update for the grouping the reader sees: pass
   `group_by` into the action URLs that `master` and `group_master` build, as
