@@ -12162,10 +12162,12 @@ function _resolve_default_sort(default_sort, headers)
         Int(col)
     else
         label = string(col)
-        found = findfirst(hdr -> _header_label(hdr) == label, headers)
-        isnothing(found) && error(
+        matches = findall(hdr -> _header_label(hdr) == label, headers)
+        isempty(matches) && error(
             "sortable_table: default_sort column $(repr(label)) does not match any String or ColumnSpec header")
-        found
+        length(matches) == 1 || error(
+            "sortable_table: default_sort label $(repr(label)) is repeated; use its 1-based column index")
+        only(matches)
     end
     1 <= idx <= length(headers) || error(
         "sortable_table: default_sort column index $idx out of range 1:$(length(headers))")
@@ -12195,6 +12197,56 @@ function _sortable_th(hdr, i, ds)
     else
         h.th(control; onclick, class="u-pointer")
     end
+end
+
+# A two-row header keeps the flat column index on every leaf <th>. Group
+# headings have no sort action; ungrouped leaves span both rows.
+function _grouped_thead(th_nodes, header_groups)
+    n = length(th_nodes)
+    starts = Dict{Int,Tuple{String,Int}}()
+    occupied = falses(n)
+    group_names = fill("", n)
+    for entry in header_groups
+        entry isa Pair || throw(ArgumentError("sortable_table: header_groups entries must be label => first:last pairs"))
+        label, span = entry
+        label isa AbstractString && !isempty(strip(label)) || throw(ArgumentError(
+            "sortable_table: a header group needs a nonempty label"))
+        span isa AbstractUnitRange{<:Integer} && step(span) == 1 && length(span) >= 2 &&
+            first(span) >= 1 && last(span) <= n || throw(ArgumentError(
+            "sortable_table: header group $(repr(label)) needs a contiguous range of at least two columns within 1:$n"))
+        any(occupied[span]) && throw(ArgumentError(
+            "sortable_table: header group $(repr(label)) overlaps another group"))
+        occupied[span] .= true
+        group_names[span] .= String(label)
+        starts[first(span)] = (String(label), last(span))
+    end
+    isempty(starts) && throw(ArgumentError("sortable_table: header_groups needs at least one group"))
+    function leaf(i; rowspan=false)
+        node = th_nodes[i]
+        node isa Node && HTMX.tag(node) === :th || throw(ArgumentError(
+            "sortable_table: grouped leaf headers must be <th> nodes"))
+        attrs = copy(HTMX.attrs(node))
+        any(k -> haskey(attrs, k), (:rowspan, :colspan, Symbol("data-htmxo-sort-col"))) &&
+            throw(ArgumentError("sortable_table: grouped leaf header $i already sets a span or sort column"))
+        attrs[Symbol("data-htmxo-sort-col")] = string(i)
+        attrs[:scope] = "col"
+        rowspan && (attrs[:rowspan] = "2")
+        Node(:th, attrs, Any[HTMX.children(node)...])
+    end
+    top, lower = Any[], Any[]
+    i = 1
+    while i <= n
+        if haskey(starts, i)
+            label, last_col = starts[i]
+            push!(top, h.th(label; colspan=string(last_col - i + 1), scope="colgroup"))
+            append!(lower, (leaf(j) for j in i:last_col))
+            i = last_col + 1
+        else
+            push!(top, leaf(i; rowspan=true))
+            i += 1
+        end
+    end
+    h.thead(h.tr(top...), h.tr(lower...)), group_names
 end
 
 """
@@ -12239,14 +12291,16 @@ See [`sortable_table`](@ref).
 function sortable_table_js()
     h.script(Raw(string(raw"""
 function sortTable(col, th) {
-    // Accept sortTable(th): with a single <th> element, derive the column
-    // index from its position in the header row. Lets a hand-built RICH header
+    // Accept sortTable(th): with a single <th> element, use its leaf-column
+    // marker in a grouped header, else its position in the header row. Lets a
+    // hand-built RICH header
     // (one holding a button/link — which can't be a plain auto-wired String
     // header) opt into sorting WITHOUT hardcoding its column index. Legacy
     // sortTable(col, th) (col a number) is unchanged.
     if (th === undefined && col && col.nodeType === 1) {
         th = col;
-        col = Array.prototype.indexOf.call(th.parentNode.children, th);
+        col = th.dataset.htmxoSortCol ? Number(th.dataset.htmxoSortCol) - 1
+            : Array.prototype.indexOf.call(th.parentNode.children, th);
     }
     const tbody = th.closest('table').querySelector('tbody');
     // Paired-row pattern: a sortable row may carry a sibling row whose id
@@ -12264,10 +12318,10 @@ function sortTable(col, th) {
     th.dataset.sortDir = asc ? 'asc' : 'desc';
     // `aria-sort` mirrors `data-sort-dir` on the active <th>: it is the
     // standard accessible marker, and it is what `sortable_table`'s
-    // `default_sort=` stamps server-side. Exactly one <th> per header row
-    // carries either attribute — clear both from the siblings.
+    // `default_sort=` stamps server-side. Exactly one <th> in the table
+    // carries either attribute — clear both from the other header cells.
     th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
-    th.closest('tr').querySelectorAll('th').forEach(h => {
+    th.closest('thead').querySelectorAll('th').forEach(h => {
         if (h !== th) { delete h.dataset.sortDir; h.removeAttribute('aria-sort'); }
     });
     // Sort key: prefer `data-sort-value` if the cell sets one, else the
@@ -12310,7 +12364,7 @@ function sortTable(col, th) {
     // (a batch-action button, a link — e.g. the KB agents table's Model ⟳
     // refresh and its bulk ↻/⏸/▶/🗑 buttons both went inert after a sort).
     // Managing a caret span leaves rich header content untouched.
-    th.closest('tr').querySelectorAll('th').forEach(h => {
+    th.closest('thead').querySelectorAll('th').forEach(h => {
         const oldCaret = h.querySelector(':scope > .htmxo-sort-caret');
         if (oldCaret) oldCaret.remove();
     });
@@ -13062,7 +13116,8 @@ function htmxoSortState(target) {
     const th = table.querySelector('thead th[data-sort-dir]');
     if (!th) return {};
     return {
-        sort_col: Array.prototype.indexOf.call(th.parentNode.children, th) + 1,
+        sort_col: th.dataset.htmxoSortCol ? Number(th.dataset.htmxoSortCol)
+            : Array.prototype.indexOf.call(th.parentNode.children, th) + 1,
         sort_dir: th.dataset.sortDir,
     };
 }
@@ -13141,7 +13196,21 @@ function downloadTableCsv(btn, filename) {
         copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help').forEach(e => e.remove());
         return copy.textContent.trim();
     };
-    const headers = Array.from(table.querySelectorAll('thead th')).map(th => esc(name(th)));
+    const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
+    const groupNames = [];
+    if (grouped) {
+        let col = 0;
+        for (const th of table.tHead.rows[0].cells) {
+            for (let j = 0; j < th.colSpan; j++)
+                groupNames[col++] = th.colSpan > 1 ? name(th) : '';
+        }
+    }
+    const headers = Array.from(table.querySelectorAll(grouped ? 'thead th[data-htmxo-sort-col]' : 'thead th'))
+        .sort((a, b) => grouped ? Number(a.dataset.htmxoSortCol) - Number(b.dataset.htmxoSortCol) : 0)
+        .map(th => {
+            const group = grouped ? groupNames[Number(th.dataset.htmxoSortCol) - 1] : '';
+            return esc(group ? group + ' / ' + name(th) : name(th));
+        });
     // A master/detail first cell holds its row controls beside the content;
     // export the content only, as sorting and search read it.
     const text = td => (td.querySelector(':scope > [data-htmxo-row-label]') || td).textContent.trim();
@@ -13218,7 +13287,8 @@ end
 """
     sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
                    download=false, download_filename=nothing, caption=nothing,
-                   default_sort=nothing, searchable=false, selectable=nothing,
+                   default_sort=nothing, header_groups=nothing,
+                   searchable=false, selectable=nothing,
                    select_form=nothing, kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
@@ -13250,6 +13320,12 @@ wrapper instead of widening the page.
   every `<td>`, including `data-sort-value` for semantic sort keys (see
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
   `id="detail-X"` for the paired-row pattern.
+- `header_groups`: optional `label => first:last` pairs for a two-row header,
+  for example `["Primal" => 2:4, "Gradient" => 5:7]`. Each range spans at
+  least two adjacent leaf columns and groups cannot overlap. Uncovered leaf
+  headers span both rows. Sort state uses the leaf column index; CSV and
+  Markdown prefix grouped leaf names with their heading (for example
+  `Primal / Ratio`).
 - `sortable`: master toggle for the auto-wiring of `String` and `ColumnSpec`
   headers (default `true`); with `false` a `ColumnSpec` keeps its explanation
   as the `<th>`'s `title`. Pre-built `h.th` headers are unaffected.
@@ -13393,6 +13469,7 @@ function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
                         download=false, download_filename=nothing,
                         caption=nothing, default_sort=nothing, role="grid",
+                        header_groups=nothing,
                         searchable::Bool=false, search_query::AbstractString="",
                         selectable=nothing, select_form=nothing, kwargs...)
     if !isnothing(default_sort) && !sortable
@@ -13414,15 +13491,29 @@ function sortable_table(headers, rows;
     table_class = sortable ? string(class, " htmxo-sortable-table") : class
     body_attrs = isnothing(id) ? (;) : (; id)
 
+    grouped = isnothing(header_groups) ? nothing : _grouped_thead(th_nodes, header_groups)
+    thead = isnothing(grouped) ? h.thead(h.tr(th_nodes...)) : first(grouped)
     table_node = h.table(; class=table_class, role, kwargs...)(
-        h.thead(h.tr(th_nodes...)),
+        thead,
         h.tbody(rows...; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
     # wrapper instead of widening the page. `table-wrap` is the class
     # `downloadTableCsv` already seeks, so CSV download keeps working.
-    table_wrap = h.div(; class="table-wrap")(table_node)
+    table_wrap = if isnothing(grouped)
+        h.div(; class="table-wrap")(table_node)
+    else
+        group_names = last(grouped)
+        flat_headers = map(eachindex(headers)) do i
+            label = _header_label(headers[i])
+            isnothing(label) && (label = strip(repr("text/markdown", th_nodes[i])))
+            h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
+        end
+        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(rows...))
+        h.div(; class="table-wrap")(html_only(table_node),
+            markdown_only(repr("text/markdown", flat_table)))
+    end
 
     fname = something(download_filename, isnothing(id) ? "table.csv" : id * ".csv")
     download_btn = download ?
@@ -14048,11 +14139,11 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   branches as they were. The buttons carry `aria-controls` for the table body
   (`id`, or one derived from the root keys) and are left out of `?plain`.
 - `detail_toggle`: every row with a detail carries a native detail button
-  (`aria-controls`, `aria-expanded`, Enter/Space) in its first cell, beside
-  that cell's content, which may itself be a link. With the default `:button`,
-  a flat table's control is a compact disclosure triangle (▸ closed, ▾ open,
-  accessible name "Details"); a hierarchical table's is a "Details" button,
-  distinct from opening its children. Flat rows keep row-click activation
+  (`aria-controls`, `aria-expanded`, Enter/Space) in its first cell. With the
+  default `:button`, a flat table uses a compact disclosure triangle (▸ closed,
+  ▾ open, accessible name "Details"). In a hierarchy, a plain leaf label
+  becomes the detail button with a disclosure glyph; a linked leaf or branch
+  with its own detail gets a separate unfilled ⓘ control. Flat rows keep row-click activation
   as a pointer shortcut, and the button runs the row's click handler (with any
   `master_attrs` extension). A branch row click opens children and its detail
   button opens only its detail. `:label` uses the first master cell's complete
@@ -14260,6 +14351,7 @@ function master_detail_table(headers, items;
         first_cell isa Node || throw(ArgumentError(string("master_detail_table: the first ",
             "master cell must be a <td> node, got ", typeof(first_cell))))
         controls = Any[]
+        trailing_controls = Any[]
         label = Any[HTMX.children(first_cell)...]
         if branch && branches_collapsible
             child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants), " ")
@@ -14277,26 +14369,28 @@ function master_detail_table(headers, items;
         end
         if has_detail
             isnothing(children) || (attrs[:data_htmxo_detail_open] = string(open))
-            # A label toggle's content is the row's name, kept in Markdown. A
-            # flat table's default is a disclosure triangle beside the cell's
-            # content (which may be a link); in a hierarchy the triangle
-            # already means child rows, so details keep the "Details" label.
+            # Plain hierarchy leaves use their label as the keyboard detail
+            # control. Linked leaves and branches with their own details keep
+            # a separate icon, so links and child-row expansion remain distinct.
+            # Flat tables retain their compact disclosure control by default.
+            label_detail = detail_toggle === :label ||
+                (!isnothing(children) && !branch && !any(_md_interactive_label, label))
             toggle_label, label_attrs =
-                detail_toggle === :label ? (label, (; data_htmxo_label="")) :
+                label_detail ? (label, (; data_htmxo_label="")) :
                 isnothing(children) ? (Any[_md_disclosure_glyph(open)],
                                        (; data_htmxo_disclosure="", aria_label="Details")) :
-                (Any["Details"], (;))
+                (Any["ⓘ"], (; aria_label="Details", title="Details"))
             toggle = h.button(toggle_label...; type="button",
                 data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
                 aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
-            if detail_toggle === :label
+            if label_detail
                 label = Any[toggle]
             else
-                push!(controls, toggle)
+                push!(isnothing(children) ? controls : trailing_controls, toggle)
             end
         end
         cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
-            Any[controls..., h.span(; data_htmxo_row_label="")(label...)])
+            Any[controls..., h.span(; data_htmxo_row_label="")(label...), trailing_controls...])
         if !isnothing(children) && isnothing(body) && isnothing(url)
             # Group rows need no placeholder or detail request. Their children
             # are ordinary rows in this same tbody, visible from first paint.
@@ -14333,7 +14427,10 @@ function master_detail_table(headers, items;
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries.
     rules = """
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button { width: auto; margin: 0 .5em 0 0; padding: .1em .4em; }
+    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle] { width: auto; margin: 0 .35em 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: inherit; vertical-align: baseline; }
+    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle] { width: auto; margin: 0 0 0 .5em; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
+    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
     [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
     .htmxo-tree-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
     .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
@@ -14347,6 +14444,9 @@ function master_detail_table(headers, items;
     [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾"; }
     [data-htmxo-row-label] > [data-htmxo-tree-label]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
+    [data-htmxo-hierarchy] [data-htmxo-row-label] > [data-htmxo-detail-toggle] { color: inherit; text-decoration: none; font: inherit; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸"; display: inline-block; margin-right: .35em; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾"; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
     td > button[data-htmxo-disclosure]:hover { color: var(--pico-primary, LinkText); }

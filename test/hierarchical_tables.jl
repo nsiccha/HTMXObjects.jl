@@ -44,6 +44,29 @@
         key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children)
 end
 
+@testitem "multilevel table headers" tags=[:unit] begin
+    using HTMXObjects
+    headers = ["Model", "Ratio", "Wren", "RKPPL", "Ratio", "Wren", "RKPPL"]
+    rows = [h.tr((h.td(string(i)) for i in 1:7)...)]
+    grouped = sortable_table(headers, rows;
+        header_groups=["Primal" => 2:4, "Gradient" => 5:7],
+        default_sort=3 => :asc)
+    html = repr("text/html", grouped)
+    @test contains(html, "rowspan=\"2\"")
+    @test contains(html, "colspan=\"3\"")
+    @test contains(html, "scope=\"colgroup\"")
+    @test contains(html, "data-htmxo-sort-col=\"3\"")
+    @test contains(html, "data-sort-dir=\"asc\"")
+    @test contains(repr("text/markdown", grouped),
+        "| Model | Primal / Ratio | Primal / Wren | Primal / RKPPL | Gradient / Ratio |")
+    @test_throws ArgumentError sortable_table(headers, rows;
+        header_groups=["Primal" => 2:4, "Overlap" => 4:6])
+    @test_throws ArgumentError sortable_table(headers, rows;
+        header_groups=["Invalid" => 2:2])
+    @test_throws ErrorException sortable_table(headers, rows;
+        header_groups=["Primal" => 2:4, "Gradient" => 5:7], default_sort="Ratio")
+end
+
 @testitem "master/detail rows keep the attributes of a <tr> from master" tags=[:unit] begin
     using HTMXObjects
     html(value) = repr("text/html", value)
@@ -131,6 +154,12 @@ end
             master_attrs=x -> (; onclick=HTMXObjects.master_detail_toggle_js("linked-$x") *
                 "window.__ext=(window.__ext||0)+1;"),
             id="linked", download=true)
+        grouped = sortable_table(["Model", "Ratio", "Wren", "RKPPL",
+                                  "Ratio", "Wren", "RKPPL"],
+            [h.tr(h.td("B"), h.td("0.8"), h.td("4"), h.td("5"), h.td("0.7"), h.td("9"), h.td("2")),
+             h.tr(h.td("A"), h.td("0.7"), h.td("3"), h.td("4"), h.td("0.6"), h.td("8"), h.td("1"))];
+            id="grouped", download=true,
+            header_groups=["Primal" => 2:4, "Gradient" => 5:7])
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function() {
             const checks = [];
@@ -147,6 +176,12 @@ end
                 row('root-a').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-expanded') === 'true');
             check('branch-label-control', row('builder-z').querySelector('[data-htmxo-tree-toggle]').textContent === 'Z builder' &&
                 row('builder-z').querySelectorAll('[data-htmxo-tree-toggle]').length === 1);
+            const leafControl = row('leaf-a').querySelector('[data-htmxo-detail-toggle]');
+            check('leaf-label-control', leafControl.textContent === 'A leaf' &&
+                leafControl.closest('[data-htmxo-row-label]') !== null &&
+                row('leaf-a').querySelectorAll('[data-htmxo-detail-toggle]').length === 1);
+            check('leaf-label-unfilled', getComputedStyle(leafControl).backgroundColor === 'rgba(0, 0, 0, 0)' &&
+                getComputedStyle(leafControl).borderTopWidth === '0px');
             check('initial-lazy', !document.querySelector('[data-loaded="1"]'));
             row('builder-z').click();
             check('branch-open', !row('leaf-z').hidden);
@@ -215,9 +250,30 @@ end
             }
             const csv = blob ? await blob.text() : '';
             check('linked-csv-content', csv.split('\n').slice(1).join('|') === 'A-link,1|B-link,2');
+            const grouped = document.getElementById('grouped').closest('table');
+            check('grouped-header-layout', grouped.tHead.rows.length === 2 &&
+                grouped.tHead.rows[0].cells[0].rowSpan === 2 &&
+                grouped.tHead.rows[0].cells[1].colSpan === 3 &&
+                grouped.tHead.rows[0].cells[2].colSpan === 3);
+            grouped.querySelector('thead th[data-htmxo-sort-col="6"] .htmxo-sort-control').click();
+            check('grouped-sort-column', grouped.tBodies[0].rows[0].cells[0].textContent === 'A' &&
+                htmxoSortState(grouped).sort_col === 6);
+            blob = null;
+            URL.createObjectURL = b => { blob = b; return 'blob:test'; };
+            HTMLAnchorElement.prototype.click = function() {};
+            try { downloadTableCsv(grouped.closest('figure').querySelector('.caption-action'), 'grouped.csv'); }
+            finally { URL.createObjectURL = createURL; HTMLAnchorElement.prototype.click = anchorClick; }
+            const groupedCsv = blob ? await blob.text() : '';
+            check('grouped-csv-leaves', groupedCsv.split('\n')[0] ===
+                'Model,Primal / Ratio,Primal / Wren,Primal / RKPPL,Gradient / Ratio,Gradient / Wren,Gradient / RKPPL');
             check('sort-state', htmxoSortState(tree).sort_col === 2 && htmxoSortState(tree).sort_dir === 'desc');
             const parent = row('dual-parent'), child = row('dual-child');
             const parentDetail = document.getElementById('detail-dual-parent');
+            const detailAction = parent.querySelector('[data-htmxo-detail-toggle]');
+            check('dual-detail-after-label', detailAction.previousElementSibling.hasAttribute('data-htmxo-row-label'));
+            check('dual-detail-icon', detailAction.textContent === 'ⓘ' && detailAction.getAttribute('aria-label') === 'Details');
+            check('dual-detail-unfilled', getComputedStyle(detailAction).backgroundColor === 'rgba(0, 0, 0, 0)' &&
+                getComputedStyle(detailAction).borderTopWidth === '0px');
             parent.click();
             check('dual-row-opens-children', !child.hidden && parentDetail.hidden);
             parent.querySelector('[data-htmxo-detail-toggle]').click();
@@ -252,7 +308,7 @@ end
             document.body.appendChild(result);
         });
         """))
-        page = repr("text/html", htmx(tree, plain, flat, dual, linked, driver;
+        page = repr("text/html", htmx(tree, plain, flat, dual, linked, grouped, driver;
             extra_head=(sortable_table_js(), sortable_table_styles(), download_table_js()),
             hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
         requests = Dict{String,Int}()

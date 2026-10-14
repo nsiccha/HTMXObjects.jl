@@ -99,12 +99,13 @@ end
     lazy = repr("text/html", table(; detail=nothing, detail_url=x -> "/detail/$(x.id)", searchable=true))
     @test count("data-htmxo-disclosure=\"\"", lazy) == 2
     @test contains(lazy, "hx-get=\"/detail/1\"")
-    # In a hierarchy the triangle means child rows, so details keep "Details".
+    # In a hierarchy the plain leaf label opens its detail without a filled button.
     leaf = (; key="leaf", name="Leaf", children=())
     tree = repr("text/html", master_detail_table(["Name"], [(; key="g", name="G", children=(leaf,))];
         key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children,
         detail=x -> isempty(x.children) ? h.p("d") : nothing))
-    @test contains(tree, ">Details</button>")
+    @test contains(tree, "data-htmxo-detail-toggle=\"\" data-htmxo-label=\"\"")
+    @test contains(tree, ">Leaf</button>")
     @test !contains(tree, "data-htmxo-disclosure=\"\"")
     # Refused: the first cell hosts the row's detail control, so it must be an
     # element; bare text would otherwise surface as a MethodError (dev §1).

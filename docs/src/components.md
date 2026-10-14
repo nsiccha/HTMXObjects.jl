@@ -199,6 +199,24 @@ export keep the label alone. With `sortable=false` the explanation stays, as
 the `<th>`'s `title`. `ColumnSpec` works in every `headers` vector of
 `sortable_table` and `master_detail_table`.
 
+#### Multilevel headers {#table-header-groups}
+
+Use `header_groups` when adjacent columns share a heading. The ranges refer
+to positions in the flat `headers` vector; columns outside a range span both
+header rows. Sorting uses the leaf columns; CSV and Markdown flatten grouped
+leaf names with their heading (for example `Primal / Ratio`):
+
+```julia
+master_detail_table(["Model", "Ratio", "Wren", "RKPPL",
+                     "Ratio", "Wren", "RKPPL"], roots;
+    key, master, children,
+    header_groups=["Primal" => 2:4, "Gradient" => 5:7])
+```
+
+Each group spans at least two columns. Groups cannot overlap. The same option
+works with `sortable_table`. If a leaf name repeats, use its 1-based position
+for `default_sort` rather than the ambiguous name.
+
 #### Client-side search {#table-search}
 
 `searchable=true` on `sortable_table`, `render_table` or `master_detail_table`
@@ -289,8 +307,8 @@ sortable_table(["Party", "Amount"],
   row's own links, buttons, inputs, labels or forms keep their behaviour.
   "Shown" excludes rows the search hides. In a `master_detail_table` a row
   click selects, so the detail opens from the row's native detail control (the
-  ▸ disclosure in a flat table, *Details* in a hierarchy, or the label with
-  `detail_toggle=:label`).
+  ▸ disclosure in a flat table, the leaf label in a hierarchy, or the ⓘ
+  control when a link or child expansion needs the label).
 - **Submission.** One hidden `<input name=...>` per selected row, valued by
   its `data-htmxo-select-value` (else the key) and associated with
   `select_form` through the HTML `form` attribute, so the table may live
@@ -347,8 +365,10 @@ clicking a nested branch does the same at the next level. A non-interactive
 branch label is a native button for keyboard use, with the disclosure glyph
 inside that label rather than in a separate button. A branch whose first cell
 contains a link or other control keeps a separate triangle, so that control
-retains its action. A branch with its own detail keeps a separate Details
-button: row clicks open children, while Details opens the paired detail.
+retains its action. A plain leaf label is a native detail button with a
+disclosure glyph. A linked leaf or a branch with its own detail keeps a small,
+unfilled ⓘ control after its label; row clicks on branches open children, while
+ⓘ opens the paired detail.
 In a selectable table, row clicks select and the branch control opens children.
 An app-provided `master_attrs.onclick` continues to override the row shortcut.
 A flat table (no `children`) gives each detail row a compact
