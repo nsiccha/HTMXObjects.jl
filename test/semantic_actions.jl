@@ -763,7 +763,13 @@ end
         token = "_2fproxy_2fdemo_2frows_2f$(n)"
         @test contains(master, " id=\"row-r$(n)\"")
         @test contains(master, " aria-level=\"$(n)\"")
-        @test contains(master, "htmxoMdToggle(this,event,&#39;r$(n)&#39;,1)")
+        if n == 1
+            @test contains(master, " onclick=\"htmxoTreeRow(this,event)\"")
+            @test contains(master, " data-htmxo-tree-row-toggle=\"\"")
+        else
+            @test contains(master, "htmxoMdToggle(this,event,&#39;r$(n)&#39;,1)")
+            @test !contains(master, "data-htmxo-tree-row-toggle")
+        end
         @test contains(master, " hx-target=\"#htmxo-semantic-result-$(token)\"")
         @test contains(master, " hx-swap=\"innerHTML\"")
         @test contains(master, " hx-include=\"#htmxo-semantic-actions-$(token), " *

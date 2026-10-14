@@ -43,12 +43,13 @@ end
     end
     @test contains(to_markdown_string(render_table((a=[1], b=[2]); download=false)),
         "| a | b |\n| --- | --- |\n| 1 | 2 |")
-    # The affordances stay in the HTML, and only the label control is marked.
+    # The affordances stay in the HTML. Both modes use native label controls
+    # for plain hierarchy leaves, so the row names survive Markdown export.
     html = repr("text/html", table(:label))
     @test contains(html, "type=\"search\"")
     @test contains(html, "No matching rows")
     @test count("data-htmxo-label=\"\"", html) == 2 + 2   # two headers, two rows
-    @test count("data-htmxo-label=\"\"", repr("text/html", table(:button))) == 2
+    @test count("data-htmxo-label=\"\"", repr("text/html", table(:button))) == 2 + 2
     # An unmarked control is still dropped whole.
     @test to_markdown_string(h.p("keep ", h.button("Run"))) == "keep \n\n"
     @test to_markdown_string(h.p("keep ", h.button("Run"; data_htmxo_label=""))) ==
