@@ -14706,17 +14706,18 @@ function master_detail_table(headers, items;
     .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
     .htmxo-tree-controls > label { display: inline-flex; align-items: baseline; gap: .5rem; margin: 0 .5rem 0 0; font-size: .875em; }
     .htmxo-tree-controls > label > select { width: auto; margin: 0; padding-block: .15em; font-size: inherit; }
-    .htmxo-tree-controls > .htmxo-group-pills { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin: 0 .5rem 0 0; font-size: .875em; }
-    .htmxo-group-pills > .htmxo-group-pill { display: inline-flex; align-items: center; border: 1px solid var(--pico-muted-border-color, GrayText); border-radius: 1em; color: inherit; cursor: grab; }
-    .htmxo-group-pills > .htmxo-group-pill[data-htmxo-group-level] { border-color: var(--pico-primary-border, Highlight); background: var(--pico-primary-background, Highlight); color: var(--pico-primary-inverse, HighlightText); }
-    .htmxo-group-pills > .htmxo-group-pill > button { width: auto; margin: 0; padding: .1em .65em; border: 0; border-radius: 1em; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: 1.5; cursor: pointer; }
-    .htmxo-group-pills > .htmxo-group-pill > button.htmxo-group-move { padding-inline: .3em; }
-    .htmxo-group-pills > .htmxo-group-pill > button.htmxo-group-move:last-child { padding-inline-end: .6em; }
-    .htmxo-group-pills > .htmxo-group-pill > button:disabled { opacity: .35; cursor: default; }
-    .htmxo-group-pills > .htmxo-group-pill > button[aria-disabled="true"] { cursor: default; }
-    .htmxo-group-pills > .htmxo-group-pill > button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
-    .htmxo-group-pills > .htmxo-group-pill[data-htmxo-drop="before"] { box-shadow: -3px 0 0 var(--pico-primary, Highlight); }
-    .htmxo-group-pills > .htmxo-group-pill[data-htmxo-drop="after"] { box-shadow: 3px 0 0 var(--pico-primary, Highlight); }
+    .htmxo-tree-controls > .htmxo-group-pills[role="group"] { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem; width: auto; margin: 0 .5rem 0 0; border-radius: 0; box-shadow: none; font-size: .875em; }
+    .htmxo-group-pills[role="group"] > * { flex: none; margin: 0; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill { display: inline-flex; align-items: center; border: 1px solid var(--pico-muted-border-color, GrayText); border-radius: 1em; color: inherit; cursor: grab; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-group-level] { border-color: var(--pico-primary-border, Highlight); background: var(--pico-primary-background, Highlight); color: var(--pico-primary-inverse, HighlightText); }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button { width: auto; margin: 0; padding: .1em .65em; border: 0; border-radius: 1em; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: 1.5; cursor: pointer; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button.htmxo-group-move { padding-inline: .3em; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button.htmxo-group-move:last-child { padding-inline-end: .6em; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button:disabled { opacity: .35; cursor: default; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button[aria-disabled="true"] { cursor: default; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-drop="before"] { box-shadow: -3px 0 0 var(--pico-primary, Highlight); }
+    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-drop="after"] { box-shadow: 3px 0 0 var(--pico-primary, Highlight); }
     .htmxo-group-pills .htmxo-group-level { margin-inline-end: .35em; font-size: .85em; opacity: .8; }
     [data-htmxo-group] > td:first-child { white-space: nowrap; }
     [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
