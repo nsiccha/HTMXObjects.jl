@@ -60,12 +60,52 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `StaticExport(; url_map, controls, record_base)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
 | `hx_response(...)` | Build a response with HTMX-specific response headers (HX-Trigger, HX-Redirect, HX-Push-Url, HX-Refresh, HX-Reswap, HX-Retarget, HX-Reselect, HX-Location), and the page shell's success toast (`toast=`, see [Success toasts](#success-toasts)) |
+| `redirect_to(req, location; status=303, query=true)` | Redirect a moved or aliased route to its canonical URL, for direct loads and htmx requests alike — see [Moved routes](#moved-routes) |
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
 response — and it passes through the response pipeline unchanged.
+
+### Moved routes {#moved-routes}
+
+When a page moves, keep its old route as a redirect so bookmarks, old links
+and the address bar all end on one URL:
+
+```julia
+@get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
+```
+
+`redirect_to` answers `303 See Other` with a `Location` built from
+`__self__/"…"`, which carries the mount prefix — including one a reverse
+proxy announces through `X-Forwarded-Prefix`, such as the KB's `/p/<App>`
+proxy. The request's query string is carried over (`?year=2025`, and
+`?plain` for Markdown peers); parameters the location already names keep the
+location's values, and `query=false` sends the location as given. `status=`
+accepts `301`, `302`, `303`, `307` or `308`; `301`/`308` are permanent and may
+be cached by browsers.
+
+The same answer serves both request kinds. A browser follows it for a direct
+load. htmx's own request follows it too, keeps `HX-Request`, and swaps the
+new route's fragment into the original target with the original swap, so a
+lazily loaded fragment stays in place. A link whose `hx-push-url` (or
+`hx-replace-url`) names the requested URL — as [`nav_sidebar`](@ref)'s links
+do — would still record the old URL; the [`htmx`](@ref) shell's
+[`redirect_history_script`](@ref) records the destination instead.
+`hx-push-url="true"` and boosted links already record it.
+
+`hx_response(...; redirect=, location=)` sets only htmx response headers,
+which a direct browser load ignores, so it cannot move a route.
+
+A redirect answers inline. If one reaches an `:auto` poller instead (its
+route was slower than the grace period), the poll's terminal response carries
+`HX-Redirect` to the same location, so the page navigates there.
+
+```@docs
+redirect_to
+redirect_history_script
+```
 
 ## The page shell
 
