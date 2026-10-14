@@ -220,6 +220,12 @@ function __init__()
                 settled.ready && return settled.value
             end
             if finalized_terminal[] !== nothing
+                # An answer its headers send elsewhere (`HX-Retarget`, …)
+                # retires the poller instead of replacing it, so there is no
+                # place for a kept tree: answer the bare terminal.
+                HTMXObjects._operation_redirects_swap(finalized_terminal[]) &&
+                    return HTMXObjects._operation_finalized_terminal(
+                        finalized_terminal[])
                 html = HTMXObjects.to_response(responded)
                 return HTTP.Response(200,
                     HTMXObjects._operation_terminal_headers(finalized_terminal[]);
