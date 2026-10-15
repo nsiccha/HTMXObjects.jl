@@ -1769,7 +1769,8 @@ the grace period is answered by the same poller a memoized route gets.
   overlapping poll cannot replace success with an unavailable article. A token
   the server no longer holds (restart, idle expiry, or eviction) answers
   `HTMXObjects.OperationResultUnavailable` (`410`; an HTMX poll receives its
-  "Result unavailable" article, which retires the poller).
+  "Result unavailable" article, which ends the poll — see
+  [How a poll ends](#How-a-poll-ends)).
 - A mutation's poller lives in the submission's swap target, so a slow
   submission is answered by one only when its client says that target exists:
   the `htmx()` shell's `mutation_poll_script()` sends the effective swap style
@@ -1786,8 +1787,9 @@ the grace period is answered by the same poller a memoized route gets.
   (an error article for a non-2xx status), but its original status is not.
   Headers that send the answer away from the poller (`HX-Retarget`,
   `HX-Reswap`, `HX-Reselect`) or swap nothing (`HX-Location`) end the polling
-  instead. That terminal answers htmx's stop-polling status `286` and never
-  carries a kept tree. The `htmx()` shell's `auto_terminal_script()` then
+  instead. Like every answer that ends a poll, that terminal carries the
+  stop-polling status `286`; it never carries a kept tree. The `htmx()`
+  shell's `auto_terminal_script()` then
   applies it as the original request would have applied a direct answer. It
   puts back the content the poller displaced, applies the headers to the bare
   body, and removes the spent poller. The page ends as it would with `@direct`,
@@ -1848,6 +1850,27 @@ terminal rendering removes a read's retained operation immediately. A mutation
 releases its operation after rendering and retains the terminal response for
 replay, bounded to 256 entries and 600 seconds since the last matching poll.
 Both registries are process-local; abandoned or failed operations expire.
+
+#### How a poll ends
+
+Every answer that ends an HTMX operation poll carries htmx's stop-polling
+status `286`, a 2xx that htmx still swaps: the result, a failure, a stall, a
+replayed mutation terminal, an unavailable token, any route error. Only the
+running poller answers `200`. htmx then cancels polling on the element that
+sent the poll. That element is not always the poller: a morph swap
+(`hx-swap="morph:*"`, a live refresh's terminal) can reuse a running poller's
+element as other content and leave htmx's poll timer on it. Without `286`,
+that element would poll the spent token for as long as the page stays open,
+swapping each answer wherever it now inherits.
+
+The `htmx()` shell's `auto_terminal_script()` stops such an element before it
+polls again: a poll whose element no longer names that operation in its
+`hx-get` is cancelled, an answer still in flight to it is not swapped, and
+htmx drops the stale trigger. A region that a morph replaced keeps what the
+morph rendered, as it would after a plain swap; the operation itself still
+finishes on the server. A request that is not an HTMX poll keeps its status:
+`curl` of a poll URL gets `200` for a result and `410` for an unavailable
+token.
 
 #### Operations that never finish
 

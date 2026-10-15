@@ -457,7 +457,7 @@ end
     # A foreign token still fails closed, with no replay of the submission.
     for target in (replace(first_url, poll_token(first_url) => "0"^64),)
         gone = hx_get(target)
-        @test gone.status == 200
+        @test gone.status == 286
         gone_body = String(gone.body)
         @test contains(gone_body, "aria-invalid=\"true\"")
         @test contains(gone_body, "Result unavailable")
@@ -641,8 +641,8 @@ end
         @test located.status == 286
         @test HTTP.header(located, "HX-Location") == "/elsewhere"
 
-        # Headers that leave the swap alone keep the ordinary terminal status.
-        @test settle_response(targets[:headers]).status == 200
+        # Headers that leave the swap alone end the poll the same way.
+        @test settle_response(targets[:headers]).status == 286
     end
 
     route!(FreshReadApp())
@@ -793,6 +793,56 @@ end
     @test contains(read_done, "aria-invalid")
     @test contains(post_done, "aria-invalid")
     @test !contains(read_done, "treebar-terminal-content\" data-htmxo-auto-terminal")
+end
+
+# htmx cancels polling on the element that sent a poll when the answer has
+# status 286. Every answer that ends a poll carries it, not only the swap the
+# live poller selects: a morph can leave the poll timer on an element that is
+# no longer the poller, and nothing swapped into it would stop it
+# (snag mutation-poller-4f9123b0).
+@testitem "every answer that ends an operation poll stops polling with 286" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!
+
+    reset_fresh!()
+    _clear_operation_polls!()
+    route!(FreshReadApp())
+    route!(FreshMutationApp())
+    route!(FreshFailureApp())
+
+    # A running answer keeps the poller polling; the result ends it.
+    read_url = poll_url(String(hx_get("/fresh_report?n=7").body))
+    order_url = poll_url(String(hx_post("/fresh_order", "n=7").body))
+    for target in (read_url, order_url)
+        still = hx_get(target)
+        @test still.status == 200
+        @test running(body_text(still))
+    end
+    release_fresh!(:read)
+    release_fresh!(:order)
+    @test settle_response(read_url).status == 286
+    order_done = settle_response(order_url)
+    @test order_done.status == 286
+    @test contains(body_text(order_done), "order-7:1")
+    # A replayed mutation terminal ends a poll too.
+    @test hx_get(order_url).status == 286
+
+    # Failures end the poll: the operation's own failure, an unavailable
+    # token, a malformed poll.
+    doomed_url = poll_url(String(hx_post("/post_doomed").body))
+    release_fresh!(:post_doomed)
+    failed = settle_response(doomed_url)
+    @test failed.status == 286
+    @test contains(body_text(failed), "aria-invalid")
+    gone = hx_get(replace(order_url, poll_token(order_url) => "0"^64))
+    @test gone.status == 286
+    @test contains(body_text(gone), "Result unavailable")
+    @test hx_get("/fresh_order?__htmxo_poll=1&__htmxo_verb=TRACE").status == 286
+
+    # Only an HTMX poll is a poller: other requests keep their status.
+    @test plain(:GET, replace(order_url, poll_token(order_url) => "0"^64)).status == 410
+    @test hx_get("/fresh_quick").status == 200
+    @test fresh_runs(:order) == 1
 end
 
 @testitem "@direct and fast fresh routes answer inline" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
@@ -1082,6 +1132,210 @@ end
             @test length(unique(poll_token(r.first) for r in polls)) == 2
         finally
             release_fresh!(:browser_card)
+            close(server)
+        end
+    end
+end
+
+# A morph swap (`hx-swap="morph:*"`, the live refresh's terminal) can reuse a
+# running poller's element as other content: it strips the poller's
+# attributes, but htmx only re-initializes an element that carries an `hx-*`
+# attribute, so the element's `every` timer keeps polling the old URL and
+# swaps each answer wherever the element now inherits. A KB tab polled a spent
+# mutation token this way about twice a second for minutes (snag
+# mutation-poller-4f9123b0). `morphAway` does to the poller what idiomorph
+# does to an element it reuses. In the `htmx()` shell, `auto_terminal_script`
+# cancels the stale timer's polls and drops an answer still in flight; on a
+# page without the shell's runtime, the stop-polling 286 that ends every poll
+# stops it.
+@testitem "a poller a morph turned into other content stops polling" setup=[FreshTransportFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+        import HTMXObjects: _clear_operation_polls!, h, Raw
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(FreshBrowserApp())
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        morph_away = raw"""
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+        async function until(predicate, label) {
+          for (let i = 0; i < 400; i++) {
+            if (await predicate()) return;
+            await sleep(25);
+          }
+          throw new Error('timed out: ' + label);
+        }
+        function morphAway(el) {
+          Array.from(el.attributes).forEach(a => el.removeAttribute(a.name));
+          el.className = 'settled';
+          el.textContent = 'settled';
+        }
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+        });
+        """
+        # The shell: a slow submission's poller, morphed while one of its polls
+        # is held in flight.
+        shell_driver = h.script(Raw(morph_away * raw"""
+        window.addEventListener('load', async function() {
+          const result = document.getElementById('result');
+          try {
+            htmx.trigger(document.getElementById('save-form'), 'submit');
+            await until(() => result.querySelector('.treebar-poller-inner'), 'save poller');
+            await fetch('/hold');
+            await until(async () => (await (await fetch('/held')).text()) === 'yes', 'held poll');
+            morphAway(result.querySelector('.treebar-poller-inner'));
+            await fetch('/mark?m=morphed');
+            await fetch('/unhold');
+            await sleep(800);
+            await fetch('/release');
+            await sleep(800);
+            if (result.querySelector('.treebar-poller-inner')) throw new Error('a poller came back');
+            if (!result.textContent.includes('settled')) throw new Error('morphed content lost');
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)) +
+                  '&result=' + encodeURIComponent(result.innerHTML));
+          }
+        });
+        """))
+        # No shell runtime: a slow submission's poller (the header the shell's
+        # `mutation_poll_script` would send is set by hand), morphed while it
+        # runs.
+        bare_driver = h.script(Raw(morph_away * raw"""
+        window.addEventListener('load', async function() {
+          const panel = document.getElementById('panel');
+          try {
+            htmx.ajax('POST', '/browser_save', {target: '#panel', swap: 'innerHTML',
+              values: {note: 'bare'}, headers: {'HTMXO-Swap': 'innerHTML'}});
+            await until(() => panel.querySelector('.treebar-poller-inner'), 'panel poller');
+            morphAway(panel.querySelector('.treebar-poller-inner'));
+            await fetch('/mark?m=morphed');
+            await sleep(600);
+            await fetch('/release');
+            await sleep(1800);
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)));
+          }
+        });
+        """))
+        page_kwargs = (; assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false, overlay=false)
+        shell_page = repr("text/html", htmx(h.main(
+                h.form(; id="save-form", hx_post="/browser_save",
+                       hx_target="#result", hx_swap="innerHTML")(
+                    h.input(; type="hidden", name="note", value="morphed")),
+                h.div(; id="result"), shell_driver); page_kwargs...))
+        bare_page = repr("text/html", htmx(h.main(h.div(; id="panel"), bare_driver);
+                                           treebars_assets=false, page_kwargs...))
+        @test !contains(bare_page, "__htmxoAutoTerminal")
+        page = Ref(shell_page)
+        receipt = Channel{String}(1)
+        seen = Tuple{Float64,String,String,Int}[]   # (time, kind, target, status)
+        hold = Ref(false)
+        held = Ref(false)
+        unhold = Base.Event()
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" &&
+                return HTTP.Response(200, ["Content-Type" => "text/html"], page[])
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, HTTP.unescapeuri(String(req.target)))
+                return HTTP.Response(204)
+            end
+            path == "/hold" && (hold[] = true; return HTTP.Response(204))
+            path == "/held" && return HTTP.Response(200, held[] ? "yes" : "no")
+            path == "/unhold" && (notify(unhold); return HTTP.Response(204))
+            if path == "/mark"
+                push!(seen, (time(), "mark", String(req.target), 0))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                release_fresh!(:browser_read)
+                release_fresh!(:browser_post)
+                return HTTP.Response(204)
+            end
+            poll = contains(req.target, "__htmxo_poll=1")
+            arrived = time()
+            if poll && hold[]
+                hold[] = false
+                held[] = true
+                wait(unhold)
+            end
+            response = dispatch(req.method, String(req.target);
+                headers=collect(req.headers),
+                body=HTMXObjects._request_body_bytes(req))
+            push!(seen, (arrived, poll ? "poll" : "request", String(req.target),
+                        response.status))
+            response
+        end
+        function browse()
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                    @test outcome == "/complete?status=passed"
+                    outcome == "/complete?status=passed" ||
+                        @info "Browser requests" outcome seen=join(string.(seen), "\n")
+                    time()
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+        end
+        marked(m) = only(e[1] for e in seen if e[2] == "mark" && contains(e[3], m))
+        polls() = filter(e -> e[2] == "poll", seen)
+        try
+            # Compile the poller paths before the browser's clock starts.
+            warm = String(hx_get("/browser_panel").body)
+            warm_post = String(hx_post("/browser_save", "note=warm").body)
+            release_fresh!(:browser_read)
+            release_fresh!(:browser_post)
+            settle(poll_url(warm))
+            settle(poll_url(warm_post))
+            reset_fresh!()
+
+            browse()
+            # The poll held across the morph is the last one: the stale timer
+            # sent nothing more, before or after the submission finished.
+            morphed = marked("morphed")
+            @test any(e -> e[1] < morphed, polls())
+            @test !any(e -> e[1] > morphed, polls())
+            @test fresh_runs(:browser_post) == 1
+
+            empty!(seen)
+            reset_fresh!()
+            page[] = bare_page
+            done = browse()
+            morphed = marked("morphed")
+            after = filter(e -> e[1] > morphed, polls())
+            # Without the shell nothing cancels the stale timer, and it polls on
+            # until the operation's last answer: 286 stops it, and the poller
+            # its running answers planted inside it, for good. Before 286 it
+            # polled the replayed terminal for as long as the page was open.
+            @test !isempty(after)
+            @test any(e -> e[4] == 286, after)
+            @test !any(e -> e[1] > done - 1.0, polls())
+            @test fresh_runs(:browser_post) == 1
+        finally
+            notify(unhold)
+            release_fresh!(:browser_read)
+            release_fresh!(:browser_post)
             close(server)
         end
     end
