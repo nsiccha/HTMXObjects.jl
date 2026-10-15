@@ -14565,9 +14565,22 @@ function htmxoMdShow(row, d, show) {
     }
 }
 function htmxoLoadSlot(s) {
-    if (s && s.dataset.loaded !== '1' && s.dataset.loading !== '1') {
-        s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
-    }
+    if (s && s.dataset.loaded !== '1' && s.dataset.loading !== '1') htmxoMdFire(s);
+}
+// Fire a slot's load, latched single-flight while its request runs. htmx binds
+// the elements a swap inserts only in its settle step, a tick after the swap,
+// so a row clicked in between fired the event at no listener and stayed
+// latched for good (snag `lazy-master-deta-01052813`); binding the slot first
+// lets that click load. A bound slot whose attributes are unchanged is left as
+// it is. A trigger that sends no request (a declined `htmx:confirm`, say)
+// releases the latch, so the next expand tries again.
+function htmxoMdFire(s) {
+    htmx.process(s);
+    var sent = false, mark = function(event) { if (event.target === s) sent = true; };
+    s.addEventListener('htmx:beforeSend', mark);
+    s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
+    s.removeEventListener('htmx:beforeSend', mark);
+    if (!sent) delete s.dataset.loading;
 }
 // A row's detail control activates exactly what a click on the row does, so
 // toggle extensions a caller concatenated onto the row handler run for it too.
@@ -14619,9 +14632,7 @@ function htmxoMdAfter(s, event) {
     }
 }
 function htmxoMdRetry(s) {
-    if (s.dataset.failed === '1' && !s.dataset.loading) {
-        s.dataset.loading = '1'; htmx.trigger(s, '$(_md_lazy_event())');
-    }
+    if (s.dataset.failed === '1' && !s.dataset.loading) htmxoMdFire(s);
 }
 if (!window.__htmxoMdReady) {
     window.__htmxoMdReady = true;
@@ -14681,8 +14692,10 @@ expand (`show`), it fires the `htmxo-md-load` event at `#<lazy_slot_id>` —
 but only when that slot is neither already loaded (`data-loaded='1'`) nor in
 flight (`data-loading='1'`) — latching `data-loading='1'` before firing so
 repeat clicks while the request is outstanding coalesce (single-flight,
-idempotent). This is the seam [`master_detail_pair`](@ref) drives for its
-`detail_url` mode; you rarely need it directly. Deliberately **not**
+idempotent). It binds a slot htmx has not processed yet (a swap that just
+inserted the row binds it only when it settles), and a trigger that sends no
+request releases the latch. This is the seam [`master_detail_pair`](@ref)
+drives for its `detail_url` mode; you rarely need it directly. Deliberately **not**
 `hx-trigger="load"` (fires for every collapsed slot at page load) nor
 `revealed`/`intersect` (a late intersection response can clobber a
 freshly-focused open slot) — the trigger is the explicit expand event.

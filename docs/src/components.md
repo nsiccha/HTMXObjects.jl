@@ -419,6 +419,11 @@ appears, including concurrent actions with separate result targets. The normal
 `htmx:afterSettle` event still marks the end of visual settling; applications
 need no fixed pause or manual `htmx.process` call for the inserted controls.
 
+A row clicked the moment a swap inserts its table still loads its detail: htmx
+binds inserted elements only when the swap settles, so the expand binds the slot
+itself first. An expand that sends no request (an `htmx:confirm` listener that
+declines it, say) leaves the slot unlatched, and the next expand tries again.
+
 #### Regroupable tables {#table-regrouping}
 
 `groupings` lets the reader regroup one set of leaf rows. Each grouping is a
