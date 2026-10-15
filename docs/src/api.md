@@ -1698,6 +1698,7 @@ otherwise it stays direct:
 | The route is not marked `@direct` | The per-route transport opt-out |
 | The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
 | The invocation can run in the background | A memoized route through its `Pending` cache cell (`semantics.pending`); a fresh one (`semantics.fresh`: `@fresh`, or any mutation verb) as a per-invocation operation |
+| The response is not Markdown or `?error`-filtered | `?plain`, `?markdown`, `Accept: text/markdown`/`text/plain` and `?error` answer inline under every policy, `HX-Request` or not: the Markdown projection drops the poller's `hx-get` continuation, and `?error` would filter a running poller to "(no errors)" |
 
 For an HTMX request, those conditions enter the polling transport directly.
 For a browser navigation that accepts `text/html` and has a `__page__` wrapper,
@@ -1712,6 +1713,14 @@ Both the load URL and every capability-poll URL preserve the request-time
 external prefix (`X-Forwarded-Prefix`), so the sequence remains under a
 path-stripping reverse-proxy mount. `:polling` forces the polling transport on
 eligible GETs; `:blocking` keeps every route direct.
+
+A Markdown or `?error` read of a poll URL (one carrying `__htmxo_operation`)
+joins the operation that URL names and waits for its result, up to the
+operation's stall bound, where it answers `OperationStalled` as a poll would.
+With no operation to join (an unknown or spent token), it is answered like a
+direct request of the same URL. So a command-line reader that requests a
+fragment with `HX-Request: true` and Markdown gets the finished fragment, never
+a poller it cannot follow.
 
 A polling-mode route is *started* non-blockingly and answers within the grace
 period (~0.1s) with a poller; an operation that finishes inside grace skips the
