@@ -1178,27 +1178,30 @@ end
         window.addEventListener('error', function(event) {
           fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
         });
-        // htmx arms a swapped-in poller when it settles (20 ms after the swap):
-        // only a poller that has polled once carries the timer a morph strands.
-        let polled = 0;
-        document.addEventListener('htmx:afterRequest', function(event) {
+        // Each poll's answer replaces the poller element, and htmx arms the new
+        // one only when it settles. The element that sent a poll is armed: the
+        // driver holds that poll on the server and morphs its sender.
+        let requester = null;
+        document.addEventListener('htmx:beforeRequest', function(event) {
           const path = (event.detail.requestConfig || {}).path || '';
-          if (path.includes('__htmxo_poll=1')) polled++;
+          if (path.includes('__htmxo_poll=1')) requester = event.detail.elt;
         });
+        async function morphHeldPoller() {
+          await fetch('/hold');
+          await until(async () => (await (await fetch('/held')).text()) === 'yes', 'held poll');
+          morphAway(requester);
+          await fetch('/mark?m=morphed');
+          await fetch('/unhold');
+        }
         """
-        # The shell: a slow submission's poller, morphed while one of its polls
-        # is held in flight.
+        # The shell: a slow submission's poller.
         shell_driver = h.script(Raw(morph_away * raw"""
         window.addEventListener('load', async function() {
           const result = document.getElementById('result');
           try {
             htmx.trigger(document.getElementById('save-form'), 'submit');
             await until(() => result.querySelector('.treebar-poller-inner'), 'save poller');
-            await fetch('/hold');
-            await until(async () => (await (await fetch('/held')).text()) === 'yes', 'held poll');
-            morphAway(result.querySelector('.treebar-poller-inner'));
-            await fetch('/mark?m=morphed');
-            await fetch('/unhold');
+            await morphHeldPoller();
             await sleep(800);
             await fetch('/release');
             await sleep(800);
@@ -1212,18 +1215,15 @@ end
         });
         """))
         # No shell runtime: a slow submission's poller (the header the shell's
-        # `mutation_poll_script` would send is set by hand), morphed while it
-        # runs.
+        # `mutation_poll_script` would send is set by hand).
         bare_driver = h.script(Raw(morph_away * raw"""
         window.addEventListener('load', async function() {
           const panel = document.getElementById('panel');
           try {
             htmx.ajax('POST', '/browser_save', {target: '#panel', swap: 'innerHTML',
               values: {note: 'bare'}, headers: {'HTMXO-Swap': 'innerHTML'}});
-            await until(() => panel.querySelector('.treebar-poller-inner') && polled > 0,
-                        'panel poller');
-            morphAway(panel.querySelector('.treebar-poller-inner'));
-            await fetch('/mark?m=morphed');
+            await until(() => panel.querySelector('.treebar-poller-inner'), 'panel poller');
+            await morphHeldPoller();
             await sleep(600);
             await fetch('/release');
             await sleep(1800);
@@ -1249,7 +1249,7 @@ end
         seen = Tuple{Float64,String,String,Int}[]   # (time, kind, target, status)
         hold = Ref(false)
         held = Ref(false)
-        unhold = Base.Event()
+        unhold = Ref(Base.Event())
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
@@ -1266,7 +1266,7 @@ end
             end
             path == "/hold" && (hold[] = true; return HTTP.Response(204))
             path == "/held" && return HTTP.Response(200, held[] ? "yes" : "no")
-            path == "/unhold" && (notify(unhold); return HTTP.Response(204))
+            path == "/unhold" && (notify(unhold[]); return HTTP.Response(204))
             if path == "/mark"
                 push!(seen, (time(), "mark", String(req.target), 0))
                 return HTTP.Response(204)
@@ -1281,7 +1281,7 @@ end
             if poll && hold[]
                 hold[] = false
                 held[] = true
-                wait(unhold)
+                wait(unhold[])
             end
             response = dispatch(req.method, String(req.target);
                 headers=collect(req.headers),
@@ -1321,7 +1321,8 @@ end
 
             browse()
             # The poll held across the morph is the last one: the stale timer
-            # sent nothing more, before or after the submission finished.
+            # sent nothing more, before or after the submission finished, and
+            # the held answer was not swapped into the morphed element.
             morphed = marked("morphed")
             @test any(e -> e[1] < morphed, polls())
             @test !any(e -> e[1] > morphed, polls())
@@ -1329,6 +1330,8 @@ end
 
             empty!(seen)
             reset_fresh!()
+            held[] = false
+            unhold[] = Base.Event()
             page[] = bare_page
             done = browse()
             morphed = marked("morphed")
@@ -1342,7 +1345,7 @@ end
             @test !any(e -> e[1] > done - 1.0, polls())
             @test fresh_runs(:browser_post) == 1
         finally
-            notify(unhold)
+            notify(unhold[])
             release_fresh!(:browser_read)
             release_fresh!(:browser_post)
             close(server)
