@@ -1941,7 +1941,12 @@ transiently displaces its children. A first paint into a structural element
 `select`/`option`, `ul`/`li`) therefore shows the poller — not the shell
 children — until the operation resolves; a fragment that self-polls on a
 periodic trigger keeps its settled content while a re-fetch runs (the
-interim diverts into the progress reporter beside it) instead. A route
+interim diverts into the progress reporter beside it) instead, as does a
+target marked `data-htmxo-live`. The resolved result lands as the route
+rendered it either way, a table part included: a `<tr>` answer for a row
+target becomes that row again, as do `<td>`, `<tbody>` and the other table
+parts (their terminal node is the table element that can parent them, since
+an HTML parser drops table tags inside a `div`). A route
 whose fragment must be the direct children of such an
 element and cannot tolerate the transient should declare itself
 `@direct @get` (direct transport, no poller at all).

@@ -11,6 +11,7 @@ using TestItemRunner
     export FreshReadApp, FreshPageApp, FreshMutationApp, SharedPathApp, RenamedPathApp,
         CoveredPathApp, FreshRetainedApp,
         FreshFailureApp, FreshDirectApp, FreshBrowserApp, FreshGates,
+        FreshStructuralApp, structural_row_html,
         reset_fresh!, fresh_runs, release_fresh!, hx_get, hx_post, plain,
         poll_url, poll_token, running, settle, settle_response, body_text
 
@@ -168,6 +169,34 @@ using TestItemRunner
     card_answer(which) = hx_response(h.div(; id="card-$which")(h.p("card:$which"));
         retarget="#card-$which", reswap="outerHTML", trigger="card-changed",
         toast="Card saved")
+
+    # Slow submissions answering a table part: a `<tr>`, a `<td>`, a
+    # `<tbody>`, and a `<div>` control. Every one waits on `:structural`, so
+    # each is answered by a poller first and by its terminal after release.
+    @htmx struct FreshStructuralApp
+        "Mark the row"
+        @post structural_row(; which::String="", live::Bool=false) =
+            (wait(gate(:structural)); structural_row_html(which, "done"; live))
+        "Mark the cell"
+        @post structural_cell() =
+            (wait(gate(:structural)); h.td("cell:done"; id="cell-x"))
+        "Replace the batch"
+        @post structural_batch() = (wait(gate(:structural));
+            h.tbody(h.tr(h.td("batch:1")), h.tr(h.td("batch:2")); id="batch"))
+        "Mark the card"
+        @post structural_card() =
+            (wait(gate(:structural)); h.div("card:done"; id="card"))
+    end
+
+    function structural_row_html(which, state; live::Bool=false)
+        swap = which == "core" ? "outerHTML" : "morph:outerHTML"
+        h.tr(; id="row-$which", data_htmxo_live=(live ? "" : nothing))(
+            h.td("$which:$state"),
+            h.td(h.button("mark"; id="btn-$which", type="button",
+                hx_post="/structural_row",
+                hx_vals="{\"which\":\"$which\",\"live\":\"$live\"}",
+                hx_target="#row-$which", hx_swap=swap)))
+    end
 
     const hx = ["HX-Request" => "true"]
     const form = "Content-Type" => "application/x-www-form-urlencoded"
@@ -1351,4 +1380,237 @@ end
             close(server)
         end
     end
+end
+
+# A slow submission whose answer is a table part (snag
+# structural-tr-ta-a296d6a9): its poller is a `div`, so while it runs it stands
+# where the row, cell or section was, but its terminal must land as that table
+# part again — in place, with no wrapper and no loose text. A `<tr>` inside a
+# `div` is no row to the HTML parser: it drops the `<tr>`/`<td>` start tags and
+# keeps their text, which is how a `div`-wrapped terminal used to land. Covered:
+# morph and plain outerHTML rows, a row marked `data-htmxo-live` (it keeps its
+# content during the run and its terminal morphs it in place), a cell, a
+# `<tbody>`, and a `div` control.
+@testitem "slow submissions answering table parts land as table parts" setup=[FreshTransportFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+        import HTMXObjects: _clear_operation_polls!, h, Raw
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(FreshStructuralApp())
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        requests = Pair{String,Int}[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+        });
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(predicate, label) {
+            for (let i = 0; i < 400; i++) {
+              if (predicate()) return;
+              await sleep(25);
+            }
+            throw new Error('timed out: ' + label);
+          }
+          const grid = document.getElementById('grid');
+          const rows = document.getElementById('rows');
+          const text = id => (document.getElementById(id) || {}).textContent || '';
+          const pollers = () => document.querySelectorAll(
+            '.treebar-poller-inner[hx-get*="__htmxo_poll"]').length;
+          try {
+            ['plain', 'live', 'core', 'cell', 'batch', 'card'].forEach(which =>
+              document.getElementById('btn-' + which).click());
+            await until(() => pollers() === 6, 'six pollers');
+            const problems = [];
+            // The marked row keeps its content while its poller runs beside it.
+            const held = document.getElementById('row-live');
+            if (!held || !held.hasAttribute('data-htmxo-live-busy') ||
+                held.querySelector('.treebar-poller') ||
+                !held.textContent.includes('live:open')) problems.push('live row not held');
+            await fetch('/release');
+            await until(() => ['plain', 'live', 'core'].every(which =>
+                text('row-' + which).includes(which + ':done')) &&
+              text('cell-x') === 'cell:done' && text('batch').includes('batch:2') &&
+              text('card') === 'card:done', 'terminals');
+            for (const which of ['plain', 'live', 'core']) {
+              const row = document.getElementById('row-' + which);
+              if (row.tagName !== 'TR' || row.parentElement !== rows) problems.push(which + ' row misplaced');
+              if (row.querySelectorAll(':scope > td').length !== 2) problems.push(which + ' cells lost');
+            }
+            const cell = document.getElementById('cell-x');
+            if (cell.tagName !== 'TD' || cell.parentElement.id !== 'row-cells') problems.push('cell misplaced');
+            const batch = document.getElementById('batch');
+            if (batch.tagName !== 'TBODY' || batch.parentElement !== grid ||
+                batch.querySelectorAll(':scope > tr').length !== 2) problems.push('batch misplaced');
+            if (grid.querySelectorAll(':scope > tbody').length !== 2) problems.push('tbody count');
+            if (rows.querySelectorAll(':scope > tr').length !== 4) problems.push('row count');
+            Array.from(rows.childNodes).forEach(n => {
+              if (n.nodeType === 3 && n.textContent.trim()) problems.push('loose text: ' + n.textContent.trim());
+              if (n.nodeType === 1 && n.tagName !== 'TR' &&
+                  !(n.classList.contains('htmxo-live-reporter') && n.hidden)) problems.push('stray ' + n.tagName);
+            });
+            if (document.querySelector('.treebar-poller, .treebar-terminal, [data-htmxo-auto-terminal]'))
+              problems.push('transport left behind');
+            if (document.getElementById('card').parentElement.tagName !== 'MAIN') problems.push('card misplaced');
+            if (problems.length) throw new Error(problems.join('; '));
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)) +
+                  '&grid=' + encodeURIComponent(grid.outerHTML));
+          }
+        });
+        """))
+        page = repr("text/html", htmx(h.main(
+                h.table(; id="grid", hx_ext="morph")(
+                    h.tbody(; id="rows")(
+                        structural_row_html("plain", "open"),
+                        structural_row_html("live", "open"; live=true),
+                        structural_row_html("core", "open"),
+                        h.tr(; id="row-cells")(
+                            h.td("cell:open"; id="cell-x"),
+                            h.td(h.button("mark"; id="btn-cell", type="button",
+                                hx_post="/structural_cell", hx_target="#cell-x",
+                                hx_swap="outerHTML")))),
+                    h.tbody(; id="batch")(h.tr(h.td("batch:open")))),
+                h.button("batch"; id="btn-batch", type="button",
+                    hx_post="/structural_batch", hx_target="#batch",
+                    hx_swap="outerHTML"),
+                h.div("card:open"; id="card"),
+                h.button("card"; id="btn-card", type="button",
+                    hx_post="/structural_card", hx_target="#card",
+                    hx_swap="outerHTML"),
+                driver);
+                assets="/test-assets", sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, hyperscript_version=nothing,
+                pico_version=nothing, feedback=false, compose=false,
+                overlay=false,
+                extra_head=(h.script(""; src="https://unpkg.com/idiomorph@0.7.3/dist/idiomorph-ext.min.js"),)))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" &&
+                return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, HTTP.unescapeuri(String(req.target)))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                release_fresh!(:structural)
+                return HTTP.Response(204)
+            end
+            response = dispatch(req.method, String(req.target);
+                headers=collect(req.headers),
+                body=HTMXObjects._request_body_bytes(req))
+            push!(requests, string(req.method, " ", req.target) => response.status)
+            response
+        end
+        try
+            # Compile the poller paths before the browser's clock starts.
+            warm = poll_url(String(hx_post("/structural_row", "which=warm").body))
+            release_fresh!(:structural)
+            @test contains(settle(warm), "warm:done")
+            reset_fresh!()
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                    @test outcome == "/complete?status=passed"
+                    outcome == "/complete?status=passed" ||
+                        @info "Browser requests" outcome requests=join(string.(requests), "\n")
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            # Every submission ran under a poller: six operations, each ended
+            # by exactly one stop-polling answer.
+            polls = filter(r -> contains(r.first, "__htmxo_poll=1"), requests)
+            tokens = unique(poll_token(r.first) for r in polls)
+            @test length(tokens) == 6
+            for token in tokens
+                mine = filter(r -> poll_token(r.first) == token, polls)
+                @test count(r -> r.second == 286, mine) == 1
+            end
+        finally
+            release_fresh!(:structural)
+            close(server)
+        end
+    end
+end
+
+# The unit half of the browser item above: a resolved terminal's node is the
+# element that can parent its content, so an HTML parser keeps a table part
+# (snag structural-tr-ta-a296d6a9). Every other answer keeps the byte-identical
+# `div` it always had, finalized answers included.
+@testitem "resolved terminals keep table parts in their table context" tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    import HTMXObjects: _auto_terminal_node, _operation_finalized_terminal, h, Raw
+
+    struct RowView end
+    Base.show(io::IO, ::MIME"text/html", ::RowView) =
+        print(io, "<tr><td>row view</td></tr>")
+
+    open_tag = "class=\"treebar-poller-inner treebar-terminal-content\" " *
+        "data-htmxo-auto-terminal=\"\">"
+    terminal(content) = repr("text/html", _auto_terminal_node(content))
+    function container(content)
+        html = terminal(content)
+        found = match(r"^<([a-z]+) ", html)
+        found === nothing && return nothing
+        tag = only(found.captures)
+        startswith(html, "<$tag $open_tag") && endswith(html, "</$tag>") ? tag : nothing
+    end
+
+    @test container(h.tr(h.td("a"))) == "tbody"
+    @test container(h.td("a")) == "tr"
+    @test container(h.th("a")) == "tr"
+    for part in (:tbody, :thead, :tfoot, :caption, :colgroup)
+        @test container(h(part)) == "table"
+    end
+    @test container(h.col()) == "colgroup"
+    # Not table parts: an HTML parser keeps these inside a `div`.
+    for part in (:p, :li, :option, :dt, :summary, :section)
+        @test container(h(part)) == "div"
+    end
+    # The first element decides, whatever renders it: leading text, a
+    # comment, upper case, a snapshot, a custom HTML-showable value.
+    @test container(["\n", h.tr(h.td("a")), h.tr(h.td("b"))]) == "tbody"
+    @test container(Raw("<!-- rows --><TR><td>a</td></TR>")) == "tbody"
+    @test container(HTMLSnapshot(h.td("a"))) == "tr"
+    @test container(RowView()) == "tbody"
+    # Escaped text renders no element, whatever it spells.
+    @test container("<tr>") == "div"
+    @test container(42) == "div"
+
+    row = h.tr(h.td("a"); id="r")
+    @test terminal(row) ==
+        "<tbody $open_tag<tr id=\"r\"><td>a</td></tr></tbody>"
+    @test terminal(h.p("x")) == "<div $open_tag<p>x</p></div>"
+    @test terminal(RowView()) ==
+        "<tbody $open_tag<tr><td>row view</td></tr></tbody>"
+
+    # A finalized answer (`hx_response`, a dispatched sub-request) is wrapped
+    # by the same node.
+    finalized(body) = String(_operation_finalized_terminal(
+        HTTP.Response(200, ["Content-Type" => "text/html"], body)).body)
+    @test finalized("<tr id=\"r\"><td>a</td></tr>") ==
+        "<tbody $open_tag<tr id=\"r\"><td>a</td></tr></tbody>"
+    @test finalized("<p>x</p>") == "<div $open_tag<p>x</p></div>"
+    # A failed one stays the bare error article.
+    @test startswith(String(_operation_finalized_terminal(
+        HTTP.Response(409, ["Content-Type" => "text/html"], "<tr><td>no</td></tr>")).body),
+        "<article aria-invalid=\"true\">")
 end
