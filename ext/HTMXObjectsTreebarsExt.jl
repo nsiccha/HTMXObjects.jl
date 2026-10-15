@@ -31,24 +31,10 @@ function _operation_ready_terminal(render_result, started)
     finalized = HTMXObjects._finalized_response(terminal)
     finalized === nothing ||
         return (ready=true, value=HTMXObjects._operation_finalized_terminal(finalized))
-    # Dual-class terminal: the trigger-less `.treebar-poller-inner` is the
-    # shape every deployed poller hx-select matches — the live select has no
-    # `.treebar-terminal-content` branch, so the bare marker swapped an EMPTY
-    # fragment — while `.treebar-terminal-content` keys the client finalizer
-    # that terminalizes the wrapper once Treebars ships it. One node, not
-    # nested: the top-level-only select excludes a nested match, and the
-    # finalizer reads the class off the swapped node itself.
-    # `data-htmxo-auto-terminal` marks this node as an `:auto` terminal for
-    # `auto_terminal_script` (core): on `htmx:afterSwap` the shell replaces
-    # the live poller wrapper with the node's bare content, so the caller's
-    # target ends with exactly the route fragment — a wrapper div cannot be
-    # a direct child of a structural element (`details`/`summary`,
-    # `table`/`tr`, `select`/`option`, …). The response shape is unchanged,
-    # so shells without the script keep the wrapper (status quo) and every
-    # select generation still matches.
-    (ready=true, value=HTMXObjects.h.div(terminal;
-        class="treebar-poller-inner treebar-terminal-content",
-        data_htmxo_auto_terminal=""))
+    # The dual-class, marked terminal node the shell unwraps to the bare
+    # route fragment, in an element that can parent it (core
+    # `_auto_terminal_node`).
+    (ready=true, value=HTMXObjects._auto_terminal_node(terminal))
 end
 
 # `track_job` (the job-ledger hook `polling_fetchindex` reports through)

@@ -5032,7 +5032,9 @@ through Treebars' done terminal — the result with the frozen tree in a
 collapsed `<details>` — instead of the bare node. Operations that finish
 within the grace budget still answer inline bare either way: no poll, no
 tree. While loading, the interim poller swaps into
-the target and transiently displaces its children; a route whose fragment
+the target and transiently displaces its children; the resolved result then
+lands as the route rendered it, a table part (`<tr>`, `<td>`, `<tbody>`, …)
+included. A route whose fragment
 must be the direct children of a structural element (`details`/`summary`,
 `table`/`tr`, `select`/`option`, …) and cannot tolerate that transient
 should declare itself `@direct @get` instead — likewise any route that must
@@ -8113,9 +8115,73 @@ _operation_redirects_swap(resp::HTTP.Response) =
 function _operation_finalized_terminal(resp::HTTP.Response)
     body = _operation_terminal_body(resp)
     inner = _operation_terminal_ok(resp) ?
-        "<div class=\"treebar-poller-inner treebar-terminal-content\" " *
-            "data-htmxo-auto-terminal=\"\">" * body * "</div>" : body
+        repr(MIME"text/html"(), _auto_terminal_node(Raw(body))) : body
     HTTP.Response(200, _operation_terminal_headers(resp); body=inner)
+end
+
+# The node a resolved `:auto` poll answers with `content` inside. It carries
+# both swap contracts: the trigger-less `.treebar-poller-inner` is the shape
+# every deployed poller `hx-select` matches (the live select has no
+# `.treebar-terminal-content` branch, so the bare marker swapped an EMPTY
+# fragment), while `.treebar-terminal-content` keys the client finalizer that
+# terminalizes the wrapper. One node, not nested: the top-level-only select
+# excludes a nested match, and the finalizer reads the class off the swapped
+# node itself. `data-htmxo-auto-terminal` marks it for `auto_terminal_script`,
+# which on `htmx:afterSwap` replaces the live poller wrapper with the node's
+# bare content, so the caller's target ends with exactly the route fragment.
+# Shells without that script keep the node (status quo), and every select
+# generation still matches.
+#
+# The node's element is one that can parent `content` (`_auto_terminal_tag`):
+# every client path parses the answer as HTML — htmx's swap, and the live
+# refresh's diversion — and inside a `div` an HTML parser drops table start
+# tags (`tr`, `td`, `tbody`, …) and keeps only their text, so a `div` around a
+# row answer landed as loose text with no row and no cells (snag
+# structural-tr-ta-a296d6a9).
+_auto_terminal_node(content) = h(_auto_terminal_tag(content), content;
+    class="treebar-poller-inner treebar-terminal-content",
+    data_htmxo_auto_terminal="")
+
+# The element that can parent a fragment whose first element is the key. An
+# HTML parser keeps a table part only inside its own table context, exactly
+# as for a bare table-part answer: htmx parses every response in a
+# `<template>`, whose first start tag picks the table insertion mode, and
+# HTMX.jl's out-of-band swaps put table parts in a `<template>` for the same
+# reason. Anything else fits in a `div`.
+const _AUTO_TERMINAL_CONTAINERS = Dict{Symbol,Symbol}(
+    :tr => :tbody,
+    :td => :tr, :th => :tr,
+    :tbody => :table, :thead => :table, :tfoot => :table,
+    :caption => :table, :colgroup => :table,
+    :col => :colgroup)
+
+_auto_terminal_tag(content) =
+    get(_AUTO_TERMINAL_CONTAINERS, _html_start_tag(content), :div)
+
+# The first element `content` renders as a child of an HTML node, as the
+# lower-case tag symbol an HTML parser chooses its insertion context by, or
+# `nothing` when it renders none. A string child renders escaped (text, no
+# element), and a vector child is spliced in order, so its first element-
+# rendering entry decides; any other value renders through its own
+# `show(::MIME"text/html")`, whose markup is read.
+_html_start_tag(node::Node) = Symbol(lowercase(String(HTMX.tag(node))))
+_html_start_tag(raw::Raw) = _html_markup_start_tag(String(raw))
+_html_start_tag(snapshot::HTMLSnapshot) = _html_markup_start_tag(snapshot.html)
+_html_start_tag(::AbstractString) = nothing
+function _html_start_tag(children::AbstractVector)
+    for child in children
+        start = _html_start_tag(child)
+        start === nothing || return start
+    end
+    nothing
+end
+_html_start_tag(value) = showable(MIME"text/html"(), value) ?
+    _html_markup_start_tag(repr(MIME"text/html"(), value)) : nothing
+
+# The first start tag in `html` (comments and doctypes are not start tags).
+function _html_markup_start_tag(html::AbstractString)
+    found = match(r"<([A-Za-z][^\s/>]*)", html)
+    found === nothing ? nothing : Symbol(lowercase(only(found.captures)))
 end
 
 # Treebars answers a still-running operation with its live poller wrapper
@@ -18424,12 +18490,16 @@ live_refresh_script() = h.script(Raw(raw"""
 Unwrap a resolved `:auto` poll to the bare route fragment.
 
 A resolved `:auto` poll answers a select-matching
-`div.treebar-poller-inner.treebar-terminal-content` carrying
+`.treebar-poller-inner.treebar-terminal-content` node carrying
 `data-htmxo-auto-terminal` (the response keeps that shape so every deployed
-poller `hx-select` generation still matches it). On `htmx:afterSwap` this
+poller `hx-select` generation still matches it). The node is a `div`, or the
+table element that can parent a table-part result: a `tbody` around rows, a
+`tr` around cells, a `table` around a `tbody`/`thead`/`tfoot`/`caption`/
+`colgroup`, a `colgroup` around columns — inside a `div` an HTML parser drops
+those tags and keeps their text. On `htmx:afterSwap` this
 script replaces the live `.treebar-poller` / `.treebar-terminal` wrapper with
 the marked node's bare content, so the caller's target ends with exactly what
-the route rendered — a wrapper `div` cannot be a direct child of a structural
+the route rendered — a wrapper cannot be a direct child of a structural
 element (`details`/`summary`, `table`/`tr`, `select`/`option`, `dl`, `ul`/`li`).
 
 Only marked nodes unwrap: hand-shaped `polling_fetchindex` terminals (frozen
