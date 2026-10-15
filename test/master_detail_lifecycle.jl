@@ -499,3 +499,135 @@ end
         end
     end
 end
+
+# htmx binds the elements a swap inserts only in its settle step, a tick after
+# the swap. A row clicked in between (snag `lazy-master-deta-01052813`: the KB
+# For-You panel, whose table arrives by an `outerHTML` load swap) fired the load
+# event at a slot with no listener yet and latched it, so no click ever loaded
+# the detail. A load the application declines must not latch the slot either.
+@testitem "lazy detail loads when its row is clicked before the inserting swap settles" tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        table_html = repr("text/html", h.div(id="md-panel")(master_detail_table(["Name"], ["late"];
+            key=identity, master=x -> (h.td(x),), detail_url="/detail")))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        requests = String[]
+        receipt = Channel{String}(1)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+          const phase = new URLSearchParams(location.search).get('phase');
+          const checks = [];
+          let clicked = false, completed = false, declined = 0;
+          const require = (ok, label) => { if (!ok) throw new Error(label); checks.push(label); };
+          async function finish(status) {
+            if (completed) return;
+            completed = true;
+            await fetch('/complete?status=' + encodeURIComponent(status));
+          }
+          window.addEventListener('error', event => finish(event.message));
+          const row = () => document.getElementById('row-late');
+          const detail = () => document.getElementById('detail-late');
+          const slot = () => document.getElementById('detail-slot-late');
+          const click = () => row().querySelector('td').click();
+          // The application declines the first load before any request starts.
+          document.body.addEventListener('htmx:confirm', function(event) {
+            if (phase === 'declined' && event.target === slot() && declined++ === 0) event.preventDefault();
+          });
+          function firstClick() {
+            try {
+              require(phase !== 'swap' || document.getElementById('md-panel').classList.contains(htmx.config.addedClass),
+                      'settle still pending at the click');
+              clicked = true;
+              click();
+              require(!detail().hidden, 'first click opens the detail');
+              if (phase === 'declined') {
+                require(declined === 1 && !slot().dataset.loading, 'a declined load leaves the slot unlatched');
+                click(); click();
+                require(!detail().hidden, 'collapse and reopen');
+              }
+            } catch (error) { finish(String(error)); }
+          }
+          document.body.addEventListener('htmx:afterSwap', function(event) {
+            if (phase === 'swap' && !clicked && row()) firstClick();
+          });
+          document.body.addEventListener('htmx:afterSettle', function(event) {
+            if (phase !== 'swap' && !clicked && row()) { firstClick(); return; }
+            if (event.target !== slot()) return;
+            try {
+              const s = slot();
+              require(s.textContent.includes('detail body'), 'detail loaded');
+              require(s.dataset.loaded === '1' && !s.dataset.loading && !s.dataset.failed, 'loaded latches');
+              const body = s.firstElementChild;
+              click(); click();
+              require(!detail().hidden && s.firstElementChild === body, 'loaded DOM reused');
+              finish('passed:' + checks.length);
+            } catch (error) { finish(String(error)); }
+          });
+          // A latched slot sends nothing more: report its state and whether a
+          // later expand recovers, instead of letting the item time out.
+          setTimeout(function() {
+            if (completed) return;
+            const s = slot(), state = s ? 'loading=' + s.dataset.loading + ',loaded=' + s.dataset.loaded : 'no slot';
+            if (s) { click(); click(); }
+            setTimeout(() => finish('stuck:' + state + ',after-reopen-loading=' + (s && s.dataset.loading)), 2000);
+          }, 15000);
+        }, {once: true});
+        """))
+        # The table arrives the way the KB For-You panel hydrates: an empty
+        # shell whose load request swaps it in.
+        shell = h.div(hx_get="/table", hx_trigger="load", hx_target="this", hx_swap="outerHTML")()
+        page = "<!DOCTYPE html>" * repr("text/html", h.html(
+            h.head(h.meta(charset="UTF-8"), h.script(src="/htmx.js"), master_detail_js()), h.body(shell, driver)))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/htmx.js" && return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            path == "/table" && return HTTP.Response(200, ["Content-Type" => "text/html"], table_html)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            push!(requests, path)
+            path == "/detail" && return HTTP.Response(200, ["Content-Type" => "text/html"],
+                repr("text/html", h.div("detail body")))
+            HTTP.Response(404)
+        end
+        try
+            # A click after settle is the control: it loads with or without the fix.
+            for phase in ("settle", "swap", "declined")
+                empty!(requests)
+                mktempdir() do profile
+                    browser_log = joinpath(profile, "browser.log")
+                    url = "http://127.0.0.1:$port/?phase=$phase"
+                    browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $url`;
+                        stdout=devnull, stderr=browser_log); wait=false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(browser), 60; pollint=0.05) === :ok
+                        @test isready(receipt)
+                        if isready(receipt)
+                            outcome = take!(receipt)
+                            @info "Lazy detail before settle" phase outcome requests
+                            @test startswith(outcome, "/complete?status=passed%3A")
+                        else
+                            @info "Lazy detail before settle timeout" phase requests log=read(browser_log, String)
+                        end
+                    finally
+                        process_exited(browser) || kill(browser)
+                        wait(browser)
+                    end
+                end
+                @test requests == ["/detail"]
+            end
+        finally
+            close(server)
+        end
+    end
+end
