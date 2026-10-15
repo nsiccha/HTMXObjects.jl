@@ -1849,6 +1849,42 @@ releases its operation after rendering and retains the terminal response for
 replay, bounded to 256 entries and 600 seconds since the last matching poll.
 Both registries are process-local; abandoned or failed operations expire.
 
+#### Operations that never finish
+
+A polled operation is bounded. When it is still unfinished `stall_after`
+seconds after it started (default `600`, ten minutes), its next poll answers a
+terminal `HTMXObjects.OperationStalled` failure instead of another running
+poller. Without the bound, a computation stuck on a lock or a network call
+would answer "running" for as long as anyone polled it, since every poll
+renews its token. The stall failure:
+
+- is recorded like any route error: the error log, the `__on_error__` /
+  `__error__` hooks, and an `X-HTMXO-Error-Id` response header (`504` for a
+  non-HTMX request);
+- shows the operation's progress tree, open, so the reader sees what was still
+  running;
+- offers a read a **Run again** button that replaces the stalled terminal with
+  a fresh request of the same URL and arguments. A mutation is never
+  re-submitted: its stall says so, and its token is spent;
+- does not cancel the computation. DynamicObjects has no cancellation, so it
+  may still finish in the background, and a later request for a memoized read
+  may find its value.
+
+An operation that finished or failed always answers its own result, however
+long it took. `@queued` operations, which can legitimately wait in the job
+queue, use `queued_stall_after` instead (default `nothing`: unbounded).
+`nothing` disables either bound:
+
+```julia
+route!(ModelApp(); operation_policy=OperationPolicy(:auto; stall_after=1800))
+route!(BatchApp(); operation_policy=OperationPolicy(:auto; queued_stall_after=6 * 3600))
+route!(LongApp(); operation_policy=OperationPolicy(:auto; stall_after=nothing))
+```
+
+Every resumed poll carries `X-HTMXO-Operation-Age: <whole seconds since the
+operation started>`, so a script that follows a poller can bound its own
+waiting too.
+
 A resolved `:auto` poll answers the result fragment in a select-matching
 terminal node — no kept progress tree, no inspection chrome — and the
 `htmx()` shell unwraps that node on swap, so the caller's target ends with

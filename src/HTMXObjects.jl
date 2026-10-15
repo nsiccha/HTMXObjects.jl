@@ -4921,7 +4921,7 @@ end
 
 """
     OperationPolicy(mode=:auto; poll_interval="200ms", keep_progress=true,
-        keep_terminal_tree=false)
+        keep_terminal_tree=false, stall_after=600, queued_stall_after=nothing)
 
 Select route execution transport. `:auto` — **the default, applied to every app
 whether or not it declares a policy** — polls pending-capable HTMX requests.
@@ -4967,8 +4967,24 @@ it.
 
 You never have to write `OperationPolicy` to get non-blocking long routes —
 `route!(app)` alone already does. Reach for it to tune (`poll_interval`),
-to keep finished progress trees (`keep_terminal_tree=true`), or to opt out
-(`:blocking`).
+to keep finished progress trees (`keep_terminal_tree=true`), to change the
+stall bound (`stall_after`, `queued_stall_after`), or to opt out (`:blocking`).
+
+A polled operation that is still unfinished `stall_after` seconds after it
+started (default `600`, ten minutes) stops being polled: its next poll answers
+a terminal `HTMXObjects.OperationStalled` failure instead of the running
+poller. It is recorded like any route error (error log,
+`__on_error__`/`__error__` hooks, an `X-HTMXO-Error-Id` response header) and
+shown beside the open progress tree, so the reader sees what was still
+running. A read offers a **Run again** button that starts a fresh computation
+with the same arguments; a mutation is never re-submitted. The stalled
+computation itself is not cancelled — DynamicObjects has no cancellation — and
+may still finish in the background. An operation that finishes or fails always
+answers its own result, however long it took. `@queued` operations, which can
+legitimately wait in the job queue, use `queued_stall_after` instead (default
+`nothing`: unbounded). `nothing` disables either bound. Every resumed poll
+carries `X-HTMXO-Operation-Age: <seconds since the operation started>`, so a
+script can bound its own polling too.
 
 Nested progress follows source-visible DynamicObjects property reads and
 indexed-property calls in generated route/property bodies. Their lowering
@@ -5020,6 +5036,20 @@ struct OperationPolicy
     poll_interval::String
     keep_progress::Bool
     keep_terminal_tree::Bool
+    # Seconds a polled operation may run before its next poll answers
+    # `OperationStalled`; `nothing` = unbounded. `@queued` operations use
+    # `queued_stall_after`.
+    stall_after::Union{Nothing,Float64}
+    queued_stall_after::Union{Nothing,Float64}
+end
+
+const _DEFAULT_STALL_AFTER = 600.0
+
+_stall_bound(::Nothing, _name) = nothing
+function _stall_bound(seconds::Real, name)
+    isfinite(seconds) && seconds > 0 || throw(ArgumentError(
+        "operation-policy $(name) must be a positive number of seconds or nothing (got $(repr(seconds)))"))
+    Float64(seconds)
 end
 
 # One default, spelled once: `route!`'s kwarg default and every
@@ -5027,16 +5057,27 @@ end
 # mode from here, so "what does an app that declares nothing get?" has a single
 # answer in the source as well as in the docs.
 function OperationPolicy(mode::Symbol=:auto; poll_interval="200ms",
-        keep_progress::Bool=true, keep_terminal_tree::Bool=false)
+        keep_progress::Bool=true, keep_terminal_tree::Bool=false,
+        stall_after::Union{Nothing,Real}=_DEFAULT_STALL_AFTER,
+        queued_stall_after::Union{Nothing,Real}=nothing)
     mode in (:blocking, :polling, :auto) || throw(ArgumentError(
         "operation-policy mode must be :blocking, :polling, or :auto (got $(repr(mode)))"))
     OperationPolicy(mode, string(poll_interval), keep_progress,
-        keep_terminal_tree)
+        keep_terminal_tree, _stall_bound(stall_after, :stall_after),
+        _stall_bound(queued_stall_after, :queued_stall_after))
 end
 
-# Back-compat: the pre-`keep_terminal_tree` positional shape keeps working.
+# Back-compat: the pre-`keep_terminal_tree` and pre-stall-bound positional
+# shapes keep working, with today's default bounds.
 OperationPolicy(mode::Symbol, poll_interval, keep_progress::Bool) =
-    OperationPolicy(mode, string(poll_interval), keep_progress, false)
+    OperationPolicy(mode; poll_interval, keep_progress)
+OperationPolicy(mode::Symbol, poll_interval, keep_progress::Bool,
+        keep_terminal_tree::Bool) =
+    OperationPolicy(mode; poll_interval, keep_progress, keep_terminal_tree)
+
+# The stall bound an operation starting now under `policy` carries.
+_operation_stall_after(policy::OperationPolicy, queued::Bool) =
+    queued ? policy.queued_stall_after : policy.stall_after
 
 function RootProvider(factory; scope::Symbol=:request, key=nothing)
     scope in (:request, :session, :job) ||
@@ -6783,6 +6824,46 @@ function Base.showerror(io::IO, e::OperationResultUnavailable)
           "not repeated; reload to see the current state.")
 end
 
+"""
+    OperationStalled(label, verb, elapsed, bound, rerun_url)
+
+A polled operation was still unfinished `elapsed` seconds after it started,
+past its root's `OperationPolicy` stall bound (`bound` seconds). Its poll
+answers this failure instead of another running poller: recorded like any route
+error, shown with the operation's open progress tree, and `504` for a
+non-HTMX request. The computation itself is not cancelled. `rerun_url` is the
+operation's URL without its poll token for a read (the **Run again** button
+re-requests it); it is `nothing` for a mutation, which is never re-submitted.
+"""
+struct OperationStalled <: Exception
+    label::String
+    verb::Symbol
+    elapsed::Float64
+    bound::Float64
+    rerun_url::Union{Nothing,String}
+end
+function Base.showerror(io::IO, e::OperationStalled)
+    print(io, e.label, " has been running for ", _human_seconds(e.elapsed),
+          ", longer than its ", _human_seconds(e.bound), " stall bound, so ",
+          "this page stopped waiting for it. The computation was not cancelled ",
+          "and may still finish in the background. ")
+    if e.rerun_url === nothing
+        print(io, "The ", e.verb, " submission was not repeated; reload to see ",
+              "the current state.")
+    else
+        print(io, "Run again starts a fresh computation with the same arguments.")
+    end
+end
+
+function _human_seconds(t::Real)
+    s = floor(Int, t)
+    s < 60 && return "$(s) s"
+    m, s = divrem(s, 60)
+    m < 60 && return s == 0 ? "$(m) min" : "$(m) min $(s) s"
+    h, m = divrem(m, 60)
+    m == 0 ? "$(h) h" : "$(h) h $(m) min"
+end
+
 function _check_revise_errors!()
     # Both checks: queue errors (Revise tried but failed) and missed edits
     # (FS watcher silently dropped a save). Either condition means the
@@ -6963,11 +7044,13 @@ function _invoke_error_handler(obj, err, uid, path)
     _default_error_render(uid, path)
 end
 
-# Caller-facing faults render their message under a plain title instead of
-# the server-fault error page.
+# Faults whose message is written for the reader — caller faults, and a
+# stalled operation — render it under a plain title instead of the
+# server-fault error page.
 _caller_fault_title(::Union{MissingRequiredParam,InvalidDomainValue}) =
     "Bad Request"
 _caller_fault_title(::OperationResultUnavailable) = "Result unavailable"
+_caller_fault_title(::OperationStalled) = "Operation stalled"
 _caller_fault_title(_err) = nothing
 
 """
@@ -6993,6 +7076,7 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 _error_status_code(err) = _unwrapped_status_code(unwrap_error(err))
 _unwrapped_status_code(::Union{MissingRequiredParam,InvalidDomainValue}) = 400
 _unwrapped_status_code(::OperationResultUnavailable) = 410
+_unwrapped_status_code(::OperationStalled) = 504
 _unwrapped_status_code(_err) = 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
@@ -7010,12 +7094,16 @@ function _stamp_error_id(resp::HTTP.Response, uid)
     resp
 end
 
-function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
+# `wrap` shapes the rendered failure for whatever receives it — a live poller
+# needs it inside its terminal node (`OperationStalled`, Treebars extension).
+function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[],
+        wrap=identity)
     uid, path = _record_error(err, bt, req)
     _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _passthrough_response(err_val)
     isnothing(direct) || return _stamp_error_id(direct, uid)
+    err_val = wrap(err_val)
     if wants_markdown(req)
         return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val)), err), uid)
     end
@@ -8255,12 +8343,15 @@ mutable struct _OperationPollEntry
     # `_runtime_operation_started!`); retaining hands it to a watcher.
     job::Any
     terminal_ready::Bool
+    # The root's stall bound when this operation started (`OperationPolicy`
+    # `stall_after` / `queued_stall_after`); `nothing` = unbounded.
+    stall_after::Union{Nothing,Float64}
 end
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job) =
     _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
-        error_obj, request, created_at, touched_at, job, false)
+        error_obj, request, created_at, touched_at, job, false, nothing)
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at) =
@@ -8705,6 +8796,20 @@ function _take_preload(req::HTTP.Request, signature)
     entry
 end
 
+# A resumed poll reports how long its operation has been running, so a client
+# can bound its own polling (`OperationPolicy` `stall_after` is the server's).
+function _stamp_operation_age(req::HTTP.Request, resp::HTTP.Response)
+    age = get(req.context, :htmxo_operation_age, nothing)
+    age === nothing && return resp
+    hdrs = Pair{String,String}[String(k) => String(v) for (k, v) in resp.headers
+                               if lowercase(String(k)) != "x-htmxo-operation-age"]
+    push!(hdrs, "X-HTMXO-Operation-Age" => string(floor(Int, age)))
+    HTTP.Response(resp.status, hdrs; body=resp.body)
+end
+
+_stamp_operation_headers(req::HTTP.Request, resp::HTTP.Response) =
+    _stamp_operation_age(req, _stamp_preload(req, resp))
+
 # A preload response that finished in time becomes reusable by the browser,
 # unless the route already chose its own caching.
 function _stamp_preload(req::HTTP.Request, resp::HTTP.Response)
@@ -9006,9 +9111,45 @@ function _operation_ready_probe(policy::OperationPolicy, render_result,
     _operation_ready_terminal(render_result, started)
 end
 
+# A still-running operation past its stall bound (`OperationPolicy`
+# `stall_after`): the failure its next poll answers, with the poll request that
+# receives it. The Treebars extension answers it only when the poll would
+# otherwise emit the running poller — an operation that finished or failed
+# answers its own result however long it took. `nothing` within the bound.
+function _operation_stall(entry::_OperationPollEntry, age::Real, descriptor,
+        name::Symbol, verb_inst, req::HTTP.Request, prefix)
+    bound = entry.stall_after
+    (bound === nothing || age <= bound) && return nothing
+    # A mutation is never re-submitted; a read can be run again from its URL.
+    rerun_url = _mutation_poll_entry(entry) ? nothing :
+        _operation_unmarked_url(_operation_request_url(req, prefix))
+    (; error=OperationStalled(_runtime_operation_label(descriptor, name),
+                              _verb_symbol(verb_inst), Float64(age), bound,
+                              rerun_url),
+       req)
+end
+
+# A read operation's URL without the transport's markers: the GET a fresh
+# request of the same operation issues. Other parameters keep their bytes.
+const _OPERATION_TRANSPORT_PARAMS =
+    ("__htmxo_poll", "__htmxo_operation", "__htmxo_page_load")
+
+function _operation_unmarked_url(target::AbstractString)
+    qi = findfirst('?', target)
+    isnothing(qi) && return String(target)
+    path = target[1:prevind(target, qi)]
+    kept = filter(split(target[nextind(target, qi):end], '&')) do part
+        !isempty(part) &&
+            !(first(split(part, '='; limit=2)) in _OPERATION_TRANSPORT_PARAMS)
+    end
+    isempty(kept) ? String(path) : string(path, '?', join(kept, '&'))
+end
+
 function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
     _runtime_job_polled!(req, entry.started)
+    age = _operation_poll_now() - entry.created_at
+    req.context[:htmxo_operation_age] = age
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
@@ -9038,6 +9179,8 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         grace_period=0.0,
         retain=() -> nothing,
         cleanup=() -> _delete_operation_poll!(token),
+        stalled=_operation_stall(entry, age, descriptor, name, verb_inst, req,
+                                 prefix),
     )
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -9087,6 +9230,7 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
     entry = _OperationPollEntry(
         token, signature, prop, keys, call_kwargs, started,
         target.leaf, req, now, now, job)
+    entry.stall_after = _operation_stall_after(policy, queued)
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
@@ -9219,6 +9363,7 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
             error_obj, req, now, now, job)
+        entry.stall_after = _operation_stall_after(policy, queued)
         _retain_operation!(entry, descriptor, name; track=queued)
         return _operation_page_load(
             req, prefix; replace_terminal=!_operation_treebars_keep(policy),
@@ -9261,6 +9406,7 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
         entry = _OperationPollEntry(
             token, signature, prop, keys, call_kwargs, started,
             error_obj, req, now, now, job)
+        entry.stall_after = _operation_stall_after(policy, queued)
         page_load_id = _operation_page_load_id(req)
         transport = (poll_url=_operation_poll_url(req, token, prefix, verb_inst),
                      label=_operation_poll_label(descriptor, name),
@@ -9448,10 +9594,10 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
-                return _stamp_preload(req, _resolve_response_nested(page_chain, req, val;
+                return _stamp_operation_headers(req, _resolve_response_nested(page_chain, req, val;
                                                 root, record_dir, save_path, record_base))
             else
-                return _stamp_preload(req, _resolve_response(leaf, req, val;
+                return _stamp_operation_headers(req, _resolve_response(leaf, req, val;
                                                 record_dir, save_path, record_base))
             end
         catch err

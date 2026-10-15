@@ -101,16 +101,51 @@ function _operation_treebars_kwargs(call_kwargs, transport,
     treebars_tracks_jobs ? merge(kwargs, (; track_job=false)) : kwargs
 end
 
+# Treebars answers a still-running operation with its live poller wrapper
+# (`div.treebar-poller`); a finished or failed one answers `div.treebar-terminal`.
+_running_poller(node::HTMXObjects.Node) =
+    get(HTMXObjects.HTMX.attrs(node), :class, nothing) == "treebar-poller"
+_running_poller(_response) = false
+
 # The framework-generated auto poll URL already holds the operation's captured
 # arguments. Keep htmx from adding ancestor hx-vals, hx-include, or form fields
 # to that URL on each poll. Hand-shaped Treebars pollers retain their normal
 # inheritance, including their current-arguments recovery behavior.
-function _isolate_auto_poll_params(node::HTMXObjects.Node)
-    get(HTMXObjects.HTMX.attrs(node), :class, nothing) == "treebar-poller" ||
-        return node
-    node(; hx_params="none")
+_isolate_auto_poll_params(response) =
+    _running_poller(response) ? response(; hx_params="none") : response
+
+# A stalled operation's poll answers `OperationStalled` through the route error
+# pipeline (error log, hooks, `X-HTMXO-Error-Id`), inside the terminal shape
+# Treebars gives a failed operation, so the live poller selects it, stops and
+# terminalizes: the failure, the open progress tree of what was still running,
+# and — for a read — a Run again button that replaces this terminal content with
+# a fresh request of the operation (it targets the content node it sits in, so
+# it works whether or not the page runs Treebars' client finalizer). The
+# registry entry goes: nothing polls it again.
+function _operation_stalled_response(stall, ip, keys, call_kwargs, transport)
+    transport.cleanup()
+    status = try
+        HTMXObjects.getstatus(ip, keys...; call_kwargs...)
+    catch err
+        @debug "HTMXObjects: no progress status for a stalled operation" exception=(err, catch_backtrace())
+        nothing
+    end
+    tree = isnothing(status) ? "" :
+        HTMXObjects.h.details(class="treebar-frozen", open=true)(
+            HTMXObjects.h.summary("Progress"),
+            Treebars.htmx_render(status; scoped=true))
+    rerun = stall.error.rerun_url === nothing ? "" :
+        HTMXObjects.h.p(HTMXObjects.h.button("Run again"; type="button",
+            class="htmxo-operation-rerun", hx_get=stall.error.rerun_url,
+            hx_target="closest .treebar-terminal-content",
+            hx_swap="outerHTML",
+            hx_params="none"))
+    HTMXObjects._route_error_response(stall.req, stall.error, backtrace();
+        error_obj=transport.error_obj,
+        wrap=failure -> HTMXObjects.h.div(class="treebar-terminal")(
+            HTMXObjects.h.div(class="treebar-terminal-content")(failure, tree,
+                                                                rerun)))
 end
-_isolate_auto_poll_params(response) = response
 
 function _operation_render_result(render_result, value, transport)
     rendered = render_result(value)
@@ -231,6 +266,12 @@ function __init__()
                     HTMXObjects._operation_terminal_headers(finalized_terminal[]);
                     body=HTMXObjects._message_body_bytes(html))
             end
+            # Past its stall bound, an operation that would still answer the
+            # running poller answers `OperationStalled` instead.
+            stall = get(transport, :stalled, nothing)
+            stall !== nothing && _running_poller(responded) &&
+                return _operation_stalled_response(stall, ip, keys,
+                                                   call_kwargs, transport)
             _isolate_auto_poll_params(responded)
         end
 
