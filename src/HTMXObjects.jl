@@ -4693,16 +4693,19 @@ const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 Answer `req` with an HTTP redirect to `location`, typically a moved or aliased
 route sending every visitor to its canonical URL:
 
-    @get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
+    @direct @get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
 
 Build `location` with `__self__/"…"`: that URL carries the mount prefix,
 including one a reverse proxy announces through `X-Forwarded-Prefix`, so the
 redirect stays inside the app behind the KB's `/p/<App>` proxy. A bare
 `"/name"` addresses the server root.
 
-The same answer serves every kind of request. A browser follows the
-`Location` for a direct load. htmx's request follows it as well and swaps the
-new route's fragment into the original target with the original swap. When
+Use `@direct` when the route must return the HTTP redirect status and headers
+on its first request. Under the default `:auto` transport, a cold HTML load
+may answer with a page shell while the route finishes in the background.
+With inline transport, a browser follows the `Location` for a direct load.
+htmx's request follows it as well and swaps the new route's fragment into the
+original target with the original swap. When
 that request records history, the [`htmx`](@ref) shell's
 [`redirect_history_script`](@ref) records the new URL, so the address bar
 and bookmarks show the canonical URL. `?plain`/Markdown and `?error`
@@ -4715,9 +4718,8 @@ requests keep those parameters and are redirected too.
   the new route); parameters `location` already names keep `location`'s
   values. `query=false` sends exactly `location`.
 
-The body is a one-line `text/plain` note naming the new URL. A redirect
-answers inline; one that reaches an `:auto` poller instead navigates the page
-with `HX-Redirect`.
+The body is a one-line `text/plain` note naming the new URL. A redirect that
+reaches an `:auto` poller navigates the page with `HX-Redirect`.
 """
 function redirect_to(req::HTTP.Request, location::AbstractString;
         status::Integer=303, query::Bool=true)

@@ -74,7 +74,7 @@ When a page moves, keep its old route as a redirect so bookmarks, old links
 and the address bar all end on one URL:
 
 ```julia
-@get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
+@direct @get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
 ```
 
 `redirect_to` answers `303 See Other` with a `Location` built from
@@ -86,8 +86,10 @@ location's values, and `query=false` sends the location as given. `status=`
 accepts `301`, `302`, `303`, `307` or `308`; `301`/`308` are permanent and may
 be cached by browsers.
 
-The same answer serves both request kinds. A browser follows it for a direct
-load. htmx's own request follows it too, keeps `HX-Request`, and swaps the
+`@direct` makes the first request return the redirect status and headers.
+Without it, the default `:auto` transport may return a page-load shell when a
+cold HTML request outlasts the grace period. A browser follows the redirect for
+a direct load. htmx's own request follows it too, keeps `HX-Request`, and swaps the
 new route's fragment into the original target with the original swap, so a
 lazily loaded fragment stays in place. A link whose `hx-push-url` (or
 `hx-replace-url`) names the requested URL — as [`nav_sidebar`](@ref)'s links
@@ -98,7 +100,7 @@ do — would still record the old URL; the [`htmx`](@ref) shell's
 `hx_response(...; redirect=, location=)` sets only htmx response headers,
 which a direct browser load ignores, so it cannot move a route.
 
-A redirect answers inline. If one reaches an `:auto` poller instead (its
+A `@direct` redirect answers inline. If one reaches an `:auto` poller instead (its
 route was slower than the grace period), the poll's terminal response carries
 `HX-Redirect` to the same location, so the page navigates there.
 

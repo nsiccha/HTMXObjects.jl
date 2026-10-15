@@ -8,7 +8,7 @@
     @htmx struct RedirectApp
         __page__(content) = htmx(h.main(content))
         "Old address of the review page"
-        @get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
+        @direct @get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
         "Old address that names its own year"
         @get legacy() = redirect_to(__req__, __self__/"transaction_review_all?year=1999")
         "Old address that drops the query"
@@ -77,6 +77,8 @@ end
 @testitem "a moved route redirects every request kind to its prefixed address" setup=[RedirectFixtures] tags=[:unit] begin
     using HTMXObjects, HTTP
     route!(RedirectApp())
+    # This route declares inline transport so a cold HTML navigation still
+    # returns the redirect status instead of an :auto page-load shell.
     direct = dispatch(:GET, "/transactions?year=2025"; headers=["Accept" => "text/html"])
     @test direct.status == 303
     @test HTTP.header(direct, "Location") == "/transaction_review_all?year=2025"
