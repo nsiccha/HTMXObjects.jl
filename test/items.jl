@@ -2814,6 +2814,29 @@ end
                                     hx, Verb{:GET}(); direct=true) === :blocking
     @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
                                     hx, Verb{:GET}(); direct=true) === :blocking
+    # The transport is chosen after content negotiation: a Markdown or
+    # `?error` answer cannot carry a poller's continuation, so it is answered
+    # inline under every policy, `HX-Request` or not (snag
+    # `markdown-negotia-5b39d614`).
+    inline_reads = (
+        HTTP.Request("GET", "/html?count=2&plain", ["HX-Request" => "true"]),
+        HTTP.Request("GET", "/html?count=2&markdown", ["HX-Request" => "true"]),
+        HTTP.Request("GET", "/html?count=2",
+                     ["HX-Request" => "true", "Accept" => "text/markdown"]),
+        HTTP.Request("GET", "/html?count=2",
+                     ["HX-Request" => "true", "Accept" => "text/plain"]),
+        HTTP.Request("GET", "/html?count=2&error", ["HX-Request" => "true"]),
+        HTTP.Request("GET", "/html?count=2&plain"),
+    )
+    for request in inline_reads,
+            policy in (OperationPolicy(:auto), OperationPolicy(:polling))
+        @test _operation_execution_mode(policy, html_descriptor, request,
+                                        Verb{:GET}()) === :blocking
+        @test _operation_execution_mode(policy, html_descriptor, request,
+                                        Verb{:GET}(); page_shell=true) === :blocking
+    end
+    @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
+                                    plain, Verb{:GET}()) === :polling
 
     # Neither executor leaks its private `fetch` selector into the route body:
     # the inline one (a non-HTMX request) and the background one (an HTMX
@@ -2909,6 +2932,14 @@ end
     @test _operation_execution_mode(OperationPolicy(:auto),
                                     post_exchange.property, swapping,
                                     Verb{:POST}(); direct=true) === :blocking
+    markdown_swapping = HTTP.Request("POST", "/exchange",
+        ["HX-Request" => "true", "HTMXO-Swap" => "outerHTML",
+         "Accept" => "text/markdown"])
+    for policy in (OperationPolicy(:auto), OperationPolicy(:polling))
+        @test _operation_execution_mode(policy, post_exchange.property,
+                                        markdown_swapping,
+                                        Verb{:POST}()) === :blocking
+    end
 
     app = PolicyApp()
     target = (context=nothing, root=app, leaf=app)
