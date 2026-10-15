@@ -2814,6 +2814,29 @@ end
                                     hx, Verb{:GET}(); direct=true) === :blocking
     @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
                                     hx, Verb{:GET}(); direct=true) === :blocking
+    # The transport is chosen after content negotiation: a Markdown or
+    # `?error` answer cannot carry a poller's continuation, so it is answered
+    # inline under every policy, `HX-Request` or not (snag
+    # `markdown-negotia-5b39d614`).
+    inline_reads = (
+        HTTP.Request("GET", "/html?count=2&plain", ["HX-Request" => "true"]),
+        HTTP.Request("GET", "/html?count=2&markdown", ["HX-Request" => "true"]),
+        HTTP.Request("GET", "/html?count=2",
+                     ["HX-Request" => "true", "Accept" => "text/markdown"]),
+        HTTP.Request("GET", "/html?count=2",
+                     ["HX-Request" => "true", "Accept" => "text/plain"]),
+        HTTP.Request("GET", "/html?count=2&error", ["HX-Request" => "true"]),
+        HTTP.Request("GET", "/html?count=2&plain"),
+    )
+    for request in inline_reads,
+            policy in (OperationPolicy(:auto), OperationPolicy(:polling))
+        @test _operation_execution_mode(policy, html_descriptor, request,
+                                        Verb{:GET}()) === :blocking
+        @test _operation_execution_mode(policy, html_descriptor, request,
+                                        Verb{:GET}(); page_shell=true) === :blocking
+    end
+    @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
+                                    plain, Verb{:GET}()) === :polling
 
     # Neither executor leaks its private `fetch` selector into the route body:
     # the inline one (a non-HTMX request) and the background one (an HTMX
@@ -2909,6 +2932,14 @@ end
     @test _operation_execution_mode(OperationPolicy(:auto),
                                     post_exchange.property, swapping,
                                     Verb{:POST}(); direct=true) === :blocking
+    markdown_swapping = HTTP.Request("POST", "/exchange",
+        ["HX-Request" => "true", "HTMXO-Swap" => "outerHTML",
+         "Accept" => "text/markdown"])
+    for policy in (OperationPolicy(:auto), OperationPolicy(:polling))
+        @test _operation_execution_mode(policy, post_exchange.property,
+                                        markdown_swapping,
+                                        Verb{:POST}()) === :blocking
+    end
 
     app = PolicyApp()
     target = (context=nothing, root=app, leaf=app)
@@ -10131,6 +10162,89 @@ end
     @test r3.read_blob("HEAD:g.md") == "v1"
     ed3.write!("v2"; version=ed3.current_version())
     @test r3.read_blob("HEAD:g.md") == "v2"
+end
+
+@testitem "GitRepo editor writes never expose a partial file to a plain reader" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: GitRepo
+
+    # A store reads its files with plain `read`/`YAML.load_file` while another
+    # request writes them through the editor. The writes used to truncate and
+    # rewrite in place, so such a reader saw a cut-off document (snag
+    # `gitrepo-editor-w-0ed7cd16`: a 360 KB YAML record ended mid-scalar).
+    dir = mktempdir()
+    ed = GitRepo(dir).editor("docs/record.yml")
+    abs = joinpath(dir, "docs", "record.yml")
+    contents = ["key: \"" * repeat(c, 200_000) * "\"\n" for c in ("a", "b", "c")]
+    @test first(ed.update!(_ -> contents[1]; message="seed")) === :ok
+    # No temp file is left beside the record.
+    @test readdir(dirname(abs)) == ["record.yml"]
+
+    # The file is REPLACED, not rewritten: a reader that opened it before a
+    # write still reads the complete old content, and the next open reads the
+    # complete new content. A rewrite in place shows the held reader the new
+    # bytes, or a prefix of them. (Windows refuses to replace a file while a
+    # handle holds it open, so this check is POSIX-only.)
+    if !Sys.iswindows()
+        old = open(abs)
+        try
+            @test first(ed.update!(_ -> contents[2]; message="update!")) === :ok
+            @test read(old, String) == contents[1]
+        finally
+            close(old)
+        end
+        @test read(abs, String) == contents[2]
+        old = open(abs)
+        try
+            @test first(ed.write!(contents[3]; version=ed.current_version(),
+                                  message="write!")) === :ok
+            @test read(old, String) == contents[2]
+        finally
+            close(old)
+        end
+        @test read(abs, String) == contents[3]
+
+        # A replaced file keeps its permission bits.
+        chmod(abs, 0o640)
+        ed.update!(_ -> contents[1])
+        @test filemode(abs) & 0o777 == 0o640
+    end
+    @test readdir(dirname(abs)) == ["record.yml"]
+    @test length(ed.versions()) == (Sys.iswindows() ? 1 : 4)
+
+    # Concurrent plain readers during a stream of writes see only complete
+    # contents. Needs a second thread: on one, no reader runs mid-write.
+    if Threads.nthreads() > 1
+        ok = Set(contents)
+        stop = Threads.Atomic{Bool}(false)
+        reads = Threads.Atomic{Int}(0)
+        torn = Threads.Atomic{Int}(0)
+        readers = [Threads.@spawn begin
+            while !stop[]
+                s = read(abs, String)
+                Threads.atomic_add!(reads, 1)
+                s in ok || Threads.atomic_add!(torn, 1)
+            end
+        end for _ in 1:2]
+        try
+            for i in 1:60
+                c = contents[mod1(i, 3)]
+                isodd(i) ? ed.update!(_ -> c; message="u$i") :
+                           ed.write!(c; version=ed.current_version(), message="w$i")
+            end
+        finally
+            stop[] = true
+            foreach(wait, readers)
+        end
+        @test reads[] > 0
+        @test torn[] == 0
+    end
+
+    # A replacement that fails propagates and removes its temp file.
+    blocked = joinpath(dir, "blocked")
+    mkpath(joinpath(blocked, "inner"))
+    @test_throws Exception HTMXObjects._replace_file!(blocked, "x")
+    @test isdir(joinpath(blocked, "inner"))
+    @test !any(endswith(".tmp"), readdir(dir))
 end
 
 @testitem "warmup - exported in-process reflect inventory" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin

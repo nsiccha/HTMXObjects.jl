@@ -10,24 +10,6 @@ import HTMXObjects
 import HTTP
 import Treebars
 
-function _grace_fetch(render_result, started, grace_period)
-    rv = started
-    grace_started = time_ns()
-    # A route may finish by returning another Pending. Follow that chain only
-    # inside the original grace budget; rendering an unresolved inner handle
-    # would synchronously fetch it and hold the request open.
-    while rv isa HTMXObjects._OperationHandle
-        elapsed = (time_ns() - grace_started) / 1.0e9
-        remaining = grace_period - elapsed
-        remaining > 0 || return (ready=false, value=nothing)
-        outcome = timedwait(() -> isready(rv), remaining;
-                            pollint=min(0.005, remaining))
-        outcome === :ok || return (ready=false, value=nothing)
-        rv = fetch(rv)
-    end
-    (ready=true, value=render_result(rv))
-end
-
 function _operation_ready_terminal(render_result, started)
     value = started
     while value isa HTMXObjects._OperationHandle
