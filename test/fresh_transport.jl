@@ -527,7 +527,7 @@ end
     foreach(release_fresh!, keys(targets))
 
     headers = settle_response(targets[:headers])
-    @test headers.status == 200
+    @test headers.status == 286
     @test HTTP.header(headers, "HX-Trigger") == "fresh-done"
     body = body_text(headers)
     @test contains(body, "treebar-terminal-content")
@@ -539,9 +539,10 @@ end
     empty!(replayed_headers.headers)
     @test HTTP.header(hx_get(targets[:headers]), "HX-Trigger") == "fresh-done"
 
-    # A 204 would not swap: the poller still receives its (empty) terminal.
+    # A 204 would not swap: the poller still receives its (empty) terminal,
+    # with the stop-polling status that ends every poll.
     nocontent = settle_response(targets[:nocontent])
-    @test nocontent.status == 200
+    @test nocontent.status == 286
     @test contains(body_text(nocontent), "treebar-terminal-content")
 
     # Any other status retires the poller with an error article.
@@ -567,7 +568,7 @@ end
     release_fresh!(:redirect)
     redirected = settle_response(target)
     redirected_body = body_text(redirected)
-    @test redirected.status == 200
+    @test redirected.status == 286
     @test HTTP.header(redirected, "HX-Redirect") == "/created"
     @test contains(redirected_body, "Created")
     @test contains(redirected_body, "treebar-terminal")
@@ -582,11 +583,11 @@ end
                    for key in (:nocontent, :conflict))
     foreach(release_fresh!, keys(targets))
     nocontent = settle_response(targets[:nocontent])
-    @test nocontent.status == 200
+    @test nocontent.status == 286
     @test contains(body_text(nocontent), "treebar-terminal-content")
     @test !contains(body_text(nocontent), "HTTP/1.1")
     conflict = settle_response(targets[:conflict])
-    @test conflict.status == 200
+    @test conflict.status == 286
     @test contains(body_text(conflict), "HTTP 409")
     @test contains(body_text(conflict), "<p>conflict</p>")
     @test !contains(body_text(conflict), "HTTP/1.1")
@@ -1177,6 +1178,13 @@ end
         window.addEventListener('error', function(event) {
           fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
         });
+        // htmx arms a swapped-in poller when it settles (20 ms after the swap):
+        // only a poller that has polled once carries the timer a morph strands.
+        let polled = 0;
+        document.addEventListener('htmx:afterRequest', function(event) {
+          const path = (event.detail.requestConfig || {}).path || '';
+          if (path.includes('__htmxo_poll=1')) polled++;
+        });
         """
         # The shell: a slow submission's poller, morphed while one of its polls
         # is held in flight.
@@ -1212,7 +1220,8 @@ end
           try {
             htmx.ajax('POST', '/browser_save', {target: '#panel', swap: 'innerHTML',
               values: {note: 'bare'}, headers: {'HTMXO-Swap': 'innerHTML'}});
-            await until(() => panel.querySelector('.treebar-poller-inner'), 'panel poller');
+            await until(() => panel.querySelector('.treebar-poller-inner') && polled > 0,
+                        'panel poller');
             morphAway(panel.querySelector('.treebar-poller-inner'));
             await fetch('/mark?m=morphed');
             await sleep(600);
