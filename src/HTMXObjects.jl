@@ -8133,10 +8133,13 @@ _operation_running_answer(_value) = false
 # refresh's terminal) can keep a running poller's node while turning it into
 # other content. htmx keeps that node's `every` trigger, and nothing swapped
 # in can retire it, so without 286 it polls the spent token for as long as the
-# page is open (snag mutation-poller-4f9123b0).
+# page is open (snag mutation-poller-4f9123b0). A Markdown or `?error` read of
+# a poll URL is answered inline to a reader, not into a poller
+# (`_operation_inline_representation`), and keeps its status.
 function _stamp_poll_end(req::HTTP.Request, resp::HTTP.Response, running::Bool)
     (!running && resp.status == 200 && is_htmx(req) &&
-        _operation_poll_request(req)) || return resp
+        _operation_poll_request(req) &&
+        !_operation_inline_representation(req)) || return resp
     HTTP.Response(286, resp.headers; body=resp.body)
 end
 

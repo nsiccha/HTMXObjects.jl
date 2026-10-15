@@ -1879,7 +1879,8 @@ htmx drops the stale trigger. A region that a morph replaced keeps what the
 morph rendered, as it would after a plain swap; the operation itself still
 finishes on the server. A request that is not an HTMX poll keeps its status:
 `curl` of a poll URL gets `200` for a result and `410` for an unavailable
-token.
+token. So does a Markdown or `?error` read of a poll URL, `HX-Request` or not:
+it is answered inline to its reader, not into a poller.
 
 #### Operations that never finish
 
