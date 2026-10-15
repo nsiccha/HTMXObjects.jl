@@ -83,18 +83,13 @@ function _operation_treebars_kwargs(call_kwargs, transport,
     treebars_tracks_jobs ? merge(kwargs, (; track_job=false)) : kwargs
 end
 
-# Treebars answers a still-running operation with its live poller wrapper
-# (`div.treebar-poller`); a finished or failed one answers `div.treebar-terminal`.
-_running_poller(node::HTMXObjects.Node) =
-    get(HTMXObjects.HTMX.attrs(node), :class, nothing) == "treebar-poller"
-_running_poller(_response) = false
-
 # The framework-generated auto poll URL already holds the operation's captured
 # arguments. Keep htmx from adding ancestor hx-vals, hx-include, or form fields
 # to that URL on each poll. Hand-shaped Treebars pollers retain their normal
 # inheritance, including their current-arguments recovery behavior.
 _isolate_auto_poll_params(response) =
-    _running_poller(response) ? response(; hx_params="none") : response
+    HTMXObjects._operation_running_answer(response) ?
+        response(; hx_params="none") : response
 
 # A stalled operation's poll answers `OperationStalled` through the route error
 # pipeline (error log, hooks, `X-HTMXO-Error-Id`), inside the terminal shape
@@ -251,7 +246,7 @@ function __init__()
             # Past its stall bound, an operation that would still answer the
             # running poller answers `OperationStalled` instead.
             stall = get(transport, :stalled, nothing)
-            stall !== nothing && _running_poller(responded) &&
+            stall !== nothing && HTMXObjects._operation_running_answer(responded) &&
                 return _operation_stalled_response(stall, ip, keys,
                                                    call_kwargs, transport)
             _isolate_auto_poll_params(responded)

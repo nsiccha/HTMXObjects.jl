@@ -6064,8 +6064,11 @@ transport actually *delivers*, not merely that it engages.
         handler = first(HTTP.Handlers.gethandler(router, request))
         @test handler !== HTTP.Handlers.default404
         response = handler(request)
-        @test response.status == 200
-        String(response.body)
+        body = String(response.body)
+        # A poll's last answer carries the stop-polling status 286.
+        @test response.status == (contains(target, "__htmxo_poll=1") &&
+            !contains(body, "hx-trigger=\"every ") ? 286 : 200)
+        body
     end
 
     # Either the catalog scan beat the grace period, or we get a poller whose
@@ -9364,8 +9367,11 @@ end # @testmodule HTMXOPollIdentityFixtures
             HTMXObjects.ROUTER, request))
         @test handler !== HTTP.Handlers.default404
         response = handler(request)
-        @test response.status == 200
-        String(response.body)
+        body = String(response.body)
+        # A poll's last answer carries the stop-polling status 286.
+        @test response.status == (contains(target, "__htmxo_poll=1") &&
+            !contains(body, "hx-trigger=\"every ") ? 286 : 200)
+        body
     end
 
     running(body) = contains(body, "hx-trigger=\"every ")
@@ -10364,7 +10370,8 @@ end
         prewarm_routes!(WarmupOperationApp, base; operations=true, include_post=true)
         rows = prewarm_routes!(WarmupOperationApp, base; operations=true,
                                include_post=true)
-        @test all(r -> r.status == 200 && r.error === nothing, rows)
+        # A deferred answer ends with its poll's stop-polling status 286.
+        @test all(r -> r.status in (200, 286) && r.error === nothing, rows)
         by = Dict((r.name, r.transport) => r for r in rows)
         @test Set(keys(by)) == Set([
             (:read, :plain), (:read, :htmx), (:read, :page),

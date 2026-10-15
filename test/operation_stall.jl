@@ -154,7 +154,7 @@ end
     age_operations!(601)
     stalled = hx_get(url)
     body = body_text(stalled)
-    @test stalled.status == 200
+    @test stalled.status == 286
     @test !isempty(HTTP.header(stalled, "X-HTMXO-Error-Id", ""))
     @test operation_age(stalled) >= 601
     @test !running(body)

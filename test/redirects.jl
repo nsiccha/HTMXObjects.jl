@@ -122,7 +122,7 @@ end
     @test startswith(target, "/p/Invoices/slow_moved?")
     notify(redirect_gate[])
     terminal = settle_response(chopprefix(target, "/p/Invoices"); headers=proxy)
-    @test terminal.status == 200
+    @test terminal.status == 286
     @test HTTP.header(terminal, "HX-Redirect") == "/p/Invoices/transaction_review_all?year=2025"
     @test !HTTP.hasheader(terminal, "Location")
     @test HTTP.header(terminal, "Content-Type") == "text/html; charset=utf-8"

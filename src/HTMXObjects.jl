@@ -6821,7 +6821,7 @@ A poll asked for the result of a mutation submission (`POST`/`PUT`/`PATCH`/
 operation registry expired or evicted it, or the poll token does not name an
 operation of this route. The submission ran at most once; it is never re-run to
 recover the response. Answers `410 Gone` (an HTMX poll receives the error
-article, which retires the poller).
+article with htmx's stop-polling status `286`, which ends the poll).
 """
 struct OperationResultUnavailable <: Exception
     route::Symbol
@@ -7116,7 +7116,9 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     if wants_markdown(req)
         return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val)), err), uid)
     end
-    is_htmx(req) && return _stamp_error_id(to_response(err_val), uid)   # always 200 for HTMX
+    # Always 200 for HTMX, except that an operation poll's error ends the poll.
+    is_htmx(req) &&
+        return _stamp_error_id(_stamp_poll_end(req, to_response(err_val), false), uid)
     for obj in reverse(page_chain)
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
@@ -8098,10 +8100,9 @@ _operation_terminal_ok(resp::HTTP.Response) =
 # Headers that make htmx apply an answer somewhere other than the element that
 # requested it (`HX-Retarget`, `HX-Reswap`, `HX-Reselect`), or not swap it at
 # all (`HX-Location`). On a poll terminal they move the answer away from the
-# poller, so the poller and its `every` trigger would stay in place and poll
-# the spent token forever. Such a terminal answers htmx's stop-polling status
-# 286 (still a swapping 2xx), and the shell's `auto_terminal_script` applies it
-# the way the original request would have.
+# poller, so the poller stays in place: like every answer that ends a poll it
+# carries the stop-polling status 286 (`_stamp_poll_end`), and the shell's
+# `auto_terminal_script` applies it the way the original request would have.
 const _OPERATION_SWAP_REDIRECT_HEADERS =
     ("hx-retarget", "hx-reswap", "hx-reselect", "hx-location")
 
@@ -8114,8 +8115,32 @@ function _operation_finalized_terminal(resp::HTTP.Response)
     inner = _operation_terminal_ok(resp) ?
         "<div class=\"treebar-poller-inner treebar-terminal-content\" " *
             "data-htmxo-auto-terminal=\"\">" * body * "</div>" : body
-    status = _operation_redirects_swap(resp) ? 286 : 200
-    HTTP.Response(status, _operation_terminal_headers(resp); body=inner)
+    HTTP.Response(200, _operation_terminal_headers(resp); body=inner)
+end
+
+# Treebars answers a still-running operation with its live poller wrapper
+# (`div.treebar-poller`). Every other answer to a poll ends it.
+_operation_running_answer(node::Node) =
+    get(HTMX.attrs(node), :class, nothing) == "treebar-poller"
+_operation_running_answer(_value) = false
+
+# An HTMX operation poll answered by anything but the running poller — the
+# result, a failure, a stall, a replayed mutation terminal, an unavailable
+# token, any route error — answers htmx's stop-polling status 286 (still a
+# swapping 2xx). htmx then cancels polling on the element that sent the poll.
+# A live poller is replaced by that answer anyway; 286 also stops an element
+# that is no longer the poller. A morph swap (`hx-swap="morph:*"`, the live
+# refresh's terminal) can keep a running poller's node while turning it into
+# other content. htmx keeps that node's `every` trigger, and nothing swapped
+# in can retire it, so without 286 it polls the spent token for as long as the
+# page is open (snag mutation-poller-4f9123b0). A Markdown or `?error` read of
+# a poll URL is answered inline to a reader, not into a poller
+# (`_operation_inline_representation`), and keeps its status.
+function _stamp_poll_end(req::HTTP.Request, resp::HTTP.Response, running::Bool)
+    (!running && resp.status == 200 && is_htmx(req) &&
+        _operation_poll_request(req) &&
+        !_operation_inline_representation(req)) || return resp
+    HTTP.Response(286, resp.headers; body=resp.body)
 end
 
 function _operation_has_page_shell(target)
@@ -8830,8 +8855,9 @@ function _stamp_operation_age(req::HTTP.Request, resp::HTTP.Response)
     HTTP.Response(resp.status, hdrs; body=resp.body)
 end
 
-_stamp_operation_headers(req::HTTP.Request, resp::HTTP.Response) =
-    _stamp_operation_age(req, _stamp_preload(req, resp))
+_stamp_operation_headers(req::HTTP.Request, resp::HTTP.Response, running::Bool) =
+    _stamp_poll_end(req, _stamp_operation_age(req, _stamp_preload(req, resp)),
+                    running)
 
 # A preload response that finished in time becomes reusable by the browser,
 # unless the route already chose its own caching.
@@ -9645,6 +9671,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                                        preload, direct, queued)
             val = operation.value
             val === _PRELOAD_SKIPPED && return _preload_skipped_response()
+            running = _operation_running_answer(val)
 
             # The request target is the authoritative external route. Rebuilding
             # it from `chain` loses indexed mount values because chain entries
@@ -9655,10 +9682,12 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
                 return _stamp_operation_headers(req, _resolve_response_nested(page_chain, req, val;
-                                                root, record_dir, save_path, record_base))
+                                                root, record_dir, save_path, record_base),
+                                                running)
             else
                 return _stamp_operation_headers(req, _resolve_response(leaf, req, val;
-                                                record_dir, save_path, record_base))
+                                                record_dir, save_path, record_base),
+                                                running)
             end
         catch err
             # Both are export-contract failures the caller must see at the
@@ -18436,6 +18465,16 @@ where the headers say, or in the original target with the original swap, and
 the spent poller is removed. An `HX-Retarget` that matches nothing raises
 htmx's `htmx:targetError` and leaves the page as it was before the request.
 
+It also ends a poll whose poller is gone. htmx keeps an `every` trigger on its
+element, and a morph swap (`hx-swap="morph:*"`, including the live refresh's
+terminal) can keep a running poller's element while turning it into other
+content. htmx then still polls from that element, but never re-initializes
+it unless it carries an `hx-*` attribute. A poll whose element no longer names
+that operation in its `hx-get` is cancelled, and the element is re-processed,
+so htmx drops the stale trigger; an answer already in flight is not swapped
+into it. The page keeps what the morph rendered, as it would after a plain
+swap that replaced the poller.
+
 Automatic — no consumer wiring. Include once per page; the `htmx()` shell
 installs it alongside the Treebars assets.
 """
@@ -18523,6 +18562,35 @@ auto_terminal_script() = h.script(Raw(raw"""
         unwrapOne(n, d);
       });
     }
+  });
+
+  // A poll whose element no longer names its operation in `hx-get`: a morph
+  // kept the poller's element as other content, and htmx's `every` timer
+  // outlived the poller. Its next poll is cancelled, and the element is
+  // re-processed after this tick (once htmx has re-armed the timer), so htmx
+  // drops the stale trigger: the element's attributes changed. An answer
+  // already in flight is not swapped into the element either. Registered
+  // before the 286 handling below, which then sees `shouldSwap` false.
+  function operationToken(url) {
+    var m = /[?&]__htmxo_operation=([^&#]+)/.exec(url || '');
+    return m ? m[1] : null;
+  }
+  function stalePoll(elt, path) {
+    if (!elt || !elt.getAttribute || !/[?&]__htmxo_poll=1(&|#|$)/.test(path || '')) return false;
+    var token = operationToken(path);
+    return !!token && operationToken(elt.getAttribute('hx-get')) !== token;
+  }
+  document.addEventListener('htmx:beforeRequest', function(evt) {
+    var d = (evt && evt.detail) || {}, elt = d.elt;
+    if (!stalePoll(elt, d.requestConfig && d.requestConfig.path)) return;
+    evt.preventDefault();
+    setTimeout(function() {
+      if (window.htmx && elt.isConnected) htmx.process(elt);
+    }, 0);
+  });
+  document.addEventListener('htmx:beforeSwap', function(evt) {
+    var d = (evt && evt.detail) || {}, config = d.requestConfig || {};
+    if (stalePoll(config.elt, config.path)) d.shouldSwap = false;
   });
 
   // A poll terminal whose headers send the answer away from the poller

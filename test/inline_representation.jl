@@ -177,6 +177,8 @@ end
     release_inline!(:join)
     response = answered(task)
     body = body_text(response)
+    # Answered to its reader, not into a poller: no stop-polling 286.
+    @test response.status == 200
     @test startswith(HTTP.header(response, "Content-Type"), "text/markdown")
     @test contains(body, "listing-join:1")
     @test !contains(body, "Polling")
