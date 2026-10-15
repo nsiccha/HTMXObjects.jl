@@ -20619,14 +20619,6 @@ function _parse_author(s::AbstractString)
     m === nothing ? (String(s), "noreply@localhost") : (String(m[1]), String(m[2]))
 end
 
-"""
-    GitRepo(; path, author="HTMXObjects <noreply@localhost>")
-
-A `@dynamicstruct` owning a directory managed as a git repo — the backend
-for [`EditorRoutes`](@ref). Auto-`git init`s on first access; mutations
-serialised via a per-instance `ReentrantLock`.
-
-"""
 # --- File-based galleries ---
 
 """
@@ -21192,6 +21184,54 @@ function _parent_shas(repo, sha::AbstractString)
     out
 end
 
+# Replace the file at `path` with `content` without ever exposing a partial
+# file: write a sibling temp file, then rename it over `path`. A concurrent
+# reader opens either the old file or the new one, each complete. Writing in
+# place truncated the file first, so a plain `read`/`YAML.load_file` racing a
+# write saw a cut-off document (snag `gitrepo-editor-w-0ed7cd16`).
+#
+# The temp file sits in the target's directory (a rename is atomic only within
+# one filesystem), is hidden and ends in `.tmp`, so a reader listing `*.yml`
+# or `*.md` never picks one up, and takes over an existing file's permissions.
+function _replace_file!(path::AbstractString, content)
+    dir = dirname(path)
+    mkpath(isempty(dir) ? "." : dir)
+    tmp = joinpath(dir, "." * basename(path) * "." *
+                        Random.randstring(Random.RandomDevice(), 12) * ".tmp")
+    try
+        write(tmp, content)
+        isfile(path) && chmod(tmp, filemode(path) & 0o7777)
+        _rename_over!(tmp, path)
+    catch
+        rm(tmp; force=true)
+        rethrow()
+    end
+    nothing
+end
+
+# rename(2) replaces `dst` atomically on POSIX. Windows refuses to replace a
+# file another handle holds open, Julia's own readers included, so retry there
+# for a few reads' worth of time (≈3 s in all) before the error propagates.
+_rename_over!(src, dst) = Sys.iswindows() ?
+    retry(() -> Base.Filesystem.rename(src, dst);
+          delays=ExponentialBackOff(; n=12, first_delay=0.005, max_delay=0.5, factor=2.0))() :
+    Base.Filesystem.rename(src, dst)
+
+"""
+    GitRepo(path; author="HTMXObjects <noreply@localhost>")
+
+A `@dynamicstruct` owning a directory managed as a git repo — the backend
+for [`EditorRoutes`](@ref). Auto-`git init`s on first access.
+
+`editor(relpath; default_content="")` returns a per-file handle with
+`current_content()`, `current_version()`, `versions()`, `read_version(sha)`,
+`write!(content; version, message)` and `update!(f; message)`. Mutations are
+serialised by a per-instance `ReentrantLock`, and every write replaces the file
+atomically (a sibling temp file renamed over it), so any reader of the file —
+`current_content()` or a plain `read`/`YAML.load_file` of
+`joinpath(path, relpath)` — sees either the previous or the new complete
+content, never a partial one. No lock is needed to read.
+"""
 @dynamicstruct struct GitRepo
     path::String
     author::String = "HTMXObjects <noreply@localhost>"
@@ -21239,10 +21279,15 @@ end
         # recomputes on every call. What stays memoized is pure: `read_version`
         # is addressed by immutable commit sha, `_ensure`/`_signature` are
         # idempotent.
+
+        # A missing file is seeded under the lock and re-checked there: an
+        # unlocked seed could land after a concurrent `write!`/`update!` created
+        # the file and replace that content with the default.
         @fresh current_content() = begin
             if !isfile(abs_path)
-                mkpath(dirname(abs_path))
-                write(abs_path, default_content)
+                Base.lock(_lock) do
+                    isfile(abs_path) || _replace_file!(abs_path, default_content)
+                end
             end
             read(abs_path, String)
         end
@@ -21331,8 +21376,7 @@ end
                 _ensure()
                 current = current_version()
                 current == version || return (:conflict, current)
-                mkpath(dirname(abs_path))
-                write(abs_path, content)
+                _replace_file!(abs_path, content)
                 repo = LibGit2.GitRepo(path)
                 try
                     LibGit2.add!(repo, relpath)
@@ -21359,8 +21403,7 @@ end
                 if new_content == current
                     return (:nochange, current_version())
                 end
-                mkpath(dirname(abs_path))
-                write(abs_path, new_content)
+                _replace_file!(abs_path, new_content)
                 repo = LibGit2.GitRepo(path)
                 try
                     LibGit2.add!(repo, relpath)
