@@ -4930,9 +4930,18 @@ an operation that finishes within it renders inline in its composed `__page__`
 shell — one response, no placeholder, no refetch. Only a slower operation
 defers, returning the shell with a load-triggered request that joins the
 already-running operation; that fragment then uses the same grace/polling path.
-Markdown/error requests and routes without page chrome stay direct. `:polling`
+Routes without page chrome stay direct for non-HTMX requests. `:polling`
 forces the polling transport. `:blocking` keeps every route direct; it is the
 opt-out for a route surface that genuinely must answer inline.
+
+A request answered as Markdown (`?plain`, `?markdown`, `Accept: text/markdown`
+or `text/plain`) or filtered by `?error` is answered inline under every policy,
+whether or not it is an HTMX request: the Markdown projection drops the
+poller's `hx-get` continuation, and `?error` would filter a running poller to
+"(no errors)". Such a read of a poll URL joins the operation the URL names and
+waits for its result, up to the operation's stall bound, instead of starting
+another; with no operation to join, it is answered like a direct request of
+that URL.
 
 Cache policy never selects the transport. A `@fresh` route and every mutation
 verb (`POST`/`PUT`/`PATCH`/`DELETE`) recompute on each invocation, and a slow
@@ -7865,6 +7874,15 @@ function _operation_background_capable(descriptor)
     get(semantics, :pending, false) || get(semantics, :fresh, false)
 end
 
+# Whether the response will be a representation no poller can live in: the
+# Markdown projection (`wants_markdown`) keeps a link's `href` but drops every
+# `hx-*` attribute, so a poller's continuation — the next poll URL — never
+# reaches the reader, and the `?error` filter answers a still-running poller
+# as "(no errors)". Such a request is answered inline whatever its headers
+# say; the transport is chosen after content negotiation, not before.
+_operation_inline_representation(req::HTTP.Request) =
+    wants_markdown(req) || wants_errors(req)
+
 function _operation_execution_mode(policy::OperationPolicy, descriptor,
         req::HTTP.Request, verb_inst::Verb; page_shell::Bool=false,
         direct::Bool=false)
@@ -7878,6 +7896,9 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     isnothing(static_export(req)) || return :blocking
     _declared_final_response(descriptor) && return :blocking
     policy.mode === :blocking && return :blocking
+    # Under every policy, `HX-Request` included: a Markdown or `?error`
+    # poller has no consumer (`_operation_inline_representation`).
+    _operation_inline_representation(req) && return :blocking
     # A mutation's poller lives in the swap target of the HTMX request that
     # submitted it, so the client must say one exists (`mutation_poll_script`).
     # A non-HTMX submission (a classic form post, curl), a swap-less one
@@ -7894,8 +7915,7 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     # chrome-free terminal) is what makes the marker-free default safe, not
     # narrowing who may poll.
     is_htmx(req) && return :polling
-    page_shell && !wants_markdown(req) && !wants_errors(req) ?
-        :page_load : :blocking
+    page_shell ? :page_load : :blocking
 end
 
 function _operation_declared_fresh(descriptor)
@@ -8292,7 +8312,10 @@ end
 # may finish by returning another Pending, and rendering an unresolved inner
 # handle would synchronously fetch it and hold the request open. A non-handle
 # `started` is ready at once. Returns `(ready, value)`; only `ready` values
-# have passed through `render_result`.
+# have passed through `render_result`. The same wait serves the long budget of
+# an inline read of a retained operation (`_operation_await_resume`, up to
+# `Inf`): the poll interval scales with the budget, within `timedwait`'s 1 ms
+# floor — 5 ms for the 0.1 s grace, 50 ms for a wait of a second or more.
 function _operation_grace_fetch(render_result, started, grace_period::Real)
     rv = started
     grace_started = time_ns()
@@ -8301,7 +8324,7 @@ function _operation_grace_fetch(render_result, started, grace_period::Real)
         remaining = grace_period - elapsed
         remaining > 0 || return (ready=false, value=nothing)
         outcome = timedwait(() -> isready(rv), remaining;
-                            pollint=min(0.005, remaining))
+                            pollint=clamp(remaining / 20, 1.0e-3, 0.05))
         outcome === :ok || return (ready=false, value=nothing)
         rv = fetch(rv)
     end
@@ -9150,6 +9173,8 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
     _runtime_job_polled!(req, entry.started)
     age = _operation_poll_now() - entry.created_at
     req.context[:htmxo_operation_age] = age
+    _operation_inline_representation(req) && return _operation_await_resume(
+        entry, token, descriptor, name, verb_inst, req, prefix)
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
@@ -9185,6 +9210,32 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
         entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
+end
+
+# A Markdown or `?error` read of a retained operation's poll URL
+# (`_operation_inline_representation`): no poller can reach its reader, so the
+# request waits for the operation's own result. The wait ends at the
+# operation's stall bound, where the request answers the `OperationStalled`
+# failure a poll would. A request arriving past the bound still waits one grace
+# budget (0.1 s, as a first request does), so an operation that has finished or
+# failed answers its own result however long it took.
+function _operation_await_resume(entry::_OperationPollEntry, token,
+        descriptor, name, verb_inst, req, prefix)
+    bound = entry.stall_after
+    budget = bound === nothing ? Inf :
+        max(bound - (_operation_poll_now() - entry.created_at), 0.1)
+    awaited = try
+        _operation_grace_fetch(value -> _finish_operation_poll(token, value),
+                               entry.started, budget)
+    catch
+        _delete_operation_poll!(token)
+        rethrow()
+    end
+    awaited.ready && return awaited.value
+    _delete_operation_poll!(token)
+    stall = _operation_stall(entry, _operation_poll_now() - entry.created_at,
+                             descriptor, name, verb_inst, req, prefix)
+    throw(stall.error)
 end
 
 # A GET carrying `__htmxo_verb=<mutation>` polls a mutation submission. It
@@ -9294,7 +9345,11 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     # GET resumes (`_execute_mutation_resume`), so poll markers on the
     # submission itself name no operation to join — and healing one would
     # run the body a second time.
-    if mode === :polling && _operation_verb_transport(verb_inst) === :read &&
+    #
+    # A Markdown or `?error` read of a poll URL joins the operation it names
+    # as well; its resume waits for the result instead of answering a poller.
+    if (mode === :polling || _operation_inline_representation(req)) &&
+            _operation_verb_transport(verb_inst) === :read &&
             (_operation_poll_request(req) || _operation_attach_request(req))
         token = _operation_poll_token(req)
         signature = _operation_poll_signature(
@@ -9310,12 +9365,17 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         # wiped the registry), expired (TTL/LRU), bound to different args
         # (hx-vals drift), or missing/ambiguous. Re-execute fresh with the
         # poll request's current args; that computes what a fresh GET would,
-        # so the poll recovers instead of failing.
-        return _with_runtime_job(req, descriptor, name, context, prop, keys,
-                                 call_kwargs; leaf=target.leaf, track=queued) do job
-            _execute_operation_heal(policy, descriptor, target, name,
-                verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
-                call_kwargs; parent_progress=parent_progress, job, queued)
+        # so the poll recovers instead of failing. An inline representation
+        # needs no heal: the direct execution below computes the same answer
+        # without a poller.
+        if mode === :polling
+            return _with_runtime_job(req, descriptor, name, context, prop,
+                                     keys, call_kwargs; leaf=target.leaf,
+                                     track=queued) do job
+                _execute_operation_heal(policy, descriptor, target, name,
+                    verb_inst, idx_vals, kw_pairs, req, prefix, prop, keys,
+                    call_kwargs; parent_progress=parent_progress, job, queued)
+            end
         end
     end
 
