@@ -14,7 +14,8 @@ using TestItemRunner
     import HTMXObjects: h
 
     export InlineReadApp, InlinePollingApp, InlineMutationApp, reset_inline!,
-        inline_runs, release_inline!, request_task, still_waiting, body_text,
+        inline_runs, release_inline!, request_task, still_waiting, answered,
+        body_text,
         running, poll_url, poll_token, age_inline_operations!, hx, markdown
 
     const inline_lock = ReentrantLock()
@@ -76,6 +77,15 @@ using TestItemRunner
         !istaskdone(task)
     end
 
+    # The request's response, once its gate is released. A request that
+    # never answers (one still held by a gate this item will not release)
+    # fails the item instead of hanging the suite.
+    function answered(task; timeout=30.0)
+        timedwait(() -> istaskdone(task), timeout; pollint=0.01) === :ok ||
+            error("the request did not answer within $timeout s")
+        fetch(task)
+    end
+
     body_text(response) = String(HTMXObjects._message_body_bytes(response))
     running(body) = contains(body, "hx-trigger=\"every ")
 
@@ -117,7 +127,7 @@ end
         @test timedwait(() -> inline_runs(Symbol(v.key)) >= 1, 10.0; pollint=0.01) === :ok
         @test still_waiting(task)
         release_inline!(Symbol(v.key))
-        response = fetch(task)
+        response = answered(task)
         body = body_text(response)
         @test response.status == 200
         @test startswith(HTTP.header(response, "Content-Type"), "text/markdown")
@@ -134,7 +144,7 @@ end
     @test timedwait(() -> inline_runs(:errors) >= 1, 10.0; pollint=0.01) === :ok
     @test still_waiting(task)
     release_inline!(:errors)
-    @test body_text(fetch(task)) == "(no errors)"
+    @test body_text(answered(task)) == "(no errors)"
 
     # Control: an HTML HTMX request of the same slow route still polls.
     html = body_text(dispatch(:GET, "/inline_listing?key=html";
@@ -165,7 +175,7 @@ end
     task = request_task(:GET, url, [hx; markdown])
     @test still_waiting(task)
     release_inline!(:join)
-    response = fetch(task)
+    response = answered(task)
     body = body_text(response)
     @test startswith(HTTP.header(response, "Content-Type"), "text/markdown")
     @test contains(body, "listing-join:1")
@@ -193,7 +203,7 @@ end
     @test timedwait(() -> inline_runs(:heal) >= 1, 10.0; pollint=0.01) === :ok
     @test still_waiting(task)
     release_inline!(:heal)
-    healed = body_text(fetch(task))
+    healed = body_text(answered(task))
     @test contains(healed, "listing-heal:1")
     @test !contains(healed, "Polling")
     @test isempty(_operation_poll_snapshot())
@@ -213,7 +223,7 @@ end
     # Past the default 600 s bound the wait ends at once (one grace budget),
     # answering the failure a poll would: recorded, with the route's status.
     age_inline_operations!(601)
-    response = dispatch(:GET, url; headers=markdown)
+    response = answered(request_task(:GET, url, markdown))
     body = body_text(response)
     @test response.status == 504
     @test !isempty(HTTP.header(response, "X-HTMXO-Error-Id", ""))
@@ -238,7 +248,7 @@ end
         @test timedwait(() -> inline_runs(Symbol(key)) >= 1, 10.0; pollint=0.01) === :ok
         @test still_waiting(task)
         release_inline!(Symbol(key))
-        @test contains(body_text(fetch(task)), "forced-$key:1")
+        @test contains(body_text(answered(task)), "forced-$key:1")
     end
     # Control: the same root still forces the poller on an HTML request.
     @test running(body_text(dispatch(:GET, "/forced_listing?key=page")))
@@ -252,6 +262,6 @@ end
     @test timedwait(() -> inline_runs(:m1) >= 1, 10.0; pollint=0.01) === :ok
     @test still_waiting(task)
     release_inline!(:m1)
-    @test contains(body_text(fetch(task)), "ordered-m1:1")
+    @test contains(body_text(answered(task)), "ordered-m1:1")
     @test inline_runs(:m1) == 1
 end
