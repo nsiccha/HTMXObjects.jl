@@ -137,8 +137,8 @@ end
         page = repr("text/html", htmx(h.main(h.p("linked")), driver; assets=:vendor,
             runtime=:linked, pico_version=HTMXObjects._PICO_VERSION))
         vendorfiles()
-        runtime_requests = Ref(0)
-        vendor_requests = Ref(0)
+        runtime_requests = Threads.Atomic{Int}(0)
+        vendor_requests = Threads.Atomic{Int}(0)
         reports = Channel{Tuple{String,Int,Int}}(2)
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
@@ -155,7 +155,11 @@ end
                 return HTTP.Response(204)
             end
             if startswith(path, "/vendor/")
-                startswith(path, "/vendor/htmxo/") ? (runtime_requests[] += 1) : (vendor_requests[] += 1)
+                if startswith(path, "/vendor/htmxo/")
+                    Threads.atomic_add!(runtime_requests, 1)
+                else
+                    Threads.atomic_add!(vendor_requests, 1)
+                end
                 return dispatch(:GET, req.target; headers=collect(req.headers))
             end
             HTTP.Response(404)
