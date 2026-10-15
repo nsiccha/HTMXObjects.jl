@@ -626,6 +626,29 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
   lazy group the reader has not opened, a new row arrives with the group's
   other rows when the group loads. A sorted table then re-applies its sort.
   `htmxoUpdateRows(html)` applies a row update fetched by other means.
+- **What the reader added to a row.** The rows' content is the update's,
+  their details' too: an open detail stays open, but its content is what the
+  call renders now (a lazy one loads again). Whatever the browser added after
+  the render goes, a disclosure the reader opened, an editor loaded into it,
+  text typed and not yet saved, unless the element holding it is marked
+  `hx-preserve` with an `id`: as in any htmx swap, the update's element of that
+  id gives way to the page's, which moves there with its state. Preserve the
+  part the browser owns, not values the update should refresh, which a
+  preserved element keeps as they were:
+
+  ```julia
+  detail = inv -> h.div(invoice_summary(inv),     # refreshed by every update
+      h.details(; id="editor-$(inv.id)", hx_preserve=true,   # kept as the reader left it
+          hx_get=query_url(self / "editor"; id=inv.id), hx_trigger="toggle once",
+          hx_target="find .editor")(h.summary("Edit"), h.div(; class="editor")))
+  ```
+
+  Key the id by the item, unique on the page: a leaf that moves to another
+  group finds its element in its new row by that id. A lazy detail's update
+  holds only its placeholder, so the preserved elements of the content it had
+  wait in it, hidden, until it loads again, at once if it is open and on the
+  next expand if not; the load's response renders the same ids to claim them,
+  as for any htmx swap. Elements in master cells are kept the same way.
 - **What leaves.** The update speaks for the copies of each leaf in
   `update_rows` and for each group in `update_groups` with all its rows: those
   it no longer lists leave, with their detail rows. A key no longer among the

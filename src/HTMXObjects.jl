@@ -13313,15 +13313,16 @@ function htmxoTreeRow(row, event) {
 // An action route answers with the rows it changed, rendered by the table's
 // own call: a <tbody data-htmxo-row-update>. Each row replaces its namesake
 // in place and keeps what the user did to it (open branch and detail,
-// selection, search, focus), and a leaf that moves to another group takes
-// its open detail and the focus along, its new groups opening if the reader
-// had it open in view; a row new to the table, or whose place among its
-// siblings changed, goes where the table's own render puts it, unless its
-// group is not loaded, and a sorted table re-applies its sort; a row in the
-// update's scope that it no longer lists leaves, with its detail and child
-// rows. Any htmx response holding such a body is applied this way, whatever
-// the requesting element's hx-target; `htmxoUpdateRows(html)` applies one
-// fetched by other means.
+// selection, search, focus) but takes the update's content, its detail's
+// too, except elements marked hx-preserve (below); a leaf that moves to
+// another group takes its open detail and the focus along, its new groups
+// opening if the reader had it open in view; a row new to the table, or
+// whose place among its siblings changed, goes where the table's own render
+// puts it, unless its group is not loaded, and a sorted table re-applies its
+// sort; a row in the update's scope that it no longer lists leaves, with its
+// detail and child rows. Any htmx response holding such a body is applied
+// this way, whatever the requesting element's hx-target;
+// `htmxoUpdateRows(html)` applies one fetched by other means.
 function htmxoUpdateRows(update, origin) {
     if (typeof update === 'string') {
         const template = document.createElement('template');
@@ -13386,13 +13387,37 @@ function htmxoUpdateRows(update, origin) {
         leaving.set(r.dataset.htmxoLeaf, {open: was.open || detailOpen(r), inView: was.inView || openInView(r),
             focus: was.focus || (focus !== null && focus.id === r.id)});
     });
+    const details = new Map(incoming.filter(isDetail).map(r => [r.id, r]));
+    // hx-preserve, as htmx's own swaps honour it: an element of the update
+    // marked hx-preserve, with an id, gives way to the page's element of that
+    // id, moved with its state (a <details> the reader opened, content loaded
+    // into it, what was typed). A lazy detail loads again, so the preserved
+    // elements of the content it had wait in it, hidden, for that load's swap
+    // to claim them; a moved leaf's go to its first new copy (as `handed`
+    // below). Meanwhile they stay off the rows that leave.
+    const claimed = new Map(), parked = new Map();
+    incoming.forEach(r => htmxoPreservedIn(r).forEach(p => {
+        const el = document.getElementById(p.id);
+        if (el && !claimed.has(el) && !update.contains(el) && !el.contains(tbody)) claimed.set(el, p);
+    }));
+    const handOver = (from, to) => {
+        if (from && to && to.querySelector('.htmxo-md-detail-slot'))
+            htmxoPreservedIn(from).forEach(el => { if (!claimed.has(el)) parked.set(el, to); });
+    };
+    const arriving = new Map();
+    incoming.forEach(r => {
+        if (isDetail(r)) return;
+        if (byId.has(r.id)) handOver(own(detailId(byId.get(r.id))), details.get(detailId(r)));
+        else if ('htmxoLeaf' in r.dataset && !arriving.has(r.dataset.htmxoLeaf)) arriving.set(r.dataset.htmxoLeaf, details.get(detailId(r)));
+    });
+    doomed.forEach(r => { if ('htmxoLeaf' in r.dataset) handOver(own(detailId(r)), arriving.get(r.dataset.htmxoLeaf)); });
+    const held = htmxoPreserveHold([...claimed.keys(), ...parked.keys()]);
     doomed.forEach(r => {
         const d = own(detailId(r));
         htmxoRowDiscard(r);
         if (d) htmxoRowDiscard(d);
         byId.delete(r.id);
     });
-    const details = new Map(incoming.filter(isDetail).map(r => [r.id, r]));
     // The last row of `r` with its detail and child rows.
     const end = r => {
         const self = new Set([r.id]);
@@ -13474,6 +13499,7 @@ function htmxoUpdateRows(update, origin) {
         fresh.push(row);
         if (detail) fresh.push(detail);
     });
+    htmxoPreservePlace(held, claimed, parked);
     // The new rows are htmx content like any swapped in: processed, then
     // announced with htmx:load (the table's own restore runs once, below).
     if (window.htmx) {
@@ -13571,6 +13597,59 @@ function htmxoCarryRow(old, row, oldDetail, detail) {
 
 function htmxoFocusables(row) {
     return Array.from(row.querySelectorAll('a[href],button,input,select,textarea,summary,[tabindex]'));
+}
+
+// The elements in `el` marked hx-preserve with an id, outermost first: a
+// preserved element brings those inside it along.
+function htmxoPreservedIn(el) {
+    return Array.from(el.querySelectorAll('[hx-preserve][id],[data-hx-preserve][id]')).filter(p => {
+        const outer = p.parentElement.closest('[hx-preserve][id],[data-hx-preserve][id]');
+        return !outer || outer === el || !el.contains(outer);
+    });
+}
+// Move `el` before `before` in `parent`, keeping its state (focus, a running
+// iframe) where the browser can, as htmx does.
+function htmxoMove(parent, el, before) {
+    if (parent.moveBefore && el.isConnected && parent.isConnected) parent.moveBefore(el, before);
+    else parent.insertBefore(el, before);
+}
+// Hold preserved elements off the page's rows, hidden, while a row update
+// replaces those rows, noting where each was.
+function htmxoPreserveHold(els) {
+    if (!els.length) return null;
+    const homes = new Map(els.map(el => [el, [el.parentNode, el.nextSibling]]));
+    const pantry = Object.assign(document.createElement('div'), {hidden: true});
+    document.body.append(pantry);
+    els.forEach(el => htmxoMove(pantry, el, null));
+    return {pantry, homes};
+}
+// Put each held element in place of the update's element it was claimed by,
+// or in a hidden holder in the lazy detail whose load claims it; one whose
+// place did not reach the page goes back where it was, or leaves with its row.
+function htmxoPreservePlace(held, claimed, parked) {
+    if (!held) return;
+    const back = el => {
+        const [parent, next] = held.homes.get(el);
+        if (parent.isConnected) htmxoMove(parent, el, next && next.parentNode === parent ? next : null);
+        else htmxoRowDiscard(el);
+    };
+    claimed.forEach((p, el) => {
+        if (!p.isConnected) return back(el);
+        htmxoMove(p.parentNode, el, p);
+        p.remove();
+    });
+    parked.forEach((d, el) => {
+        const slot = d.isConnected && d.querySelector('.htmxo-md-detail-slot');
+        if (!slot) return back(el);
+        let hold = slot.querySelector(':scope > [data-htmxo-preserved]');
+        if (!hold) {
+            hold = Object.assign(document.createElement('div'), {hidden: true});
+            hold.dataset.htmxoPreserved = '';
+            slot.append(hold);
+        }
+        htmxoMove(hold, el, null);
+    });
+    held.pantry.remove();
 }
 
 // Remove a row as an htmx swap would, so htmx releases what it bound there.
@@ -14658,10 +14737,15 @@ function htmxoMdControl(button, event) {
     else if (row.onclick) row.onclick({target: row});
     else htmxoMdToggle(row, {target: row}, key, document.getElementById('detail-slot-' + key) ? 1 : 0);
 }
+// The slot's status line: its placeholder's, never one in the preserved
+// elements a row update left waiting in the slot for this load.
+function htmxoMdStatus(s) {
+    return Array.from(s.querySelectorAll('[data-status]')).find(function(p) { return !p.closest('[data-htmxo-preserved]'); }) || null;
+}
 function htmxoMdBefore(s, event) {
     if (event.detail.requestConfig.elt !== s) return;
     s.dataset.loading = '1'; delete s.dataset.failed; s.__htmxoMdAborted = false;
-    var p = s.querySelector('[data-status]'); if (p) p.textContent = 'Loading…';
+    var p = htmxoMdStatus(s); if (p) p.textContent = 'Loading…';
 }
 function htmxoMdReady(s, event) {
     if (event.target !== s || event.detail.target !== s) return;
@@ -14680,7 +14764,7 @@ function htmxoMdTransient(s, event) {
 }
 function htmxoMdAfter(s, event) {
     if (event.detail.requestConfig.elt !== s) return;
-    var p = s.querySelector('[data-status]'), n = +(s.dataset.retries || 0);
+    var p = htmxoMdStatus(s), n = +(s.dataset.retries || 0);
     if (event.detail.successful) {
         delete s.dataset.loading; delete s.dataset.retries;
         s.dataset.loaded = '1'; delete s.dataset.failed;
@@ -15147,6 +15231,12 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   of each leaf in the active grouping, with the rows of the groups it is in
   (their summaries depend on it); in a tree, the item's own row. Rows keep what
   the user did to them: open branches and details, selection, search, focus.
+  Their content is the update's, the detail's too: an open detail stays open
+  with what the call renders now (a lazy one loads again), so what the reader
+  loaded or typed into it after the render is replaced. An element marked
+  `hx-preserve` with an `id` is the exception, as in any htmx swap: it keeps
+  the page's element of that id, moved with its state (an editor the reader
+  opened, unsaved input); in a lazy detail it waits for the detail's next load.
   A leaf that moves to another group (or parent) takes its open detail and the
   focus along, and if its detail was open in view the groups above it open.
   A row new to the page, or whose place among its siblings changed, goes where

@@ -1319,3 +1319,184 @@ end
         end
     end
 end
+
+@testitem "a row update keeps the hx-preserve elements of its rows browser" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # Invoices whose detail holds a disclosure that loads the invoice's
+        # editor into itself when the reader opens it; saving in the editor
+        # answers with a row update. `ed-*` disclosures are hx-preserve,
+        # `plain-*` ones are not.
+        hours = Dict(id => 0 for id in ("e1", "e2", "l1", "l2", "g1", "m1"))
+        stage = Dict("g1" => "Open", "m1" => "Open")
+        save_url(id, t) = "/save?id=$id&t=$t"
+        disclosure(id, t; preserve=true) = h.details(; id=(preserve ? "ed-" : "plain-") * id,
+            (preserve ? (; hx_preserve=true) : (;))...,
+            hx_get="/editor?id=$id&t=$t", hx_trigger="toggle once", hx_target="find .ed", hx_swap="innerHTML")(
+            h.summary("Edit $id"), h.div(; class="ed"))
+        body(id, t) = h.div(h.p(; class="rev")("rev $(hours[id])"), disclosure(id, t),
+            disclosure(id, t; preserve=false))
+        cells(x) = (h.td(x.id), h.td(h.span(; class="hours")(string(hours[x.id]))),
+            h.td(h.button("bump"; type="button", data_bump=x.id, hx_post=save_url(x.id, "bump"),
+                hx_target="closest tr", hx_swap="outerHTML")))
+        items(ids) = [(; id) for id in ids]
+        eager(; kw...) = master_detail_table(["Invoice", "Hours", "Act"], items(["e1", "e2"]);
+            key=x -> x.id, master=cells, detail=x -> body(x.id, "eager"), id="eager", kw...)
+        lazy(; kw...) = master_detail_table(["Invoice", "Hours", "Act"], items(["l1", "l2"]);
+            key=x -> x.id, master=cells, detail_url=x -> "/detail?id=$(x.id)", id="lazy", kw...)
+        # Grouped by stage: saving moves the invoice to "Saved".
+        grouped(; kw...) = master_detail_table(["Invoice", "Hours", "Act"], items(["g1"]);
+            key=x -> x.id, master=cells, detail=x -> body(x.id, "grouped"),
+            groupings=["Stage" => x -> stage[x.id]], group_by="Stage", initially_open=true, id="grouped", kw...)
+        moved(; kw...) = master_detail_table(["Invoice", "Hours", "Act"], items(["m1"]);
+            key=x -> x.id, master=cells, detail_url=x -> "/detail?id=$(x.id)",
+            groupings=["Stage" => x -> stage[x.id]], group_by="Stage", initially_open=true, id="moved", kw...)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const wait = async cond => { for (let n = 0; n < 200 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const settle = () => new Promise(r => setTimeout(r, 50));
+            const row = id => document.getElementById('row-' + id);
+            const detail = id => document.getElementById('detail-' + id);
+            const control = id => row(id).querySelector('[data-htmxo-detail-toggle]');
+            const hoursOf = id => row(id).querySelector('.hours').textContent;
+            const revOf = id => { const p = detail(id).querySelector('.rev'); return p && p.textContent; };
+            // Open a row's detail, then its disclosure(s), and type into the
+            // editors they load.
+            const edit = async (rid, id, plain) => {
+                if (detail(rid).hidden) control(rid).click();
+                await wait(() => document.getElementById('ed-' + id));
+                for (const d of plain ? ['ed-', 'plain-'] : ['ed-']) {
+                    const el = document.getElementById(d + id);
+                    el.open = true;
+                    await wait(() => el.querySelector('.note'));
+                    el.querySelector('.note').value = 'typed ' + d;
+                }
+                await settle();   // htmx binds the loaded editor as it settles
+                const ed = document.getElementById('ed-' + id);
+                ed.htmxoMark = 'kept';
+                return ed;
+            };
+            const kept = (ed, id, rid) => document.getElementById('ed-' + id) === ed && ed.htmxoMark === 'kept' && ed.open &&
+                ed.querySelector('.note').value === 'typed ed-' && detail(rid).contains(ed);
+            const save = async (ed, rid, before) => {
+                const b = ed.querySelector('[data-save]'); b.focus(); b.click();
+                await wait(() => !row(rid) || hoursOf(rid) !== before); await settle();
+                return b;
+            };
+            try {
+            // An eager detail: the update replaces the detail's content, and the
+            // disclosure marked hx-preserve stays as the reader left it.
+            let ed = await edit('e1', 'e1', true);
+            let b = await save(ed, 'e1', '0');
+            check('eager-master', hoursOf('e1') === '1');
+            check('eager-detail-open', !detail('e1').hidden && control('e1').getAttribute('aria-expanded') === 'true');
+            check('eager-rest-refreshes', revOf('e1') === 'rev 1');
+            check('eager-preserved', kept(ed, 'e1', 'e1'));
+            check('eager-plain-replaced', !document.getElementById('plain-e1').open && !document.getElementById('plain-e1').querySelector('.note'));
+            check('eager-focus', document.activeElement === b);
+            // The kept editor still works: saving again updates the row again.
+            await save(ed, 'e1', '1');
+            check('eager-again', hoursOf('e1') === '2' && kept(ed, 'e1', 'e1'));
+            // An update from a master cell keeps it as well.
+            row('e1').querySelector('[data-bump]').click();
+            await wait(() => hoursOf('e1') === '3'); await settle();
+            check('eager-bump', kept(ed, 'e1', 'e1') && revOf('e1') === 'rev 3');
+            // Without Element.prototype.moveBefore (browsers before it), the
+            // same, and the focus returns to the same control.
+            const moveBefore = Element.prototype.moveBefore;
+            delete Element.prototype.moveBefore;
+            try {
+                ed = await edit('e2', 'e2');
+                b = await save(ed, 'e2', '0');
+                check('fallback-preserved', hoursOf('e2') === '1' && revOf('e2') === 'rev 1' && kept(ed, 'e2', 'e2'));
+                check('fallback-focus', document.activeElement === b);
+            } finally { if (moveBefore) Element.prototype.moveBefore = moveBefore; }
+            // An open lazy detail loads again, and its reload keeps the
+            // hx-preserve element of the content it had.
+            ed = await edit('l1', 'l1');
+            await save(ed, 'l1', '0');
+            await wait(() => revOf('l1') === 'rev 1'); await settle();
+            check('lazy-reloads', hoursOf('l1') === '1' && revOf('l1') === 'rev 1');
+            check('lazy-preserved', kept(ed, 'l1', 'l1'));
+            // A closed lazy detail: the editor waits for the next expand.
+            ed = await edit('l2', 'l2');
+            control('l2').click();
+            row('l2').querySelector('[data-bump]').click();
+            await wait(() => hoursOf('l2') === '1'); await settle();
+            check('lazy-closed-waits', detail('l2').hidden && detail('l2').querySelector('[data-loaded]').dataset.loaded === '0');
+            control('l2').click();
+            await wait(() => revOf('l2') === 'rev 1'); await settle();
+            check('lazy-closed-preserved', kept(ed, 'l2', 'l2'));
+            // A leaf that moves to another group: its new copy has it.
+            ed = await edit('group--Open--g1', 'g1');
+            await save(ed, 'group--Open--g1', '0');
+            await wait(() => row('group--Saved--g1')); await settle();
+            check('moved-preserved', !row('group--Open--g1') && hoursOf('group--Saved--g1') === '1' &&
+                revOf('group--Saved--g1') === 'rev 1' && kept(ed, 'g1', 'group--Saved--g1') && !detail('group--Saved--g1').hidden);
+            // The same with a lazy detail, which loads again in the new copy.
+            ed = await edit('group--Open--m1', 'm1');
+            await save(ed, 'group--Open--m1', '0');
+            await wait(() => row('group--Saved--m1') && revOf('group--Saved--m1') === 'rev 1'); await settle();
+            check('moved-lazy-preserved', !row('group--Open--m1') && kept(ed, 'm1', 'group--Saved--m1'));
+            check('no-leaks', document.querySelectorAll('[data-htmxo-preserved], tbody[data-htmxo-row-update]').length === 0 &&
+                document.querySelectorAll('[id^="ed-"]').length === 6 && !document.body.nextElementSibling);
+            } catch (e) { check('threw ' + e, false); }
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(eager(), lazy(), grouped(), moved(), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            q = HTTP.queryparams(uri)
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            table(id) = id in ("e1", "e2") ? eager : id in ("l1", "l2") ? lazy : id == "g1" ? grouped : moved
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/detail"
+                html(body(q["id"], "lazy"))
+            elseif uri.path == "/editor"
+                id = q["id"]
+                html(h.div(h.input(; name="note", class="note"), h.button("save"; type="button", data_save=id,
+                    hx_post=save_url(id, q["t"]), hx_target="closest tr", hx_swap="outerHTML")))
+            elseif uri.path == "/save"
+                id = q["id"]
+                hours[id] += 1
+                if haskey(stage, id) && stage[id] == "Open"
+                    stage[id] = "Saved"
+                    html(table(id)(; update_rows=id, update_groups=["Open", "Saved"]))
+                else
+                    html(table(id)(; update_rows=id))
+                end
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 17
+            end
+        finally
+            close(server)
+        end
+    end
+end
