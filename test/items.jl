@@ -5237,6 +5237,10 @@ end
     end
     @test contains(runtime, "htmx.trigger(s, 'htmxo-md-load')")
     @test contains(runtime, "a,button,input,textarea,select,form")
+    # The page's moveBefore guard rides along wherever the runtime does.
+    for page in (runtime, repr("text/html", htmx(h.p("body"))), repr("text/html", sortable_table_js()))
+        @test contains(page, "C.prototype.moveBefore = function (node, child)")
+    end
 end
 
 @testitem "master/detail shared runtime keeps toggle and extension semantics" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
