@@ -44,6 +44,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     reset_slow_page!, release_slow_page!, slow_page_runs,
     PreloadApp, reset_preload!, release_preload!, preload_count,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
+    LiveGateApp, reset_live_gate!, live_gate_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
     AutoUnwrapApp, reset_auto_unwrap!, auto_unwrap_pings,
     ComposeSettleApp, warm_browser_page,
@@ -786,6 +787,105 @@ end
         live_morph_shell(content; ext=false, flip_swap=true, slow_cycles=1)
     @get index() = live_morph_section(0, "outerHTML")
     @get panel(; n::Int=1) = live_morph_panel(n, "outerHTML")
+end
+
+# Live-refresh consumer swap gate (snag live-refresh-ter-4ec4fe63): the same
+# slow-after-first-render section as above, carrying a content hash, with a
+# consumer `htmx:beforeSwap` gate on the page — the KB chat panel's shape. The
+# gate skips an answer whose hash matches the live element's and carries the
+# element's client-only `data-client` attribute into any other answer. Render
+# 2 repeats render 1's hash, so its diverted terminal must be skipped (the
+# element, its client state and its JS identity survive); render 3 changes
+# the hash, so it lands with the client state carried in.
+const live_gate_interims = Ref(0)
+
+reset_live_gate!() = (live_gate_interims[] = 0; nothing)
+
+live_gate_hash(n) = n == 2 ? "h1" : "h$n"
+
+function live_gate_section(n)
+    h.section("rows n=$n"; id="live-gate", hx_get="panel?n=$n",
+        hx_trigger="every 60s", hx_swap="outerHTML", data_hash=live_gate_hash(n))
+end
+
+function live_gate_driver()
+    h.script(Raw("""
+    (function() {
+      function sec() { return document.getElementById('live-gate'); }
+      function fire(n) {
+        htmx.ajax('GET', 'panel?n=' + n,
+          {target: sec(), swap: 'outerHTML', source: sec()});
+      }
+      function mark(k) { document.body.setAttribute('data-gate-' + k, '1'); }
+      window.addEventListener('load', function() {
+        var vetoes = 0;
+        document.body.addEventListener('htmx:beforeSwap', function(e) {
+          var d = e.detail || {}, t = d.target;
+          if (!t || t.id !== 'live-gate' || typeof d.serverResponse !== 'string') return;
+          var tpl = document.createElement('template');
+          tpl.innerHTML = d.serverResponse;
+          var root = tpl.content.querySelector('#live-gate');
+          if (!root) return;  // an interim poller: the live refresh diverts it
+          if (d.htmxoLiveTerminal) mark('terminal');
+          if (root.getAttribute('data-hash') === t.getAttribute('data-hash')) {
+            d.shouldSwap = false;
+            vetoes += 1;
+            return;
+          }
+          if (t.hasAttribute('data-client')) {
+            root.setAttribute('data-client', t.getAttribute('data-client'));
+            d.serverResponse = tpl.innerHTML;
+          }
+        });
+        fire(1);
+        var phase = 2;
+        var iv = setInterval(function() {
+          var s = sec();
+          if (!s) return;
+          var text = s.textContent;
+          if (phase === 2 && s.hasAttribute('data-htmxo-live-settled') &&
+              text.indexOf('rows n=1') !== -1) {
+            s.setAttribute('data-client', 'kept');
+            s.__gateIdentity = 'original';
+            fire(2);
+            phase = 3;
+          } else if (phase === 3 && vetoes >= 1 &&
+                     !s.hasAttribute('data-htmxo-live-busy')) {
+            if (s.__gateIdentity === 'original') mark('identity');
+            if (text.indexOf('rows n=1') !== -1) mark('text');
+            if (s.getAttribute('data-client') === 'kept') mark('client');
+            var rep = s.nextElementSibling;
+            if (rep && rep.classList.contains('htmxo-live-reporter') &&
+                rep.hidden && !rep.firstChild) mark('reporter');
+            fire(3);
+            phase = 4;
+          } else if (phase === 4 && text.indexOf('rows n=3') !== -1) {
+            clearInterval(iv);
+            if (s.__gateIdentity === undefined) mark('replaced');
+            if (vetoes === 1) mark('one-veto');
+            mark('done');
+          }
+        }, 50);
+      });
+    })();
+    """))
+end
+
+function live_gate_panel(n)
+    if n != 1
+        while live_gate_interims[] < n - 1
+            sleep(0.01)
+        end
+    end
+    live_gate_section(n)
+end
+
+@htmx struct LiveGateApp
+    __page__(content) = htmx(content; hyperscript_version=nothing,
+        feedback=false, compose=false, thread=false, overlay=false,
+        extra_head=(live_gate_driver(),))
+    @get index() = live_gate_section(0)
+    @get panel(; n::Int=1) = live_gate_panel(n)
 end
 
 # `:auto` terminal-unwrap fixtures (snag auto-terminal-do-6d1b5bb4): a page
@@ -3761,6 +3861,13 @@ end
     # Engine-absent fallback: a `morph:*` terminal keeps the outer/inner
     # distinction via the core style instead of the innerHTML fallback.
     @test contains(html, "morph:innerHTML")
+    # `htmx.swap` fires no `htmx:beforeSwap`, so the terminal is offered to
+    # the live target's gate first, marked so this script's own listener and
+    # the poll-retire listener leave the offer alone.
+    @test contains(html, "'htmx:beforeSwap', d)")
+    @test contains(html, "htmxoLiveTerminal")
+    @test contains(repr("text/html", HTMXObjects.auto_terminal_script()),
+                   "htmxoLiveTerminal")
 end
 
 @testitem "auto terminal unwrap keeps bare single-run live content" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
@@ -4002,6 +4109,75 @@ end
             @test length(collect(eachmatch(
                 r"<div class=\"htmxo-live-reporter\" hidden=\"\"></div>",
                 dom))) == opens
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "live-refresh terminal passes the target's beforeSwap gate" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_live_gate!()
+        _clear_operation_polls!()
+        route!(LiveGateApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            target = String(req.target)
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            resp = handler(req)
+            body = String(resp.body)
+            if startswith(HTTP.URI(target).path, "/panel") &&
+                    !contains(target, "__htmxo_poll") &&
+                    contains(body, "__htmxo_poll")
+                live_gate_interims[] += 1
+            end
+            resp
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
+                dump_dom(cmd)
+            end
+            # Both slow refreshes really diverted (an interim poller each).
+            @test live_gate_interims[] == 2
+            @test contains(dom, "data-gate-done=\"1\"")
+            # The gate saw the diverted terminals on the live target itself.
+            @test contains(dom, "data-gate-terminal=\"1\"")
+            # Render 2 kept render 1's hash: the gate skipped its terminal, so
+            # the live element, its client-only state and its JS identity
+            # survived, and the reporter was cleared. Before the fix the
+            # terminal swapped in regardless and no veto ever happened.
+            @test contains(dom, "data-gate-identity=\"1\"")
+            @test contains(dom, "data-gate-text=\"1\"")
+            @test contains(dom, "data-gate-client=\"1\"")
+            @test contains(dom, "data-gate-reporter=\"1\"")
+            # Render 3 changed the hash: it swapped in (a new element) and the
+            # gate's rewritten response carried the client state into it.
+            @test contains(dom, "data-gate-replaced=\"1\"")
+            @test contains(dom, "data-gate-one-veto=\"1\"")
+            sec = match(r"<section[^>]*id=\"live-gate\"[^>]*>rows n=3</section>", dom)
+            @test !isnothing(sec)
+            @test !isnothing(sec) && contains(sec.match, "data-client=\"kept\"")
+            @test length(collect(eachmatch(r"id=\"live-gate\"", dom))) == 1
+            @test !contains(dom, "data-htmxo-live-busy=\"")
         finally
             close(server)
             _clear_operation_polls!()

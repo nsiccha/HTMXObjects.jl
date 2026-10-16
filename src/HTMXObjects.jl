@@ -18324,6 +18324,16 @@ shows the first time. The terminal is applied with the *request's* swap style �
 exactly like the ajax path), so an outer morph replaces in place instead of
 nesting; without the morph engine they fall back to the matching core style.
 
+Before it lands, the terminal is offered to the live target as an
+`htmx:beforeSwap`, as htmx offers a direct answer (`htmx.swap` itself fires
+none): `target` is the live element, `serverResponse` the bare result,
+`swapOverride` the effective swap style, `htmxoLiveTerminal` is `true`, and
+the rest is the terminal poll's detail (`xhr`, `requestConfig`, `pathInfo`).
+A consumer's swap gate therefore covers diverted terminals too: setting
+`shouldSwap = false` (or `preventDefault()`) skips the swap and just clears
+the reporter, and a rewritten `serverResponse` or `swapOverride` is what
+lands. `target`, `selectOverride` and `isError` are not re-read.
+
 Periodic targets are automatic — no consumer wiring. An event-driven target
 opts in by carrying `data-htmxo-live`: once it holds settled (non-poller)
 content it diverts exactly like a periodic target, whatever trigger or
@@ -18449,6 +18459,28 @@ live_refresh_script() = h.script(Raw(raw"""
       live.innerHTML = content;
     }
   }
+  // Offer a diverted terminal to the live target's `htmx:beforeSwap`
+  // listeners before it lands, as htmx offers a direct answer: `htmx.swap`
+  // fires no `htmx:beforeSwap`, so without this a consumer's swap gate
+  // (skip an unchanged answer, carry client-only state into it) never sees a
+  // diverted terminal. The detail is the terminal poll's own (its `xhr`,
+  // `requestConfig`, `pathInfo`) with `target` the live element,
+  // `serverResponse` the bare result, `swapOverride` the effective swap
+  // style, and `htmxoLiveTerminal: true`. Returns the detail with whatever a
+  // listener changed in `serverResponse` / `swapOverride`, or null when one
+  // vetoed it (`shouldSwap = false`, or `preventDefault()`).
+  function offerTerminal(live, content, swap, poll) {
+    var d = {};
+    for (var k in poll) { d[k] = poll[k]; }
+    d.target = live;
+    d.serverResponse = content;
+    d.swapOverride = swap;
+    d.shouldSwap = true;
+    d.htmxoLiveTerminal = true;
+    if (window.htmx && window.htmx.trigger &&
+        !window.htmx.trigger(live, 'htmx:beforeSwap', d)) return null;
+    return d.shouldSwap ? d : null;
+  }
   // Stamp any settled live element in a freshly swapped subtree, and give it a
   // reporter. A live element only ever appears carrying terminal content, so
   // "swapped in" == "settled".
@@ -18523,6 +18555,8 @@ live_refresh_script() = h.script(Raw(raw"""
 
   document.addEventListener('htmx:beforeSwap', function(evt) {
     var d = evt.detail; if (!d) return;
+    // A terminal this script is offering to its live target (below).
+    if (d.htmxoLiveTerminal) return;
     var target = d.target;
     var resp = d.serverResponse;
 
@@ -18571,11 +18605,13 @@ live_refresh_script() = h.script(Raw(raw"""
       // The result content the route rendered, applied to the live target with
       // the diverted request's swap style — so `outerHTML`/`morph:outerHTML`
       // replaces the element (in place for morph) while
-      // `innerHTML`/`morph:innerHTML` reconciles its children.
+      // `innerHTML`/`morph:innerHTML` reconciles its children — unless the
+      // target's own `htmx:beforeSwap` gate skips it.
       var content = term ? term.innerHTML : null;
       if (content != null) {
-        swapTerminal(live, content, rep2.__htmxoSwapStyle ||
-                     live.getAttribute('hx-swap') || 'outerHTML');
+        var swap = rep2.__htmxoSwapStyle || live.getAttribute('hx-swap') || 'outerHTML';
+        var offer = offerTerminal(live, content, swap, d);
+        if (offer) swapTerminal(live, offer.serverResponse, offer.swapOverride || swap);
       }
       rep2.innerHTML = '';
       rep2.hidden = true;
@@ -18850,7 +18886,11 @@ auto_terminal_script() = h.script(Raw(raw"""
       reswap: !!xhr.getResponseHeader('HX-Reswap') };
   });
   document.addEventListener('htmx:beforeSwap', function(evt) {
-    var d = (evt && evt.detail) || {}, r = d.xhr && d.xhr.__htmxoRetire;
+    var d = (evt && evt.detail) || {};
+    // `live_refresh_script()` re-offers a diverted terminal to its live
+    // target with the poll's own `xhr`; that offer is not a poll answer.
+    if (d.htmxoLiveTerminal) return;
+    var r = d.xhr && d.xhr.__htmxoRetire;
     if (!r) { recordOrigin(d); return; }
     var term = firstElement(d.serverResponse);
     if (marked(term)) d.serverResponse = term.innerHTML;
