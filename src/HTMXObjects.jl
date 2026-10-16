@@ -5773,7 +5773,7 @@ struct _SSEFailure
 end
 
 function _sse_failure(err, bt, req, error_obj)
-    uid, path = _record_error(err, bt, req)
+    uid, path = _maybe_record_error(err, bt, req)
     _SSEFailure(_invoke_error_handler(error_obj, err, uid, path))
 end
 
@@ -6997,7 +6997,8 @@ root-level definition propagates to every route — including `@include`d
 upstream structs the app cannot edit. It is invoked for its side effect only
 (return value ignored) and does not replace the error article; a failure inside
 it is logged, not swallowed. Fires for both route errors and `safely`-wrapped
-widget errors.
+widget errors, but not for a caller fault (a `4xx` answer), which is not
+recorded.
 
 In dev (Revise loaded), include the full log path so the article matches
 the `@error` line on stderr (`HTMXObjects caught an error: <path>`) — the
@@ -7026,11 +7027,12 @@ end
 # `nothing`. When non-nothing, invoke it as a side effect (return value ignored)
 # after the error is recorded but before rendering — the hook point for running
 # an extra command once HTMXObjects' built-in logging has run. A failure inside
-# the hook is logged, never swallowed silently. Then invoke the user's
-# `__error__` render hook if present, else fall back to the default. `__error__`
-# is called with just the exception, so `__error__ = rethrow` works.
+# the hook is logged, never swallowed silently. A caller fault is not recorded
+# (`uid === nothing`, see `_maybe_record_error`) and fires no hook. Then invoke
+# the user's `__error__` render hook if present, else fall back to the default.
+# `__error__` is called with just the exception, so `__error__ = rethrow` works.
 function _invoke_error_handler(obj, err, uid, path)
-    if obj !== nothing && hasproperty(obj, :__on_error__)
+    if uid !== nothing && obj !== nothing && hasproperty(obj, :__on_error__)
         hook = getproperty(obj, :__on_error__)
         if hook !== nothing
             try
@@ -7045,6 +7047,9 @@ function _invoke_error_handler(obj, err, uid, path)
     end
     inner = unwrap_error(err)
     title = _caller_fault_title(inner)
+    # An unrecorded caller fault has no error id to point at: one whose type
+    # names no title reads under a plain one.
+    title === nothing && uid === nothing && (title = "Request refused")
     if title !== nothing
         return h.article(
             h.header(title),
@@ -7092,6 +7097,15 @@ _unwrapped_status_code(_err) = 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
+# Caller faults (4xx: a missing or invalid submitted value, a refused resource
+# operation, a mutation result the server no longer holds) are answered, not
+# recorded: no error log or `@error` line, no `X-HTMXO-Error-Id`, no
+# `__on_error__` (user decision `1danmww`). Server faults (5xx, a stalled
+# operation included) keep the full record.
+_records_error(err) = !(400 <= _error_status_code(err) < 500)
+_maybe_record_error(err, bt, req) =
+    _records_error(err) ? _record_error(err, bt, req) : (nothing, nothing)
+
 _passthrough_response(r::HTTP.Response) = r
 _passthrough_response(_) = nothing
 
@@ -7104,12 +7118,13 @@ function _stamp_error_id(resp::HTTP.Response, uid)
     HTTP.setheader(resp, "X-HTMXO-Error-Id" => uid)
     resp
 end
+_stamp_error_id(resp::HTTP.Response, ::Nothing) = resp
 
 # `wrap` shapes the rendered failure for whatever receives it — a live poller
 # needs it inside its terminal node (`OperationStalled`, Treebars extension).
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[],
         wrap=identity)
-    uid, path = _record_error(err, bt, req)
+    uid, path = _maybe_record_error(err, bt, req)
     _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _passthrough_response(err_val)
@@ -7149,7 +7164,7 @@ function safely(f; obj=nothing, req=nothing)
         return f()
     catch err
         bt = catch_backtrace()
-        uid, path = _record_error(err, bt, req)
+        uid, path = _maybe_record_error(err, bt, req)
         return _invoke_error_handler(obj, err, uid, path)
     end
 end
@@ -18845,6 +18860,14 @@ so htmx drops the stale trigger; an answer already in flight is not swapped
 into it. The page keeps what the morph rendered, as it would after a plain
 swap that replaced the poller.
 
+It also keeps one poll per operation at a time, and none after the operation's
+286. htmx loses a poll element's request lock when it processes an ancestor
+while the element's request runs (the element then carries `htmx-request`),
+and sends a tick queued during a slow poll once that poll ends, if the element
+is still in the page. A poll of an operation whose 286 has arrived is cancelled
+and its element stops polling; a poll of an operation that is still waiting for
+another of its polls is cancelled, and the next tick polls again.
+
 Automatic — no consumer wiring. Include once per page; the `htmx()` shell
 installs it alongside the Treebars assets.
 """
@@ -18961,6 +18984,60 @@ auto_terminal_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:beforeSwap', function(evt) {
     var d = (evt && evt.detail) || {}, config = d.requestConfig || {};
     if (stalePoll(config.elt, config.path)) d.shouldSwap = false;
+  });
+
+  // One poll per operation at a time, and none once its 286 has arrived.
+  // htmx keeps a poll element's request lock, queued tick and stop-polling
+  // flag in per-element data, and wipes that data when it processes an
+  // ancestor while the element's attributes differ from the last processing;
+  // a polling element carries the `htmx-request` class for as long as its
+  // request runs, so a slow poll gained a second one beside it. A tick during
+  // a slow poll also queues a request that htmx sends when the poll ends, if
+  // its element is still in the page then, as the poller of a terminal
+  // applied elsewhere (below) is. A 286 marks its operation finished before
+  // htmx handles it: a later poll of that operation is cancelled and its
+  // element stops polling. A poll sent while another poll of its operation
+  // is still out is cancelled; the next tick polls again.
+  var finished = [], inflight = {};
+  function pollToken(path) {
+    return /[?&]__htmxo_poll=1(&|#|$)/.test(path || '') ? operationToken(path) : null;
+  }
+  function stopPolling(elt) {
+    ['hx-trigger', 'data-hx-trigger', 'hx-get', 'data-hx-get'].forEach(function(name) {
+      elt.removeAttribute(name);
+    });
+    setTimeout(function() {
+      if (window.htmx && elt.isConnected) htmx.process(elt);
+    }, 0);
+  }
+  document.addEventListener('htmx:beforeRequest', function(evt) {
+    var d = (evt && evt.detail) || {};
+    var token = pollToken(d.requestConfig && d.requestConfig.path);
+    if (!token || evt.defaultPrevented) return;
+    if (finished.indexOf(token) !== -1) {
+      evt.preventDefault();
+      if (d.elt && d.elt.removeAttribute) stopPolling(d.elt);
+    } else if (inflight[token]) {
+      evt.preventDefault();
+    }
+  });
+  // Registered when the request is actually sent: a listener after this one
+  // may still cancel it in `htmx:beforeRequest`.
+  document.addEventListener('htmx:beforeSend', function(evt) {
+    var d = (evt && evt.detail) || {}, xhr = d.xhr;
+    var token = xhr && pollToken(d.requestConfig && d.requestConfig.path);
+    if (!token) return;
+    inflight[token] = xhr;
+    xhr.addEventListener('loadend', function() {
+      if (inflight[token] === xhr) delete inflight[token];
+    });
+  });
+  document.addEventListener('htmx:beforeOnLoad', function(evt) {
+    var d = (evt && evt.detail) || {}, xhr = d.xhr;
+    var token = xhr && xhr.status === 286 && pollToken(d.requestConfig && d.requestConfig.path);
+    if (!token || finished.indexOf(token) !== -1) return;
+    finished.push(token);
+    if (finished.length > 256) finished.shift();
   });
 
   // A poll terminal whose headers send the answer away from the poller

@@ -1382,6 +1382,222 @@ end
     end
 end
 
+# One operation, one poll at a time, and none after its 286 (snag
+# spent-mutation-p-80878aaf). htmx keeps a poll element's request lock, queued
+# tick and stop-polling flag in per-element data, and wipes that data when it
+# processes an ancestor while the element's attributes differ from the last
+# processing; a polling element carries the `htmx-request` class while its
+# request runs. So a poll held up by a stalled server while the page
+# re-processed its body (a detail slot opening, a pane re-injected) got a second
+# poll beside it. And a tick during a slow poll queues a request that htmx sends
+# when the poll ends, if its element is still in the page then: a terminal whose
+# headers send it elsewhere keeps the poller until the answer is applied, so the
+# queued request polled the spent token again, and its replayed answer threw
+# htmx's "Invalid re-target" from the detached poller. A KB tab sent two polls
+# for one brief reply during a 167 s stall.
+@testitem "an operation sends one poll at a time and none after its 286" setup=[FreshTransportFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+        import HTMXObjects: _clear_operation_polls!, h, Raw
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(FreshBrowserApp())
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        driver = h.script(Raw(raw"""
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+        async function until(predicate, label) {
+          for (let i = 0; i < 400; i++) {
+            if (await predicate()) return;
+            await sleep(25);
+          }
+          throw new Error('timed out: ' + label);
+        }
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+        });
+        let changed = 0;
+        document.body.addEventListener('card-changed', function() { changed++; });
+        // What the page sends per operation: requests in flight at once, and
+        // requests sent after the operation's 286 arrived. Server arrival
+        // times cannot show the overlap: a held request occupies the server.
+        const inflight = {}, ended = {}, faults = [];
+        function pollToken(path) {
+          const m = /[?&]__htmxo_poll=1&.*__htmxo_operation=([0-9a-f]+)/.exec(path || '');
+          return m ? m[1].slice(0, 8) : null;
+        }
+        document.addEventListener('htmx:beforeSend', function(event) {
+          const d = event.detail, token = pollToken((d.requestConfig || {}).path);
+          if (!token) return;
+          if (ended[token]) faults.push('poll ' + token + ' after its 286');
+          inflight[token] = (inflight[token] || 0) + 1;
+          if (inflight[token] > 1) faults.push(inflight[token] + ' polls of ' + token + ' at once');
+          d.xhr.addEventListener('loadend', function() { inflight[token]--; });
+        });
+        // Before htmx handles the answer, so a request it sends while
+        // finishing this one counts as sent after the 286.
+        document.addEventListener('htmx:beforeOnLoad', function(event) {
+          const d = event.detail, token = pollToken((d.requestConfig || {}).path);
+          if (token && d.xhr.status === 286) ended[token] = true;
+        }, true);
+        // The server holds the next poll that arrives, as a stalled server would.
+        async function holdNextPoll() {
+          await fetch('/hold');
+          await until(async () => (await (await fetch('/held')).text()) === 'yes', 'held poll');
+        }
+        window.addEventListener('load', async function() {
+          const result = document.getElementById('result');
+          try {
+            // A poll is held while the page re-processes its body.
+            htmx.trigger(document.getElementById('save-form'), 'submit');
+            await until(() => result.querySelector('.treebar-poller-inner'), 'save poller');
+            await holdNextPoll();
+            htmx.process(document.body);
+            await sleep(800);
+            await fetch('/release?gate=browser_post');
+            await fetch('/unhold');
+            await until(() => result.textContent.includes('saved-held'), 'save terminal');
+            // A held poll answers a terminal whose headers retarget it, while
+            // the poller's timer keeps ticking.
+            htmx.trigger(document.getElementById('form-card'), 'submit');
+            await until(() => document.querySelector('#content-card .treebar-poller-inner'),
+                        'card poller');
+            await holdNextPoll();
+            await fetch('/release?gate=browser_card');
+            await sleep(800);
+            await fetch('/unhold');
+            await until(() => (document.getElementById('card-card') || {}).textContent === 'card:card',
+                        'card terminal');
+            // Settled: re-processing the page polls nothing.
+            await sleep(300);
+            await fetch('/mark?m=settled');
+            htmx.process(document.body);
+            await sleep(1000);
+            if (document.querySelector('.treebar-poller')) throw new Error('poller left behind');
+            if (changed !== 1) throw new Error('card-changed fired ' + changed + ' times');
+            if (faults.length) throw new Error(faults.join('; '));
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)));
+          }
+        });
+        """))
+        page = repr("text/html", htmx(h.main(
+                h.form(; id="save-form", hx_post="/browser_save",
+                       hx_target="#result", hx_swap="innerHTML")(
+                    h.input(; type="hidden", name="note", value="held")),
+                h.div(; id="result"),
+                h.form(; id="form-card", hx_post="/browser_card",
+                       hx_target="#content-card")(
+                    h.input(; type="hidden", name="which", value="card")),
+                h.div(h.div(; id="content-card")(h.p("content")),
+                      h.div(; id="card-card")(h.p("old"))),
+                driver);
+                assets="/test-assets", sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, hyperscript_version=nothing,
+                pico_version=nothing, feedback=false, compose=false,
+                overlay=false))
+        receipt = Channel{String}(1)
+        seen = NamedTuple{(:arrived, :finished, :kind, :target, :status),
+                          Tuple{Float64,Float64,String,String,Int}}[]
+        hold = Ref(false)
+        held = Ref(false)
+        unhold = Ref(Base.Event())
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" &&
+                return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, HTTP.unescapeuri(String(req.target)))
+                return HTTP.Response(204)
+            end
+            path == "/hold" && (unhold[] = Base.Event(); hold[] = true; return HTTP.Response(204))
+            path == "/held" && return HTTP.Response(200, held[] ? "yes" : "no")
+            path == "/unhold" && (notify(unhold[]); return HTTP.Response(204))
+            if path == "/mark"
+                push!(seen, (; arrived=time(), finished=time(), kind="mark",
+                             target=String(req.target), status=0))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                gate = HTTP.queryparams(HTTP.URI(req.target))["gate"]
+                release_fresh!(Symbol(gate))
+                return HTTP.Response(204)
+            end
+            poll = contains(req.target, "__htmxo_poll=1")
+            arrived = time()
+            if poll && hold[]
+                hold[] = false
+                held[] = true
+                wait(unhold[])
+                held[] = false
+            end
+            response = dispatch(req.method, String(req.target);
+                headers=collect(req.headers),
+                body=HTMXObjects._request_body_bytes(req))
+            push!(seen, (; arrived, finished=time(), kind=(poll ? "poll" : "request"),
+                         target=String(req.target), status=response.status))
+            response
+        end
+        try
+            # Compile the poller paths before the browser's clock starts.
+            warm = poll_url(String(hx_post("/browser_save", "note=warm").body))
+            warm_card = poll_url(String(hx_post("/browser_card", "which=warm").body))
+            release_fresh!(:browser_post)
+            release_fresh!(:browser_card)
+            settle(warm)
+            settle(warm_card)
+            reset_fresh!()
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                    @test outcome == "/complete?status=passed"
+                    if outcome != "/complete?status=passed"
+                        println("Browser outcome: ", outcome)
+                        t0 = first(seen).arrived
+                        for e in seen
+                            println(round(e.arrived - t0; digits=3), "–", round(e.finished - t0; digits=3),
+                                    " ", e.kind, " ", e.status, " ", e.target)
+                        end
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            polls = filter(e -> e.kind == "poll", seen)
+            tokens = unique(poll_token(e.target) for e in polls)
+            @test length(tokens) == 2
+            for token in tokens
+                mine = sort(filter(e -> poll_token(e.target) == token, polls); by=e -> e.arrived)
+                # Its 286 is its last poll, and the only one.
+                @test count(e -> e.status == 286, mine) == 1
+                @test last(mine).status == 286
+            end
+            settled = only(e.arrived for e in seen if e.kind == "mark")
+            @test !any(e -> e.arrived > settled, polls)
+            @test fresh_runs(:browser_post) == 1
+        finally
+            notify(unhold[])
+            release_fresh!(:browser_post)
+            release_fresh!(:browser_card)
+            close(server)
+        end
+    end
+end
+
 # A slow submission whose answer is a table part (snag
 # structural-tr-ta-a296d6a9): its poller is a `div`, so while it runs it stands
 # where the row, cell or section was, but its terminal must land as that table

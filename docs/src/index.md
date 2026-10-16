@@ -788,9 +788,13 @@ worked examples.
 
 ### Where errors go — `/tmp/htmxo_errors/<uid>.log`
 
-**Every caught route exception writes a full report to
+**Every caught server fault writes a full report to
 `/tmp/htmxo_errors/<uid>.log` by default.** That is the first place to
-look when a route returns the framework's error article. The in-browser
+look when a route returns the framework's error article. A caller fault — a
+`4xx` answer such as a missing or invalid submitted value, a refused resource
+operation, or a mutation result the server no longer holds — is answered with
+its article and status but not recorded: no log file, no `@error` line, no
+`X-HTMXO-Error-Id`, no `__on_error__`. The in-browser
 article only shows the short `<uid>` — the uid, ISO timestamp, request
 method + target, and full `showerror(io, err, bt)` backtrace all live in
 the log file on disk.
@@ -812,7 +816,8 @@ Grep the uid from your terminal/log viewer back to the file in one click.
 
 ### What happens on exception
 
-Every route handler is wrapped in try/catch. On exception, HTMXObjects:
+Every route handler is wrapped in try/catch. On a server-fault exception
+(any status but `4xx`), HTMXObjects:
 
 1. Generates a short uid (`hash(time_ns())`).
 2. Writes `$ERROR_DIR[]/<uid>.log` (default `/tmp/htmxo_errors/<uid>.log`)

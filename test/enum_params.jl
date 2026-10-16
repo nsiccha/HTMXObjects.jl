@@ -58,7 +58,8 @@ using TestItemRunner
         bad = dispatch(:GET, "/workspace/source?stage=$(invalid)")
         @test bad.status == 400
         @test contains(String(bad.body), "Invalid value for parameter stage")
-        @test HTTP.hasheader(bad, "X-HTMXO-Error-Id")
+        # A caller fault is answered, not recorded (user decision `1danmww`).
+        @test !HTTP.hasheader(bad, "X-HTMXO-Error-Id")
     end
     @test app.workspace.stage === stage_queued
 end

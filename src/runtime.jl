@@ -420,9 +420,11 @@ _runtime_note_mode!(req, mode::Symbol) =
 
 # HTMX requests receive route errors as 200 fragments (so the error article
 # swaps in), which would make a failed request look healthy in the ledger.
-# `_route_error_response` notes the failure and its recorded error id instead.
+# `_route_error_response` notes the failure instead, with its recorded error id
+# (a caller fault has none: it is not recorded).
 _runtime_note_error!(req, err, uid) = _runtime_annotate!(req) do record
-    record.error = string(_runtime_error_summary(err), " [error ", uid, "]")
+    record.error = uid === nothing ? _runtime_error_summary(err) :
+        string(_runtime_error_summary(err), " [error ", uid, "]")
 end
 
 # --- sessions --------------------------------------------------------------
