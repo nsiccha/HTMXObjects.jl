@@ -13608,7 +13608,8 @@ function htmxoPreservedIn(el) {
     });
 }
 // Move `el` before `before` in `parent`, keeping its state (focus, a running
-// iframe) where the browser can, as htmx does.
+// iframe) where the browser can, as htmx does. The page's moveBefore guard
+// (the master/detail runtime) keeps a datalist inside `el` from stopping Chrome.
 function htmxoMove(parent, el, before) {
     if (parent.moveBefore && el.isConnected && parent.isConnected) parent.moveBefore(el, before);
     else parent.insertBefore(el, before);
@@ -14657,6 +14658,35 @@ _md_disclosure_glyph(open::Bool) = open ? "▾" : "▸"
 _md_lazy_trigger(; also_load::Bool=false) =
     also_load ? "$(_md_lazy_event()) consume, load" : "$(_md_lazy_event()) consume"
 
+# Chrome (measured on 151) stops a tab's renderer for good at the next style
+# pass after `moveBefore` moves a subtree in which a `<datalist>` with options
+# comes before an `<input list>` naming it: script and debugger alike get no
+# answer. The same subtree moves fine with `insertBefore`, with the input
+# before its datalist, or with the inputs' `list` detached for the move, and
+# only the last keeps what `moveBefore` is for: focus, the selection, a running
+# iframe. A row update moves `hx-preserve` elements with it (`htmxoMove`), and
+# so does htmx's own swap whenever an `hx-preserve` element is kept, so the
+# guard wraps the native method once per page: every caller moves such a
+# subtree with its inputs' `list` detached and put back before anything
+# restyles it (snag `row-update-with-dc4feb3a`).
+_move_before_guard_js() = """
+if (!window.htmxoMoveBeforeGuarded) {
+    window.htmxoMoveBeforeGuarded = true;
+    [window.Element, window.Document, window.DocumentFragment].forEach(function (C) {
+        var native = C && C.prototype.moveBefore;
+        if (!native) return;
+        C.prototype.moveBefore = function (node, child) {
+            var lists = node && node.querySelector && node.querySelector('datalist')
+                ? Array.prototype.map.call(node.querySelectorAll('input[list]'), function (i) { return [i, i.getAttribute('list')]; })
+                : [];
+            lists.forEach(function (l) { l[0].removeAttribute('list'); });
+            try { return native.call(this, node, child); }
+            finally { lists.forEach(function (l) { l[0].setAttribute('list', l[1]); }); }
+        };
+    });
+}
+"""
+
 # The master/detail client runtime: the toggle and the lazy slot's
 # readiness/latch/retry handlers, defined ONCE per page. Every row `master_detail_pair`
 # renders carries only a short call into it (ids as arguments), so a table
@@ -14684,7 +14714,11 @@ _md_lazy_trigger(; also_load::Bool=false) =
 # `expand-several-l-28054c83`). An application error (any other status), an
 # explicit `htmx:abort` of the slot's request, or an exhausted budget shows
 # click-to-retry, which grants a fresh budget.
-_md_runtime_js() = """
+#
+# The runtime starts with the page's `moveBefore` guard
+# (`_move_before_guard_js`), so every page carrying it moves preserved
+# elements safely.
+_md_runtime_js() = _move_before_guard_js() * """
 function htmxoMdToggle(row, event, key, slot) {
     if (event.target.closest('a,button,input,textarea,select,form')) return;
     var d = document.getElementById('detail-' + key); if (!d) return;
@@ -14814,6 +14848,12 @@ Auto-included by [`htmx`](@ref) (so `pico_page` too) and carried by
 table. Include it yourself only when you build your own `<head>` without
 either; a page lacking it throws `ReferenceError: htmxoMdToggle is not
 defined` on the first row click. Including it more than once is harmless.
+
+It also wraps the page's native `moveBefore` once: Chrome stops the tab when
+`moveBefore` moves a subtree whose `<datalist>` comes before an `<input list>`
+naming it, which a row update or an htmx swap does to every kept
+`hx-preserve` element. The wrapper detaches those inputs' `list` for the move,
+so such a subtree still moves with its focus and selection.
 """
 master_detail_js() = h.script(Raw(_md_runtime_js()))
 

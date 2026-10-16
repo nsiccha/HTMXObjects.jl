@@ -1500,3 +1500,138 @@ end
         end
     end
 end
+
+@testitem "a kept hx-preserve element holding a datalist moves without stopping Chrome browser" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # Chrome (151) stopped the tab at the next style pass after moveBefore
+        # moved a subtree whose datalist comes before the input listing it:
+        # an invoice editor kept with hx-preserve through a row update, a
+        # lazy detail's reload or a plain htmx swap.
+        hours = Dict("d1" => 0, "l1" => 0)
+        boxes = Ref(0)
+        suggest(id) = h.datalist(; id="opts-$id")(h.option(; value="Groceries"), h.option(; value="Rent"))
+        editor(id) = h.div(h.p(; class="rev")("rev $(hours[id])"),
+            h.details(; id="ed-$id", hx_preserve=true, open=true)(h.summary("Edit $id"),
+                suggest(id), h.input(; name="category", class="note", list="opts-$id")))
+        cells(x) = (h.td(x.id), h.td(h.span(; class="hours")(string(hours[x.id]))),
+            h.td(h.button("bump"; type="button", data_bump=x.id, hx_post="/save?id=$(x.id)",
+                hx_target="closest tr", hx_swap="outerHTML")))
+        eager(; kw...) = master_detail_table(["Invoice", "Hours", "Act"], [(; id="d1")];
+            key=x -> x.id, master=cells, detail=x -> editor(x.id), initially_open=true, id="eager", kw...)
+        lazy(; kw...) = master_detail_table(["Invoice", "Hours", "Act"], [(; id="l1")];
+            key=x -> x.id, master=cells, detail_url=x -> "/detail?id=$(x.id)", id="lazy", kw...)
+        box() = h.div(; id="box", hx_get="/box", hx_trigger="refresh-box", hx_swap="outerHTML")(
+            h.p(; class="rev")("box $(boxes[])"),
+            h.div(; id="keep-box", hx_preserve=true)(suggest("box"), h.input(; class="note", list="opts-box")))
+        direct = (h.div(; id="direct-from")(h.div(; id="direct")(suggest("direct"),
+            h.input(; class="note", list="opts-direct"))), h.div(; id="direct-to"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const wait = async cond => { for (let n = 0; n < 200 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            // A forced style pass: where Chrome stopped. (No frames under
+            // --virtual-time-budget, so no requestAnimationFrame.)
+            const settle = () => { void document.body.offsetHeight; return new Promise(r => setTimeout(r, 50)); };
+            const moves = 'moveBefore' in Element.prototype;
+            const row = id => document.getElementById('row-' + id);
+            const detail = id => document.getElementById('detail-' + id);
+            const hoursOf = id => row(id).querySelector('.hours').textContent;
+            const revOf = el => { const p = el && el.querySelector('.rev'); return p && p.textContent; };
+            const type = (keep, text) => {
+                const i = keep.querySelector('.note');
+                i.value = text; i.focus(); i.setSelectionRange(1, 3);
+                keep.htmxoMark = 'kept';
+                return i;
+            };
+            const kept = (keep, id, text, inside) => {
+                const i = keep.querySelector('.note');
+                return document.getElementById(id) === keep && keep.htmxoMark === 'kept' && inside.contains(keep) &&
+                    i.value === text && i.getAttribute('list') === 'opts-' + id.replace(/^(ed|keep)-/, '') &&
+                    i.list === keep.querySelector('datalist');
+            };
+            // moveBefore keeps the focus and the selection; without it they go.
+            const focused = i => !moves || (document.activeElement === i && i.selectionStart === 1 && i.selectionEnd === 3);
+            try {
+            // The page's moveBefore itself.
+            const direct = document.getElementById('direct'), to = document.getElementById('direct-to');
+            let i = type(direct, 'typed direct');
+            (moves ? to.moveBefore : to.insertBefore).call(to, direct, null);
+            await settle();
+            check('direct-moved', kept(direct, 'direct', 'typed direct', to));
+            check('direct-focus', focused(i));
+            // A row update answering a request the editor sent itself.
+            const ed = document.getElementById('ed-d1');
+            i = type(ed, 'typed d1');
+            htmx.ajax('POST', '/save?id=d1', {source: i, swap: 'none'});
+            await wait(() => hoursOf('d1') === '1'); await settle();
+            check('eager-update', revOf(detail('d1')) === 'rev 1' && !detail('d1').hidden);
+            check('eager-preserved', kept(ed, 'ed-d1', 'typed d1', detail('d1')) && ed.open);
+            check('eager-focus', focused(i));
+            // An open lazy detail loads again; htmx's own swap puts the kept
+            // editor back.
+            row('l1').querySelector('[data-htmxo-detail-toggle]').click();
+            await wait(() => document.getElementById('ed-l1')); await settle();
+            const led = document.getElementById('ed-l1');
+            type(led, 'typed l1');
+            row('l1').querySelector('[data-bump]').click();
+            await wait(() => hoursOf('l1') === '1' && revOf(detail('l1')) === 'rev 1'); await settle();
+            check('lazy-preserved', kept(led, 'ed-l1', 'typed l1', detail('l1')));
+            // A plain htmx swap keeping an hx-preserve element.
+            const keep = document.getElementById('keep-box');
+            type(keep, 'typed box');
+            htmx.trigger('#box', 'refresh-box');
+            await wait(() => revOf(document.getElementById('box')) === 'box 1'); await settle();
+            check('swap-preserved', kept(keep, 'keep-box', 'typed box', document.getElementById('box')));
+            } catch (e) { check('threw ' + e, false); }
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(direct..., eager(), lazy(), box(), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            q = HTTP.queryparams(uri)
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            if uri.path == "/"
+                HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            elseif uri.path == "/detail"
+                html(editor(q["id"]))
+            elseif uri.path == "/save"
+                id = q["id"]
+                hours[id] += 1
+                html((id == "d1" ? eager : lazy)(; update_rows=id))
+            elseif uri.path == "/box"
+                boxes[] += 1
+                html(box())
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 7
+            end
+        finally
+            close(server)
+        end
+    end
+end
