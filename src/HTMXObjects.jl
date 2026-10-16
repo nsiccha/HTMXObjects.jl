@@ -18364,15 +18364,6 @@ shows the first time. The terminal is applied with the *request's* swap style �
 exactly like the ajax path), so an outer morph replaces in place instead of
 nesting; without the morph engine they fall back to the matching core style.
 
-The newest request wins. Requests aimed at a live element are numbered when
-they are sent, and once the element holds settled content an answer older
-than one already shown there never lands, whether it would swap straight in
-or divert. A newer answer that swaps straight in also stops a refresh still
-running in the reporter, and a newer request for something else (another URL
-or other parameters) that also diverts takes the reporter over. The same
-request re-fired while it runs — a periodic tick, a repeated event — still
-waits for the running refresh instead of restarting it.
-
 Periodic targets are automatic — no consumer wiring. An event-driven target
 opts in by carrying `data-htmxo-live`: once it holds settled (non-poller)
 content it diverts exactly like a periodic target, whatever trigger or
@@ -18382,6 +18373,15 @@ inherit, unlike `hx-swap`, so it is safe on aggregate wrappers). Detection
 uses the same Treebars markers the poller/terminal already carry
 (`treebar-poller` vs `treebar-terminal-content`). Include once per page; the
 `htmx()` shell installs it alongside the Treebars assets.
+
+The newest request wins. Requests aimed at a live element are numbered when
+they are sent, and once the element holds settled content an answer older
+than one already shown there never lands, whether it would swap straight in
+or divert. A newer answer that swaps straight in also stops a refresh still
+running in the reporter, and a newer request for something else (another URL
+or other parameters) that also diverts takes the reporter over. The same
+request re-fired while it runs — a periodic tick, a repeated event — still
+waits for the running refresh instead of restarting it.
 """
 live_refresh_script() = h.script(Raw(raw"""
 (function() {
