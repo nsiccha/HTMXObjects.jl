@@ -18389,9 +18389,14 @@ they are sent, and once the element holds settled content an answer older
 than one already shown there never lands, whether it would swap straight in
 or divert. A newer answer that swaps straight in also stops a refresh still
 running in the reporter, and a newer request for something else (another URL
-or other parameters) that also diverts takes the reporter over. The same
-request re-fired while it runs — a periodic tick, a repeated event — still
-waits for the running refresh instead of restarting it.
+or other parameters) that also diverts takes the reporter over. A newer answer
+the target's own `htmx:beforeSwap` gate skips (`shouldSwap = false` or
+`preventDefault()` on an answer htmx would have swapped in) counts as shown:
+the consumer kept what is on screen as that request's result, so the skip
+stops a running refresh just as a swap does. An answer htmx does not swap
+anyway, such as a 204 or an error status, changes nothing. The same request
+re-fired while it runs — a periodic tick, a repeated event — still waits for
+the running refresh instead of restarting it.
 """
 live_refresh_script() = h.script(Raw(raw"""
 (function() {
@@ -18598,6 +18603,13 @@ live_refresh_script() = h.script(Raw(raw"""
     if (d && d.xhr && d.target && isLive(d.target)) d.xhr.__htmxoLiveSeq = ++seq;
   });
   function seqOf(d) { return (d && d.xhr && d.xhr.__htmxoLiveSeq) || 0; }
+  // What htmx itself proposed for a live answer, seen before any listener
+  // can change it (capture phase): (D) tells a consumer's skip from an answer
+  // htmx would not swap anyway.
+  document.addEventListener('htmx:beforeSwap', function(evt) {
+    var d = evt.detail;
+    if (seqOf(d)) d.xhr.__htmxoLiveOffer = { detail: d, target: d.target, swap: d.shouldSwap };
+  }, true);
   // An answer to a newer request already landed in this live element.
   function superseded(d, rep) {
     var n = seqOf(d);
@@ -18612,24 +18624,26 @@ live_refresh_script() = h.script(Raw(raw"""
   }
   // A live request's answer: one older than an answer already shown does not
   // land, whichever path the newer one took. Otherwise record the swap style
-  // it goes in with for (C) — `afterSwap` does not carry it, and a `none`
-  // answer leaves the element as it was, so it stops nothing there.
+  // it goes in with for (C) and (D) — `afterSwap` does not carry it, and a
+  // `none` answer leaves the element as it was, so it stops nothing there.
+  // An answer the script holds back itself (here, or diverted in (A)) is
+  // marked `__htmxoLiveDropped`, so (D) never reads it as a consumer's skip.
   document.addEventListener('htmx:beforeSwap', function(evt) {
     var d = evt.detail;
     if (!seqOf(d)) return;
-    if (superseded(d, d.target && d.target.__htmxoReporter)) { d.shouldSwap = false; return; }
+    if (superseded(d, d.target && d.target.__htmxoReporter)) {
+      d.shouldSwap = false;
+      d.xhr.__htmxoLiveDropped = true;
+      return;
+    }
     d.xhr.__htmxoLiveStyle =
       d.swapOverride || closestSwap(d.requestConfig && d.requestConfig.elt) || '';
   });
-  // (C) A newer request's answer landed in the live element itself (a real
-  //     htmx swap — a diverted interim never swaps, and the script's own
-  //     terminal swap carries no request): an older refresh still running in
-  //     the reporter is stale. Stop it, so its terminal cannot overwrite the
-  //     newer content and its BUSY flag cannot hold back the next refresh.
-  document.addEventListener('htmx:afterSwap', function(evt) {
-    var d = evt.detail, t = d && d.target, rep = t && t.__htmxoReporter;
-    var n = seqOf(d);
-    if (!rep || !n || bareSwapStyle(d.xhr.__htmxoLiveStyle || '') === 'none') return;
+  // An answer to request `n` is what live element `t` shows: an older refresh
+  // still running in its reporter `rep` is stale. Stop it, so its terminal
+  // cannot overwrite the newer content and its BUSY flag cannot hold back the
+  // next refresh.
+  function landed(t, rep, n) {
     if (n > (rep.__htmxoLandedSeq || 0)) rep.__htmxoLandedSeq = n;
     if (n <= (rep.__htmxoCycleSeq || 0)) return;
     rep.__htmxoCycleSeq = n;
@@ -18639,6 +18653,33 @@ live_refresh_script() = h.script(Raw(raw"""
     t.removeAttribute(BUSY);
     var now = t.isConnected ? t : (t.id ? document.getElementById(t.id) : null);
     if (now && now.removeAttribute) now.removeAttribute(BUSY);
+  }
+  // (C) A newer request's answer landed in the live element itself (a real
+  //     htmx swap — a diverted interim never swaps, and the script's own
+  //     terminal swap carries no request).
+  document.addEventListener('htmx:afterSwap', function(evt) {
+    var d = evt.detail, t = d && d.target, rep = t && t.__htmxoReporter;
+    var n = seqOf(d);
+    if (!rep || !n || bareSwapStyle(d.xhr.__htmxoLiveStyle || '') === 'none') return;
+    landed(t, rep, n);
+  });
+  // (D) The live element's own `htmx:beforeSwap` gate skipped a newer answer
+  //     htmx would have swapped in (`shouldSwap = false` or `preventDefault()`
+  //     — "unchanged, keep what is shown"): as far as its consumer is
+  //     concerned, the element shows that request's answer, so it counts as
+  //     landed exactly like (C). Read once the event is over, so the verdict
+  //     is final wherever the gate listens; htmx records `successful` only
+  //     once `htmx:beforeSwap` went through uncancelled. An answer htmx would
+  //     not swap anyway (a 204, an error status) stops nothing.
+  document.addEventListener('htmx:afterRequest', function(evt) {
+    var r = evt.detail, xhr = r && r.xhr, o = xhr && xhr.__htmxoLiveOffer;
+    if (!o) return;
+    xhr.__htmxoLiveOffer = null;
+    var t = o.target, rep = t && t.__htmxoReporter;
+    if (!rep || !o.swap || xhr.__htmxoLiveDropped) return;
+    if (r.successful !== undefined && o.detail.shouldSwap) return;
+    if (bareSwapStyle(xhr.__htmxoLiveStyle || '') === 'none') return;
+    landed(t, rep, seqOf(o.detail));
   });
 
   document.addEventListener('htmx:configRequest', function(evt) {
@@ -18677,6 +18718,7 @@ live_refresh_script() = h.script(Raw(raw"""
                   target.getAttribute('hx-swap') || 'outerHTML';
       if (bareSwapStyle(style) === 'none') return;
       d.shouldSwap = false;
+      d.xhr.__htmxoLiveDropped = true;
       var rep = reporterFor(target);
       var n = seqOf(d), key = keyOf(d);
       // An answer to a newer request is already shown: this older refresh
