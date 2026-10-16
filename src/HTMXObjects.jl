@@ -18845,6 +18845,14 @@ so htmx drops the stale trigger; an answer already in flight is not swapped
 into it. The page keeps what the morph rendered, as it would after a plain
 swap that replaced the poller.
 
+It also keeps one poll per operation at a time, and none after the operation's
+286. htmx loses a poll element's request lock when it processes an ancestor
+while the element's request runs (the element then carries `htmx-request`),
+and sends a tick queued during a slow poll once that poll ends, if the element
+is still in the page. A poll of an operation whose 286 has arrived is cancelled
+and its element stops polling; a poll of an operation that is still waiting for
+another of its polls is cancelled, and the next tick polls again.
+
 Automatic — no consumer wiring. Include once per page; the `htmx()` shell
 installs it alongside the Treebars assets.
 """
@@ -18961,6 +18969,60 @@ auto_terminal_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:beforeSwap', function(evt) {
     var d = (evt && evt.detail) || {}, config = d.requestConfig || {};
     if (stalePoll(config.elt, config.path)) d.shouldSwap = false;
+  });
+
+  // One poll per operation at a time, and none once its 286 has arrived.
+  // htmx keeps a poll element's request lock, queued tick and stop-polling
+  // flag in per-element data, and wipes that data when it processes an
+  // ancestor while the element's attributes differ from the last processing;
+  // a polling element carries the `htmx-request` class for as long as its
+  // request runs, so a slow poll gained a second one beside it. A tick during
+  // a slow poll also queues a request that htmx sends when the poll ends, if
+  // its element is still in the page then, as the poller of a terminal
+  // applied elsewhere (below) is. A 286 marks its operation finished before
+  // htmx handles it: a later poll of that operation is cancelled and its
+  // element stops polling. A poll sent while another poll of its operation
+  // is still out is cancelled; the next tick polls again.
+  var finished = [], inflight = {};
+  function pollToken(path) {
+    return /[?&]__htmxo_poll=1(&|#|$)/.test(path || '') ? operationToken(path) : null;
+  }
+  function stopPolling(elt) {
+    ['hx-trigger', 'data-hx-trigger', 'hx-get', 'data-hx-get'].forEach(function(name) {
+      elt.removeAttribute(name);
+    });
+    setTimeout(function() {
+      if (window.htmx && elt.isConnected) htmx.process(elt);
+    }, 0);
+  }
+  document.addEventListener('htmx:beforeRequest', function(evt) {
+    var d = (evt && evt.detail) || {};
+    var token = pollToken(d.requestConfig && d.requestConfig.path);
+    if (!token || evt.defaultPrevented) return;
+    if (finished.indexOf(token) !== -1) {
+      evt.preventDefault();
+      if (d.elt && d.elt.removeAttribute) stopPolling(d.elt);
+    } else if (inflight[token]) {
+      evt.preventDefault();
+    }
+  });
+  // Registered when the request is actually sent: a listener after this one
+  // may still cancel it in `htmx:beforeRequest`.
+  document.addEventListener('htmx:beforeSend', function(evt) {
+    var d = (evt && evt.detail) || {}, xhr = d.xhr;
+    var token = xhr && pollToken(d.requestConfig && d.requestConfig.path);
+    if (!token) return;
+    inflight[token] = xhr;
+    xhr.addEventListener('loadend', function() {
+      if (inflight[token] === xhr) delete inflight[token];
+    });
+  });
+  document.addEventListener('htmx:beforeOnLoad', function(evt) {
+    var d = (evt && evt.detail) || {}, xhr = d.xhr;
+    var token = xhr && xhr.status === 286 && pollToken(d.requestConfig && d.requestConfig.path);
+    if (!token || finished.indexOf(token) !== -1) return;
+    finished.push(token);
+    if (finished.length > 256) finished.shift();
   });
 
   // A poll terminal whose headers send the answer away from the poller
