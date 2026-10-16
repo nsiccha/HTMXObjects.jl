@@ -18364,6 +18364,15 @@ shows the first time. The terminal is applied with the *request's* swap style �
 exactly like the ajax path), so an outer morph replaces in place instead of
 nesting; without the morph engine they fall back to the matching core style.
 
+The newest request wins. Requests aimed at a live element are numbered when
+they are sent, and once the element holds settled content an answer older
+than one already shown there never lands, whether it would swap straight in
+or divert. A newer answer that swaps straight in also stops a refresh still
+running in the reporter, and a newer request for something else (another URL
+or other parameters) that also diverts takes the reporter over. The same
+request re-fired while it runs — a periodic tick, a repeated event — still
+waits for the running refresh instead of restarting it.
+
 Periodic targets are automatic — no consumer wiring. An event-driven target
 opts in by carrying `data-htmxo-live`: once it holds settled (non-poller)
 content it diverts exactly like a periodic target, whatever trigger or
@@ -18545,6 +18554,61 @@ live_refresh_script() = h.script(Raw(raw"""
     }
     return null;
   }
+  // Request order: every request aimed at a live element takes the next
+  // number when it is sent, so "newer" means "issued later", whichever answer
+  // comes back first. The reporter keeps the number of the refresh it is
+  // running (`__htmxoCycleSeq`) and of the newest answer that has landed in
+  // its element (`__htmxoLandedSeq`); an answer older than one already shown
+  // never lands.
+  var seq = 0;
+  document.addEventListener('htmx:beforeRequest', function(evt) {
+    var d = evt.detail;
+    if (d && d.xhr && d.target && isLive(d.target)) d.xhr.__htmxoLiveSeq = ++seq;
+  });
+  function seqOf(d) { return (d && d.xhr && d.xhr.__htmxoLiveSeq) || 0; }
+  // An answer to a newer request already landed in this live element.
+  function superseded(d, rep) {
+    var n = seqOf(d);
+    return !!(n && rep && n <= (rep.__htmxoLandedSeq || 0));
+  }
+  // What a request asks for. The same request re-fired (a periodic tick, a
+  // repeated event) has the same key; another view of the element does not.
+  function keyOf(d) {
+    var c = d.requestConfig || {}, p = d.pathInfo || {};
+    var body = (c.useUrlParams || !c.formData) ? '' : String(new URLSearchParams(c.formData));
+    return (c.verb || '') + ' ' + (p.finalRequestPath || p.requestPath || '') + ' ' + body;
+  }
+  // A live request's answer: one older than an answer already shown does not
+  // land, whichever path the newer one took. Otherwise record the swap style
+  // it goes in with for (C) — `afterSwap` does not carry it, and a `none`
+  // answer leaves the element as it was, so it stops nothing there.
+  document.addEventListener('htmx:beforeSwap', function(evt) {
+    var d = evt.detail;
+    if (!seqOf(d)) return;
+    if (superseded(d, d.target && d.target.__htmxoReporter)) { d.shouldSwap = false; return; }
+    d.xhr.__htmxoLiveStyle =
+      d.swapOverride || closestSwap(d.requestConfig && d.requestConfig.elt) || '';
+  });
+  // (C) A newer request's answer landed in the live element itself (a real
+  //     htmx swap — a diverted interim never swaps, and the script's own
+  //     terminal swap carries no request): an older refresh still running in
+  //     the reporter is stale. Stop it, so its terminal cannot overwrite the
+  //     newer content and its BUSY flag cannot hold back the next refresh.
+  document.addEventListener('htmx:afterSwap', function(evt) {
+    var d = evt.detail, t = d && d.target, rep = t && t.__htmxoReporter;
+    var n = seqOf(d);
+    if (!rep || !n || bareSwapStyle(d.xhr.__htmxoLiveStyle || '') === 'none') return;
+    if (n > (rep.__htmxoLandedSeq || 0)) rep.__htmxoLandedSeq = n;
+    if (n <= (rep.__htmxoCycleSeq || 0)) return;
+    rep.__htmxoCycleSeq = n;
+    rep.__htmxoCycleKey = null;
+    rep.innerHTML = '';
+    rep.hidden = true;
+    t.removeAttribute(BUSY);
+    var now = t.isConnected ? t : (t.id ? document.getElementById(t.id) : null);
+    if (now && now.removeAttribute) now.removeAttribute(BUSY);
+  });
+
   document.addEventListener('htmx:configRequest', function(evt) {
     var d = evt.detail; if (!d || !d.target) return;
     if (!isLive(d.target)) return;
@@ -18579,20 +18643,30 @@ live_refresh_script() = h.script(Raw(raw"""
                   target.getAttribute('hx-swap') || 'outerHTML';
       if (bareSwapStyle(style) === 'none') return;
       d.shouldSwap = false;
+      var rep = reporterFor(target);
+      var n = seqOf(d), key = keyOf(d);
+      // An answer to a newer request is already shown: this older refresh
+      // has nothing left to deliver.
+      if (superseded(d, rep)) return;
       if (target.hasAttribute(BUSY)) {
-        // A prior refresh is still polling in the reporter — drop this re-fire.
-        // But if that reporter has stalled/errored (no live poller left), recover
-        // so a transient failure cannot pause refreshes for good.
-        var r = target.__htmxoReporter;
-        if (r && r.querySelector && r.querySelector('.treebar-poller-inner[hx-trigger]')) return;
+        // A prior refresh is still polling in the reporter. The same request
+        // re-fired, or an older one, waits for it: drop this interim. A newer
+        // request for something else takes the reporter over below — its
+        // poller replaces the running one, so the old loop stops and its
+        // terminal never lands. A stalled/errored reporter (no live poller
+        // left) is recovered either way, so a transient failure cannot pause
+        // refreshes for good.
+        var running = rep.querySelector && rep.querySelector('.treebar-poller-inner[hx-trigger]');
+        if (running && (n <= (rep.__htmxoCycleSeq || 0) || key === rep.__htmxoCycleKey)) return;
         target.removeAttribute(BUSY);
       }
       target.setAttribute(BUSY, '1');
-      var rep = reporterFor(target);
       rep.__htmxoLiveTarget = target;
       // Per-cycle state on the reporter: immune to a later request
       // re-stashing the target mid-cycle.
       rep.__htmxoSwapStyle = style;
+      rep.__htmxoCycleSeq = n;
+      rep.__htmxoCycleKey = key;
       rep.hidden = false;
       rep.innerHTML = resp;
       if (window.htmx && window.htmx.process) window.htmx.process(rep);
@@ -18605,9 +18679,14 @@ live_refresh_script() = h.script(Raw(raw"""
     if (rep2 && rep2.__htmxoLiveTarget && isTerminal(resp)) {
       d.shouldSwap = false;
       var live = rep2.__htmxoLiveTarget;
+      // The refresh this answers lands unless an answer to a newer request
+      // already has — (C) normally stops such a loop before it gets here.
+      var cyc = rep2.__htmxoCycleSeq || 0;
+      var stale = cyc > 0 && cyc < (rep2.__htmxoLandedSeq || 0);
+      if (!stale && cyc > 0) rep2.__htmxoLandedSeq = cyc;
       var tmp = document.createElement('template');
       tmp.innerHTML = resp;
-      var term = tmp.content.querySelector('.treebar-terminal-content');
+      var term = stale ? null : tmp.content.querySelector('.treebar-terminal-content');
       // The result content the route rendered, applied to the live target with
       // the diverted request's swap style — so `outerHTML`/`morph:outerHTML`
       // replaces the element (in place for morph) while

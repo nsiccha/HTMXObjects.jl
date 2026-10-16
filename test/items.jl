@@ -45,6 +45,8 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     PreloadApp, reset_preload!, release_preload!, preload_count,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
+    LiveRaceApp, reset_race!, race_interim!, race_release!, race_status,
+    race_hold!, _RACE_HELD,
     AutoUnwrapApp, reset_auto_unwrap!, auto_unwrap_pings,
     ComposeSettleApp, warm_browser_page,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
@@ -1075,6 +1077,188 @@ end
         h.div(; id="event-plain-wrap")(event_plain_section(0)))
     @get panel(; n::Int=1) = event_morph_panel(n)
     @get control(; n::Int=1) = event_plain_panel(n)
+end
+
+# Live-refresh ordering fixtures (snag refreshed-a-data-286f186f): ONE marked
+# section refreshed by several requesters with different `view` params — the
+# roster-table shape (its ↻ button and an in-table link both refetch the same
+# body). Slow views block until the test server has served their own interim
+# poller (so they always divert), and the gated ones additionally until the
+# driver releases them, so "the older refresh resolves after the newer one"
+# holds by construction, with no wall-clock timing. A held view renders at
+# once (a direct answer) but the test server holds its RESPONSE until the
+# browser releases it — from an `htmx:afterSwap` listener, since headless
+# virtual time stands still while a fetch is pending — so an older direct
+# answer arrives after a newer one has landed. The driver reads progress and
+# releases views through the server's `/__race` hook.
+const race_interims = Dict{String,Int}()
+const race_released = Set{String}()
+const race_done = Set{String}()
+const race_sent = Set{String}()
+const race_lock = ReentrantLock()
+
+reset_race!() = lock(race_lock) do
+    foreach(empty!, (race_interims, race_released, race_done, race_sent))
+    nothing
+end
+race_interim!(view) = lock(() -> (race_interims[view] = get(race_interims, view, 0) + 1), race_lock)
+race_release!(view) = lock(() -> push!(race_released, view), race_lock)
+race_status() = lock(race_lock) do
+    join(("$k=" * join(sort!(collect(s)), ",")
+          for (k, s) in (("done", race_done), ("sent", race_sent))), "|")
+end
+# Hold a held view's response until the browser releases it. The bound only
+# turns a driver that never releases into failed asserts instead of a server
+# that cannot close.
+function race_hold!(view)
+    started = time()
+    while !lock(() -> view in race_released, race_lock) && time() - started < 30
+        sleep(0.01)
+    end
+    lock(() -> push!(race_sent, view), race_lock)
+    nothing
+end
+
+const _RACE_SLOW = ("b", "e", "f")
+const _RACE_GATED = ("b", "e")
+const _RACE_HELD = ("g",)
+
+function race_driver()
+    h.script(Raw("""
+    (function() {
+      function sec() { return document.getElementById('race'); }
+      function view() { var m = /view=(\\w)/.exec(sec() ? sec().textContent : ''); return m ? m[1] : ''; }
+      // The poller a diverted refresh is running in the reporter, if any.
+      function polling() {
+        return document.querySelector('.htmxo-live-reporter .treebar-poller-inner[hx-get*="__htmxo_poll"]');
+      }
+      function token() {
+        var p = polling();
+        var m = p && /[?&]__htmxo_operation=([^&#]+)/.exec(p.getAttribute('hx-get') || '');
+        return m ? m[1] : null;
+      }
+      function click(v) { document.getElementById('race-' + v).click(); }
+      // Interim operation tokens per view, as the browser received them.
+      var interims = {};
+      document.addEventListener('htmx:beforeSwap', function(evt) {
+        var d = evt.detail, p = (d.pathInfo && d.pathInfo.finalRequestPath) || '';
+        if (p.indexOf('__htmxo_poll') !== -1) return;
+        var v = /view=(\\w)/.exec(p), t = /__htmxo_operation=([^&#"]+)/.exec(d.serverResponse || '');
+        if (v && t) (interims[v[1]] = interims[v[1]] || []).push(t[1]);
+      });
+      var status = '', asking = false;
+      function ask() {
+        if (asking) return;
+        asking = true;
+        fetch('/__race?op=status').then(function(r) { return r.text(); })
+          .then(function(t) { status = t; asking = false; });
+      }
+      // Scenario 3's held older answer (g) goes out only once the newer one
+      // (h) has landed. Released from the swap itself: no timer runs while
+      // g's fetch is pending.
+      var gReleased = false;
+      document.addEventListener('htmx:afterSwap', function() {
+        if (!gReleased && view() === 'h') {
+          gReleased = true;
+          fetch('/__race?op=release&view=g');
+        }
+      });
+      // Whether the server lists view `v` under `what` (done / sent).
+      function has(what, v) {
+        var parts = status.split('|');
+        for (var i = 0; i < parts.length; i++) {
+          if (parts[i].indexOf(what + '=') === 0)
+            return parts[i].slice(what.length + 1).split(',').indexOf(v) !== -1;
+        }
+        return false;
+      }
+      function finished(v) { return has('done', v); }
+      window.addEventListener('load', function() {
+        var phase = 1, wait = 0, tokE = null, b = document.body.dataset;
+        // Unbounded phases (the suite norm): a stuck phase leaves its flags
+        // absent and the asserts fail on the dumped DOM.
+        var iv = setInterval(function() {
+          var s = sec();
+          if (!s) return;
+          ask();
+          if (wait > 0) { wait--; return; }
+          if (phase === 1 && s.hasAttribute('data-htmxo-live-settled')) {
+            click('b'); phase = 2;
+          } else if (phase === 2 && polling() && s.hasAttribute('data-htmxo-live-busy')) {
+            // Scenario 1: b diverted and is pending; a newer FAST request
+            // swaps straight in.
+            click('c'); phase = 3;
+          } else if (phase === 3 && view() === 'c') {
+            fetch('/__race?op=release&view=b'); phase = 4;
+          } else if (phase === 4 && finished('b') && !polling()) {
+            // b's operation finished after c had landed; give any still
+            // running poll loop time to deliver it.
+            wait = 12; phase = 5;
+          } else if (phase === 5) {
+            b.raceFirst = view();
+            click('e'); phase = 6;
+          } else if (phase === 6 && polling() && (interims.e || []).length >= 1) {
+            // Scenario 2: e diverted; the SAME request fires again.
+            tokE = token(); click('e'); phase = 7;
+          } else if (phase === 7 && (interims.e || []).length >= 2) {
+            wait = 12; phase = 8;
+          } else if (phase === 8) {
+            b.raceRefireKept = token() === tokE ? '1' : '0';
+            b.raceRefireDistinct = interims.e[0] !== interims.e[1] ? '1' : '0';
+            // A newer, DIFFERENT request that also diverts.
+            click('f'); phase = 9;
+          } else if (phase === 9 && (interims.f || []).length >= 1) {
+            wait = 12; phase = 10;
+          } else if (phase === 10) {
+            fetch('/__race?op=release&view=e'); phase = 11;
+          } else if (phase === 11 && finished('e') && finished('f') && !polling()) {
+            wait = 12; phase = 12;
+          } else if (phase === 12) {
+            b.raceSecond = view();
+            // Scenario 3: two direct answers out of order — g is sent first
+            // but its response is held; the newer h swaps in, then g arrives.
+            click('g'); click('h'); phase = 13;
+          } else if (phase === 13 && has('sent', 'g')) {
+            wait = 12; phase = 14;
+          } else if (phase === 14) {
+            b.raceThird = view();
+            b.raceBusyLeft = s.hasAttribute('data-htmxo-live-busy') ? '1' : '0';
+            b.raceDone = '1';
+            clearInterval(iv);
+          }
+        }, 25);
+      });
+    })();
+    """))
+end
+
+race_section(view) = h.section("view=$view"; id="race", data_htmxo_live="")
+
+function race_panel(view)
+    if view in _RACE_SLOW
+        while lock(() -> get(race_interims, view, 0), race_lock) < 1
+            sleep(0.01)
+        end
+    end
+    if view in _RACE_GATED
+        while !lock(() -> view in race_released, race_lock)
+            sleep(0.01)
+        end
+    end
+    lock(() -> push!(race_done, view), race_lock)
+    race_section(view)
+end
+
+@htmx struct LiveRaceApp
+    __page__(content) = htmx(content; hyperscript_version=nothing,
+        feedback=false, compose=false, thread=false, overlay=false,
+        extra_head=(h.script(""; src=_LIVE_MORPH_EXT), race_driver()))
+    @get index() = h.div(; hx_ext="morph")(
+        (h.button(v; id="race-$v", type="button", hx_get="race?view=$v",
+            hx_target="#race", hx_swap="morph:outerHTML")
+         for v in ("b", "c", "e", "f", "g", "h"))...,
+        race_section("a"))
+    @get race(; view::String="a") = race_panel(view)
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -4096,6 +4280,86 @@ end
             # bare name appears in the page's own scripts, so match the
             # attribute form.)
             @test !contains(dom, "data-htmxo-live-busy=\"")
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "live-refresh keeps the newest request's result" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_race!()
+        _clear_operation_polls!()
+        route!(LiveRaceApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            target = String(req.target)
+            uri = HTTP.URI(target)
+            if uri.path == "/__race"
+                q = HTTP.queryparams(uri)
+                q["op"] == "release" && race_release!(q["view"])
+                return HTTP.Response(200, race_status())
+            end
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            resp = handler(req)
+            if uri.path == "/race" && !contains(target, "__htmxo_poll")
+                view = get(HTTP.queryparams(uri), "view", "a")
+                contains(String(resp.body), "__htmxo_poll") && race_interim!(view)
+                view in _RACE_HELD && race_hold!(view)
+            end
+            resp
+        end
+
+        try
+            warm_browser_page("http://127.0.0.1:$port/")
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile $url`
+                dump_dom(cmd)
+            end
+            # Driver control: both scenarios ran to completion.
+            @test contains(dom, "data-race-done=\"1\"")
+            # Scenario 1: a slow refresh (b) diverted to the reporter, then a
+            # newer fast request (c) swapped straight in. b's operation
+            # finished afterwards; c stays (pre-fix: b's terminal undid it).
+            @test contains(dom, "data-race-first=\"c\"")
+            # Scenario 2: the same request re-fired while it was pending keeps
+            # the running poll loop (a periodic tick or a repeated event must
+            # not restart it) — the control shows the re-fire was a distinct
+            # operation, so keeping the token is a real check ...
+            @test contains(dom, "data-race-refire-distinct=\"1\"")
+            @test contains(dom, "data-race-refire-kept=\"1\"")
+            # ... while a newer, different request that also diverts takes
+            # over: f is shown even though e resolved after it (pre-fix: f's
+            # interim was dropped and e's terminal won).
+            @test contains(dom, "data-race-second=\"f\"")
+            # Scenario 3: two answers that swap straight in, the older one
+            # (g) arriving after the newer one (h) had landed: h stays
+            # (plain htmx lands them in arrival order).
+            @test contains(dom, "data-race-third=\"h\"")
+            @test contains(dom, "data-race-busy-left=\"0\"")
+            @test length(collect(eachmatch(r"id=\"race\"", dom))) == 1
+            # One reporter, hidden and empty, after the section.
+            @test length(collect(eachmatch(
+                r"<div class=\"htmxo-live-reporter\"", dom))) == 1
+            @test contains(dom, "view=h</section>" *
+                "<div class=\"htmxo-live-reporter\" hidden=\"\"></div>")
         finally
             close(server)
             _clear_operation_polls!()
