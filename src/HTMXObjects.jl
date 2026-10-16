@@ -6997,7 +6997,8 @@ root-level definition propagates to every route — including `@include`d
 upstream structs the app cannot edit. It is invoked for its side effect only
 (return value ignored) and does not replace the error article; a failure inside
 it is logged, not swallowed. Fires for both route errors and `safely`-wrapped
-widget errors.
+widget errors, but not for a caller fault (a `4xx` answer), which is not
+recorded.
 
 In dev (Revise loaded), include the full log path so the article matches
 the `@error` line on stderr (`HTMXObjects caught an error: <path>`) — the
