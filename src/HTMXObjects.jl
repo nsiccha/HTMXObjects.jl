@@ -5773,7 +5773,7 @@ struct _SSEFailure
 end
 
 function _sse_failure(err, bt, req, error_obj)
-    uid, path = _record_error(err, bt, req)
+    uid, path = _maybe_record_error(err, bt, req)
     _SSEFailure(_invoke_error_handler(error_obj, err, uid, path))
 end
 
@@ -7026,11 +7026,12 @@ end
 # `nothing`. When non-nothing, invoke it as a side effect (return value ignored)
 # after the error is recorded but before rendering — the hook point for running
 # an extra command once HTMXObjects' built-in logging has run. A failure inside
-# the hook is logged, never swallowed silently. Then invoke the user's
-# `__error__` render hook if present, else fall back to the default. `__error__`
-# is called with just the exception, so `__error__ = rethrow` works.
+# the hook is logged, never swallowed silently. A caller fault is not recorded
+# (`uid === nothing`, see `_maybe_record_error`) and fires no hook. Then invoke
+# the user's `__error__` render hook if present, else fall back to the default.
+# `__error__` is called with just the exception, so `__error__ = rethrow` works.
 function _invoke_error_handler(obj, err, uid, path)
-    if obj !== nothing && hasproperty(obj, :__on_error__)
+    if uid !== nothing && obj !== nothing && hasproperty(obj, :__on_error__)
         hook = getproperty(obj, :__on_error__)
         if hook !== nothing
             try
@@ -7045,6 +7046,9 @@ function _invoke_error_handler(obj, err, uid, path)
     end
     inner = unwrap_error(err)
     title = _caller_fault_title(inner)
+    # An unrecorded caller fault has no error id to point at: one whose type
+    # names no title reads under a plain one.
+    title === nothing && uid === nothing && (title = "Request refused")
     if title !== nothing
         return h.article(
             h.header(title),
@@ -7092,6 +7096,15 @@ _unwrapped_status_code(_err) = 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
+# Caller faults (4xx: a missing or invalid submitted value, a refused resource
+# operation, a mutation result the server no longer holds) are answered, not
+# recorded: no error log or `@error` line, no `X-HTMXO-Error-Id`, no
+# `__on_error__` (user decision `1danmww`). Server faults (5xx, a stalled
+# operation included) keep the full record.
+_records_error(err) = !(400 <= _error_status_code(err) < 500)
+_maybe_record_error(err, bt, req) =
+    _records_error(err) ? _record_error(err, bt, req) : (nothing, nothing)
+
 _passthrough_response(r::HTTP.Response) = r
 _passthrough_response(_) = nothing
 
@@ -7104,12 +7117,13 @@ function _stamp_error_id(resp::HTTP.Response, uid)
     HTTP.setheader(resp, "X-HTMXO-Error-Id" => uid)
     resp
 end
+_stamp_error_id(resp::HTTP.Response, ::Nothing) = resp
 
 # `wrap` shapes the rendered failure for whatever receives it — a live poller
 # needs it inside its terminal node (`OperationStalled`, Treebars extension).
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[],
         wrap=identity)
-    uid, path = _record_error(err, bt, req)
+    uid, path = _maybe_record_error(err, bt, req)
     _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _passthrough_response(err_val)
@@ -7149,7 +7163,7 @@ function safely(f; obj=nothing, req=nothing)
         return f()
     catch err
         bt = catch_backtrace()
-        uid, path = _record_error(err, bt, req)
+        uid, path = _maybe_record_error(err, bt, req)
         return _invoke_error_handler(obj, err, uid, path)
     end
 end

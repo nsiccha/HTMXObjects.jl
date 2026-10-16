@@ -1571,7 +1571,8 @@ discriminator to recover against — not the status alone.
 This is distinct from *submitted-value* failures. `HTMXObjects.MissingRequiredParam`
 and `HTMXObjects.InvalidDomainValue` (raised when a form posts a value outside its
 current domain) map to **400** on a non-HTMX request and render a `Bad Request`
-article; under HTMX they too stay 200 with `X-HTMXO-Error-Id`. Neither type is
+article; under HTMX they too stay 200. As caller faults they are not recorded:
+no error log, no `X-HTMXO-Error-Id`, no `__on_error__`. Neither type is
 exported, so catching one needs the qualified name.
 
 In short: **400 means the caller sent something wrong; 500 means the surface
@@ -1779,7 +1780,8 @@ the grace period is answered by the same poller a memoized route gets.
   the server no longer holds (restart, idle expiry, or eviction) answers
   `HTMXObjects.OperationResultUnavailable` (`410`; an HTMX poll receives its
   "Result unavailable" article, which ends the poll — see
-  [How a poll ends](#How-a-poll-ends)).
+  [How a poll ends](#How-a-poll-ends)). Like every `4xx` answer it is not
+  recorded as an error.
 - A mutation's poller lives in the submission's swap target, so a slow
   submission is answered by one only when its client says that target exists:
   the `htmx()` shell's `mutation_poll_script()` sends the effective swap style
@@ -2416,7 +2418,9 @@ as later requests; a different key selects a different retained graph. Explicit
 POST body parameters must be passed as `query_url` overrides (§URL helpers).
 
 Check both the response status and `X-HTMXO-Error-Id`: an HTMX error fragment can
-have status 200. A successful progress response means submission, not batch
+have status 200. A caller fault (`4xx`, a missing parameter say) is not recorded
+and carries no error id; its HTMX fragment is the `aria-invalid="true"` article.
+A successful progress response means submission, not batch
 completion. Omitting the HX header under `:auto`, requesting static export, or
 calling an unmarked heavy property directly does not select this queued transport.
 `track_job!` records independently started work; it does not admit it to the
