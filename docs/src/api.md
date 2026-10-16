@@ -1879,7 +1879,14 @@ polls again: a poll whose element no longer names that operation in its
 `hx-get` is cancelled, an answer still in flight to it is not swapped, and
 htmx drops the stale trigger. A region that a morph replaced keeps what the
 morph rendered, as it would after a plain swap; the operation itself still
-finishes on the server. A request that is not an HTMX poll keeps its status:
+finishes on the server. The script also keeps one poll per operation at a
+time, and none after its `286`: htmx loses a poll element's request lock when
+it processes an ancestor while the poll runs, and sends a tick queued during a
+slow poll once that poll ends, if the element is still in the page (as a
+retargeted terminal's poller is). A poll of an operation whose `286` has
+arrived is cancelled and its element stops polling; a poll sent while another
+poll of its operation is still out is cancelled, and the next tick polls
+again. A request that is not an HTMX poll keeps its status:
 `curl` of a poll URL gets `200` for a result and `410` for an unavailable
 token. So does a Markdown or `?error` read of a poll URL, `HX-Request` or not:
 it is answered inline to its reader, not into a poller.
