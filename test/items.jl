@@ -47,7 +47,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     LiveGateApp, reset_live_gate!, live_gate_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
     LiveRaceApp, reset_race!, race_interim!, race_release!, race_status,
-    race_hold!, _RACE_HELD,
+    race_hold!, _RACE_HELD, LiveVetoApp,
     AutoUnwrapApp, reset_auto_unwrap!, auto_unwrap_pings,
     ComposeSettleApp, warm_browser_page,
     StackedSemanticRoute, ContextSemanticApp, ExternalContextApp, ExternalContextChild, JobScopedApp,
@@ -1223,29 +1223,18 @@ const _RACE_SLOW = ("b", "e", "f")
 const _RACE_GATED = ("b", "e")
 const _RACE_HELD = ("g",)
 
-function race_driver()
-    h.script(Raw("""
-    (function() {
-      function sec() { return document.getElementById('race'); }
+# Driver helpers shared by the ordering fixtures: the live section `id` and
+# the view it shows, the poller a diverted refresh is running in the reporter,
+# a click on the `id-<view>` button, and the test server's progress.
+function race_driver_prelude(id)
+    """
+      function sec() { return document.getElementById('$id'); }
       function view() { var m = /view=(\\w)/.exec(sec() ? sec().textContent : ''); return m ? m[1] : ''; }
       // The poller a diverted refresh is running in the reporter, if any.
       function polling() {
         return document.querySelector('.htmxo-live-reporter .treebar-poller-inner[hx-get*="__htmxo_poll"]');
       }
-      function token() {
-        var p = polling();
-        var m = p && /[?&]__htmxo_operation=([^&#]+)/.exec(p.getAttribute('hx-get') || '');
-        return m ? m[1] : null;
-      }
-      function click(v) { document.getElementById('race-' + v).click(); }
-      // Interim operation tokens per view, as the browser received them.
-      var interims = {};
-      document.addEventListener('htmx:beforeSwap', function(evt) {
-        var d = evt.detail, p = (d.pathInfo && d.pathInfo.finalRequestPath) || '';
-        if (p.indexOf('__htmxo_poll') !== -1) return;
-        var v = /view=(\\w)/.exec(p), t = /__htmxo_operation=([^&#"]+)/.exec(d.serverResponse || '');
-        if (v && t) (interims[v[1]] = interims[v[1]] || []).push(t[1]);
-      });
+      function click(v) { document.getElementById('$id-' + v).click(); }
       var status = '', asking = false;
       function ask() {
         if (asking) return;
@@ -1253,16 +1242,6 @@ function race_driver()
         fetch('/__race?op=status').then(function(r) { return r.text(); })
           .then(function(t) { status = t; asking = false; });
       }
-      // Scenario 3's held older answer (g) goes out only once the newer one
-      // (h) has landed. Released from the swap itself: no timer runs while
-      // g's fetch is pending.
-      var gReleased = false;
-      document.addEventListener('htmx:afterSwap', function() {
-        if (!gReleased && view() === 'h') {
-          gReleased = true;
-          fetch('/__race?op=release&view=g');
-        }
-      });
       // Whether the server lists view `v` under `what` (done / sent).
       function has(what, v) {
         var parts = status.split('|');
@@ -1273,6 +1252,36 @@ function race_driver()
         return false;
       }
       function finished(v) { return has('done', v); }
+    """
+end
+
+function race_driver()
+    h.script(Raw("""
+    (function() {
+    $(race_driver_prelude("race"))
+      function token() {
+        var p = polling();
+        var m = p && /[?&]__htmxo_operation=([^&#]+)/.exec(p.getAttribute('hx-get') || '');
+        return m ? m[1] : null;
+      }
+      // Interim operation tokens per view, as the browser received them.
+      var interims = {};
+      document.addEventListener('htmx:beforeSwap', function(evt) {
+        var d = evt.detail, p = (d.pathInfo && d.pathInfo.finalRequestPath) || '';
+        if (p.indexOf('__htmxo_poll') !== -1) return;
+        var v = /view=(\\w)/.exec(p), t = /__htmxo_operation=([^&#"]+)/.exec(d.serverResponse || '');
+        if (v && t) (interims[v[1]] = interims[v[1]] || []).push(t[1]);
+      });
+      // Scenario 3's held older answer (g) goes out only once the newer one
+      // (h) has landed. Released from the swap itself: no timer runs while
+      // g's fetch is pending.
+      var gReleased = false;
+      document.addEventListener('htmx:afterSwap', function() {
+        if (!gReleased && view() === 'h') {
+          gReleased = true;
+          fetch('/__race?op=release&view=g');
+        }
+      });
       window.addEventListener('load', function() {
         var phase = 1, wait = 0, tokE = null, b = document.body.dataset;
         // Unbounded phases (the suite norm): a stuck phase leaves its flags
@@ -1334,7 +1343,7 @@ end
 
 race_section(view) = h.section("view=$view"; id="race", data_htmxo_live="")
 
-function race_panel(view)
+function race_panel(view; section=race_section)
     if view in _RACE_SLOW
         while lock(() -> get(race_interims, view, 0), race_lock) < 1
             sleep(0.01)
@@ -1346,7 +1355,7 @@ function race_panel(view)
         end
     end
     lock(() -> push!(race_done, view), race_lock)
-    race_section(view)
+    section(view)
 end
 
 @htmx struct LiveRaceApp
@@ -1359,6 +1368,103 @@ end
          for v in ("b", "c", "e", "f", "g", "h"))...,
         race_section("a"))
     @get race(; view::String="a") = race_panel(view)
+end
+
+# A consumer gate's skip counts as the newest answer (snag
+# newest-wins-igno-42687134): the race section again, carrying a content hash,
+# under the KB chat's `htmx:beforeSwap` gate, which skips an answer whose hash
+# matches what is shown. A slow refresh (b) diverts; a newer fast answer (c)
+# carries the shown hash, so the gate skips it — what is shown IS c's answer —
+# and b's older terminal must not land afterwards. The control: a newer answer
+# htmx itself does not swap (z, a 204 from the test server) is no consumer
+# skip, so the refresh running then (e) still lands. Released through the same
+# `/__race` hook, with b and e gated slow views.
+veto_section(view) = h.section("view=$view"; id="veto", data_htmxo_live="",
+    data_hash=view in ("a", "c") ? "same" : view)
+
+function veto_driver()
+    h.script(Raw("""
+    (function() {
+    $(race_driver_prelude("veto"))
+      var skipped = {}, answered = {};
+      document.addEventListener('htmx:afterRequest', function(evt) {
+        var p = (evt.detail.pathInfo && evt.detail.pathInfo.finalRequestPath) || '';
+        var v = /view=(\\w)/.exec(p);
+        if (v && p.indexOf('__htmxo_poll') === -1) answered[v[1]] = true;
+      });
+      window.addEventListener('load', function() {
+        // The gate, on the document and registered after the page's scripts,
+        // so it runs after every listener of the live refresh.
+        document.addEventListener('htmx:beforeSwap', function(e) {
+          var d = e.detail || {}, t = d.target;
+          if (!t || t.id !== 'veto' || typeof d.serverResponse !== 'string') return;
+          var tpl = document.createElement('template');
+          tpl.innerHTML = d.serverResponse;
+          var root = tpl.content.querySelector('#veto');
+          if (!root) return;  // an interim poller: the live refresh diverts it
+          if (root.getAttribute('data-hash') === t.getAttribute('data-hash')) {
+            d.shouldSwap = false;
+            var v = /view=(\\w)/.exec(root.textContent);
+            if (v) skipped[v[1]] = true;
+          }
+        });
+        var phase = 1, wait = 0, b = document.body.dataset;
+        function quiet(s) { return !polling() && !s.hasAttribute('data-htmxo-live-busy'); }
+        // Unbounded phases (the suite norm): a stuck phase leaves its flags
+        // absent and the asserts fail on the dumped DOM.
+        var iv = setInterval(function() {
+          var s = sec();
+          if (!s) return;
+          ask();
+          if (wait > 0) { wait--; return; }
+          if (phase === 1 && s.hasAttribute('data-htmxo-live-settled')) {
+            click('b'); phase = 2;
+          } else if (phase === 2 && polling() && s.hasAttribute('data-htmxo-live-busy')) {
+            // b diverted and is pending; a newer fast answer repeats what is
+            // shown, and the gate skips it.
+            click('c'); phase = 3;
+          } else if (phase === 3 && answered.c) {
+            b.vetoSkipped = skipped.c ? '1' : '0';
+            // c is handled: b's refresh has nothing left to deliver.
+            b.vetoFreed = quiet(s) ? '1' : '0';
+            fetch('/__race?op=release&view=b'); phase = 4;
+          } else if (phase === 4 && finished('b') && !polling()) {
+            // b's operation finished; give a still-running poll loop time to
+            // deliver it.
+            wait = 12; phase = 5;
+          } else if (phase === 5) {
+            b.vetoFirst = view();
+            click('e'); phase = 6;
+          } else if (phase === 6 && polling() && s.hasAttribute('data-htmxo-live-busy')) {
+            click('z'); phase = 7;
+          } else if (phase === 7 && answered.z) {
+            // htmx swaps no 204, and no consumer skipped it: e keeps running.
+            b.vetoKept = quiet(s) ? '0' : '1';
+            fetch('/__race?op=release&view=e'); phase = 8;
+          } else if (phase === 8 && finished('e') && !polling()) {
+            wait = 12; phase = 9;
+          } else if (phase === 9) {
+            b.vetoSecond = view();
+            b.vetoBusyLeft = s.hasAttribute('data-htmxo-live-busy') ? '1' : '0';
+            b.vetoDone = '1';
+            clearInterval(iv);
+          }
+        }, 25);
+      });
+    })();
+    """))
+end
+
+@htmx struct LiveVetoApp
+    __page__(content) = htmx(content; hyperscript_version=nothing,
+        feedback=false, compose=false, thread=false, overlay=false,
+        extra_head=(h.script(""; src=_LIVE_MORPH_EXT), veto_driver()))
+    @get index() = h.div(; hx_ext="morph")(
+        (h.button(v; id="veto-$v", type="button", hx_get="veto?view=$v",
+            hx_target="#veto", hx_swap="morph:outerHTML")
+         for v in ("b", "c", "e", "z"))...,
+        veto_section("a"))
+    @get veto(; view::String="a") = race_panel(view; section=veto_section)
 end
 
 @htmx struct MultiVerbPolicyApp
@@ -4535,6 +4641,81 @@ end
             @test length(collect(eachmatch(
                 r"<div class=\"htmxo-live-reporter\"", dom))) == 1
             @test contains(dom, "view=h</section>" *
+                "<div class=\"htmxo-live-reporter\" hidden=\"\"></div>")
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "live-refresh counts an answer its gate skips as the newest" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_race!()
+        _clear_operation_polls!()
+        route!(LiveVetoApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            target = String(req.target)
+            uri = HTTP.URI(target)
+            if uri.path == "/__race"
+                q = HTTP.queryparams(uri)
+                q["op"] == "release" && race_release!(q["view"])
+                return HTTP.Response(200, race_status())
+            end
+            view = get(HTTP.queryparams(uri), "view", "a")
+            uri.path == "/veto" && view == "z" && return HTTP.Response(204)
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            resp = handler(req)
+            if uri.path == "/veto" && !contains(target, "__htmxo_poll") &&
+                    contains(String(resp.body), "__htmxo_poll")
+                race_interim!(view)
+            end
+            resp
+        end
+
+        try
+            warm_browser_page("http://127.0.0.1:$port/")
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile $url`
+                dump_dom(cmd)
+            end
+            # Driver control: both scenarios ran to completion.
+            @test contains(dom, "data-veto-done=\"1\"")
+            # A slow refresh (b) diverted, then the gate skipped a newer fast
+            # answer (c) that repeats what is shown. That stops b at once (no
+            # poll loop or busy flag left), and b's terminal never lands once
+            # its operation finishes: the element keeps a, which is c's answer
+            # as far as the gate is concerned. Pre-fix b kept running and won.
+            @test contains(dom, "data-veto-skipped=\"1\"")
+            @test contains(dom, "data-veto-freed=\"1\"")
+            @test contains(dom, "data-veto-first=\"a\"")
+            # Control: a newer answer htmx itself does not swap (a 204) is no
+            # gate skip, so the refresh running then (e) keeps going and lands.
+            @test contains(dom, "data-veto-kept=\"1\"")
+            @test contains(dom, "data-veto-second=\"e\"")
+            @test contains(dom, "data-veto-busy-left=\"0\"")
+            @test length(collect(eachmatch(r"id=\"veto\"", dom))) == 1
+            # One reporter, hidden and empty, after the section.
+            @test length(collect(eachmatch(
+                r"<div class=\"htmxo-live-reporter\"", dom))) == 1
+            @test contains(dom, "view=e</section>" *
                 "<div class=\"htmxo-live-reporter\" hidden=\"\"></div>")
         finally
             close(server)
