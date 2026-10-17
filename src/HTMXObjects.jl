@@ -14818,7 +14818,10 @@ function htmxoMdAfter(s, event) {
         delete s.dataset.loading; delete s.dataset.retries;
         s.dataset.loaded = '1'; delete s.dataset.failed;
     } else if (htmxoMdTransient(s, event) && n < htmxoMdRetryDelays.length) {
-        // Still latched as loading: the retry owns the next request.
+        // Still latched as loading: the retry owns the next request, and the
+        // slot's own status line reports it, so the shell raises no failure
+        // toast for this attempt (a failure the retries cannot cure does).
+        event.detail.htmxoFailureShown = true;
         s.dataset.retries = String(n + 1);
         if (p) p.textContent = 'Connection lost — retrying…';
         setTimeout(function() {
@@ -19830,6 +19833,13 @@ response all mark the element the response actually lands in. A target that an
 `outerHTML` swap has already replaced is marked through its same-id
 replacement; otherwise the requesting element's own `hx-target` CSS selector is
 used, then the requesting element itself.
+
+Success and failure are read as [`toast_script`](@ref)'s
+`window.htmxoRequestOutcome` reads them, so the red flash and the shell's
+failure toast agree: a network error or timeout flashes red, while a request
+the page aborted or an answer that navigates (`HX-Redirect`, `HX-Refresh`,
+`HX-Location`) just clears the outline. A head without the toast runtime
+flashes red for every request htmx does not report as successful.
 """
 request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
@@ -19869,6 +19879,21 @@ document.addEventListener('DOMContentLoaded', function() {
     function clearFeedback(el) {
         el.classList.remove('htmx-request-active', 'htmx-request-success', 'htmx-request-error');
     }
+    // How the request ended, as the toast runtime reads it: an aborted request
+    // or an answer that navigates is neither success nor failure, and a
+    // network error or timeout is decided by the event that follows
+    // afterRequest. A head without that runtime keeps the plain reading.
+    function outcome(e) {
+        if (window.htmxoRequestOutcome) return window.htmxoRequestOutcome(e).state;
+        if (e.type !== 'htmx:afterRequest') return 'pending';
+        return e.detail.successful ? 'success' : 'failure';
+    }
+    function mark(el, state) {
+        clearFeedback(el);
+        if (state === 'neutral') return;
+        el.classList.add(state === 'success' ? 'htmx-request-success' : 'htmx-request-error');
+        setTimeout(function() { clearFeedback(el); }, state === 'success' ? 1000 : 2000);
+    }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
         var elt = e.detail.elt;
         if (isPolling(elt) || isPreload(e)) return;
@@ -19887,27 +19912,17 @@ document.addEventListener('DOMContentLoaded', function() {
         t.classList.add('htmx-request-success');
         setTimeout(function() { clearFeedback(t); }, 1000);
     });
-    document.body.addEventListener('htmx:afterRequest', function(e) {
+    function finished(e) {
         var elt = e.detail.elt;
         if (isPollingRelated(elt)) return;
+        var state = outcome(e);
+        if (state === 'pending') return;
         var t = getTarget(e);
-        t.classList.remove('htmx-request-active');
-        if (e.detail.successful) {
-            t.classList.add('htmx-request-success');
-            setTimeout(function() { clearFeedback(t); }, 1000);
-            if (t !== elt) {
-                elt.classList.remove('htmx-request-active');
-                elt.classList.add('htmx-request-success');
-                setTimeout(function() { clearFeedback(elt); }, 1000);
-            }
-        } else {
-            t.classList.add('htmx-request-error');
-            setTimeout(function() { clearFeedback(t); }, 2000);
-            if (t !== elt) {
-                elt.classList.add('htmx-request-error');
-                setTimeout(function() { clearFeedback(elt); }, 2000);
-            }
-        }
+        mark(t, state);
+        if (t !== elt) mark(elt, state);
+    }
+    ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout', 'htmx:sendAbort'].forEach(function(name) {
+        document.body.addEventListener(name, finished);
     });
 });
 """))
@@ -20480,8 +20495,11 @@ JS driving [`compose_box`](@ref): auto-grow (no-op when the browser supports
 `field-sizing: content`, JS fallback otherwise), Enter-to-send /
 Shift+Enter-newline, localStorage draft persistence for `.htmxo-compose-draft`
 elements (keyed by `data-draft-key`), and a submit guard on
-`.htmxo-compose-form` forms (clear drafts + reset on 2xx, toast on
-failure / network error, through [`toast_script`](@ref)'s `window.htmxoToast`).
+`.htmxo-compose-form` forms (clear drafts + reset on success; on a failure,
+network error or timeout, one toast saying the text is preserved, in place of
+the shell's generic failure toast). It reads the outcome with
+[`toast_script`](@ref)'s `window.htmxoRequestOutcome` and raises the toast
+through `window.htmxoToast`, so it needs that runtime on the page.
 Re-binds on `htmx:afterSwap` and
 `htmx:afterSettle`; idempotent per element. The swap pass covers swaps
 that never settle (one whose nodes an `afterSwap` listener detaches —
@@ -20557,23 +20575,26 @@ compose_box_script() = h.script(Raw(raw"""
             restoreDrafts(evt.detail && evt.detail.elt);
             bindTextareas(evt.detail && evt.detail.elt);
         });
-        // 2xx → clear drafts + reset the form. Non-2xx → keep value, toast.
-        document.body.addEventListener('htmx:afterRequest', function(evt) {
+        // Success → clear drafts + reset the form. A failure → keep the text
+        // and say so, in place of the shell's generic failure toast (this
+        // listener runs first and claims the request's one failure message).
+        function finished(evt) {
             var form = evt.target && evt.target.closest && evt.target.closest('.htmxo-compose-form');
-            if (!form) return;
-            if (evt.detail && evt.detail.successful) {
+            if (!form || !evt.detail) return;
+            var result = window.htmxoRequestOutcome(evt);
+            if (result.state === 'success') {
                 clearFormDrafts(form);
                 form.reset();
                 form.querySelectorAll('.htmxo-compose-textarea').forEach(autoGrow);
-            } else {
-                toast('send failed — your text is preserved, retry when ready', 'error');
+            } else if (result.state === 'failure' && !evt.detail.htmxoFailureShown) {
+                evt.detail.htmxoFailureShown = true;
+                toast(evt.type === 'htmx:sendError'
+                    ? 'send failed — unreachable; your text is preserved'
+                    : 'send failed — your text is preserved, retry when ready', 'error');
             }
-        });
-        // No response at all (server down, network drop). Same UX as a non-2xx.
-        document.body.addEventListener('htmx:sendError', function(evt) {
-            var form = evt.target && evt.target.closest && evt.target.closest('.htmxo-compose-form');
-            if (!form) return;
-            toast('send failed — unreachable; your text is preserved', 'error');
+        }
+        ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout'].forEach(function(name) {
+            document.body.addEventListener(name, finished);
         });
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
@@ -20649,9 +20670,31 @@ The page shell's notification runtime, which [`htmx`](@ref) includes:
 - **An element can toast its own response.** On a requesting element (or an
   ancestor), `data-htmxo-toast="body"` (or an empty value) toasts the
   response's text on success, and any other value is the success text itself.
-  On failure such an element shows an error toast: a short `text/plain` body,
-  else "Request failed (HTTP <status>)". This suits `hx-swap="none"` actions
-  whose response is their outcome message. A route's header text wins.
+  This suits `hx-swap="none"` actions whose response is their outcome
+  message. A route's header text wins.
+- **A failed request raises one error toast**, whatever element sent it: an
+  answer htmx does not swap because of its status (a gateway's 413 or 502, a
+  router's 404, a short `text/plain` refusal), no answer at all, or a timeout.
+  The text names the status and its reason, read from the answer's `<title>`
+  when `statusText` is empty (HTTP/2), plus a short `text/plain` body or an
+  HTML title/heading that says more: "Request failed (HTTP 413 Request Entity
+  Too Large)", "Request failed (HTTP 409 Conflict): already stopped",
+  "Request failed: no response (network error or server unreachable)",
+  "Request timed out". HTMXObjects' own error articles are 2xx answers that
+  land in the target, so they raise none. A request the page aborted, an
+  answer that navigates (`HX-Redirect`, `HX-Refresh`, `HX-Location`), an error
+  answer an app's `htmx.config.responseHandling` swaps in, and pollers
+  (`hx-trigger="every …"`) and preloads raise none either. An identical error
+  toast already on screen counts the repeat ("(×3)") instead of stacking.
+  A listener that shows its own failure message sets
+  `evt.detail.htmxoFailureShown = true` while the request's events dispatch,
+  an element's `hx-on::after-request` included, since the toast waits for
+  them (as [`compose_box_script`](@ref) does, and the lazy master/detail
+  loader for an attempt it retries by itself).
+- `window.htmxoRequestOutcome(evt)` classifies an `htmx:afterRequest`,
+  `htmx:sendError`, `htmx:timeout` or `htmx:sendAbort` event as
+  `{state: "success" | "failure" | "neutral" | "pending", text}`, the reading
+  [`request_feedback_script`](@ref) and the compose box share.
 """
 toast_script() = h.script(Raw(raw"""
 (function() {
@@ -20672,8 +20715,13 @@ toast_script() = h.script(Raw(raw"""
         }
         return r;
     }
+    // An error toast whose text is already on screen counts the repeat instead
+    // of stacking a copy: a gateway outage fails every request on the page.
+    var shownErrors = {};
     function toast(text, status) {
         status = status || 'info';
+        var same = status === 'error' && shownErrors[text];
+        if (same) { same.repeat(); return same.node; }
         var t = document.createElement('div');
         t.className = 'htmxo-toast htmxo-toast-' + status;
         if (status === 'error') t.setAttribute('role', 'alert');
@@ -20686,19 +20734,26 @@ toast_script() = h.script(Raw(raw"""
         close.textContent = '×';
         t.appendChild(msg);
         t.appendChild(close);
-        var timer = null;
+        var timer = null, held = false, count = 1;
         function dismiss() {
             clearTimeout(timer);
+            if (shownErrors[text] && shownErrors[text].node === t) delete shownErrors[text];
             t.classList.remove('htmxo-toast-show');
             setTimeout(function() { t.remove(); }, 300);
         }
-        function arm() { clearTimeout(timer); timer = setTimeout(dismiss, DURATION[status] || 4000); }
-        function hold() { clearTimeout(timer); }
+        function arm() { clearTimeout(timer); if (!held) timer = setTimeout(dismiss, DURATION[status] || 4000); }
+        function hold() { held = true; clearTimeout(timer); }
+        function release() { held = false; arm(); }
         close.addEventListener('click', dismiss);
         t.addEventListener('mouseenter', hold);
-        t.addEventListener('mouseleave', arm);
+        t.addEventListener('mouseleave', release);
         t.addEventListener('focusin', hold);
-        t.addEventListener('focusout', arm);
+        t.addEventListener('focusout', release);
+        if (status === 'error') shownErrors[text] = { node: t, repeat: function() {
+            count += 1;
+            msg.textContent = text + ' (×' + count + ')';
+            arm();
+        } };
         region().appendChild(t);
         void t.offsetWidth;
         t.classList.add('htmxo-toast-show');
@@ -20721,26 +20776,99 @@ toast_script() = h.script(Raw(raw"""
         var doc = new DOMParser().parseFromString(body, 'text/html');
         return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
     }
+    function squash(text) { return (text || '').replace(/\s+/g, ' ').trim(); }
+    // Over HTTP/2 `statusText` is empty, so the reason comes from the answer's
+    // own `<title>` (a gateway's "413 Request Entity Too Large") or this table.
+    var REASONS = {
+        400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found',
+        405: 'Method Not Allowed', 408: 'Request Timeout', 409: 'Conflict', 410: 'Gone',
+        413: 'Content Too Large', 414: 'URI Too Long', 415: 'Unsupported Media Type',
+        422: 'Unprocessable Content', 429: 'Too Many Requests', 500: 'Internal Server Error',
+        501: 'Not Implemented', 502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout'
+    };
     function failureText(xhr) {
-        var body = (xhr.responseText || '').trim();
-        if (body && body.length <= 300 && (header(xhr, 'Content-Type') || '').indexOf('text/plain') >= 0) return body;
-        return xhr.status ? 'Request failed (HTTP ' + xhr.status + ')' : 'Request failed: no response';
+        var type = header(xhr, 'Content-Type') || '', body = xhr.responseText || '';
+        var plain = '', title = '', heading = '';
+        if (type.indexOf('text/plain') >= 0) plain = body.trim();
+        else if (type.indexOf('html') >= 0 && body.length <= 100000) {
+            var doc = new DOMParser().parseFromString(body, 'text/html');
+            var h = doc.querySelector('h1, h2');
+            title = squash(doc.title);
+            heading = h ? squash(h.textContent) : '';
+        }
+        var reason = squash(xhr.statusText);
+        var named = title.match(/^(\d{3})\s+(.+)$/);
+        if (!reason && named && +named[1] === xhr.status) reason = named[2];
+        if (!reason) reason = REASONS[xhr.status] || '';
+        var line = 'HTTP ' + xhr.status + (reason ? ' ' + reason : '');
+        // A title or heading that names this status code, in any wording, is
+        // the status line again, not a detail.
+        function restates(text) {
+            var named = text.match(/^(?:HTTP\s+)?(\d{3})(\s|:|$)/i);
+            return (named && +named[1] === xhr.status) || text.toLowerCase() === reason.toLowerCase();
+        }
+        var detail = plain && plain.length <= 300 ? plain :
+            [title, heading].filter(function(text) { return text && text.length <= 200 && !restates(text); })[0];
+        return 'Request failed (' + line + ')' + (detail ? ': ' + detail : '');
     }
-    document.addEventListener('htmx:afterRequest', function(evt) {
+    // How a finished htmx request ended: `success`; `failure`, with the text
+    // that says why; `neutral`, for a request the page aborted or an answer
+    // that navigates (HX-Redirect, HX-Refresh, HX-Location); or `pending` for
+    // an `htmx:afterRequest` without a status, which htmx follows at once with
+    // the `htmx:sendError` / `htmx:timeout` / `htmx:sendAbort` that decides it.
+    // `shown` marks an error answer htmx swapped in anyway (an app's own
+    // `responseHandling`): it is on screen already.
+    function outcome(evt) {
+        var d = evt.detail || {}, xhr = d.xhr;
+        if (evt.type === 'htmx:sendError') return { state: 'failure', text: 'Request failed: no response (network error or server unreachable)' };
+        if (evt.type === 'htmx:timeout') return { state: 'failure', text: 'Request timed out' };
+        if (evt.type === 'htmx:sendAbort') return { state: 'neutral' };
+        if (!xhr || !xhr.status) return { state: 'pending' };
+        if (d.successful === true) return { state: 'success' };
+        if (d.failed === true) return { state: 'failure', text: failureText(xhr), shown: xhr.__htmxoErrorSwapped === true };
+        return { state: 'neutral' };
+    }
+    window.htmxoRequestOutcome = outcome;
+    document.addEventListener('htmx:beforeSwap', function(evt) {
+        var d = evt.detail || {};
+        if (d.isError && d.xhr) d.xhr.__htmxoErrorSwapped = !!d.shouldSwap;
+    });
+    // Pollers and preloads are background work: they fail silently, as they
+    // pulse silently.
+    function background(d, elt) {
+        var headers = d.requestConfig && d.requestConfig.headers;
+        var trigger = elt && elt.getAttribute ? elt.getAttribute('hx-trigger') || '' : '';
+        return trigger.indexOf('every') !== -1 || !!(headers && headers['HX-Preloaded'] === 'true');
+    }
+    function finished(evt) {
         var d = evt.detail || {}, xhr = d.xhr;
         if (!xhr) return;
         var elt = (d.requestConfig && d.requestConfig.elt) || d.elt;
-        var own = elt && elt.closest ? elt.closest('[data-htmxo-toast]') : null;
-        if (d.successful) {
+        var result = outcome(evt);
+        if (result.state === 'success') {
+            var own = elt && elt.closest ? elt.closest('[data-htmxo-toast]') : null;
             var text = routeText(xhr);
             if (text === null && own) {
                 var given = own.getAttribute('data-htmxo-toast');
                 text = given && given !== 'body' ? given : bodyText(xhr);
             }
             if (text) toast(text, 'success');
-        } else if (own) {
-            toast(failureText(xhr), 'error');
+        } else if (result.state === 'failure' && !result.shown && !background(d, elt) && !d.__htmxoFailureQueued) {
+            // One failure message per request. A listener that shows its own
+            // sets `htmxoFailureShown`; waiting for the microtask lets every
+            // listener of this request's events run first, including an
+            // element's `hx-on::after-request`, which htmx dispatches (as the
+            // kebab-case alias) only after this document listener.
+            d.__htmxoFailureQueued = true;
+            queueMicrotask(function() {
+                if (d.htmxoFailureShown) return;
+                d.htmxoFailureShown = true;
+                toast(result.text, 'error');
+            });
         }
+    }
+    ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout'].forEach(function(name) {
+        document.addEventListener(name, finished);
     });
     if (document.body) region();
     else document.addEventListener('DOMContentLoaded', region);

@@ -157,9 +157,9 @@ h.button("Stop"; hx_post="/agents/x/interrupt", hx_swap="none", data_htmxo_toast
 ```
 
 `"body"` (or an empty value) toasts the response text on success; any other
-value is the success text itself. On failure such an element shows an error
-toast: a short `text/plain` body, else "Request failed (HTTP <status>)". A
-route's `X-HTMXO-Toast` text takes precedence over the element's.
+value is the success text itself. A route's `X-HTMXO-Toast` text takes
+precedence over the element's. A failure raises the shell's
+[failure toast](#failure-toasts), as for any other request.
 
 Toasts stack bottom-right in one `role="status"` / `aria-live="polite"` region
 (an error toast is also `role="alert"`), so they cause no layout shift. Each
@@ -171,6 +171,42 @@ the page's scheme, with a status edge from `--htmxo-success`,
 runtime is [`toast_styles`](@ref) + [`toast_script`](@ref), which every
 `htmx()` shell carries and [`compose_box_assets`](@ref) also includes for
 hand-built heads. `?plain`/Markdown and static export are unaffected.
+
+### Failure toasts {#failure-toasts}
+
+Some requests fail before HTMXObjects answers them. A gateway in front of the
+app can refuse an upload over its size limit with `413`, or answer `502` while
+the app restarts. The connection can drop, or the router can answer `404` to
+a stale link. htmx swaps none of these answers, so the shell raises one error
+toast saying why, with no app code:
+
+- `Request failed (HTTP 413 Request Entity Too Large)` names the status and its reason. Over HTTP/2 the browser receives no reason phrase, so the shell reads it from the answer's `<title>` (a gateway error page carries one), or else uses the standard phrase.
+- `Request failed (HTTP 409 Conflict): already stopped` appends a short `text/plain` body, or an HTML title or heading that says more than the status.
+- `Request failed: no response (network error or server unreachable)` and `Request timed out` cover a request that got no answer.
+
+The requesting element and its target still flash red, as
+[`request_feedback`](@ref) marks them. The previous content of the target
+stays, since nothing was swapped. HTMXObjects' own route errors are unaffected:
+for an htmx request they are `200` error articles that land in the target. No
+toast is raised for:
+
+- a request the page aborted;
+- an answer that navigates (`HX-Redirect`, `HX-Refresh`, `HX-Location`); these also no longer flash red;
+- an error answer that an app's `htmx.config.responseHandling` swaps in;
+- a poller (`hx-trigger="every …"`) or a preload.
+
+An identical error toast already on screen counts the repeat, so an outage
+that fails several requests shows `… (×3)` instead of a stack.
+
+A component that shows its own failure message claims the request by setting
+`evt.detail.htmxoFailureShown = true` while the request's events dispatch,
+an element's `hx-on::after-request` included. The toast waits for those
+handlers. [`compose_box`](@ref) forms raise their own "send failed — your text
+is preserved" toast this way, and a lazy master/detail slot claims an attempt
+it is about to retry by itself. `window.htmxoRequestOutcome(evt)` returns the
+shell's reading of an `htmx:afterRequest`, `htmx:sendError`, `htmx:timeout`
+or `htmx:sendAbort` event: `{state, text}`, where `state` is `"success"`,
+`"failure"`, `"neutral"` or `"pending"`.
 
 ### Offline pages — `assets=:vendor`
 
