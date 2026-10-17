@@ -852,7 +852,10 @@ Drop once per page to enable a centred loading indicator and click-feedback styl
 `loading_indicator_script()` is deprecated in its favour. Request feedback marks the requesting element
 and the element htmx resolved as the request's target. That covers an inherited
 `hx-target`, relative selectors such as `next .result` or `closest tr`, and an
-`HX-Retarget` response.
+`HX-Retarget` response. A failed request (an unswapped error status, no answer,
+a timeout) flashes red, and the shell's
+[failure toast](api.md#failure-toasts) says why. A request the page aborted, or
+an answer that navigates, only clears the outline.
 
 ## Links and links-as-actions
 

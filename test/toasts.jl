@@ -42,6 +42,10 @@ end
     page = repr("text/html", htmx(h.p("x")))
     @test count("window.htmxoToast = toast", page) == 1
     @test count(".htmxo-toasts {", page) == 1
+    # One outcome reading, shared by the failure toast, request feedback and
+    # the compose box.
+    @test count("window.htmxoRequestOutcome = outcome", page) == 1
+    @test contains(page, "window.htmxoRequestOutcome(e).state")
     # Without the compose box the toast runtime still ships.
     @test contains(repr("text/html", htmx(h.p("x"); compose=false)), "window.htmxoToast = toast")
     # One implementation: the compose box raises its toasts through it.
@@ -115,12 +119,14 @@ end
             await wait(() => toasts().length === 0);
             check('dismissed', toasts().length === 0);
             await settle('fail');
-            check('no-success-toast-on-error', toasts().length === 0);
+            check('error-gets-failure-toast-not-success', texts().join('|') === 'Request failed (HTTP 500 Internal Server Error)' && toasts()[0].classList.contains('htmxo-toast-error'));
+            toasts()[0].querySelector('.htmxo-toast-close').click();
+            await wait(() => toasts().length === 0);
             await settle('act');
             check('swap-none-body', texts().join('|') === 'interrupt sent');
             await settle('act-fail');
             const error = toasts().find(t => t.classList.contains('htmxo-toast-error'));
-            check('error-toast', error && error.querySelector('span').textContent === 'already stopped' && error.getAttribute('role') === 'alert');
+            check('error-toast', error && error.querySelector('span').textContent === 'Request failed (HTTP 409 Conflict): already stopped' && error.getAttribute('role') === 'alert');
             await settle('copy');
             check('static-text', texts().includes('Copied'));
             await settle('both');
@@ -175,6 +181,178 @@ end
             end
         finally
             close(server)
+        end
+    end
+end
+
+# A request that fails before it reaches HTMXObjects (a gateway's 413, a
+# dropped connection) used to show only request feedback's two-second red
+# outline (snag `request-feedback-02dea6aa`: an upload over a gateway's size
+# limit). It now raises one error toast that names the status and reason. A
+# raw-socket server answers with an empty reason phrase, as an HTTP/2 gateway
+# does, and closes a connection without any answer.
+@testitem "failed requests raise one error toast in a real browser" tags=[:unit, :browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_file = "/vendor/" * HTMXObjects._VENDOR_ASSETS[:htmx].file
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        controls = h.div(
+            h.form(h.input(; type="file", name="image"), h.button("Transcribe"; id="upload");
+                id="upload-form", hx_post="/gateway", hx_encoding="multipart/form-data", hx_target="#upload-out"),
+            h.div("previous result"; id="upload-out"),
+            h.button("Stop"; id="plain", hx_post="/plain", hx_swap="none"),
+            h.button("Drop"; id="drop", hx_post="/drop", hx_target="#drop-out"), h.div(; id="drop-out"),
+            h.button("Away"; id="away", hx_post="/location", hx_target="#away-out"), h.div(; id="away-out"),
+            h.button("Slow"; id="slow", hx_post="/slow", hx_target="#slow-out"), h.div(; id="slow-out"),
+            h.form(compose_box("text"); id="compose", class="htmxo-compose-form", hx_post="/gateway", hx_swap="none"),
+            h.button("Shown"; id="shown", hx_post="/gateway", hx_target="#shown-out"), h.div(; id="shown-out"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const require = (ok, label) => { if (!ok) throw new Error(label + ' ' + JSON.stringify(state())); checks.push(label); };
+            const el = id => document.getElementById(id);
+            const shown = () => Array.from(document.querySelectorAll('.htmxo-toast.htmxo-toast-show'));
+            const texts = () => shown().map(t => t.querySelector('span').textContent);
+            const state = () => ({ texts: texts(), classes: ['upload-form', 'drop', 'away', 'slow'].map(id => id + ':' + el(id).className) });
+            const wait = async cond => { for (let n = 0; n < 400 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            // Resolves a macrotask after the request from `id` ended: its
+            // answer, or the sendError/sendAbort that follows an
+            // afterRequest without a status. The shell's toast has run by then.
+            const ended = (id, fire) => new Promise(resolve => {
+                const names = ['htmx:afterRequest', 'htmx:sendError', 'htmx:sendAbort'];
+                const on = e => {
+                    const elt = e.detail.requestConfig && e.detail.requestConfig.elt || e.detail.elt;
+                    if (elt !== el(id) || (e.type === 'htmx:afterRequest' && !(e.detail.xhr && e.detail.xhr.status))) return;
+                    names.forEach(n => document.removeEventListener(n, on));
+                    setTimeout(resolve, 0);
+                };
+                names.forEach(n => document.addEventListener(n, on));
+                fire();
+            });
+            const dismissAll = async () => { shown().forEach(t => t.querySelector('.htmxo-toast-close').click()); await wait(() => shown().length === 0); };
+            try {
+                await ended('upload-form', () => el('upload').click());
+                require(texts().join('|') === 'Request failed (HTTP 413 Request Entity Too Large)' && shown()[0].getAttribute('role') === 'alert',
+                    'gateway 413 names status and reason from the title');
+                require(el('upload-form').classList.contains('htmx-request-error') && !el('upload-form').classList.contains('htmx-request-active'),
+                    'failed requester flashes red without the in-flight class');
+                require(el('upload-out').textContent === 'previous result', 'nothing swapped into the target');
+                await ended('upload-form', () => el('upload').click());
+                require(texts().join('|') === 'Request failed (HTTP 413 Request Entity Too Large) (×2)', 'a repeat counts instead of stacking');
+                await dismissAll();
+                await ended('plain', () => el('plain').click());
+                require(texts().join('|') === 'Request failed (HTTP 409 Conflict): already stopped', 'short text/plain refusal follows the status');
+                await dismissAll();
+                await ended('drop', () => el('drop').click());
+                require(texts().join('|') === 'Request failed: no response (network error or server unreachable)', 'dropped connection');
+                require(el('drop').classList.contains('htmx-request-error') && !el('drop').classList.contains('htmx-request-active'),
+                    'dropped connection flashes red');
+                await dismissAll();
+                await ended('away', () => el('away').click());
+                require(texts().length === 0 && !el('away').classList.contains('htmx-request-error'), 'HX-Location answer is no failure');
+                require(await wait(() => el('away-out').textContent === 'landed'), 'HX-Location followed');
+                await ended('slow', () => { el('slow').click(); setTimeout(() => htmx.trigger(el('slow'), 'htmx:abort'), 100); });
+                require(texts().length === 0 && !el('slow').classList.contains('htmx-request-error'), 'aborted request is no failure');
+                const poll = document.createElement('div');
+                poll.id = 'poll'; poll.setAttribute('hx-get', '/missing'); poll.setAttribute('hx-trigger', 'load, every 60s');
+                document.body.appendChild(poll);
+                await ended('poll', () => htmx.process(poll));
+                require(texts().length === 0, 'a poller fails silently');
+                poll.remove();
+                await ended('compose', () => htmx.trigger(el('compose'), 'submit'));
+                require(texts().join('|') === 'send failed — your text is preserved, retry when ready', 'compose box keeps its own single toast');
+                await dismissAll();
+                const timeout = window.htmxoRequestOutcome({ type: 'htmx:timeout', detail: {} });
+                require(timeout.state === 'failure' && timeout.text === 'Request timed out', 'timeout outcome');
+                require(window.htmxoRequestOutcome({ type: 'htmx:sendAbort', detail: {} }).state === 'neutral', 'abort outcome');
+                const defaults = htmx.config.responseHandling;
+                htmx.config.responseHandling = [{ code: '413', swap: true, error: true }].concat(defaults);
+                await ended('shown', () => el('shown').click());
+                htmx.config.responseHandling = defaults;
+                require(texts().length === 0 && el('shown-out').textContent.indexOf('413 Request Entity Too Large') >= 0,
+                    'an error answer the app swaps in raises no toast');
+                await fetch('/complete?status=' + encodeURIComponent('passed:' + checks.length));
+            } catch (error) {
+                await fetch('/complete?status=' + encodeURIComponent(String(error)));
+            }
+        }, { once: true });
+        """))
+        page = repr("text/html", htmx(controls, driver; assets=:vendor, sse_version=nothing,
+            ws_version=nothing, preload_version=nothing, hyperscript_version=nothing, overlay=false))
+        nginx = "<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n<body>\r\n" *
+            "<center><h1>413 Request Entity Too Large</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+
+        receipt = Channel{String}(1)
+        listener = listen(Sockets.localhost, 0)
+        port = Int(getsockname(listener)[2])
+        respond(io, status_line, body=""; type="text/html", headers="") = write(io,
+            "HTTP/1.1 $status_line\r\nContent-Type: $type; charset=utf-8\r\n$headers" *
+            "Content-Length: $(sizeof(body))\r\nConnection: close\r\n\r\n", body)
+        function handle(io)
+            request_line = readline(io)
+            body_bytes = 0
+            while true
+                line = readline(io)
+                isempty(strip(line)) && break
+                name, value = strip.(split(line, ':'; limit=2))
+                lowercase(name) == "content-length" && (body_bytes = parse(Int, value))
+            end
+            body_bytes > 0 && read(io, body_bytes)
+            target = split(request_line)[2]
+            path = first(split(target, '?'))
+            path == "/" && return respond(io, "200 OK", page)
+            path == htmx_file && return respond(io, "200 OK", htmx_js; type="application/javascript")
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(target))
+                return respond(io, "204 No Content")
+            end
+            # An empty reason phrase: what the browser sees from an HTTP/2 gateway.
+            path == "/gateway" && return respond(io, "413 ", nginx)
+            path == "/plain" && return respond(io, "409 Conflict", "already stopped"; type="text/plain")
+            path == "/drop" && return nothing
+            path == "/location" && return respond(io, "200 OK";
+                headers="HX-Location: {\"path\":\"/landed\",\"target\":\"#away-out\"}\r\n")
+            path == "/landed" && return respond(io, "200 OK", "landed")
+            # Held past the client's abort; the late write may hit a closed socket.
+            path == "/slow" && (sleep(2); return respond(io, "200 OK", "late"))
+            respond(io, "404 Not Found", "missing")
+        end
+        acceptor = @async while isopen(listener)
+            io = try accept(listener) catch; break end
+            @async try
+                handle(io)
+            catch err
+                err isa Base.IOError || @error "test server handler failed" exception=(err, catch_backtrace())
+            finally
+                close(io)
+            end
+        end
+        try
+            mktempdir() do profile
+                browser_log = joinpath(profile, "browser.log")
+                browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`;
+                    stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(browser), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        outcome = HTTP.unescapeuri(take!(receipt))
+                        @test outcome == "/complete?status=passed:15"
+                        outcome == "/complete?status=passed:15" || @info "Failure toast outcome" outcome
+                    else
+                        @info "Failure toast timeout" log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(browser) || kill(browser)
+                    wait(browser)
+                end
+            end
+        finally
+            close(listener)
         end
     end
 end
