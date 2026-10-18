@@ -1963,6 +1963,53 @@ Every resumed poll carries `X-HTMXO-Operation-Age: <whole seconds since the
 operation started>`, so a script that follows a poller can bound its own
 waiting too.
 
+#### How long operations took
+
+The access log writes one line per request, and a polled operation is many
+requests: the first one, cut off at the grace period, then one short line per
+poll. So [`serve`](@ref) also writes one line per polled operation when it
+ends, next to the access log:
+
+```
+2026-10-17T17:29:22+0200 - operation GET /transaction_review_all?quarter=2 ok compute=12.4s answered=477.0s polls=23
+2026-10-17T18:40:02+0200 - operation GET /tax abandoned compute=95.3s answered=- polls=40 last_poll=8.2s
+```
+
+- The outcome is `ok` (the operation answered its result), `failed` (it
+  answered a failure), `stalled` (it answered `OperationStalled`), `abandoned`
+  (no request reached it for ten minutes, so it was dropped) or `evicted`
+  (dropped to make room for newer operations). An abandoned or evicted
+  operation is written when the registry drops it, so its line appears at
+  least ten minutes after the last request that reached it, and only while
+  the process keeps running.
+- `compute` is the time from the start until the computation finished or
+  failed, measured on the server (`-` while it still runs).
+- `answered` is the time from the start until the client received the answer
+  that ended the operation. A client polls at its own pace: a browser slows
+  timers in a background tab, so `answered` can exceed `compute` by however
+  long nobody asked. `last_poll` is the age at the last request that reached
+  the operation.
+- `polls` counts the follow-up requests (a page load's first fetch included).
+- The target is the starting request's path and query, as the access log shows
+  it, without the poll markers or the operation token. Values of
+  credential-like parameters are replaced by `…`.
+
+An operation that answered within the grace period has no operation line; its
+access-log line already holds its time. A poll whose token was spent or expired
+starts a new operation, which gets its own line.
+
+Records are logged at `Info` with `_group=:operation`, so a logger can route
+them separately. Pass `serve(; operation_log=nothing)` to turn them off, or a
+formatter `(io, record) -> nothing` taking an
+[`HTMXObjects.OperationRecord`](@ref) to write your own format. The setting is
+process-wide ([`HTMXObjects.OPERATION_LOG`](@ref)); in-process
+[`dispatch`](@ref) calls and other servers write records only once it is set.
+
+```@docs
+HTMXObjects.OperationRecord
+HTMXObjects.OPERATION_LOG
+```
+
 A resolved `:auto` poll answers the result fragment in a select-matching
 terminal node — no kept progress tree, no inspection chrome — and the
 `htmx()` shell unwraps that node on swap, so the caller's target ends with

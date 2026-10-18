@@ -86,6 +86,7 @@ _isolate_auto_poll_params(response) =
 # it works whether or not the page runs Treebars' client finalizer). The
 # registry entry goes: nothing polls it again.
 function _operation_stalled_response(stall, ip, keys, call_kwargs, transport)
+    HTMXObjects._operation_ended(transport, :stalled)
     transport.cleanup()
     status = try
         HTMXObjects.getstatus(ip, keys...; call_kwargs...)
@@ -190,6 +191,7 @@ function __init__()
             catch
                 # keep_progress=true renders failures internally; propagated
                 # failures (including keep_progress=false) have no future poll.
+                HTMXObjects._operation_ended(transport, :failed)
                 transport.cleanup()
                 rethrow()
             end
@@ -235,6 +237,12 @@ function __init__()
             stall !== nothing && HTMXObjects._operation_running_answer(responded) &&
                 return _operation_stalled_response(stall, ip, keys,
                                                    call_kwargs, transport)
+            # Any other answer that is not the running poller ends the
+            # operation. A result rendered through `render_operation_result`
+            # has already recorded it; what Treebars rendered without a value
+            # is its failure terminal.
+            HTMXObjects._operation_running_answer(responded) ||
+                HTMXObjects._operation_ended(transport, :failed)
             _isolate_auto_poll_params(responded)
         end
 
