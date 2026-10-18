@@ -2216,7 +2216,7 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 |--------|---------|
 | `TestRoutes`     | Test-runner UI (see Testing section) |
 | `EditorRoutes`   | Git-backed inline file editor (see Editor section) |
-| `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`) |
+| `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`). `GET /schema` returns `{routes, contexts, params}`: each route lists its own params and names a `context`, and each inherited `@param` is described once in `params`. `GET /schema?inherited=inline` returns the flat `reflect(T)` array, which repeats inherited `@param`s on every route |
 | `OpenAPIRoutes` | OpenAPI 3.1 endpoint for an `@htmx` app's route tree (opt-in via `@include openapi = OpenAPIRoutes(; root=T)`) — see [OpenAPI](#openapi) |
 | `SwaggerRoutes` | Version-pinned Swagger UI viewer for the app's OpenAPI document (opt-in via `@include docs = SwaggerRoutes(; spec_url="/openapi")`) — see [OpenAPI](#openapi) |
 | `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
@@ -2570,7 +2570,7 @@ prewarm_routes!(base_url, warm)  # post-listen validation
 
 | Export | Purpose |
 |--------|---------|
-| `reflect(T)` / `reflect(app)` | In-process route inventory: one `(verb, path, name, doc, params)` NamedTuple per route, mirroring what `route!` registers. `SchemaRoutes` serves this same inventory as JSON |
+| `reflect(T)` / `reflect(app)` | In-process route inventory: one `(verb, path, name, doc, params)` NamedTuple per route, mirroring what `route!` registers. `SchemaRoutes` serves this inventory as JSON (`?inherited=inline` for this exact flat shape) |
 | `select_routes(routes; verb, prefix, names, pattern)` | Pure, stateless filter over the inventory (filters combine with AND); also accepts the app type directly. Returns the collection the two functions below consume |
 | `precompile_routes!(root, coll=nothing)` | Pre-listen: `Base.precompile` each resolved handler body + argument parser. Reports `(verb, path, name, precompiled)` per route; bodies never run |
 | `prewarm_routes!(base_url, coll; include_post=false, operations=false)` | Post-listen: one real request per resolved route. Reports `(verb, path, name, url, status, error)` per route; non-`GET` routes are skipped unless `include_post=true`, failures never throw. `operations=true` also drives each route's deferred answer (below) |
@@ -2670,6 +2670,7 @@ markdown = String(resp.body)
 | `body` | A `String` or `Vector{UInt8}` (for `POST`/`PUT`/`PATCH` routes) |
 | `parent` | An optional Treebars progress node the route's compute hangs under |
 | `static` | An optional `StaticExport` spec: this one request runs blocking and comes back in static form ([below](#request-scoped-static-export)) |
+| `operation_policy` | An optional `OperationPolicy`, or its mode Symbol, this one request runs under instead of its root's ([below](#a-per-request-operation-policy)) |
 
 The request resolves through the live router, so `:index` collapse, verb
 dispatch, path/query/body extraction (including repeated-key vectors), the
@@ -2702,6 +2703,37 @@ already parents automatically. Off `dispatch` the accessor returns
 
 Serve-time middleware (the access log, Revise, `serve`'s `middleware`) does
 not run: `dispatch` resolves at the router, beneath the middleware stack.
+
+### A per-request operation policy
+
+Under the default `:auto` policy a slow route answers an HTMX request with a
+poller, which a caller in Julia cannot follow. `operation_policy=:blocking`
+(or `OperationPolicy(:blocking)`) runs that one request to completion and
+returns its ordinary answer — the bare fragment with `"HX-Request" => "true"`,
+the composed page without:
+
+```julia
+resp = dispatch(:GET, "/review"; headers=["HX-Request" => "true"],
+                operation_policy=:blocking)
+html = String(resp.body)   # the finished fragment, never a poller
+```
+
+- **Request-scoped.** The override replaces the root's policy for this request
+  only; registration is not touched, so requests served concurrently keep the
+  app's policy. Re-running `route!` with another policy is never needed for
+  this.
+- **Poll URLs are joined.** A blocking dispatch of a poll URL (one carrying
+  `__htmxo_poll`/`__htmxo_operation`) waits for the operation it names, up to
+  its stall bound, instead of starting another — as a Markdown read does. A
+  mutation's poll URL waits for the retained submission; it never re-runs it.
+- **Route-level transport still wins**, exactly as against a registered
+  policy: Markdown and `?error` reads, `@direct` routes and routes that declare
+  an `HTTP.Response`/`MIMEResponse` output answer inline under every policy,
+  and a route body that calls `polling_fetchindex` itself decides its own
+  `sync`.
+- **Any mode is accepted.** A `:polling` or `:auto` override answers with a
+  poller; its follow-up polls are requests of their own, so dispatch them with
+  the same `operation_policy` to keep the override.
 
 ### Request-scoped static export
 
