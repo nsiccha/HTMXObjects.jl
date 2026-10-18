@@ -7389,7 +7389,7 @@ end
     @test graph_response.status == 200
     @test contains(String(graph_response.body), "\"children\"")
 
-    # /schema keeps serving the flat route index it always did.
+    # /schema keeps serving a route index, not the semantic graph.
     schema_response = drive("/schema")
     @test schema_response.status == 200
     schema_body = String(schema_response.body)

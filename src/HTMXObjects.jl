@@ -10793,14 +10793,48 @@ function _reflect_local_param(T, nm)
             doc=_decl_doc(info))
 end
 
+# One reflection walk meets the same `@param`s on every route below their
+# declaring ancestor, and resolving one is a linear `metafirst` scan of a DO
+# meta vector. An app with ~115 root params and ~217 routes paid ~25k scans
+# per `reflect` (snag `schemaroutes-rep-4e4caea7`). A walk therefore carries
+# one cache: each `(type, name)` resolves once, and each
+# `(owner, read-location, ancestor chain)` param list is built once. Cached
+# values are shared between routes, so callers must not mutate them.
+const _ReflectParamEntry =
+    NamedTuple{(:params, :declared_by),Tuple{Vector{NamedTuple},Vector{Any}}}
+
+struct _ReflectCache
+    local_params::Dict{Tuple{Type,Symbol},Any}
+    param_props::Dict{Tuple{Type,Symbol,Tuple},_ReflectParamEntry}
+end
+_ReflectCache() = _ReflectCache(Dict{Tuple{Type,Symbol},Any}(),
+                                Dict{Tuple{Type,Symbol,Tuple},_ReflectParamEntry}())
+
+_reflect_local_param(cache::_ReflectCache, T, nm) =
+    get!(() -> _reflect_local_param(T, nm), cache.local_params, (T, nm))
+
 # Build param descriptors for every `@param` of `OwnerT` (`_param_names`
 # includes names inherited from ancestors). A locally-declared param is read
 # straight off `OwnerT`; an inherited/delegated one is resolved from the
 # nearest ancestor in `parent_stack` that declares it locally. `source` is the
 # read-location (query/body by method); `inherited` carries the provenance.
-function _reflect_param_props(OwnerT, method, parent_stack)
+_reflect_param_props(OwnerT, method, parent_stack, cache=_ReflectCache()) =
+    _reflect_param_entry(cache, OwnerT, method, parent_stack).params
+
+# The cached `(params, declared_by)` pair behind `_reflect_param_props`:
+# `declared_by[i]` is the type whose local `@param` answered `params[i]`
+# (`OwnerT` itself for a local one), or `nothing` when no type in the chain
+# declares it. `reflect`'s param descriptor has no such field; the `/schema`
+# document keys its shared params on it.
+function _reflect_param_entry(cache::_ReflectCache, OwnerT, method, parent_stack)
     src = _reflect_kw_source(method)
+    get!(() -> _build_reflect_param_props(OwnerT, src, parent_stack, cache),
+         cache.param_props, (OwnerT, src, Tuple(parent_stack)))
+end
+
+function _build_reflect_param_props(OwnerT, src, parent_stack, cache)
     out = NamedTuple[]
+    declared_by = Any[]
     # Inline children receive an emitted `_param_names` tuple containing their
     # parent's context. Separately declared external children do not, even
     # though construction still threads the same `__parent__`/`__req__` chain.
@@ -10813,14 +10847,17 @@ function _reflect_param_props(OwnerT, method, parent_stack)
         end
     end
     for nm in names
-        loc = _reflect_local_param(OwnerT, nm)
+        loc = _reflect_local_param(cache, OwnerT, nm)
+        declarer = OwnerT
         inherited = loc === nothing
         if inherited
+            declarer = nothing
             for anc in Iterators.reverse(parent_stack)
-                loc = _reflect_local_param(anc, nm)
-                loc === nothing || break
+                loc = _reflect_local_param(cache, anc, nm)
+                loc === nothing || (declarer = anc; break)
             end
         end
+        push!(declared_by, declarer)
         if loc === nothing
             push!(out, (name=nm, source=src, type=nothing, required=false,
                         default=nothing, doc=nothing, inherited=inherited))
@@ -10829,34 +10866,36 @@ function _reflect_param_props(OwnerT, method, parent_stack)
                         default=loc.default, doc=loc.doc, inherited=inherited))
         end
     end
-    out
+    (params=out, declared_by=declared_by)
 end
 
 # Build one route descriptor. Factored out of `_reflect_walk!` so the flat
 # transport view and the hierarchical semantic graph derive a route from the
 # SAME body — two walks, one answer. Anything route-shaped that needs a
 # descriptor calls this; nobody re-derives paths or params locally.
-function _reflect_route(IterT, name::Symbol, info, method, prefix, parent_stack)
+function _reflect_route(IterT, name::Symbol, info, method, prefix, parent_stack,
+                        cache=_ReflectCache())
     route_doc = _decl_doc(info)
     arg_docs = isnothing(route_doc) ? Dict{Symbol,String}() :
                _parse_arguments_section(route_doc)
     path_params, kwargs = _reflect_call_params(IterT, info, method, arg_docs)
     param_strs = [string(p.name) for p in path_params]
     path = _route_path(prefix, name, param_strs)
-    params = vcat(path_params, kwargs, _reflect_param_props(IterT, method, parent_stack))
+    params = vcat(path_params, kwargs,
+                  _reflect_param_props(IterT, method, parent_stack, cache))
     (verb=Symbol(method), path=path, name=name, doc=route_doc, params=params)
 end
 
 function _reflect_walk!(acc, IterT, prefix, parent_stack=Any[];
-        enrich=(owner, route, parents) -> route)
+        enrich=(owner, route, parents) -> route, cache=_ReflectCache())
     _walk_route_meta(IterT,
         (name, info, nested_type) -> begin
             nested_prefix, _step = _nested_prefix_and_step(IterT, name, info, prefix)
             _reflect_walk!(acc, nested_type, nested_prefix,
-                           push!(copy(parent_stack), IterT); enrich)
+                           push!(copy(parent_stack), IterT); enrich, cache)
         end,
         (name, info, method) -> push!(acc, enrich(
-            IterT, _reflect_route(IterT, name, info, method, prefix, parent_stack),
+            IterT, _reflect_route(IterT, name, info, method, prefix, parent_stack, cache),
             parent_stack)))
 end
 
@@ -11667,10 +11706,11 @@ function _nav_routes(T, path::AbstractString, parent_stack=Any[];
     hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return out
     prefix = _nav_prefix_arg(path)
     origin = _node_origin(T)
+    cache = _ReflectCache()
     _walk_route_meta(T,
         (_name, _info, _nested) -> nothing,
         (name, info, method) -> begin
-            route = _reflect_route(T, name, info, method, prefix, parent_stack)
+            route = _reflect_route(T, name, info, method, prefix, parent_stack, cache)
             push!(out, merge(enrich(T, route, parent_stack),
                              (; label=_humanize(name), origin)))
         end)

@@ -2169,7 +2169,7 @@ Drop-in `@htmx struct`s that ship with HTMXObjects and are mounted via `@include
 |--------|---------|
 | `TestRoutes`     | Test-runner UI (see Testing section) |
 | `EditorRoutes`   | Git-backed inline file editor (see Editor section) |
-| `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`) |
+| `SchemaRoutes` / `StructureRoutes` | JSON schema endpoint for an `@htmx` app's route tree (opt-in via `@include schema = SchemaRoutes(; root=T)`). `GET /schema` returns `{routes, contexts, params}`: each route lists its own params and names a `context`, and each inherited `@param` is described once in `params`. `GET /schema?inherited=inline` returns the flat `reflect(T)` array, which repeats inherited `@param`s on every route |
 | `OpenAPIRoutes` | OpenAPI 3.1 endpoint for an `@htmx` app's route tree (opt-in via `@include openapi = OpenAPIRoutes(; root=T)`) — see [OpenAPI](#openapi) |
 | `SwaggerRoutes` | Version-pinned Swagger UI viewer for the app's OpenAPI document (opt-in via `@include docs = SwaggerRoutes(; spec_url="/openapi")`) — see [OpenAPI](#openapi) |
 | `ReflectionRoutes` | Application architecture explorer plus deterministic descriptor and optional observation JSON endpoints |
@@ -2523,7 +2523,7 @@ prewarm_routes!(base_url, warm)  # post-listen validation
 
 | Export | Purpose |
 |--------|---------|
-| `reflect(T)` / `reflect(app)` | In-process route inventory: one `(verb, path, name, doc, params)` NamedTuple per route, mirroring what `route!` registers. `SchemaRoutes` serves this same inventory as JSON |
+| `reflect(T)` / `reflect(app)` | In-process route inventory: one `(verb, path, name, doc, params)` NamedTuple per route, mirroring what `route!` registers. `SchemaRoutes` serves this inventory as JSON (`?inherited=inline` for this exact flat shape) |
 | `select_routes(routes; verb, prefix, names, pattern)` | Pure, stateless filter over the inventory (filters combine with AND); also accepts the app type directly. Returns the collection the two functions below consume |
 | `precompile_routes!(root, coll=nothing)` | Pre-listen: `Base.precompile` each resolved handler body + argument parser. Reports `(verb, path, name, precompiled)` per route; bodies never run |
 | `prewarm_routes!(base_url, coll; include_post=false, operations=false)` | Post-listen: one real request per resolved route. Reports `(verb, path, name, url, status, error)` per route; non-`GET` routes are skipped unless `include_post=true`, failures never throw. `operations=true` also drives each route's deferred answer (below) |
