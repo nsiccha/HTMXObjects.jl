@@ -10770,12 +10770,15 @@ end
 # one cache: each `(type, name)` resolves once, and each
 # `(owner, read-location, ancestor chain)` param list is built once. Cached
 # values are shared between routes, so callers must not mutate them.
+const _ReflectParamEntry =
+    NamedTuple{(:params, :declared_by),Tuple{Vector{NamedTuple},Vector{Any}}}
+
 struct _ReflectCache
     local_params::Dict{Tuple{Type,Symbol},Any}
-    param_props::Dict{Tuple{Type,Symbol,Tuple},Vector{NamedTuple}}
+    param_props::Dict{Tuple{Type,Symbol,Tuple},_ReflectParamEntry}
 end
 _ReflectCache() = _ReflectCache(Dict{Tuple{Type,Symbol},Any}(),
-                                Dict{Tuple{Type,Symbol,Tuple},Vector{NamedTuple}}())
+                                Dict{Tuple{Type,Symbol,Tuple},_ReflectParamEntry}())
 
 _reflect_local_param(cache::_ReflectCache, T, nm) =
     get!(() -> _reflect_local_param(T, nm), cache.local_params, (T, nm))
@@ -10785,7 +10788,15 @@ _reflect_local_param(cache::_ReflectCache, T, nm) =
 # straight off `OwnerT`; an inherited/delegated one is resolved from the
 # nearest ancestor in `parent_stack` that declares it locally. `source` is the
 # read-location (query/body by method); `inherited` carries the provenance.
-function _reflect_param_props(OwnerT, method, parent_stack, cache=_ReflectCache())
+_reflect_param_props(OwnerT, method, parent_stack, cache=_ReflectCache()) =
+    _reflect_param_entry(cache, OwnerT, method, parent_stack).params
+
+# The cached `(params, declared_by)` pair behind `_reflect_param_props`:
+# `declared_by[i]` is the type whose local `@param` answered `params[i]`
+# (`OwnerT` itself for a local one), or `nothing` when no type in the chain
+# declares it. `reflect`'s param descriptor has no such field; the `/schema`
+# document keys its shared params on it.
+function _reflect_param_entry(cache::_ReflectCache, OwnerT, method, parent_stack)
     src = _reflect_kw_source(method)
     get!(() -> _build_reflect_param_props(OwnerT, src, parent_stack, cache),
          cache.param_props, (OwnerT, src, Tuple(parent_stack)))
@@ -10793,6 +10804,7 @@ end
 
 function _build_reflect_param_props(OwnerT, src, parent_stack, cache)
     out = NamedTuple[]
+    declared_by = Any[]
     # Inline children receive an emitted `_param_names` tuple containing their
     # parent's context. Separately declared external children do not, even
     # though construction still threads the same `__parent__`/`__req__` chain.
@@ -10806,13 +10818,16 @@ function _build_reflect_param_props(OwnerT, src, parent_stack, cache)
     end
     for nm in names
         loc = _reflect_local_param(cache, OwnerT, nm)
+        declarer = OwnerT
         inherited = loc === nothing
         if inherited
+            declarer = nothing
             for anc in Iterators.reverse(parent_stack)
                 loc = _reflect_local_param(cache, anc, nm)
-                loc === nothing || break
+                loc === nothing || (declarer = anc; break)
             end
         end
+        push!(declared_by, declarer)
         if loc === nothing
             push!(out, (name=nm, source=src, type=nothing, required=false,
                         default=nothing, doc=nothing, inherited=inherited))
@@ -10821,7 +10836,7 @@ function _build_reflect_param_props(OwnerT, src, parent_stack, cache)
                         default=loc.default, doc=loc.doc, inherited=inherited))
         end
     end
-    out
+    (params=out, declared_by=declared_by)
 end
 
 # Build one route descriptor. Factored out of `_reflect_walk!` so the flat

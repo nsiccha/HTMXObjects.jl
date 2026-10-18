@@ -10,8 +10,8 @@
 #
 # Deliberately a SEPARATE bundle from `SchemaRoutes`, not an extension of it.
 # `/schema` answers a transport question — "what routes exist, with what
-# parameters" — and its JSON is consumed by MCP tool-autogen and doc
-# generators, so its shape is a contract that must not move. `/reflect`
+# parameters" — for MCP tool-autogen and doc generators, so it stays a route
+# index rather than growing semantic fields. `/reflect`
 # answers a semantic question — what the application IS: containment, declared
 # computation dependencies, option domains, materialization, selection
 # identity. Both read the same underlying walk (`semantic_descriptor`), so they
