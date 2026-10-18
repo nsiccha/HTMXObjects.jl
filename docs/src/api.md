@@ -302,6 +302,30 @@ HTTP.jl 2 enforces it during the handshake. Ordinary `middleware`
 cannot replace this check because the upgrade uses the stream's original
 request. `check_origin` applies to every `@ws` route on that `serve` instance.
 
+## Response compression
+
+`serve` gzips a text response of at least 1 KiB when the request's
+`Accept-Encoding` admits gzip. Text means `text/*` (HTML, Markdown, CSS,
+plain text), JSON, JavaScript, XML and SVG. Browsers ask for gzip and
+decompress it themselves, so a large page crosses a tunnel or a proxy at a
+fraction of its size: a 20.9 MB HTML table went out as 908 KB. A client
+that sends no `Accept-Encoding` gets the body as the route produced it.
+Plain `curl` without `--compressed` is such a client, and so is a reverse
+proxy that forwards only the headers its own client sent.
+
+A compressed response carries `Content-Encoding: gzip`, its compressed
+`Content-Length`, and a weak `ETag` in place of a strong one. Every response
+of that kind also carries `Vary: Accept-Encoding`, compressed or not, so a
+shared cache keeps the two forms apart. `serve` leaves a response alone when
+it is a HEAD answer, a `206` or `Content-Range` answer, already carries
+`Content-Encoding`, or is marked `Cache-Control: no-transform`. It also
+leaves streams alone: `@sse`, a streamed `IO` body, and WebSocket upgrades.
+In-process [`dispatch`](@ref) and static recording never compress.
+
+Pass `serve(; compress=false)` to send every body uncompressed. A page that
+reflects attacker-supplied text next to a secret, served over HTTPS, may want
+that (the BREACH attack reads such secrets from compressed sizes).
+
 ## Server-sent events
 
 `@sse` turns a property into a `text/event-stream` endpoint. The body receives

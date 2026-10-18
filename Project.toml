@@ -4,6 +4,7 @@ authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
 version = "0.1.0"
 
 [deps]
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 CommonMark = "a80b9123-70ca-4bc0-993e-6e3bcb318db6"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
@@ -22,6 +23,7 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 HTMXObjectsTreebarsExt = "Treebars"
 
 [compat]
+CodecZlib = "0.7"
 CommonMark = "1"
 Dates = "1"
 DynamicObjects = "0.4.4, 0.5"
