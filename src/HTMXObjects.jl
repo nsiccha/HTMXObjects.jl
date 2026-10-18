@@ -65,6 +65,8 @@ using LazyArtifacts
 import Dates
 import Random
 import CommonMark
+# gzip for `serve`'s response compression. HTTP.jl depends on it already.
+import CodecZlib
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
@@ -175,7 +177,7 @@ _url_segment_escapes(b::UInt8) =
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
           middleware=[], check_origin=nothing, access_log=<timed default>,
-          operation_log=<default>, runtime_tracking=true, kwargs...)
+          operation_log=<default>, runtime_tracking=true, compress=true, kwargs...)
 
 Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 `async=false` (the default), blocks until interrupted and calls
@@ -208,6 +210,8 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref)
   dev dashboard. Pass `false` to skip it. Long-running `@queued` operations are
   recorded as jobs either way.
+- `compress=true` (the default) gzips text responses for clients that accept
+  gzip (see below). Pass `false` to send every body as the route produced it.
 - `revise` — `:lazy` applies pending Revise revisions before each request;
   `:eager` also applies them in the background as soon as a file changes. Both
   need `using Revise` before the app is loaded.
@@ -220,6 +224,18 @@ without content (1xx, 204, 304). The client then has the complete response as
 soon as the body is written. On HTTP.jl 1.x such a response would otherwise go
 out chunked, and its last chunk is written only when the connection task
 resumes. A streamed body (an `IO`) keeps HTTP.jl's own framing.
+
+With `compress=true`, such a body of at least 1 KiB whose `Content-Type` is
+text (`text/*`, JSON, JavaScript, XML or SVG) is gzipped when the request's
+`Accept-Encoding` admits gzip. The response then carries `Content-Encoding:
+gzip`, the compressed `Content-Length`, and a weak `ETag` in place of a strong
+one. Every such response carries `Vary: Accept-Encoding`, compressed or not,
+so a cache keeps the two forms apart. A client that sends no
+`Accept-Encoding` (plain `curl`, for example) gets the body unchanged. Left
+alone: HEAD answers, `206` and `Content-Range` answers, responses that
+already carry `Content-Encoding` or `Cache-Control: no-transform`, streamed
+bodies (`@sse`, `IO`), and WebSocket upgrades. [`dispatch`](@ref) and static
+recording do not go through `serve` and always see the uncompressed body.
 
 `parallel` chooses where each request is handled:
 - `false` (default) — on HTTP.jl's own connection task. HTTP.jl 2 spawns that
@@ -251,7 +267,7 @@ with `auto`. To size both pools equally, compute shell-side:
 function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
-        runtime_tracking::Bool=true, kwargs...)
+        runtime_tracking::Bool=true, compress::Bool=true, kwargs...)
     kwargs = _drop_oxygen_kwargs(kwargs)
     revise in (nothing, :none, :lazy, :eager) ||
         throw(ArgumentError("`revise` must be nothing, :lazy or :eager, got $(repr(revise))"))
@@ -262,7 +278,7 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
     OPERATION_LOG[] = operation_log
     tracker = runtime_tracking ? runtime_tracker() : nothing
     handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker),
-        check_origin)
+        check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
     warning === nothing || @warn warning
@@ -372,12 +388,15 @@ end
 
 # Stream-level entry point: exposes the raw stream to the request pipeline (a
 # WebSocket upgrade needs it) and hands off to HTTP.jl's request adapter.
-function _stream_handler(app, check_origin=nothing)
+# `compress`: `serve(; compress)`.
+function _stream_handler(app, check_origin=nothing, compress::Bool=true)
     function (stream::HTTP.Stream)
         handle = HTTP.streamhandler(function (req::HTTP.Request)
             req.context[:stream] = stream
             req.context[:ws_check_origin] = check_origin
-            return _frame_buffered!(req, app(req))
+            response = app(req)
+            compress && (response = _compress_buffered(req, response))
+            return _frame_buffered!(req, response)
         end)
         try
             handle(stream)
@@ -415,6 +434,107 @@ _buffered_length(body::AbstractString) = ncodeunits(body)
 _buffered_length(body) = nothing
 
 _carries_content(status::Integer) = !(100 <= status < 200 || status == 204 || status == 304)
+
+# `serve(; compress=true)`: the response to send for `response`, gzipped when
+# the client admits gzip. Runs after every middleware, before
+# `_frame_buffered!`, so the compressed length is the one that is framed. An
+# eligible response (a text body of at least `_COMPRESS_MIN_BYTES` held in
+# memory, see `_compression_eligible`) gets `Vary: Accept-Encoding` whether or
+# not this client takes gzip, so a cache never hands one client's form to
+# another. A compressed answer is a NEW response: a route may return a
+# response it keeps (a cached page, a constant), and rewriting its body or
+# headers in place would compress it for every later request too.
+function _compress_buffered(req::HTTP.Request, response::HTTP.Response)
+    _compression_eligible(req, response) || return response
+    bytes = _buffered_bytes(response.body)
+    (bytes === nothing || length(bytes) < _COMPRESS_MIN_BYTES) && return response
+    gzip = _accepts_gzip(HTTP.header(req, "Accept-Encoding", ""))
+    compressed = gzip ? transcode(CodecZlib.GzipCompressor, bytes) : nothing
+    # Highly random text can come out larger; the original is the better answer.
+    compressed !== nothing && length(compressed) >= length(bytes) && (compressed = nothing)
+    headers = Pair{String,String}[]
+    vary = String[]
+    for (k, v) in response.headers
+        name = lowercase(k)
+        # The identity length; framing computes the compressed one.
+        compressed !== nothing && name == "content-length" && continue
+        name == "vary" && (push!(vary, v); continue)
+        name == "etag" && compressed !== nothing && !startswith(v, "W/") && (v = "W/" * v)
+        push!(headers, String(k) => String(v))
+    end
+    push!(headers, "Vary" => _vary_with_accept_encoding(join(vary, ", ")))
+    compressed === nothing && return HTTP.Response(response.status, headers, bytes;
+        request=response.request)
+    push!(headers, "Content-Encoding" => "gzip")
+    return HTTP.Response(response.status, headers, compressed; request=response.request)
+end
+# Not a response: HTTP.jl's adapter reports it.
+_compress_buffered(req, response) = response
+
+const _COMPRESS_MIN_BYTES = 1024
+
+# Whether `response` is one `serve` may compress for `req`, before its body and
+# the client's `Accept-Encoding` are looked at: a GET-like answer whose status
+# carries a complete body, with a text `Content-Type`, not encoded, ranged or
+# framed already, and not marked `no-transform` (RFC 9111 §5.2.2.6).
+function _compression_eligible(req::HTTP.Request, response::HTTP.Response)
+    req.method == "HEAD" && return false
+    (_carries_content(response.status) && response.status != 206) || return false
+    for name in ("Content-Encoding", "Content-Range", "Transfer-Encoding")
+        HTTP.hasheader(response, name) && return false
+    end
+    occursin("no-transform", lowercase(HTTP.header(response, "Cache-Control", ""))) &&
+        return false
+    return _compressible_type(HTTP.header(response, "Content-Type", ""))
+end
+
+# Text media types worth compressing; images, archives and fonts are compressed
+# already or not text.
+function _compressible_type(content_type::AbstractString)
+    mime = lowercase(strip(first(split(content_type, ';'))))
+    return startswith(mime, "text/") || mime in _COMPRESSIBLE_TYPES ||
+        endswith(mime, "+json") || endswith(mime, "+xml")
+end
+const _COMPRESSIBLE_TYPES = ("application/json", "application/javascript",
+    "application/xml", "image/svg+xml")
+
+# The bytes of a body held in memory, in a form `transcode` takes, or `nothing`
+# for a streamed one. HTTP.jl 2 keeps them in a `BytesBody`; converting it
+# copies the unread bytes without consuming them.
+_buffered_bytes(body::Union{Vector{UInt8},Base.CodeUnits{UInt8}}) = body
+_buffered_bytes(body::AbstractVector{UInt8}) = Vector{UInt8}(body)
+_buffered_bytes(body::AbstractString) = codeunits(String(body))
+function _buffered_bytes(body)
+    isdefined(HTTP, :BytesBody) && isa(body, getproperty(HTTP, :BytesBody)) &&
+        return Vector{UInt8}(body)
+    return nothing
+end
+
+# Whether an `Accept-Encoding` value admits gzip (RFC 9110 §12.5.3): its own
+# entry, or else a `*` entry, with a nonzero q-value. No header, no entry, or
+# a malformed q-value: no.
+function _accepts_gzip(accept::AbstractString)
+    gzip_q = star_q = nothing
+    for entry in split(accept, ',')
+        coding, params... = split(entry, ';')
+        coding = lowercase(strip(coding))
+        q = 1.0
+        for param in params
+            key, value = (split(param, '='; limit=2)..., "")[1:2]
+            lowercase(strip(key)) == "q" && (q = something(tryparse(Float64, strip(value)), 0.0))
+        end
+        coding in ("gzip", "x-gzip") && (gzip_q = q)
+        coding == "*" && (star_q = q)
+    end
+    return something(gzip_q, star_q, 0.0) > 0
+end
+
+# A `Vary` value naming `Accept-Encoding` besides what `vary` names already.
+function _vary_with_accept_encoding(vary::AbstractString)
+    fields = filter(!isempty, strip.(split(vary, ',')))
+    any(f -> f == "*" || lowercase(f) == "accept-encoding", fields) && return join(fields, ", ")
+    return join([fields; "Accept-Encoding"], ", ")
+end
 
 # `serve(; parallel)`: the threadpool each request is spawned on (`nothing`: it
 # runs on HTTP.jl's own connection task) and the startup warning for a setting
