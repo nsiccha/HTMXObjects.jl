@@ -175,7 +175,7 @@ _url_segment_escapes(b::UInt8) =
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
           middleware=[], check_origin=nothing, access_log=<timed default>,
-          runtime_tracking=true, kwargs...)
+          operation_log=<default>, runtime_tracking=true, kwargs...)
 
 Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 `async=false` (the default), blocks until interrupted and calls
@@ -192,6 +192,17 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
 - `access_log` — an `(io, req) -> nothing` formatter written once per request
   (`req.context[:response]` holds the response), or `nothing` to disable the
   log. The default line is `time - ip:port - "GET /path HTTP/1.1" 200 12.3ms`.
+- `operation_log` — an `(io, record)` formatter written once for every polled
+  operation (one that outlived the `:auto` grace period) when it ends, or
+  `nothing` to disable it. `record` is an [`HTMXObjects.OperationRecord`](@ref).
+  The default line is
+  `time - operation GET /path?x=1 ok compute=12.4s answered=477.0s polls=23`.
+  An access-log line covers one request, and a slow page is many of them; this
+  line states the whole operation: how it ended (`ok`, `failed`, `stalled`,
+  `abandoned`, `evicted`), how long its computation ran, how long the client
+  took to receive the answer, and how many polls reached it. Records are
+  logged at `Info` with `_group=:operation`. The setting is process-wide
+  ([`HTMXObjects.OPERATION_LOG`](@ref)).
 - `runtime_tracking=true` (the default) installs [`track_requests`](@ref)
   outside `middleware`, recording in-flight and finished requests with their
   handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref)
@@ -239,7 +250,7 @@ with `auto`. To size both pools equally, compute shell-side:
 """
 function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
-        access_log=_timed_access_log,
+        access_log=_timed_access_log, operation_log=_default_operation_log,
         runtime_tracking::Bool=true, kwargs...)
     kwargs = _drop_oxygen_kwargs(kwargs)
     revise in (nothing, :none, :lazy, :eager) ||
@@ -248,6 +259,7 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
     revise in (:lazy, :eager) && Revise === nothing &&
         error("`serve(; revise=$(repr(revise)))` needs Revise: run `using Revise` before loading the app.")
 
+    OPERATION_LOG[] = operation_log
     tracker = runtime_tracking ? runtime_tracker() : nothing
     handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker),
         check_origin)
@@ -472,6 +484,77 @@ function _timed_access_log(io::IO, req::HTTP.Request)
     t0 = Base.get(req.context, :t0, nothing)
     t0 === nothing || print(io, " ", fmt_time(time() - t0))
 end
+
+# --- Operation log -----------------------------------------------------------
+
+"""
+    HTMXObjects.OperationRecord
+
+How one polled operation ended, as handed to the `operation_log` formatter of
+[`serve`](@ref) (see [`HTMXObjects.OPERATION_LOG`](@ref)). A polled operation is
+a route operation that outlived the `:auto` grace period, so the client
+followed it with polls; one that answered within the grace period is only its
+request's access-log line.
+
+- `method`, `target` — the request that started it. `target` is its path and
+  query as the access log shows it, without the poll markers and the operation
+  token, and with the values of credential-like parameters replaced by `…`.
+- `outcome` — `:ok` (it answered its result), `:failed` (it answered a
+  failure), `:stalled` (it answered `OperationStalled` at its stall bound),
+  `:abandoned` (no request reached it for ten minutes, so it was dropped) or
+  `:evicted` (dropped to make room for newer operations).
+- `started_at` — when it started, in Unix seconds.
+- `compute` — seconds from its start until the computation finished or failed,
+  measured on the server; `NaN` while it still runs.
+- `answered` — seconds from its start until the client received the answer that
+  ended it; `NaN` for `:abandoned` and `:evicted`. Clients poll at their own
+  pace (a browser slows timers in background tabs), so `answered` can exceed
+  `compute` by however long the client was not asking.
+- `last_seen` — seconds from its start until the last request that reached it.
+- `polls` — follow-up requests that reached it (a page load's first fetch
+  included).
+"""
+struct OperationRecord
+    method::String
+    target::String
+    outcome::Symbol
+    started_at::Float64
+    compute::Float64
+    answered::Float64
+    last_seen::Float64
+    polls::Int
+end
+
+"""
+    HTMXObjects.OPERATION_LOG
+
+The process-wide operation log formatter (`Ref`): `(io, record::OperationRecord)
+-> nothing`, written once per polled operation when it ends, or `nothing` to
+write no records. [`serve`](@ref) sets it from its `operation_log` keyword
+(default on). It is `nothing` until then, so in-process [`dispatch`](@ref) calls
+and other servers write no records unless they set it.
+"""
+const OPERATION_LOG = Ref{Any}(nothing)
+
+"""
+    _default_operation_log(io, record)
+
+Default `operation_log` formatter:
+`time - operation METHOD target outcome compute=… answered=… polls=…`, with
+seconds to one decimal and `-` for an unknown value. An operation that was not
+answered (`:abandoned`, `:evicted`) adds `last_poll=…`, the age at its last
+request.
+"""
+function _default_operation_log(io::IO, r::OperationRecord)
+    print(io, _access_log_timestamp(), " - operation ", r.method, " ", r.target,
+        " ", r.outcome, " compute=", _operation_log_seconds(r.compute),
+        " answered=", _operation_log_seconds(r.answered),
+        " polls=", r.polls)
+    isnan(r.answered) && print(io, " last_poll=", _operation_log_seconds(r.last_seen))
+end
+
+_operation_log_seconds(seconds::Real) =
+    isnan(seconds) ? "-" : string(round(seconds; digits=1), "s")
 
 # Same split as HTTP.jl's `$time_iso8601` log variable: Windows' C runtime
 # `strftime` does not support `%F`/`%T`/`%z`, so format without a zone there.
@@ -8475,12 +8558,21 @@ mutable struct _OperationPollEntry
     # The root's stall bound when this operation started (`OperationPolicy`
     # `stall_after` / `queued_stall_after`); `nothing` = unbounded.
     stall_after::Union{Nothing,Float64}
+    # The operation's end record (`OPERATION_LOG`): follow-up requests that
+    # reached it, whether it entered the registry (crossed the grace period),
+    # whether its record was written, and when its computation finished
+    # (`_operation_poll_now()` clock, `NaN` until a watcher stamps it).
+    polls::Int
+    retained::Bool
+    recorded::Bool
+    finished_at::Threads.Atomic{Float64}
 end
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job) =
     _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
-        error_obj, request, created_at, touched_at, job, false, nothing)
+        error_obj, request, created_at, touched_at, job, false, nothing,
+        0, false, false, Threads.Atomic{Float64}(NaN))
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at) =
@@ -8514,13 +8606,16 @@ function _new_operation_poll_token()
     bytes2hex(Random.rand(Random.RandomDevice(), UInt8, 32))
 end
 
+# Drop every entry no request reached for `_OPERATION_POLL_TTL` seconds, and
+# return them: the caller writes their `:abandoned` records once it has
+# released the lock.
 function _prune_operation_polls!(now::Real=_operation_poll_now())
-    expired = String[]
-    for (token, entry) in _operation_polls
-        now - entry.touched_at >= _OPERATION_POLL_TTL && push!(expired, token)
+    expired = _OperationPollEntry[]
+    for entry in values(_operation_polls)
+        now - entry.touched_at >= _OPERATION_POLL_TTL && push!(expired, entry)
     end
-    foreach(token -> delete!(_operation_polls, token), expired)
-    nothing
+    foreach(entry -> delete!(_operation_polls, entry.token), expired)
+    expired
 end
 
 function _prune_mutation_terminals!(now::Real=_operation_poll_now())
@@ -8547,6 +8642,7 @@ function _evict_oldest_mutation_terminal!()
     nothing
 end
 
+# Drop the least recently reached entry to make room, and return it.
 function _evict_oldest_operation_poll!()
     isempty(_operation_polls) && return nothing
     token = first(keys(_operation_polls))
@@ -8557,38 +8653,46 @@ function _evict_oldest_operation_poll!()
             touched = entry.touched_at
         end
     end
-    delete!(_operation_polls, token)
-    nothing
+    pop!(_operation_polls, token)
 end
 
 function _retain_operation_poll!(entry::_OperationPollEntry;
         now::Real=_operation_poll_now())
+    dropped = _OperationPollEntry[]
+    evicted = _OperationPollEntry[]
     lock(_operation_poll_lock)
     try
-        _prune_operation_polls!(now)
+        append!(dropped, _prune_operation_polls!(now))
         while length(_operation_polls) >= _OPERATION_POLL_LIMIT
-            _evict_oldest_operation_poll!()
+            push!(evicted, _evict_oldest_operation_poll!())
         end
         entry.touched_at = Float64(now)
+        entry.retained = true
         _operation_polls[entry.token] = entry
     finally
         unlock(_operation_poll_lock)
+        _record_operation_ends!(dropped, :abandoned)
+        _record_operation_ends!(evicted, :evicted)
     end
+    _watch_operation_finish!(entry)
     entry
 end
 
 function _lookup_operation_poll(token::AbstractString, signature;
         now::Real=_operation_poll_now())
+    dropped = _OperationPollEntry[]
     lock(_operation_poll_lock)
     try
-        _prune_operation_polls!(now)
+        append!(dropped, _prune_operation_polls!(now))
         entry = get(_operation_polls, String(token), nothing)
         entry isa _OperationPollEntry || return nothing
         isequal(entry.signature, signature) || return nothing
         entry.touched_at = Float64(now)
+        entry.polls += 1
         entry
     finally
         unlock(_operation_poll_lock)
+        _record_operation_ends!(dropped, :abandoned)
     end
 end
 
@@ -8597,15 +8701,17 @@ end
 # that handoff as a missing token.
 function _lookup_mutation_poll(token::AbstractString, signature;
         now::Real=_operation_poll_now())
+    dropped = _OperationPollEntry[]
     lock(_operation_poll_lock)
     try
-        _prune_operation_polls!(now)
+        append!(dropped, _prune_operation_polls!(now))
         _prune_mutation_terminals!(now)
         key = String(token)
         entry = get(_operation_polls, key, nothing)
         if entry isa _OperationPollEntry
             isequal(entry.signature, signature) || return nothing
             entry.touched_at = Float64(now)
+            entry.polls += 1
             return entry
         end
         terminal = get(_mutation_terminals, key, nothing)
@@ -8615,6 +8721,7 @@ function _lookup_mutation_poll(token::AbstractString, signature;
         terminal
     finally
         unlock(_operation_poll_lock)
+        _record_operation_ends!(dropped, :abandoned)
     end
 end
 
@@ -8663,13 +8770,96 @@ function _clear_operation_polls!()
 end
 
 function _operation_poll_snapshot(; now::Real=_operation_poll_now())
+    dropped = _OperationPollEntry[]
     lock(_operation_poll_lock)
     try
-        _prune_operation_polls!(now)
+        append!(dropped, _prune_operation_polls!(now))
         copy(_operation_polls)
     finally
         unlock(_operation_poll_lock)
+        _record_operation_ends!(dropped, :abandoned)
     end
+end
+
+# Remove a retained operation that ended without a value — it failed or stalled
+# — and write its record.
+function _end_operation_poll!(token::AbstractString, outcome::Symbol)
+    entry = lock(_operation_poll_lock) do
+        pop!(_operation_polls, String(token), nothing)
+    end
+    entry isa _OperationPollEntry && _record_operation_end!(entry, outcome)
+    nothing
+end
+
+# --- Operation end records (`OPERATION_LOG`) --------------------------------
+#
+# Every operation that crossed the grace period (`retained`) writes one record
+# when it ends: at its terminal answer (`:ok`, or `:failed` for a failure
+# answer), its stall answer (`:stalled`), or when the registry drops it — no
+# request reached it for `_OPERATION_POLL_TTL` (`:abandoned`) or a newer one
+# needed its slot (`:evicted`). The answer paths can see one end twice (a
+# settle re-probe renders the value again; a failure answer follows a recorded
+# result), so the record is written once per entry, by whichever path claims it
+# first under the registry lock.
+
+function _record_operation_end!(entry::_OperationPollEntry, outcome::Symbol;
+        now::Real=_operation_poll_now())
+    format = OPERATION_LOG[]
+    format === nothing && return nothing
+    claimed = lock(_operation_poll_lock) do
+        (entry.retained && !entry.recorded) || return false
+        entry.recorded = true
+        true
+    end
+    claimed || return nothing
+    try
+        @info sprint(format, _operation_record(entry, outcome, now)) _group=:operation
+    catch err
+        @warn "`operation_log` formatter failed" exception=(err, catch_backtrace())
+    end
+    nothing
+end
+
+_record_operation_ends!(entries, outcome::Symbol) =
+    foreach(entry -> _record_operation_end!(entry, outcome), entries)
+
+function _operation_record(entry::_OperationPollEntry, outcome::Symbol, now::Real)
+    finished = entry.finished_at[]
+    answered = outcome in (:abandoned, :evicted) ? NaN : now - entry.created_at
+    # An answered operation has finished. Its watcher may not have stamped the
+    # time yet when the answer comes the instant the computation ends.
+    compute = !isnan(finished) ? finished - entry.created_at :
+        outcome in (:ok, :failed) ? answered : NaN
+    OperationRecord(String(entry.request.method),
+        _runtime_redact_target(_operation_unmarked_url(String(entry.request.target))),
+        outcome, time() - (now - entry.created_at), compute, answered,
+        entry.touched_at - entry.created_at, entry.polls)
+end
+
+# Stamp when a retained operation's computation finished — or failed: the
+# failure itself reaches the client through the poll that answers it. One
+# lightweight task per polled operation, on the interactive pool when there is
+# one (the `@queued` job watcher's placement), so a saturated `:default` pool
+# does not delay the stamp. Skipped while operation records are off.
+function _watch_operation_finish!(entry::_OperationPollEntry)
+    OPERATION_LOG[] === nothing && return nothing
+    handle = entry.started
+    finished = entry.finished_at
+    if !(handle isa _OperationHandle)
+        finished[] = _operation_poll_now()
+        return nothing
+    end
+    watch = function ()
+        try
+            _runtime_await(handle)
+        catch
+            # The poll that reaches this operation answers its failure.
+        end
+        finished[] = _operation_poll_now()
+    end
+    Threads.nthreads(:interactive) > 0 ?
+        Threads.@spawn(:interactive, watch()) : Threads.@spawn(watch())
+    nothing
 end
 
 function _operation_poll_signature(target, LeafT, name, verb_inst, idx_vals,
@@ -8705,11 +8895,10 @@ function _finish_operation_poll(token::AbstractString, value)
     resolved = try
         _resolve_operation_value(value)
     catch
-        _delete_operation_poll!(token)
+        _end_operation_poll!(token, :failed)
         rethrow()
     end
-    lock(_operation_poll_lock)
-    try
+    entry = lock(_operation_poll_lock) do
         entry = get(_operation_polls, String(token), nothing)
         if entry isa _OperationPollEntry && _mutation_poll_entry(entry)
             # The enclosing poll path caches the fully rendered response. Do
@@ -8718,9 +8907,9 @@ function _finish_operation_poll(token::AbstractString, value)
         else
             delete!(_operation_polls, String(token))
         end
-    finally
-        unlock(_operation_poll_lock)
+        entry
     end
+    entry isa _OperationPollEntry && _record_operation_end!(entry, :ok)
     resolved
 end
 
@@ -9259,6 +9448,15 @@ function _operation_stall(entry::_OperationPollEntry, age::Real, descriptor,
        req)
 end
 
+# Tell a polling transport that its operation ended without a value it rendered
+# (`:failed`, `:stalled`), so the operation's record is written. A hand-built
+# transport carries no `ended` hook.
+function _operation_ended(transport, outcome::Symbol)
+    ended = get(transport, :ended, nothing)
+    ended === nothing || ended(outcome)
+    nothing
+end
+
 # A read operation's URL without the transport's markers: the GET a fresh
 # request of the same operation issues. Other parameters keep their bytes.
 const _OPERATION_TRANSPORT_PARAMS =
@@ -9311,6 +9509,7 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         grace_period=0.0,
         retain=() -> nothing,
         cleanup=() -> _delete_operation_poll!(token),
+        ended=outcome -> _record_operation_end!(entry, outcome),
         stalled=_operation_stall(entry, age, descriptor, name, verb_inst, req,
                                  prefix),
     )
@@ -9335,11 +9534,11 @@ function _operation_await_resume(entry::_OperationPollEntry, token,
         _operation_grace_fetch(value -> _finish_operation_poll(token, value),
                                entry.started, budget)
     catch
-        _delete_operation_poll!(token)
+        _end_operation_poll!(token, :failed)
         rethrow()
     end
     awaited.ready && return awaited.value
-    _delete_operation_poll!(token)
+    _end_operation_poll!(token, :stalled)
     stall = _operation_stall(entry, _operation_poll_now() - entry.created_at,
                              descriptor, name, verb_inst, req, prefix)
     throw(stall.error)
@@ -9408,7 +9607,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  grace_period=0.0,
                  retain=() -> _retain_operation!(entry, descriptor, name;
                                                  track=queued),
-                 cleanup=() -> _delete_operation_poll!(token))
+                 cleanup=() -> _delete_operation_poll!(token),
+                 ended=outcome -> _record_operation_end!(entry, outcome))
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
         started, prop, keys, call_kwargs, transport))
@@ -9587,7 +9787,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      grace_period=_operation_grace_period(policy, req),
                      retain=() -> _retain_operation!(entry, descriptor, name;
                                                  track=queued),
-                     cleanup=() -> _delete_operation_poll!(token))
+                     cleanup=() -> _delete_operation_poll!(token),
+                     ended=outcome -> _record_operation_end!(entry, outcome))
         value = _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
             started, prop, keys, call_kwargs, transport))
