@@ -4978,6 +4978,8 @@ You never have to write `OperationPolicy` to get non-blocking long routes —
 `route!(app)` alone already does. Reach for it to tune (`poll_interval`),
 to keep finished progress trees (`keep_terminal_tree=true`), to change the
 stall bound (`stall_after`, `queued_stall_after`), or to opt out (`:blocking`).
+One in-process request takes a policy of its own through [`dispatch`](@ref)
+(`dispatch(...; operation_policy=:blocking)`) without re-registering anything.
 
 A polled operation that is still unfinished `stall_after` seconds after it
 started (default `600`, ten minutes) stops being polled: its next poll answers
@@ -5085,6 +5087,14 @@ OperationPolicy(mode::Symbol, poll_interval, keep_progress::Bool) =
 OperationPolicy(mode::Symbol, poll_interval, keep_progress::Bool,
         keep_terminal_tree::Bool) =
     OperationPolicy(mode; poll_interval, keep_progress, keep_terminal_tree)
+
+# What an `operation_policy=` keyword accepts — `route!`'s and `dispatch`'s
+# alike: a policy, or a mode Symbol standing for `OperationPolicy(mode)`.
+_operation_policy(policy::OperationPolicy) = policy
+_operation_policy(mode::Symbol) = OperationPolicy(mode)
+_operation_policy(other) = throw(ArgumentError(
+    "operation_policy takes an OperationPolicy or a mode Symbol " *
+    "(:blocking, :polling, :auto); got $(repr(other))"))
 
 # The stall bound an operation starting now under `policy` carries.
 _operation_stall_after(policy::OperationPolicy, queued::Bool) =
@@ -7902,6 +7912,23 @@ end
 _operation_inline_representation(req::HTTP.Request) =
     wants_markdown(req) || wants_errors(req)
 
+# A `dispatch(...; operation_policy=)` request runs under that policy instead of
+# its root's registered one (`_run_operation`); every other request carries none.
+_request_operation_policy(req::HTTP.Request, registered::OperationPolicy) =
+    get(req.context, :htmxo_operation_policy, registered)::OperationPolicy
+
+# A dispatched `:blocking` override: its caller waits for the finished answer.
+_operation_blocking_override(req::HTTP.Request) =
+    _blocking_policy(get(req.context, :htmxo_operation_policy, nothing))
+_blocking_policy(::Nothing) = false
+_blocking_policy(policy::OperationPolicy) = policy.mode === :blocking
+
+# Whether a request naming a retained operation (a poll or attach URL) waits for
+# its result instead of answering a poller: an inline representation has no
+# poller consumer, and a blocking dispatch asked for the finished answer.
+_operation_awaits_result(req::HTTP.Request) =
+    _operation_inline_representation(req) || _operation_blocking_override(req)
+
 function _operation_execution_mode(policy::OperationPolicy, descriptor,
         req::HTTP.Request, verb_inst::Verb; page_shell::Bool=false,
         direct::Bool=false)
@@ -8215,12 +8242,12 @@ _operation_running_answer(_value) = false
 # other content. htmx keeps that node's `every` trigger, and nothing swapped
 # in can retire it, so without 286 it polls the spent token for as long as the
 # page is open (snag mutation-poller-4f9123b0). A Markdown or `?error` read of
-# a poll URL is answered inline to a reader, not into a poller
-# (`_operation_inline_representation`), and keeps its status.
+# a poll URL, and a blocking dispatch of one, is answered inline to its caller,
+# not into a poller (`_operation_awaits_result`), and keeps its status.
 function _stamp_poll_end(req::HTTP.Request, resp::HTTP.Response, running::Bool)
     (!running && resp.status == 200 && is_htmx(req) &&
         _operation_poll_request(req) &&
-        !_operation_inline_representation(req)) || return resp
+        !_operation_awaits_result(req)) || return resp
     HTTP.Response(286, resp.headers; body=resp.body)
 end
 
@@ -9280,7 +9307,7 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
     _runtime_job_polled!(req, entry.started)
     age = _operation_poll_now() - entry.created_at
     req.context[:htmxo_operation_age] = age
-    _operation_inline_representation(req) && return _operation_await_resume(
+    _operation_awaits_result(req) && return _operation_await_resume(
         entry, token, descriptor, name, verb_inst, req, prefix)
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
@@ -9454,8 +9481,9 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
     # run the body a second time.
     #
     # A Markdown or `?error` read of a poll URL joins the operation it names
-    # as well; its resume waits for the result instead of answering a poller.
-    if (mode === :polling || _operation_inline_representation(req)) &&
+    # as well, and so does a blocking dispatch of one; its resume waits for the
+    # result instead of answering a poller.
+    if (mode === :polling || _operation_awaits_result(req)) &&
             _operation_verb_transport(verb_inst) === :read &&
             (_operation_poll_request(req) || _operation_attach_request(req))
         token = _operation_poll_token(req)
@@ -9593,12 +9621,13 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
             started, prop, keys, call_kwargs, transport))
         return _cache_mutation_terminal!(entry, value)
     end
-    if _operation_poll_request(req)
+    if _operation_poll_request(req) && !_operation_blocking_override(req)
         # A poll-marked request that landed on `:blocking` (the descriptor
         # lost `pending` across a Revise re-eval between poller-emit and
         # poll) still answers a LIVE poller: wrap terminal-compatible so the
         # poller's hx-select matches and the transport retires instead of
-        # sticking. Unresolved falls through bare — the poller retries.
+        # sticking. Unresolved falls through bare — the poller retries. A
+        # blocking dispatch has no poller to retire: it gets the bare answer.
         probe = _operation_ready_terminal(_resolve_operation_value, started)
         probe.ready && return _operation_page_runtime(req, probe.value)
     end
@@ -9613,6 +9642,7 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         operation_policy::OperationPolicy=OperationPolicy(),
         parent_progress=nothing, preload::Bool=false, direct::Bool=false,
         queued::Bool=false)
+    operation_policy = _request_operation_policy(req, operation_policy)
     if _operation_form_request(req)
         return _operation_form_refresh(target, LeafT, name, verb_inst, req,
                                        base, n_params)
@@ -11951,8 +11981,7 @@ function route!(obj; prefix="", record_dir=nothing, record_base="",
     provider = isnothing(root_provider) &&
                _is_semantic_root_provider(existing_provider) ?
         existing_provider : _normalize_root_provider(root_provider)
-    policy = operation_policy isa OperationPolicy ? operation_policy :
-             OperationPolicy(operation_policy)
+    policy = _operation_policy(operation_policy)
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
     _root_providers[T] = provider
@@ -12091,6 +12120,9 @@ _dispatch_static(spec::StaticExport) = spec
 _dispatch_static(other) = throw(ArgumentError(
     "dispatch takes `static` as a StaticExport spec or nothing; got $(repr(other))"))
 
+_dispatch_operation_policy(::Nothing) = nothing
+_dispatch_operation_policy(policy) = _operation_policy(policy)
+
 _dispatch_body(::Nothing) = UInt8[]
 _dispatch_body(b::Vector{UInt8}) = b
 _dispatch_body(b::AbstractVector{UInt8}) = Vector{UInt8}(b)
@@ -12129,7 +12161,8 @@ requests and the same route body serves both paths.
 dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, nothing)
 
 """
-    dispatch(method, url; headers=[], body=UInt8[], parent=nothing, static=nothing) -> HTTP.Response
+    dispatch(method, url; headers=[], body=UInt8[], parent=nothing, static=nothing,
+             operation_policy=nothing) -> HTTP.Response
 
 Run one request against the registered route tree in-process and return the
 handler's `HTTP.Response` — no listener, no socket, no serialization
@@ -12176,6 +12209,20 @@ for a loopback request.
   unaffected; `parent=` nests the blocking execution as usual. A route that
   returns a finished `HTTP.Response`/`MIMEResponse` makes the call throw
   [`StaticExportRefused`](@ref).
+- `operation_policy` — an optional [`OperationPolicy`](@ref), or its mode
+  Symbol, that this one request runs under instead of its root's registered
+  policy. `operation_policy=:blocking` answers once the work has finished —
+  the ordinary bare fragment with `"HX-Request" => "true"`, the composed page
+  without — where the app's `:auto` would answer a slow route with a poller,
+  and a dispatched poll URL joins the operation it names and waits for its
+  result (up to its stall bound) instead of starting another. Registration and
+  the root's policy are untouched, so requests served concurrently keep
+  theirs. Route-level transport wins exactly as against a registered policy:
+  Markdown and `?error` reads, `@direct` routes and declared `HTTP.Response`
+  outputs answer inline anyway, and a route body that hand-rolls
+  `polling_fetchindex` decides its own `sync`. A `:polling` or `:auto`
+  override answers with a poller whose follow-up polls are requests of their
+  own: dispatch them with the same `operation_policy` to keep it.
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
@@ -12194,12 +12241,14 @@ markdown = String(resp.body)
 ```
 """
 function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
-        parent=nothing, static=nothing)
+        parent=nothing, static=nothing, operation_policy=nothing)
     spec = _dispatch_static(static)
+    policy = _dispatch_operation_policy(operation_policy)
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
     spec !== nothing && (req.context[:htmxo_static_export] = spec)
+    policy !== nothing && (req.context[:htmxo_operation_policy] = policy)
     _with_dispatch_parent(() -> ROUTER(req), parent)
 end
 

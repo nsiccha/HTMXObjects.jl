@@ -2623,6 +2623,7 @@ markdown = String(resp.body)
 | `body` | A `String` or `Vector{UInt8}` (for `POST`/`PUT`/`PATCH` routes) |
 | `parent` | An optional Treebars progress node the route's compute hangs under |
 | `static` | An optional `StaticExport` spec: this one request runs blocking and comes back in static form ([below](#request-scoped-static-export)) |
+| `operation_policy` | An optional `OperationPolicy`, or its mode Symbol, this one request runs under instead of its root's ([below](#a-per-request-operation-policy)) |
 
 The request resolves through the live router, so `:index` collapse, verb
 dispatch, path/query/body extraction (including repeated-key vectors), the
@@ -2655,6 +2656,37 @@ already parents automatically. Off `dispatch` the accessor returns
 
 Serve-time middleware (the access log, Revise, `serve`'s `middleware`) does
 not run: `dispatch` resolves at the router, beneath the middleware stack.
+
+### A per-request operation policy
+
+Under the default `:auto` policy a slow route answers an HTMX request with a
+poller, which a caller in Julia cannot follow. `operation_policy=:blocking`
+(or `OperationPolicy(:blocking)`) runs that one request to completion and
+returns its ordinary answer — the bare fragment with `"HX-Request" => "true"`,
+the composed page without:
+
+```julia
+resp = dispatch(:GET, "/review"; headers=["HX-Request" => "true"],
+                operation_policy=:blocking)
+html = String(resp.body)   # the finished fragment, never a poller
+```
+
+- **Request-scoped.** The override replaces the root's policy for this request
+  only; registration is not touched, so requests served concurrently keep the
+  app's policy. Re-running `route!` with another policy is never needed for
+  this.
+- **Poll URLs are joined.** A blocking dispatch of a poll URL (one carrying
+  `__htmxo_poll`/`__htmxo_operation`) waits for the operation it names, up to
+  its stall bound, instead of starting another — as a Markdown read does. A
+  mutation's poll URL waits for the retained submission; it never re-runs it.
+- **Route-level transport still wins**, exactly as against a registered
+  policy: Markdown and `?error` reads, `@direct` routes and routes that declare
+  an `HTTP.Response`/`MIMEResponse` output answer inline under every policy,
+  and a route body that calls `polling_fetchindex` itself decides its own
+  `sync`.
+- **Any mode is accepted.** A `:polling` or `:auto` override answers with a
+  poller; its follow-up polls are requests of their own, so dispatch them with
+  the same `operation_policy` to keep the override.
 
 ### Request-scoped static export
 
