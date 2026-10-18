@@ -46,14 +46,14 @@ using TestItemRunner
     # Other text types compress; Markdown is `text/*`.
     for type in ("text/markdown; charset=utf-8", "application/json", "application/javascript",
                  "image/svg+xml", "application/ld+json", "application/atom+xml", "text/css")
-        r = _compress_buffered(request("gzip"), HTTP.Response(200, ["Content-Type" => type], page))
+        local r = _compress_buffered(request("gzip"), HTTP.Response(200, ["Content-Type" => type], page))
         @test header(r, "Content-Encoding") == "gzip"
     end
 
     # A client without gzip gets the same bytes, plus Vary so a cache keeps
     # the forms apart.
     for accept in (nothing, "br", "gzip;q=0")
-        r = _compress_buffered(request(accept), original)
+        local r = _compress_buffered(request(accept), original)
         @test header(r, "Content-Encoding") === nothing
         @test header(r, "Vary") == "Accept-Encoding"
         @test header(r, "Content-Length") == string(sizeof(page))
@@ -164,17 +164,17 @@ end
         # intact, and a client that did not ask still gets plain bytes.
         relayed = HTTP.get("http://127.0.0.1:$port/compression_page",
             ["Accept" => "text/html", "HX-Request" => "true", "Accept-Encoding" => "gzip"];
-            decompress=false, retry=false, readtimeout=60)
+            decompress=false, retry=false)
         @test HTTP.header(relayed, "Content-Encoding") == "gzip"
         @test gunzip(Vector{UInt8}(HTMXObjects._buffered_bytes(relayed.body))) == page
         plain = HTTP.get("http://127.0.0.1:$port/compression_page",
             ["Accept" => "text/html", "HX-Request" => "true"];
-            decompress=false, retry=false, readtimeout=60)
+            decompress=false, retry=false)
         @test !HTTP.hasheader(plain, "Content-Encoding")
         @test String(Vector{UInt8}(HTMXObjects._buffered_bytes(plain.body))) == page
         # HTTP.jl's own client asks for gzip and decompresses it.
         auto = HTTP.get("http://127.0.0.1:$port/compression_page",
-            ["Accept" => "text/html", "HX-Request" => "true"]; retry=false, readtimeout=60)
+            ["Accept" => "text/html", "HX-Request" => "true"]; retry=false)
         @test String(Vector{UInt8}(HTMXObjects._buffered_bytes(auto.body))) == page
 
         # In-process dispatch never goes through serve's compression.
@@ -194,5 +194,61 @@ end
         @test contains(String(off.body), "row $COMPRESS_PAGE_ROWS")
     finally
         terminate()
+    end
+end
+
+@testmodule CompressionChrome begin
+    include(joinpath(@__DIR__, "support", "chrome.jl"))
+end
+
+"""
+A browser asks for gzip on its own. Through a real `serve`, Chrome loads the
+vendored htmx script and swaps a table fragment, both gzipped, and the page
+works.
+"""
+@testitem "a browser runs gzipped htmx and swaps a gzipped fragment from serve" setup=[CompressionChrome, HTMXOTestImports, HTMXOTestPorts] tags=[:integration, :server, :browser] begin
+    @htmx struct ServeCompressionBrowserApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)
+        @direct @get index() = h.div("waiting"; id="slot", hx_get=__self__/"compression_browser_rows", hx_trigger="load")
+        @direct @get compression_browser_rows() =
+            h.table([h.tr(h.td("browser row $i"), h.td("12.50")) for i in 1:300]; id="swapped")
+    end
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        route!(ServeCompressionBrowserApp())
+        vendorfiles()
+        # What the browser asked for, seen inside `serve` (compression runs
+        # after every middleware).
+        asked = Channel{Tuple{String,String}}(Inf)
+        record = handler -> req -> (put!(asked, (req.target, HTTP.header(req, "Accept-Encoding", ""))); handler(req))
+        port = free_port()
+        serve(; port, async=true, access_log=nothing, middleware=[record])
+        try
+            HTTP.get("http://127.0.0.1:$port/compression_browser_rows", ["HX-Request" => "true"]; retry=false)
+            take!(asked)
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            @test contains(dom, "id=\"swapped\"") && contains(dom, "browser row 300")
+            @test !contains(dom, ">waiting</div>")
+            requests = Dict{String,String}()
+            while isready(asked)
+                target, accept = take!(asked)
+                requests[first(split(target, '?'))] = accept
+            end
+            script = only(filter(t -> startswith(t, "/vendor/") && endswith(t, ".js") && contains(t, "htmx"), collect(keys(requests))))
+            for target in (script, "/compression_browser_rows")
+                @test contains(requests[target], "gzip")
+                # The same request again: what Chrome was sent.
+                local r = HTTP.get("http://127.0.0.1:$port$target",
+                    ["Accept-Encoding" => requests[target], "HX-Request" => "true"];
+                    decompress=false, retry=false)
+                @test HTTP.header(r, "Content-Encoding") == "gzip"
+            end
+        finally
+            terminate()
+        end
     end
 end
