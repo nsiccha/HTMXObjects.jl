@@ -4644,7 +4644,9 @@ Walk a Node tree and make it static-safe under `rules`:
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
 - Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline
 
-Non-Node values pass through unchanged.
+Documents, arrays, tuples, `content => id` pairs, [`html_only`](@ref) content
+and [`HTMLSnapshot`](@ref) values are walked through; other values pass
+through unchanged.
 """
 _static_walk(val, rules::_StaticRules) = val
 # A full page arrives as an `HTMLDocument`; unwrap so the `<html>` tree is
@@ -4746,6 +4748,15 @@ _static_walk_child(child::Node, rules) = _static_walk(child, rules)
 # A snapshot's stored bytes predate the rewrite, so export walks its value.
 _static_walk(s::HTMLSnapshot, rules::_StaticRules) = _static_walk(_html_value(s.value), rules)
 _static_walk_child(s::HTMLSnapshot, rules) = _static_walk(s, rules)
+# `html_only` content is HTML like any other subtree (the table toolbars and
+# grouped-header tables put live controls there), so it is walked and
+# re-wrapped to keep its empty Markdown projection. A removed control takes
+# the wrapper with it.
+function _static_walk(val::HtmlOnly, rules::_StaticRules)
+    walked = _static_walk(val.content, rules)
+    walked === _STATIC_REMOVED ? walked : HtmlOnly(walked)
+end
+_static_walk_child(val::HtmlOnly, rules) = _static_walk(val, rules)
 
 """
     _inject_static_style(val)

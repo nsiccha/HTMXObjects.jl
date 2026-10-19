@@ -879,7 +879,8 @@ route!(app; record_dir="site")
 ```
 
 Every response is saved to disk mirroring the URL path (`/post/42` →
-`site/post/42.html`). `static_transform` walks the Node tree and:
+`site/post/42.html`). `static_transform` walks the Node tree, `html_only(...)`
+content included, and:
 
 - Strips `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes.
 - Strips `hx-get` attributes whose URL contains `?` or points at a
