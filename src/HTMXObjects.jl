@@ -4091,15 +4091,22 @@ Base.show(io::IO, ::MIME"text/markdown", artifact::SemanticArtifact) = print(
     io, "[", artifact.name, "](", _semantic_artifact_href(artifact), ") (`",
     artifact.mime, "`)")
 
+# A Markdown table row is one line, and GFM splits a cell at every `|`, code
+# spans included. So a cell's line breaks fold into an inline `<br>` and its
+# `|` is escaped as `\|` — the rule HTMX.jl applies to an `h.table`'s cells, so
+# a `SemanticTable` reads the same as a `render_table` of the same source.
+_semantic_table_cell(value) =
+    replace(replace(strip(string(value)), r"\s*\n\s*" => "<br>"), "|" => "\\|")
+
 function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
     cells = _semantic_table_columns(table.source)
     isnothing(cells) && return _semantic_show_leaf(io, mime, table.source)
     names, columns = cells
-    print(io, "| ", join(names, " | "), " |\n")
+    print(io, "| ", join(map(_semantic_table_cell, names), " | "), " |\n")
     print(io, "|", repeat(" --- |", length(names)), "\n")
     for row in eachindex(first(columns))
         print(io, "| ",
-            join((string(column[row]) for column in columns), " | "), " |\n")
+            join((_semantic_table_cell(column[row]) for column in columns), " | "), " |\n")
     end
 end
 

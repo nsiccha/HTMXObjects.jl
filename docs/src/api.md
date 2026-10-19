@@ -1328,7 +1328,11 @@ projection rather than mangled into a spurious one-row table. Prefer passing the
 richer source directly — materializing a `TreeData` into a `DataFrame` just to
 render it loses information for nothing. The HTML projection delegates to
 [`render_table`](@ref) with sorting and download off, since both are interactive
-chrome rather than part of a semantic projection.
+chrome rather than part of a semantic projection. The Markdown projection is a
+GFM pipe table whose rows each stay one line: a `|` in a header or cell is
+escaped as `\|` (GFM splits a cell at every unescaped pipe, code spans included),
+and a line break becomes an inline `<br>` — the same cell rule HTMX.jl applies
+to `render_table`'s `h.table`.
 
 `anchor`, where present, becomes the HTML `id` — a document address, so an
 element can be cited from elsewhere. An unaddressed element emits no attribute
