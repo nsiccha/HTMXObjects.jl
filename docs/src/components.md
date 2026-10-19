@@ -470,8 +470,10 @@ declines it, say) leaves the slot unlatched, and the next expand tries again.
 
 `groupings` lets the reader regroup one set of leaf rows. Each grouping is a
 name and a `leaf -> group key(s)` function; `nothing` is the flat view, and
-the first grouping is the default. One route renders the table, another a lazy
-group's rows, both through the same call:
+the first grouping is the default. The browser regroups: every leaf is on the
+page, and the *Group by* control rebuilds the groups there with no request, so
+the table regroups the same way in a live app and in a page recorded with
+`record!` and served as plain files:
 
 ```julia
 groupings = ["None" => nothing,
@@ -479,43 +481,70 @@ groupings = ["None" => nothing,
              "IBAN" => t -> t.iban,
              "Rule" => t -> matching_rule_names(t)]   # several keys: listed under each
 
-transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_table(
+transactions_table(group_by="Counterparty") = master_detail_table(
     ["Counterparty", "Date", "Amount"], transactions;
     key = t -> t.id,
     master = t -> (h.td(t.party), h.td(t.date), h.td(string(t.amount))),
     detail = t -> h.p(t.memo),
-    groupings, group_by, group_rows,
-    group_by_url = self / "table",
-    group_rows_url = (key, members) -> length(members) > 200 ?
-        query_url(self / "rows"; group_by, key) : nothing,
-    group_master = (key, members) -> (h.td(h.strong(key)), h.td(""),
-        h.td(string(sum(m.amount for m in members)))),
-    searchable = true, search_query = q, expand_controls = group_by != "None",
+    groupings, group_by,
+    group_summary = ["Amount" => ColumnSummary(:sum, t -> t.amount; digits=2)],
+    searchable = true, expand_controls = true,
     selectable = "tx", select_form = "bulk")
-
-@get table(; group_by::String="Counterparty", q::String="") =
-    transactions_table(__self__, group_by, q)
-@get rows(; group_by::String="Counterparty", key::String="") =
-    transactions_table(__self__, group_by; group_rows=key)
 ```
 
 - **Groups.** A grouping renders one collapsible branch per group key, in
-  first-appearance order, with its leaves below. `group_master(key, members)`
-  returns the group row's cells (default: the key and the member count).
-  Controls in it, such as a rule-mode select, keep their own behaviour: they
-  neither toggle nor select the group. Group rows sort among themselves by the
-  same columns; leaves sort within their group.
+  first-appearance order, with its leaves below. A group row shows the key and
+  the member count, and in each column `group_summary` names, a
+  `ColumnSummary` of the group's leaves: `:sum`, `:mean`, `:min`, `:max` of
+  `item -> number`, `:count`, or `:ratio` of two sums (Σ demand / Σ capacity).
+  A leaf whose function returns `nothing` or `missing` is left out. The
+  browser computes the summaries again for every grouping the reader picks,
+  rounded to `digits` decimals and written with the table's `decimal` and
+  `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`). Group rows
+  sort among themselves by the same columns; leaves sort within their group.
 - **The same leaves.** Leaf rows render through `master`, `detail` /
   `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
   (a shared IBAN, a rule matching several counterparties) gets one row per
   group, each with its own id.
-- **Group by.** With `group_by_url`, a *Group by* select joins the tree
+- **Group by.** With two or more groupings a *Group by* select joins the tree
   controls (for a `group_by` list, pills: see
-  [Nested levels](#table-grouping-levels)). A change GETs `group_by_url` with
-  `group_by` and `q` (the current search) and swaps the table for the response. With `select_form` the select
-  is associated with that form, so a bulk submission carries the active
-  grouping. An unknown `group_by` throws an `ArgumentError`; validate it in the
-  route.
+  [Nested levels](#table-grouping-levels)). A change regroups in the browser:
+  the search, the selection, the sort and the groups the reader opened carry
+  over, a group holding a leaf whose detail is open opens, and the table fires
+  `htmxo:regrouped` with the new `group_by` values. With `select_form` the
+  select is associated with that form, so a bulk submission carries the active
+  grouping. An unknown `group_by` throws an `ArgumentError`.
+- **Group rows from the server.** The browser cannot run two things: your own
+  `group_master(key, members)`, whose group row cells may hold anything Julia
+  renders (links, a rule-mode select), and lazy groups (`group_rows_url`),
+  whose leaves are not on the page. For those, pass `group_by_url`: a route
+  that renders the same call for the `group_by` and `q` (the current search) it
+  receives. With `group_master` the browser regroups at once and then swaps in
+  the server's render of the new grouping; with lazy groups a change asks the
+  server straight away. Without `group_by_url` (a recorded page) a
+  `group_master` table still regroups in the browser, with default group rows
+  (key, count and `group_summary`); lazy groups then get no *Group by* control.
+  Controls in `group_master` cells keep their own behaviour: they neither
+  toggle nor select the group. Validate `group_by` in the route:
+
+  ```julia
+  transactions_table(self, group_by, q=""; group_rows=nothing) = master_detail_table(
+      ["Counterparty", "Date", "Amount"], transactions;
+      key = t -> t.id, master = t -> cells(t), detail = t -> h.p(t.memo),
+      groupings, group_by, group_rows,
+      group_by_url = self / "table",
+      group_rows_url = (key, members) -> length(members) > 200 ?
+          query_url(self / "rows"; group_by, key) : nothing,
+      group_master = (key, members) -> (h.td(h.strong(key)), h.td(rule_mode_select(key)),
+          h.td(string(sum(m.amount for m in members)))),
+      searchable = true, search_query = q, expand_controls = true,
+      selectable = "tx", select_form = "bulk")
+
+  @get table(; group_by::String="Counterparty", q::String="") =
+      transactions_table(__self__, group_by, q)
+  @get rows(; group_by::String="Counterparty", key::String="") =
+      transactions_table(__self__, group_by; group_rows=key)
+  ```
 - **Selection.** Keys are per leaf. Selecting a leaf selects every copy, it is
   submitted once, and the selection survives regrouping and the flat view.
   Group rows are selectable too and submit their key under
@@ -556,9 +585,10 @@ Pass `group_by` as an ordered list to nest the groups level by level, the
 first outermost. The *Group by* control is then a row of pills, one per
 grouping: a pill turns its level on (as the innermost) or off, and the active
 pills reorder by dragging, by their ‹ › buttons, or with ←/→ on a focused pill.
-No active pill is the flat view. Each change re-renders the table through
-`group_by_url` as before, sending the levels as repeated `group_by` values, so
-the route takes a vector:
+No active pill is the flat view. Each change regroups in the browser, at
+every level. A table whose group rows or lazy groups need the server also
+re-renders through `group_by_url`, sending the levels as repeated `group_by`
+values, so that route takes a vector:
 
 ```julia
 document_table(self, group_by, q=""; kw...) = master_detail_table(headers, documents;
