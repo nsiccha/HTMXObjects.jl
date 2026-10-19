@@ -5570,6 +5570,11 @@ end
     cap_css = repr("text/html", caption_style())
     @test contains(cap_css, ".caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }")
     @test !contains(cap_css, "flex-shrink")
+    # The header wraps the actions below the title as one row, and the button
+    # sizing sits after the layer closes: Pico's unlayered button rules beat
+    # any layered rule. The real-Chrome check is in test/captions.jl.
+    @test contains(cap_css, ".caption-header { display: flex; flex-wrap: wrap;")
+    @test occursin(r"@layer htmxo \{.*\n\}\n.*\.caption-actions > \.caption-action \{ padding: 0\.1rem 0\.5rem; font-size: 0\.85em; margin: 0; \}"s, cap_css)
 end
 
 @testitem "sortable_table_js" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin

@@ -13221,17 +13221,29 @@ const _EN_CAPTION_TEXTS = caption_texts(:en)
 Return a `<style>` node with default CSS for `render_caption` / `with_caption`:
 flex layout for the caption header (title left, actions right) and small
 spacing for the `<details>` body. Include once per page.
+
+The actions stay one compact row. When the title would keep less than `16rem`
+beside them, they move below it, wrapping only if the row itself is wider than
+the column. The `.caption-action` button sizing is deliberately **outside any
+`@layer`**: Pico styles buttons unlayered, and an unlayered rule beats any
+`@layer`-ed rule regardless of specificity, so a layered size never applied.
 """
 caption_style() = h.style(Raw("""
 @layer htmxo {
 figure.captioned { margin: 0 0 1rem 0; }
 figcaption.caption { margin-bottom: 0.5rem; }
-.caption-header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.caption-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.25rem 1rem; }
+/* The title keeps 16rem beside the actions, else they wrap below it. An empty
+   placeholder (the uncaptioned download header) takes no basis, so its button
+   stays on the right. */
+.caption-header > :first-child:not(:empty) { flex: 1 1 16rem; min-width: 0; }
 .caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
-.caption-action { padding: 0.1rem 0.5rem; font-size: 0.85em; margin: 0; }
 .caption-long { margin-top: 0.25rem; }
 .caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
 }
+/* Caption buttons — INTENTIONALLY UNLAYERED, at (0,2,0) so they beat Pico's
+   unlayered button and [type=button] rules (0,0,1)/(0,1,0) in any order. */
+.caption-actions > .caption-action { padding: 0.1rem 0.5rem; font-size: 0.85em; margin: 0; }
 """))
 
 _wrap_long(s::AbstractString) = h.div(s)
@@ -13241,7 +13253,8 @@ _wrap_long(s) = s
     render_caption(spec::CaptionSpec; actions=(), texts=caption_texts())
 
 Return a `<figcaption>` node for `spec`. `actions` is an iterable of nodes
-(buttons, links, …) rendered on the right side of the caption header.
+(buttons, links, …) rendered on the right side of the caption header, or in
+one row below the title in a narrow column (see [`caption_style`](@ref)).
 `texts` (a [`CaptionTexts`](@ref)) holds the caption's own words, such as the
 toggle that opens `long`; pass `caption_texts(:de)` on a German page.
 
@@ -13276,7 +13289,7 @@ _as_children(content::AbstractVector) = content
 
 Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
 caption rendered above it. Pass `actions` (e.g. download buttons) to populate
-the right side of the caption header, `id` to give the `<figure>` an id, and
+the right side of the caption header (below the title in a narrow column), `id` to give the `<figure>` an id, and
 `texts` (a [`CaptionTexts`](@ref)) for the caption's own words, as in
 [`render_caption`](@ref).
 """

@@ -974,7 +974,7 @@ manual.)
 
 ## Captions
 
-`with_caption(spec, content)` wraps a figure (or any content) in a `<figure>` with a caption above it; `render_table(table; caption=spec)` captions a table the same way. `actions` puts buttons or links, such as a CSV download, on the right of the caption header:
+`with_caption(spec, content)` wraps a figure (or any content) in a `<figure>` with a caption above it; `render_table(table; caption=spec)` captions a table the same way. `actions` puts buttons or links, such as a CSV download, on the right of the caption header, or in one row below the title when the column would leave the title less than `16rem` beside them:
 
 ```julia
 cap = CaptionSpec(; title="Posterior fit", short="Median and 95% interval per dose.",
