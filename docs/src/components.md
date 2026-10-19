@@ -357,8 +357,9 @@ The texts cover everything these tables write themselves: the search field
 (`group_by`, `group_add`, `group_add_inner`, `group_level`, `group_kept`,
 `group_stop`, `group_earlier`, `group_later`), lazy-detail status lines
 (`loading`, `retrying`, `load_failed`), the toasts of a lazy group that fails
-to load (`rows_failed`, `rows_missing`) and the CSV button (`csv`). The
-`TableTexts` docstring names them all.
+to load (`rows_failed`, `rows_missing`), the CSV button (`csv`) and the toggle
+of the table's caption (`more`, the same word as `caption_texts`, see
+[Captions](#captions)). The `TableTexts` docstring names them all.
 
 A text in braces is a placeholder: `count` takes `{shown}` and `{total}`, the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also

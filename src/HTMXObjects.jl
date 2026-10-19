@@ -14739,7 +14739,8 @@ end
 
 The words a table's built-in controls show: the search field, its count and
 empty state, the selection bar, *Expand all* / *Collapse all*, the *Group by*
-control, lazy-detail status lines and the CSV button. Build one with
+control, lazy-detail status lines, the CSV button and the toggle of its
+caption's long text (`more`, as in [`caption_texts`](@ref)). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -14777,6 +14778,7 @@ struct TableTexts
     rows_failed::String         # toast: a lazy group's rows failed to load
     rows_missing::String        # toast: a lazy group's response held no rows
     csv::String                 # the CSV download button
+    more::String                # the caption's long-text toggle (`CaptionTexts`)
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -14815,6 +14817,7 @@ const _TABLE_TEXT_LOCALES = (
         rows_failed = "Loading rows failed ({status})",
         rows_missing = "Loading rows failed: no rows in the response",
         csv = "⬇ CSV",
+        more = _CAPTION_TEXT_LOCALES.en.more,
     ),
     de = (
         search = "Suche",
@@ -14843,6 +14846,7 @@ const _TABLE_TEXT_LOCALES = (
         rows_failed = "Laden der Zeilen fehlgeschlagen ({status})",
         rows_missing = "Laden der Zeilen fehlgeschlagen: keine Zeilen in der Antwort",
         csv = "⬇ CSV",
+        more = _CAPTION_TEXT_LOCALES.de.more,
     ),
 )
 
@@ -14861,24 +14865,8 @@ master_detail_table(headers, items; key, master, detail, searchable=true, texts=
 An unknown locale or text name, or a placeholder the text does not take
 (`"{shwon}"`), throws an `ArgumentError`.
 """
-function table_texts(locale::Symbol=:en; texts...)
-    haskey(_TABLE_TEXT_LOCALES, locale) || throw(ArgumentError(string("table_texts: unknown locale ",
-        repr(locale), "; available: ", join(repr.(keys(_TABLE_TEXT_LOCALES)), ", "))))
-    names = fieldnames(TableTexts)
-    for name in keys(texts)
-        name in names || throw(ArgumentError(string("table_texts: unknown text ", repr(name),
-            "; texts are ", join(names, ", "))))
-    end
-    merged = merge(getfield(_TABLE_TEXT_LOCALES, locale), (; (k => string(v) for (k, v) in pairs(texts))...))
-    for name in names
-        allowed = get(_TABLE_TEXT_PLACEHOLDERS, name, ())
-        for m in eachmatch(r"\{([A-Za-z_]+)\}", merged[name])
-            Symbol(m[1]) in allowed || throw(ArgumentError(string("table_texts: ", name, " has no placeholder {",
-                m[1], "}", isempty(allowed) ? "" : string("; it takes ", join(("{$p}" for p in allowed), ", ")))))
-        end
-    end
-    TableTexts((merged[name] for name in names)...)
-end
+table_texts(locale::Symbol=:en; texts...) =
+    _locale_texts(TableTexts, :table_texts, _TABLE_TEXT_LOCALES, _TABLE_TEXT_PLACEHOLDERS, locale; texts...)
 
 const _EN_TABLE_TEXTS = table_texts(:en)
 
@@ -15203,7 +15191,7 @@ function sortable_table(headers, rows;
     framed = if !isnothing(caption)
         actions = download ? (download_btn,) : ()
         fig_id = isnothing(id) ? nothing : "tbl-$id"
-        with_caption(caption, table_wrap; actions, id=fig_id)
+        with_caption(caption, table_wrap; actions, id=fig_id, texts=caption_texts(; more=texts.more))
     elseif download
         h.figure(; class="captioned")(
             h.figcaption(; class="caption")(

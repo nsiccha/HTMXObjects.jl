@@ -12,7 +12,7 @@
     # Fragments of the English texts that no fixture's own content contains.
     english_words = ["Search", "rows shown", "No matching rows", "0 selected", "Select all shown",
         "Clear", "Expand all", "Collapse all", "Toggle child rows", "Details", "Group by",
-        "grouping", "Move ", "Loading", "CSV"]
+        "grouping", "Move ", "Loading", "CSV", "More"]
 
     items = [(id="k$i", name="Item $i", grp=isodd(i) ? "A" : "B", party=i % 3 == 0 ? "X" : "Y",
               kids=i <= 2 ? [(id="c$i$j", name="Child $i.$j", grp="A", party="X", kids=[]) for j in 1:2] : [])
@@ -29,6 +29,8 @@
         "search" => sortable_table(["A", "B"], rows; id="t", searchable=true, texts),
         "select" => sortable_table(["A", "B"], rows; id="t", searchable=true, selectable="s", select_form="f", texts),
         "csv" => sortable_table(["A", "B"], rows; id="t", download=true, texts),
+        "caption" => sortable_table(["A", "B"], rows; id="t", download=true, texts,
+            caption=CaptionSpec(; title="T", short="s", long="l")),
         "render_table" => render_table((a=[1, 2], b=["x", "y"]); searchable=true, texts),
         "flat_lazy" => master_detail_table(["N", "G"], items; key=it -> it.id, master=cells,
             detail_url=it -> "/d/$(it.id)", searchable=true, id="m", texts),
@@ -54,6 +56,8 @@ end
     de = table_texts(:de; search="Einrichtungen filtern", count="{shown} von {total} Einrichtungen")
     @test de.search == "Einrichtungen filtern" && de.empty == "Keine passenden Zeilen"
     @test HTMXObjects._table_text(de, :count; shown=3, total=42) == "3 von 42 Einrichtungen"
+    # A table's caption toggle takes the caption set's own word.
+    @test en.more == caption_texts().more && table_texts(:de).more == caption_texts(:de).more == "Mehr"
     @test HTMXObjects._table_text(table_texts(:de), :group_level; level=2, name="Ort") ==
         "Ebene 2: nicht mehr nach Ort gruppieren; ziehen oder ←/→ drücken, um die Reihenfolge zu ändern"
     # Every locale names every text, with no placeholder its text does not take.
@@ -87,7 +91,8 @@ end
                    "⟨clear_selection⟩", "⟨expand_all⟩", "⟨collapse_all⟩", "⟨toggle_children⟩",
                    "⟨details⟩", "⟨group_by⟩", "⟨group_add Group⟩", "⟨group_add_inner Party⟩",
                    "⟨group_level 2 Party⟩", "⟨group_earlier Party⟩", "⟨group_later Group⟩",
-                   "⟨group_stop Group⟩", "⟨group_kept Group⟩", "⟨loading⟩", "⟨csv⟩"]
+                   "⟨group_stop Group⟩", "⟨group_kept Group⟩", "⟨loading⟩", "⟨csv⟩",
+                   "<summary>⟨more⟩</summary>"]
         @test contains(shown, marker)
     end
     # The browser's texts ride on the outermost element, once per table.
@@ -113,6 +118,15 @@ end
     lazy_md(texts) = to_markdown_string(table_variants(texts)["flat_lazy"])
     @test contains(lazy_md(texts), "| ⟨loading⟩ |") && contains(lazy_md(table_texts()), "| Loading… |")
     @test replace(lazy_md(texts), "⟨loading⟩" => "Loading…") == lazy_md(table_texts())
+end
+
+@testitem "a captioned table's long-text toggle follows its texts" tags=[:unit] begin
+    using HTMXObjects
+    cap = CaptionSpec(; title="Kapazität", short="Plätze je Kreis", long="Stand: Oktober 2026.")
+    table(; kw...) = repr("text/html", render_table((kreis=["Kiel"], plaetze=[3]); caption=cap, kw...))
+    @test contains(table(texts=table_texts(:de)), "<summary>Mehr</summary>")
+    @test contains(table(texts=table_texts(:de; more="Erläuterung")), "<summary>Erläuterung</summary>")
+    @test contains(table(), "<summary>More</summary>") && !contains(table(), "data-htmxo-texts")
 end
 
 @testitem "row updates, lazy rows and pairs render their texts without the attribute" setup=[TableTextFixtures] tags=[:unit] begin
