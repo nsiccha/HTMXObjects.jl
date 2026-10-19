@@ -2429,6 +2429,11 @@ parse errors; the quirks-mode check is a precondition).
 `root` stays a plain `Node`, so the recording pipeline
 ([`static_transform`](@ref)) walks the document exactly as it walked the bare
 `<html>` node before.
+
+Every other projection reads `root` too, wherever the document sits (returned
+from a route or nested in a node): a `?plain` / `?markdown` /
+`Accept: text/markdown` read is the Markdown of the `<html>` tree, and `?error`
+keeps only its error-tagged nodes, still behind the doctype.
 """
 struct HTMLDocument
     root::Node
@@ -2436,6 +2441,17 @@ end
 
 Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
     (print(io, "<!DOCTYPE html>\n"); show(io, m, doc.root); nothing)
+# The doctype carries no content, so the Markdown and error projections are the
+# root's. Without these, HTMX's catch-all Markdown `show` prints the struct's
+# repr, and `filter_errors` passes the whole page through as its errors.
+Base.show(io::IO, m::MIME"text/markdown", doc::HTMLDocument) = show(io, m, doc.root)
+filter_errors(doc::HTMLDocument) = let root = filter_errors(doc.root)
+    isnothing(root) ? nothing : HTMLDocument(root)
+end
+_filter_errors_child(doc::HTMLDocument) = filter_errors(doc)
+_strip_md_chrome(doc::HTMLDocument) = _strip_md_chrome(doc.root)
+_strip_md_chrome_child(doc::HTMLDocument) = _strip_md_chrome(doc)
+_rescue_semantic!(out, doc::HTMLDocument) = _rescue_semantic!(out, doc.root)
 
 # --- Vendored head assets ----------------------------------------------------
 #
