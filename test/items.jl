@@ -11347,10 +11347,14 @@ end
         @get hopage() = page()
         @get hotable(; group_by::String="party") = regroupable(group_by)
         @get hobrowser() = regroupable("party"; server=false)
+        @get homaster() = master_detail_table(["Party"], rows; key=r -> r.id,
+            master=r -> (h.td(r.party),), detail=r -> h.p(r.id),
+            groupings=["none" => nothing, "party" => r -> r.party], group_by="party",
+            group_by_url="/hotable", group_master=(k, ms) -> (h.td(h.strong(k)),))
     end
     mktempdir() do dir
         record!(HtmlOnlyRecording(); record_dir=dir, record_base="/b",
-                paths=["/hopage", "/hotable", "/hobrowser"], hx=false, markdown=false)
+                paths=["/hopage", "/hotable", "/hobrowser", "/homaster"], hx=false, markdown=false)
         recorded = read(joinpath(dir, "hopage.html"), String)
         @test contains(repr("text/html", page()), "hx-post=\"/hodrop\"")
         @test !contains(recorded, "hx-post")
@@ -11363,6 +11367,12 @@ end
         # A table the browser regroups keeps its control: no request to strip.
         browser = read(joinpath(dir, "hobrowser.html"), String)
         @test contains(browser, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\">")
+        # So does one whose `group_master` rows come from the server: only the
+        # hidden element that asks for them loses its request.
+        master = read(joinpath(dir, "homaster.html"), String)
+        @test contains(master, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\">") &&
+            occursin(r"<span hidden=\"true\" data-htmxo-group-refresh=\"\"[^>]* data-static-disabled=\"true\"", master) &&
+            !contains(master, "hx-get=\"/hotable\"")
     end
 end
 

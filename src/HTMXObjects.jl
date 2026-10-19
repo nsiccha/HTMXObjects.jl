@@ -14459,6 +14459,8 @@ function htmxoGroupRequest(pills, names, focusId) {
     if (names.join('\u0000') === htmxoGroupLevels(pills).join('\u0000')) return;
     const wrapper = pills.closest('[data-htmxo-grouped]');
     pills.htmxoPending = names;
+    // A server render that replaces the pills hands the focus back too.
+    window.htmxoGroupFocus = focusId ? {id: focusId, pills} : null;
     if ('htmxoRegroup' in wrapper.dataset) {
         htmxoRegroup(wrapper, names);
         // Moving a pill drops the focus; a ‹/› now at the bar's end hands it
@@ -14466,9 +14468,8 @@ function htmxoGroupRequest(pills, names, focusId) {
         const el = focusId && document.getElementById(focusId), pill = el && el.closest('.htmxo-group-pill');
         const target = el && !el.disabled ? el : pill && pill.querySelector('button');
         if (target) target.focus();
-        if (!htmxoRegroupConfig(wrapper).refresh) return;
+        return;
     }
-    window.htmxoGroupFocus = focusId ? {id: focusId, pills} : null;
     htmx.trigger(pills, 'htmxo-regroup');
 }
 function htmxoGroupToggle(button) {
@@ -14711,6 +14712,10 @@ function htmxoRegroup(wrapper, levels) {
     const root = wrapper.querySelector('.htmxo-searchable-table');
     if (root) { htmxoTreeRestore(root, htmxoSearchOf(root)); htmxoFilterTable(root); }
     wrapper.dispatchEvent(new CustomEvent('htmxo:regrouped', {bubbles: true, detail: {groupBy: JSON.parse(wrapper.dataset.htmxoGroupBy)}}));
+    // Group rows from `group_master` come from the server's render of the new
+    // grouping; in a recorded page the element has no request left.
+    const refresh = cfg.refresh && wrapper.querySelector('[data-htmxo-group-refresh][hx-get]');
+    if (refresh && window.htmx) htmx.trigger(refresh, 'htmxo-regroup');
 }
 // Set the pills the way `_md_group_pills` renders them for `levels`.
 function htmxoGroupPillsSync(pills, levels) {
@@ -16228,9 +16233,11 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   `hx-vals`, and the table fires `htmxo:regrouped` after each change.
 - `group_by_url`: the route that renders this table for the `group_by` and `q`
   (the current search) it receives, for what the browser cannot build: group
-  rows from `group_master`, which replace the browser's after each regroup,
-  and lazy groups (`group_rows_url`), whose control asks this URL instead of
-  regrouping in the browser and appears only with it. A list sends its levels
+  rows from `group_master`, which replace the browser's after each regroup (a
+  hidden element asks for them, so a recording, which strips that request,
+  keeps the control live with the browser's group rows), and lazy groups
+  (`group_rows_url`), whose control asks this URL instead of regrouping in the
+  browser and appears only with it. A list sends its levels
   as repeated `group_by` values, or for none the flat grouping's name, so
   declare the route's `group_by::Vector{String}`.
 - `group_rows_url(key, members)`: return a URL to load that group's rows on
@@ -16871,20 +16878,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     _attrs(item) = isnothing(master_attrs) ? (;) : master_attrs(item)
     leaf_value(item) = string(isnothing(select_value) ? key(item) : select_value(item))
     leaf_select(item) = _md_group_select_attrs(selectable, string(key(item)), leaf_value(item), nothing)
-    # The Group by control joins the tree controls; with a bulk form it is
-    # also submitted there, so a group selection arrives with its grouping.
-    # An ordered `group_by` gets pills that turn levels on and off and
-    # reorder them; a single name, the select.
     ncols = length(headers)
     summaries = _md_group_summaries(headers, group_summary)
     # The browser regroups a table whose leaves are all on the page
-    # (`htmxoRegroup`). Lazy groups hold rows it has not got, so they regroup
-    # through the server, and so do group rows from `group_master`: with
-    # `group_by_url` the table asks the server for them after the browser has
-    # regrouped; without one (a recorded page, no server) the browser's group
-    # rows show the group's key, its count and the `group_summary` cells.
+    # (`htmxoRegroup`). Lazy groups hold rows it has not got, so their
+    # control regroups through the server. Group rows from `group_master`
+    # need the server too: after the browser has regrouped, a hidden element
+    # asks `group_by_url` for them. A recording strips that element's request
+    # (it names a kwargs route) and leaves the control live, so a recorded
+    # page, like a table without `group_by_url`, shows the browser's group
+    # rows: the group's key, its count and the `group_summary` cells.
     browser = isnothing(group_rows_url)
-    serve = !isnothing(group_by_url) && (!browser || !isnothing(group_master))
+    serve = !isnothing(group_by_url) && !browser
+    refresh = !isnothing(group_by_url) && browser && !isnothing(group_master)
     table_id = string(get(kwargs, :id, "htmxo-grouped-" * string(hash(names); base=36)))
     # The Group by control joins the tree controls; with a bulk form it is
     # also submitted there, so a group selection arrives with its grouping.
@@ -16900,6 +16906,10 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
                             hx_swap="outerHTML", hx_vals="js:{q: htmxoGroupedQuery(this)}") : (;))...,
                 (isnothing(select_form) ? (;) : (; form=select_form))...)(
                 (h.option(n; value=n, (n == grouped_by ? (; selected=true) : (;))...) for n in names)...)),)
+    toolbar = !(control && refresh) ? toolbar : (toolbar...,
+        h.span(; hidden=true, data_htmxo_group_refresh="", hx_get=string(group_by_url), hx_trigger="htmxo-regroup",
+            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
+            hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this)}"))
     leaf_keys = _md_update_keys(update_rows)
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     # A group's key names it in callbacks, selections and requests; its
@@ -17090,7 +17100,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         (isempty(unplaced) ? () : tree(unplaced, _ -> (), gmaster; rows_only=true))...))
     config = string("{\"names\":", _md_json_list(grouping_names),
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
-        ",\"ordered\":", ordered, ",\"open\":", initially_open === true, ",\"refresh\":", serve,
+        ",\"ordered\":", ordered, ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
         ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]}")
     h.div(; grouping..., data_htmxo_regroup=config)(template..., store, built)
 end

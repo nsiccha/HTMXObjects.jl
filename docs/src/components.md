@@ -521,9 +521,12 @@ transactions_table(group_by="Counterparty") = master_detail_table(
   that renders the same call for the `group_by` and `q` (the current search) it
   receives. With `group_master` the browser regroups at once and then swaps in
   the server's render of the new grouping; with lazy groups a change asks the
-  server straight away. Without `group_by_url` (a recorded page) a
+  server straight away. In a recorded page, or without `group_by_url`, a
   `group_master` table still regroups in the browser, with default group rows
-  (key, count and `group_summary`); lazy groups then get no *Group by* control.
+  (key, count and `group_summary`): the request for the server's render rides
+  a hidden element, which recording strips, never the control. Lazy groups
+  cannot regroup without a server: a recording greys their control out, and
+  without `group_by_url` they get none.
   Controls in `group_master` cells keep their own behaviour: they neither
   toggle nor select the group. Validate `group_by` in the route:
 
