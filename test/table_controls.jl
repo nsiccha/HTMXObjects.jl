@@ -211,6 +211,54 @@ end
     @test_throws ErrorException sortable_table([h.th("Primal"), "Name"], rows; default_sort="Primal")
 end
 
+@testitem "table labels survive a consumer's own Markdown show" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string
+    # The reported shape: an app wraps the table in its own type whose Markdown
+    # `show` delegates to the table node. That reaches HTMX.jl's serializer, not
+    # `to_markdown_string`, and HTMX.jl drops a `<button>` whole, so every
+    # sortable header (and every label button) came out empty: `|  |  |`.
+    struct ConsumerTable
+        inner
+    end
+    Base.show(io::IO, ::MIME"text/html", t::ConsumerTable) = show(io, MIME"text/html"(), t.inner)
+    Base.show(io::IO, m::MIME"text/markdown", t::ConsumerTable) = show(io, m, t.inner)
+
+    data = (Vessel=["Syringe-50", "Bottle-50"], Diet=["1.0", "0.81"])
+    caption = CaptionSpec(; title="Bioavailability", short="Posterior median")
+    items = [(id="a", name="Alpha", kind="K1"), (id="b", name="Beta", kind="K2")]
+    tree = [(id="g", name="Group", kids=[(id="c", name="Child", kids=[])])]
+    cells(x) = (h.td(h.strong(x.name)), h.td(x.kind))
+    tables = (
+        render_table(data; caption),
+        sortable_table([ColumnSpec("Vessel"; help="The vessel."), "Diet"], [h.tr(h.td("a"), h.td("b"))]),
+        master_detail_table(["Name", "Kind"], items; key=x -> x.id, master=cells,
+            detail=x -> h.p("About ", x.name), detail_toggle=:label),
+        master_detail_table(["Name"], tree; key=x -> x.id, master=x -> (h.td(x.name),),
+            children=x -> x.kids, detail=x -> isempty(x.kids) ? h.p("Leaf") : nothing),
+        master_detail_table(["Name", "Kind"], items; key=x -> x.id, master=cells,
+            detail=x -> h.p("About"), groupings=["None" => nothing, "Kind" => x -> x.kind],
+            group_by="Kind"))
+    for table in tables
+        @test repr("text/markdown", table) == to_markdown_string(table)
+        @test repr("text/markdown", ConsumerTable(table)) == to_markdown_string(table)
+        # The HTML is the same control, label inside.
+        @test repr("text/html", ConsumerTable(table)) == repr("text/html", table)
+    end
+    @test contains(repr("text/markdown", ConsumerTable(first(tables))), "| Vessel | Diet |")
+    @test contains(repr("text/markdown", ConsumerTable(tables[3])), "| **Alpha** | K1 |")
+    @test contains(repr("text/markdown", ConsumerTable(tables[4])), "| Group |")
+    @test contains(repr("text/markdown", ConsumerTable(tables[5])), "| **K1** (1) |")
+    # A route returning the wrapper answers `Accept: text/markdown` with the labels.
+    @htmx struct ConsumerTableApp
+        @get table() = ConsumerTable(render_table(data; caption))
+    end
+    route!(ConsumerTableApp())
+    response = dispatch(:GET, "/table"; headers=["Accept" => "text/markdown"])
+    @test response.status == 200
+    @test contains(String(response.body), "| Vessel | Diet |\n| --- | --- |\n| Syringe-50 | 1.0 |")
+end
+
 @testitem "explained column headers sort and export their label" setup=[ChromeDump] tags=[:browser] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"

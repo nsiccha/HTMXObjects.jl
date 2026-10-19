@@ -502,6 +502,13 @@ data_htmxo_label="")`): Markdown drops the control and keeps that label in its
 place. Sortable column headers and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
 
+These rules belong to the response's Markdown projection. A type of your own
+whose `show(io, ::MIME"text/markdown", x)` delegates with `show(io, m, x.inner)`
+reaches HTMX.jl's serializer instead, which drops every `<button>` with its
+content. The tables' own column, row and branch labels survive that path too.
+For the rest (dropped chrome, a control's state, your own labelled controls),
+delegate with `print(io, HTMXObjects.to_markdown_string(x.inner))`.
+
 A control that shows the reader a state keeps that state in Markdown, with no
 annotation:
 
