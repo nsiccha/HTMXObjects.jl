@@ -2175,6 +2175,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `master_detail_js` | Shared runtime for `master_detail_table`/`master_detail_pair` rows; auto-included by `htmx`, also carried by `sortable_table_js` |
 | `master_detail_table(headers, roots; children, searchable, …)` | Hierarchical sibling sorting, ancestor-preserving search, keyboard branch/detail controls, and lazy details; see [components](components.md#hierarchical-master-detail-tables) |
 | `ColumnSpec(label; help)` | A `sortable_table`/`master_detail_table` header with an explanation that stays sortable; see [components](components.md#column-explanations) |
+| `table_texts(locale; texts...)`, `TableTexts` | The words of a table's built-in controls (`:en`, `:de`, per-text overrides), passed as `texts=`; see [components](components.md#table-texts) |
 | `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a `master_detail_table` grouped by an ordered `group_by` list; see [components](components.md#table-regrouping) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 | `caption_texts(locale; …)`, `CaptionTexts` | A caption's own words (the toggle that opens its long text) in English or German, with per-text overrides; pass as `texts=` to `render_caption` / `with_caption`; see [components](components.md#captions) |
