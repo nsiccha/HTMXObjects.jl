@@ -1781,8 +1781,8 @@ end
         @test_skip false
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
-        flat(group_by) = regroup_table(; group_by, selectable="tx", select_form="bulk", searchable=true,
-            expand_controls=true, id="g")
+        flat(group_by; kw...) = regroup_table(; group_by, selectable="tx", select_form="bulk", searchable=true,
+            expand_controls=true, id="g", kw...)
         nested(group_by) = regroup_table(; group_by, id="n", key=t -> "n" * t.id, texts=table_texts(:de))
         bulk = h.form(; id="bulk")(h.button("Apply"; id="apply", data_htmxo_needs_selection="tx", disabled=true))
         driver = h.script(Raw(regroup_driver_prelude() * raw"""
@@ -1808,6 +1808,9 @@ end
             }
             regroup('rule');
             check('summary', summary('group--Shops', 0) === '-230.0' && summary('group--Shops', 1) === '6' && summary('group--Media', 0) === '-80.0');
+            // A row update the server renders for this grouping fits the rows the browser built.
+            htmxoUpdateRows(await (await fetch('/flat?group_by=rule&update=p3')).text());
+            check('row-update', await parity(g(), '/flat?group_by=rule'));
             check('unplaced', (regroup('media'), shown(g())) === 'group--Prime' &&
                 g().querySelector('template[data-htmxo-unplaced]').content.querySelectorAll('tr[data-htmxo-leaf]').length === 5);
             regroup('party');
@@ -1864,8 +1867,9 @@ end
             uri = HTTP.URI(req.target)
             levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
             html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            q = HTTP.queryparams(uri)
             uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
-            uri.path == "/flat" ? html(flat(only(levels))) :
+            uri.path == "/flat" ? html(haskey(q, "update") ? flat(only(levels); update_rows=q["update"]) : flat(only(levels))) :
             uri.path == "/nested" ? html(nested(levels)) : HTTP.Response(404)
         end
         try
@@ -1878,7 +1882,7 @@ end
                 for line in split(checks[1], '\n')
                     @test endswith(line, ":true")
                 end
-                @test count(==('\n'), checks[1]) + 1 == 20
+                @test count(==('\n'), checks[1]) + 1 == 21
             end
         finally
             close(server)
