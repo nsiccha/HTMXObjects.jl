@@ -35,8 +35,8 @@ end
     tree(; kw...) = repr("text/html", master_detail_table(["Name"], roots;
         key=x -> x.key, master=x -> (h.td(x.key),), children=x -> x.children,
         detail_url=x -> "/d/$(x.key)", kw...))
-    # Collapsed children are rendered hidden, so the first paint counts them out.
-    @test contains(tree(searchable=true), "2 of 4 rows shown")
+    # The count is of items: collapsed children are hidden, but still shown.
+    @test contains(tree(searchable=true), "4 of 4 rows shown")
     @test contains(tree(searchable=true, initially_open=true), "4 of 4 rows shown")
     # Without `searchable`, a hierarchy keeps a hidden scaffold for its toggles.
     @test contains(tree(), "<label hidden")

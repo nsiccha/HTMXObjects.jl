@@ -133,11 +133,11 @@ end
     page = html(grouped(group_by="party", selectable="tx", group_rows_url=lazy_url,
         select_submit=t -> t.id != "p7"))
     # "Acme" (3 rows) loads lazily; "Bakery" (2 rows) is eager.
-    @test contains(page, "data-htmxo-lazy-rows=\"/rows?key=Acme\"") && contains(page, "data-htmxo-lazy-count=\"3\"")
-    # Unloaded rows count toward the total: 4 groups + 4 eager leaves + 3 lazy.
-    @test contains(page, "4 of 11 rows shown")
+    @test contains(page, "data-htmxo-lazy-rows=\"/rows?key=Acme\"")
+    # The count is of items: 4 eager leaves + 3 not loaded yet; group rows are none.
+    @test contains(page, "7 of 7 rows shown")
     @test !contains(page, "id=\"row-group--Acme--p1\"") && contains(page, "id=\"row-group--Bakery--p4\"")
-    @test contains(page, "data-htmxo-search-members=\"Acme DE01 -10.0 Acme DE02 -20.0 Acme DE01 -70.0\"")
+    @test contains(page, "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme DE02 -20.0&quot;],[&quot;p7&quot;,&quot;Acme DE01 -70.0&quot;]]\"")
     @test contains(page, "data-htmxo-select-members=\"{&quot;p1&quot;:&quot;p1&quot;,&quot;p2&quot;:&quot;p2&quot;,&quot;p7&quot;:null}\"")
     # A lazy group starts collapsed and names no child rows yet.
     acme = match(r"<tr[^>]*id=\"row-group--Acme\"[^>]*>.*?</tr>"s, page).match
@@ -157,7 +157,26 @@ end
     @test_throws ArgumentError grouped(group_by="none", group_rows="Acme")
     # Search text from `search_text` when given.
     custom = html(grouped(group_by="party", group_rows_url=lazy_url, search_text=t -> "tx $(t.id)"))
-    @test contains(custom, "data-htmxo-search-members=\"tx p1 tx p2 tx p7\"")
+    @test contains(custom, "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;tx p1&quot;],[&quot;p2&quot;,&quot;tx p2&quot;],[&quot;p7&quot;,&quot;tx p7&quot;]]\"")
+end
+
+@testitem "the search count counts items, not group rows" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    count_line(page) = match(r"data-htmxo-table-count=\"\"[^>]*>([^<]*)<", page)[1]
+    # "rule" lists p3 under Shops and under Media: 2 group rows and 8 leaf rows are 7 items.
+    rule = html(grouped(group_by="rule", searchable=true))
+    @test count("data-htmxo-leaf=\"p3\"", table_rows(rule)) == 2
+    @test count_line(rule) == "7 of 7 rows shown"
+    # Collapsed groups hide their leaves; the leaves still count as shown.
+    party = html(grouped(group_by="party", searchable=true))
+    @test occursin(r" hidden(=\"true\")?[ >]", match(r"<tr[^>]*data-htmxo-leaf=\"p1\"[^>]*>", table_rows(party)).match)
+    @test count_line(party) == "7 of 7 rows shown"
+    # An item-named count, as htmxo-master-detail recommends, reads the items
+    # at every level.
+    de = table_texts(:de; count="{shown} von {total} Zahlungen")
+    @test count_line(html(grouped(group_by=["rule", "party"], searchable=true, texts=de))) == "7 von 7 Zahlungen"
+    @test count_line(html(grouped(group_by="none", searchable=true))) == "7 of 7 rows shown"
 end
 
 @testitem "initially_open: a predicate opens the groups of the leaves it opens" setup=[GroupingFixtures] tags=[:unit] begin
@@ -252,7 +271,7 @@ end
     # A run of listed siblings names the neighbours of its first row only;
     # the others follow the row before them in the update.
     @test places(acme) == "{'row-group--Acme':['','row-group--Acme--Prime'],'row-group--Acme--p1':['','row-group--Acme--p2']}"
-    @test contains(acme, "data-htmxo-lazy-rows=\"/rows?key=Acme\"") && contains(acme, "data-htmxo-lazy-count=\"3\"")
+    @test contains(acme, "data-htmxo-lazy-rows=\"/rows?key=Acme\"") && contains(acme, "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme DE02 -20.0&quot;],[&quot;p7&quot;,&quot;Acme DE01 -70.0&quot;]]\"")
     @test all(contains(acme, "id=\"row-group--Acme--$id\"") for id in ("p1", "p2", "p7"))
     @test !contains(acme, "Bakery")
     # Several keys at once; a group that no longer exists is in the scope with no rows.
@@ -392,13 +411,13 @@ end
     lazy_url = (k, ms) -> length(ms) > 2 ? "/rows?key=$(HTMXObjects.HTTP.escapeuri(k))" : nothing
     by = ["rule", "party"]
     page = html(grouped(group_by=by, group_rows_url=lazy_url, selectable="tx"))
-    # "Shops" (6) loads lazily; its rows count toward the total as if loaded:
-    # 2 groups, Media's 2 subgroups and 2 leaves, Shops' 3 subgroups and 6 leaves.
+    # "Shops" (6) loads lazily; its leaves count as if loaded, each once:
+    # p3 is in Shops and in Media, so the 8 listings are 7 items.
     shops = row(page, "row-group--Shops")
-    @test contains(shops, "data-htmxo-lazy-count=\"9\"") && contains(page, "2 of 15 rows shown")
+    @test contains(page, "7 of 7 rows shown")
     @test contains(shops, "data-htmxo-lazy-rows=\"/rows?key=%5B%22Shops%22%5D\"")
-    # Search reaches the unloaded rows and the keys of the levels below.
-    @test contains(shops, "data-htmxo-search-members=\"Acme DE01 -10.0 Acme DE02 -20.0 Acme Prime DE01 -30.0 Bakery DE03 -40.0 Bakery DE03 -60.0 Acme DE01 -70.0 Acme Acme Prime Bakery\"")
+    # Search reaches the unloaded leaves, each with its keys at the levels below.
+    @test contains(shops, "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme Acme DE02 -20.0&quot;],[&quot;p3&quot;,&quot;Acme Prime Acme Prime DE01 -30.0&quot;],[&quot;p4&quot;,&quot;Bakery Bakery DE03 -40.0&quot;],[&quot;p6&quot;,&quot;Bakery Bakery DE03 -60.0&quot;],[&quot;p7&quot;,&quot;Acme Acme DE01 -70.0&quot;]]\"")
     @test !contains(page, "row-group--Shops--Acme\"")
     # The lazy load: the group's rows as an eager render gives them; a big
     # subgroup inside loads lazily in turn.
@@ -443,7 +462,7 @@ end
         contains(gone, "data-htmxo-tree-open=\"false\"") && !contains(gone, "aria-controls")
     # A lazy group in an update keeps its marks, and its rows come along.
     lz = html(grouped(group_by=by, id="g", group_rows_url=lazy_url, update_rows="p1"))
-    @test contains(row(lz, "row-group--Shops"), "data-htmxo-lazy-count=\"9\"") && contains(lz, "id=\"row-group--Shops--Acme--p1\"")
+    @test contains(row(lz, "row-group--Shops"), "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme Acme DE02 -20.0&quot;],[&quot;p3&quot;,&quot;Acme Prime Acme Prime DE01 -30.0&quot;],[&quot;p4&quot;,&quot;Bakery Bakery DE03 -40.0&quot;],[&quot;p6&quot;,&quot;Bakery Bakery DE03 -60.0&quot;],[&quot;p7&quot;,&quot;Acme Acme DE01 -70.0&quot;]]\"") && contains(lz, "id=\"row-group--Shops--Acme--p1\"")
     # The flat view of an ordered grouping names its leaves.
     @test contains(html(grouped(group_by=String[], update_rows="p1", id="g")), "data-htmxo-grouped=\"[]\" data-htmxo-update-leaves=")
     @test_throws ArgumentError grouped(group_by=by, update_groups="[]")
@@ -484,14 +503,18 @@ end
                 await new Promise(r => setTimeout(r, 50));
             };
             const total = () => g().querySelector('[data-htmxo-table-count]').textContent;
-            check('initial', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '4 of 11 rows shown');
+            check('initial', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '7 of 7 rows shown');
             check('lazy-placeholder', row('group--Acme').dataset.htmxoLazyRows && !row('group--Acme--p1'));
+            // The count reaches the leaves of a group that has not loaded: only p2 is DE02.
+            search('DE02');
+            check('lazy-search-count', total() === '1 of 7 rows shown' && !row('group--Acme--p2'));
+            search('');
             // Expanding a lazy group fetches its rows once and opens it.
             toggle('group--Acme');
             await wait(() => row('group--Acme--p1'));
             check('lazy-loaded', shown() === 'group--Acme,group--Acme--p1,group--Acme--p2,group--Acme--p7,group--Acme--Prime,group--Bakery,group--Prime--Video' &&
                 row('group--Acme').getAttribute('aria-expanded') === 'true' && !('htmxoLazyRows' in row('group--Acme').dataset));
-            check('lazy-count', total() === '7 of 11 rows shown');
+            check('lazy-count', total() === '7 of 7 rows shown');
             check('lazy-aria-controls', row('group--Acme').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Acme--p1 row-group--Acme--p2 row-group--Acme--p7');
             click(row('group--Acme--p1').cells[2]);
             click(row('group--Acme--p2').cells[2], {ctrlKey: true});
@@ -505,6 +528,8 @@ end
             await regroup('rule');
             check('regroup-keeps-selection', count() === '2 selected (2 in collapsed groups)' && inputs() === 'p1,p2');
             check('rule-groups', shown() === 'group--Shops,group--Media');
+            // p3 is listed in Shops (not loaded) and in Media: one item.
+            check('rule-count-once', total() === '7 of 7 rows shown');
             // Selecting a whole group submits it under tx_group, with its grouping.
             click(row('group--Media').cells[2], {ctrlKey: true});
             check('group-selection', groups() === 'Media' && new FormData(document.getElementById('bulk')).get('group_by') === 'rule' &&
@@ -516,9 +541,10 @@ end
             // Search reaches the rows of a group that has not loaded yet.
             search('bakery');
             check('search-lazy-members', shown() === 'group--Shops' && !row('group--Shops').querySelector('[data-htmxo-tree-toggle]').disabled);
+            check('search-lazy-count', total() === '2 of 7 rows shown');
             toggle('group--Shops');
             await wait(() => row('group--Shops--p4'));
-            check('search-after-load', shown() === 'group--Shops,group--Shops--p4,group--Shops--p6');
+            check('search-after-load', shown() === 'group--Shops,group--Shops--p4,group--Shops--p6' && total() === '2 of 7 rows shown');
             check('both-copies-selected', row('group--Shops--p3').getAttribute('aria-selected') === 'true' &&
                 row('group--Media--p3').getAttribute('aria-selected') === 'true');
             check('filter-wording', count() === '4 selected (4 hidden by the filter)' && inputs() === 'p1,p2,p3');
@@ -538,7 +564,8 @@ end
             await regroup('iban');
             g().querySelector('.htmxo-tree-controls > button').click();
             await wait(() => !rows().some(r => 'htmxoLazyRows' in r.dataset));
-            check('expand-all-loads', rows().filter(r => !r.hidden).length === rows().length && rows().length === 4 + 7);
+            check('expand-all-loads', rows().filter(r => !r.hidden).length === rows().length && rows().length === 4 + 7 &&
+                total() === '7 of 7 rows shown');
             // Flat view: the same leaves, still selected; the query rides along.
             search('acme');
             await regroup('none');
@@ -589,7 +616,7 @@ end
                 for line in split(checks[1], '\n')
                     @test endswith(line, ":true")
                 end
-                @test count(==('\n'), checks[1]) + 1 == 22
+                @test count(==('\n'), checks[1]) + 1 == 25
             end
         finally
             close(server)
@@ -864,7 +891,7 @@ end
             toggle('iban').click();
             check('add-level', await regrouped(['party', 'iban']));
             check('add-pills', pressed() === 'party+,iban+,rule-' && document.activeElement && document.activeElement.id === 'g-group-iban');
-            check('nested-rows', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '4 of 16 rows shown');
+            check('nested-rows', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '7 of 7 rows shown');
             row('group--Bakery').querySelector('[data-htmxo-tree-toggle]').click();
             row('group--Bakery--DE03').querySelector('[data-htmxo-tree-toggle]').click();
             check('open-nested', shown().includes('group--Bakery,group--Bakery--DE03,group--Bakery--DE03--p4,group--Bakery--DE03--p6') &&
@@ -890,7 +917,7 @@ end
             stage('drag-move');
             check('drag-marker-after', drag('party', 'iban', true) === 'after');
             check('drag-move', await regrouped(['rule', 'iban', 'party']));
-            check('three-levels', shown() === 'group--Shops,group--Media' && total() === '2 of 21 rows shown' &&
+            check('three-levels', shown() === 'group--Shops,group--Media' && total() === '7 of 7 rows shown' &&
                 'htmxoLazyRows' in row('group--Shops').dataset);
             // A selected nested group submits its path, with the grouping.
             stage('select');
@@ -904,7 +931,7 @@ end
             g().querySelector('.htmxo-tree-controls > button').click();
             check('expand-nested-lazy', await wait(() => rows().length === 21 && !rows().some(r => 'htmxoLazyRows' in r.dataset)));
             await new Promise(r => setTimeout(r, 60));
-            check('expand-all-open', rows().every(r => !r.hidden) && total() === '21 of 21 rows shown' &&
+            check('expand-all-open', rows().every(r => !r.hidden) && total() === '7 of 7 rows shown' &&
                 row('group--Shops--DE01--Acme--p7').getAttribute('aria-level') === '4');
             // A regroup carries the search; removing a level keeps the others' order.
             stage('search');

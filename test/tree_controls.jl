@@ -69,7 +69,9 @@ end
             check('search-collapse-keeps-matches', shown() === 'all,fam-a,grp-a');
             check('search-collapse-state', row('grp-a').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-expanded') === 'false' &&
                 row('fam-a').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-expanded') === 'true');
-            check('count-follows', root.querySelector('[data-htmxo-table-count]').textContent === '3 of 7 rows shown');
+            // Collapsing does not change the count: the five matching rows (the
+            // groups on their path included) stay shown, folded or not.
+            check('count-ignores-collapse', root.querySelector('[data-htmxo-table-count]').textContent === '5 of 7 rows shown');
             button('Expand all').click();
             check('search-expand', shown() === 'all,fam-a,grp-a,m1,m2');
             button('Collapse all').click();
