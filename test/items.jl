@@ -8095,6 +8095,20 @@ end
     @test repr("text/markdown", SemanticTable("hi")) == "hi"
 end
 
+@testitem "SemanticTable markdown keeps each row one line with its columns" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # GFM splits a cell at every unescaped `|`, code spans included, and a
+    # newline ends the row: a shell command or a multi-line value added a
+    # column or broke the row in two. Cells and headers now escape `|` and fold
+    # line breaks into `<br>`, the rule HTMX.jl applies to an `h.table`.
+    table = SemanticTable((; Job=["b47", "c12"],
+        var"a|b"=["git status --short | head -3", "line one\nline two"]))
+    md = repr("text/markdown", table)
+    @test md == "| Job | a\\|b |\n| --- | --- |\n" *
+        "| b47 | git status --short \\| head -3 |\n| c12 | line one<br>line two |\n"
+    unescaped_pipes(line) = count(_ -> true, eachmatch(r"(?<!\\)\|", line))
+    @test all(==(3), map(unescaped_pipes, split(chomp(md), '\n')))
+end
+
 @testitem "semantic containers splat a narrowed child vector" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     # `collect` and comprehensions NARROW, so these arrive as
     # `Vector{SemanticMetric}`. Against a `Vector{Any}` arm that misses and the
