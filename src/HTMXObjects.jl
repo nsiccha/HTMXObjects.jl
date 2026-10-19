@@ -4365,6 +4365,31 @@ _strip_md_chrome(s::HTMLSnapshot) = _strip_md_chrome(s.value)
 _strip_md_chrome_child(s::HTMLSnapshot) = _strip_md_chrome_child(s.value)
 _rescue_semantic!(out, s::HTMLSnapshot) = _rescue_semantic!(out, s.value)
 
+# A control whose label belongs to the document: a sortable column's name, a
+# `detail_toggle=:label` row's name, a branch row's label. HTML writes the
+# control; Markdown writes its label with every serializer. `_strip_md_chrome`
+# (behind `to_markdown_string`) already keeps the label of a `data-htmxo-label`
+# control, but a consumer's own `show(io, MIME"text/markdown"(), x)` that
+# delegates to a table node reaches HTMX.jl's serializer directly, which drops a
+# `<button>` whole and would leave the table's header row empty. The other
+# projections see through to the control (walker methods for static export sit
+# beside `_static_walk_child`).
+struct _LabelledControl
+    control::Node
+end
+Base.show(io::IO, m::MIME"text/html", c::_LabelledControl) = show(io, m, c.control)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", c::_LabelledControl) =
+    show(io, m, c.control)
+Base.show(io::IO, m::MIME"text/markdown", c::_LabelledControl) =
+    let label = _strip_md_chrome(c.control)
+        isnothing(label) || show(io, m, label)
+    end
+filter_errors(c::_LabelledControl) = filter_errors(c.control)
+_filter_errors_child(c::_LabelledControl) = _filter_errors_child(c.control)
+_strip_md_chrome(c::_LabelledControl) = _strip_md_chrome(c.control)
+_strip_md_chrome_child(c::_LabelledControl) = _strip_md_chrome_child(c.control)
+_rescue_semantic!(out, c::_LabelledControl) = _rescue_semantic!(out, c.control)
+
 
 """
     _save_typed_response(record_dir, url_path, response)
@@ -4764,6 +4789,11 @@ function _static_walk(val::HtmlOnly, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : HtmlOnly(walked)
 end
 _static_walk_child(val::HtmlOnly, rules) = _static_walk(val, rules)
+function _static_walk(c::_LabelledControl, rules::_StaticRules)
+    walked = _static_walk(c.control, rules)
+    walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
+end
+_static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
 
 """
     _inject_static_style(val)
@@ -13394,9 +13424,9 @@ end
 # toggle from the right direction (`sortTable` reads `data-sort-dir`).
 function _sortable_th(hdr, i, ds)
     onclick = "sortTable($(i-1), this)"
-    control = h.button(_header_content(hdr)...; type="button", class="htmxo-sort-control",
-        data_htmxo_label="", _header_help_attrs(hdr)...,
-        onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))")
+    control = _LabelledControl(h.button(_header_content(hdr)...; type="button",
+        class="htmxo-sort-control", data_htmxo_label="", _header_help_attrs(hdr)...,
+        onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))"))
     if !isnothing(ds) && first(ds) == i
         dir = last(ds)
         h.th(control, h.span(dir == "asc" ? " ▲" : " ▼"; class="htmxo-sort-caret");
@@ -15981,6 +16011,7 @@ _md_master_row(cells) = (collect(Any, cells), ())
 
 _md_interactive_label(::Any) = false
 _md_interactive_label(::Raw) = true
+_md_interactive_label(::_LabelledControl) = true
 _md_interactive_label(node::Node) =
     HTMX.tag(node) in (:a, :button, :input, :textarea, :select, :form) ||
     any(_md_interactive_label, HTMX.children(node))
@@ -16526,8 +16557,8 @@ function master_detail_table(headers, items;
                 aria_expanded=string(open),
                 onclick="htmxoTreeToggle(this); event.stopPropagation()")
             if !(has_detail && detail_toggle === :label) && !any(_md_interactive_label, label)
-                label = Any[h.button(label...; branch_attrs...,
-                    data_htmxo_tree_label="", data_htmxo_label="")]
+                label = Any[_LabelledControl(h.button(label...; branch_attrs...,
+                    data_htmxo_tree_label="", data_htmxo_label=""))]
             else
                 push!(controls, h.button(_md_disclosure_glyph(open); branch_attrs...,
                     aria_label=texts.toggle_children))
@@ -16550,7 +16581,7 @@ function master_detail_table(headers, items;
                 data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
                 aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
             if label_detail
-                label = Any[toggle]
+                label = Any[_LabelledControl(toggle)]
             else
                 push!(isnothing(children) ? controls : trailing_controls, toggle)
             end
@@ -16912,6 +16943,7 @@ _md_group_select_attrs(selectable, kind_key, value, name) = isnothing(selectable
 _md_text(x::Node) = join((_md_text(c) for c in HTMX.children(x)), " ")
 _md_text(x::Union{Tuple,AbstractVector}) = join((_md_text(c) for c in x), " ")
 _md_text(x::Raw) = replace(x.html, r"<[^>]*>" => " ")
+_md_text(c::_LabelledControl) = _md_text(c.control)
 _md_text(::Nothing) = ""
 _md_text(x) = string(x)
 
