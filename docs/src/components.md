@@ -236,7 +236,8 @@ from its cells searchable; it does not change sorting. `detail-<key>` companion
 rows are neither matched nor counted: one hides with its master and reopens
 when the master returns, and sorting a filtered table keeps the filter. The
 field, count and empty state are left out of `?plain`/Markdown. Search needs
-`sortable_table_js()` on the page.
+`sortable_table_js()` on the page. Their wording follows `texts=`
+([Built-in texts](#table-texts)).
 
 App filters compose with the phrase search as named row predicates:
 
@@ -333,6 +334,46 @@ sortable_table(["Party", "Amount"],
   on rows, one roving `tabindex="0"`. Selected rows are tinted and the active
   row marked from `--htmxo-accent` in light and dark; set
   `--htmxo-selected-row` to change the tint.
+
+#### Built-in texts in another language {#table-texts}
+
+The words of a table's built-in controls come from one `texts=` keyword on
+`sortable_table`, `render_table`, `master_detail_table` and
+`master_detail_pair`. `table_texts(locale; overrides...)` builds them:
+`:en` (the default) and `:de` are built in, and any single text can be
+replaced:
+
+```julia
+const DE = table_texts(:de; search="Einrichtungen filtern",
+    count="{shown} von {total} Einrichtungen", empty="Keine passenden Einrichtungen")
+master_detail_table(headers, facilities; key, master, detail, searchable=true, texts=DE)
+```
+
+The texts cover everything these tables write themselves: the search field
+(`search`, `count`, `empty`), the selection bar (`selected`,
+`selected_filtered`, `selected_collapsed`, `select_all`, `clear_selection`),
+*Expand all* / *Collapse all*, the accessible names of the ▸ and ⓘ controls
+(`toggle_children`, `details`), the *Group by* select and its pills
+(`group_by`, `group_add`, `group_add_inner`, `group_level`, `group_kept`,
+`group_stop`, `group_earlier`, `group_later`), lazy-detail status lines
+(`loading`, `retrying`, `load_failed`), the toasts of a lazy group that fails
+to load (`rows_failed`, `rows_missing`) and the CSV button (`csv`). The
+`TableTexts` docstring names them all.
+
+A text in braces is a placeholder: `count` takes `{shown}` and `{total}`, the
+selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
+`{level}`), `rows_failed` takes `{status}`. The browser writes the live count
+and status lines from the same templates, so they are strings, not Julia
+functions: the count changes on every keystroke without asking the server. An
+unknown locale, text name or placeholder throws an `ArgumentError`.
+
+A table with other texts than English carries them as one `data-htmxo-texts`
+attribute on its outermost element; an English table is unchanged. Pass the
+same `texts` wherever the table is rendered again (lazy group rows, row
+updates, regrouping), and to the `sortable_table` that holds hand-built
+`master_detail_pair` rows. Markdown and CSV output leave these controls out;
+the one text Markdown keeps is a lazy detail's placeholder (`loading`), which
+follows `texts=` there too.
 
 ## Layout / widgets
 

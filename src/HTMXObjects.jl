@@ -28,7 +28,7 @@ export safely, record_error, ERROR_DIR
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, ColumnSpec, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, CaptionSpec, ColumnSpec, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
@@ -13664,7 +13664,7 @@ function htmxoFilterTable(target) {
     const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length + pending, query, hiddenBy, notes: []};
     root.dispatchEvent(new CustomEvent('htmxo:table-filtered', {bubbles: true, detail}));
     const count = root.querySelector(':scope > label > [data-htmxo-table-count]');
-    if (count) count.textContent = detail.shown + ' of ' + detail.total + ' rows shown' +
+    if (count) count.textContent = htmxoText(root, 'count', {shown: detail.shown, total: detail.total}) +
         detail.notes.map(note => ' · ' + note).join('');
     root.querySelector(':scope > [data-htmxo-table-empty]').hidden = visible.size !== 0;
 }
@@ -13696,12 +13696,12 @@ function htmxoLoadRows(row, expand) {
     if (row.htmxoLoading) return row.htmxoLoading;
     row.setAttribute('aria-busy', 'true');
     row.htmxoLoading = fetch(row.dataset.htmxoLazyRows, {headers: {'HX-Request': 'true'}})
-        .then(r => r.ok ? r.text() : Promise.reject(new Error('Loading rows failed (' + r.status + ')')))
+        .then(r => r.ok ? r.text() : Promise.reject(new Error(htmxoText(row, 'rows_failed', {status: r.status}))))
         .then(html => {
             const template = document.createElement('template');
             template.innerHTML = html;
             const body = template.content.querySelector('tbody[data-htmxo-group-rows]');
-            if (!body) throw new Error('Loading rows failed: no rows in the response');
+            if (!body) throw new Error(htmxoText(row, 'rows_missing'));
             const rows = Array.from(body.rows);
             row.after(...rows);
             ['htmxoLazyRows', 'htmxoLazyCount', 'htmxoSearchMembers', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
@@ -14240,9 +14240,11 @@ function htmxoSelectionUpdate(root) {
     const filtered = selected.filter(r => why(r) === 2).length;
     const folded = selected.filter(r => why(r) === 1).length + unloaded.length;
     const hidden = filtered + folded;
-    const notes = [filtered && filtered + ' hidden by the filter', folded && folded + ' in collapsed groups'].filter(Boolean);
+    const notes = [filtered && htmxoText(root, 'selected_filtered', {count: filtered}),
+        folded && htmxoText(root, 'selected_collapsed', {count: folded})].filter(Boolean);
     const count = root.querySelector(':scope > div > .htmxo-selection-bar > [data-htmxo-selection-count]');
-    if (count) count.textContent = (selected.length + unloaded.length) + ' selected' + (notes.length ? ' (' + notes.join(', ') + ')' : '');
+    if (count) count.textContent = htmxoText(root, 'selected', {count: selected.length + unloaded.length}) +
+        (notes.length ? ' (' + notes.join(', ') + ')' : '');
     document.querySelectorAll('[data-htmxo-needs-selection]').forEach(control => {
         if (control.dataset.htmxoNeedsSelection === name)
             control.disabled = submitted.length === 0 && !unloaded.some(k => pending.get(k) !== null);
@@ -14668,6 +14670,174 @@ function downloadTableCsv(btn, filename) {
 end
 
 """
+    TableTexts
+
+The words a table's built-in controls show: the search field, its count and
+empty state, the selection bar, *Expand all* / *Collapse all*, the *Group by*
+control, lazy-detail status lines and the CSV button. Build one with
+[`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
+[`render_table`](@ref), [`master_detail_table`](@ref) or
+[`master_detail_pair`](@ref).
+
+A text in braces is a placeholder the table fills in, on the server and in the
+browser alike: `count` takes `{shown}` and `{total}`; `selected`,
+`selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
+texts take `{name}` (the grouping), `group_level` also `{level}`;
+`rows_failed` takes `{status}`.
+"""
+struct TableTexts
+    search::String              # search field label and accessible name
+    count::String               # the search field's live count
+    empty::String               # shown when the search matches no row
+    selected::String            # the selection count
+    selected_filtered::String   # note: selected rows the search hides
+    selected_collapsed::String  # note: selected rows in collapsed groups
+    select_all::String          # button: select every shown row
+    clear_selection::String     # button: clear the selection
+    expand_all::String
+    collapse_all::String
+    toggle_children::String     # accessible name of a branch's ▸/▾ control
+    details::String             # accessible name of a row's detail control
+    group_by::String            # label of the Group by select or pills
+    group_add::String           # tooltip: an inactive pill, nothing grouped yet
+    group_add_inner::String     # tooltip: an inactive pill beside active levels
+    group_level::String         # tooltip: an active pill among several levels
+    group_kept::String          # tooltip: the one level that cannot be turned off
+    group_stop::String          # tooltip: the one active, removable level
+    group_earlier::String       # accessible name of a pill's ‹ button
+    group_later::String         # accessible name of a pill's › button
+    loading::String             # a lazy detail while it loads
+    retrying::String            # a lazy detail retrying after a dropped connection
+    load_failed::String         # a lazy detail that failed; a click retries
+    rows_failed::String         # toast: a lazy group's rows failed to load
+    rows_missing::String        # toast: a lazy group's response held no rows
+    csv::String                 # the CSV download button
+end
+
+const _TABLE_TEXT_PLACEHOLDERS = (
+    count = (:shown, :total),
+    selected = (:count,), selected_filtered = (:count,), selected_collapsed = (:count,),
+    group_add = (:name,), group_add_inner = (:name,), group_level = (:level, :name),
+    group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
+    rows_failed = (:status,),
+)
+
+const _TABLE_TEXT_LOCALES = (
+    en = (
+        search = "Search",
+        count = "{shown} of {total} rows shown",
+        empty = "No matching rows",
+        selected = "{count} selected",
+        selected_filtered = "{count} hidden by the filter",
+        selected_collapsed = "{count} in collapsed groups",
+        select_all = "Select all shown",
+        clear_selection = "Clear",
+        expand_all = "Expand all",
+        collapse_all = "Collapse all",
+        toggle_children = "Toggle child rows",
+        details = "Details",
+        group_by = "Group by",
+        group_add = "Group by {name}",
+        group_add_inner = "Also group by {name}, as the innermost level",
+        group_level = "Level {level}: stop grouping by {name}; drag or press ←/→ to reorder",
+        group_kept = "Grouped by {name}; add another grouping to change it",
+        group_stop = "Stop grouping by {name}",
+        group_earlier = "Move {name} earlier",
+        group_later = "Move {name} later",
+        loading = "Loading…",
+        retrying = "Connection lost — retrying…",
+        load_failed = "Failed to load — click to retry",
+        rows_failed = "Loading rows failed ({status})",
+        rows_missing = "Loading rows failed: no rows in the response",
+        csv = "⬇ CSV",
+    ),
+    de = (
+        search = "Suche",
+        count = "{shown} von {total} Zeilen angezeigt",
+        empty = "Keine passenden Zeilen",
+        selected = "{count} ausgewählt",
+        selected_filtered = "{count} durch den Filter ausgeblendet",
+        selected_collapsed = "{count} in eingeklappten Gruppen",
+        select_all = "Alle angezeigten auswählen",
+        clear_selection = "Auswahl aufheben",
+        expand_all = "Alle aufklappen",
+        collapse_all = "Alle zuklappen",
+        toggle_children = "Unterzeilen ein- oder ausblenden",
+        details = "Details",
+        group_by = "Gruppieren nach",
+        group_add = "Nach {name} gruppieren",
+        group_add_inner = "Zusätzlich nach {name} gruppieren, als innerste Ebene",
+        group_level = "Ebene {level}: nicht mehr nach {name} gruppieren; ziehen oder ←/→ drücken, um die Reihenfolge zu ändern",
+        group_kept = "Nach {name} gruppiert; eine weitere Gruppierung hinzufügen, um dies zu ändern",
+        group_stop = "Nicht mehr nach {name} gruppieren",
+        group_earlier = "{name} nach vorne verschieben",
+        group_later = "{name} nach hinten verschieben",
+        loading = "Wird geladen…",
+        retrying = "Verbindung unterbrochen — neuer Versuch…",
+        load_failed = "Laden fehlgeschlagen — zum Wiederholen klicken",
+        rows_failed = "Laden der Zeilen fehlgeschlagen ({status})",
+        rows_missing = "Laden der Zeilen fehlgeschlagen: keine Zeilen in der Antwort",
+        csv = "⬇ CSV",
+    ),
+)
+
+"""
+    table_texts(locale::Symbol=:en; texts...)
+
+The [`TableTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
+replaced by keyword:
+
+```julia
+const DE = table_texts(:de; search="Einrichtungen filtern",
+    count="{shown} von {total} Einrichtungen", empty="Keine passenden Einrichtungen")
+master_detail_table(headers, items; key, master, detail, searchable=true, texts=DE)
+```
+
+An unknown locale or text name, or a placeholder the text does not take
+(`"{shwon}"`), throws an `ArgumentError`.
+"""
+function table_texts(locale::Symbol=:en; texts...)
+    haskey(_TABLE_TEXT_LOCALES, locale) || throw(ArgumentError(string("table_texts: unknown locale ",
+        repr(locale), "; available: ", join(repr.(keys(_TABLE_TEXT_LOCALES)), ", "))))
+    names = fieldnames(TableTexts)
+    for name in keys(texts)
+        name in names || throw(ArgumentError(string("table_texts: unknown text ", repr(name),
+            "; texts are ", join(names, ", "))))
+    end
+    merged = merge(getfield(_TABLE_TEXT_LOCALES, locale), (; (k => string(v) for (k, v) in pairs(texts))...))
+    for name in names
+        allowed = get(_TABLE_TEXT_PLACEHOLDERS, name, ())
+        for m in eachmatch(r"\{([A-Za-z_]+)\}", merged[name])
+            Symbol(m[1]) in allowed || throw(ArgumentError(string("table_texts: ", name, " has no placeholder {",
+                m[1], "}", isempty(allowed) ? "" : string("; it takes ", join(("{$p}" for p in allowed), ", ")))))
+        end
+    end
+    TableTexts((merged[name] for name in names)...)
+end
+
+const _EN_TABLE_TEXTS = table_texts(:en)
+
+# A table text with its placeholders filled in. The browser runtime's
+# `htmxoText` fills the same templates from the same values.
+_table_text(texts::TableTexts, name::Symbol; values...) =
+    replace(getfield(texts, name), r"\{([A-Za-z_]+)\}" => m -> string(values[Symbol(m[2:end-1])]))
+
+# The texts as the JSON object `htmxoText` reads.
+_table_texts_json(texts::TableTexts) =
+    "{" * join((string(_md_json_string(string(n)), ":", _md_json_string(getfield(texts, n)))
+               for n in fieldnames(TableTexts)), ",") * "}"
+
+# The outermost element of a table carries its texts for the browser runtime,
+# which writes the count, selection and lazy-detail lines; English is the
+# runtime's own default, so an English table stays byte-identical.
+_with_table_texts(node, texts::TableTexts) = texts == _EN_TABLE_TEXTS ? node :
+    Node(HTMX.tag(node), merge(copy(HTMX.attrs(node)),
+        Dict{Symbol,Any}(Symbol("data-htmxo-texts") => _table_texts_json(texts))), HTMX.children(node))
+
+# One wording for the server's first paint and `htmxoFilterTable`'s updates.
+_table_count_text(texts::TableTexts, shown, total) = _table_text(texts, :count; shown, total)
+
+"""
     render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
@@ -14690,6 +14860,8 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   [`sortable_table`](@ref)
 - `search_text(row)`: optional replacement for a row's searchable text, called
   with each Tables.jl row
+- `texts`: the words of the built-in controls, a [`TableTexts`](@ref) from
+  [`table_texts`](@ref) (default English); see [`sortable_table`](@ref)
 - Extra kwargs are forwarded to `h.table()`
 
 # Example
@@ -14724,7 +14896,7 @@ end
                    download=false, download_filename=nothing, caption=nothing,
                    default_sort=nothing, header_groups=nothing,
                    searchable=false, selectable=nothing,
-                   select_form=nothing, kwargs...)
+                   select_form=nothing, texts=table_texts(), kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -14779,6 +14951,12 @@ wrapper instead of widening the page.
   selection submits (e.g. `selectable="rows"`). See *Row selection* below.
 - `select_form`: the `id` of the form those inputs submit with; they carry
   the HTML `form` attribute, so the table need not sit inside the form.
+- `texts`: the words of the table's built-in controls (the search label,
+  count and empty state, the selection bar, the CSV button, lazy-detail
+  status lines), as a [`TableTexts`](@ref) from [`table_texts`](@ref), e.g.
+  `texts=table_texts(:de)`. Default English. The browser runtime writes the
+  live count and status lines from the same texts; give hand-built
+  [`master_detail_pair`](@ref) rows the same `texts`.
 
 Other keyword arguments behave the same as in [`render_table`](@ref).
 
@@ -14906,7 +15084,8 @@ function sortable_table(headers, rows;
                         caption=nothing, default_sort=nothing, role="grid",
                         header_groups=nothing,
                         searchable::Bool=false, search_query::AbstractString="",
-                        selectable=nothing, select_form=nothing, kwargs...)
+                        selectable=nothing, select_form=nothing,
+                        texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true, kwargs...)
     if !isnothing(default_sort) && !sortable
         error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
     end
@@ -14952,7 +15131,7 @@ function sortable_table(headers, rows;
 
     fname = something(download_filename, isnothing(id) ? "table.csv" : id * ".csv")
     download_btn = download ?
-        h.button("⬇ CSV"; type="button", class="outline caption-action",
+        h.button(texts.csv; type="button", class="outline caption-action",
             onclick="downloadTableCsv(this, '$(fname)')") :
         nothing
 
@@ -14972,8 +15151,10 @@ function sortable_table(headers, rows;
     else
         table_wrap
     end
-    searched = searchable ? _searchable_table(framed, rows; query=search_query) : framed
-    isnothing(selectable) ? searched : _selectable_table(searched, rows, selectable; form=select_form)
+    searched = searchable ? _searchable_table(framed, rows; query=search_query, texts) : framed
+    selected = isnothing(selectable) ? searched : _selectable_table(searched, rows, selectable; form=select_form, texts)
+    # `master_detail_table` wraps this table and marks its own outermost element.
+    _stamp_texts ? _with_table_texts(selected, texts) : selected
 end
 
 # A selectable row's key: `data-htmxo-select-key`, else its id. Keyed state
@@ -15015,17 +15196,17 @@ _selection_css() = """
 # runtime keeps in step with the selection. `form` names the form those
 # inputs submit with (the HTML `form` attribute), so the table need not sit
 # inside it. The bar is client-side only, like the search field.
-function _selectable_table(inner, rows, name; form=nothing)
+function _selectable_table(inner, rows, name; form=nothing, texts::TableTexts=_EN_TABLE_TEXTS)
     name isa AbstractString && !isempty(name) || throw(ArgumentError(
         "selectable must be the non-empty name of the submitted inputs; got $(repr(name))"))
     form_attrs = isnothing(form) ? (;) : (; data_htmxo_select_form=string(form))
     h.div(; class="htmxo-selectable-table", data_htmxo_select=name, form_attrs...)(
         html_only(h.div(h.style(Raw(_selection_css())),
             h.p(; class="htmxo-selection-bar")(
-                h.small("$(count(_is_selected_row, rows)) selected";
+                h.small(_table_text(texts, :selected; count=count(_is_selected_row, rows));
                     data_htmxo_selection_count="", role="status", aria_live="polite"),
-                h.button("Select all shown"; type="button", class="secondary outline", data_htmxo_select_all=""),
-                h.button("Clear"; type="button", class="secondary outline", data_htmxo_select_clear="")))),
+                h.button(texts.select_all; type="button", class="secondary outline", data_htmxo_select_all=""),
+                h.button(texts.clear_selection; type="button", class="secondary outline", data_htmxo_select_clear="")))),
         inner,
         html_only(h.div(; hidden=true, data_htmxo_selection_inputs="")),
     )
@@ -15037,8 +15218,6 @@ _is_master_row(row) = !(row isa Node && startswith(string(get(HTMX.attrs(row), :
 _row_hidden(row) = row isa Node && get(HTMX.attrs(row), :hidden, false) ∉ (false, nothing)
 # Rows of a lazy branch that are not loaded yet count toward the total.
 _row_lazy_count(row) = row isa Node ? parse(Int, string(get(HTMX.attrs(row), Symbol("data-htmxo-lazy-count"), "0"))) : 0
-# One wording for the server's first paint and `htmxoFilterTable`'s updates.
-_table_count_text(shown, total) = "$shown of $total rows shown"
 
 # The client-side search shared by `sortable_table` and `master_detail_table`:
 # a labelled field with a live shown-count as its helper text, the table, and
@@ -15046,20 +15225,21 @@ _table_count_text(shown, total) = "$shown of $total rows shown"
 # (`html_only`): in Markdown the label would run into the table's header row.
 # `field=false` keeps a hidden scaffold that a hierarchy's branch toggles
 # filter through. The input's `aria-label` keeps the count out of its name.
-function _searchable_table(table, rows; field::Bool=true, controls=nothing, query::AbstractString="")
+function _searchable_table(table, rows; field::Bool=true, controls=nothing, query::AbstractString="",
+                           texts::TableTexts=_EN_TABLE_TEXTS)
     masters = [row for row in rows if _is_master_row(row)]
-    count_text = _table_count_text(count(!_row_hidden, masters), length(masters) + sum(_row_lazy_count, masters; init=0))
+    count_text = _table_count_text(texts, count(!_row_hidden, masters), length(masters) + sum(_row_lazy_count, masters; init=0))
     # A prefilled query (e.g. carried across a regroup) is applied by the
     # runtime when the table loads; the server's count is the unfiltered one.
     value_attrs = isempty(query) ? (;) : (; value=query)
     h.div(; class="htmxo-searchable-table")(
-        html_only(h.label("Search",
-            h.input(; type="search", aria_label="Search", oninput="htmxoFilterTable(this)", value_attrs...),
+        html_only(h.label(texts.search,
+            h.input(; type="search", aria_label=texts.search, oninput="htmxoFilterTable(this)", value_attrs...),
             h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
             hidden=!field)),
         (isnothing(controls) ? () : (html_only(controls),))...,
         table,
-        html_only(h.p("No matching rows"; hidden=true, data_htmxo_table_empty="")),
+        html_only(h.p(texts.empty; hidden=true, data_htmxo_table_empty="")),
     )
 end
 
@@ -15160,6 +15340,20 @@ if (!window.htmxoMoveBeforeGuarded) {
 # (`_move_before_guard_js`), so every page carrying it moves preserved
 # elements safely.
 _md_runtime_js() = _move_before_guard_js() * """
+// A table text (`TableTexts`) with its {placeholders} filled in: from the
+// nearest `data-htmxo-texts` the table's `texts=` wrote, else English.
+var htmxoTableTextsDefault = $(_table_texts_json(_EN_TABLE_TEXTS));
+function htmxoText(el, name, values) {
+    var holder = el && el.closest ? el.closest('[data-htmxo-texts]') : null, texts = htmxoTableTextsDefault;
+    if (holder) {
+        if (holder.htmxoTextsSource !== holder.dataset.htmxoTexts) {
+            holder.htmxoTextsSource = holder.dataset.htmxoTexts;
+            holder.htmxoTexts = JSON.parse(holder.htmxoTextsSource);
+        }
+        texts = holder.htmxoTexts;
+    }
+    return texts[name].replace(/[{]([A-Za-z_]+)[}]/g, function(m, k) { return values && k in values ? String(values[k]) : m; });
+}
 function htmxoMdToggle(row, event, key, slot) {
     if (event.target.closest('a,button,input,textarea,select,form')) return;
     var d = document.getElementById('detail-' + key); if (!d) return;
@@ -15220,7 +15414,7 @@ function htmxoMdStatus(s) {
 function htmxoMdBefore(s, event) {
     if (event.detail.requestConfig.elt !== s) return;
     s.dataset.loading = '1'; delete s.dataset.failed; s.__htmxoMdAborted = false;
-    var p = htmxoMdStatus(s); if (p) p.textContent = 'Loading…';
+    var p = htmxoMdStatus(s); if (p) p.textContent = htmxoText(s, 'loading');
 }
 function htmxoMdReady(s, event) {
     if (event.target !== s || event.detail.target !== s) return;
@@ -15249,14 +15443,14 @@ function htmxoMdAfter(s, event) {
         // toast for this attempt (a failure the retries cannot cure does).
         event.detail.htmxoFailureShown = true;
         s.dataset.retries = String(n + 1);
-        if (p) p.textContent = 'Connection lost — retrying…';
+        if (p) p.textContent = htmxoText(s, 'retrying');
         setTimeout(function() {
             if (document.contains(s) && s.dataset.loaded !== '1') htmx.trigger(s, '$(_md_lazy_event())');
         }, htmxoMdRetryDelays[n]);
     } else {
         delete s.dataset.loading; delete s.dataset.retries;
         s.dataset.loaded = '0'; s.dataset.failed = '1';
-        if (p) p.textContent = 'Failed to load — click to retry';
+        if (p) p.textContent = htmxoText(s, 'load_failed');
     }
 }
 function htmxoMdRetry(s) {
@@ -15351,8 +15545,8 @@ end
 # must carry a `[data-status]` element for the loading/retry text swaps to have
 # a target — the default does). `also_load=true` (an initially-open row) adds
 # `load` so that one slot fetches on render; collapsed slots never do.
-function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false)
-    ph = isnothing(placeholder) ? h.small(data_status="muted")("Loading…") : placeholder
+function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false, texts::TableTexts=_EN_TABLE_TEXTS)
+    ph = isnothing(placeholder) ? h.small(data_status="muted")(texts.loading) : placeholder
     h.div(id="detail-slot-$safe",
           class="htmxo-md-detail-slot",
           data_loaded="0",
@@ -15421,7 +15615,8 @@ end
                        detail_class=nothing,
                        master_attrs=(),
                        initially_open::Bool=false,
-                       detail_url=nothing)
+                       detail_url=nothing,
+                       texts=table_texts())
 
 Build the `(master_tr, detail_tr)` pair for one master/detail item.
 
@@ -15506,6 +15701,9 @@ the user came to see (a question + answer brief, for example).
   `master_attrs` note above for the `lazy_slot_id` seam you must carry.
   HTMXObjects owns only the load/latch/retry mechanics — response caching,
   content hashing, TTL/LRU, and refresh-gating stay the caller's concern.
+- `texts`: a [`TableTexts`](@ref) for the default placeholder. The status
+  lines the browser writes later come from the `texts` of the
+  [`sortable_table`](@ref) holding the rows, so pass both the same value.
   Default `nothing` → today's eager `detail_body`, unchanged.
 
 The pair MUST be interleaved into the row list passed to
@@ -15524,7 +15722,8 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             master_attrs=(),
                             initially_open::Bool=false,
                             detail_url=nothing,
-                            row_toggle::Bool=true)
+                            row_toggle::Bool=true,
+                            texts::TableTexts=_EN_TABLE_TEXTS)
     safe = _md_safe_key(key)
     lazy = !isnothing(detail_url)
     tr_kwargs = Dict{Symbol,Any}(:id => "row-$safe")
@@ -15557,7 +15756,7 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     # first expand (see `_md_lazy_slot`); `detail_body` becomes its pre-load
     # placeholder. Eager mode: `detail_body` is the final content, unchanged.
     cell_body = lazy ?
-        _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open) :
+        _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open, texts) :
         detail_body
     detail = h.tr(; detail_kwargs...)(
         h.td(colspan=string(ncols))(cell_body),
@@ -15658,6 +15857,13 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   [`sortable_table`](@ref)`(...; searchable=true)`; see its *Client-side search*.
 - `search_text(item)`: optional replacement for a row's searchable text; useful
   for metadata absent from its visible cells. It does not affect sorting.
+- `texts`: the words of every built-in control — search, selection bar,
+  *Expand all* / *Collapse all*, *Group by* and its pills, the ▸/ⓘ controls'
+  accessible names, lazy-detail status lines, the CSV button — as a
+  [`TableTexts`](@ref) from [`table_texts`](@ref), e.g.
+  `texts=table_texts(:de; search="Einrichtungen filtern")`. Default English.
+  Pass the same value to the routes that render this table again (lazy group
+  rows, row updates, regrouping), as with every other keyword.
 - `selectable`, `select_form`: multi-row selection submitted as hidden inputs
   named `selectable`; see *Row selection* in [`sortable_table`](@ref). Every
   master row is keyed by its row id. A row click then selects instead of
@@ -15782,13 +15988,14 @@ function master_detail_table(headers, items;
                              _toolbar=(),
                              _level_marks::Bool=false,
                              _update_scope=nothing,
+                             texts::TableTexts=_EN_TABLE_TEXTS,
                              kwargs...)
     isnothing(groupings) || return _grouped_master_detail_table(headers, items;
         key, master, detail, detail_url, master_attrs, master_class, detail_class,
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, update_rows, update_groups, kwargs...)
+        group_rows_url, group_rows, update_rows, update_groups, texts, kwargs...)
     all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, update_groups)) || throw(ArgumentError(
         "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
@@ -15900,7 +16107,7 @@ function master_detail_table(headers, items;
                     data_htmxo_tree_label="", data_htmxo_label="")]
             else
                 push!(controls, h.button(_md_disclosure_glyph(open); branch_attrs...,
-                    aria_label="Toggle child rows"))
+                    aria_label=texts.toggle_children))
             end
         end
         if has_detail
@@ -15914,8 +16121,8 @@ function master_detail_table(headers, items;
             toggle_label, label_attrs =
                 label_detail ? (label, (; data_htmxo_label="")) :
                 isnothing(children) ? (Any[_md_disclosure_glyph(open)],
-                                       (; data_htmxo_disclosure="", aria_label="Details")) :
-                (Any["ⓘ"], (; aria_label="Details", title="Details"))
+                                       (; data_htmxo_disclosure="", aria_label=texts.details)) :
+                (Any["ⓘ"], (; aria_label=texts.details, title=texts.details))
             toggle = h.button(toggle_label...; type="button",
                 data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
                 aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
@@ -15939,7 +16146,7 @@ function master_detail_table(headers, items;
             (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
                                     initially_open=open && ancestors_open, detail_url=url,
-                                    row_toggle=!selecting)
+                                    row_toggle=!selecting, texts)
             push!(rows, m, d)
         end
         visit_children(descendants, safe, level, ancestors_open && branch_open)
@@ -15963,7 +16170,7 @@ function master_detail_table(headers, items;
     # gets one from its root keys, which are unique on the page.
     body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
-    table = sortable_table(headers, rows; table_attrs..., kwargs...)
+    table = sortable_table(headers, rows; table_attrs..., texts, _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries.
@@ -16012,14 +16219,14 @@ function master_detail_table(headers, items;
     # branch toggles and the search share one visibility pass.
     tools = Any[_toolbar...]
     expand_controls && push!(tools,
-        h.button("Expand all"; type="button", class="secondary outline", aria_controls=body_id,
+        h.button(texts.expand_all; type="button", class="secondary outline", aria_controls=body_id,
             onclick="htmxoTreeAll(this, true)"),
-        h.button("Collapse all"; type="button", class="secondary outline", aria_controls=body_id,
+        h.button(texts.collapse_all; type="button", class="secondary outline", aria_controls=body_id,
             onclick="htmxoTreeAll(this, false)"))
     controls = isempty(tools) ? nothing : h.p(; class="htmxo-tree-controls")(tools...)
     searched = (searchable || !isnothing(children) || !isnothing(controls)) ?
-        _searchable_table(table, rows; field=searchable, controls, query=search_query) : table
-    selecting ? _selectable_table(searched, rows, selectable; form=select_form) : searched
+        _searchable_table(table, rows; field=searchable, controls, query=search_query, texts) : table
+    _with_table_texts(selecting ? _selectable_table(searched, rows, selectable; form=select_form, texts) : searched, texts)
 end
 
 # --- Regroupable master/detail tables ---
@@ -16179,7 +16386,7 @@ end
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
         group_by_url, group_rows_url, group_rows, update_rows, update_groups, selectable,
-        select_form, select_value, select_submit, search_text, kwargs...)
+        select_form, select_value, select_submit, search_text, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
     names = String[string(first(g)) for g in groupings]
@@ -16222,8 +16429,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # reorder them; a single name, the select.
     toolbar = isnothing(group_by_url) || !isnothing(group_rows) ? () :
         ordered ? (_md_group_pills(names, by_name, levels, flat_name, group_by_values, group_by_url, select_form,
-            string(get(kwargs, :id, "htmxo-grouped-" * string(hash(names); base=36)))),) :
-        (h.label("Group by",
+            string(get(kwargs, :id, "htmxo-grouped-" * string(hash(names); base=36))), texts),) :
+        (h.label(texts.group_by,
             h.select(; name="group_by", hx_get=string(group_by_url),
                 hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
                 hx_vals="js:{q: htmxoGroupedQuery(this)}",
@@ -16237,7 +16444,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         built = master_detail_table(headers, items; key, master, detail, detail_url,
             master_attrs=item -> _md_attr_union(leaf_select(item), _attrs(item)), initially_open,
             selectable, select_form, select_submit, search_text, _toolbar=toolbar,
-            update_rows=update ? leaf_keys : nothing, flat_kwargs...,
+            update_rows=update ? leaf_keys : nothing, texts, flat_kwargs...,
             # This view has no groups: `update_groups` names none of its rows.
             _update_scope=(; grouped=grouped_by, ids=["row-" * _md_safe_key(k) for k in leaf_keys]))
         update && return built
@@ -16380,7 +16587,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
                 (x -> x isa _MDGroup ? true : select_submit(x.item)),
             _level_marks = nlevels > 1,
             update_rows = update ? rendered : nothing,
-            _rows_only = !isnothing(group_rows), _toolbar = toolbar, kwargs...,
+            _rows_only = !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
             _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
                 groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
         # The lazy-load response: the target group's rows (the rows of its
@@ -16400,7 +16607,7 @@ end
 # submit the grouping alongside the selection. Without a flat grouping there
 # is no view without levels to ask for (an empty `group_by` reaches a
 # `Vector{String}` route as no values at all), so the last level stays on.
-function _md_group_pills(names, by_name, levels, flat_name, values, url, form, id)
+function _md_group_pills(names, by_name, levels, flat_name, values, url, form, id, texts::TableTexts)
     nactive = length(levels)
     keep_last = isnothing(flat_name) && nactive == 1
     order = [levels; [n for n in names if !isnothing(by_name[n]) && !(n in levels)]]
@@ -16410,30 +16617,31 @@ function _md_group_pills(names, by_name, levels, flat_name, values, url, form, i
         if isnothing(level)
             return h.span(; class="htmxo-group-pill", data_htmxo_group_name=n, draggable="true")(
                 h.button(n; type="button", id="$id-group-$safe", aria_pressed="false",
-                    title=nactive == 0 ? "Group by $n" : "Also group by $n, as the innermost level",
+                    title=_table_text(texts, nactive == 0 ? :group_add : :group_add_inner; name=n),
                     onclick="htmxoGroupToggle(this)"))
         end
         move(glyph, by, edge, where) = h.button(glyph; type="button", id="$id-group-$safe-$where",
-            class="htmxo-group-move", aria_label="Move $n $where", onclick="htmxoGroupMove(this,$by)",
+            class="htmxo-group-move", aria_label=_table_text(texts, Symbol("group_", where); name=n),
+            onclick="htmxoGroupMove(this,$by)",
             (edge ? (; disabled=true) : (;))...)
         h.span(; class="htmxo-group-pill", data_htmxo_group_name=n, data_htmxo_group_level=string(level),
                 draggable="true")(
             h.button((nactive > 1 ? (h.span(string(level); class="htmxo-group-level", aria_hidden="true"),) : ())...,
                 n; type="button", id="$id-group-$safe", aria_pressed="true",
-                title=nactive > 1 ? "Level $level: stop grouping by $n; drag or press ←/→ to reorder" :
-                    keep_last ? "Grouped by $n; add another grouping to change it" : "Stop grouping by $n",
+                title=nactive > 1 ? _table_text(texts, :group_level; level, name=n) :
+                    _table_text(texts, keep_last ? :group_kept : :group_stop; name=n),
                 (keep_last ? (; aria_disabled="true") : (;))...,
                 onclick="htmxoGroupToggle(this)", onkeydown="htmxoGroupKey(this,event)"),
             (nactive > 1 ? (move("‹", -1, level == 1, "earlier"), move("›", 1, level == nactive, "later")) : ())...)
     end
-    h.span(; class="htmxo-group-pills", role="group", aria_label="Group by",
+    h.span(; class="htmxo-group-pills", role="group", aria_label=texts.group_by,
             hx_get=string(url), hx_trigger="htmxo-regroup", hx_target="closest [data-htmxo-grouped]",
             hx_swap="outerHTML", hx_vals="js:{group_by: htmxoGroupPending(this), q: htmxoGroupedQuery(this)}",
             (isnothing(flat_name) ? (;) : (; data_htmxo_group_flat=flat_name))...,
             ondragstart="htmxoGroupDrag(event)", ondragover="htmxoGroupDragOver(event)",
             ondragleave="htmxoGroupDragLeave(event)", ondrop="htmxoGroupDrop(event)",
             ondragend="htmxoGroupDragEnd(event)")(
-        h.span("Group by"; class="htmxo-group-pills-label", aria_hidden="true"),
+        h.span(texts.group_by; class="htmxo-group-pills-label", aria_hidden="true"),
         (pill(n) for n in order)...,
         (isnothing(form) ? () : (h.input(; type="hidden", name="group_by", value=v, form) for v in values))...)
 end
