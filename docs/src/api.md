@@ -2178,6 +2178,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `table_texts(locale; texts...)`, `TableTexts` | The words of a table's built-in controls (`:en`, `:de`, per-text overrides), passed as `texts=`; see [components](components.md#table-texts) |
 | `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a `master_detail_table` grouped by an ordered `group_by` list; see [components](components.md#table-regrouping) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
+| `caption_texts(locale; …)`, `CaptionTexts` | A caption's own words (the toggle that opens its long text) in English or German, with per-text overrides; pass as `texts=` to `render_caption` / `with_caption`; see [components](components.md#captions) |
 
 ## Formatting
 
