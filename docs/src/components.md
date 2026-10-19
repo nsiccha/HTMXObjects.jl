@@ -899,8 +899,12 @@ manual.)
 
 ## Captions
 
-For figures / tables that need a caption with a CSV-download button or a "show data" details:
+`with_caption(spec, content)` wraps a figure (or any content) in a `<figure>` with a caption above it; `render_table(table; caption=spec)` captions a table the same way. `actions` puts buttons or links, such as a CSV download, on the right of the caption header:
 
 ```julia
-with_caption(plot_node, CaptionSpec(; title="Posterior fit", csv=download_url))
+cap = CaptionSpec(; title="Posterior fit", short="Median and 95% interval per dose.",
+    long="Fitted with 4 chains of 1000 draws.")
+with_caption(cap, plot_node; actions=(h.a("⬇ CSV"; href=csv_url, class="caption-action"),))
 ```
+
+`title` and `short` form the caption's header line, and `long` is folded behind a **More** toggle. The toggle's word comes from `texts=`: `with_caption(cap, plot_node; texts=caption_texts(:de))` shows **Mehr**, and `caption_texts(:de; more="Erläuterung")` replaces it with the app's own word. `render_caption` takes the same keyword. An unknown locale or text name throws an `ArgumentError`. Include `caption_style()` once per page.

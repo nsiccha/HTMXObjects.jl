@@ -31,6 +31,7 @@ export hx_link, htmx_or
 export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, CaptionSpec, ColumnSpec, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
+export CaptionTexts, caption_texts
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
@@ -13130,7 +13131,8 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 Caption metadata for a figure or table. `title` is a short bold heading,
 `short` is a one-line summary (typically built from live state so every
 parameter is visible), and `long` is an optional longer description shown
-behind a `<details>` toggle inside the `<figcaption>`.
+behind a `<details>` toggle inside the `<figcaption>`. The toggle's word is
+not part of the spec: it comes from the renderer's `texts=` ([`caption_texts`](@ref)).
 
 `long` may be a `String` or any HTMX `Node` (e.g. `h.div(h.p(...), h.p(...))`).
 In markdown the three tiers join with `" — "` into a single paragraph; a
@@ -13142,6 +13144,65 @@ struct CaptionSpec
     long::Any
 end
 CaptionSpec(; title, short="", long=nothing) = CaptionSpec(title, short, long)
+
+# A texts struct `T` for `locale` from `locales` (one NamedTuple of texts per
+# locale), with any texts replaced by keyword. `fname` names the public
+# constructor in errors; `placeholders` lists the `{names}` each text may hold.
+function _locale_texts(::Type{T}, fname, locales, placeholders, locale::Symbol; texts...) where {T}
+    haskey(locales, locale) || throw(ArgumentError(string(fname, ": unknown locale ",
+        repr(locale), "; available: ", join(repr.(keys(locales)), ", "))))
+    names = fieldnames(T)
+    for name in keys(texts)
+        name in names || throw(ArgumentError(string(fname, ": unknown text ", repr(name),
+            "; texts are ", join(names, ", "))))
+    end
+    merged = merge(getfield(locales, locale), (; (k => string(v) for (k, v) in pairs(texts))...))
+    for name in names
+        allowed = get(placeholders, name, ())
+        for m in eachmatch(r"\{([A-Za-z_]+)\}", merged[name])
+            Symbol(m[1]) in allowed || throw(ArgumentError(string(fname, ": ", name, " has no placeholder {",
+                m[1], "}", isempty(allowed) ? "" : string("; it takes ", join(("{$p}" for p in allowed), ", ")))))
+        end
+    end
+    T((merged[name] for name in names)...)
+end
+
+"""
+    CaptionTexts
+
+The words a caption shows besides the caller's own title, summary and long
+text: `more` labels the toggle that opens the long text. Build one with
+[`caption_texts`](@ref) and pass it as `texts=` to [`render_caption`](@ref) or
+[`with_caption`](@ref).
+"""
+struct CaptionTexts
+    more::String  # the toggle that opens the long text
+end
+
+const _CAPTION_TEXT_LOCALES = (
+    en = (more = "More",),
+    de = (more = "Mehr",),
+)
+
+"""
+    caption_texts(locale::Symbol=:en; texts...)
+
+The [`CaptionTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
+replaced by keyword:
+
+```julia
+cap = CaptionSpec(; title="Kapazität", short="Plätze je Kreis", long="Stand: Oktober 2026.")
+with_caption(cap, plot; texts=caption_texts(:de))                      # toggle reads "Mehr"
+with_caption(cap, plot; texts=caption_texts(:de; more="Erläuterung"))  # the app's own word
+```
+
+An unknown locale or text name, or a placeholder in a text (caption texts take
+none), throws an `ArgumentError`.
+"""
+caption_texts(locale::Symbol=:en; texts...) =
+    _locale_texts(CaptionTexts, :caption_texts, _CAPTION_TEXT_LOCALES, (;), locale; texts...)
+
+const _EN_CAPTION_TEXTS = caption_texts(:en)
 
 """
     caption_style()
@@ -13166,16 +13227,18 @@ _wrap_long(s::AbstractString) = h.div(s)
 _wrap_long(s) = s
 
 """
-    render_caption(spec::CaptionSpec; actions=())
+    render_caption(spec::CaptionSpec; actions=(), texts=caption_texts())
 
 Return a `<figcaption>` node for `spec`. `actions` is an iterable of nodes
 (buttons, links, …) rendered on the right side of the caption header.
+`texts` (a [`CaptionTexts`](@ref)) holds the caption's own words, such as the
+toggle that opens `long`; pass `caption_texts(:de)` on a German page.
 
 Use `with_caption(spec, content; actions)` to wrap content in a `<figure>` —
 this function returns just the `<figcaption>` so it can be embedded in a
 custom layout if needed.
 """
-function render_caption(spec::CaptionSpec; actions=())
+function render_caption(spec::CaptionSpec; actions=(), texts::CaptionTexts=_EN_CAPTION_TEXTS)
     header_kids = Any[h.span(h.strong(spec.title), isempty(spec.short) ? "" : " — ", spec.short)]
     if !isempty(actions)
         push!(header_kids, h.span(; class="caption-actions")(actions...))
@@ -13183,7 +13246,7 @@ function render_caption(spec::CaptionSpec; actions=())
     header = h.div(; class="caption-header")(header_kids...)
     body = isnothing(spec.long) ? "" :
         h.details(; class="caption-long")(
-            h.summary("More"),
+            h.summary(texts.more),
             _wrap_long(spec.long),
         )
     # Markdown-only boundary between the header and the long body: without it
@@ -13198,15 +13261,17 @@ _as_children(content::Tuple) = content
 _as_children(content::AbstractVector) = content
 
 """
-    with_caption(spec::CaptionSpec, content; actions=())
+    with_caption(spec::CaptionSpec, content; actions=(), id=nothing, texts=caption_texts())
 
 Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
 caption rendered above it. Pass `actions` (e.g. download buttons) to populate
-the right side of the caption header.
+the right side of the caption header, `id` to give the `<figure>` an id, and
+`texts` (a [`CaptionTexts`](@ref)) for the caption's own words, as in
+[`render_caption`](@ref).
 """
-function with_caption(spec::CaptionSpec, content; actions=(), id=nothing)
+function with_caption(spec::CaptionSpec, content; actions=(), id=nothing, texts::CaptionTexts=_EN_CAPTION_TEXTS)
     fig_attrs = isnothing(id) ? (; class="captioned") : (; class="captioned", id)
-    h.figure(; fig_attrs...)(render_caption(spec; actions), _as_children(content)...)
+    h.figure(; fig_attrs...)(render_caption(spec; actions, texts), _as_children(content)...)
 end
 
 # --- Table rendering ---

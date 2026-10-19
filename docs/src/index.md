@@ -998,7 +998,7 @@ on success, coral on error — included by default in `htmx()`).
 `endswith`.
 
 **Captions:** `CaptionSpec(; title, short, long)`, `render_caption(spec)`,
-`with_caption(spec, content)`.
+`with_caption(spec, content)`; `texts=caption_texts(:de)` for a German toggle.
 
 See the docstrings for full signatures.
 
