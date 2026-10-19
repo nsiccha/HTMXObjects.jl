@@ -80,12 +80,27 @@ function _regroup_table(self, group_by, q; kw...)
         selectable="rows", select_form="regroup-bulk", id="regroup", kw...)
 end
 
+# The same transactions regrouped in the browser alone: no routes, group rows
+# from declared column summaries, so a copy of this page recorded with
+# `record!` and served as plain files regroups too.
+_regroup_browser_table() = master_detail_table(["Counterparty", "Date", "IBAN", "Category", "Amount"], _REGROUP_TX;
+    key=t -> t.id,
+    master=t -> (h.td(t.party), h.td(t.date), h.td(h.code(t.iban; style="white-space: nowrap")),
+                 h.td(t.category), _regroup_amount(t.amount)),
+    detail=t -> h.p(t.memo; style="margin: 0; padding: .5rem 1rem"), detail_toggle=:label,
+    groupings=_REGROUP_GROUPINGS, group_by=["Category", "Counterparty"],
+    group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount; digits=2)],
+    searchable=true, expand_controls=true, id="regroup-browser")
+
 @htmx struct RegroupDemoRoutes
     @get index() = h.div(
         h.h1("Regroupable Table Demo"),
-        h.p("One set of $(length(_REGROUP_TX)) synthetic transactions, regrouped on the server by the ",
+        h.p("One set of $(length(_REGROUP_TX)) synthetic transactions, regrouped by the ",
             h.em("Group by"), " pills: click a pill to add or remove its level, and drag the active ones ",
-            "(or use their ‹ › buttons, or ←/→) to change the nesting. Selection is keyed by transaction, ",
+            "(or use their ‹ › buttons, or ←/→) to change the nesting. This table's group rows hold a ",
+            "rule-mode control and its big groups load lazily, so the server renders each grouping; ",
+            h.a("the same rows regrouped in the browser alone"; href=__self__ / "browser"),
+            " need no server at all. Selection is keyed by transaction, ",
             "so it survives regrouping; search matches group and row text; grouped by ", h.em("Rule"),
             ", one payment can belong to several groups. Groups over 30 rows load when first expanded, ",
             "at any level. Select group rows to act on whole groups. Marking a row reviewed or changing ",
@@ -97,6 +112,14 @@ end
                     h.option("Retail"), h.option("Food"), h.option("Travel")),
                 h.button("Categorize selected"; data_htmxo_needs_selection="rows", disabled=true))),
         _regroup_table(__self__, ["Category", "Counterparty"], ""),
+        sortable_table_js(), sortable_table_styles())
+
+    @get browser() = h.div(
+        h.h1("Regrouped in the Browser"),
+        h.p("The same $(length(_REGROUP_TX)) transactions with no table routes: the pills regroup the rows ",
+            "in the page, and each group row sums its rows' amounts there. A copy of this page recorded with ",
+            h.code("record!"), " and served as plain files works the same."),
+        _regroup_browser_table(),
         sortable_table_js(), sortable_table_styles())
 
     @get table(; group_by::Vector{String}=["Category", "Counterparty"], q::String="") =
