@@ -11329,14 +11329,16 @@ end
     gone = static_transform(html_only(h.button("x"; hx_post="/p")), StaticExport(; controls=:remove))
     @test isempty(String(to_response(gone).body))
 
-    # The table helpers put live controls inside `html_only`: the regroupable
-    # table's Group by control (here a kwargs route), the selection bar, and
-    # a grouped-header table whole.
+    # The table helpers put live controls inside `html_only`: a regroupable
+    # table's Group by control when it regroups through the server (here lazy
+    # groups through a kwargs route), the selection bar, and a grouped-header
+    # table whole.
     rows = [(; id="p$i", party) for (i, party) in enumerate(["Acme", "Bakery", "Acme"])]
-    regroupable(group_by) = master_detail_table(["Party"], rows; key=r -> r.id,
+    regroupable(group_by; server=true) = master_detail_table(["Party"], rows; key=r -> r.id,
         master=r -> (h.td(r.party),), detail=r -> h.p(r.id),
         groupings=["none" => nothing, "party" => r -> r.party], group_by,
-        group_by_url="/hotable", searchable=true, selectable="tx")
+        (server ? (; group_by_url="/hotable", group_rows_url=(k, ms) -> "/horows?key=$k") : (;))...,
+        searchable=true, selectable="tx")
     page() = h.div(html_only(h.button("Delete"; hx_post="/hodrop")),
         sortable_table(["Name", "Action", "Link"],
             [h.tr(h.td("a"), h.td(h.button("Drop"; hx_post="/hodrop")), h.td(h.a("Doc"; href="/hodoc")))];
@@ -11344,10 +11346,11 @@ end
     @htmx struct HtmlOnlyRecording
         @get hopage() = page()
         @get hotable(; group_by::String="party") = regroupable(group_by)
+        @get hobrowser() = regroupable("party"; server=false)
     end
     mktempdir() do dir
         record!(HtmlOnlyRecording(); record_dir=dir, record_base="/b",
-                paths=["/hopage", "/hotable"], hx=false, markdown=false)
+                paths=["/hopage", "/hotable", "/hobrowser"], hx=false, markdown=false)
         recorded = read(joinpath(dir, "hopage.html"), String)
         @test contains(repr("text/html", page()), "hx-post=\"/hodrop\"")
         @test !contains(recorded, "hx-post")
@@ -11357,6 +11360,9 @@ end
         @test contains(repr("text/html", regroupable("party")), "<select name=\"group_by\" hx-get=\"/hotable\"")
         @test contains(table, r"<select name=\"group_by\" hx-target=[^>]* data-static-disabled=\"true\" disabled=\"true\">")
         @test !contains(table, "hx-get=\"/hotable\"")
+        # A table the browser regroups keeps its control: no request to strip.
+        browser = read(joinpath(dir, "hobrowser.html"), String)
+        @test contains(browser, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\">")
     end
 end
 
