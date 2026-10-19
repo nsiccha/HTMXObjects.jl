@@ -4644,7 +4644,9 @@ Walk a Node tree and make it static-safe under `rules`:
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
 - Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline
 
-Non-Node values pass through unchanged.
+Documents, arrays, tuples, `content => id` pairs, [`html_only`](@ref) content
+and [`HTMLSnapshot`](@ref) values are walked through; other values pass
+through unchanged.
 """
 _static_walk(val, rules::_StaticRules) = val
 # A full page arrives as an `HTMLDocument`; unwrap so the `<html>` tree is
@@ -4746,6 +4748,15 @@ _static_walk_child(child::Node, rules) = _static_walk(child, rules)
 # A snapshot's stored bytes predate the rewrite, so export walks its value.
 _static_walk(s::HTMLSnapshot, rules::_StaticRules) = _static_walk(_html_value(s.value), rules)
 _static_walk_child(s::HTMLSnapshot, rules) = _static_walk(s, rules)
+# `html_only` content is HTML like any other subtree (the table toolbars and
+# grouped-header tables put live controls there), so it is walked and
+# re-wrapped to keep its empty Markdown projection. A removed control takes
+# the wrapper with it.
+function _static_walk(val::HtmlOnly, rules::_StaticRules)
+    walked = _static_walk(val.content, rules)
+    walked === _STATIC_REMOVED ? walked : HtmlOnly(walked)
+end
+_static_walk_child(val::HtmlOnly, rules) = _static_walk(val, rules)
 
 """
     _inject_static_style(val)
@@ -13244,16 +13255,16 @@ function render_caption(spec::CaptionSpec; actions=(), texts::CaptionTexts=_EN_C
         push!(header_kids, h.span(; class="caption-actions")(actions...))
     end
     header = h.div(; class="caption-header")(header_kids...)
-    body = isnothing(spec.long) ? "" :
-        h.details(; class="caption-long")(
-            h.summary(texts.more),
-            _wrap_long(spec.long),
-        )
-    # Markdown-only boundary between the header and the long body: without it
-    # the two tiers concatenate with no separator ("shortlong"). Blank longs
-    # emit no separator so the caption never trails " — ". Invisible in HTML.
-    sep = (isnothing(spec.long) || (spec.long isa AbstractString && isempty(strip(spec.long)))) ? "" : markdown_only(" — ")
-    h.figcaption(; class="caption")(header, sep, body)
+    isnothing(spec.long) && return h.figcaption(; class="caption")(header)
+    long = _wrap_long(spec.long)
+    body = html_only(h.details(; class="caption-long")(h.summary(texts.more), long))
+    # Markdown joins the long tier onto the header line with " — ", so its first
+    # paragraph stays in the caption paragraph Quarto numbers. HTMX.jl starts
+    # every block (a `<p>` in a Node long) on its own line, so the join is
+    # written from the long's own markdown instead of the `<details>` above.
+    # A blank long emits no separator, so the caption never trails " — ".
+    long_md = lstrip(to_markdown_string(long))
+    h.figcaption(; class="caption")(header, isempty(long_md) ? "" : markdown_only(" — " * long_md), body)
 end
 
 _as_children(content) = (content,)

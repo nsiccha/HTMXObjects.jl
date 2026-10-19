@@ -11310,6 +11310,56 @@ end
                                                 StaticExport(; url_map=_ -> 42))
 end
 
+@testitem "static export walks html_only content" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: h, to_markdown_string
+    # `html_only` content is HTML like any other subtree: its controls are
+    # disabled or removed and its addresses rewritten. It keeps its empty
+    # Markdown projection.
+    frag = h.div(html_only(h.button("Delete"; hx_post="/delete")),
+                 html_only(h.nav(h.a("Doc"; href="/doc"), h.div(; hx_get="/fig"))),
+                 h.p("keep"))
+    based = static_transform(frag; record_base="/b")
+    html = repr("text/html", based)
+    @test !contains(html, "hx-post") && count("data-static-disabled", html) == 1
+    @test contains(html, "href=\"/b/doc\"") && contains(html, "hx-get=\"/b/hx/fig\"")
+    @test to_markdown_string(based) == to_markdown_string(frag)
+    removed = repr("text/html", static_transform(frag, StaticExport(; controls=:remove)))
+    @test !contains(removed, "Delete") && !contains(removed, "disabled")
+    @test contains(removed, "href=\"/doc\"") && contains(removed, "keep")
+    gone = static_transform(html_only(h.button("x"; hx_post="/p")), StaticExport(; controls=:remove))
+    @test isempty(String(to_response(gone).body))
+
+    # The table helpers put live controls inside `html_only`: the regroupable
+    # table's Group by control (here a kwargs route), the selection bar, and
+    # a grouped-header table whole.
+    rows = [(; id="p$i", party) for (i, party) in enumerate(["Acme", "Bakery", "Acme"])]
+    regroupable(group_by) = master_detail_table(["Party"], rows; key=r -> r.id,
+        master=r -> (h.td(r.party),), detail=r -> h.p(r.id),
+        groupings=["none" => nothing, "party" => r -> r.party], group_by,
+        group_by_url="/hotable", searchable=true, selectable="tx")
+    page() = h.div(html_only(h.button("Delete"; hx_post="/hodrop")),
+        sortable_table(["Name", "Action", "Link"],
+            [h.tr(h.td("a"), h.td(h.button("Drop"; hx_post="/hodrop")), h.td(h.a("Doc"; href="/hodoc")))];
+            header_groups=["Row" => 2:3]))
+    @htmx struct HtmlOnlyRecording
+        @get hopage() = page()
+        @get hotable(; group_by::String="party") = regroupable(group_by)
+    end
+    mktempdir() do dir
+        record!(HtmlOnlyRecording(); record_dir=dir, record_base="/b",
+                paths=["/hopage", "/hotable"], hx=false, markdown=false)
+        recorded = read(joinpath(dir, "hopage.html"), String)
+        @test contains(repr("text/html", page()), "hx-post=\"/hodrop\"")
+        @test !contains(recorded, "hx-post")
+        @test count("data-static-disabled", recorded) == 2
+        @test contains(recorded, "href=\"/b/hodoc\"")
+        table = read(joinpath(dir, "hotable.html"), String)
+        @test contains(repr("text/html", regroupable("party")), "<select name=\"group_by\" hx-get=\"/hotable\"")
+        @test contains(table, r"<select name=\"group_by\" hx-target=[^>]* data-static-disabled=\"true\" disabled=\"true\">")
+        @test !contains(table, "hx-get=\"/hotable\"")
+    end
+end
+
 @testitem "dispatch static= returns a mapped static response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     route!(StaticExportApp())
     hx = ["HX-Request" => "true"]
