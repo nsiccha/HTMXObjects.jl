@@ -30,6 +30,8 @@ using TestItemRunner
         CaptionSpec(; title, short, long="   ")))
     @test !contains(blank_md, "— Shape")
     @test strip(blank_md) == "**Fig 14** — amplitude is shown separately."
+    @test HTMXObjects.to_markdown_string(render_caption(
+        CaptionSpec(; title, short, long=h.div()))) == "**Fig 14** — amplitude is shown separately."
 
     # Node longs (Bruno's `render_blocks` shape: `div(p, p, …)`) separate at
     # the header boundary; internal paragraph breaks are the paragraphs' own.
