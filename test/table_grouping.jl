@@ -86,9 +86,13 @@ end
     # It regroups in the browser; the server is asked only for what needs it.
     @test contains(party, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\" form=\"bulk\">")
     @test !contains(party, "hx-get=\"/table\"") && contains(party, "&quot;refresh&quot;:false")
+    # Group rows from `group_master` come from the server after a browser
+    # regroup, through a hidden element: the control itself stays request-free,
+    # so a recording (which strips that request) keeps it live.
     master_rows = html(grouped(group_by="party", group_by_url="/table", group_master=(k, ms) -> (h.td(k), h.td(""), h.td(""))))
-    @test contains(master_rows, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\" hx-get=\"/table\"")
-    @test contains(master_rows, "&quot;refresh&quot;:true")
+    @test contains(master_rows, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\">")
+    @test occursin(r"<span hidden=\"true\" data-htmxo-group-refresh=\"\" hx-get=\"/table\" hx-trigger=\"htmxo-regroup\"[^>]* hx-vals=\"js:\{group_by: htmxoGroupBy\(this\), q: htmxoGroupedQuery\(this\)\}\"", master_rows)
+    @test contains(master_rows, "&quot;refresh&quot;:true") && !contains(party, "data-htmxo-group-refresh")
     lazy = html(grouped(group_by="party", group_by_url="/table", group_rows_url=(k, ms) -> "/rows"))
     @test contains(lazy, "<select name=\"group_by\" hx-get=\"/table\"") && !contains(lazy, "data-htmxo-regroup")
     # Without a server to ask, lazy groups cannot regroup: no control.
@@ -318,9 +322,13 @@ end
     # They regroup in the browser; group rows from `group_master` also come
     # from the server afterwards.
     @test !contains(pills, "hx-get")
-    served = match(r"<span class=\"htmxo-group-pills\"[^>]*>"s, html(grouped(group_by=["rule", "party"], group_by_url="/table",
-        group_master=(k, ms) -> (h.td(k), h.td(""), h.td(""))))).match
-    @test contains(served, "hx-get=\"/table\" hx-trigger=\"htmxo-regroup\" hx-target=\"closest [data-htmxo-grouped]\" hx-swap=\"outerHTML\"")
+    served = html(grouped(group_by=["rule", "party"], group_by_url="/table", group_master=(k, ms) -> (h.td(k), h.td(""), h.td(""))))
+    @test !contains(match(r"<span class=\"htmxo-group-pills\"[^>]*>"s, served).match, "hx-get") &&
+        contains(served, "data-htmxo-group-refresh=\"\" hx-get=\"/table\"")
+    # Lazy groups regroup through the server: the pills ask it.
+    lazy_pills = match(r"<span class=\"htmxo-group-pills\"[^>]*>"s, html(grouped(group_by=["rule", "party"], group_by_url="/table",
+        group_rows_url=(k, ms) -> "/rows"))).match
+    @test contains(lazy_pills, "hx-get=\"/table\" hx-trigger=\"htmxo-regroup\" hx-target=\"closest [data-htmxo-grouped]\" hx-swap=\"outerHTML\"")
     @test contains(pills, "data-htmxo-group-flat=\"none\"")
     @test [m[1] for m in eachmatch(r"data-htmxo-group-name=\"([^\"]*)\"", pills)] == ["rule", "party", "iban"]
     @test contains(pills, "data-htmxo-group-name=\"rule\" data-htmxo-group-level=\"1\"") &&
