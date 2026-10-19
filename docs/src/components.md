@@ -259,6 +259,16 @@ phrase), `input` (the field's raw value) and `text` (the row's lower-case
 search text, ancestor text included in a hierarchy). Each predicate runs for
 every row on every pass, also when the field is empty.
 
+The count counts the table's items, not its rows. `{total}` is every item the
+table lists, and `{shown}` those the search and the predicates keep, whether or
+not their group or branch is open: with an empty field and no predicate it reads
+"42 of 42", however many groups are collapsed. In a [regroupable
+table](#table-regrouping) a group row is not an item, a leaf listed under several
+groups counts once, and the leaves of a lazy group that has not loaded yet count
+too, by the `'search'` predicate alone on their own text until they load. An
+item-named count such as `count="{shown} von {total} Einrichtungen"` therefore
+stays right in a grouped table.
+
 The query and the registered predicates are kept per table `id` and page path,
 like the [selection](#table-selection), so they survive a re-render of the
 table: after an `outerHTML` swap (a bulk action, a tab switch away and back)
@@ -272,9 +282,9 @@ bulk action; remove a predicate with `null`. A table without an `id` keeps this
 state on its wrapper element, so a swap that replaces the table drops it.
 
 Each pass fires a bubbling `htmxo:table-filtered` event on the wrapper. Its
-`detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
-that first rejected them) and `notes`, which a listener may extend; the count
-line appends each note after ` · `:
+`detail` holds `shown` and `total` (the count's numbers), `query`, `hiddenBy`
+(hidden items per predicate that first rejected them) and `notes`, which a
+listener may extend; the count line appends each note after ` · `:
 
 ```js
 document.addEventListener('htmxo:table-filtered', e => {
@@ -361,7 +371,8 @@ to load (`rows_failed`, `rows_missing`), the CSV button (`csv`) and the toggle
 of the table's caption (`more`, the same word as `caption_texts`, see
 [Captions](#captions)). The `TableTexts` docstring names them all.
 
-A text in braces is a placeholder: `count` takes `{shown}` and `{total}`, the
+A text in braces is a placeholder: `count` takes `{shown}` and `{total}` (items,
+not rows: see [Client-side search](#table-search)), the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
 `{level}`), `rows_failed` takes `{status}`. The browser writes the live count
 and status lines from the same templates, so they are strings, not Julia
@@ -611,8 +622,8 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
 - **Levels.** Each group row is a branch of the group above it; leaves sit
   under their innermost group, and a leaf with no key at an inner level is
   listed directly in its outer group. A grouping that returns several keys
-  lists the leaf under each, at any level. Counts, sorting, search ("N of M
-  rows shown", ancestor paths), open groups, *Expand all* and selection work as
+  lists the leaf under each, at any level. Counts, sorting, search (its count
+  of items, ancestor paths), open groups, *Expand all* and selection work as
   with one level.
 - **Group keys are paths.** With a list, each group is named by its path, a
   JSON array of its level keys, outermost first (`["Open","Invoice"]`): the

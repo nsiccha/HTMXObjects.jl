@@ -214,7 +214,7 @@ end
             // A lazy group's failed rows raise a German toast.
             document.querySelector('#row-group--Rest [data-htmxo-tree-toggle]').click();
             check('rows-failed', await wait(() => toasts.includes('Laden der Zeilen fehlgeschlagen (500)')));
-            check('group-count', count('gr') === '2 von 6 Zeilen angezeigt');
+            check('group-count', count('gr') === '4 von 4 Zeilen angezeigt');
             // A table without texts= keeps English on the same page.
             search('en', 'alp');
             check('english-default', count('en') === '1 of 2 rows shown');

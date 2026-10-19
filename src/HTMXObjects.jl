@@ -13660,6 +13660,18 @@ function htmxoTableSearch(target, query) {
     htmxoFilterTable(root);
 }
 
+// The leaves of a group whose rows have not loaded yet, as `[key, search
+// text]` pairs (`data-htmxo-lazy-leaves`), parsed once per value.
+function htmxoLazyLeaves(row) {
+    const source = row.dataset.htmxoLazyLeaves;
+    if (!source) return [];
+    if (row.htmxoLazyLeavesSource !== source) {
+        row.htmxoLazyLeavesSource = source;
+        row.htmxoLazyLeavesParsed = JSON.parse(source);
+    }
+    return row.htmxoLazyLeavesParsed;
+}
+
 function htmxoFilterTable(target) {
     const root = htmxoSearchRoot(target);
     const input = root.querySelector(':scope > label > input[type="search"]');
@@ -13692,8 +13704,8 @@ function htmxoFilterTable(target) {
     const collapsed = query.length > 0 && 'htmxoSearchCollapsed' in root.dataset;
     const direct = new Set();
     // A branch whose rows have not loaded yet also matches its rows' text.
-    const text = r => ((r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')) +
-        (r.dataset.htmxoSearchMembers ? ' ' + r.dataset.htmxoSearchMembers : '')).toLocaleLowerCase();
+    const ownText = r => r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ');
+    const text = r => (ownText(r) + htmxoLazyLeaves(r).map(([, t]) => ' ' + t).join('')).toLocaleLowerCase();
     rows.forEach(row => {
         const path = [];
         for (let r = row; r; r = byId.get(r.dataset.htmxoParent)) path.push(r);
@@ -13744,13 +13756,38 @@ function htmxoFilterTable(target) {
             if (!detail.hidden) htmxoLoadSlot(detail.querySelector('[data-loaded]'));
         }
     });
-    // hiddenBy counts the hidden rows per predicate that first rejected them;
-    // listeners may push short notes that the count line appends.
+    // The count is of the table's items, not its rows (`_table_item_counts`
+    // on the server): a group row is none, a leaf listed under several groups
+    // is one, and an item is shown when the search and the predicates keep
+    // it, whether or not its group or branch is open. The leaves of a group
+    // that has not loaded yet count once each, shown when the group's row is
+    // kept and the 'search' predicate keeps their own text.
+    const items = new Map();
+    const tally = (key, shown, by) => {
+        const was = items.get(key);
+        if (!was || (shown && !was.shown)) items.set(key, {shown, by});
+    };
+    const search = filters[0][1];
+    rows.forEach(row => {
+        if (!('htmxoGroup' in row.dataset)) {
+            tally('htmxoLeaf' in row.dataset ? 'leaf:' + row.dataset.htmxoLeaf : row, visible.has(row), rejectedBy.get(row));
+            return;
+        }
+        const leaves = htmxoLazyLeaves(row);
+        if (!leaves.length) return;
+        const kept = visible.has(row), path = [ownText(row).toLocaleLowerCase()];
+        for (let r = byId.get(row.dataset.htmxoParent); r; r = byId.get(r.dataset.htmxoParent)) path.unshift(text(r));
+        leaves.forEach(([key, t]) => {
+            const ctx = {query, input: raw, text: (path.join(' ') + ' ' + t.toLocaleLowerCase()).replace(/\s+/g, ' ')};
+            tally('leaf:' + key, kept && search(row, ctx), kept ? 'search' : rejectedBy.get(row));
+        });
+    });
+    // hiddenBy counts the hidden items per predicate that first rejected
+    // them; listeners may push short notes that the count line appends.
     const hiddenBy = {};
-    rejectedBy.forEach((name, row) => { if (row.hidden) hiddenBy[name] = (hiddenBy[name] || 0) + 1; });
-    // Rows of a branch that has not loaded yet count toward the total.
-    const pending = rows.reduce((n, r) => n + (Number(r.dataset.htmxoLazyCount) || 0), 0);
-    const detail = {shown: rows.filter(r => !r.hidden).length, total: rows.length + pending, query, hiddenBy, notes: []};
+    let shown = 0;
+    items.forEach(item => { if (item.shown) shown++; else hiddenBy[item.by] = (hiddenBy[item.by] || 0) + 1; });
+    const detail = {shown, total: items.size, query, hiddenBy, notes: []};
     root.dispatchEvent(new CustomEvent('htmxo:table-filtered', {bubbles: true, detail}));
     const count = root.querySelector(':scope > label > [data-htmxo-table-count]');
     if (count) count.textContent = htmxoText(root, 'count', {shown: detail.shown, total: detail.total}) +
@@ -13793,7 +13830,7 @@ function htmxoLoadRows(row, expand) {
             if (!body) throw new Error(htmxoText(row, 'rows_missing'));
             const rows = Array.from(body.rows);
             row.after(...rows);
-            ['htmxoLazyRows', 'htmxoLazyCount', 'htmxoSearchMembers', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
+            ['htmxoLazyRows', 'htmxoLazyLeaves', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
             delete row.htmxoMembers;
             row.removeAttribute('aria-busy');
             row.querySelector('[data-htmxo-tree-toggle]').setAttribute('aria-controls',
@@ -14114,7 +14151,7 @@ function htmxoCarryRow(old, row, oldDetail, detail) {
     // A lazy group stays lazy until the table loads it; once loaded, its rows
     // are on the page and the update's lazy marks no longer apply.
     if (!('htmxoLazyRows' in old.dataset))
-        ['htmxoLazyRows', 'htmxoLazyCount', 'htmxoSearchMembers', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
+        ['htmxoLazyRows', 'htmxoLazyLeaves', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
     row.hidden = old.hidden;
     if ('htmxoFiltered' in old.dataset) row.dataset.htmxoFiltered = ''; else delete row.dataset.htmxoFiltered;
     ['aria-selected', 'tabindex'].forEach(a => { if (old.hasAttribute(a)) row.setAttribute(a, old.getAttribute(a)); });
@@ -15017,7 +15054,8 @@ separators of group summaries (`decimal`, `thousands`; see `group_summary` in
 [`master_detail_pair`](@ref).
 
 A text in braces is a placeholder the table fills in, on the server and in the
-browser alike: `count` takes `{shown}` and `{total}`; `selected`,
+browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
+*Client-side search* in [`sortable_table`](@ref)); `selected`,
 `selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
 texts take `{name}` (the grouping), `group_level` also `{level}`;
 `rows_failed` takes `{status}`.
@@ -15316,6 +15354,14 @@ predicate named `'search'`; registering that name replaces it, e.g. with a
 regular-expression mode. Every predicate runs for every row on every pass,
 including when the field is empty.
 
+The count counts the table's items, not its rows: `{total}` is every item the
+table lists and `{shown}` those the search and the predicates keep, whether or
+not their group or branch is open, so with an empty field and no predicate it
+reads "42 of 42". In a regroupable [`master_detail_table`](@ref) a group row is
+not an item, a leaf listed under several groups counts once, and the leaves of
+a group that has not loaded yet count too (by the `'search'` predicate alone,
+on their own text, until they load).
+
 The query and the registered predicates are kept per table `id` and page path,
 like the selection, so they survive a re-render of the table (an `outerHTML`
 swap after a bulk action, a tab switch away and back): the re-rendered table's
@@ -15327,9 +15373,10 @@ and filters; remove a predicate with `null`. A table without an `id` keeps
 this state on its wrapper element, so a swap that replaces the table drops it.
 
 After each pass the wrapper fires a bubbling `htmxo:table-filtered` event whose
-`detail` holds `shown`, `total`, `query`, `hiddenBy` (hidden rows per predicate
-name that first rejected them) and `notes`, an array a listener may push short
-strings into; the count line appends them after ` · `:
+`detail` holds `shown`, `total` (the count's numbers), `query`, `hiddenBy`
+(hidden items per predicate name that first rejected them) and `notes`, an
+array a listener may push short strings into; the count line appends them
+after ` · `:
 
 ```js
 document.addEventListener('htmxo:table-filtered', e => {
@@ -15546,8 +15593,27 @@ end
 # `detail-<key>` companion, which follows its master's visibility.
 _is_master_row(row) = !(row isa Node && startswith(string(get(HTMX.attrs(row), :id, "")), "detail-"))
 _row_hidden(row) = row isa Node && get(HTMX.attrs(row), :hidden, false) ∉ (false, nothing)
-# Rows of a lazy branch that are not loaded yet count toward the total.
-_row_lazy_count(row) = row isa Node ? parse(Int, string(get(HTMX.attrs(row), Symbol("data-htmxo-lazy-count"), "0"))) : 0
+
+# The search count's (shown, total): of the table's items, not its rows, as
+# `htmxoFilterTable` counts them. A group row (`data-htmxo-group`) is none, a
+# leaf listed under several groups (`data-htmxo-leaf`) is one, and a row hidden
+# only because its group or branch is collapsed (it has a parent) is shown.
+# `pending` are the keys of leaves whose group has not loaded yet: each counts
+# once, as shown, since the first paint applies no search.
+function _table_item_counts(rows, pending)
+    shown = Dict{Any,Bool}()
+    for (i, row) in enumerate(rows)
+        _is_master_row(row) || continue
+        attrs = row isa Node ? HTMX.attrs(row) : Dict{Symbol,Any}()
+        haskey(attrs, Symbol("data-htmxo-group")) && continue
+        leaf = get(attrs, Symbol("data-htmxo-leaf"), nothing)
+        item = isnothing(leaf) ? i : "leaf:" * string(leaf)
+        shown[item] = get(shown, item, false) || !_row_hidden(row) ||
+            !isempty(string(get(attrs, Symbol("data-htmxo-parent"), "")))
+    end
+    foreach(k -> shown["leaf:" * k] = true, pending)
+    count(values(shown)), length(shown)
+end
 
 # The client-side search shared by `sortable_table` and `master_detail_table`:
 # a labelled field with a live shown-count as its helper text, the table, and
@@ -15556,9 +15622,8 @@ _row_lazy_count(row) = row isa Node ? parse(Int, string(get(HTMX.attrs(row), Sym
 # `field=false` keeps a hidden scaffold that a hierarchy's branch toggles
 # filter through. The input's `aria-label` keeps the count out of its name.
 function _searchable_table(table, rows; field::Bool=true, controls=nothing, query::AbstractString="",
-                           texts::TableTexts=_EN_TABLE_TEXTS)
-    masters = [row for row in rows if _is_master_row(row)]
-    count_text = _table_count_text(texts, count(!_row_hidden, masters), length(masters) + sum(_row_lazy_count, masters; init=0))
+                           texts::TableTexts=_EN_TABLE_TEXTS, pending=String[])
+    count_text = _table_count_text(texts, _table_item_counts(rows, pending)...)
     # A prefilled query (e.g. carried across a regroup) is applied by the
     # runtime when the table loads; the server's count is the unfiltered one.
     value_attrs = isempty(query) ? (;) : (; value=query)
@@ -16182,8 +16247,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   text, retains matching paths, and reveals descendants of a matching group.
   It temporarily reveals matching branches; clearing restores branch and
   detail state. Collapsed details stay lazy. Only master text is searched.
-  The live "N of M rows shown" count, app predicates (`htmxoTableFilter`) and
-  the `htmxo:table-filtered` event are shared with
+  The live count (of items: group rows are none, a leaf under several groups
+  is one, collapsed rows that match are shown), app predicates
+  (`htmxoTableFilter`) and the `htmxo:table-filtered` event are shared with
   [`sortable_table`](@ref)`(...; searchable=true)`; see its *Client-side search*.
 - `search_text(item)`: optional replacement for a row's searchable text; useful
   for metadata absent from its visible cells. It does not affect sorting.
@@ -16370,6 +16436,8 @@ function master_detail_table(headers, items;
     update_keys = _md_update_keys(update_rows)
     update = isnothing(update_rows) ? nothing : Set(update_keys)
     placed = Pair{String,Tuple{String,String}}[]
+    # The leaves of lazy branches, which the search count counts unloaded.
+    pending = String[]
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
         descendants = isnothing(children) ? () : children(item)
@@ -16399,7 +16467,7 @@ function master_detail_table(headers, items;
             end
             if !isnothing(lazy_rows)
                 attrs[:data_htmxo_lazy_rows] = lazy_rows.url
-                attrs[:data_htmxo_lazy_count] = string(lazy_rows.count)
+                append!(pending, lazy_rows.leaves)
             end
             max_level[] = max(max_level[], level)
         end
@@ -16573,7 +16641,7 @@ function master_detail_table(headers, items;
             onclick="htmxoTreeAll(this, false)"))
     controls = isempty(tools) ? nothing : h.p(; class="htmxo-tree-controls")(tools...)
     searched = (searchable || !isnothing(children) || !isnothing(controls)) ?
-        _searchable_table(table, rows; field=searchable, controls, query=search_query, texts) : table
+        _searchable_table(table, rows; field=searchable, controls, query=search_query, texts, pending) : table
     _with_table_texts(selecting ? _selectable_table(searched, rows, selectable; form=select_form, texts) : searched, texts)
 end
 
@@ -16596,7 +16664,7 @@ end
 # `children` result for a branch whose rows load on first expand.
 struct _MDLazyRows
     url::String
-    count::Int
+    leaves::Vector{String}  # the keys of the leaves it loads
 end
 
 _md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = [string(k) for k in keys if !isnothing(k)]
@@ -17001,11 +17069,6 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         (subgroups(g.members, depth + 1, g.path),
          [m for m in g.members if isempty(_md_group_keys(fns[depth+1](m)))])
     end
-    # The rows a group adds below its own row, nested lazy groups counted
-    # as loaded: "N of M rows shown" counts rows not loaded yet.
-    row_count(g) = let (subs, direct) = contents(g)
-        sum((1 + row_count(s) for s in subs); init=0) + length(direct)
-    end
     shown_leaf(g, m) = whole(g.path) || string(key(m)) in leaf_set
     # An update walks every group and leaf, so each row's place among its
     # siblings is the full table's, and renders only the rows `keep` and
@@ -17035,15 +17098,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         isnothing(url) && return attrs
         # An update renders a lazy group's rows too, for a table that has
         # loaded them; the row keeps its lazy marks for one that has not.
-        if update
-            attrs[:data_htmxo_lazy_rows] = url
-            attrs[:data_htmxo_lazy_count] = string(row_count(g))
-        end
-        # Rows not loaded yet still count: search reaches their text (and
-        # the keys of the levels below), and a selection keeps their keys
-        # (and submits their values).
-        below = unique!(String[k for d in length(g.path)+1:nlevels for m in g.members for k in _md_group_keys(fns[d](m))])
-        attrs[:data_htmxo_search_members] = join([[leaf_text(m) for m in g.members]; below], " ")
+        update && (attrs[:data_htmxo_lazy_rows] = url)
+        # Leaves not loaded yet still count: the search reaches their text
+        # (with their keys at the levels below), the count counts each once,
+        # and a selection keeps their keys (and submits their values).
+        attrs[:data_htmxo_lazy_leaves] = "[" * join(("[" * _md_json_string(string(key(m))) * "," *
+            _md_json_string(join([[k for d in length(g.path)+1:nlevels for k in _md_group_keys(fns[d](m))]; leaf_text(m)], " ")) * "]"
+            for m in g.members), ",") * "]"
         if !isnothing(selectable)
             attrs[:data_htmxo_select_members] = "{" * join((string(_md_json_string(string(key(m))), ":",
                 isnothing(select_submit) || select_submit(m) ? _md_json_string(leaf_value(m)) : "null")
@@ -17092,7 +17153,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
     built = tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
-            !update && !isnothing(url) ? _MDLazyRows(url, row_count(x)) : group_children(x)
+            !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
         end, gmaster)
     # The lazy-load response: the target group's rows (the rows of its
     # path and its own row dropped: each is one <tr>).
