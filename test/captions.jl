@@ -67,3 +67,36 @@ using TestItemRunner
     @test contains(String(response.body), "Synthetic results. — Crossing fractions")
     @test !contains(String(response.body), "results.Crossing")
 end
+
+@testitem "caption texts replace the long-text toggle's word" tags=[:unit] begin
+    using HTMXObjects
+
+    spec = CaptionSpec(; title="Kapazität", short="Plätze je Kreis", long="Stand: Oktober 2026.")
+    html(node) = repr("text/html", node)
+
+    # No texts, or the English set, renders exactly the caption pinned above.
+    @test html(render_caption(spec; texts=caption_texts())) == html(render_caption(spec))
+    @test html(render_caption(spec; texts=caption_texts(:en))) == html(render_caption(spec))
+    @test contains(html(render_caption(spec)), "<summary>More</summary>")
+
+    german = html(render_caption(spec; texts=caption_texts(:de)))
+    @test contains(german, "<summary>Mehr</summary>")
+    @test !contains(german, "More")
+
+    # `with_caption` passes its texts on, and a keyword replaces one word.
+    figure = html(with_caption(spec, h.p("Plot."); id="kapazitaet",
+        texts=caption_texts(:de; more="Erläuterung")))
+    @test contains(figure, "<summary>Erläuterung</summary>")
+    @test contains(figure, "id=\"kapazitaet\"")
+
+    # Markdown never shows the toggle, in any language.
+    @test HTMXObjects.to_markdown_string(render_caption(spec; texts=caption_texts(:de))) ==
+        HTMXObjects.to_markdown_string(render_caption(spec))
+
+    # refused: a mistyped locale or text name must not silently fall back to
+    # English, and caption texts fill no placeholder, so `{n}` would show
+    # literally; the same rules as `table_texts` (decision 0c8h2ll, option 1).
+    @test_throws ArgumentError caption_texts(:fr)
+    @test_throws ArgumentError caption_texts(:de; less="Weniger")
+    @test_throws ArgumentError caption_texts(:de; more="Mehr {n}")
+end
