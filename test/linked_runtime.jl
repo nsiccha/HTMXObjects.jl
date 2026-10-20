@@ -107,6 +107,113 @@ end
     end
 end
 
+@testitem "StaticExport(; runtime=:linked) keeps the links a copied runtime answers" setup=[HTMXOTestImports] tags=[:unit] begin
+    using Treebars
+    import HTMXObjects: _runtime_text
+    # A many-page bundle: pages one level down address the copies relatively.
+    page = htmx(h.p("x"); assets="../assets/vendor", runtime=:linked,
+        pico_version=HTMXObjects._PICO_VERSION, extra_head=(sortable_table_js(),))
+    live = repr("text/html", page)
+    exported = repr("text/html", static_transform(page, StaticExport(; controls=:remove, runtime=:linked)))
+
+    # Nothing goes back inline: the exported page is the linked page.
+    @test exported == live
+    @test !contains(exported, "<style")
+    @test all(isempty(m.captures[1]) for m in eachmatch(r"<script\b[^>]*>(.*?)</script>"s, exported))
+    @test contains(exported, "src=\"../assets/vendor/htmxo/sortable_table.js?v=")
+
+    # Every head link resolves to a file copy_vendorfiles writes, holding the
+    # linked text.
+    mktempdir() do bundle
+        written = Set(normpath.(copy_vendorfiles(joinpath(bundle, "assets", "vendor"))))
+        urls = [m.captures[1] for m in eachmatch(r"(?:src|href)=\"([^\"]+)\"", exported)]
+        @test length(urls) >= 20
+        for url in urls
+            file = normpath(joinpath(bundle, "person", first(split(url, '?'))))
+            @test file in written
+        end
+        for m in eachmatch(r"data-htmxo-runtime=\"([a-z_]+)\"", exported)
+            name = Symbol(m.captures[1])
+            ext = first(getfield(HTMXObjects._runtime_blocks(), name))
+            @test read(joinpath(bundle, "assets", "vendor", "htmxo", "$name.$ext"), String) == _runtime_text(name)
+        end
+        # The libraries alone, on request.
+        libraries = copy_vendorfiles(joinpath(bundle, "libs"); packages=(:htmx,), runtime=false)
+        @test libraries == [joinpath(bundle, "libs", "htmx.min.js")]
+        @test !isdir(joinpath(bundle, "libs", "htmxo"))
+    end
+
+    # The links' addresses take url_map and record_base like any src/href.
+    to_root(url) = contains(url, "/htmxo/") ? replace(url, "../assets/" => "assets/") : nothing
+    mapped = repr("text/html", static_transform(page, StaticExport(; runtime=:linked, url_map=to_root)))
+    @test contains(mapped, "src=\"assets/vendor/htmxo/live_region.js?v=")
+    @test contains(mapped, "src=\"../assets/vendor/htmx.min.js?v=")
+    rooted = htmx(h.p("x"); assets=:vendor, runtime=:linked)
+    based = repr("text/html", static_transform(rooted, StaticExport(; runtime=:linked, record_base="/site")))
+    @test contains(based, "src=\"/site/vendor/htmxo/live_region.js?v=")
+
+    # Through dispatch, the request-scoped form.
+    @htmx struct LinkedExportApp
+        __page__(content) = htmx(content; assets="../assets/vendor", runtime=:linked)
+        @get linked_export_page() = h.p("exported")
+    end
+    route!(LinkedExportApp())
+    kept = String(dispatch(:GET, "/linked_export_page"; static=StaticExport(; runtime=:linked)).body)
+    @test contains(kept, "src=\"../assets/vendor/htmxo/live_region.js?v=") && contains(kept, "exported")
+    standalone = String(dispatch(:GET, "/linked_export_page"; static=StaticExport()).body)
+    @test !contains(standalone, "/htmxo/") && contains(standalone, _runtime_text(:live_region))
+
+    @test_throws ArgumentError StaticExport(; runtime=:external)
+    @test StaticExport().runtime === :inline
+end
+
+@testitem "a linked shell links the page helpers an app puts into extra_head" setup=[HTMXOTestImports] tags=[:unit] begin
+    using Treebars
+    import HTMXObjects: _runtime_text, _runtime_version
+    helpers = (sortable_table_js(), sortable_table_styles(), caption_style(), master_detail_js(), download_table_js())
+    names = (:sortable_table, :sortable_table_styles, :caption_style, :master_detail, :download_table)
+    own = h.style(Raw(".mine{color:red}"))
+    kw = (; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)
+
+    # Inline: every helper stays exactly as given.
+    inline = repr("text/html", htmx(h.p("x"); kw..., extra_head=(helpers..., own)))
+    @test all(name -> contains(inline, _runtime_text(name)), names)
+    @test !contains(inline, "data-htmxo-runtime")
+
+    # Linked: each helper becomes its versioned link, in place and in order,
+    # after the shell's own blocks; other elements stay as given.
+    linked = repr("text/html", htmx(h.p("x"); kw..., runtime=:linked,
+        extra_head=(h.title("T"), helpers..., own)))
+    linked_names = Symbol.(m.captures[1] for m in eachmatch(r"data-htmxo-runtime=\"([a-z_]+)\"", linked))
+    @test linked_names[end-4:end] == collect(names)
+    for name in names
+        ext = first(getfield(HTMXObjects._runtime_blocks(), name))
+        @test contains(linked, "/vendor/htmxo/$name.$ext?v=$(_runtime_version(_runtime_text(name)))")
+        @test !contains(linked, _runtime_text(name))
+    end
+    @test contains(linked, "<title>T</title>") && contains(linked, ".mine{color:red}")
+    @test findfirst("<title>", linked).start < findfirst("htmxo/sortable_table.js", linked).start <
+        findfirst(".mine{color:red}", linked).start
+
+    # A changed or attributed block is not the helper, so it stays inline.
+    tweaked = h.script(Raw(_runtime_text(:sortable_table) * "\n// app tweak"))
+    attributed = h.style(Raw(_runtime_text(:caption_style)); media="print")
+    kept = repr("text/html", htmx(h.p("x"); kw..., runtime=:linked, extra_head=(tweaked, attributed)))
+    @test contains(kept, "// app tweak") && contains(kept, "media=\"print\"")
+    @test !contains(kept, "htmxo/sortable_table.js") && !contains(kept, "htmxo/caption_style.css")
+
+    # vendorfiles serves them, and a default export puts them back inline.
+    vendorfiles()
+    for name in names
+        ext = first(getfield(HTMXObjects._runtime_blocks(), name))
+        r = dispatch(:GET, "/vendor/htmxo/$name.$ext")
+        @test r.status == 200 && String(r.body) == _runtime_text(name)
+    end
+    exported = repr("text/html", static_transform(htmx(h.p("x"); kw..., runtime=:linked, extra_head=helpers)))
+    @test all(name -> contains(exported, _runtime_text(name)), names)
+    @test !contains(exported, "data-htmxo-runtime")
+end
+
 @testitem "a linked runtime runs and stays cached across page loads in a browser" setup=[HTMXOTestImports] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true

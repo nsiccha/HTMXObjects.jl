@@ -5005,17 +5005,20 @@ end
         out = joinpath(dir, "assets", "vendor")
         # Selected packages only, created dir, load order (not request order).
         written = copy_vendorfiles(out; packages=(:pico, :htmx))
-        @test written == [joinpath(out, "htmx.min.js"), joinpath(out, "pico.min.css")]
-        @test sort(readdir(out)) == ["htmx.min.js", "pico.min.css"]
+        @test written[1:2] == [joinpath(out, "htmx.min.js"), joinpath(out, "pico.min.css")]
+        # The page runtime follows, under `htmxo/` as `vendorfiles` mounts it.
+        @test !isempty(written[3:end]) && all(f -> dirname(f) == joinpath(out, "htmxo"), written[3:end])
+        @test sort(readdir(out)) == ["htmx.min.js", "htmxo", "pico.min.css"]
         # Byte-identical to what `vendorfiles` serves.
         vendorfiles()
-        for f in ("htmx.min.js", "pico.min.css")
+        for f in ("htmx.min.js", "pico.min.css", "htmxo/theme.css")
             @test read(joinpath(out, f), String) == String(dispatch(:GET, "/vendor/$f").body)
         end
-        # Copies are writable, so a re-copy overwrites in place.
-        @test copy_vendorfiles(out; packages=["htmx"]) == [joinpath(out, "htmx.min.js")]
+        # Copies are writable, so a re-copy overwrites in place; the runtime
+        # is skipped on request.
+        @test copy_vendorfiles(out; packages=["htmx"], runtime=false) == [joinpath(out, "htmx.min.js")]
         # The default copies all six pins.
-        @test length(filter(isfile, copy_vendorfiles(joinpath(dir, "all")))) == 6
+        @test length(filter(isfile, copy_vendorfiles(joinpath(dir, "all"); runtime=false))) == 6
         @test_throws ArgumentError copy_vendorfiles(dir; packages=(:jquery,))
     end
 
