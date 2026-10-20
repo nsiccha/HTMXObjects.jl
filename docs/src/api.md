@@ -57,7 +57,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `to_response(x)` | Coerce arbitrary content to an `HTTP.Response`                           |
 | `save_response(...)` | Persist a response (used by static recording)                        |
 | `static_transform(...)` | Convert dynamic responses to static-friendly form (`static_transform(val; record_base)` for recording, `static_transform(val, spec::StaticExport)` for a request-scoped export) |
-| `StaticExport(; url_map, controls, record_base)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
+| `StaticExport(; url_map, controls, record_base, runtime)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
 | `hx_response(...)` | Build a response with HTMX-specific response headers (HX-Trigger, HX-Redirect, HX-Push-Url, HX-Refresh, HX-Reswap, HX-Retarget, HX-Reselect, HX-Location), and the page shell's success toast (`toast=`, see [Success toasts](#success-toasts)) |
 | `redirect_to(req, location; status=303, query=true)` | Redirect a moved or aliased route to its canonical URL, for direct loads and htmx requests alike — see [Moved routes](#moved-routes) |
@@ -229,7 +229,9 @@ prefix: `vendorfiles("static/vendor")` + `assets="/static/vendor"`.
 
 A static bundle has no routes to serve the files from, so copy them instead:
 `copy_vendorfiles(dir; packages)` writes the same pinned files into `dir` and
-returns their paths in load order. `vendor_head(base; packages)` returns the
+returns their paths in load order, followed by HTMXObjects' own runtime files
+under `dir/htmxo/` (the files a `runtime=:linked` page links; pass
+`runtime=false` to skip them). `vendor_head(base; packages)` returns the
 matching head nodes (scripts, plus a stylesheet link for `:pico`, htmx before
 its extensions) for a hand-built `HTMLDocument`. `base` is used as given, so
 a relative prefix addresses the copies relative to the page. The `htmx()`
@@ -263,8 +265,15 @@ __page__(content) = htmx(content; assets=:vendor, runtime=:linked)
 head once and reuses it on every later page; a changed runtime (an upgrade,
 a Revise edit) is a new URL. Other requests revalidate against an `ETag`.
 Each block keeps its own element in its old position, so load order and
-script isolation are unchanged. A static export or recording puts the
-runtime back inline, so exported pages stay standalone. Behind a
+script isolation are unchanged. The page helpers an app puts into
+`extra_head` — `sortable_table_js()`, `sortable_table_styles()`,
+`caption_style()`, `master_detail_js()` and `download_table_js()`, exactly as
+they return — are linked the same way, in place; any other `extra_head`
+element stays as given. A static export or recording puts the runtime back
+inline, so exported pages stay standalone. A many-page bundle can keep it
+linked instead: copy the files once with `copy_vendorfiles` and export with
+`StaticExport(; runtime=:linked)`
+([Request-scoped static export](#request-scoped-static-export)). Behind a
 path-stripping proxy, a root `__page__` passes the request mount once:
 `assets=__prefix__ * "/vendor"`. `runtime=:linked` with `assets=:cdn` is an
 error; the default `runtime=:inline` is unchanged.
@@ -2800,6 +2809,17 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
 | `url_map` | `nothing`, or `address -> target`. Called with the full value of every `hx-get`, `href`, and `src` (query included). A `String` replaces the attribute verbatim — relative targets such as `"embeds/qoi.html"` are emitted as given — and the element stays live; `nothing` takes the default rules; anything else throws. |
 | `controls` | `:disable` (default) strips `hx-post`/`hx-put`/`hx-patch`/`hx-delete` and unmapped query-string `hx-get`s and greys the element out, as recording does. `:remove` drops those elements with their subtree, so the output carries no non-GET attribute and no greyed element. |
 | `record_base` | Prefix the default rules prepend to rooted addresses an unmapped attribute keeps (`hx-get` under `<record_base>/hx`). Empty by default: unchanged. |
+| `runtime` | `:inline` (default) puts a `runtime=:linked` page's runtime back inline, so each file stands alone. `:linked` keeps the links, rewritten by `url_map`/`record_base` like any `src`/`href`, for a bundle that carries the runtime once: `copy_vendorfiles(dir)` writes it next to the libraries, so the page's `assets` prefix addresses both. |
+
+- **Many pages, one runtime.** Without `runtime=:linked`, every exported page
+  repeats the whole runtime (well over 100 KB). With a relative `assets`
+  prefix in the page wrapper and the files copied once:
+
+  ```julia
+  copy_vendorfiles(joinpath(bundle, "assets", "vendor"))
+  spec = StaticExport(; url_map, runtime=:linked)
+  # __page__(content) = htmx(content; assets="../assets/vendor", runtime=:linked, …)
+  ```
 
 - **Fragments vs pages.** Send `"HX-Request" => "true"` for the bare fragment;
   without it the response is the full page (or the levels of the `__page__`

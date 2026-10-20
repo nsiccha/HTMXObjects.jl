@@ -2619,14 +2619,20 @@ _etag_matches(if_none_match, etag) =
 _vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[pkg].relpath)
 
 """
-    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico)) -> Vector{String}
+    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico), runtime=true) -> Vector{String}
 
-Copy the vendored head assets — the same pinned files [`vendorfiles`](@ref)
+Copy the vendored head assets — the same files [`vendorfiles`](@ref)
 serves — into `dir` (created if missing), for a static bundle that has no
-routes to serve them from. `packages` selects which libraries to copy; the
-written paths come back in load order. Existing files are overwritten, and
-the copies are ordinary writable files (the artifact store is read-only).
-Like `vendorfiles`, the first call downloads the pinned npm tarballs.
+routes to serve them from. `packages` selects which pinned libraries to copy.
+With `runtime=true` (the default) HTMXObjects' own page runtime is copied
+too, to `dir/htmxo/<name>.css|js` — the files a `runtime=:linked` page links
+(see [`htmx`](@ref)), including the Treebars poll assets while that
+extension is loaded — so `StaticExport(; runtime=:linked)` pages can link one
+shared copy instead of carrying the runtime inline. The written paths come
+back with the libraries first, in load order. Existing files are overwritten,
+and the copies are ordinary writable files (the artifact store is
+read-only). Like `vendorfiles`, the first call downloads the pinned npm
+tarballs.
 
 Pair it with [`vendor_head`](@ref) (or `htmx(...; assets=<same relative
 prefix>)`) for head tags that address the copies relative to the page:
@@ -2638,14 +2644,20 @@ page = HTMLDocument(h.html(
     h.body(content)))
 ```
 """
-function copy_vendorfiles(dir::AbstractString; packages=keys(_VENDOR_ASSETS))
+function copy_vendorfiles(dir::AbstractString; packages=keys(_VENDOR_ASSETS), runtime::Bool=true)
     pkgs = _vendor_packages(packages)
     mkpath(dir)
-    map(pkgs) do pkg
+    libraries = map(pkgs) do pkg
         dest = joinpath(dir, _VENDOR_ASSETS[pkg].file)
         write(dest, read(_vendor_file(pkg)))
         dest
     end
+    runtime || return libraries
+    mkpath(joinpath(dir, "htmxo"))
+    [libraries; [let dest = joinpath(dir, "htmxo", _runtime_file(name))
+                     write(dest, _runtime_text(name))
+                     dest
+                 end for name in _available_runtime_names()]]
 end
 
 """
@@ -2710,7 +2722,21 @@ _runtime_blocks() = (
     auto_terminal = (:js, auto_terminal_script),
     mutation_poll = (:js, mutation_poll_script),
     semantic_refresh = (:js, semantic_refresh_script),
+    # Page helpers the shell does not carry: an app places them itself,
+    # usually in `extra_head`, and a linked shell links them there
+    # (`_linked_extra_head`).
+    sortable_table = (:js, sortable_table_js),
+    sortable_table_styles = (:css, sortable_table_styles),
+    caption_style = (:css, caption_style),
+    master_detail = (:js, master_detail_js),
+    download_table = (:js, download_table_js),
 )
+
+# The blocks whose text exists in this process: the Treebars poll assets only
+# while that extension is loaded.
+_available_runtime_names() = isempty(_polling_page_assets()) ?
+    filter(name -> !(name in (:treebars_styles, :treebars_script)), keys(_runtime_blocks())) :
+    keys(_runtime_blocks())
 
 _runtime_block(name::Symbol) = last(getfield(_runtime_blocks(), name))()
 _runtime_file(name::Symbol) = string(name, '.', first(getfield(_runtime_blocks(), name)))
@@ -2744,6 +2770,32 @@ _runtime_link(::Val{:css}, src, name) = h.link(rel="stylesheet", href=src, data_
 _runtime_link(::Val{:js}, src, name) = h.script(src=src, data_htmxo_runtime=string(name))
 
 _runtime_heads(mount, names...) = map(name -> _runtime_head(name, mount), names)
+
+# The named runtime block an element is exactly — an attribute-free
+# `<style>`/`<script>` whose `Raw` text equals that block's — or `nothing`.
+_runtime_block_name(node, texts) = nothing
+function _runtime_block_name(node::Node, texts)
+    HTMX.tag(node) in (:style, :script) && isempty(HTMX.attrs(node)) &&
+        all(child -> child isa Raw, HTMX.children(node)) || return nothing
+    get(texts, (HTMX.tag(node), join(String(child) for child in HTMX.children(node))), nothing)
+end
+
+# `extra_head` as the shell carries it. Linked, an element that is exactly a
+# named runtime block — an app's own `sortable_table_js()`, say — becomes its
+# link in the same place, like the shell's blocks; anything else stays as given.
+_linked_extra_head(extra_head, ::Nothing) = extra_head
+function _linked_extra_head(extra_head, mount::AbstractString)
+    texts = nothing
+    map(extra_head) do node
+        node isa Node && HTMX.tag(node) in (:style, :script) || return node
+        # Built once, and only for a head that has a candidate element.
+        isnothing(texts) && (texts = Dict(
+            (_runtime_tag(Val(first(getfield(_runtime_blocks(), name)))), _runtime_text(name)) => name
+            for name in _available_runtime_names()))
+        name = _runtime_block_name(node, texts)
+        isnothing(name) ? node : _runtime_head(name, mount)
+    end
+end
 
 # `runtime` → the mount the shell links its runtime from, or `nothing` to
 # inline it. Linking needs a same-origin mount, which `assets` names.
@@ -2800,8 +2852,15 @@ the same way, so a browser keeps the whole head for good and a changed
 runtime is a new URL. It needs a vendor mount — `assets=:vendor` or a mount
 path, served by [`vendorfiles`](@ref) — and errors under `assets=:cdn`. Each
 block keeps its place and its own element, so load order and script
-isolation are unchanged. A static export or recording ([`static_transform`](@ref))
-puts the runtime back inline, so exported pages stay standalone. Behind a
+isolation are unchanged. The page helpers an app adds through `extra_head` —
+[`sortable_table_js`](@ref), [`sortable_table_styles`](@ref),
+[`caption_style`](@ref), [`master_detail_js`](@ref) and
+[`download_table_js`](@ref), exactly as they return — are linked the same
+way, in place; any other `extra_head` element stays as given. A static export
+or recording ([`static_transform`](@ref)) puts the runtime back inline, so
+exported pages stay standalone; `StaticExport(; runtime=:linked)` keeps the
+links instead, for a bundle that carries the files once
+([`copy_vendorfiles`](@ref)). Behind a
 path-stripping proxy, pass the request mount with the prefix:
 `assets=__prefix__ * "/vendor"` in a root `__page__`. The default
 `runtime=:inline` leaves the page byte-identical.
@@ -2890,7 +2949,7 @@ function htmx(args...;
             # Treebars), ahead of `extra_head` so apps can still override.
             # A manual install alongside stays harmless but redundant.
             _runtime_heads(mount, _operation_page_blocks(treebars_assets)...)...,
-            extra_head...,
+            _linked_extra_head(extra_head, mount)...,
         ),
         body(args...),
     ))
@@ -4496,7 +4555,7 @@ const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45
 const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-patch"), Symbol("hx-delete")])
 
 """
-    StaticExport(; url_map=nothing, controls=:disable, record_base="")
+    StaticExport(; url_map=nothing, controls=:disable, record_base="", runtime=:inline)
 
 Request-scoped static-export spec: pass it as `dispatch(...; static=spec)` to
 receive one route's response in static form from inside a live server. For
@@ -4529,6 +4588,14 @@ alone, so concurrent ordinary requests are unaffected.
 - `record_base` — the prefix the default rules prepend to rooted addresses an
   unmapped attribute keeps (`hx-get` → `<record_base>/hx/…`, `href`/`src` →
   `<record_base>/…`). Empty (default) leaves them unchanged.
+- `runtime` — what happens to a page's linked runtime (`htmx(...;
+  runtime=:linked)`). `:inline` (default) puts each block back inline, so the
+  exported page needs no other file. `:linked` keeps the links, their
+  addresses rewritten by `url_map` and `record_base` like any other `src` or
+  `href`, for a bundle that carries the runtime once:
+  [`copy_vendorfiles`](@ref) writes those files next to the libraries, so a
+  page whose `assets` addresses the copied libraries addresses the runtime
+  too. A many-page export then holds one copy instead of one per page.
 
 A route that returns a finished `HTTP.Response` or [`MIMEResponse`](@ref) has
 no value to transform, so a static dispatch of it throws
@@ -4549,17 +4616,20 @@ struct StaticExport{F}
     url_map::F
     controls::Symbol
     record_base::String
+    runtime::Symbol
     function StaticExport(url_map::F, controls::Symbol,
-            record_base::AbstractString) where {F}
+            record_base::AbstractString, runtime::Symbol=:inline) where {F}
         controls in (:disable, :remove) || throw(ArgumentError(
             "StaticExport controls must be :disable or :remove (got $(repr(controls)))"))
-        new{F}(url_map, controls, String(record_base))
+        runtime in (:inline, :linked) || throw(ArgumentError(
+            "StaticExport runtime must be :inline or :linked (got $(repr(runtime)))"))
+        new{F}(url_map, controls, String(record_base), runtime)
     end
 end
 
 StaticExport(; url_map=nothing, controls::Symbol=:disable,
-        record_base::AbstractString="") =
-    StaticExport(url_map, controls, record_base)
+        record_base::AbstractString="", runtime::Symbol=:inline) =
+    StaticExport(url_map, controls, record_base, runtime)
 
 """
     StaticExportRefused <: Exception
@@ -4674,7 +4744,8 @@ Walk a Node tree and make it static-safe under `rules`:
   routes) or names one of `rules.unservable` (kwargs routes)
 - Mark affected elements with `data-static-disabled` and `disabled`, or —
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
-- Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline
+- Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline,
+  unless the spec keeps it linked (`runtime=:linked`)
 
 Documents, arrays, tuples, `content => id` pairs, [`html_only`](@ref) content
 and [`HTMLSnapshot`](@ref) values are walked through; other values pass
@@ -4716,11 +4787,13 @@ _rewrite_hx_url(url::AbstractString, record_base::AbstractString) =
     _rewrite_static_url(url, isempty(record_base) ? "" : (rstrip(record_base, '/') * "/hx"))
 
 function _static_walk(node::Node, rules::_StaticRules)
-    # A linked page-runtime block goes back inline, so an exported page needs
-    # nothing from the live vendor mount (`htmx(...; runtime=:linked)`).
-    runtime = get(HTMX.attrs(node), Symbol("data-htmxo-runtime"), nothing)
-    isnothing(runtime) || return _runtime_block(Symbol(runtime))
     spec = rules.spec
+    # A linked page-runtime block goes back inline, so an exported page needs
+    # nothing from the live vendor mount (`htmx(...; runtime=:linked)`) —
+    # unless the bundle carries the runtime files and the spec keeps the link,
+    # whose address is then rewritten below like any other.
+    runtime = get(HTMX.attrs(node), Symbol("data-htmxo-runtime"), nothing)
+    isnothing(runtime) || spec.runtime === :linked || return _runtime_block(Symbol(runtime))
     new_attrs = copy(HTMX.attrs(node))
     # Set when the element carries a request a static server cannot answer.
     unservable = false
