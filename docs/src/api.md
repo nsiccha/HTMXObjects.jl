@@ -2307,8 +2307,11 @@ end
 ```
 
 `spec_url` is explicit because the document's mount point is the consumer's
-choice. Viewer assets load from a pinned CDN release (`swagger_version`,
-`cdn_base` re-points air-gapped deployments at a local mirror).
+choice. Viewer assets load from a pinned CDN release of the
+`swagger-ui-dist` npm package (`swagger_version`; `cdn_base` re-points
+air-gapped deployments at a local mirror serving
+`<cdn_base>/swagger-ui-dist@<swagger_version>/swagger-ui-bundle.js` and
+`.../swagger-ui.css`).
 
 ```@docs
 openapi
