@@ -10,7 +10,8 @@ using TestItemRunner
     import HTMXObjects: h
 
     export RetentionProbe, retention_providers, reset_retention!, retention_runs,
-        release_retention!, hx_get, running, settle
+        release_retention!, hx_get, running, settle,
+        MountProbe, mount_providers, prefixed_get
 
     const runs_lock = ReentrantLock()
     const runs = Dict{Symbol,Int}()
@@ -83,8 +84,47 @@ using TestItemRunner
         (; custom, managed)
     end
 
+    # An external `@include` child: `arg` is a constructor argument, and `work`
+    # reads only it, so its count shows whether requests share the child.
+    @htmx struct RetentionMount
+        arg::String = ""
+        work() = (hit!(Symbol(:mount_, arg)); arg)
+        @direct @get index() = h.p("arg=$(work()) prefix=$(__prefix__)")
+    end
+
+    # External children whose constructor arguments read request context, the
+    # way an app serves its API docs behind a path-stripping proxy: `spec_url`
+    # follows `X-Forwarded-Prefix`.
+    @htmx struct RetainedApi
+        @param name::String = "none"
+        spec_url = __self__ / "openapi"
+        @include openapi = OpenAPIRoutes(; root=RetainedApi,
+                                          servers=[chopsuffix(spec_url, "/openapi")])
+        @include docs = SwaggerRoutes(; spec_url)
+        @include addressed = RetentionMount(; arg=spec_url)
+        @include prefixed = RetentionMount(; arg=__prefix__)
+        @include named = RetentionMount(; arg=name)
+        @include constant = RetentionMount(; arg="constant")
+    end
+
+    @htmx struct MountProbe
+        @include mounts = RetainedApi()
+    end
+
+    function mount_providers()
+        retained = MountProbe()
+        custom = RootProvider(; scope=:job, key=_ -> :mounts) do _RootT, _context
+            retained
+        end
+        managed = RootProvider(; scope=:job, key=_ -> :mounts,
+                               retention=RootRetention())
+        (; custom, managed)
+    end
+
     hx_get(target) = dispatch(:GET, target; headers=["HX-Request" => "true"])
     body_text(response) = String(HTMXObjects._message_body_bytes(response))
+    prefixed_get(target, prefix) = body_text(dispatch(:GET, target;
+        headers=isempty(prefix) ? Pair{String,String}[] : ["X-Forwarded-Prefix" => prefix]))
     running(body) = contains(body, "hx-trigger=\"every ")
 
     # A hand-shaped poller polls its own route; repeat it until it answers.
@@ -185,6 +225,49 @@ end
         release_retention!(:root_self_slow)
         @test contains(settle("/poll_self/1"), "self-done:1")
         @test retention_runs(:root_self_slow) == 1
+    end
+    reset_retention!()
+end
+
+# An external `@include` child whose constructor arguments read request context
+# — the mount prefix through `__self__ / "…"` or `__prefix__`, or an `@param` —
+# is built per request from those arguments, and a request that builds it alike
+# keeps sharing the retained child's work (DynamicObjects `7c3852e`, snag
+# `DynamicObjects/remount-reuses-a-77419def`). Earlier pins kept the first
+# request's arguments for the life of the root: a viewer and document mounted
+# behind two proxy prefixes served the first one's addresses (snag
+# `retained-root-pr-a3e9ebb4`).
+@testitem "provider-retained roots build external includes from each request's arguments" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    for (label, provider) in pairs(mount_providers())
+        reset_retention!()
+        route!(MountProbe(); root_provider=provider)
+
+        for prefix in ("", "/p/A", "/p/B", "")
+            api = prefix * "/mounts"
+            @test contains(prefixed_get("/mounts/docs", prefix),
+                           "url: \"$api/openapi\"")
+            @test contains(prefixed_get("/mounts/openapi", prefix),
+                           "\"servers\":[{\"url\":\"$api\"}]")
+            @test contains(prefixed_get("/mounts/addressed", prefix),
+                           "arg=$api/openapi prefix=$api/addressed")
+            @test contains(prefixed_get("/mounts/prefixed", prefix),
+                           "arg=$api prefix=$api/prefixed")
+            @test contains(prefixed_get("/mounts/constant", prefix),
+                           "arg=constant prefix=$api/constant")
+        end
+        @test contains(prefixed_get("/mounts/named?name=a", ""), "arg=a")
+        @test contains(prefixed_get("/mounts/named?name=b", ""), "arg=b")
+
+        if label === :managed
+            # The managed store realizes the children on its source at the first
+            # (unprefixed) request; later requests that build a child alike share
+            # its work, the others build their own.
+            @test retention_runs(:mount_constant) == 1
+            @test retention_runs(Symbol(:mount_, "/mounts/openapi")) == 1
+            @test retention_runs(Symbol(:mount_, "/p/A/mounts/openapi")) == 1
+        end
     end
     reset_retention!()
 end
