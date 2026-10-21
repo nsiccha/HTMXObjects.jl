@@ -151,27 +151,20 @@ end
 # the object that is already calling it.
 function _resource_gate(resource, context)
     resource.policy.authorize(context) ||
-        throw(_ResourceRefused(403, "Forbidden"))
+        throw(_resource_refused(403, "Forbidden"))
     let message = resource.policy.validate(context)
         message === nothing ||
-            throw(_ResourceRefused(400, string(message)))
+            throw(_resource_refused(400, string(message)))
     end
     resource.policy.precondition(context) ||
-        throw(_ResourceRefused(409, "Conflict"))
+        throw(_resource_refused(409, "Conflict"))
     context
 end
 
-struct _ResourceRefused <: Exception
-    status::Int
-    message::String
-end
-
-Base.showerror(io::IO, err::_ResourceRefused) =
-    print(io, "resource operation refused (", err.status, "): ", err.message)
-
-# Carry the refusal's own status through the one `_error_status_code`
-# chokepoint (403 / 404 / 409 instead of a blanket 500).
-_unwrapped_status_code(err::_ResourceRefused) = err.status
+# A refusal is a caller fault: answered with its own status (403 / 404 / 409
+# instead of a blanket 500), not recorded.
+_resource_refused(status, message) =
+    CallerFault(status, string("resource operation refused (", status, "): ", message))
 
 _resource_context(resource, operation::Symbol; key=nothing, draft=nothing,
                   current=nothing, req=nothing) =
@@ -307,7 +300,7 @@ end
 # this preamble, so it lives once.
 function _resource_item(action, item, operation::Symbol; draft=() -> nothing)
     resource = item.resource
-    item.exists || throw(_ResourceRefused(404,
+    item.exists || throw(_resource_refused(404,
         string(resource.name, " ", repr(item.key), " not found")))
     context = _resource_context(resource, operation; key=item.stored_key,
                                 draft=draft(), current=item.current,

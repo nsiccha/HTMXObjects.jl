@@ -50,13 +50,17 @@ using TestItemRunner
             HTMXObjects.ERROR_DIR[] = old_dir
         end
     end
-    # A caller fault whose type names no title reads under a plain one, not
-    # the server-fault page that points at an error id.
+    # A refused resource operation is a caller fault titled with its reason
+    # phrase, not the server-fault page that points at an error id; a 4xx with
+    # no standard phrase reads under a plain title.
     refused = repr("text/html", HTMXObjects._invoke_error_handler(
-        nothing, HTMXObjects._ResourceRefused(409, "Conflict"), nothing, nothing))
-    @test contains(refused, "Request refused")
+        nothing, HTMXObjects._resource_refused(409, "Conflict"), nothing, nothing))
+    @test contains(refused, "<header>Conflict</header>")
     @test contains(refused, "resource operation refused (409): Conflict")
     @test !contains(refused, "Error ID")
+    unnamed = repr("text/html", HTMXObjects._invoke_error_handler(
+        nothing, CallerFault(499, "client closed"), nothing, nothing))
+    @test contains(unnamed, "<header>Request refused</header>")
 end
 
 # An `__error__` hook that returns a `MIMEResponse` answers with it: a JSON
@@ -119,4 +123,77 @@ end
             HTMXObjects.ERROR_DIR[] = old_dir
         end
     end
+end
+
+# A route body throws `CallerFault(status, message)` when the request is at
+# fault: an unknown resource id, an argument out of range. It is answered like
+# a missing parameter, with its own status and message and no error record
+# (snag json-api-errors-056cb64e: ODLPlaus's unknown probe id and out-of-range
+# float were recorded 500s).
+@testitem "a route body's CallerFault is answered with its status, not recorded" tags=[:unit, :server] begin
+    using HTMXObjects, HTTP, Logging
+    import HTMXObjects: h
+
+    hooked = String[]
+    @htmx struct CallerFaultRouteApp
+        __on_error__ = (err, uid, path) -> push!(hooked, uid)
+        "One probe"
+        @get cf_probe(kenn::String) = kenn == "a1" ? h.p("probe a1") :
+            throw(CallerFault(404, "unknown probe $kenn"))
+        @get cf_window(; p_min::Float64=0.0) = 0 <= p_min <= 1 ? h.p("p_min=$p_min") :
+            throw(CallerFault(400, "p_min must be in [0, 1], got $p_min"))
+    end
+    json_fault(err) = let fault = unwrap_error(err)
+        MIMEResponse("application/json",
+            "{\"status\":$(fault.status),\"error\":\"$(fault.message)\"}")
+    end
+    @htmx struct CallerFaultJsonApp
+        __error__ = json_fault
+        @direct @get cf_json(kenn::String) = throw(CallerFault(404, "unknown probe $kenn"))
+    end
+    route!(CallerFaultRouteApp())
+    route!(CallerFaultJsonApp())
+    hx = ["HX-Request" => "true"]
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            @test contains(String(dispatch(:GET, "/cf_probe/a1").body), "probe a1")
+
+            missing_probe = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_probe/zz")
+            @test missing_probe.status == 404
+            body = String(missing_probe.body)
+            @test contains(body, "<header>Not Found</header>")
+            @test contains(body, "unknown probe zz")
+            @test !HTTP.hasheader(missing_probe, "X-HTMXO-Error-Id")
+
+            plain = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_probe/zz?plain")
+            @test plain.status == 404
+            @test contains(String(plain.body), "unknown probe zz")
+
+            swapped = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_probe/zz"; headers=hx)
+            @test swapped.status == 200
+            @test contains(String(swapped.body), "aria-invalid=\"true\"")
+            @test contains(String(swapped.body), "unknown probe zz")
+
+            out_of_range = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_window?p_min=2")
+            @test out_of_range.status == 400
+            @test contains(String(out_of_range.body), "<header>Bad Request</header>")
+            @test contains(String(out_of_range.body), "p_min must be in [0, 1], got 2.0")
+
+            json = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_json/zz")
+            @test (json.status, HTTP.header(json, "Content-Type"), String(json.body)) ==
+                (404, "application/json", "{\"status\":404,\"error\":\"unknown probe zz\"}")
+
+            @test isempty(readdir(dir))
+            @test isempty(hooked)
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+    # refused: a non-4xx status is not a caller fault; a server fault stays an
+    # ordinary, recorded exception (user decision 0jvov7q, option 1).
+    @test_throws ArgumentError CallerFault(500, "upstream down")
+    @test_throws ArgumentError CallerFault(302, "moved")
+    @test sprint(showerror, CallerFault(404, "unknown probe zz")) == "unknown probe zz"
 end
