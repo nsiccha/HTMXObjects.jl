@@ -2250,7 +2250,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 |--------|---------|
 | `GalleryItem(path)`            | `@dynamicstruct` wrapping one `.jl` example file (label, group, source, frontmatter) |
 | `Gallery(gallery_dir)`         | Walks a directory of example files into a vector of `GalleryItem`s |
-| `gallery_grid(items; ...)`     | Render a grid of cards (one per item) with section headings |
+| `gallery_grid(items; ...)`     | Render a grid of cards (one per item) with section headings; `tag_filters=true` adds per-section tag chips (`tag_match=:all` narrows, `:any` widens) that combine with the search box and work in static exports |
 | `gallery_toolbar`, `gallery_controls_script` | Toolbar widget + JS for filter/group controls in the grid |
 | `record!(app; record_dir, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
