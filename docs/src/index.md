@@ -836,6 +836,17 @@ Every route handler is wrapped in try/catch. On a server-fault exception
   so logs and monitors see errors as errors.
 - If your `__error__` hook returns an `HTTP.Response` directly, its status is
   respected — no rewrite.
+- If it returns a `MIMEResponse`, that is the answer as it is — no `__page__`
+  shell, no Markdown projection — with the status above (500, or 400 for a
+  missing or invalid parameter; 200 under HTMX). A JSON API answers its errors
+  as JSON this way; a recorded error's id is in its `X-HTMXO-Error-Id` header:
+
+```julia
+@htmx struct Api
+    __error__(err) = MIMEResponse("application/json", "{\"error\":\"request failed\"}")
+    @get item(k::String) = MIMEResponse("application/json", lookup_json(k))
+end
+```
 
 ### Customising
 
