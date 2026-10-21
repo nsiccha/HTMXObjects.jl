@@ -170,8 +170,10 @@ end
 @testitem "a linked shell links the page helpers an app puts into extra_head" setup=[HTMXOTestImports] tags=[:unit] begin
     using Treebars
     import HTMXObjects: _runtime_text, _runtime_version
-    helpers = (sortable_table_js(), sortable_table_styles(), caption_style(), master_detail_js(), download_table_js())
-    names = (:sortable_table, :sortable_table_styles, :caption_style, :master_detail, :download_table)
+    helpers = (sortable_table_js(), sortable_table_styles(), caption_style(), master_detail_js(), download_table_js(),
+        htmxo_gallery_styles())
+    names = (:sortable_table, :sortable_table_styles, :caption_style, :master_detail, :download_table,
+        :gallery_styles)
     own = h.style(Raw(".mine{color:red}"))
     kw = (; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)
 
@@ -185,7 +187,7 @@ end
     linked = repr("text/html", htmx(h.p("x"); kw..., runtime=:linked,
         extra_head=(h.title("T"), helpers..., own)))
     linked_names = Symbol.(m.captures[1] for m in eachmatch(r"data-htmxo-runtime=\"([a-z_]+)\"", linked))
-    @test linked_names[end-4:end] == collect(names)
+    @test linked_names[end-length(names)+1:end] == collect(names)
     for name in names
         ext = first(getfield(HTMXObjects._runtime_blocks(), name))
         @test contains(linked, "/vendor/htmxo/$name.$ext?v=$(_runtime_version(_runtime_text(name)))")

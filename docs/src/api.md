@@ -2216,8 +2216,8 @@ HTMXObjects ships its own CSS variables and matches the host environment (raw Pi
 | Export | Purpose |
 |--------|---------|
 | `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
-| `pico_bridge()`           | Map `--htmxo-*` onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set |
-| `vitepress_bridge()`      | Map `--htmxo-*` onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
+| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color |
+| `vitepress_bridge()`      | Map `--htmxo-*` (including `--htmxo-bg`) onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
 | `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight) |
 | `escape_html(s)`          | HTML-escape (`HTMX.escape`, 5 chars) — for hand-built HTML strings only; `h.*` escapes text + attrs itself, use `Raw` for trusted markup |
 | `html_escape(s)`          | Minimal `&` / `<` / `>` escape — for hand-built HTML strings (never pre-escape a value passed through `h.*`) |
@@ -2250,7 +2250,10 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 |--------|---------|
 | `GalleryItem(path)`            | `@dynamicstruct` wrapping one `.jl` example file (label, group, source, frontmatter) |
 | `Gallery(gallery_dir)`         | Walks a directory of example files into a vector of `GalleryItem`s |
-| `gallery_grid(items; ...)`     | Render a grid of cards (one per item) with section headings; `tag_filters=true` adds per-section tag chips (`tag_match=:all` narrows, `:any` widens) that combine with the search box and work in static exports |
+| `gallery_grid(items; ...)`     | Render a grid of cards (one per item) with section headings; `tag_filters=true` adds per-section tag chips (`tag_match=:all` narrows, `:any` widens) that combine with the search box and work in static exports. The gallery carries its own stylesheet, so it needs no head setup |
+| `gallery_card(item; attrs...)` | The `<article>` of a custom card, with the `id` / `data-*` attributes the gallery controller reads; call it with the card's content: `card_renderer = item -> gallery_card(item)(h.h4(item.title), my_plot(item))` |
+| `default_gallery_card(item)`   | The default card (title, description, code), built on `gallery_card` |
+| `htmxo_gallery_styles()`       | The gallery stylesheet (`gallery_grid` includes it; for galleries an app composes itself) |
 | `gallery_toolbar`, `gallery_controls_script` | Toolbar widget + JS for filter/group controls in the grid |
 | `record!(app; record_dir, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |

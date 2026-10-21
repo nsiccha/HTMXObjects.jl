@@ -2,7 +2,8 @@
  * proper heading hierarchy, themed via `--htmxo-*` tokens. Source of
  * truth: HTMXObjects/assets/vitepress/htmxo-gallery.css. Loaded into:
  *   - the live app via `htmxo_gallery_styles()` in Julia (which reads
- *     this file at runtime), and
+ *     this file at runtime); `gallery_grid` carries it as the first
+ *     child of `.htmxo-gallery`, so every gallery brings its own, and
  *   - VitePress docs themes via `htmxo-embed.ts` (which imports this
  *     file as a side-effect), so the embedded fragment styles match.
  *
@@ -10,6 +11,7 @@
  *   <div class="htmxo-gallery-root">
  *     [optional toolbar]
  *     <div class="htmxo-gallery">
+ *       [this stylesheet, from gallery_grid]
  *       <section data-section="...">
  *         <h3>Section title</h3>
  *         [optional <div data-role="tag-filters"><button data-tag aria-pressed>tag</button>…</div>]
@@ -36,12 +38,15 @@
 }
 
 /* Cards: integrate into the surrounding container — no frame, no
- * inset padding. The plot itself supplies the visual weight. */
+ * inset padding. The plot itself supplies the visual weight. A
+ * classless framework frames every <article> (Pico: background,
+ * padding, shadow), so each of those is reset. */
 .htmxo-gallery article {
     margin: 0;
     padding: 0;
     background: transparent;
     border: none;
+    box-shadow: none;
     min-width: 0;
 }
 .htmxo-gallery article > h4 {
@@ -139,7 +144,7 @@
     border-bottom: 1px solid var(--htmxo-border, currentColor);
     position: sticky;
     top: 0;
-    background: var(--htmxo-bg, var(--vp-c-bg, white));
+    background: var(--htmxo-bg, var(--vp-c-bg, Canvas));
     z-index: 5;
 }
 .htmxo-gallery-toolbar > input[type="search"] {

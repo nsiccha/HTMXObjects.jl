@@ -39,7 +39,7 @@ export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
 export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_script,
-    default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
+    gallery_card, default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
 export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
@@ -2730,6 +2730,7 @@ _runtime_blocks() = (
     caption_style = (:css, caption_style),
     master_detail = (:js, master_detail_js),
     download_table = (:js, download_table_js),
+    gallery_styles = (:css, htmxo_gallery_styles),
 )
 
 # The blocks whose text exists in this process: the Treebars poll assets only
@@ -2854,8 +2855,8 @@ path, served by [`vendorfiles`](@ref) — and errors under `assets=:cdn`. Each
 block keeps its place and its own element, so load order and script
 isolation are unchanged. The page helpers an app adds through `extra_head` —
 [`sortable_table_js`](@ref), [`sortable_table_styles`](@ref),
-[`caption_style`](@ref), [`master_detail_js`](@ref) and
-[`download_table_js`](@ref), exactly as they return — are linked the same
+[`caption_style`](@ref), [`master_detail_js`](@ref),
+[`download_table_js`](@ref) and [`htmxo_gallery_styles`](@ref), exactly as they return — are linked the same
 way, in place; any other `extra_head` element stays as given. A static export
 or recording ([`static_transform`](@ref)) puts the runtime back inline, so
 exported pages stay standalone; `StaticExport(; runtime=:linked)` keeps the
@@ -20725,10 +20726,16 @@ and are declared at zero specificity (`:where(:root)`) inside `@layer htmxo`
 so any host's `:root { --htmxo-...: ... }` override wins automatically — no
 specificity wars, no host detection in component code. See [`pico_bridge`](@ref)
 and [`vitepress_bridge`](@ref) for one-line adapters.
+
+`--htmxo-bg` is the page background, for surfaces that must cover content
+behind them (the sticky gallery toolbar) or contrast with a filled badge.
+Its default `Canvas` is the browser's page background, which follows the
+page's light/dark color scheme.
 """
 htmxo_theme() = h.style(Raw("""
 @layer htmxo {
     :where(:root) {
+        --htmxo-bg:      Canvas;
         --htmxo-accent:  #4a90d9;
         --htmxo-success: #2a9d8f;
         --htmxo-warning: #e9a23b;
@@ -20744,16 +20751,21 @@ htmxo_theme() = h.style(Raw("""
 
 `<style>` block remapping `--htmxo-*` to Pico CSS's color tokens. Include
 once at the page level when an HTMXO app uses Pico CSS, so HTMXO components
-pick up the host's accent / borders / status colors. Loaded automatically by
+pick up the host's page background, accent, muted and status colors. Borders
+keep the text color. Loaded automatically by
 [`htmx`](@ref) when `pico_version` is non-`nothing`.
 """
 pico_bridge() = h.style(Raw("""
 :root {
+    --htmxo-bg:      var(--pico-background-color, Canvas);
     --htmxo-accent:  var(--pico-primary, #4a90d9);
     --htmxo-success: var(--pico-color-green-550, #2a9d8f);
     --htmxo-warning: var(--pico-color-amber-550, #e9a23b);
     --htmxo-error:   var(--pico-color-red-550, #e76f51);
-    --htmxo-border:  var(--pico-border-color, currentColor);
+    /* Pico has no root-level border color: `--pico-border-color` exists only
+       on form controls and buttons, and its divider color
+       (`--pico-muted-border-color`) is too faint for the 2px tab frames. */
+    --htmxo-border:  currentColor;
     --htmxo-muted:   var(--pico-muted-color, color-mix(in srgb, currentColor 60%, transparent));
 }
 """))
@@ -20768,6 +20780,7 @@ theme automatically. Falls back to HTMXO defaults when a token is missing.
 """
 vitepress_bridge() = h.style(Raw("""
 :root {
+    --htmxo-bg:      var(--vp-c-bg, Canvas);
     --htmxo-accent:  var(--vp-c-brand-1, #4a90d9);
     --htmxo-success: var(--vp-c-success-1, #2a9d8f);
     --htmxo-warning: var(--vp-c-warning-1, #e9a23b);
@@ -22948,9 +22961,18 @@ against each card's `data-tags` (space-separated). With
 chip narrows, and a chip that would leave no card is disabled; with
 `tag_match=:any` a card needs one of them. Tags combine with the search
 box (a card must pass both), and a section with no card left is hidden,
-as with search. A section without tags gets no chips. A custom
-`card_renderer` must keep `data-tags` (and the other attributes of
-[`default_gallery_card`](@ref)) on its `<article>`.
+as with search. A section without tags gets no chips.
+
+A custom `card_renderer` builds its card with [`gallery_card`](@ref):
+the controller only sees `<article>` children of a section, and reads
+the `id`, `data-tags` and `data-search-text` that `gallery_card` sets.
+
+The gallery carries its own stylesheet ([`htmxo_gallery_styles`](@ref)) as
+the first child of `.htmxo-gallery`, in both forms: it is what hides the
+cards the controller marks, so search, pagination and chips work on any
+page without head setup. An app that restyles the gallery from its
+`<head>` needs a selector more specific than the sheet's, since the sheet
+comes later in the document.
 
 URL state: the search query mirrors `?q=`, the current page mirrors
 `?page=`, the page size mirrors `?ps=`, and a section's pressed tags
@@ -23002,7 +23024,7 @@ function gallery_grid(items::AbstractVector{GalleryItem};
             [card_renderer(it) for it in groups[sec]]...,
         )
     end
-    inner = h.div(; class="htmxo-gallery")(sections...)
+    inner = h.div(; class="htmxo-gallery")(htmxo_gallery_styles(), sections...)
     (controls && (search || pagination || tag_filters)) || return inner
     h.div(; class="htmxo-gallery-root")(
         (search || pagination ? (html_only(gallery_toolbar(; search, pagination,
@@ -23266,26 +23288,40 @@ gallery_controls_script() = """
 """
 
 """
+    gallery_card(item::GalleryItem; attrs...)
+
+The `<article>` of one gallery card, carrying what the controller of
+[`gallery_grid`](@ref) reads: `id` and `data-id` (an `#id` link reveals
+the card), `data-section`, `data-tags` (the tag chips) and
+`data-search-text` (the search corpus: title, description, tags, section
+and id, lowercased). Call the result with the card's content. Further
+keywords become attributes, and one named like these replaces it — e.g.
+`data_search_text=` for a corpus of your own.
+
+    card_renderer = item -> gallery_card(item)(
+        h.h4(h.a(item.title; href="#" * item.id)), my_plot(item))
+"""
+gallery_card(item::GalleryItem; attrs...) = h.article(;
+    id=item.id,
+    data_id=item.id,
+    data_section=item.section,
+    data_tags=join(item.tags, " "),
+    # Lowercased so the controller can `includes()` directly.
+    data_search_text=lowercase(strip(string(
+        item.title, ' ', item.description, ' ',
+        join(item.tags, ' '), ' ', item.section, ' ', item.id))),
+    attrs...)
+
+"""
     default_gallery_card(item::GalleryItem)
 
 Default card layout: title heading + description (always visible) +
 inline source code block. No collapsible details — important info
-is visible directly. Apps wrap this with their own
-`card_renderer = item -> h.article(default_gallery_card(item),
-my_render(item))` to add Vega-Lite plots, PPC plots, etc.
+is visible directly. Apps that add Vega-Lite plots, PPC plots, etc.
+build their own on [`gallery_card`](@ref):
+`card_renderer = item -> gallery_card(item)(h.h4(item.title), my_render(item))`.
 """
-default_gallery_card(item::GalleryItem) = h.article(;
-        id=item.id,
-        data_id=item.id,
-        data_section=item.section,
-        data_tags=join(item.tags, " "),
-        # Canonical search corpus: title + description + tags + section
-        # + id, lowercased so the controller can `includes()` directly.
-        # Custom card renderers can either set their own `data-search-text`
-        # or let the controller fall back to `textContent`.
-        data_search_text=lowercase(strip(string(
-            item.title, ' ', item.description, ' ',
-            join(item.tags, ' '), ' ', item.section, ' ', item.id))))(
+default_gallery_card(item::GalleryItem) = gallery_card(item)(
     h.h4(
         h.a(item.title; href="#" * item.id),
     ),
@@ -23299,15 +23335,22 @@ default_gallery_card(item::GalleryItem) = h.article(;
 
 `<style>` block with the canonical gallery layout: single-column,
 flat (no card frame), proper heading hierarchy, themed via `--htmxo-*`
-tokens. Include via `extra_head` in `htmx(...)` so all HTMXO apps
-present galleries the same way.
+tokens. It also hides the cards and sections the gallery controller
+marks. [`gallery_grid`](@ref) carries it itself, so all HTMXO apps
+present galleries the same way; a gallery an app composes from its own
+markup includes it via `extra_head` in `htmx(...)`, which a linked shell
+(`runtime=:linked`) links like the other page helpers.
 
 Source of truth is
 `HTMXObjects/assets/vitepress/htmxo-gallery.css` — same file is
 imported by `htmxo-embed.ts` so the docs-embedded fragment matches.
 """
-htmxo_gallery_styles() = h.style(Raw(
-    read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-gallery.css"), String)))
+htmxo_gallery_styles() = h.style(Raw(replace(
+    read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-gallery.css"), String),
+    # Without its comments: every gallery carries the sheet, where they are
+    # dead bytes (about 40 %), and inside an inline <style> a comment's
+    # markup example could end the element early.
+    r"/\*.*?\*/"s => "")))
 
 """
     htmxo_syntax_head(; languages=("julia", "stan"))
