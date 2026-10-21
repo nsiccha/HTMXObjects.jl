@@ -10658,15 +10658,20 @@ end
         _operation_polling_impl[] = old
     end
 
-    # The operation has a structural root, but no implicit nested progress:
-    # ordinary property calls are not rewritten by HTMXObjects.
+    # The operation has a structural root, and DynamicObjects nests the reads
+    # its body writes under it while they compute: `mid.middle(k)` shows as
+    # "Middle work", and the `deep_child.deep(k)` read in that body as "Deep
+    # leaf work" under it, parked on the closed gate. HTMXObjects adds nothing.
     @test node isa TBNode
     @test node.impl.description == "Slow page"
-    @test progress_descendants(node) == String[]
+    @test timedwait(() -> progress_descendants(node) == ["Middle work", "Deep leaf work"],
+                    10.0) === :ok
 
-    # And the final value still arrives once the leaf is released.
+    # The final value still arrives once the leaf is released, and the
+    # finished reads have left the operation's node.
     notify(property_gate[])
     @test repr("text/html", app.slow(Verb{:GET}(), 2)) == "<p>21</p>"
+    @test progress_descendants(node) == String[]
 end
 
 @testitem "automatic progress — property-scoped direct requests and failures stay visible" setup=[HTMXOPropertyScopedFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -10686,13 +10691,13 @@ end
     @test repr("text/html", direct.value) == "<p>31</p>"
     @test !(direct.value isa DynamicObjects.Pending)
 
-    # A nested failure still surfaces through the normal operation error path;
-    # no implicit child progress node is fabricated for the foreign helper.
+    # A nested failure still surfaces through the normal operation error path,
+    # and the failed `boom(k)` read stays under the body that read it.
     bad_app = PropertyScopedFailRoute()
     @test_throws DynamicObjects.PropertyComputationError bad_app.bad(Verb{:GET}(), 1)
     bad_node = DynamicObjects.getstatus(bad_app.bad, Verb{:GET}(), 1)
     @test bad_node isa TBNode
-    @test progress_descendants(bad_node) == String[]
+    @test progress_descendants(bad_node) == ["Failing leaf"]
 end
 
 @testitem "EditorRoutes serves its own mount point" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
