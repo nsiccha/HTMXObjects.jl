@@ -12,6 +12,7 @@
  *     <div class="htmxo-gallery">
  *       <section data-section="...">
  *         <h3>Section title</h3>
+ *         [optional <div data-role="tag-filters"><button data-tag aria-pressed>tag</button>…</div>]
  *         <article>
  *           <h4><a>Title</a> [optional <a rel="external">…</a>] [optional <button aria-pressed=…>flag</button>]</h4>
  *           <p>Optional description</p>
@@ -181,6 +182,44 @@
 }
 .htmxo-gallery-pagination > span { white-space: nowrap; }
 
+/* Tag chips (`gallery_grid(...; tag_filters=true)`): one row under each
+   section heading. State is on native aria-pressed / disabled. The
+   selectors outrank a classless framework's bare `button` rules (Pico),
+   and every box property those rules set is reset here. */
+.htmxo-gallery section > [data-role="tag-filters"] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: 0 0 0.75rem;
+}
+.htmxo-gallery section > [data-role="tag-filters"] > button {
+    width: auto;
+    margin: 0;
+    padding: 0.1rem 0.6rem;
+    border: 1px solid var(--htmxo-border, currentColor);
+    border-radius: 999px;
+    background: transparent;
+    box-shadow: none;
+    color: var(--htmxo-muted, currentColor);
+    font: inherit;
+    font-size: 0.8em;
+    line-height: 1.4;
+    cursor: pointer;
+}
+.htmxo-gallery section > [data-role="tag-filters"] > button[aria-pressed="true"] {
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    color: inherit;
+    font-weight: 600;
+}
+.htmxo-gallery section > [data-role="tag-filters"] > button[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.htmxo-gallery section > [data-role="tag-filters"] > button:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 1px;
+}
+
 .htmxo-gallery-empty {
     padding: 1rem 0;
     color: var(--htmxo-muted, currentColor);
@@ -193,6 +232,7 @@
    independently. Using attributes (not classes) keeps state out of the
    class-list. */
 .htmxo-gallery article[data-search-hidden],
+.htmxo-gallery article[data-tag-hidden],
 .htmxo-gallery article[data-page-hidden],
 .htmxo-gallery section[data-empty] {
     display: none;

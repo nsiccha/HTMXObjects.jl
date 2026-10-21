@@ -22914,7 +22914,8 @@ section_items(g::Gallery, section::AbstractString) =
     gallery_grid(items; section_titles=Dict(), card_renderer=default_gallery_card,
                         controls=true, search=true, pagination=true,
                         page_size=25, page_sizes=(10, 25, 50, 100, 0),
-                        search_placeholder="Search (regex; literal fallback)…")
+                        search_placeholder="Search (regex; literal fallback)…",
+                        tag_filters=false, tag_match=:all)
 
 Render a single-column grid of `card_renderer(item)` cards, grouped by
 section. Sections appear in directory-traversal order (preserved by
@@ -22925,9 +22926,9 @@ section id (typically the directory basename).
 When `controls=true` (default), the result is wrapped in a
 `.htmxo-gallery-root` that also carries a sticky toolbar with a search
 box and pagination controls. The toolbar is driven by an inline
-controller script that toggles `is-search-hidden` / `is-page-hidden`
-classes on cards (and `is-empty` on sections whose visible-card count
-drops to zero). The controller works identically in:
+controller script that sets `data-search-hidden` / `data-page-hidden`
+on cards (and `data-empty` on sections whose visible-card count drops
+to zero). The controller works identically in:
 
   * Live HTMXObjects pages (browser executes the inline `<script>` as
     part of normal page load).
@@ -22935,14 +22936,34 @@ drops to zero). The controller works identically in:
     swaps don't auto-execute scripts, but `setupHtmxoEmbed` from
     `htmxo-embed.ts` re-executes inline scripts inside `.htmxo-embed`
     after every swap so the controller wires up there too).
+  * Static exports (`static_transform`, `record!`): the controls are
+    plain buttons and inputs, so they run without a server.
+
+`tag_filters=true` adds a row of tag chips under each section heading:
+one `<button aria-pressed>` per distinct tag of that section's items
+(`GalleryItem.tags`, the `# tags:` header), in order of first
+appearance. Pressing chips filters only that section's cards, matched
+against each card's `data-tags` (space-separated). With
+`tag_match=:all` (default) a card must carry every pressed tag, so each
+chip narrows, and a chip that would leave no card is disabled; with
+`tag_match=:any` a card needs one of them. Tags combine with the search
+box (a card must pass both), and a section with no card left is hidden,
+as with search. A section without tags gets no chips. A custom
+`card_renderer` must keep `data-tags` (and the other attributes of
+[`default_gallery_card`](@ref)) on its `<article>`.
 
 URL state: the search query mirrors `?q=`, the current page mirrors
-`?page=`, and the page size mirrors `?ps=` — so a deep-link to a
-filtered/paginated view round-trips.
+`?page=`, the page size mirrors `?ps=`, and a section's pressed tags
+mirror `?tag.<section>=a,b` — so a deep-link to a filtered/paginated
+view round-trips.
 
 Pass `controls=false` to opt out and recover the original bare
 `.htmxo-gallery` `<div>` (used by apps that want to compose their own
-toolbar).
+toolbar); its tag chips (if any) then need the app's own
+`.htmxo-gallery-root` and [`gallery_controls_script`](@ref).
+
+In Markdown (`?plain`) the toolbar, the chips and the empty-state line
+are dropped; the sections and cards remain.
 
 Standard CSS classes: `htmxo-gallery-root`, `htmxo-gallery-toolbar`,
 `htmxo-gallery-search`, `htmxo-gallery-pagination`, `htmxo-gallery`,
@@ -22958,7 +22979,11 @@ function gallery_grid(items::AbstractVector{GalleryItem};
         pagination::Bool=true,
         page_size::Int=25,
         page_sizes=(10, 25, 50, 100, 0),
-        search_placeholder::AbstractString="Search (regex; literal fallback)…")
+        search_placeholder::AbstractString="Search (regex; literal fallback)…",
+        tag_filters::Bool=false,
+        tag_match::Symbol=:all)
+    tag_match in (:all, :any) || throw(ArgumentError(
+        "gallery_grid tag_match must be :all or :any; got $(repr(tag_match))"))
     seen = String[]
     groups = Dict{String,Vector{GalleryItem}}()
     for it in items
@@ -22970,20 +22995,33 @@ function gallery_grid(items::AbstractVector{GalleryItem};
     end
     sections = map(seen) do sec
         title = get(section_titles, sec, sec)
+        chips = tag_filters ? _gallery_tag_chips(groups[sec], tag_match) : ()
         h.section(; data_section=sec)(
             h.h3(title),
+            chips...,
             [card_renderer(it) for it in groups[sec]]...,
         )
     end
     inner = h.div(; class="htmxo-gallery")(sections...)
-    (controls && (search || pagination)) || return inner
+    (controls && (search || pagination || tag_filters)) || return inner
     h.div(; class="htmxo-gallery-root")(
-        gallery_toolbar(; search, pagination, page_size, page_sizes,
-                          search_placeholder),
+        (search || pagination ? (html_only(gallery_toolbar(; search, pagination,
+            page_size, page_sizes, search_placeholder)),) : ())...,
         inner,
-        h.div("No items match the current filter."; class="htmxo-gallery-empty"),
+        html_only(h.div("No items match the current filter."; class="htmxo-gallery-empty")),
         h.script(Raw(gallery_controls_script())),
     )
+end
+
+# One section's tag chips: a row of toggles, one per distinct tag, right
+# under the section heading. Not `role="group"`: Pico styles that as a
+# joined button group whose children stretch. HTML only; the controller
+# reads `data-tag` / `aria-pressed` and the row's `data-tag-match`.
+function _gallery_tag_chips(items, tag_match::Symbol)
+    tags = unique(Iterators.flatten(it.tags for it in items))
+    isempty(tags) && return ()
+    (html_only(h.div(; data_role="tag-filters", data_tag_match=String(tag_match))(
+        (h.button(t; type="button", data_tag=t, aria_pressed="false") for t in tags)...)),)
 end
 
 """
@@ -23068,14 +23106,34 @@ gallery_controls_script() = """
 
         const cards    = () => Array.from(gallery.querySelectorAll(':scope > section > article, :scope > article'));
         const sections = () => Array.from(gallery.querySelectorAll(':scope > section'));
+        // Per-section tag chips (`gallery_grid(...; tag_filters=true)`).
+        const chipGroups = () => Array.from(gallery.querySelectorAll(':scope > section > [data-role="tag-filters"]'));
+        const chipsOf  = group => Array.from(group.querySelectorAll('button[data-tag]'));
         const params   = new URLSearchParams(window.location.search);
         let page = Math.max(0, (parseInt(params.get('page') || '1', 10) || 1) - 1);
 
         if (search && params.get('q'))  search.value = params.get('q');
         if (psSel  && params.get('ps')) psSel.value  = params.get('ps');
+        chipGroups().forEach(group => {
+            const wanted = (params.get('tag.' + group.parentElement.dataset.section) || '')
+                .split(',').filter(Boolean);
+            chipsOf(group).forEach(b => b.setAttribute('aria-pressed',
+                String(wanted.includes(b.dataset.tag))));
+        });
 
         const haystack = c => (c.dataset.searchText
             || (c.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim());
+        const cardTags = c => (c.dataset.tags || '').split(/\\s+/).filter(Boolean);
+        const pressed  = group => chipsOf(group)
+            .filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.dataset.tag);
+        const tagsPass = (group, tags) => {
+            const want = pressed(group);
+            if (!want.length) return true;
+            return group.dataset.tagMatch === 'any'
+                ? want.some(t => tags.includes(t))
+                : want.every(t => tags.includes(t));
+        };
+        const filtered = c => c.hasAttribute('data-search-hidden') || c.hasAttribute('data-tag-hidden');
 
         const setAttr = (el, name, on) => {
             if (on) el.setAttribute(name, ''); else el.removeAttribute(name);
@@ -23098,11 +23156,25 @@ gallery_controls_script() = """
                     || (re && re.test(hay))
                     || (lit && hay.includes(lit));
                 setAttr(c, 'data-search-hidden', !show);
+                setAttr(c, 'data-tag-hidden', false);
+            });
+            chipGroups().forEach(group => {
+                const own = Array.from(group.parentElement.querySelectorAll(':scope > article'));
+                own.forEach(c => setAttr(c, 'data-tag-hidden', !tagsPass(group, cardTags(c))));
+                // A chip is offered while pressing it could still show a
+                // card that passes the search: under `all` among the cards
+                // the pressed chips leave, under `any` among all of them.
+                const pool = own.filter(c => !c.hasAttribute('data-search-hidden')
+                    && (group.dataset.tagMatch === 'any' || !c.hasAttribute('data-tag-hidden')));
+                chipsOf(group).forEach(b => {
+                    b.disabled = b.getAttribute('aria-pressed') !== 'true'
+                        && !pool.some(c => cardTags(c).includes(b.dataset.tag));
+                });
             });
         };
 
         const applyPagination = () => {
-            const visible = cards().filter(c => !c.hasAttribute('data-search-hidden'));
+            const visible = cards().filter(c => !filtered(c));
             const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
             const total = visible.length;
             const pages = ps > 0 ? Math.max(1, Math.ceil(total / ps)) : 1;
@@ -23112,10 +23184,10 @@ gallery_controls_script() = """
                 const inPage = ps <= 0 || (i >= page * ps && i < (page + 1) * ps);
                 setAttr(c, 'data-page-hidden', !inPage);
             });
-            // Search-hidden cards must not also carry data-page-hidden —
-            // when search clears, those cards re-become candidates and
-            // pagination needs to re-decide their fate.
-            cards().filter(c => c.hasAttribute('data-search-hidden'))
+            // Filtered cards must not also carry data-page-hidden — when
+            // the search or a chip clears, those cards re-become candidates
+            // and pagination needs to re-decide their fate.
+            cards().filter(filtered)
                    .forEach(c => c.removeAttribute('data-page-hidden'));
             if (pageInfo) pageInfo.textContent =
                 'Page ' + (page + 1) + ' / ' + pages + ' \\u2022 ' + total
@@ -23128,8 +23200,7 @@ gallery_controls_script() = """
         const applySectionVisibility = () => sections().forEach(sec => {
             const allCards = sec.querySelectorAll(':scope > article');
             const anyVisible = Array.from(allCards).some(c =>
-                !c.hasAttribute('data-search-hidden')
-                && !c.hasAttribute('data-page-hidden'));
+                !filtered(c) && !c.hasAttribute('data-page-hidden'));
             setAttr(sec, 'data-empty', !anyVisible);
         });
 
@@ -23146,6 +23217,12 @@ gallery_controls_script() = """
             if (q) url.searchParams.set('q', q); else url.searchParams.delete('q');
             if (page > 0) url.searchParams.set('page', String(page + 1));
             else          url.searchParams.delete('page');
+            chipGroups().forEach(group => {
+                const key = 'tag.' + group.parentElement.dataset.section;
+                const on = pressed(group);
+                if (on.length) url.searchParams.set(key, on.join(','));
+                else           url.searchParams.delete(key);
+            });
             history.replaceState(null, '', url);
         };
 
@@ -23153,11 +23230,15 @@ gallery_controls_script() = """
         if (psSel)   psSel.addEventListener('change',  () => { page = 0; refresh(); syncUrl(); });
         if (prevBtn) prevBtn.addEventListener('click', () => { page--;   refresh(); syncUrl(); });
         if (nextBtn) nextBtn.addEventListener('click', () => { page++;   refresh(); syncUrl(); });
+        chipGroups().forEach(group => chipsOf(group).forEach(b => b.addEventListener('click', () => {
+            b.setAttribute('aria-pressed', String(b.getAttribute('aria-pressed') !== 'true'));
+            page = 0; refresh(); syncUrl();
+        })));
 
         // Hash navigation: clicking a card title's `#id` anchor must
         // reveal the card even if it was filtered or paginated out.
-        // Reset search, recompute filters, jump to the page that
-        // contains the card, and scroll it into view.
+        // Reset search and the card's section chips, recompute filters,
+        // jump to the page that contains the card, and scroll it into view.
         const jumpToHash = () => {
             const id = decodeURIComponent((window.location.hash || '').slice(1));
             if (!id) return;
@@ -23165,8 +23246,11 @@ gallery_controls_script() = """
             const card = gallery.querySelector(sel);
             if (!card) return;
             if (search && search.value) search.value = '';
+            const group = card.parentElement.querySelector(':scope > [data-role="tag-filters"]');
+            if (group && !tagsPass(group, cardTags(card)))
+                chipsOf(group).forEach(b => b.setAttribute('aria-pressed', 'false'));
             applyFilter();
-            const visible = cards().filter(c => !c.hasAttribute('data-search-hidden'));
+            const visible = cards().filter(c => !filtered(c));
             const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
             const idx = visible.indexOf(card);
             if (idx >= 0 && ps > 0) page = Math.floor(idx / ps);
