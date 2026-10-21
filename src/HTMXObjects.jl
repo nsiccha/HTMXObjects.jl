@@ -7434,7 +7434,8 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 #     so logs / health checks / load balancers see errors as errors,
 #     except missing/invalid submitted parameters, which map to 400.
 # If the user's `__error__` hook returns an `HTTP.Response` directly, their
-# status choice is respected — not rewritten.
+# status choice is respected — not rewritten. A `MIMEResponse` from the hook is
+# sent as it is but with this status (`_hook_response`).
 # Unwrap ONCE here (a route-body throw arrives wrapped in a
 # `PropertyComputationError`), then dispatch on the real error. Method dispatch
 # rather than a growing `isa` chain so a new error type can carry its own status
@@ -7457,8 +7458,23 @@ _records_error(err) = !(400 <= _error_status_code(err) < 500)
 _maybe_record_error(err, bt, req) =
     _records_error(err) ? _record_error(err, bt, req) : (nothing, nothing)
 
-_passthrough_response(r::HTTP.Response) = r
-_passthrough_response(_) = nothing
+# A hook that returns a finished response answers the request as it is: no
+# `wrap`, no Markdown projection, no `__page__` shell, so a JSON API's error
+# stays JSON. An `HTTP.Response` chose its own status and keeps it. Any other
+# finalized value (`MIMEResponse`, or a type with its own `_finalized_response`
+# method) carries only a body and its type, so it gets the status the error
+# would have had.
+_hook_response(req, r::HTTP.Response, err) = r
+function _hook_response(req, val, err)
+    finalized = _finalized_response(val)
+    isnothing(finalized) ? nothing : _error_answer_status(req, finalized, err)
+end
+
+# Always 200 for HTMX, so vanilla htmx still swaps the answer in, except that an
+# operation poll's error ends the poll (286). Any other request gets the
+# error's own status.
+_error_answer_status(req, resp::HTTP.Response, err) =
+    is_htmx(req) ? _stamp_poll_end(req, resp, false) : _with_error_status(req, resp, err)
 
 # Expose the recorded error-log uid to the client as a response header so the
 # overlay bar's traffic-observer (D3) can attach it to a bug report without
@@ -7478,20 +7494,19 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     uid, path = _maybe_record_error(err, bt, req)
     _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
-    direct = _passthrough_response(err_val)
+    direct = _hook_response(req, err_val, err)
     isnothing(direct) || return _stamp_error_id(direct, uid)
     err_val = wrap(err_val)
     if wants_markdown(req)
         return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val)), err), uid)
     end
-    # Always 200 for HTMX, except that an operation poll's error ends the poll.
-    is_htmx(req) &&
-        return _stamp_error_id(_stamp_poll_end(req, to_response(err_val), false), uid)
-    for obj in reverse(page_chain)
-        wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
+    if !is_htmx(req)
+        for obj in reverse(page_chain)
+            wrapper = _page_wrapper(obj)
+            isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
+        end
     end
-    _stamp_error_id(_with_error_status(req, to_response(err_val), err), uid)
+    _stamp_error_id(_error_answer_status(req, to_response(err_val), err), uid)
 end
 
 """
