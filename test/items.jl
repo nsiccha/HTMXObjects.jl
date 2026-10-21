@@ -8097,6 +8097,53 @@ end
     @test repr("text/plain", SemanticPlot("LAYER")) == "LAYER"
 end
 
+@testitem "a declined computation's marker word follows texts=semantic_texts(locale)" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    formats = ("text/html", "application/vnd.hyperview+xml", "text/markdown", "text/plain")
+
+    # The default is English, byte-identical to the element before `texts=`.
+    declined = SemanticUnavailable("no draws at this level")
+    @test repr("text/html", declined) == "<p class=\"htmxo-semantic-unavailable\">" *
+        "<strong>∅ unavailable</strong><small> — no draws at this level</small></p>"
+    @test repr("application/vnd.hyperview+xml", declined) ==
+        "<text style=\"p htmxo-semantic-unavailable\"><text style=\"strong\">∅ unavailable</text>" *
+        "<text style=\"small\"> — no draws at this level</text></text>"
+    @test all(repr(m, declined) == repr(m, SemanticUnavailable(
+        "no draws at this level"; texts=semantic_texts(:en))) for m in formats)
+    @test semantic_texts() == semantic_texts(:en) == SemanticTexts("unavailable")
+
+    # A German page states the refusal in German in every peer format; the
+    # framework-owned class keeps its name, it is a styling hook, not text.
+    reason = "Die Auswertung war beim Export noch nicht berechnet."
+    de = SemanticUnavailable(reason; texts=semantic_texts(:de))
+    @test repr("text/markdown", de) == "∅ **nicht verfügbar** — $reason"
+    @test repr("text/plain", de) == "[nicht verfügbar] $reason"
+    @test repr("text/html", de) == "<p class=\"htmxo-semantic-unavailable\">" *
+        "<strong>∅ nicht verfügbar</strong><small> — $reason</small></p>"
+    @test contains(repr("application/vnd.hyperview+xml", de), "∅ nicht verfügbar")
+    @test !any(contains(repr(m, de), "∅ unavailable") ||
+               contains(repr(m, de), "**unavailable**") ||
+               contains(repr(m, de), "[unavailable]") for m in formats)
+    @test repr("text/markdown", SemanticUnavailable(""; texts=semantic_texts(:de))) ==
+        "∅ **nicht verfügbar**"
+    @test repr("text/plain", SemanticUnavailable(""; texts=semantic_texts(:de))) ==
+        "[nicht verfügbar]"
+    # Still not a prose run of the same string: the marker carries the meaning.
+    @test repr("text/markdown", de) != repr("text/markdown", SemanticProse(reason))
+
+    # An app's own word replaces the built-in one.
+    own = SemanticUnavailable(reason; texts=semantic_texts(:de; unavailable="entfällt"))
+    @test repr("text/markdown", own) == "∅ **entfällt** — $reason"
+    @test contains(repr("text/html", own), "<strong>∅ entfällt</strong>")
+
+    # Unknown locales and text names, and placeholders, fail loudly.
+    @test_throws ArgumentError semantic_texts(:fr)
+    @test_throws ArgumentError semantic_texts(:de; unavalable="x")
+    @test_throws ArgumentError semantic_texts(:de; unavailable="{reason} fehlt")
+    # refused: a table's texts hold no marker word for the vocabulary — each
+    # texts struct belongs to the words its own renderer writes.
+    @test_throws TypeError SemanticUnavailable(reason; texts=table_texts(:de))
+end
+
 @testitem "SemanticTable is gated by Tables.istable, never duck-typed" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     table = SemanticTable((x=[1, 2], y=["a", "b"]))
     @test contains(repr("text/markdown", table), "| x | y |")
