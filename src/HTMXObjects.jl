@@ -14,7 +14,7 @@ export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfile
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
-    static_export
+    static_export, static_url
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -4575,7 +4575,9 @@ alone, so concurrent ordinary requests are unaffected.
 
 - `url_map` — `nothing`, or a function from an address (the full attribute
   value, query included: `"/report/figure?doc=a&name=b"`) to a static target
-  `String` or `nothing`. It is consulted for every `hx-get`, `href`, and `src`.
+  `String` or `nothing`. It is consulted for every `hx-get`, `href`, and `src`,
+  and for every address a route body passes to [`static_url`](@ref) (one
+  inside a script or a JSON payload, which the walk cannot see).
   A `String` replaces the attribute verbatim — relative targets such as
   `"embeds/fig-a.html"` are emitted as given — and the element stays live.
   `nothing` falls back to the default rules below. Any other return value
@@ -4787,6 +4789,42 @@ end
 _rewrite_hx_url(url::AbstractString, record_base::AbstractString) =
     _rewrite_static_url(url, isempty(record_base) ? "" : (rstrip(record_base, '/') * "/hx"))
 
+# What an `href`/`src` address becomes under `spec`: the `url_map` target, or
+# the default rule. `static_url` applies the same rule to addresses the walk
+# cannot see.
+function _static_url(spec::StaticExport, url)
+    target = _static_url_target(spec, url)
+    isnothing(target) ? _rewrite_static_url(url, spec.record_base) : target
+end
+
+"""
+    static_url(req::HTTP.Request, address::AbstractString) -> String
+
+The address a response should embed for `address` where a static export
+cannot rewrite it: inside a JSON payload, an inline script, or a Vega spec's
+`data.url` (an AlgebraOfVega `geoshape(url)` or `data(url)`). A static export
+rewrites only the `hx-get`, `href` and `src` attributes it walks.
+
+For a `dispatch(...; static=spec)` request this is what an `href` or `src`
+with that value becomes: the target `spec.url_map(address)` returns, or else
+the default rule (`record_base` before a rooted address). The `url_map` is
+called with `address`, so an exporter that follows every address its
+`url_map` sees exports this one too. Every other request gets `address`
+unchanged, so the same route body serves live pages and exports:
+
+```julia
+@direct @get raster() = MIMEResponse("application/geo+json", read(path, String))
+@get map() = data(cells) * mapping(:gid; color=:value) *
+             geoshape(static_url(__req__, __self__ / "raster"))
+```
+
+A `record!` recording saves the same value it serves live, so there the
+address stays as given.
+"""
+static_url(req::HTTP.Request, address::AbstractString) =
+    _static_url(static_export(req), address)
+_static_url(::Nothing, address::AbstractString) = String(address)
+
 function _static_walk(node::Node, rules::_StaticRules)
     spec = rules.spec
     # A linked page-runtime block goes back inline, so an exported page needs
@@ -4830,10 +4868,7 @@ function _static_walk(node::Node, rules::_StaticRules)
     # A mapped address takes the caller's target instead.
     for sym in (:href, :src)
         haskey(new_attrs, sym) || continue
-        url = new_attrs[sym]
-        target = _static_url_target(spec, url)
-        new_attrs[sym] = isnothing(target) ?
-            _rewrite_static_url(url, spec.record_base) : target
+        new_attrs[sym] = _static_url(spec, new_attrs[sym])
     end
 
     if unservable
