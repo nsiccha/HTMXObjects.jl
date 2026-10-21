@@ -22992,6 +22992,16 @@ chip narrows, and a chip that would leave no card is disabled; with
 box (a card must pass both), and a section with no card left is hidden,
 as with search. A section without tags gets no chips.
 
+Each section carries `id` = its section key (`<section id="2-software"
+data-section="2-software">`), as each card carries its card id, so a page's
+nav links reach it with `href="#2-software"`. A section key equal to a card
+id would put one id on two elements and throws an `ArgumentError`. With the
+controls, a link to a section none of whose cards shows reveals it: the
+search is cleared only if it hides all of the section's cards, the section's
+chips are released only if they then still do, and the page turns to its
+first card. A link to a card reveals the card. Both also apply when a page
+opens at the link, and a target scrolls to just below the sticky toolbar.
+
 A custom `card_renderer` builds its card with [`gallery_card`](@ref):
 the controller only sees `<article>` children of a section, and reads
 the `id`, `data-tags` and `data-search-text` that `gallery_card` sets.
@@ -23044,10 +23054,17 @@ function gallery_grid(items::AbstractVector{GalleryItem};
         end
         push!(groups[it.section], it)
     end
+    # A section's `id` is its key, as a card's is its card id; one id on two
+    # elements would send a `#id` link to whichever comes first.
+    clash = findfirst(it -> haskey(groups, it.id), items)
+    isnothing(clash) || throw(ArgumentError(
+        "gallery_grid: the section \"$(items[clash].id)\" and the card " *
+        "$(repr(items[clash].path)) would share the id \"$(items[clash].id)\"; " *
+        "rename the section or give the card an `# id:` header"))
     sections = map(seen) do sec
         title = get(section_titles, sec, sec)
         chips = tag_filters ? _gallery_tag_chips(groups[sec], tag_match) : ()
-        h.section(; data_section=sec)(
+        h.section(; id=sec, data_section=sec)(
             h.h3(title),
             chips...,
             [card_renderer(it) for it in groups[sec]]...,
@@ -23286,31 +23303,67 @@ gallery_controls_script() = """
             page = 0; refresh(); syncUrl();
         })));
 
+        // A link scrolls its target to the top of the window, under the sticky
+        // toolbar. `--htmxo-gallery-toolbar-h` (the sheet's
+        // `scroll-margin-top` on sections and cards) is the toolbar's height
+        // plus the gap it keeps above the first section.
+        const toolbar = root.querySelector('.htmxo-gallery-toolbar');
+        const setToolbarHeight = () => root.style.setProperty('--htmxo-gallery-toolbar-h',
+            (toolbar ? toolbar.offsetHeight + (parseFloat(getComputedStyle(toolbar).marginBottom) || 0) : 0) + 'px');
+        setToolbarHeight();
+        if (toolbar && window.ResizeObserver) new ResizeObserver(setToolbarHeight).observe(toolbar);
+
+        const chipGroupOf = sec => sec.querySelector(':scope > [data-role="tag-filters"]');
+        const release = group => chipsOf(group).forEach(b => b.setAttribute('aria-pressed', 'false'));
+        // Turn to the page holding `card`, one the filters leave.
+        const turnTo = card => {
+            const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
+            const idx = cards().filter(c => !filtered(c)).indexOf(card);
+            if (idx >= 0 && ps > 0) page = Math.floor(idx / ps);
+        };
         // Hash navigation: clicking a card title's `#id` anchor must
         // reveal the card even if it was filtered or paginated out.
         // Reset search and the card's section chips, recompute filters,
-        // jump to the page that contains the card, and scroll it into view.
+        // and jump to the page that contains the card.
+        const revealCard = card => {
+            if (search && search.value) search.value = '';
+            const group = chipGroupOf(card.parentElement);
+            if (group && !tagsPass(group, cardTags(card))) release(group);
+            applyFilter();
+            turnTo(card);
+        };
+        // A link to a section's `#key` reveals it only when none of its
+        // cards shows: it clears the search only if that hides all of them,
+        // then releases the section's chips only if they still do, and turns
+        // to the page of its first card. Returns whether anything changed.
+        const revealSection = sec => {
+            const own = Array.from(sec.querySelectorAll(':scope > article'));
+            if (own.some(c => !filtered(c) && !c.hasAttribute('data-page-hidden'))) return false;
+            if (search && search.value && own.every(c => c.hasAttribute('data-search-hidden'))) {
+                search.value = ''; applyFilter();
+            }
+            const group = chipGroupOf(sec);
+            if (group && own.every(c => filtered(c))) { release(group); applyFilter(); }
+            const first = own.find(c => !filtered(c));
+            if (first) turnTo(first);
+            return true;
+        };
         const jumpToHash = () => {
             const id = decodeURIComponent((window.location.hash || '').slice(1));
             if (!id) return;
             const sel = 'article[data-id="' + CSS.escape(id) + '"], #' + CSS.escape(id);
-            const card = gallery.querySelector(sel);
-            if (!card) return;
-            if (search && search.value) search.value = '';
-            const group = card.parentElement.querySelector(':scope > [data-role="tag-filters"]');
-            if (group && !tagsPass(group, cardTags(card)))
-                chipsOf(group).forEach(b => b.setAttribute('aria-pressed', 'false'));
-            applyFilter();
-            const visible = cards().filter(c => !filtered(c));
-            const ps = psSel ? (parseInt(psSel.value, 10) || 0) : 0;
-            const idx = visible.indexOf(card);
-            if (idx >= 0 && ps > 0) page = Math.floor(idx / ps);
-            applyPagination(); applySectionVisibility(); syncUrl();
-            card.scrollIntoView({ block: 'start' });
+            const target = gallery.querySelector(sel);
+            if (!target) return;
+            const changed = sections().includes(target) ? revealSection(target)
+                : (revealCard(target.closest('article') || target), true);
+            if (changed) { applyPagination(); applySectionVisibility(); syncUrl(); }
+            target.scrollIntoView({ block: 'start' });
         };
         window.addEventListener('hashchange', jumpToHash);
 
         refresh();
+        // A page opened at a section's or a card's `#id` shows it as well.
+        jumpToHash();
     };
     document.querySelectorAll('.htmxo-gallery-root').forEach(initRoot);
 })();

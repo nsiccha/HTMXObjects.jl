@@ -209,6 +209,126 @@ end
     end
 end
 
+@testitem "gallery sections carry their key as id" setup=[GalleryFixture] tags=[:unit] begin
+    using HTMXObjects
+    g = fixture_gallery()
+    html(x) = repr("text/html", x)
+    for page in (html(gallery_grid(g.items; section_titles=g.section_titles)),
+                 html(gallery_grid(g.items; controls=false)))
+        @test occursin("<section id=\"odl\" data-section=\"odl\"><h3>", page)
+        @test count("<section id=", page) == 3
+    end
+    # refused: a section key equal to a card id puts one id on two elements,
+    # so a `#id` link reaches only the first of them (decision 1ap95jg).
+    dir = mktempdir()
+    mkpath(joinpath(dir, "odl")); write(joinpath(dir, "odl", "pkgs.jl"), "1\n")
+    mkpath(joinpath(dir, "pkgs")); write(joinpath(dir, "pkgs", "e.jl"), "2\n")
+    err = try gallery_grid(Gallery(dir).items); nothing catch e; e end
+    @test err isa ArgumentError && occursin("the section \"pkgs\" and the card", err.msg)
+    # The card's `# id:` header resolves it.
+    write(joinpath(dir, "odl", "pkgs.jl"), "# id: pkgs-card\n\n1\n")
+    @test occursin("<section id=\"pkgs\" data-section=\"pkgs\">", html(gallery_grid(Gallery(dir).items)))
+end
+
+@testitem "a link to a gallery section reveals it below the toolbar" setup=[GalleryFixture, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        g = fixture_gallery()
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const finish = () => {
+                const result = document.createElement('pre'); result.id = 'checks';
+                result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+                document.body.appendChild(result);
+            };
+            const section = s => document.getElementById(s);
+            const shown = s => Array.from(section(s).querySelectorAll(':scope > article'))
+                .filter(c => c.offsetParent !== null).map(c => c.dataset.id).join(',');
+            const visible = s => section(s).offsetParent !== null;
+            const search = document.querySelector('.htmxo-gallery-toolbar input[type="search"]');
+            const type = v => { search.value = v; search.dispatchEvent(new Event('input', {bubbles: true})); };
+            const psSel = document.querySelector('[data-role="page-size"]');
+            const info = () => document.querySelector('[data-role="page-info"]').textContent;
+            const chip = (s, t) => section(s).querySelector('[data-tag="' + t + '"]');
+            // Just below the toolbar: not under it, and within its 1rem gap.
+            const belowToolbar = s => {
+                const d = section(s).getBoundingClientRect().top
+                    - document.querySelector('.htmxo-gallery-toolbar').getBoundingClientRect().bottom;
+                return d >= -0.5 && d <= 17;
+            };
+            const go = id => new Promise(resolve => {
+                window.addEventListener('hashchange', () => setTimeout(resolve, 0), {once: true});
+                location.hash = id;
+            });
+            if (location.hash === '#pkgs') {
+                // Opened at the link: its cards are on page 3 of 4.
+                check('load-reveals', info().startsWith('Page 3') && shown('pkgs') === 'e,f' && !visible('odl'));
+                check('load-below-toolbar', belowToolbar('pkgs'));
+                return finish();
+            }
+            check('ids', section('odl').dataset.section === 'odl' && section('zplain').tagName === 'SECTION');
+            check('initial', info().startsWith('Page 1') && shown('odl') === 'a,b' && !visible('pkgs'));
+            await go('pkgs');
+            check('page-turns', info().startsWith('Page 3') && shown('pkgs') === 'e,f' && !visible('odl'));
+            check('page-in-url', new URLSearchParams(location.search).get('page') === '3');
+            psSel.value = '0'; psSel.dispatchEvent(new Event('change', {bubbles: true}));
+            type('julia');
+            await go('odl');
+            check('search-cleared', search.value === '' && shown('odl') === 'a,b,c,d');
+            type('web');
+            await go('pkgs');
+            check('shown-keeps-search', search.value === 'web' && shown('pkgs') === 'f');
+            type('');
+            chip('odl', 'web').click();
+            type('alpha');
+            check('chips-and-search-hide', !visible('odl'));
+            await go('odl');
+            check('chips-released', search.value === 'alpha' && shown('odl') === 'a'
+                && chip('odl', 'web').getAttribute('aria-pressed') === 'false');
+            type('');
+            await go('zplain');
+            check('below-toolbar', window.scrollY > 0 && belowToolbar('zplain'));
+            finish();
+        });
+        """))
+        # Two cards a page, and room below the gallery to scroll its last
+        # section to the top of the window.
+        page = htmx(gallery_grid(g.items; section_titles=g.section_titles, tag_filters=true,
+                                 page_size=2, page_sizes=(2, 0)),
+                    h.div(; style="height: 2000px"), driver; pico_version=nothing,
+                    hyperscript_version=nothing, feedback=false, compose=false, overlay=false)
+        body = repr("text/html", page)
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            HTTP.URI(req.target).path == "/" ?
+                HTTP.Response(200, ["Content-Type" => "text/html"], body) : HTTP.Response(404)
+        end
+        try
+            for (fragment, n) in (("", 9), ("#pkgs", 2))
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1000,600 --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/$fragment`)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                if !isnothing(checks)
+                    for line in split(checks[1], '\n')
+                        @test endswith(line, ":true")
+                    end
+                    @test count(==('\n'), checks[1]) + 1 == n
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "a gallery carries its own stylesheet" setup=[GalleryFixture] tags=[:unit] begin
     using HTMXObjects
     g = fixture_gallery()

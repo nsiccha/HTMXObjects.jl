@@ -12,7 +12,7 @@
  *     [optional toolbar]
  *     <div class="htmxo-gallery">
  *       [this stylesheet, from gallery_grid]
- *       <section data-section="...">
+ *       <section id="<section key>" data-section="<section key>">
  *         <h3>Section title</h3>
  *         [optional <div data-role="tag-filters"><button data-tag aria-pressed>tag</button>…</div>]
  *         <article>
@@ -241,4 +241,11 @@
 .htmxo-gallery article[data-page-hidden],
 .htmxo-gallery section[data-empty] {
     display: none;
+}
+
+/* A `#id` link scrolls its section or card to just below the sticky
+ * toolbar; the gallery controller measures the toolbar into the variable. */
+.htmxo-gallery > section,
+.htmxo-gallery article {
+    scroll-margin-top: var(--htmxo-gallery-toolbar-h, 0px);
 }
