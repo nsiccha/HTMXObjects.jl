@@ -133,6 +133,25 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 
 Fragments are not documents and never carry a doctype.
 
+### Text size and page width under Pico {#pico-page-size}
+
+Pico ties the text size and the page width to the window: it raises the root
+font size from 16 px to 20 px at 1280 px and 21 px from 1536 px, and caps
+`.container` at 1200 px (1450 px from 1536 px). A shell with `pico_version`
+set (and `pico_page`) undoes both through [`pico_bridge`](@ref): text stays at
+the browser's 16 px at every width, and from a 1280 px window `.container`
+fills the window up to 1600 px with a 2rem margin on each side. Below 1280 px
+Pico's own widths apply. An app tunes either in a stylesheet after the shell's,
+such as one in `extra_head`:
+
+```css
+:root {
+    --pico-font-size: 112.5%;            /* another text size */
+    --htmxo-container-max-width: 1800px; /* the widest the container gets */
+    --htmxo-container-gutter: 1rem;      /* the margin on each side */
+}
+```
+
 ### Success toasts {#success-toasts}
 
 The shell confirms a completed action with one short toast whose text the
@@ -2216,7 +2235,7 @@ HTMXObjects ships its own CSS variables and matches the host environment (raw Pi
 | Export | Purpose |
 |--------|---------|
 | `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
-| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color |
+| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }` |
 | `vitepress_bridge()`      | Map `--htmxo-*` (including `--htmxo-bg`) onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
 | `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight) |
 | `escape_html(s)`          | HTML-escape (`HTMX.escape`, 5 chars) — for hand-built HTML strings only; `h.*` escapes text + attrs itself, use `Raw` for trusted markup |

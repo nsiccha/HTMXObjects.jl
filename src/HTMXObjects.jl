@@ -20749,11 +20749,29 @@ htmxo_theme() = h.style(Raw("""
 """
     pico_bridge()
 
-`<style>` block remapping `--htmxo-*` to Pico CSS's color tokens. Include
-once at the page level when an HTMXO app uses Pico CSS, so HTMXO components
-pick up the host's page background, accent, muted and status colors. Borders
-keep the text color. Loaded automatically by
-[`htmx`](@ref) when `pico_version` is non-`nothing`.
+`<style>` block adapting a Pico CSS page to HTMXO. Include once at the page
+level, after Pico's stylesheet, when an HTMXO app uses Pico CSS. Loaded
+automatically by [`htmx`](@ref) (and so [`pico_page`](@ref)) when
+`pico_version` is non-`nothing`.
+
+It remaps `--htmxo-*` to Pico's color tokens, so HTMXO components pick up the
+host's page background, accent, muted and status colors. Borders keep the
+text color.
+
+It also sets the page's text size and width, which Pico ties to the window:
+
+- Text stays at the browser's default size (16 px) at every window width.
+  Pico raises its root font size with the window, to 20 px from 1280 px and
+  21 px from 1536 px.
+- From a 1280 px window, `.container` fills the window up to 1600 px, with a
+  2rem margin on each side. Pico caps it at 1200 px, and at 1450 px from
+  1536 px.
+
+The rules are unlayered and plain `:root` / `.container` selectors, so a
+later stylesheet (for example in `extra_head`) overrides them:
+`:root { --pico-font-size: 112.5%; }` picks another text size, and
+`:root { --htmxo-container-max-width: 1800px; --htmxo-container-gutter: 1rem; }`
+tunes the width.
 """
 pico_bridge() = h.style(Raw("""
 :root {
@@ -20767,6 +20785,17 @@ pico_bridge() = h.style(Raw("""
        (`--pico-muted-border-color`) is too faint for the 2px tab frames. */
     --htmxo-border:  currentColor;
     --htmxo-muted:   var(--pico-muted-color, color-mix(in srgb, currentColor 60%, transparent));
+    /* Pico raises this in steps from 576 px up to 131.25% from 1536 px. Its
+       media-query rules have the same specificity as this one and come
+       earlier in the page, so this value holds at every width. */
+    --pico-font-size: 100%;
+}
+/* Pico caps `.container` at 1200 px from 1280 px and 1450 px from 1536 px. */
+@media (min-width: 1280px) {
+    .container {
+        max-width: min(var(--htmxo-container-max-width, 1600px),
+                       calc(100% - 2 * var(--htmxo-container-gutter, 2rem)));
+    }
 }
 """))
 
