@@ -59,6 +59,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `static_transform(...)` | Convert dynamic responses to static-friendly form (`static_transform(val; record_base)` for recording, `static_transform(val, spec::StaticExport)` for a request-scoped export) |
 | `StaticExport(; url_map, controls, record_base, runtime)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
+| `static_url(req, address)` | The address to embed where the static walk cannot rewrite it (a script, a JSON payload, a Vega spec's `data.url`): what an `src` with that value becomes under a static `dispatch`, `address` unchanged otherwise — see [Request-scoped static export](#request-scoped-static-export) |
 | `hx_response(...)` | Build a response with HTMX-specific response headers (HX-Trigger, HX-Redirect, HX-Push-Url, HX-Refresh, HX-Reswap, HX-Retarget, HX-Reselect, HX-Location), and the page shell's success toast (`toast=`, see [Success toasts](#success-toasts)) |
 | `redirect_to(req, location; status=303, query=true)` | Redirect a moved or aliased route to its canonical URL, for direct loads and htmx requests alike — see [Moved routes](#moved-routes) |
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
@@ -2844,7 +2845,7 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
 
 | `StaticExport` keyword | Meaning |
 |------------------------|---------|
-| `url_map` | `nothing`, or `address -> target`. Called with the full value of every `hx-get`, `href`, and `src` (query included). A `String` replaces the attribute verbatim — relative targets such as `"embeds/qoi.html"` are emitted as given — and the element stays live; `nothing` takes the default rules; anything else throws. |
+| `url_map` | `nothing`, or `address -> target`. Called with the full value of every `hx-get`, `href`, and `src` (query included), and with every address a route body passes to `static_url`. A `String` replaces the attribute verbatim — relative targets such as `"embeds/qoi.html"` are emitted as given — and the element stays live; `nothing` takes the default rules; anything else throws. |
 | `controls` | `:disable` (default) strips `hx-post`/`hx-put`/`hx-patch`/`hx-delete` and unmapped query-string `hx-get`s and greys the element out, as recording does. `:remove` drops those elements with their subtree, so the output carries no non-GET attribute and no greyed element. |
 | `record_base` | Prefix the default rules prepend to rooted addresses an unmapped attribute keeps (`hx-get` under `<record_base>/hx`). Empty by default: unchanged. |
 | `runtime` | `:inline` (default) puts a `runtime=:linked` page's runtime back inline, so each file stands alone. `:linked` keeps the links, rewritten by `url_map`/`record_base` like any `src`/`href`, for a bundle that carries the runtime once: `copy_vendorfiles(dir)` writes it next to the libraries, so the page's `assets` prefix addresses both. |
@@ -2859,6 +2860,23 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
   # __page__(content) = htmx(content; assets="../assets/vendor", runtime=:linked, …)
   ```
 
+- **Addresses inside scripts and payloads.** The walk rewrites only `hx-get`,
+  `href` and `src` attributes. An address a route body puts anywhere else —
+  a JSON payload, an inline script, a Vega spec's `data.url` such as
+  AlgebraOfVega's `geoshape(url)` — goes through `static_url(__req__,
+  address)`, which returns what an `src` with that value becomes (the
+  `url_map` target, else the default rule) under a static dispatch and
+  `address` unchanged on every other request. `url_map` is called with it, so
+  an exporter that follows every mapped address writes that one too:
+
+  ```julia
+  @direct @get raster() = MIMEResponse("application/geo+json", read(path, String))
+  @get map() = data(cells) * mapping(:gid; color=:value) *
+               geoshape(static_url(__req__, __self__ / "raster"))
+  ```
+
+  A `record!` recording saves the value it serves live, so there the address
+  stays as given.
 - **Fragments vs pages.** Send `"HX-Request" => "true"` for the bare fragment;
   without it the response is the full page (or the levels of the `__page__`
   chain the request owes), transformed as a whole.

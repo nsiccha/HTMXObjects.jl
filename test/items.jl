@@ -2015,6 +2015,15 @@ release_static_gate!() = notify(static_gate[])
     @get sxraw() = HTTP.Response(200, "raw")
     @get sxmime() = MIMEResponse("application/json", "{}")
     @post sxrun() = h.p("ran")
+    # A plot-like embed: the geometry address sits in a script's JSON payload,
+    # where the static walk cannot see it, beside the same address as a `src`.
+    @get sxmap() = h.div(
+        h.div(; id="sx-map"),
+        h.script(Raw("embed('sx-map', {\"data\":{\"url\":\"" *
+                     static_url(__req__, __self__/"sxraster") * "\"}});")),
+        h.img(; src=__self__/"sxraster"))
+    @direct @get sxraster() = MIMEResponse("application/geo+json",
+                                           "{\"type\":\"FeatureCollection\",\"features\":[]}")
 end
 
 # `live_thread` fixture: messages 1..n keyed by index, the newest `final_lag`
@@ -11463,6 +11472,41 @@ end
     @test_throws StaticExportRefused dispatch(:GET, "/sxmime"; static=spec)
     @test String(dispatch(:GET, "/sxraw").body) == "raw"
     @test_throws ArgumentError dispatch(:GET, "/sxfig"; static=:yes)
+end
+
+@testitem "static_url maps an address inside a payload like an src" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    route!(StaticExportApp())
+    hx = ["HX-Request" => "true"]
+    seen = String[]
+    raster(url) = (push!(seen, url); url == "/sxraster" ? "data/raster.geojson" : nothing)
+
+    # The address inside the script takes the `url_map` target, exactly as the
+    # `src` beside it does, and the map saw it, so an exporter that follows
+    # every mapped address writes the geometry too.
+    exported = String(dispatch(:GET, "/sxmap"; headers=hx,
+                               static=StaticExport(; url_map=raster, controls=:remove)).body)
+    @test contains(exported, "{\"data\":{\"url\":\"data/raster.geojson\"}}")
+    @test contains(exported, "src=\"data/raster.geojson\"")
+    @test !contains(exported, "/sxraster")
+    @test count(==("/sxraster"), seen) == 2
+    @test String(dispatch(:GET, "/sxraster").body) == "{\"type\":\"FeatureCollection\",\"features\":[]}"
+
+    # An unmapped address takes the default rule, as an `src` does.
+    based = String(dispatch(:GET, "/sxmap"; headers=hx,
+                            static=StaticExport(; record_base="/site")).body)
+    @test contains(based, "{\"data\":{\"url\":\"/site/sxraster\"}}")
+    @test contains(based, "src=\"/site/sxraster\"")
+
+    # Every other request keeps the live address.
+    live = String(dispatch(:GET, "/sxmap"; headers=hx).body)
+    @test contains(live, "{\"data\":{\"url\":\"/sxraster\"}}")
+    @test static_url(HTTP.Request("GET", "/"), "/sxraster") == "/sxraster"
+
+    # refused: `url_map` returns a String or nothing (StaticExport docstring),
+    # here as for the attributes the walk rewrites.
+    req = HTTP.Request("GET", "/sxmap")
+    req.context[:htmxo_static_export] = StaticExport(; url_map=_ -> 42)
+    @test_throws ArgumentError static_url(req, "/sxraster")
 end
 
 @testitem "static dispatch is request-scoped under concurrent requests" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
