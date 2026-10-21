@@ -264,13 +264,15 @@ end
 # rendered viewer reproducible. Bumped deliberately, never floating.
 const _SWAGGER_UI_VERSION = "5.7.2"
 
-# Standalone viewer page. Assets load from a pinned CDN release
-# (`cdn_base` re-points air-gapped deployments at a local mirror without a
-# code change); the spec URL is emitted as a JSON string literal so
-# quoting/escaping cannot break the initializer.
+# Standalone viewer page. Assets load from a pinned CDN release of the
+# `swagger-ui-dist` npm package — the prebuilt browser bundle; the
+# `swagger-ui` module package keeps its build under `dist/` and 404s at the
+# package root (`cdn_base` re-points air-gapped deployments at a local
+# mirror without a code change); the spec URL is emitted as a JSON string
+# literal so quoting/escaping cannot break the initializer.
 function _swagger_html(; title::AbstractString, spec_url::AbstractString,
         swagger_version::AbstractString, cdn_base::AbstractString)
-    base = rstrip(String(cdn_base), '/') * "/swagger-ui@" * String(swagger_version)
+    base = rstrip(String(cdn_base), '/') * "/swagger-ui-dist@" * String(swagger_version)
     """
     <!DOCTYPE html>
     <html lang="en">
@@ -312,8 +314,10 @@ The single `GET` route (the `@get index()`) returns a standalone HTML page
 it) running a version-pinned Swagger UI release initialized against
 `spec_url`. `spec_url` is explicit because the document's mount point is the
 consumer's choice — point it at wherever the companion `OpenAPIRoutes`
-lives. `cdn_base` re-points air-gapped deployments at a local mirror of the
-pinned release.
+lives. The page loads `<cdn_base>/swagger-ui-dist@<swagger_version>/swagger-ui.css`
+and `.../swagger-ui-bundle.js` (the `swagger-ui-dist` npm package), so
+`cdn_base` re-points air-gapped deployments at a local mirror laid out the
+same way.
 """
 @htmx struct SwaggerRoutes
     title::String = "API docs"

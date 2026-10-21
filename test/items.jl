@@ -7501,9 +7501,17 @@ end
     # A standalone viewer page — no page shell wrapped around it.
     @test startswith(body, "<!DOCTYPE html>")
     @test contains(body, "<title>Widgets docs</title>")
-    @test contains(body, "swagger-ui@5.7.2/swagger-ui-bundle.js")
-    @test contains(body, "swagger-ui@5.7.2/swagger-ui.css")
+    # Assets come from the `swagger-ui-dist` browser package; the
+    # `swagger-ui` module package 404s at these paths (blank viewer).
+    @test contains(body, "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.7.2/swagger-ui-bundle.js")
+    @test contains(body, "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.7.2/swagger-ui.css")
+    @test !contains(body, "/swagger-ui@")
     @test contains(body, "SwaggerUIBundle")
+    # `cdn_base` re-points both assets at a mirror with the same layout.
+    mirrored = HTMXObjects._swagger_html(; title="t", spec_url="/openapi",
+        swagger_version="5.7.2", cdn_base="https://mirror.example/npm/")
+    @test contains(mirrored, "\"https://mirror.example/npm/swagger-ui-dist@5.7.2/swagger-ui-bundle.js\"")
+    @test contains(mirrored, "\"https://mirror.example/npm/swagger-ui-dist@5.7.2/swagger-ui.css\"")
     # Initialized against the companion document route.
     @test contains(body, "\"/openapi\"")
 
