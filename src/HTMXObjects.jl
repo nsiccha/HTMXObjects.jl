@@ -24,7 +24,7 @@ export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
-export safely, record_error, ERROR_DIR
+export safely, record_error, ERROR_DIR, CallerFault
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or
@@ -7167,6 +7167,62 @@ function Base.showerror(io::IO, e::InvalidDomainValue)
 end
 
 """
+    CallerFault(status, message)
+
+Throw from a route body when the request itself is at fault: an unknown
+resource id (`404`), an argument out of range (`400`), a refused operation
+(`403`, `409`). The answer has `status` (`200` under HTMX, so the swap still
+happens) and shows `message`: in the default article, titled with the status's
+reason phrase (`Not Found`), or through the struct's `__error__` hook, which
+reads `status` and `message` from `unwrap_error(err)`. Like a missing
+parameter it is not recorded: no error log, no `@error` line, no
+`X-HTMXO-Error-Id`, no `__on_error__`.
+
+`status` must be a 4xx. A server fault is an ordinary exception, which is
+recorded.
+
+```julia
+@get probe(kenn::String) = begin
+    haskey(PROBES, kenn) || throw(CallerFault(404, "unknown probe \$kenn"))
+    probe_view(PROBES[kenn])
+end
+```
+"""
+struct CallerFault <: Exception
+    status::Int
+    message::String
+    function CallerFault(status::Integer, message::AbstractString)
+        400 <= status <= 499 || throw(ArgumentError(string(
+            "CallerFault needs a 4xx status, got ", status,
+            "; a server fault is an ordinary exception")))
+        new(status, message)
+    end
+end
+Base.showerror(io::IO, e::CallerFault) = print(io, e.message)
+
+# Standard reason phrases (RFC 9110, plus 429). A caller fault's article is
+# titled with one; the toast runtime names a failed request's status from the
+# same table when the browser has no reason phrase (HTTP/2).
+const _REASON_PHRASES = Dict{Int,String}(
+    400 => "Bad Request", 401 => "Unauthorized", 402 => "Payment Required",
+    403 => "Forbidden", 404 => "Not Found", 405 => "Method Not Allowed",
+    406 => "Not Acceptable", 407 => "Proxy Authentication Required",
+    408 => "Request Timeout", 409 => "Conflict", 410 => "Gone",
+    411 => "Length Required", 412 => "Precondition Failed",
+    413 => "Content Too Large", 414 => "URI Too Long",
+    415 => "Unsupported Media Type", 416 => "Range Not Satisfiable",
+    417 => "Expectation Failed", 421 => "Misdirected Request",
+    422 => "Unprocessable Content", 423 => "Locked", 424 => "Failed Dependency",
+    425 => "Too Early", 426 => "Upgrade Required", 428 => "Precondition Required",
+    429 => "Too Many Requests", 431 => "Request Header Fields Too Large",
+    451 => "Unavailable For Legal Reasons",
+    500 => "Internal Server Error", 501 => "Not Implemented", 502 => "Bad Gateway",
+    503 => "Service Unavailable", 504 => "Gateway Timeout",
+)
+const _REASON_PHRASES_JS = "{" * join(("$code: '$phrase'"
+    for (code, phrase) in sort!(collect(_REASON_PHRASES))), ", ") * "}"
+
+"""
     OperationResultUnavailable(route, verb)
 
 A poll asked for the result of a mutation submission (`POST`/`PUT`/`PATCH`/
@@ -7416,6 +7472,7 @@ end
 # server-fault error page.
 _caller_fault_title(::Union{MissingRequiredParam,InvalidDomainValue}) =
     "Bad Request"
+_caller_fault_title(e::CallerFault) = get(_REASON_PHRASES, e.status, "Request refused")
 _caller_fault_title(::OperationResultUnavailable) = "Result unavailable"
 _caller_fault_title(::OperationStalled) = "Operation stalled"
 _caller_fault_title(_err) = nothing
@@ -7434,7 +7491,8 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 #     so logs / health checks / load balancers see errors as errors,
 #     except missing/invalid submitted parameters, which map to 400.
 # If the user's `__error__` hook returns an `HTTP.Response` directly, their
-# status choice is respected — not rewritten.
+# status choice is respected — not rewritten. A `MIMEResponse` from the hook is
+# sent as it is but with this status (`_hook_response`).
 # Unwrap ONCE here (a route-body throw arrives wrapped in a
 # `PropertyComputationError`), then dispatch on the real error. Method dispatch
 # rather than a growing `isa` chain so a new error type can carry its own status
@@ -7442,6 +7500,7 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 # this file — and stays hot-reloadable, exactly like `_finalized_response`.
 _error_status_code(err) = _unwrapped_status_code(unwrap_error(err))
 _unwrapped_status_code(::Union{MissingRequiredParam,InvalidDomainValue}) = 400
+_unwrapped_status_code(e::CallerFault) = e.status
 _unwrapped_status_code(::OperationResultUnavailable) = 410
 _unwrapped_status_code(::OperationStalled) = 504
 _unwrapped_status_code(_err) = 500
@@ -7457,8 +7516,23 @@ _records_error(err) = !(400 <= _error_status_code(err) < 500)
 _maybe_record_error(err, bt, req) =
     _records_error(err) ? _record_error(err, bt, req) : (nothing, nothing)
 
-_passthrough_response(r::HTTP.Response) = r
-_passthrough_response(_) = nothing
+# A hook that returns a finished response answers the request as it is: no
+# `wrap`, no Markdown projection, no `__page__` shell, so a JSON API's error
+# stays JSON. An `HTTP.Response` chose its own status and keeps it. Any other
+# finalized value (`MIMEResponse`, or a type with its own `_finalized_response`
+# method) carries only a body and its type, so it gets the status the error
+# would have had.
+_hook_response(req, r::HTTP.Response, err) = r
+function _hook_response(req, val, err)
+    finalized = _finalized_response(val)
+    isnothing(finalized) ? nothing : _error_answer_status(req, finalized, err)
+end
+
+# Always 200 for HTMX, so vanilla htmx still swaps the answer in, except that an
+# operation poll's error ends the poll (286). Any other request gets the
+# error's own status.
+_error_answer_status(req, resp::HTTP.Response, err) =
+    is_htmx(req) ? _stamp_poll_end(req, resp, false) : _with_error_status(req, resp, err)
 
 # Expose the recorded error-log uid to the client as a response header so the
 # overlay bar's traffic-observer (D3) can attach it to a bug report without
@@ -7478,20 +7552,19 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     uid, path = _maybe_record_error(err, bt, req)
     _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
-    direct = _passthrough_response(err_val)
+    direct = _hook_response(req, err_val, err)
     isnothing(direct) || return _stamp_error_id(direct, uid)
     err_val = wrap(err_val)
     if wants_markdown(req)
         return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val)), err), uid)
     end
-    # Always 200 for HTMX, except that an operation poll's error ends the poll.
-    is_htmx(req) &&
-        return _stamp_error_id(_stamp_poll_end(req, to_response(err_val), false), uid)
-    for obj in reverse(page_chain)
-        wrapper = _page_wrapper(obj)
-        isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
+    if !is_htmx(req)
+        for obj in reverse(page_chain)
+            wrapper = _page_wrapper(obj)
+            isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
+        end
     end
-    _stamp_error_id(_with_error_status(req, to_response(err_val), err), uid)
+    _stamp_error_id(_error_answer_status(req, to_response(err_val), err), uid)
 end
 
 """
@@ -22109,13 +22182,7 @@ toast_script() = h.script(Raw(raw"""
     function squash(text) { return (text || '').replace(/\s+/g, ' ').trim(); }
     // Over HTTP/2 `statusText` is empty, so the reason comes from the answer's
     // own `<title>` (a gateway's "413 Request Entity Too Large") or this table.
-    var REASONS = {
-        400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found',
-        405: 'Method Not Allowed', 408: 'Request Timeout', 409: 'Conflict', 410: 'Gone',
-        413: 'Content Too Large', 414: 'URI Too Long', 415: 'Unsupported Media Type',
-        422: 'Unprocessable Content', 429: 'Too Many Requests', 500: 'Internal Server Error',
-        501: 'Not Implemented', 502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout'
-    };
+    var REASONS = """ * _REASON_PHRASES_JS * raw""";
     function failureText(xhr) {
         var type = header(xhr, 'Content-Type') || '', body = xhr.responseText || '';
         var plain = '', title = '', heading = '';

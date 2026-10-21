@@ -64,6 +64,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
+| `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, not recorded as an error |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
 response — and it passes through the response pipeline unchanged.
@@ -1653,7 +1654,10 @@ and `HTMXObjects.InvalidDomainValue` (raised when a form posts a value outside i
 current domain) map to **400** on a non-HTMX request and render a `Bad Request`
 article; under HTMX they too stay 200. As caller faults they are not recorded:
 no error log, no `X-HTMXO-Error-Id`, no `__on_error__`. Neither type is
-exported, so catching one needs the qualified name.
+exported, so catching one needs the qualified name. A route body raises its own
+caller fault — an unknown id (`404`), an argument out of range (`400`) — with
+the exported `CallerFault(status, message)`, which is answered the same way with
+its own status.
 
 In short: **400 means the caller sent something wrong; 500 means the surface
 itself could not be compiled.**
@@ -2251,7 +2255,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 | `record!(app; record_dir, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
 | `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
-| `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline |
+| `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline. Returned by an `__error__` hook, it is the error answer as it is, with the error's status (500, 400 for a caller fault, 200 under HTMX) |
 
 See the [`htmxo-gallery`](https://github.com/nsiccha/Claude/blob/main/skills/htmxo-gallery/SKILL.md) skill for the canonical wiring.
 

@@ -791,8 +791,9 @@ worked examples.
 **Every caught server fault writes a full report to
 `/tmp/htmxo_errors/<uid>.log` by default.** That is the first place to
 look when a route returns the framework's error article. A caller fault — a
-`4xx` answer such as a missing or invalid submitted value, a refused resource
-operation, or a mutation result the server no longer holds — is answered with
+`4xx` answer such as a missing or invalid submitted value, a `CallerFault` a
+route body threw, a refused resource operation, or a mutation result the server
+no longer holds — is answered with
 its article and status but not recorded: no log file, no `@error` line, no
 `X-HTMXO-Error-Id`, no `__on_error__`. The in-browser
 article only shows the short `<uid>` — the uid, ISO timestamp, request
@@ -836,6 +837,38 @@ Every route handler is wrapped in try/catch. On a server-fault exception
   so logs and monitors see errors as errors.
 - If your `__error__` hook returns an `HTTP.Response` directly, its status is
   respected — no rewrite.
+- If it returns a `MIMEResponse`, that is the answer as it is — no `__page__`
+  shell, no Markdown projection — with the status above (500, or 400 for a
+  missing or invalid parameter, a `CallerFault`'s own status; 200 under HTMX).
+  A JSON API answers its errors as JSON this way; a recorded error's id is in
+  its `X-HTMXO-Error-Id` header:
+
+```julia
+@htmx struct Api
+    __error__(err) = MIMEResponse("application/json", "{\"error\":\"request failed\"}")
+    @get item(k::String) = MIMEResponse("application/json", lookup_json(k))
+end
+```
+
+### Caller faults from a route body — `CallerFault`
+
+When the request itself is at fault — an unknown resource id, an argument out
+of range, a refused operation — throw `CallerFault(status, message)` with a
+`4xx` status. It is answered like a missing parameter: that status (200 under
+HTMX), the message in an article titled with the status's reason phrase
+(`Not Found`) or in your `__error__` hook's rendering, and no error log, no
+`@error` line, no `X-HTMXO-Error-Id`, no `__on_error__`. A server fault stays an
+ordinary exception; `CallerFault` refuses a status outside `4xx`.
+
+```julia
+@get probe(kenn::String) = begin
+    haskey(PROBES, kenn) || throw(CallerFault(404, "unknown probe $kenn"))
+    probe_view(PROBES[kenn])
+end
+```
+
+The hook receives the exception wrapped like any route error, so read it with
+`unwrap_error(err)`: a `CallerFault` carries `status` and `message`.
 
 ### Customising
 
