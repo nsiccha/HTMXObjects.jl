@@ -133,7 +133,7 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 
 Fragments are not documents and never carry a doctype.
 
-### Text size and page width under Pico {#pico-page-size}
+### Text size, page width and buttons under Pico {#pico-page-size}
 
 Pico ties the text size and the page width to the window: it raises the root
 font size from 16 px to 20 px at 1280 px and 21 px from 1536 px, and caps
@@ -151,6 +151,15 @@ such as one in `extra_head`:
     --htmxo-container-gutter: 1rem;      /* the margin on each side */
 }
 ```
+
+Pico also fills every button that has no colour class with its azure. Under
+the shell such a button — `<button>`, `<input type=submit|button>`,
+`role="button"`, or a bare `.outline` — takes Pico's own slate outline, the
+look of `class="secondary outline"`, at rest, on hover and focus, and while
+busy. `.secondary` and `.contrast` buttons keep Pico's looks. An app that
+wants a coloured button sets `--pico-background-color`, `--pico-color` and
+`--pico-border-color` on it from a later stylesheet, with a selector at least
+as specific as two classes (`.app .cta`).
 
 ### Success toasts {#success-toasts}
 
@@ -2235,7 +2244,7 @@ HTMXObjects ships its own CSS variables and matches the host environment (raw Pi
 | Export | Purpose |
 |--------|---------|
 | `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
-| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }` |
+| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }`. Buttons without a colour class get Pico's slate `secondary outline` look instead of its azure fill; see [the page shell](#pico-page-size) |
 | `vitepress_bridge()`      | Map `--htmxo-*` (including `--htmxo-bg`) onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
 | `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight) |
 | `escape_html(s)`          | HTML-escape (`HTMX.escape`, 5 chars) — for hand-built HTML strings only; `h.*` escapes text + attrs itself, use `Raw` for trusted markup |
