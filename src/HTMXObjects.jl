@@ -19,7 +19,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
-    semantic_card
+    semantic_card, SemanticTexts, semantic_texts
 export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
@@ -3123,11 +3123,49 @@ end
 SemanticStatus(state::Symbol; detail="") = SemanticStatus(state, String(detail))
 
 """
-    SemanticUnavailable(reason)
+    SemanticTexts
+
+The words the semantic vocabulary writes itself, besides the caller's own
+content: `unavailable` is the marker of a [`SemanticUnavailable`](@ref), in
+every peer format. Build one with [`semantic_texts`](@ref) and pass it as
+`texts=`.
+"""
+struct SemanticTexts
+    unavailable::String  # the marker of a declined computation
+end
+
+const _SEMANTIC_TEXT_LOCALES = (
+    en = (unavailable = "unavailable",),
+    de = (unavailable = "nicht verfügbar",),
+)
+
+"""
+    semantic_texts(locale::Symbol=:en; texts...)
+
+The [`SemanticTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
+replaced by keyword:
+
+```julia
+const DE = semantic_texts(:de)
+SemanticUnavailable("Die Auswertung war beim Export noch nicht berechnet."; texts=DE)
+# HTML: ∅ nicht verfügbar — Die Auswertung …; Markdown: ∅ **nicht verfügbar** — …
+SemanticUnavailable("…"; texts=semantic_texts(:de; unavailable="entfällt"))
+```
+
+An unknown locale or text name, or a placeholder in a text (semantic texts take
+none), throws an `ArgumentError`.
+"""
+semantic_texts(locale::Symbol=:en; texts...) =
+    _locale_texts(SemanticTexts, :semantic_texts, _SEMANTIC_TEXT_LOCALES, (;), locale; texts...)
+
+"""
+    SemanticUnavailable(reason; texts=semantic_texts())
 
 A DECLINED computation: content that was not produced, and why. The reason is
 held as data, so every peer format states it rather than leaving a slot the
-reader has to interpret.
+reader has to interpret. The marker word that precedes it (`unavailable`) comes
+from `texts`, a [`SemanticTexts`](@ref): `texts=semantic_texts(:de)` writes
+`nicht verfügbar` in every peer format.
 
 Deliberately NOT a [`SemanticStatus`](@ref), which reports a state the system is
 IN. A refusal is not a state: nothing is warning, failing or pending, so every
@@ -3144,7 +3182,9 @@ rather than burying the meaning back in a call-site `class=`.
 """
 struct SemanticUnavailable <: SemanticNode
     reason::String
-    SemanticUnavailable(reason) = new(String(reason))
+    texts::SemanticTexts
+    SemanticUnavailable(reason; texts::SemanticTexts=semantic_texts()) =
+        new(String(reason), texts)
 end
 
 """
@@ -3406,7 +3446,7 @@ end
 function _semantic_unavailable_node(unavailable::SemanticUnavailable)
     reason = isempty(unavailable.reason) ? Any[] :
         Any[h.small(" — $(unavailable.reason)")]
-    h.p(h.strong("∅ unavailable"), reason...;
+    h.p(h.strong("∅ $(unavailable.texts.unavailable)"), reason...;
         class="htmxo-semantic-unavailable")
 end
 
@@ -4125,7 +4165,7 @@ end
 # Same shape as the status peer above, for the same reason: the marker carries
 # the meaning, the reason carries the why.
 Base.show(io::IO, ::MIME"text/markdown", unavailable::SemanticUnavailable) =
-    print(io, "∅ **unavailable**",
+    print(io, "∅ **", unavailable.texts.unavailable, "**",
         isempty(unavailable.reason) ? "" : " — $(unavailable.reason)")
 
 Base.show(io::IO, ::MIME"text/markdown", prose::SemanticProse) =
@@ -4213,7 +4253,7 @@ function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
 end
 
 Base.show(io::IO, ::MIME"text/plain", unavailable::SemanticUnavailable) = print(
-    io, "[unavailable]",
+    io, '[', unavailable.texts.unavailable, ']',
     isempty(unavailable.reason) ? "" : " $(unavailable.reason)")
 
 Base.show(io::IO, ::MIME"text/plain", prose::SemanticProse) =

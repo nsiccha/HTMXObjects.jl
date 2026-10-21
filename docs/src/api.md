@@ -1180,6 +1180,8 @@ SemanticFields
 SemanticCode
 SemanticStatus
 SemanticUnavailable
+SemanticTexts
+semantic_texts
 SemanticProse
 SemanticTable
 SemanticPlot
@@ -1316,7 +1318,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
 | `SemanticStatus(state; detail="")` | A state, not a colour |
-| `SemanticUnavailable(reason)` | A declined computation, and why — not a state |
+| `SemanticUnavailable(reason; texts=semantic_texts())` | A declined computation, and why — not a state |
 | `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
 | `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
@@ -1345,6 +1347,15 @@ what happened. Reach for `SemanticUnavailable(reason)` whenever the honest
 sentence is "there is nothing here, and here is why" — the whole point of the
 vocabulary is that this distinction survives into Markdown and plain text, where
 a mis-chosen element cannot be recovered from.
+
+The marker word in front of the reason (`unavailable`) is the one word the
+vocabulary writes itself, so it follows `texts=`, a `SemanticTexts` from
+`semantic_texts(locale; overrides...)` — the same shape as `table_texts` and
+`caption_texts`. `SemanticUnavailable(reason; texts=semantic_texts(:de))` reads
+`∅ nicht verfügbar — reason` in HTML, `∅ **nicht verfügbar** — reason` in
+Markdown and `[nicht verfügbar] reason` in plain text;
+`semantic_texts(:de; unavailable="entfällt")` puts the app's own word there.
+The `htmxo-semantic-unavailable` class keeps its name in every language.
 
 Four points where a projection is deliberately not a translation of the HTML:
 
@@ -2233,6 +2244,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a `master_detail_table` grouped by an ordered `group_by` list; see [components](components.md#table-regrouping) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 | `caption_texts(locale; …)`, `CaptionTexts` | A caption's own words (the toggle that opens its long text) in English or German, with per-text overrides; pass as `texts=` to `render_caption` / `with_caption`; see [components](components.md#captions) |
+| `semantic_texts(locale; …)`, `SemanticTexts` | The semantic vocabulary's own words (the marker of a `SemanticUnavailable`) in English or German, with per-text overrides; pass as `texts=` to `SemanticUnavailable`; see [The semantic element vocabulary](@ref) |
 
 ## Formatting
 
