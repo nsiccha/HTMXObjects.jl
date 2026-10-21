@@ -2250,7 +2250,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 |--------|---------|
 | `GalleryItem(path)`            | `@dynamicstruct` wrapping one `.jl` example file (label, group, source, frontmatter) |
 | `Gallery(gallery_dir)`         | Walks a directory of example files into a vector of `GalleryItem`s |
-| `gallery_grid(items; ...)`     | Render a grid of cards (one per item) with section headings; `tag_filters=true` adds per-section tag chips (`tag_match=:all` narrows, `:any` widens) that combine with the search box and work in static exports. The gallery carries its own stylesheet, so it needs no head setup |
+| `gallery_grid(items; ...)`     | Render a grid of cards (one per item) with section headings; `tag_filters=true` adds per-section tag chips (`tag_match=:all` narrows, `:any` widens) that combine with the search box and work in static exports. Each section has `id` = its section key, so `href="#<key>"` links reach it and reveal it when filters or pagination hide it. The gallery carries its own stylesheet, so it needs no head setup |
 | `gallery_card(item; attrs...)` | The `<article>` of a custom card, with the `id` / `data-*` attributes the gallery controller reads; call it with the card's content: `card_renderer = item -> gallery_card(item)(h.h4(item.title), my_plot(item))` |
 | `default_gallery_card(item)`   | The default card (title, description, code), built on `gallery_card` |
 | `htmxo_gallery_styles()`       | The gallery stylesheet (`gallery_grid` includes it; for galleries an app composes itself) |
