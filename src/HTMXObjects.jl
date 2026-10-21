@@ -5574,9 +5574,14 @@ function (factory::_ManagedRootFactory)(RootT, context::OperationContext)
         end
         # Prime only declaration-level, non-indexed mounted children. This
         # gives remount a stable rooted graph whose unrelated child/model caches
-        # can be shared. Context-dependent children remain invalidated by
-        # DynamicObjects' dependency partition; indexed children are realized
-        # lazily because their keys are request/application inputs.
+        # can be shared. The primed children carry THIS request's context: a
+        # later request's remount runs each child's own constructor call and
+        # adopts the primed child only when that call builds it alike, so a
+        # child whose arguments read request context (the mount prefix, an
+        # `@param`) is rebuilt for a request that differs (DynamicObjects
+        # `7c3852e`; earlier pins reused it with the first request's
+        # arguments). Indexed children are realized lazily because their keys
+        # are request/application inputs.
         root = _prime_managed_root!(_default_root_factory(RootT, context))
         factory.entries[store_key] = _RetainedRoot(root, now)
         root
