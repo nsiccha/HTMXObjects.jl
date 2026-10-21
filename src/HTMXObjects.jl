@@ -20772,6 +20772,14 @@ later stylesheet (for example in `extra_head`) overrides them:
 `:root { --pico-font-size: 112.5%; }` picks another text size, and
 `:root { --htmxo-container-max-width: 1800px; --htmxo-container-gutter: 1rem; }`
 tunes the width.
+
+A button without a colour class (`<button>`, `<input type=submit|button>`,
+`role="button"`, a bare `.outline`) takes Pico's own slate outline — the look
+of `class="secondary outline"` — in place of Pico's azure fill, in its rest,
+hover, focus and busy states. `.secondary` and `.contrast` buttons keep
+Pico's looks. To colour a button otherwise, set `--pico-background-color`,
+`--pico-color` and `--pico-border-color` on it from a later stylesheet, with a
+selector at least as specific as two classes (`.app .cta`).
 """
 pico_bridge() = h.style(Raw("""
 :root {
@@ -20796,6 +20804,32 @@ pico_bridge() = h.style(Raw("""
         max-width: min(var(--htmxo-container-max-width, 1600px),
                        calc(100% - 2 * var(--htmxo-container-gutter, 2rem)));
     }
+}
+/* Pico paints a button without a colour class in its primary azure. It takes
+   Pico's slate outline (`.secondary.outline`) instead, through the same three
+   variables Pico sets on every button; `.secondary` and `.contrast` keep
+   theirs. Each selector outranks the Pico rule it replaces. */
+:is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast) {
+    --pico-background-color: transparent;
+    --pico-color: var(--pico-secondary);
+    --pico-border-color: var(--pico-secondary);
+}
+:is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast):is([aria-current]:not([aria-current=false]), :hover, :active, :focus) {
+    --pico-background-color: transparent;
+    --pico-color: var(--pico-secondary-hover);
+    --pico-border-color: var(--pico-secondary-hover);
+}
+:is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast):is(:focus, [aria-current]:not([aria-current=false]):focus) {
+    --pico-box-shadow: var(--pico-button-hover-box-shadow, 0 0 0 rgba(0, 0, 0, 0)), 0 0 0 var(--pico-outline-width) var(--pico-secondary-focus);
+}
+:is([role=search], [role=group]):has(:is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast):focus) {
+    --pico-group-box-shadow-focus-with-button: 0 0 0 var(--pico-outline-width) var(--pico-secondary-focus);
+}
+/* Pico whitens a dropdown's chevron and a busy button's spinner to suit its
+   filled buttons; on the outline they keep their own colour. */
+details summary[role=button]:not(.secondary, .contrast)::after,
+[aria-busy=true]:not(input, select, textarea):is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast)::before {
+    filter: none;
 }
 """))
 
@@ -22513,9 +22547,11 @@ HTMX-driven tab row: each tab click fetches content from the server.
 `tab_attrs(label)` returns extra per-tab named-tuple attributes (e.g. hx_include).
 `preload=true` starts fetching a tab while the pointer rests on it (see
 [`hx_link`](@ref)).
+The active tab is a `contrast` outline button and the others `secondary`, as in
+[`nav_sidebar`](@ref); `active_class` / `inactive_class` change them.
 """
 function htmx_tabset(items; active=nothing, target="#content",
-                     active_class="primary", inactive_class="secondary",
+                     active_class="contrast", inactive_class="secondary",
                      btn_class="outline btn-xs",
                      tab_attrs=Returns(NamedTuple()), preload=nothing)
     h.div(; class="tab-row")(
