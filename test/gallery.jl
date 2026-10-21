@@ -179,7 +179,7 @@ end
             gallery_grid(g.items; section_titles=g.section_titles, tag_filters=true),
             gallery_grid(cg.items; card_renderer=render, tag_filters=true, tag_match=:any,
                          search=false, pagination=false),
-            driver; extra_head=(htmxo_gallery_styles(),), pico_version=nothing,
+            driver; pico_version=nothing,
             hyperscript_version=nothing, feedback=false, compose=false, overlay=false)
         # Serve the static export as plain files would be: no app behind it.
         exported = repr("text/html", static_transform(page, StaticExport(; controls=:remove)))
@@ -202,6 +202,107 @@ end
                     end
                     @test count(==('\n'), checks[1]) + 1 == n
                 end
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "a gallery carries its own stylesheet" setup=[GalleryFixture] tags=[:unit] begin
+    using HTMXObjects
+    g = fixture_gallery()
+    html(x) = repr("text/html", x)
+    sheet = html(htmxo_gallery_styles())
+    # It is what hides the cards and sections the controller marks.
+    @test occursin(".htmxo-gallery article[data-search-hidden]", sheet)
+    # Both forms carry it once, as the gallery's first child.
+    for page in (html(gallery_grid(g.items)), html(gallery_grid(g.items; controls=false)))
+        @test occursin("<div class=\"htmxo-gallery\">" * sheet * "<section", page)
+        @test count(sheet, page) == 1
+    end
+    # Markdown drops it, like the controller script.
+    @test !occursin("display", repr(MIME"text/markdown"(), gallery_grid(g.items)))
+    # A static export keeps it, so the exported page still filters.
+    page = htmx(gallery_grid(g.items); pico_version=nothing, hyperscript_version=nothing)
+    @test occursin(sheet, html(static_transform(page, StaticExport())))
+end
+
+@testitem "gallery_card carries the attributes the controller reads" setup=[GalleryFixture] tags=[:unit] begin
+    using HTMXObjects
+    g = fixture_gallery()
+    a = only(filter(it -> it.id == "a", g.items))
+    html(x) = repr("text/html", x)
+    @test html(gallery_card(a)(h.p("x"))) == "<article id=\"a\" data-id=\"a\" data-section=\"odl\" " *
+        "data-tags=\"bayes stan\" data-search-text=\"alpha  bayes stan odl a\"><p>x</p></article>"
+    # Further keywords add attributes; one named like a default replaces it.
+    custom = html(gallery_card(a; class="wide", data_search_text="own corpus")())
+    @test occursin("class=\"wide\"", custom)
+    @test occursin("data-search-text=\"own corpus\"", custom) && count("data-search-text", custom) == 1
+    # The default card is built on it.
+    open_tag = html(gallery_card(a))[1:end-length("</article>")]
+    @test startswith(html(default_gallery_card(a)), open_tag * "<h4><a href=\"#a\">Alpha</a></h4>")
+end
+
+@testitem "the theme gives HTMXObjects components the page background" tags=[:unit] begin
+    using HTMXObjects
+    css(x) = repr("text/html", x)
+    @test occursin(r"--htmxo-bg:\s*Canvas;", css(htmxo_theme()))
+    @test occursin(r"--htmxo-bg:\s*var\(--pico-background-color, Canvas\);", css(pico_bridge()))
+    @test occursin(r"--htmxo-bg:\s*var\(--vp-c-bg, Canvas\);", css(vitepress_bridge()))
+    # Pico defines `--pico-border-color` only on form controls and buttons,
+    # never on :root, so a bridge to it always fell back to the text color.
+    @test !occursin("var(--pico-border-color", css(pico_bridge()))
+    @test occursin("background: var(--htmxo-bg, var(--vp-c-bg, Canvas));", css(htmxo_gallery_styles()))
+end
+
+@testitem "a gallery filters without head setup, its toolbar on the page background" setup=[GalleryFixture, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        g = fixture_gallery()
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const out = [];
+            const search = document.querySelector('.htmxo-gallery-toolbar input[type="search"]');
+            search.value = 'stan';
+            search.dispatchEvent(new Event('input', {bubbles: true}));
+            out.push('shown=' + Array.from(document.querySelectorAll('.htmxo-gallery article'))
+                .filter(c => c.offsetParent !== null).map(c => c.dataset.id).join(','));
+            out.push('toolbar=' + getComputedStyle(document.querySelector('.htmxo-gallery-toolbar')).backgroundColor);
+            out.push('shadow=' + getComputedStyle(document.querySelector('.htmxo-gallery article')).boxShadow);
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = out.join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        # No gallery stylesheet in the head. `pico_bridge` without Pico itself:
+        # the stand-ins are Pico's dark page background and its article shadow.
+        pico_dark = h.style(Raw(":root { --pico-background-color: rgb(19, 23, 31); } " *
+                                "article { box-shadow: 0 0 4px red; }"))
+        page = htmx(gallery_grid(g.items; section_titles=g.section_titles), driver;
+            extra_head=(pico_bridge(), pico_dark), pico_version=nothing,
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false)
+        body = repr("text/html", page)
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            HTTP.URI(req.target).path == "/" ?
+                HTTP.Response(200, ["Content-Type" => "text/html"], body) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                lines = split(checks[1], '\n')
+                @test "shown=a,b" in lines
+                @test "toolbar=rgb(19, 23, 31)" in lines
+                @test "shadow=none" in lines
             end
         finally
             close(server)
