@@ -34,7 +34,7 @@ HTMXObjects builds on [DynamicObjects.jl](https://github.com/nsiccha/DynamicObje
 
 ### Which HTMX.jl
 
-HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies on `h.*` escaping text and attribute values by default, neither of which exists before HTMX 1.0. HTMX.jl is unregistered, so a consumer assembling its own environment must supply a 1.x checkout itself: that is the `dev` branch of [nsiccha/HTMX.jl](https://github.com/nsiccha/HTMX.jl). Anything off the pre-1.0 history still reports `version = "0.1.0"` and is rejected at resolve time — deliberately, so the mismatch surfaces as an unsatisfiable requirement rather than as an `UndefVarError` on `HTMX.Raw` at render time.
+HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on `h.*` escaping text and attribute values by default, which HTMX 1.0 introduced, and its block semantic elements declare `HTMX.markdown_block`, which HTMX 1.1 introduced. HTMX.jl is unregistered, so a consumer assembling its own environment must supply a checkout itself: the `dev` branch of [nsiccha/HTMX.jl](https://github.com/nsiccha/HTMX.jl), from its 1.1.0 version bump on. An older checkout reports `version = "1.0.0"` (or `"0.1.0"` before 1.0) and is rejected at resolve time — deliberately, so the mismatch surfaces as an unsatisfiable requirement naming HTMXObjects rather than as an `UndefVarError` (`markdown_block`, `Raw`) when HTMXObjects precompiles. The bound moves with every HTMX function HTMXObjects starts calling: HTMX.jl raises its minor version when it adds one, and HTMXObjects raises this bound to that version in the same change that starts calling it.
 
 ## HTTP / request helpers
 
