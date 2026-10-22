@@ -3091,6 +3091,12 @@ renderable value, or plain data.
 
 `anchor`, when non-empty, becomes the HTML `id` — a document address, so a card
 can be cited from elsewhere.
+
+In HTML the title is the card's `<header>`, not a heading, so a card opens no
+level of the HTML outline. In Markdown it is a heading one level below the
+[`SemanticSection`](@ref) holding the card, and `###` outside any section,
+where a card sits below the page's `##` headings; the card's own content,
+nested sections included, continues one level below it.
 """
 struct SemanticCard <: SemanticNode
     title::String
@@ -3353,6 +3359,11 @@ SemanticArtifact(name, mime, bytes=nothing; target=nothing) =
 
 A document-level division — it opens a heading level, unlike
 [`SemanticCard`](@ref), which is a self-contained summary.
+
+The level follows the nesting: a section's title is `<h2>` / `##` at the top
+of a document, below its title, and one level deeper inside each enclosing
+section, through any markup in between (an `h.div` or a card holding the inner
+section). `<h6>` / `######` is the deepest; a section nested deeper keeps it.
 """
 struct SemanticSection <: SemanticNode
     title::String
@@ -4056,11 +4067,35 @@ _semantic_html_node(action::SemanticAction) = h.a(
 _semantic_html_node(artifact::SemanticArtifact) = h.a(
     artifact.name; href=_semantic_artifact_href(artifact),
     download=artifact.name, type=artifact.mime, class="htmxo-semantic-artifact")
+# The heading level a `SemanticSection` opens where it renders: 2 at the top of
+# a document (below its title), one more inside each enclosing heading. It is a
+# dynamic scope rather than an `IOContext` key, because it must reach every
+# division a section holds: through an `h.div` (HTMX.jl's Markdown serializer
+# re-wraps an `IO` it is handed, splitting its stream state), into a table cell
+# rendered to a buffer of its own, and through the static-export walk, which
+# builds HTML peers with no `IO` at all.
+const _SEMANTIC_HEADING_LEVEL = :htmxo_semantic_heading_level
+
+_semantic_heading_level() = get(task_local_storage(), _SEMANTIC_HEADING_LEVEL, 2)
+
+# Runs `f(level)` for a heading at `level`, with everything below it one deeper.
+_semantic_heading(f, level) =
+    task_local_storage(() -> f(level), _SEMANTIC_HEADING_LEVEL, level + 1)
+
+# A card's Markdown title sits at the level a section would open there, and at
+# `###` outside any section, below the page's `##` headings (an operation's
+# title, say). Its HTML title is not a heading, so only Markdown asks for this.
+_semantic_card_level() = max(_semantic_heading_level(), 3)
+
+# HTML and Markdown have six heading levels; a deeper division keeps the sixth.
+_semantic_heading_tag(level) = Symbol(:h, min(level, 6))
+_semantic_heading_sigil(level) = "#"^min(level, 6)
+
 _semantic_html_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)), card.children...;
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
-_semantic_html_node(section::SemanticSection) = h.section(
-    h.h2(section.title), section.children...;
+_semantic_html_node(section::SemanticSection, level=_semantic_heading_level()) = h.section(
+    h(_semantic_heading_tag(level), section.title), section.children...;
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
 _semantic_html_node(group::SemanticGroup) = h.div(
     group.children...; class="htmxo-semantic-group")
@@ -4097,8 +4132,11 @@ _semantic_hxml_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)),
     map(_semantic_hxml_child, card.children)...;
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
-_semantic_hxml_node(section::SemanticSection) = h.section(
-    h.h2(section.title), map(_semantic_hxml_child, section.children)...;
+# Children are classified here, before serializing, so a nested section must
+# already see the level below this one.
+_semantic_hxml_node(section::SemanticSection, level=_semantic_heading_level()) = h.section(
+    h(_semantic_heading_tag(level), section.title),
+    _semantic_heading(_ -> map(_semantic_hxml_child, section.children), level)...;
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
 _semantic_hxml_node(group::SemanticGroup) = h.div(
     map(_semantic_hxml_child, group.children)...; class="htmxo-semantic-group")
@@ -4115,12 +4153,21 @@ _semantic_hxml_node(alt::SemanticAlternatives) =
 # delegates every format to its layer's own `show` (below).
 for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
           SemanticUnavailable, SemanticProse, SemanticTable, SemanticMetric,
-          SemanticLink, SemanticAction, SemanticArtifact, SemanticSection,
+          SemanticLink, SemanticAction, SemanticArtifact,
           SemanticGroup, SemanticDisclosure, SemanticAlternatives)
     @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
         show(io, mime, _semantic_html_node(value))
     @eval Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", value::$T) =
         show(io, mime, _semantic_hxml_node(value))
+end
+# A section's peer is built at the level it opens here and shown with its
+# children one level below: they render inside its `show`, not before it.
+for (mime, peer) in ((MIME"text/html", :_semantic_html_node),
+                     (MIME"application/vnd.hyperview+xml", :_semantic_hxml_node))
+    @eval Base.show(io::IO, mime::$mime, section::SemanticSection) =
+        _semantic_heading(_semantic_heading_level()) do level
+            show(io, mime, $peer(section, level))
+        end
 end
 
 _semantic_show_leaf(io::IO, mime::MIME, value) =
@@ -4178,11 +4225,12 @@ Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
     io, _semantic_status_glyph(status.state), " **", status.state, "**",
     isempty(status.detail) ? "" : " — $(status.detail)")
 
-function Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard)
-    print(io, "### ", card.title)
-    isempty(card.children) || print(io, "\n\n")
-    _semantic_show_children(io, mime, card.children, "\n\n")
-end
+Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
+    _semantic_heading(_semantic_card_level()) do level
+        print(io, _semantic_heading_sigil(level), " ", card.title)
+        isempty(card.children) || print(io, "\n\n")
+        _semantic_show_children(io, mime, card.children, "\n\n")
+    end
 
 # Same shape as the status peer above, for the same reason: the marker carries
 # the meaning, the reason carries the why.
@@ -4232,11 +4280,12 @@ function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
     end
 end
 
-function Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection)
-    print(io, "## ", section.title)
-    isempty(section.children) || print(io, "\n\n")
-    _semantic_show_children(io, mime, section.children, "\n\n")
-end
+Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
+    _semantic_heading(_semantic_heading_level()) do level
+        print(io, _semantic_heading_sigil(level), " ", section.title)
+        isempty(section.children) || print(io, "\n\n")
+        _semantic_show_children(io, mime, section.children, "\n\n")
+    end
 
 Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
     _semantic_show_children(io, mime, group.children, "\n\n")
@@ -5214,6 +5263,12 @@ _static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
 _static_walk(value::SemanticNode, rules::_StaticRules) =
     _static_walk(_semantic_html_node(value), rules)
 _static_walk_child(value::SemanticNode, rules) = _static_walk(value, rules)
+# The sections a section holds are built while its children are walked, so the
+# walk runs one heading level below it, as its `show` does.
+_static_walk(section::SemanticSection, rules::_StaticRules) =
+    _semantic_heading(_semantic_heading_level()) do level
+        _static_walk(_semantic_html_node(section, level), rules)
+    end
 # A plot owns no markup: its layer renders itself, and an address inside its
 # spec goes through `static_url`.
 _static_walk(plot::SemanticPlot, ::_StaticRules) = plot
