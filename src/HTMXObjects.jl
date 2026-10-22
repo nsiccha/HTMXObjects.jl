@@ -4960,8 +4960,10 @@ alike:
   link that swaps a new version of it in — the value is written into the
   address (`history.replaceState`; other parameters and htmx's history state
   stay). A first load that shows the rendered value leaves the address as it
-  is. Reload, Back and a copied link then show the same view; no
-  `hx-push-url` is needed for it.
+  is. A request whose route answers through a deferred operation's poller
+  writes the value it asked for when the poller takes the element's place, so
+  the element the polls bring matches the address. Reload, Back and a copied
+  link then show the same view; no `hx-push-url` is needed for it.
 - **Static exports.** A static export calls `url_map` with the address of every
   declared value (the element's `hx-get` with that value) and gives the element
   each value's file, so an exporter that follows mapped addresses writes them and
@@ -7543,6 +7545,18 @@ url_params_script() = h.script(Raw(raw"""
     var base = shown(el, ps);
     return ps.map(function (p, i) { return query.has(p.as) ? query.get(p.as) : base[i]; });
   }
+  // Another element's request replaced a declared element with content that
+  // declares nothing: a deferred operation's poller, whose own polls bring the
+  // element later. The request's values are written now, as the element's own
+  // request writes them; otherwise the element arriving through the polls
+  // shows another value than the address and loads the old one again (snag
+  // url-params-outer-1b61cafa).
+  function standIn(el, cfg, d) {
+    var t = d.target, ps = declared(t);
+    if (!ps || t === cfg.elt || t === el || t.isConnected) return;
+    var vals = requested(t, ps, d);
+    if (vals) write(byName(ps, vals), byName(ps, shown(t, ps)));
+  }
   document.addEventListener('htmx:beforeSwap', function (e) {
     var d = e.detail || {}, ps = declared(d.target);
     if (ps && d.requestConfig) d.requestConfig.htmxoUrlBefore = byName(ps, shown(d.target, ps));
@@ -7555,7 +7569,7 @@ url_params_script() = h.script(Raw(raw"""
       write(cfg.htmxoUrlValues, cfg.htmxoUrlShown);
     }
     var el = e.target, ps = el === cfg.elt ? null : declared(el);
-    if (!ps) return;
+    if (!ps) return standIn(el, cfg, d);
     // A new version of the element, swapped in for the target: until htmx
     // settles it, it carries the old version's attributes when the two share
     // an id, so its values are written once it loads (`loaded`).
