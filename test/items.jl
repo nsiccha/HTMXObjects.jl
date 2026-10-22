@@ -11541,6 +11541,46 @@ end
     end
 end
 
+@testitem "static export walks semantic elements" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: h
+    # A semantic element is walked as its HTML peer: a link's `href`
+    # (`external=true` too), an action's `hx-get`, prose links and everything a
+    # semantic container holds follow the rules of a hand-built element.
+    seen = String[]
+    target(url) = (push!(seen, url);
+        startswith(url, "/api/") ? replace(url[2:end], r"[/?=]" => "-") * ".json" : nothing)
+    frag = h.div(
+        h.p("Example: ", SemanticLink("Open", "/api/a"; external=true)),
+        SemanticLink("Inside", "/api/b"),
+        SemanticAction("Run", "/api/c?x=1"),
+        SemanticCard("Card", h.a("nested"; href="/api/d"), SemanticProse("see [prose](/api/e)")),
+        SemanticLink("Elsewhere", "https://example.org/f"; external=true))
+    mapped = repr("text/html", static_transform(frag, StaticExport(; url_map=target)))
+    @test seen == ["/api/a", "/api/b", "/api/c?x=1", "/api/c?x=1", "/api/d", "/api/e",
+                   "https://example.org/f"]
+    @test contains(mapped, "<a href=\"api-a.json\" target=\"_blank\" rel=\"noopener\"")
+    @test contains(mapped, "<a href=\"api-b.json\" class=\"htmxo-semantic-link\"")
+    @test contains(mapped, "<a href=\"api-c-x-1.json\" hx-get=\"api-c-x-1.json\"")
+    @test contains(mapped, "href=\"api-d.json\"") && contains(mapped, "href=\"api-e.json\"")
+    @test contains(mapped, "<a href=\"https://example.org/f\" target=\"_blank\"")
+    # Unmapped, the default rules apply: rooted addresses gain `record_base`
+    # and an action whose request a static server cannot answer is disabled
+    # or removed.
+    based = repr("text/html", static_transform(frag; record_base="/b"))
+    @test contains(based, "href=\"/b/api/a\"") && contains(based, "href=\"/b/api/b\"")
+    @test occursin(r"class=\"htmxo-semantic-action\" data-static-disabled=\"true\"", based)
+    @test !contains(based, "hx-get")
+    removed = repr("text/html", static_transform(frag, StaticExport(; controls=:remove)))
+    @test !contains(removed, "Run") && contains(removed, "Inside")
+    # A semantic value a route returns whole is walked too; a plot owns no
+    # markup and passes through.
+    @test contains(repr("text/html", static_transform(SemanticLink("x", "/api/g"),
+                                                      StaticExport(; url_map=target))),
+                   "href=\"api-g.json\"")
+    plot = SemanticPlot(:layer)
+    @test static_transform(plot, StaticExport(; url_map=target)) === plot
+end
+
 @testitem "dispatch static= returns a mapped static response" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     route!(StaticExportApp())
     hx = ["HX-Request" => "true"]

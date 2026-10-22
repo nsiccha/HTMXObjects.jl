@@ -3280,7 +3280,9 @@ a real link in Markdown, rather than as a bare stringified URL.
 With `external=true` the link leaves the app: it opens in a new tab
 (`target="_blank"`, `rel="noopener"`), carries a trailing `↗` glyph, and keeps
 that marker in the Markdown (`[label ↗](target)`) and plain (`label ↗ (target)`)
-peers.
+peers. A [`StaticExport`](@ref) still hands its address to `url_map` like any
+`href`, so an in-app address opened in a new tab is mapped into the bundle; an
+address outside the app gets `nothing` back and stays as given.
 
 With `code=true` the label is an identifier — a repo slug, a branch name, a
 SHA — and keeps its code styling: `<a …><code>label</code> ↗</a>` in HTML and
@@ -4665,8 +4667,10 @@ alone, so concurrent ordinary requests are unaffected.
 - `url_map` — `nothing`, or a function from an address (the full attribute
   value, query included: `"/report/figure?doc=a&name=b"`) to a static target
   `String` or `nothing`. It is consulted for every `hx-get`, `href`, and `src`,
-  and for every address a route body passes to [`static_url`](@ref) (one
-  inside a script or a JSON payload, which the walk cannot see).
+  semantic elements' included (a [`SemanticLink`](@ref)'s `href`, `external=true`
+  too, and a [`SemanticAction`](@ref)'s `hx-get`), and for every address a
+  route body passes to [`static_url`](@ref) (one inside a script or a JSON
+  payload, which the walk cannot see).
   A `String` replaces the attribute verbatim — relative targets such as
   `"embeds/fig-a.html"` are emitted as given — and the element stays live.
   `nothing` falls back to the default rules below. Any other return value
@@ -5202,6 +5206,17 @@ function _static_walk(c::_LabelledControl, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
 end
 _static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
+# A semantic element has no attributes until its HTML peer is built, so the
+# export walks that peer: a `SemanticLink`'s `href` (`external=true` included),
+# a `SemanticAction`'s `hx-get`, prose links, and every element a semantic
+# container holds follow the same rules as a hand-built element. An export is
+# HTML alone, so nothing is lost (the same reason a snapshot walks its value).
+_static_walk(value::SemanticNode, rules::_StaticRules) =
+    _static_walk(_semantic_html_node(value), rules)
+_static_walk_child(value::SemanticNode, rules) = _static_walk(value, rules)
+# A plot owns no markup: its layer renders itself, and an address inside its
+# spec goes through `static_url`.
+_static_walk(plot::SemanticPlot, ::_StaticRules) = plot
 
 """
     _inject_static_style(val)
