@@ -2305,7 +2305,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
 | `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |
 | `Upload`                        | Route-argument type for an uploaded file (`Vector{Upload}` for several); generated forms render a file input and submit multipart |
-| `tabset`, `tabset_styles`, `htmx_tabset` | Tab navigation widgets                            |
+| `tabset`, `tabset_styles`, `tabset_script`, `htmx_tabset` | Tab navigation widgets; a `tabset` keeps its open tab in the page URL |
 | `comparison_view`, `comparison_js`, `comparison_styles` | Selectable comparison columns, either inline tabs with a Compare dialog or shown directly inline, independently loaded and scrolling; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
 | `loading_indicator_script`, `request_feedback_*`, `show_when_script` | UX scripts injected into the page |
