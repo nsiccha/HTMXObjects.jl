@@ -5556,10 +5556,10 @@ const _REQUEST_CONTEXT_INPUTS = (:__req__, :__route__, :__prefix__, :__parent__,
 
 # A DynamicObject's construction inputs: its fixed fields (every field but the
 # trailing property cache, as `DynamicObjects.remake` copies them) and the
-# keyword overrides it was created with (`PropertyCache.seed`). `remake` itself
-# would also carry the instance's settled memos into every request root and
-# keeps the overrides only as memos (DynamicObjects snag
-# `remake-drops-the-295be6c2`).
+# keyword overrides it was created with (`PropertyCache.seed`). `remake` is not
+# used: it would also carry the instance's settled memos into every request
+# root. (Before DynamicObjects `d0a0b82` it also kept the overrides only as
+# memos, snag `remake-drops-the-295be6c2`.)
 function _construction_inputs(obj)
     T = typeof(obj)
     fixed = Any[getfield(obj, name) for name in fieldnames(T)[1:end-1]]
