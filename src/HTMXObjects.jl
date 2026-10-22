@@ -5189,6 +5189,17 @@ function _static_walk(c::_LabelledControl, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
 end
 _static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
+# A semantic element has no attributes until its HTML peer is built, so the
+# export walks that peer: a `SemanticLink`'s `href` (`external=true` included),
+# a `SemanticAction`'s `hx-get`, prose links, and every element a semantic
+# container holds follow the same rules as a hand-built element. An export is
+# HTML alone, so nothing is lost (the same reason a snapshot walks its value).
+_static_walk(value::SemanticNode, rules::_StaticRules) =
+    _static_walk(_semantic_html_node(value), rules)
+_static_walk_child(value::SemanticNode, rules) = _static_walk(value, rules)
+# A plot owns no markup: its layer renders itself, and an address inside its
+# spec goes through `static_url`.
+_static_walk(plot::SemanticPlot, ::_StaticRules) = plot
 
 """
     _inject_static_style(val)
