@@ -1709,6 +1709,33 @@ operation needs nothing from its parent, renders standalone without complaint.
 
 ## Scoped root lifecycle
 
+Requests are served from the instance given to `route!`. Every root HTMXObjects
+builds for a request receives that instance's fixed fields and the keyword
+overrides it was constructed with, alongside the request. That holds for the
+default fresh-per-request root, a new `RootRetention` entry and `semantic_app`'s
+automatic store alike. So configure an app by constructing it:
+
+```julia
+@htmx struct SimApp
+    bundles_dir::String = get(ENV, "SIM_BUNDLES", joinpath(pwd(), "bundles"))
+    fits = sort!(readdir(bundles_dir))
+    @options(fit) = fits
+    # …
+end
+
+route!(SimApp(; bundles_dir=root))   # every request reads `root`
+```
+
+A type with a required fixed field routes the same way (`route!(App(dir))`).
+Properties the instance did not override are still computed per root, so a
+default that reads `ENV` is read again by each fresh root. Nothing the instance
+computed itself is shared with requests. Calling `route!` again with another
+instance serves later requests from that one; a managed store drops the roots
+it built from the earlier instance. A custom `RootProvider(factory)` builds its
+own roots. Before HTMXObjects `4472df4`, `route!` used only the instance's type,
+and every root was built from the type's defaults (snag
+`route-drops-the-0fde2d8d`).
+
 For a `semantic_app`, HTMXObjects automatically owns the keyed store, locking,
 and root remounting. The default identity is `(root type, normalized mount
 prefix)`, so the declaration and ordinary `route!(ModelApp())` call need no
