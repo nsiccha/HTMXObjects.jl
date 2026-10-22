@@ -345,6 +345,48 @@ sortable_table(["Party", "Amount"],
   row marked from `--htmxo-accent` in light and dark; set
   `--htmxo-selected-row` to change the tint.
 
+#### Hover linking {#table-linking}
+
+A page often shows the same items twice, as marks on a plot or map and as rows
+of a table. `link="<group>"` on `sortable_table`, `render_table` or
+`master_detail_table` puts the table in a link group: hovering an item in one
+member of the group highlights it in every other member, with no application
+script.
+
+```julia
+master_detail_table(["Probe", "Land", "P(anomaly)"], probes;
+    key=p -> p.kenn, master=cells, detail=probe_fragment,
+    groupings, searchable=true, link="probes")
+render_table(summary; link="probes", link_key=r -> r.kenn)
+```
+
+- **Keys.** `master_detail_table` keys each item row by its `key` (as a
+  string, not the sanitised row id), including every copy of a leaf that a
+  regrouped table lists under several groups; group rows have no key.
+  `render_table` keys rows by `link_key(row)`. Hand-built `sortable_table` rows
+  carry `data-htmxo-link-key`, or are keyed by their `data-htmxo-select-key`.
+  A detail row counts as its master. Keys compare as strings.
+- **The event.** Hovering or keyboard-focusing a keyed row dispatches
+  `htmxo:link` on `document` with `detail` `{group, key, source}`; when the
+  hover ends, `key` is `null`. Every linked table listens for it and marks the
+  rows of its group that hold the key (`data-htmxo-linked`). A plot or any
+  other element joins the group by listening for the same event and
+  dispatching it on its own hover; page script can call
+  `htmxoLink(group, key)` (`null` clears). The latest key per group is kept in
+  `window.htmxoLinkState`, so a table that is swapped in, regrouped or filtered
+  later shows it too.
+- **Hidden rows.** A highlight never changes the table. An item inside a
+  collapsed group or branch lights up the innermost shown row above it, with a
+  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`
+  (the `linked_inside` and `linked_deep` texts, below). That includes a group
+  whose rows load lazily. A row that the search or a filter hides lights up
+  nothing. A lit row that is out of view scrolls into view inside the table's
+  own scroll box (an `overflow: auto` wrapper), never the page, and only when
+  the hover started outside that table.
+- **Theme.** Lit rows are tinted and outlined from `--htmxo-accent`; set
+  `--htmxo-linked-row` to change the tint. The rules ship in
+  `sortable_table_styles()`, and the runtime in `sortable_table_js()`.
+
 #### Built-in texts in another language {#table-texts}
 
 The words of a table's built-in controls come from one `texts=` keyword on
@@ -367,14 +409,16 @@ The texts cover everything these tables write themselves: the search field
 (`group_by`, `group_add`, `group_add_inner`, `group_level`, `group_kept`,
 `group_stop`, `group_earlier`, `group_later`), lazy-detail status lines
 (`loading`, `retrying`, `load_failed`), the toasts of a lazy group that fails
-to load (`rows_failed`, `rows_missing`), the CSV button (`csv`) and the toggle
+to load (`rows_failed`, `rows_missing`), the CSV button (`csv`), the toggle
 of the table's caption (`more`, the same word as `caption_texts`, see
-[Captions](#captions)). The `TableTexts` docstring names them all.
+[Captions](#captions)) and the note on a row that holds a hovered item in a
+collapsed group (`linked_inside`, `linked_deep`, see
+[Hover linking](#table-linking)). The `TableTexts` docstring names them all.
 
 A text in braces is a placeholder: `count` takes `{shown}` and `{total}` (items,
 not rows: see [Client-side search](#table-search)), the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
-`{level}`), `rows_failed` takes `{status}`. The browser writes the live count
+`{level}`), `rows_failed` takes `{status}` and `linked_deep` `{levels}`. The browser writes the live count
 and status lines from the same templates, so they are strings, not Julia
 functions: the count changes on every keystroke without asking the server. An
 unknown locale, text name or placeholder throws an `ArgumentError`.
