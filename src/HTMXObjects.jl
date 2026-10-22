@@ -9565,8 +9565,16 @@ function _stamp_operation_age(req::HTTP.Request, resp::HTTP.Response)
 end
 
 _stamp_operation_headers(req::HTTP.Request, resp::HTTP.Response, running::Bool) =
-    _stamp_poll_end(req, _stamp_operation_age(req, _stamp_preload(req, resp)),
-                    running)
+    _stamp_poll_end(req, _stamp_operation_age(req,
+        _stamp_preload(req, _stamp_operation_failure(req, resp))), running)
+
+# An operation failure noted on this request (`_note_operation_failure!`) is
+# answered as `_route_error_response` answers a route error.
+function _stamp_operation_failure(req::HTTP.Request, resp::HTTP.Response)
+    failure = get(req.context, :htmxo_operation_failure, nothing)
+    failure === nothing && return resp
+    _stamp_error_id(_with_error_status(req, resp, failure.err), failure.uid)
+end
 
 # A preload response that finished in time becomes reusable by the browser,
 # unless the route already chose its own caching.
@@ -9896,6 +9904,25 @@ function _operation_ended(transport, outcome::Symbol)
     nothing
 end
 
+# A failed operation's terminal is rendered by Treebars, which records the
+# error through `safely` rather than `_route_error_response`. The transport's
+# `failed` hook hands that recorded error to the request the terminal answers,
+# so the answer carries what a route error's does: the runtime ledger's error
+# note, and — through `_stamp_operation_headers` — the recorded uid as
+# `X-HTMXO-Error-Id` and the error's own status outside htmx. A hand-built
+# transport carries no `failed` hook.
+function _operation_failed(transport, err, uid)
+    failed = get(transport, :failed, nothing)
+    failed === nothing || failed(err, uid)
+    nothing
+end
+
+function _note_operation_failure!(req::HTTP.Request, err, uid)
+    _runtime_note_error!(req, err, uid)
+    req.context[:htmxo_operation_failure] = (; err, uid)
+    nothing
+end
+
 # A read operation's URL without the transport's markers: the GET a fresh
 # request of the same operation issues. Other parameters keep their bytes.
 const _OPERATION_TRANSPORT_PARAMS =
@@ -9949,6 +9976,7 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         retain=() -> nothing,
         cleanup=() -> _delete_operation_poll!(token),
         ended=outcome -> _record_operation_end!(entry, outcome),
+        failed=(err, uid) -> _note_operation_failure!(req, err, uid),
         stalled=_operation_stall(entry, age, descriptor, name, verb_inst, req,
                                  prefix),
     )
@@ -10047,7 +10075,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  retain=() -> _retain_operation!(entry, descriptor, name;
                                                  track=queued),
                  cleanup=() -> _delete_operation_poll!(token),
-                 ended=outcome -> _record_operation_end!(entry, outcome))
+                 ended=outcome -> _record_operation_end!(entry, outcome),
+                 failed=(err, uid) -> _note_operation_failure!(req, err, uid))
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
         started, prop, keys, call_kwargs, transport))
@@ -10228,7 +10257,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      retain=() -> _retain_operation!(entry, descriptor, name;
                                                  track=queued),
                      cleanup=() -> _delete_operation_poll!(token),
-                     ended=outcome -> _record_operation_end!(entry, outcome))
+                     ended=outcome -> _record_operation_end!(entry, outcome),
+                     failed=(err, uid) -> _note_operation_failure!(req, err, uid))
         value = _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
             started, prop, keys, call_kwargs, transport))

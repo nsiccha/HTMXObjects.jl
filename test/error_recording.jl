@@ -197,3 +197,116 @@ end
     @test_throws ArgumentError CallerFault(302, "moved")
     @test sprint(showerror, CallerFault(404, "unknown probe zz")) == "unknown probe zz"
 end
+
+# A failed polled operation answers with Treebars' failure terminal, which
+# records the error itself (through `safely`) rather than through
+# `_route_error_response`. The answer still carries what a route error's does:
+# the recorded uid as `X-HTMXO-Error-Id`, and the runtime ledger's error note.
+# Without the header, a failed htmx answer (a 200 or 286 the page swaps in)
+# reads as content (snag htmx-terminal-er-93025c20). The fixture covers all
+# three transports: a poll of a retained operation, the request that started
+# the operation, and a poll that heals an unknown token into a fresh one. For
+# the last two, a wrapped `_operation_polling_impl` lets the operation fail
+# before Treebars renders the answer, the way a slow failure past the grace
+# budget does in a live app.
+@testitem "a failed polled operation's answer carries its recorded error id" tags=[:unit, :server, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!, _operation_polling_impl
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+
+    hooked = String[]
+    doom_gate = Base.Event()
+    @htmx struct FailedPollApp
+        __on_error__ = (err, uid, path) -> push!(hooked, uid)
+        "Compute the doomed report"
+        @get doomed_report() = (wait(doom_gate); error("report exploded"))
+    end
+    @htmx struct FailedInlineApp
+        __on_error__ = (err, uid, path) -> push!(hooked, uid)
+        "Compute the instant failure"
+        @get doomed_now() = error("failed at once")
+    end
+    tracker = RuntimeTracker(; record_polls=true)
+    _clear_operation_polls!()
+    route!(FailedPollApp())
+    route!(FailedInlineApp(); operation_policy=OperationPolicy(:polling))
+    app = track_requests(HTMXObjects.ROUTER; tracker)
+    hx_get(target) = app(HTTP.Request("GET", target, ["HX-Request" => "true"], UInt8[]))
+    body(r) = String(HTMXObjects._message_body_bytes(r))
+    running(r) = contains(body(r), "hx-trigger=\"every ")
+    # The snapshot lists requests newest first.
+    newest_record(kind) = first(filter(r -> r.kind === kind, runtime_snapshot(tracker).history))
+    function recorded(answer, dir)
+        uid = HTTP.header(answer, "X-HTMXO-Error-Id", "")
+        !isempty(uid) &&
+            contains(body(answer), "class=\"treebar-terminal\"") &&
+            contains(body(answer), "Error ID: <code>$uid</code>") &&
+            "$uid.log" in readdir(dir) && last(hooked) == uid
+    end
+
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            # A poll of a retained operation that has failed since.
+            started = hx_get("/doomed_report")
+            @test running(started)
+            @test !HTTP.hasheader(started, "X-HTMXO-Error-Id")
+            url = replace(only(match(r"hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\"",
+                                     body(started)).captures), "&amp;" => "&")
+            notify(doom_gate)
+            failed = nothing
+            for _ in 1:400
+                answer = hx_get(url)
+                running(answer) || (failed = answer; break)
+                sleep(0.025)
+            end
+            @test failed.status == 286
+            @test recorded(failed, dir)
+            uid = HTTP.header(failed, "X-HTMXO-Error-Id")
+            @test contains(newest_record(:poll).error, "report exploded [error $uid]")
+
+            # The request that started the operation, and a heal.
+            old_polling = _operation_polling_impl[]
+            _operation_polling_impl[] = (render, started, args...) -> begin
+                timedwait(() -> isready(started), 10.0; pollint=0.005)
+                old_polling(render, started, args...)
+            end
+            try
+                inline = hx_get("/doomed_now")
+                @test inline.status == 200
+                @test recorded(inline, dir)
+                uid = HTTP.header(inline, "X-HTMXO-Error-Id")
+                @test contains(newest_record(:htmx).error, "failed at once [error $uid]")
+
+                healed = hx_get("/doomed_now?__htmxo_poll=1&__htmxo_operation=$(repeat("0", 64))")
+                @test healed.status == 286
+                @test recorded(healed, dir)
+                uid = HTTP.header(healed, "X-HTMXO-Error-Id")
+                @test contains(newest_record(:poll).error, "failed at once [error $uid]")
+            finally
+                _operation_polling_impl[] = old_polling
+            end
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+
+    # The answer follows `_route_error_response`'s rule: htmx keeps the
+    # swapping status, any other request takes the error's own, and an
+    # unrecorded caller fault carries no id. Without a noted failure the
+    # answer is untouched.
+    function stamped(headers, err, uid)
+        req = HTTP.Request("GET", "/doomed_now", headers, UInt8[])
+        isnothing(err) || HTMXObjects._note_operation_failure!(req, err, uid)
+        answer = HTMXObjects._stamp_operation_headers(
+            req, HTTP.Response(200, "terminal"), false)
+        (answer.status, HTTP.header(answer, "X-HTMXO-Error-Id", ""))
+    end
+    hx = ["HX-Request" => "true"]
+    page = Pair{String,String}[]
+    @test stamped(hx, ErrorException("x"), "abc") == (200, "abc")
+    @test stamped(page, ErrorException("x"), "abc") == (500, "abc")
+    @test stamped(page, CallerFault(404, "gone"), nothing) == (404, "")
+    @test stamped(hx, nothing, nothing) == (200, "")
+end
