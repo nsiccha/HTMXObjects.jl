@@ -839,6 +839,38 @@ htmx_tabset(
 
 Drop `tabset_styles()` once per page to style the active-tab indicator.
 
+A `tabset`'s open tab lives in the page URL. A tab click replaces the URL's
+`tab` parameter with the tab's name (the history entry is replaced, not added),
+and a page opened with `?tab=<name>` shows that tab, so a reload, Back or a
+shared link reopens it. The browser does both; the app's routes need not read
+`?tab=`. A tab's name is its label lowercased, with umlauts spelled out and
+every other run of characters a `-`:
+
+```julia
+# ?tab=voralarme, ?tab=stoerungen, ?tab=guete-der-messungen-k-40
+tabset("Voralarme" => alarms, "Störungen" => "/stoerungen",
+       "Güte der Messungen (K-40)" => "/guete")
+
+# names of your own; `active` picks the tab shown when the URL names none,
+# by position or by name
+tabset("Voralarme" => alarms, "Störungen" => "/stoerungen";
+       names=["voralarme", "stoerungen"], active="stoerungen")
+
+# a second tabset on the page keeps its own parameter (?insitu=…);
+# tabsets that share a parameter share its value
+tabset("K-40" => "/k40", "Cs-137" => "/cs137"; url_param="insitu")
+
+# keep this tabset out of the URL
+tabset("A" => a, "B" => b; url_param=nothing)
+```
+
+A lazy tab named by the URL loads once it shows, and the default tab's lazy
+panel is not fetched until its tab is clicked. Two tabs with one name are an
+`ArgumentError` while the URL or `active` picks tabs by name. Inside a docs embed (`.htmxo-embed`) the URL belongs to the
+host page and is left alone. `htmx()` pages carry the script that does
+this, `tabset_script()`; a page with its own `<head>` adds it next to
+`tabset_styles()`.
+
 ### `comparison_view` — tabs and selectable comparison columns {#comparison-view}
 
 ```julia

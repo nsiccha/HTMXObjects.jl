@@ -66,6 +66,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 | `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, not recorded as an error |
+| `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles and failure toasts (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
 response — and it passes through the response pipeline unchanged.
@@ -213,6 +214,14 @@ toast saying why, with no app code:
 - `Request failed (HTTP 413 Request Entity Too Large)` names the status and its reason. Over HTTP/2 the browser receives no reason phrase, so the shell reads it from the answer's `<title>` (a gateway error page carries one), or else uses the standard phrase.
 - `Request failed (HTTP 409 Conflict): already stopped` appends a short `text/plain` body, or an HTML title or heading that says more than the status.
 - `Request failed: no response (network error or server unreachable)` and `Request timed out` cover a request that got no answer.
+
+The toasts are written in the page's `error_texts` (the same [`ErrorTexts`](@ref)
+the error articles use): `htmx(...; error_texts=__error_texts__)` or
+`pico_page(...; error_texts=__error_texts__)` in the root's `__page__`.
+`error_texts(:de)` gives `Anfrage fehlgeschlagen (HTTP 502 Fehlerhaftes
+Gateway)`; a page in another language names the status from its own table,
+since the browser's reason phrase and a gateway's title are English. English
+is the default, and an English page carries no extra markup.
 
 The requesting element and its target still flash red, as
 [`request_feedback`](@ref) marks them. The previous content of the target
@@ -616,6 +625,48 @@ metadata up. `?plain` carries `[label](href)` either way.
 | `e`                   | Error-tagged HTML builder — mirrors `h` (`e.div(...)`, `e.p(...)`, …) but injects `data-error="true"`. Pair with `filter_errors` and `?error` to expose machine-readable error summaries from a composite page |
 | `filter_errors(html)` | Walk a Node tree and keep only nodes with `data-error="true"` (and their ancestors); used by the response pipeline when `?error` is on the query |
 | `ERROR_DIR`           | `Ref{String}` — directory where caught route exceptions are logged (default `joinpath(tempdir(), "htmxo_errors")`, override via `HTMXO_ERROR_DIR` env var) |
+
+### Error articles in the app's language {#error-texts}
+
+A failed route answers with a small error article: for a recorded server
+fault, `Error` / `Something went wrong. Error ID: <id>`, and for a caller
+fault its status's reason phrase (`Not Found`, `Bad Request`) over the
+message. An app in another language sets the framework's words once, on its
+root struct:
+
+```julia
+@htmx struct App
+    __error_texts__ = error_texts(:de)
+    __page__(content) = pico_page(content; error_texts=__error_texts__)
+    @get probe(kenn::String) = haskey(PROBES, kenn) ? probe_view(PROBES[kenn]) :
+        throw(CallerFault(404, "Sonde $kenn unbekannt"))
+    @include admin = AdminRoutes()
+end
+```
+
+`@htmx` threads `__error_texts__` down the `__parent__` chain, like
+`__on_error__`, so every `@include`d struct's routes answer in it too, as do
+`safely` panels and polled operations. A server fault then reads
+`Fehler` / `Etwas ist schiefgegangen. Fehler-ID: <id>`, keeping the error id
+that names its log file; `/probe/x` reads `Nicht gefunden` / `Sonde x
+unbekannt`; a missing parameter reads `Ungültige Anfrage` / `Pflichtangabe
+fehlt: n`. A stalled operation's terminal and its **Run again** button follow
+too. Passing the same value to the page shell translates the
+[failure toasts](#failure-toasts). Any text can be replaced by keyword, and
+`reasons` replaces the phrases of the statuses it names:
+`error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
+reasons=Dict(404 => "Unbekannt"))`. `server_fault` must keep `{id}`.
+
+An app's own `CallerFault` message is shown as written. Error logs, `@error`
+lines and `showerror` stay English. A custom `__error__`
+hook that takes two arguments, `__error__(err, uid)`, receives the recorded
+error id as well (`nothing` for an unrecorded caller fault), so its own
+article or JSON body can carry it.
+
+```@docs
+ErrorTexts
+error_texts
+```
 
 ## Semantic applications
 
@@ -2254,7 +2305,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
 | `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |
 | `Upload`                        | Route-argument type for an uploaded file (`Vector{Upload}` for several); generated forms render a file input and submit multipart |
-| `tabset`, `tabset_styles`, `htmx_tabset` | Tab navigation widgets                            |
+| `tabset`, `tabset_styles`, `tabset_script`, `htmx_tabset` | Tab navigation widgets; a `tabset` keeps its open tab in the page URL |
 | `comparison_view`, `comparison_js`, `comparison_styles` | Selectable comparison columns, either inline tabs with a Compare dialog or shown directly inline, independently loaded and scrolling; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
 | `loading_indicator_script`, `request_feedback_*`, `show_when_script` | UX scripts injected into the page |

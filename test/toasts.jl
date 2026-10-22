@@ -356,3 +356,152 @@ end
         end
     end
 end
+
+# The failed-request toasts speak the page's error texts: `htmx(...;
+# error_texts)` puts them on `<html>`, where the shell's toast runtime reads
+# them, and an English page stays byte-identical (snag
+# error-articles-i-c4c9b7f6, design pick `16ro3ue`).
+@testitem "the page shell carries non-English toast texts" tags=[:unit] begin
+    using HTMXObjects
+    de = error_texts(:de)
+    html_tag(page) = match(r"<html[^>]*>", repr("text/html", page)).match
+    tag = html_tag(htmx(h.p("x"); error_texts=de))
+    @test contains(tag, "data-htmxo-error-texts=")
+    @test contains(tag, "Anfrage fehlgeschlagen") && contains(tag, "Fehlerhaftes Gateway") &&
+        contains(tag, "Schließen")
+    @test contains(tag, "hx-ext=\"preload\"")
+    @test !contains(html_tag(htmx(h.p("x"); preload_version=nothing, error_texts=de)), "hx-ext")
+    @test contains(html_tag(HTMXObjects.pico_page(h.p("x"); error_texts=de)), "data-htmxo-error-texts=")
+    english = repr("text/html", htmx(h.p("x")))
+    @test english == repr("text/html", htmx(h.p("x"); error_texts=error_texts(:en)))
+    @test html_tag(htmx(h.p("x"))) == "<html hx-ext=\"preload\">"
+    # The runtime's English default is written from the same texts.
+    @test contains(english, "var ENGLISH = {\"request_failed\":\"Request failed\"")
+    @test contains(english, "\"404\":\"Not Found\"")
+    # refused: a locale symbol is not a set of texts, and would silently stay English
+    @test_throws ArgumentError htmx(h.p("x"); error_texts=:de)
+end
+
+@testitem "failure toasts speak the page's error_texts in a real browser" tags=[:unit, :browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_file = "/vendor/" * HTMXObjects._VENDOR_ASSETS[:htmx].file
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        controls = h.div(
+            h.button("Bad"; id="bad", hx_post="/bad", hx_target="#out"),
+            h.button("Big"; id="big", hx_post="/big", hx_target="#out"),
+            h.button("Drop"; id="drop", hx_post="/drop", hx_target="#out"), h.div(; id="out"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const require = (ok, label) => { if (!ok) throw new Error(label + ' ' + JSON.stringify(texts())); checks.push(label); };
+            const el = id => document.getElementById(id);
+            const shown = () => Array.from(document.querySelectorAll('.htmxo-toast.htmxo-toast-show'));
+            const texts = () => shown().map(t => t.querySelector('span').textContent);
+            const wait = async cond => { for (let n = 0; n < 400 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const ended = (id, fire) => new Promise(resolve => {
+                const names = ['htmx:afterRequest', 'htmx:sendError'];
+                const on = e => {
+                    const elt = e.detail.requestConfig && e.detail.requestConfig.elt || e.detail.elt;
+                    if (elt !== el(id) || (e.type === 'htmx:afterRequest' && !(e.detail.xhr && e.detail.xhr.status))) return;
+                    names.forEach(n => document.removeEventListener(n, on));
+                    setTimeout(resolve, 0);
+                };
+                names.forEach(n => document.addEventListener(n, on));
+                fire();
+            });
+            const dismissAll = async () => { shown().forEach(t => t.querySelector('.htmxo-toast-close').click()); await wait(() => shown().length === 0); };
+            try {
+                await ended('bad', () => el('bad').click());
+                // HTTP/1.1 brings the English reason "Bad Gateway"; the page's table names it.
+                require(texts().join('|') === 'Anfrage fehlgeschlagen (HTTP 502 Fehlerhaftes Gateway)', 'reason phrase from the page texts');
+                require(shown()[0].querySelector('.htmxo-toast-close').getAttribute('aria-label') === 'Schließen', 'dismiss label');
+                await dismissAll();
+                await ended('big', () => el('big').click());
+                require(texts().join('|') === 'Anfrage fehlgeschlagen (HTTP 413 Inhalt zu groß)', 'empty reason phrase');
+                await dismissAll();
+                await ended('drop', () => el('drop').click());
+                require(texts().join('|') === 'Anfrage fehlgeschlagen: keine Antwort (Netzwerkfehler oder Server nicht erreichbar)', 'dropped connection');
+                const timeout = window.htmxoRequestOutcome({ type: 'htmx:timeout', detail: {} });
+                require(timeout.text === 'Zeitüberschreitung der Anfrage', 'timeout outcome');
+                await fetch('/complete?status=' + encodeURIComponent('passed:' + checks.length));
+            } catch (error) {
+                await fetch('/complete?status=' + encodeURIComponent(String(error)));
+            }
+        }, { once: true });
+        """))
+        page = repr("text/html", htmx(controls, driver; assets=:vendor, sse_version=nothing,
+            ws_version=nothing, preload_version=nothing, hyperscript_version=nothing, overlay=false,
+            error_texts=error_texts(:de)))
+        gateway(title) = "<html>\r\n<head><title>$title</title></head>\r\n<body>\r\n" *
+            "<center><h1>$title</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+
+        receipt = Channel{String}(1)
+        listener = listen(Sockets.localhost, 0)
+        port = Int(getsockname(listener)[2])
+        respond(io, status_line, body=""; type="text/html") = write(io,
+            "HTTP/1.1 $status_line\r\nContent-Type: $type; charset=utf-8\r\n" *
+            "Content-Length: $(sizeof(body))\r\nConnection: close\r\n\r\n", body)
+        function handle(io)
+            request_line = readline(io)
+            body_bytes = 0
+            while true
+                line = readline(io)
+                isempty(strip(line)) && break
+                name, value = strip.(split(line, ':'; limit=2))
+                lowercase(name) == "content-length" && (body_bytes = parse(Int, value))
+            end
+            body_bytes > 0 && read(io, body_bytes)
+            target = split(request_line)[2]
+            path = first(split(target, '?'))
+            path == "/" && return respond(io, "200 OK", page)
+            path == htmx_file && return respond(io, "200 OK", htmx_js; type="application/javascript")
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(target))
+                return respond(io, "204 No Content")
+            end
+            path == "/bad" && return respond(io, "502 Bad Gateway", gateway("502 Bad Gateway"))
+            # An empty reason phrase: what the browser sees from an HTTP/2 gateway.
+            path == "/big" && return respond(io, "413 ", gateway("413 Request Entity Too Large"))
+            path == "/drop" && return nothing
+            respond(io, "404 Not Found", "missing")
+        end
+        acceptor = @async while isopen(listener)
+            io = try accept(listener) catch; break end
+            @async try
+                handle(io)
+            catch err
+                err isa Base.IOError || @error "test server handler failed" exception=(err, catch_backtrace())
+            finally
+                close(io)
+            end
+        end
+        try
+            mktempdir() do profile
+                browser_log = joinpath(profile, "browser.log")
+                browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`;
+                    stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(browser), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        outcome = HTTP.unescapeuri(take!(receipt))
+                        @test outcome == "/complete?status=passed:5"
+                        outcome == "/complete?status=passed:5" || @info "German failure toast outcome" outcome
+                    else
+                        @info "German failure toast timeout" log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(browser) || kill(browser)
+                    wait(browser)
+                end
+            end
+        finally
+            close(listener)
+        end
+    end
+end
