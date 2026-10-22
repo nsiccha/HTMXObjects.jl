@@ -898,7 +898,7 @@ without repeating that page-level installation.
 | Setting | Where it can be shared | Boundary |
 |---|---|---|
 | `hx_target`, `hx_swap` | Nearest common ancestor | A descendant's explicit value wins. Relative targets such as `next .row-operations` resolve from the requesting control. Generated operation forms retain their own stable target and swap. |
-| `hx_vals`, `hx_headers` | Common ancestor | Use static JSON for common values. A nearer declaration overrides the same key; evaluated `js:` expressions must be trusted application code. |
+| `hx_vals`, `hx_headers` | Common ancestor | Use static JSON for common values. A nearer declaration overrides the same key; evaluated `js:` expressions must be trusted application code. An inherited `js:` expression runs for every request beneath its element, with that request's own event, so keep one that reads a particular event's fields off an element whose swapped-in content sends requests of its own. |
 | `hx_include` | Common ancestor | Use a stable selector for external controls. Extended selectors such as `find` are evaluated from the requester, even when inherited; they do not search from the ancestor that declares them. |
 | `hx_on__…`, `hx_on_click` | Ancestor that receives bubbling events | The handler is installed on that ancestor; `this` is the ancestor and `event.target` identifies the originating node. These are event delegation, not inherited attributes. |
 | Appearance | One wrapper class and a stylesheet selector | HTML `class`, `title`, and `aria-label` are not inherited. A generated submit button's accessible name remains on that button via `submit_attrs`. |
@@ -906,9 +906,17 @@ without repeating that page-level installation.
 An operation's framework-generated `:auto` poller keeps the arguments captured
 in its poll URL. Its follow-up requests exclude inherited `hx-vals`,
 `hx-include`, and successful form inputs, so a setting changed while the
-operation runs cannot duplicate or override the captured arguments. The
-original request still uses shared settings normally. Hand-shaped Treebars
-pollers retain ordinary htmx inheritance.
+operation runs cannot duplicate or override the captured arguments. They also
+never evaluate an inherited `js:` value: htmx evaluates one for every request
+beneath the element that declares it, with that request's own triggering
+event, and a poll has none, so an expression that reads its event
+(`js:{kenn: event.detail.datum.kenn}` on an `aov:click` detail panel) would
+throw and stop the poll. A stalled operation's Run again button is isolated
+the same way. The isolation sits on the polling element rather than the
+poller's wrapper, so the controls of a result kept inside that wrapper
+(`keep_terminal_tree=true`) send their own values. The original request still
+uses shared settings normally. Hand-shaped Treebars pollers retain ordinary
+htmx inheritance.
 
 Request URLs, request triggers, operation result addresses, and successful form
 inputs keep their local identities. In particular, `hx_get`, `hx_post`, and
