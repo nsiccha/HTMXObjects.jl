@@ -516,7 +516,8 @@ handler injects them — but route bodies may reference them.
 | `__route__`     | `route!` handler (per request)       | The per-request URL (query string stripped). Use for `hx_get=__route__` / `href=__route__` instead of recomputing. |
 | `__appdata__`   | User (`= APPDATA`) + `@include`      | App data; falls through the `__parent__` chain.       |
 | `__page__`      | User                                 | `content -> full_page(content)`. Called by pipeline.  |
-| `__error__`     | User (optional)                      | `err -> renderable`. Called on caught exceptions.     |
+| `__error__`     | User (optional)                      | `err -> renderable`, or `(err, uid) -> renderable` to also receive the recorded error id. Called on caught exceptions. |
+| `__error_texts__` | User (`= error_texts(:de)`) + `@include` | The language of the error articles; falls through the `__parent__` chain. |
 
 ## URL building — `__self__ / "path"`
 
@@ -826,8 +827,10 @@ Every route handler is wrapped in try/catch. On a server-fault exception
    `showerror(io, err, bt)`.
 3. Emits one `@error "HTMXObjects caught an error: <full path>"` — terse;
    the full stack trace is on disk.
-4. Feeds the result of `__error__(err)` (or the default renderer) back
-   through the response pipeline.
+4. Feeds the result of `__error__(err)` — `__error__(err, uid)` when the
+   hook takes two arguments — or of the default renderer back through the
+   response pipeline. The default article is written in the struct's
+   `__error_texts__` (English unless the app sets it; see below).
 
 ### Status codes
 
@@ -879,8 +882,29 @@ The hook receives the exception wrapped like any route error, so read it with
 
     # Custom rendering:
     __error__(err) = h.article(h.header("Oops"), h.p(sprint(showerror, err)))
+
+    # ...or with the recorded error id (`nothing` for a caller fault):
+    # __error__(err, uid) = h.article(h.header("Oops"), h.p("Error ", h.code(something(uid, "–"))))
 end
 ```
+
+### The error articles in the app's language
+
+The default articles are English. An app in another language sets the
+framework's words once on its root struct; every `@include`d struct inherits
+them, and the server-fault article keeps its error id:
+
+```julia
+@htmx struct AppRoutes
+    __error_texts__ = error_texts(:de)   # "Fehler" / "Etwas ist schiefgegangen. Fehler-ID: …"
+    __page__(content) = pico_page(content; error_texts=__error_texts__)   # the failure toasts too
+end
+```
+
+Caller faults read `Nicht gefunden`, `Ungültige Anfrage`, `Pflichtangabe
+fehlt: n`; any text can be replaced by keyword (`error_texts(:de;
+server_fault="… {id}")`). See [Error articles in the app's
+language](api.md#error-texts).
 
 ### Widget-level containment — `safely`
 

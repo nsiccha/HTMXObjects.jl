@@ -68,6 +68,7 @@ function HTMXObjects._invoke_error_handler(ctx::_OperationErrorContext, err,
     HTMXObjects._operation_failed(ctx.transport, err, uid)
     HTMXObjects._invoke_error_handler(ctx.obj, err, uid, path)
 end
+HTMXObjects._error_texts(ctx::_OperationErrorContext) = HTMXObjects._error_texts(ctx.obj)
 
 function _operation_treebars_kwargs(call_kwargs, transport,
         treebars_tracks_jobs::Bool)
@@ -111,12 +112,13 @@ function _operation_stalled_response(stall, ip, keys, call_kwargs, transport)
         @debug "HTMXObjects: no progress status for a stalled operation" exception=(err, catch_backtrace())
         nothing
     end
+    texts = HTMXObjects._error_texts(transport.error_obj)
     tree = isnothing(status) ? "" :
         HTMXObjects.h.details(class="treebar-frozen", open=true)(
-            HTMXObjects.h.summary("Progress"),
+            HTMXObjects.h.summary(texts.progress),
             Treebars.htmx_render(status; scoped=true))
     rerun = stall.error.rerun_url === nothing ? "" :
-        HTMXObjects.h.p(HTMXObjects.h.button("Run again"; type="button",
+        HTMXObjects.h.p(HTMXObjects.h.button(texts.run_again; type="button",
             class="htmxo-operation-rerun", hx_get=stall.error.rerun_url,
             hx_target="closest .treebar-terminal-content",
             hx_swap="outerHTML",
