@@ -271,3 +271,110 @@ end
     end
     reset_retention!()
 end
+
+# `route!(app)` serves requests from `app`: every root built for a request takes
+# `app`'s fixed fields and constructor overrides, whichever provider builds it
+# (snag `route-drops-the-0fde2d8d`: the instance used to be dropped, and every
+# root was built from the type's defaults).
+@testmodule RouteInstanceFixtures begin
+    using HTMXObjects, HTTP
+    import HTMXObjects: h
+
+    export InstanceApp, FixedInstance, DEFAULT_DIR, fit_dirs, instance_get
+
+    const DEFAULT_DIR = Ref("")
+    # One subdirectory per fit, named after the directory's label.
+    fit_dirs(labels...) = map(labels) do label
+        dir = mktempdir()
+        mkpath(joinpath(dir, "$label-fit"))
+        dir
+    end
+
+    @htmx struct InstancePart
+        dir::String = ""
+        @direct @get index() = h.p("part dir=$dir")
+    end
+
+    @htmx struct InstanceApp
+        dir::String = DEFAULT_DIR[]
+        fits = sort!(readdir(dir))
+        @options(fit) = fits
+        @include part = InstancePart(; dir)
+        @get index() = semantic_app(__self__; title="instance",
+                                    select=entry -> entry.name === :show)
+        "Show the fit"
+        @direct @get show(; fit::String) = h.p("fit=$fit dir=$dir")
+    end
+
+    @htmx struct FixedInstance
+        dir::String
+        @direct @get index() = h.p("fixed dir=$dir")
+    end
+
+    function instance_get(target)
+        response = dispatch(:GET, target; headers=["Accept" => "text/markdown"])
+        (; response.status, body=String(HTMXObjects._message_body_bytes(response)))
+    end
+end
+
+@testitem "route! builds every request root from the routed instance" setup=[RouteInstanceFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    default_dir, configured = fit_dirs("default", "configured")
+    DEFAULT_DIR[] = default_dir
+    # An explicit `RootProvider()` is the default; spelled out, it also replaces a
+    # semantic store another item may have switched on for this type.
+    providers = (; fresh=RootProvider(),
+        managed=RootProvider(; scope=:job, key=_ -> :instance, retention=RootRetention()))
+    for (label, provider) in pairs(providers)
+        route!(InstanceApp(; dir=configured); prefix="instance", root_provider=provider)
+        answer = instance_get("/instance/show?fit=configured-fit")
+        @test answer.status == 200
+        @test contains(answer.body, "dir=$configured")
+        # The declared domain is the instance's directory, not the default one.
+        @test instance_get("/instance/show?fit=default-fit").status == 400
+        # A mounted child is built from the request root, so it sees the override.
+        @test contains(instance_get("/instance/part").body, "part dir=$configured")
+    end
+
+    # A type with a required fixed field is routed from its instance; it used to
+    # answer every request with a recorded 500 (no `FixedInstance(; __req__, …)`).
+    route!(FixedInstance(configured); prefix="instance-fixed")
+    answer = instance_get("/instance-fixed")
+    @test answer.status == 200
+    @test contains(answer.body, "fixed dir=$configured")
+end
+
+@testitem "route! of a bare instance still evaluates defaults per request" setup=[RouteInstanceFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    first_dir, second_dir = fit_dirs("first", "second")
+    DEFAULT_DIR[] = first_dir
+    route!(InstanceApp(); prefix="instance", root_provider=RootProvider())
+    @test contains(instance_get("/instance/show?fit=first-fit").body, "dir=$first_dir")
+    # Nothing was overridden, so each fresh root reads the default again.
+    DEFAULT_DIR[] = second_dir
+    @test contains(instance_get("/instance/show?fit=second-fit").body, "dir=$second_dir")
+end
+
+@testitem "the semantic store serves the instance route! was last given" setup=[RouteInstanceFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    default_dir, first_dir, second_dir = fit_dirs("default", "first", "second")
+    DEFAULT_DIR[] = default_dir
+    route!(InstanceApp(; dir=first_dir); prefix="instance")
+    # Rendering the semantic surface switches on its managed store; the root it
+    # retains carries the instance's directory.
+    index = instance_get("/instance")
+    @test index.status == 200
+    @test contains(index.body, "Show the fit")
+    @test HTMXObjects._is_semantic_root_provider(HTMXObjects._root_providers[InstanceApp])
+    @test contains(instance_get("/instance/show?fit=first-fit").body, "dir=$first_dir")
+
+    # Routing another instance keeps the store but drops the roots it built
+    # from the earlier one.
+    route!(InstanceApp(; dir=second_dir); prefix="instance")
+    @test HTMXObjects._is_semantic_root_provider(HTMXObjects._root_providers[InstanceApp])
+    @test contains(instance_get("/instance/show?fit=second-fit").body, "dir=$second_dir")
+    @test instance_get("/instance/show?fit=first-fit").status == 400
+end

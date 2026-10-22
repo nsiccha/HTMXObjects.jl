@@ -69,6 +69,31 @@ end
     @test_throws ArgumentError probe_table(; link="probes",
         master=p -> h.tr(probe_cells(p)...; data_htmxo_link_key="x"))
 
+    # `link_key`: tables of the same items on one page keep their own page-unique
+    # `key` (row and detail ids) and name each item by one key in the link group.
+    trend = html(probe_table(; key=p -> "trend-" * p.id, link="probes", link_key=p -> p.id))
+    @test keyed(trend) == [p.id for p in PROBES]
+    @test contains(trend, "id=\"row-trend-k1\"") && contains(trend, "id=\"detail-trend-k1\"")
+    ttree = html(master_detail_table(["Name"], [(; id="g", kids=[(; id="l", kids=[])])];
+        key=x -> "t-" * x.id, master=x -> (h.td(x.id),), children=x -> x.kids, link="probes", link_key=x -> x.id))
+    @test keyed(ttree) == ["g", "l"] && contains(ttree, "id=\"row-t-l\"")
+    tgrouped = html(probe_table(; key=p -> "trend-" * p.id, groupings=[LINK_GROUPINGS..., "Both" => p -> [p.land, p.region]],
+        group_by="Both", link="probes", link_key=p -> p.id))
+    @test count(==("k1"), keyed(tgrouped)) >= 2 && "k:9" in keyed(tgrouped) && !any(startswith("trend-"), keyed(tgrouped))
+    tupdate = html(probe_table(; key=p -> "trend-" * p.id, groupings=LINK_GROUPINGS, group_by="Land",
+        link="probes", link_key=p -> p.id, update_rows="trend-k3"))
+    @test "k3" in keyed(tupdate)
+    # A lazy group lists each unloaded leaf's link key after its key and search
+    # text, so a hover lights the group; without `link_key` the entries stay pairs.
+    lazy(; kw...) = html(probe_table(; groupings=LINK_GROUPINGS, group_by="Land",
+        group_rows_url=(k, ms) -> "/rows?land=$k", link="probes", kw...))
+    @test contains(lazy(; key=p -> "trend-" * p.id, link_key=p -> p.id),
+        "data-htmxo-lazy-leaves=\"[[&quot;trend-k5&quot;,&quot;k5 Sachsen 5&quot;,&quot;k5&quot;],[&quot;trend-k8&quot;,&quot;k8 Sachsen 8&quot;,&quot;k8&quot;]]\"")
+    @test contains(lazy(), "data-htmxo-lazy-leaves=\"[[&quot;k5&quot;,&quot;k5 Sachsen 5&quot;],[&quot;k8&quot;,&quot;k8 Sachsen 8&quot;]]\"")
+    # Refused: a link key without a link group would highlight nothing.
+    @test_throws ArgumentError probe_table(; link_key=p -> p.id)
+    @test_throws ArgumentError probe_table(; groupings=LINK_GROUPINGS, link_key=p -> p.id)
+
     # The note on a row that holds the hovered item, in both built-in languages.
     @test table_texts().linked_inside == "↳ inside" && table_texts().linked_deep == "↳ {levels} levels down"
     @test table_texts(:de).linked_inside == "↳ darin" && table_texts(:de).linked_deep == "↳ {levels} Ebenen tiefer"
@@ -198,6 +223,85 @@ end
                     @test endswith(line, ":true")
                 end
                 @test count(==('\n'), checks[1]) + 1 == 22
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "linked tables keyed by link_key browser" setup=[LinkFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # Three tables of the same probes on one page: each keeps its own row
+        # and detail ids, and all three name a probe by its id in the group.
+        main = probe_table(; link="probes", id="main")
+        trend = probe_table(; key=p -> "trend-" * p.id, link="probes", link_key=p -> p.id, id="trend")
+        lazy = probe_table(; key=p -> "lz-" * p.id, groupings=LINK_GROUPINGS, group_by="Land",
+            group_rows_url=(k, ms) -> "/rows?land=$k", link="probes", link_key=p -> p.id, id="lazy")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const wait = async cond => { for (let n = 0; n < 200 && !cond(); n++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const events = [];
+            document.addEventListener('htmxo:link', e => events.push(e.detail.group + ':' + e.detail.key));
+            const last = () => events[events.length - 1];
+            const body = id => document.getElementById(id).closest('table').tBodies[0];
+            const lit = id => Array.from(body(id).rows).filter(r => 'htmxoLinked' in r.dataset)
+                .map(r => r.id + '=' + (r.dataset.htmxoLinked || 'row') + (r.cells[0].dataset.htmxoLinkedNote ? '[' + r.cells[0].dataset.htmxoLinkedNote + ']' : '')).join(',');
+            const over = (to, from) => (to || document.body).dispatchEvent(new PointerEvent('pointerover', {bubbles: true, relatedTarget: from || null}));
+            const row = id => document.getElementById('row-' + id);
+
+            // A row of the second table announces the probe's own key and lights the
+            // probe in the other tables, the lazy group around it included.
+            over(row('trend-k3').cells[1]);
+            check('announces-link-key', last() === 'probes:k3');
+            check('lights-itself', lit('trend') === 'row-trend-k3=row');
+            check('lights-other-table', lit('main') === 'row-k3=row');
+            check('lights-lazy-group', lit('lazy') === 'row-group--Bayern=inside[↳ inside]');
+            // A row of the first table lights the second table's row.
+            over(row('k8').cells[1], row('trend-k3').cells[1]);
+            check('row-to-row', last() === 'probes:k8' && lit('trend') === 'row-trend-k8=row' && lit('lazy') === 'row-group--Sachsen=inside[↳ inside]');
+            over(document.body, row('k8').cells[1]);
+            check('leave-ends', last() === 'probes:null' && lit('main') === '' && lit('trend') === '' && lit('lazy') === '');
+            // Each table's detail is its own: the ids do not collide.
+            row('trend-k5').querySelector('[data-htmxo-detail-toggle]').click();
+            await wait(() => !document.getElementById('detail-trend-k5').hidden);
+            check('own-detail', !document.getElementById('detail-trend-k5').hidden && document.getElementById('detail-k5').hidden);
+            // Page script announces a key that is not a CSS identifier.
+            htmxoLink('probes', 'k:9');
+            check('any-key', lit('trend') === 'row-trend-k--9=row' && lit('main') === 'row-k--9=row' && lit('lazy') === 'row-group--Bayern=inside[↳ inside]');
+            htmxoLink('probes', null);
+            check('cleared', lit('main') === '' && lit('trend') === '' && lit('lazy') === '');
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(main, trend, lazy, driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            HTTP.URI(req.target).path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=10000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 9
             end
         finally
             close(server)
