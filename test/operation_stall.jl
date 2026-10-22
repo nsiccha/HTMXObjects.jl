@@ -12,7 +12,7 @@ using TestItemRunner
     import HTMXObjects: h
 
     export StallReadApp, StallQueuedApp, StallQueuedBoundApp, StallOffApp,
-        StallMutationApp, StallBrowserApp, reset_stall!, stall_runs,
+        StallMutationApp, StallBrowserApp, StallGermanApp, reset_stall!, stall_runs,
         release_stall!, age_operations!, hx_get, hx_post, running, poll_url,
         poll_token, settle, body_text, rerun_url, operation_age
 
@@ -76,6 +76,13 @@ using TestItemRunner
         "Submit the slow order"
         @post stall_order(; key::String="order") =
             gated(key, run -> h.p("ordered-$key:$run"))
+    end
+
+    @htmx struct StallGermanApp
+        __error_texts__ = error_texts(:de)
+        "Bericht berechnen"
+        @get german_report(; key::String="german") =
+            gated(key, run -> h.p("german-report:$run"))
     end
 
     @htmx struct StallBrowserApp
@@ -181,6 +188,33 @@ end
     running(again) && (again = settle(poll_url(again)))
     @test contains(again, "report-stall1:")
     @test !contains(again, "Operation stalled")
+end
+
+# The stall terminal speaks the root's error texts: its heading and message,
+# the open progress tree's summary and the Run again button (snag
+# error-articles-i-c4c9b7f6).
+@testitem "a stalled operation's terminal speaks the root's error_texts" setup=[StallFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!
+
+    reset_stall!()
+    _clear_operation_polls!()
+    route!(StallGermanApp())
+    url = poll_url(body_text(hx_get("/german_report?key=german1")))
+    age_operations!(601)
+    stalled = hx_get(url)
+    body = body_text(stalled)
+    @test stalled.status == 286
+    @test !isempty(HTTP.header(stalled, "X-HTMXO-Error-Id", ""))
+    @test contains(body, "<header>Vorgang hängt</header>")
+    @test contains(body, "Bericht berechnen läuft seit 10 min")
+    @test contains(body, "länger als die Grenze von 10 min, daher wartet diese Seite nicht mehr darauf")
+    @test contains(body, "„Erneut ausführen“ startet eine neue Berechnung")
+    @test contains(body, "<summary>Fortschritt</summary>")
+    @test contains(body, ">Erneut ausführen</button>")
+    @test rerun_url(body) == "/german_report?key=german1"
+    @test !contains(body, "Operation stalled") && !contains(body, "Run again")
+    release_stall!(:german1)
 end
 
 @testitem "an operation that finished or failed answers its own result past the bound" setup=[StallFixtures] tags=[:unit, :semantic] begin

@@ -310,3 +310,177 @@ end
     @test stamped(page, CallerFault(404, "gone"), nothing) == (404, "")
     @test stamped(hx, nothing, nothing) == (200, "")
 end
+
+# An app in another language sets its error texts once on the root struct:
+# `@htmx` threads `__error_texts__` down the `__parent__` chain, so an
+# `@include`d struct's routes answer in it too, and the server-fault article
+# keeps the recorded error id that ties it to its log (snag
+# error-articles-i-c4c9b7f6, reporter ODLPlaus:ux; design pick `16ro3ue`).
+# Before, every framework word was English and a German `__error__` hook could
+# not see the id. An app without the setting is the control: byte-identical
+# English.
+@testitem "error articles speak the root's error_texts and keep the error id" tags=[:unit, :server] begin
+    using HTMXObjects, HTTP, Logging
+    import HTMXObjects: h
+
+    @htmx struct ErrorTextsChild
+        @get et_child_boom() = error("child server fault")
+    end
+    @htmx struct ErrorTextsApp
+        __error_texts__ = error_texts(:de)
+        __page__(content) = htmx(h.main(content))
+        @get et_boom() = error("server fault")
+        @get et_probe(kenn::String) = throw(CallerFault(404, "Sonde $kenn unbekannt"))
+        @get et_needs(; n::Int) = h.p("n=$n")
+        @get et_flag(; b::Bool) = h.p("b=$b")
+        @include et_sub = ErrorTextsChild()
+    end
+    @htmx struct ErrorTextsEnglishApp
+        @get en_boom() = error("server fault")
+        @get en_needs(; n::Int) = h.p("n=$n")
+    end
+    route!(ErrorTextsApp())
+    route!(ErrorTextsEnglishApp())
+    hx = ["HX-Request" => "true"]
+    quiet(path; headers=[]) = with_logger(NullLogger()) do
+        dispatch(:GET, path; headers)
+    end
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            page = quiet("/et_boom")
+            @test page.status == 500
+            uid = HTTP.header(page, "X-HTMXO-Error-Id", "")
+            @test !isempty(uid) && isfile(joinpath(dir, "$uid.log"))
+            @test contains(String(page.body), "<article aria-invalid=\"true\"><header>Fehler</header>" *
+                "<p>Etwas ist schiefgegangen. Fehler-ID: <code>$uid</code></p></article>")
+            plain = quiet("/et_boom?plain")
+            plain_uid = HTTP.header(plain, "X-HTMXO-Error-Id", "")
+            @test contains(String(plain.body), "### Fehler")
+            @test contains(String(plain.body), "Etwas ist schiefgegangen. Fehler-ID: `$plain_uid`")
+
+            child = quiet("/et_sub/et_child_boom"; headers=hx)
+            child_uid = HTTP.header(child, "X-HTMXO-Error-Id", "")
+            @test !isempty(child_uid)
+            @test contains(String(child.body), "<header>Fehler</header><p>Etwas ist schiefgegangen. " *
+                "Fehler-ID: <code>$child_uid</code></p>")
+
+            probe = quiet("/et_probe/x"; headers=hx)
+            @test contains(String(probe.body), "<header>Nicht gefunden</header><p>Sonde x unbekannt</p>")
+            needs = quiet("/et_needs")
+            @test needs.status == 400
+            @test contains(String(needs.body), "<header>Ungültige Anfrage</header><p>Pflichtangabe fehlt: n</p>")
+            flag = quiet("/et_flag?b=maybe"; headers=hx)
+            @test contains(String(flag.body),
+                "<p>Ungültiger Wert für b: &quot;maybe&quot;; zulässige Werte: false, true</p>")
+
+            english = quiet("/en_boom")
+            english_uid = HTTP.header(english, "X-HTMXO-Error-Id", "")
+            @test String(english.body) == "<article aria-invalid=\"true\"><header>Error</header>" *
+                "<p>Something went wrong. Error ID: <code>$english_uid</code></p></article>"
+            @test contains(String(quiet("/en_needs").body),
+                "<header>Bad Request</header><p>Missing required parameter: n</p>")
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+    # Logs, `?error` and stack traces stay English whatever the app speaks.
+    @test sprint(showerror, HTMXObjects.MissingRequiredParam(:n)) == "Missing required parameter: n"
+    @test sprint(showerror, HTMXObjects.InvalidDomainValue(:b, "maybe", (false, true))) ==
+        "Invalid value for parameter b: \"maybe\"; allowed values: false, true"
+    @test sprint(showerror, HTMXObjects.OperationResultUnavailable(:save, :POST)) ==
+        "The result of this POST save submission is no longer available. It ran at most once " *
+        "and was not repeated; reload to see the current state."
+end
+
+# `error_texts` follows `table_texts`: keyword overrides, a status table merged
+# into the locale's, and loud refusals for a text that would lose meaning.
+@testitem "error_texts takes overrides and refuses texts that lose meaning" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: _invoke_error_handler, _reason_phrase, _caller_fault_message
+
+    de = error_texts(:de)
+    @test de == error_texts(:de) && error_texts() == HTMXObjects._EN_ERROR_TEXTS
+    @test _reason_phrase(de, 404) == "Nicht gefunden" && _reason_phrase(de, 400) == "Ungültige Anfrage"
+    @test _reason_phrase(de, 299) === nothing
+    # Every status the English table names has a German phrase.
+    @test first.(de.reasons) == first.(error_texts(:en).reasons)
+    custom = error_texts(:de; reasons=Dict(404 => "Unbekannt"),
+        server_fault="Ein Fehler ist aufgetreten ({id}); bitte melden: {id}")
+    @test _reason_phrase(custom, 404) == "Unbekannt" && _reason_phrase(custom, 400) == "Ungültige Anfrage"
+    @test repr("text/html", _invoke_error_handler(nothing, ErrorException("x"), "u9", nothing)) ==
+        "<article aria-invalid=\"true\"><header>Error</header><p>Something went wrong. Error ID: <code>u9</code></p></article>"
+    @test repr("text/html", HTMXObjects._default_error_render("u9", nothing, custom)) ==
+        "<article aria-invalid=\"true\"><header>Fehler</header><p>Ein Fehler ist aufgetreten (" *
+        "<code>u9</code>); bitte melden: <code>u9</code></p></article>"
+    @test _caller_fault_message(HTMXObjects.OperationStalled("Fit", :POST, 75.0, 60.0, nothing), de) ==
+        "Fit läuft seit 1 min 15 s, länger als die Grenze von 1 min, daher wartet diese Seite nicht mehr " *
+        "darauf. Die Berechnung wurde nicht abgebrochen und kann im Hintergrund noch fertig werden. " *
+        "Die POST-Übermittlung wurde nicht wiederholt; laden Sie die Seite neu, um den aktuellen Stand zu sehen."
+    # A 4xx with no reason phrase reads under the plain `refused` title.
+    @test contains(repr("text/html", HTMXObjects._invoke_error_handler(
+        nothing, CallerFault(499, "abgebrochen"), nothing, nothing)), "<header>Request refused</header>")
+    # refused: the article must keep the recorded error id that ties it to its log (snag error-articles-i-c4c9b7f6)
+    @test_throws ArgumentError error_texts(:de; server_fault="Etwas ist schiefgegangen.")
+    @test_throws ArgumentError error_texts(:fr)
+    @test_throws ArgumentError error_texts(:de; bogus="x")
+    @test_throws ArgumentError error_texts(:de; missing_param="{param} fehlt")
+    # refused: a misspelt setting must not silently answer in English
+    @test_throws ArgumentError HTMXObjects._error_texts_value(:de)
+end
+
+# A custom `__error__` hook that takes two arguments also receives the
+# recorded error id (`nothing` for an unrecorded caller fault), so a hook in
+# the app's own wording — or a JSON API's error body — keeps it. A
+# one-argument hook is called as before (snag error-articles-i-c4c9b7f6).
+@testitem "a two-argument __error__ hook receives the recorded error id" tags=[:unit, :server] begin
+    using HTMXObjects, HTTP, Logging
+    import HTMXObjects: h
+
+    @htmx struct TwoArgHookApp
+        __error__(err, uid) = h.p("id=", something(uid, "none"))
+        @get two_boom() = error("server fault")
+        @get two_probe(kenn::String) = throw(CallerFault(404, "unknown $kenn"))
+    end
+    one_arg(err) = h.p("one argument")
+    @htmx struct OneArgHookApp
+        __error__ = one_arg
+        @get one_boom() = error("server fault")
+    end
+    @htmx struct OneArgMethodHookApp
+        __error__(err) = h.p("one-argument method")
+        @get one_method_boom() = error("server fault")
+    end
+    two_args(err, uid) = h.p("value id=", something(uid, "none"))
+    @htmx struct TwoArgValueHookApp
+        __error__ = two_args
+        @get two_value_boom() = error("server fault")
+    end
+    route!(TwoArgValueHookApp())
+    route!(TwoArgHookApp())
+    route!(OneArgHookApp())
+    route!(OneArgMethodHookApp())
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            boom = with_logger(NullLogger()) do; dispatch(:GET, "/two_boom"); end
+            uid = HTTP.header(boom, "X-HTMXO-Error-Id", "")
+            @test !isempty(uid) && contains(String(boom.body), "<p>id=$uid</p>")
+            probe = with_logger(NullLogger()) do; dispatch(:GET, "/two_probe/x"); end
+            @test probe.status == 404 && contains(String(probe.body), "<p>id=none</p>")
+            one = with_logger(NullLogger()) do; dispatch(:GET, "/one_boom"); end
+            @test one.status == 500 && contains(String(one.body), "<p>one argument</p>")
+            method = with_logger(NullLogger()) do; dispatch(:GET, "/one_method_boom"); end
+            @test method.status == 500 && contains(String(method.body), "<p>one-argument method</p>")
+            value = with_logger(NullLogger()) do; dispatch(:GET, "/two_value_boom"); end
+            value_uid = HTTP.header(value, "X-HTMXO-Error-Id", "")
+            @test !isempty(value_uid) && contains(String(value.body), "<p>value id=$value_uid</p>")
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+    # `__error__ = rethrow` keeps its one-argument call.
+    @test !applicable(rethrow, ErrorException("x"), "u1")
+end
