@@ -407,7 +407,13 @@ end
           }
         });
         """))
-        page = repr("text/html", htmx(h.main(h.div(; id="panel"), driver);
+        # The panel sits in a container whose `js:` value reads its triggering
+        # event. Neither a poll (no event) nor the Run again click (a click's
+        # `detail` is a count) can evaluate it, so both must leave it unread
+        # (snag a-slow-route-ins-cd926595).
+        page = repr("text/html", htmx(h.main(
+                h.div(h.div(; id="panel"); hx_vals="js:{kenn: event.detail.datum.kenn}"),
+                driver);
                 assets="/test-assets", sse_version=nothing, ws_version=nothing,
                 preload_version=nothing, hyperscript_version=nothing,
                 pico_version=nothing, feedback=false, compose=false,

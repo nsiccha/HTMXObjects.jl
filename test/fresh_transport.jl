@@ -157,6 +157,10 @@ using TestItemRunner
         @fresh @get browser_grouped(; group_by::String="None",
                 review_scope::String="all", focus_year::Int=0) =
             gated(:browser_grouped, "grouped-$group_by-$review_scope-$focus_year")
+        "Render the echo control"
+        @fresh @get browser_echo() = (wait(gate(:browser_echo));
+            h.button("echo"; id="echo", type="button", hx_get="/echo",
+                     hx_vals="{\"probe\":\"kept\"}", hx_target="#echo-out"))
         "Save the slow form"
         @post browser_save(; note::String="") = gated(:browser_post, "saved-$note")
         "Save the card"
@@ -292,7 +296,12 @@ end
                          h.option("Counterparty"; value="Counterparty", selected=true);
                          id="live-group", name="group_by"),
                 h.input(; id="included", name="focus_year", value="999"),
-                h.div(Raw(poller); id="grouped-result")),
+                # A container whose `js:` value reads its triggering event
+                # (an `aov:click` detail panel): a poll has no event, so
+                # merely evaluating the expression throws and the poll never
+                # leaves the browser (snag a-slow-route-ins-cd926595).
+                h.div(Raw(poller); id="grouped-result",
+                      hx_vals="js:{kenn: event.detail.datum.kenn}")),
             driver);
             assets="/test-assets", sse_version=nothing, ws_version=nothing,
             preload_version=nothing, hyperscript_version=nothing,
@@ -349,6 +358,129 @@ end
             @test fresh_runs(:browser_grouped) == 1
         finally
             release_fresh!(:browser_grouped)
+            close(server)
+        end
+    end
+end
+
+# The request isolation belongs to the polling element: it is the only element
+# whose requests carry captured arguments, and the wrapper outlives polling.
+@testitem "an auto poller isolates its polling element, not its wrapper" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!
+
+    reset_fresh!()
+    _clear_operation_polls!()
+    route!(FreshReadApp())
+    started = body_text(hx_get("/fresh_report?n=4"))
+    # The first answer, and a poll's answer: the inner the live poller selects.
+    for answer in (started, body_text(hx_get(poll_url(started))))
+        @test running(answer)
+        wrapper = match(r"<div class=\"treebar-poller\"[^>]*>", answer).match
+        inner = match(r"<div class=\"treebar-poller-inner\"[^>]*>", answer).match
+        for (name, value) in (("hx-params", "none"), ("hx-vals", "unset"), ("hx-vars", "unset"))
+            @test contains(inner, "$name=\"$value\"")
+            @test !contains(wrapper, name)
+        end
+    end
+    release_fresh!(:read)
+end
+
+# A kept terminal tree terminalizes the live wrapper in place, so the result's
+# own controls stay inside it. The poll isolation sits on the polling element,
+# never on that wrapper, so those controls send their values as anywhere else.
+@testitem "a kept terminal's own controls send their values" setup=[FreshTransportFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+        import HTMXObjects: _clear_operation_polls!, h, Raw
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(FreshBrowserApp();
+            operation_policy=OperationPolicy(:auto; keep_terminal_tree=true))
+
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        echoes = String[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('error', event => {
+          fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+        });
+        window.addEventListener('load', async () => {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(predicate, label) {
+            for (let i = 0; i < 400; i++) {
+              if (predicate()) return;
+              await sleep(25);
+            }
+            throw new Error('timed out: ' + label);
+          }
+          const panel = document.getElementById('panel');
+          try {
+            htmx.ajax('GET', '/browser_echo', {target: '#panel', swap: 'innerHTML'});
+            await until(() => panel.querySelector('.treebar-poller .treebar-poller-inner'), 'running poller');
+            await fetch('/release');
+            await until(() => panel.querySelector('.treebar-terminal #echo'), 'kept terminal');
+            // htmx binds swapped-in content when it settles.
+            await sleep(300);
+            panel.querySelector('#echo').click();
+            const out = document.getElementById('echo-out');
+            await until(() => out.textContent.includes('echoed'), 'echo answer');
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)) +
+                  '&panel=' + encodeURIComponent(panel.innerHTML));
+          }
+        });
+        """))
+        page = repr("text/html", htmx(h.main(h.div(; id="panel"), h.div(; id="echo-out"), driver);
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false,
+            overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                release_fresh!(:browser_echo)
+                return HTTP.Response(204)
+            end
+            if path == "/echo"
+                push!(echoes, String(req.target))
+                return HTTP.Response(200, ["Content-Type" => "text/html"], "<p>echoed</p>")
+            end
+            dispatch(req.method, String(req.target); headers=collect(req.headers))
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 30; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                    @test outcome == "/complete?status=passed"
+                    outcome == "/complete?status=passed" || @info "Browser outcome" outcome
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            @test echoes == ["/echo?probe=kept"]
+        finally
+            release_fresh!(:browser_echo)
             close(server)
         end
     end

@@ -88,12 +88,35 @@ function _operation_treebars_kwargs(call_kwargs, transport,
 end
 
 # The framework-generated auto poll URL already holds the operation's captured
-# arguments. Keep htmx from adding ancestor hx-vals, hx-include, or form fields
-# to that URL on each poll. Hand-shaped Treebars pollers retain their normal
-# inheritance, including their current-arguments recovery behavior.
+# arguments, so a poll sends nothing else. `hx-params="none"` keeps ancestor
+# hx-vals, hx-include, and form fields out of the request. htmx still EVALUATES
+# every ancestor `hx-vals`/`hx-vars` before filtering, and a `js:` value that
+# reads its triggering event throws on a timer-fired poll, which has none, so
+# that poll is never sent (snag a-slow-route-ins-cd926595). `unset` ends htmx's
+# value walk at the element that carries it (htmx 2.0.0 on). The attributes sit
+# on the polling element, not on the wrapper: a kept terminal tree keeps the
+# wrapper around the result, whose own controls must still send their values.
+# Hand-shaped Treebars pollers retain their normal inheritance, including their
+# current-arguments recovery behavior.
+const _ISOLATED_REQUEST = (hx_params="none", hx_vals="unset", hx_vars="unset")
+
 _isolate_auto_poll_params(response) =
     HTMXObjects._operation_running_answer(response) ?
-        response(; hx_params="none") : response
+        _isolate_polling_inner(response) : response
+
+function _isolate_polling_inner(poller)
+    HTMX = HTMXObjects.HTMX
+    children = copy(HTMX.children(poller))
+    inner = findfirst(_polling_inner, children)
+    inner === nothing && error(
+        "Treebars' running poller has no `.treebar-poller-inner` child to isolate")
+    children[inner] = children[inner](; _ISOLATED_REQUEST...)
+    HTMXObjects.Node(HTMX.tag(poller), HTMX.attrs(poller), children)
+end
+
+_polling_inner(child::HTMXObjects.Node) =
+    get(HTMXObjects.HTMX.attrs(child), :class, nothing) == "treebar-poller-inner"
+_polling_inner(_child) = false
 
 # A stalled operation's poll answers `OperationStalled` through the route error
 # pipeline (error log, hooks, `X-HTMXO-Error-Id`), inside the terminal shape
@@ -101,7 +124,8 @@ _isolate_auto_poll_params(response) =
 # terminalizes: the failure, the open progress tree of what was still running,
 # and — for a read — a Run again button that replaces this terminal content with
 # a fresh request of the operation (it targets the content node it sits in, so
-# it works whether or not the page runs Treebars' client finalizer). The
+# it works whether or not the page runs Treebars' client finalizer; its request
+# is isolated like a poll, since its URL holds the captured arguments). The
 # registry entry goes: nothing polls it again.
 function _operation_stalled_response(stall, ip, keys, call_kwargs, transport)
     HTMXObjects._operation_ended(transport, :stalled)
@@ -122,7 +146,7 @@ function _operation_stalled_response(stall, ip, keys, call_kwargs, transport)
             class="htmxo-operation-rerun", hx_get=stall.error.rerun_url,
             hx_target="closest .treebar-terminal-content",
             hx_swap="outerHTML",
-            hx_params="none"))
+            _ISOLATED_REQUEST...))
     HTMXObjects._route_error_response(stall.req, stall.error, backtrace();
         error_obj=transport.error_obj,
         wrap=failure -> HTMXObjects.h.div(class="treebar-terminal")(
