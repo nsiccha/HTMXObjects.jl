@@ -5327,6 +5327,10 @@ poll on an indexed property whose body reads no request context. The default
 is rejected for `scope=:request` because request scope already has exactly one
 request per root.
 
+Both forms without a `factory` build each new root from the instance given to
+[`route!`](@ref): its fixed fields and constructor keyword overrides, plus the
+request. A custom `factory` builds its own roots.
+
 The managed store is deliberately process-local. A distributed/multipod job
 store remains an application/runtime adapter expressed by the factory form.
 """
@@ -5526,9 +5530,42 @@ function RootProvider(factory; scope::Symbol=:request, key=nothing)
     RootProvider{typeof(factory),typeof(keyfn)}(factory, scope, keyfn)
 end
 
+# Every root HTMXObjects builds for a request — the fresh per-request root and a
+# new entry in a managed store — comes from the instance `route!` was given: its
+# fixed fields and the keyword overrides it was constructed with
+# (`App(; dir=…)`) are passed to the new root alongside the request. Nothing the
+# instance computed is carried over; each root computes its own properties, so
+# a default the instance did not override is still evaluated per root.
 _default_root_factory(RootT, context::OperationContext) =
-    RootT(; __req__=context.request, __route__=context.route,
-          _prefix_kw(context.prefix)...)
+    _root_from(get(_root_templates, RootT, nothing), RootT, context)
+
+_root_from(::Nothing, RootT, context::OperationContext) =
+    RootT(; _root_request_kw(context)...)
+
+function _root_from(template, RootT, context::OperationContext)
+    fixed, overrides = _construction_inputs(template)
+    RootT(fixed...; overrides..., _root_request_kw(context)...)
+end
+
+_root_request_kw(context::OperationContext) =
+    (; __req__=context.request, __route__=context.route, _prefix_kw(context.prefix)...)
+
+# Request and mount context, which a root takes from its own request and never
+# from the instance it was built from.
+const _REQUEST_CONTEXT_INPUTS = (:__req__, :__route__, :__prefix__, :__parent__, :__status__)
+
+# A DynamicObject's construction inputs: its fixed fields (every field but the
+# trailing property cache, as `DynamicObjects.remake` copies them) and the
+# keyword overrides it was created with (`PropertyCache.seed`). `remake` itself
+# would also carry the instance's settled memos into every request root and
+# keeps the overrides only as memos (DynamicObjects snag
+# `remake-drops-the-295be6c2`).
+function _construction_inputs(obj)
+    T = typeof(obj)
+    fixed = Any[getfield(obj, name) for name in fieldnames(T)[1:end-1]]
+    seed = getfield(obj, :cache).seed
+    fixed, Base.structdiff(seed, NamedTuple{_REQUEST_CONTEXT_INPUTS})
+end
 
 mutable struct _RetainedRoot
     value::Any
@@ -5613,6 +5650,24 @@ function _evict_managed_root!(factory::_ManagedRootFactory, scope::Symbol)
     _managed_root_release_event(factory, oldest_key, entry, scope, :lru)
 end
 
+# `route!` with another instance of a type already served from this store: the
+# retained roots were built from the earlier instance, so the next request
+# builds a new one from the current instance instead. A retained root that IS
+# the routed instance stays: `semantic_app(app)` before `route!(app)` retains
+# `app` itself, and requests then share its caches.
+function _forget_managed_roots!(provider::RootProvider, RootT, routed)
+    factory = provider.factory
+    factory isa _ManagedRootFactory || return nothing
+    released = lock(factory.lock) do
+        Any[(delete!(factory.entries, key);
+             _managed_root_release_event(factory, key, entry, provider.scope, :reroute))
+            for (key, entry) in collect(factory.entries)
+            if first(key) === RootT && entry.value !== routed]
+    end
+    _notify_managed_root_releases(released)
+    nothing
+end
+
 function _prime_managed_root!(root, seen=Base.IdSet())
     root in seen && return root
     push!(seen, root)
@@ -5688,6 +5743,8 @@ _normalize_root_provider(factory) = RootProvider(factory)
 # Companion registry rather than another field on `_registered_types`: that
 # const's NamedTuple value type is frozen under Julia 1.10/Revise.
 const _root_providers = Dict{DataType,Any}()
+# The instance each root type was routed with (`_default_root_factory`).
+const _root_templates = Dict{DataType,Any}()
 const _operation_policies = Dict{DataType,OperationPolicy}()
 const _semantic_root_types = Set{Type}()
 # Convert a string value to the target type. Strings pass through as-is.
@@ -12626,6 +12683,19 @@ Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` route decla
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) on
 [`ROUTER`](@ref). Returns `app`.
 
+Requests are served from `app`: every root HTMXObjects builds for a request —
+a fresh one per request by default, or a new entry of a managed
+[`RootRetention`](@ref) store, `semantic_app`'s automatic one included —
+receives `app`'s fixed fields and the keyword overrides it was constructed
+with, alongside the request. So `route!(App(; dir=root))` serves `dir=root`,
+and a type with a required fixed field routes as `route!(App(dir))`.
+Properties `app` did not override are still computed per root, and nothing
+`app` itself computed is shared with requests — unless `semantic_app(app)`
+rendered before `route!(app)`: its automatic store then retains `app` itself,
+remounted per request. A custom `root_provider` factory builds its own roots. Calling `route!` again with another instance
+serves later requests from that one; a managed store drops the roots it built
+from the earlier instance.
+
 Mutation routes (`@post`, `@put`, `@patch`, `@delete`) execute their route body
 fresh for every request, even when a managed `root_provider` retains the root
 and the submitted arguments are identical. GET/WS/SSE routes and any child
@@ -12640,7 +12710,7 @@ properties a mutation reads keep their own DynamicObjects cache semantics.
 - `root_provider` — a [`RootProvider`](@ref), including its managed
   [`RootRetention`](@ref) form, or a callable `factory(RootT, context)`, used by
   HTTP, WebSocket, and SSE operations. `nothing` preserves the historic
-  fresh-root-per-request behavior.
+  fresh-root-per-request behavior, each root built from `app` as above.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
   polling, or HTMX-aware automatic execution. **Defaults to
   `OperationPolicy(:auto)`**, so an app that declares nothing already serves
@@ -12668,6 +12738,8 @@ function route!(obj; prefix="", record_dir=nothing, record_base="",
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
     _root_providers[T] = provider
+    get(_root_templates, T, nothing) === obj || _forget_managed_roots!(provider, T, obj)
+    _root_templates[T] = obj
     _operation_policies[T] = policy
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
     _register_routes(T; prefix, record_dir, record_base, root_provider=provider,
