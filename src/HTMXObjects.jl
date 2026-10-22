@@ -14,7 +14,7 @@ export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfile
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
-    static_export, static_url
+    static_export, static_url, url_params, url_params_script
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -2729,6 +2729,7 @@ _runtime_blocks() = (
     auto_terminal = (:js, auto_terminal_script),
     mutation_poll = (:js, mutation_poll_script),
     semantic_refresh = (:js, semantic_refresh_script),
+    url_params = (:js, url_params_script),
     # Page helpers the shell does not carry: an app places them itself,
     # usually in `extra_head`, and a linked shell links them there
     # (`_linked_extra_head`).
@@ -2959,7 +2960,10 @@ function htmx(args...;
                 :live_region,
                 # Semantic shared context groups follow their live declared
                 # domains; inert on pages without a refreshable group.
-                :semantic_refresh)...,
+                :semantic_refresh,
+                # `url_params` elements follow the page address and write
+                # their values into it; inert on pages without one.
+                :url_params)...,
             # Poller quietness by default: the Treebars stylesheet + script
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
@@ -4600,6 +4604,24 @@ function _guard_record_destination!(record_dir::String, dest::String)
     nothing
 end
 
+# Queues a `url_params` value a recording walk met (`_static_variant_target`)
+# for the running `record!`, which records its fragment after the requested
+# paths. `false` when no `record!` runs, so nothing will record it.
+function _record_variant!(address::AbstractString)
+    session = get(task_local_storage(), _RECORDING_SESSION_KEY, nothing)
+    isnothing(session) && return false
+    if !(address in session.variants_seen)
+        push!(session.variants_seen, address)
+        push!(session.variants, String(address))
+    end
+    true
+end
+
+# Where a recorded response is saved: its path without the query, except a
+# `url_params` value `record!` records, whose query names it.
+_record_save_path(req::HTTP.Request) = get(req.context, :htmxo_record_variant, false) ?
+    _record_variant_save_path(String(req.target)) : String(first(split(String(req.target), "?"; limit=2)))
+
 # Paths that use kwargs (query params) and thus can't vary by query string on static servers.
 # Populated by route! when record_dir is set; consulted only by the recording form of the
 # static transform (`static_transform(val; record_base)`), never by a request-scoped export.
@@ -4637,7 +4659,10 @@ alone, so concurrent ordinary requests are unaffected.
   A `String` replaces the attribute verbatim — relative targets such as
   `"embeds/fig-a.html"` are emitted as given — and the element stays live.
   `nothing` falls back to the default rules below. Any other return value
-  throws an `ArgumentError`.
+  throws an `ArgumentError`. It is also called with the address of each value
+  a [`url_params`](@ref) element declares, whose target becomes that value's
+  file in the bundle, and with the path of an `hx-push-url`/`hx-replace-url`
+  address, which keeps its query.
 - `controls` — what happens to an element a static server cannot serve: one
   carrying `hx-post`/`hx-put`/`hx-patch`/`hx-delete`, or an unmapped `hx-get`
   whose address has a query string. `:disable` (default; the recording
@@ -4735,12 +4760,19 @@ end
 """
 static_export(req::HTTP.Request) = get(req.context, :htmxo_static_export, nothing)
 
-# What a static walk consults: the spec, plus the rooted `hx-get` paths a static
+# Who names the file of each value a `url_params` element declares: the spec's
+# `url_map` for a request-scoped export, the recording rule for `record!`.
+struct _MappedVariants end
+struct _RecordedVariants end
+
+# What a static walk consults: the spec, the rooted `hx-get` paths a static
 # server cannot vary by query — `route!`'s recording registry for the recording
-# form of `static_transform`, nothing for a request-scoped export.
-struct _StaticRules{S<:StaticExport}
+# form of `static_transform`, nothing for a request-scoped export — and who
+# names a declared URL parameter's files.
+struct _StaticRules{S<:StaticExport,V}
     spec::S
     unservable::Set{String}
+    variants::V
 end
 
 # Returned by the walker for an element `controls=:remove` drops; containers
@@ -4803,6 +4835,10 @@ Walk a Node tree and make it static-safe under `rules`:
   routes) or names one of `rules.unservable` (kwargs routes)
 - Mark affected elements with `data-static-disabled` and `disabled`, or —
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
+- Give a [`url_params`](@ref) element the file of each value it declares
+  (`data-htmxo-url-files`), its `hx-get` the file of the value it shows
+- Map the path of an `hx-push-url`/`hx-replace-url` address like an `href`,
+  keeping its query
 - Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline,
   unless the spec keeps it linked (`runtime=:linked`)
 
@@ -4881,6 +4917,182 @@ static_url(req::HTTP.Request, address::AbstractString) =
     _static_url(static_export(req), address)
 _static_url(::Nothing, address::AbstractString) = String(address)
 
+"""
+    url_params(; name = value, …, values = (name = domain, …)) -> NamedTuple
+
+Attributes that let parameters in the page address drive an element that loads
+its content with `hx-get`. Splat them onto that element:
+
+```julia
+h.div(id="voralarme", hx_get=base * "/voralarme", hx_trigger="none", hx_swap="outerHTML";
+      url_params(k = k; values = (k = (3.0, 4.0, 5.0),))...)(alarms_view(k))
+```
+
+An element that shows its content from the start, as this one does, needs a
+trigger that never fires (`hx_trigger="none"`): an element with `hx-get` and
+no trigger loads on every click inside it. One that loads itself
+(`hx_trigger="load"`) sends the address's values with that first request.
+`hx-vals` that carry a value from an event leave the parameter out when there
+is none (`"js:{...(event?.detail?.kenn ? {kenn: event.detail.kenn} : {})}"`);
+an `undefined` value would be sent as the text `undefined`.
+
+`k = k` says that the address parameter `k` drives this element and that the
+element was rendered for `k` (`nothing`: rendered without one).
+`messstelle = kenn => :kenn` renames: the address says `messstelle`, the
+element's requests send `kenn`. Values are compared and sent as their
+[`option_wire_value`](@ref). `values` names each parameter's domain; a
+parameter without one follows the address on a live page only. `values` is
+therefore not a parameter name.
+
+The page's runtime ([`url_params_script`](@ref), which [`htmx`](@ref) pages
+carry) does the rest in the browser, on a live page and in a static export
+alike:
+
+- **Address → element.** When the element enters the page (page load, an htmx
+  swap, Back/Forward) and the address names another value than the one it shows,
+  it requests its `hx-get` again with the address's value. Its own requests (a
+  `load` trigger, polling) carry the address's value too, unless the request
+  carries the parameter itself, such as a value an `hx-vals` takes from a click.
+  A value outside the declared domain keeps the element as it is, with a
+  console warning.
+- **Element → address.** When a request loads the element with a new value — its
+  own request, or another element's whose `hx-target` is this one, such as a
+  link that swaps a new version of it in — the value is written into the
+  address (`history.replaceState`; other parameters and htmx's history state
+  stay). A first load that shows the rendered value leaves the address as it
+  is. Reload, Back and a copied link then show the same view; no
+  `hx-push-url` is needed for it.
+- **Static exports.** A static export calls `url_map` with the address of every
+  declared value (the element's `hx-get` with that value) and gives the element
+  each value's file, so an exporter that follows mapped addresses writes them and
+  the bundle's page loads the right one with no app script. `record!` records
+  them itself, named `<record_base>/hx/<path>@<query>.html`. A value whose
+  address maps to no file keeps the element as it is.
+
+Inside a docs embed (`.htmxo-embed`) the address belongs to the host page and is
+left alone.
+"""
+function url_params(; values=(;), params...)
+    isempty(params) && throw(ArgumentError(
+        "url_params: name at least one address parameter, e.g. `url_params(k = 3.0)`"))
+    for name in keys(values)
+        haskey(params, name) || throw(ArgumentError(
+            "url_params: `values` names `$name`, which is not one of the parameters ($(join(keys(params), ", ")))"))
+    end
+    entries = [_url_param(name, spec, get(values, name, nothing)) for (name, spec) in pairs(params)]
+    sent = [p.as for p in entries]
+    allunique(sent) || throw(ArgumentError(
+        "url_params: two parameters send the same request name ($(join(sent, ", ")))"))
+    (; data_htmxo_url_params = "[" * join((_url_param_json(p) for p in entries), ",") * "]")
+end
+
+# One declared parameter: its address name, the request name its value is sent
+# under, the value the element was rendered with and its domain (`nothing`:
+# none), all as wire strings.
+_url_param(name, spec, domain) = _url_param(name, spec => name, domain)
+function _url_param(name, (value, as)::Pair, domain)
+    rendered = _url_param_wire(value)
+    values = _url_param_domain(domain)
+    isnothing(values) || isnothing(rendered) || rendered in values || throw(ArgumentError(
+        "url_params: $name = $(repr(rendered)) is not among its values ($(join(repr.(values), ", ")))"))
+    (; name=string(name), as=string(as), value=rendered, values)
+end
+_url_param_wire(::Nothing) = nothing
+_url_param_wire(value) = _option_wire_string(value)
+_url_param_domain(::Nothing) = nothing
+_url_param_domain(domain) = String[_option_wire_string(v) for v in domain]
+
+_url_param_json(p) = "[" * _md_json_string(p.name) * "," * _md_json_string(p.as) * "," *
+    _json_or_null(_md_json_string, p.value) * "," * _json_or_null(_md_json_list, p.values) * "]"
+_json_or_null(f, ::Nothing) = "null"
+_json_or_null(f, x) = f(x)
+
+# The parameters `url_params` declared, read back from its attribute.
+function _url_params_decode(s::AbstractString)
+    bad() = throw(ArgumentError("data-htmxo-url-params: not what url_params writes: $(repr(s))"))
+    tree = _json_string_tree(s, bad)
+    tree isa Vector || bad()
+    map(tree) do p
+        p isa Vector && length(p) == 4 && p[1] isa String && p[2] isa String &&
+            p[3] isa Union{String,Nothing} && (isnothing(p[4]) || p[4] isa Vector && all(v -> v isa String, p[4])) || bad()
+        (; name=p[1], as=p[2], value=p[3], values=isnothing(p[4]) ? nothing : String.(p[4]))
+    end
+end
+
+# `address` with the query parameter `name` set to `value` in place of any it
+# carries (`nothing`: removed); the other parameters and a fragment stay.
+function _url_with_param(address::AbstractString, name::AbstractString, value)
+    rest, fragment = _split_once(address, '#')
+    path, query = _split_once(rest, '?')
+    key = HTTP.URIs.escapeuri(name)
+    kept = filter(split(something(query, ""), '&'; keepempty=false)) do pair
+        HTTP.URIs.unescapeuri(first(split(pair, '='; limit=2))) != name
+    end
+    isnothing(value) || push!(kept, key * "=" * HTTP.URIs.escapeuri(value))
+    path * (isempty(kept) ? "" : "?" * join(kept, "&")) * (isnothing(fragment) ? "" : "#" * fragment)
+end
+_split_once(s, c) = (i = findfirst(c, s); isnothing(i) ? (String(s), nothing) : (String(s[1:prevind(s, i)]), String(s[nextind(s, i):end])))
+
+# Where a declared value's content lives in a static export, or `nothing`:
+# the `url_map` target of its address for a request-scoped export; for a
+# recording, the recording rule's file, which the running `record!` is told
+# to record (none outside `record!`: nothing would write the file).
+_static_variant_target(rules::_StaticRules{<:StaticExport,_MappedVariants}, address) =
+    _static_url_target(rules.spec, address)
+_static_variant_target(rules::_StaticRules{<:StaticExport,_RecordedVariants}, address) =
+    _record_variant!(address) ?
+        rstrip(rules.spec.record_base, '/') * "/hx" * replace(_record_variant_save_path(address), "%" => "%25") * ".html" :
+        nothing
+
+# A recorded `url_params` value's file, below the recording's `hx/`: its
+# path, then `@` and its query, so each value has its own file beside the
+# path's (`/voralarme?k=4.0` → `/voralarme@k=4.0`).
+function _record_variant_save_path(address::AbstractString)
+    path, query = _split_once(first(_split_once(address, '#')), '?')
+    isnothing(query) ? path : path * "@" * replace(query, "/" => "%2F")
+end
+
+# The file of each value a `url_params` element declares, as the JSON the
+# runtime reads (one object level per parameter with a domain, in declared
+# order), and the file of the values it was rendered with, or `nothing`.
+function _static_url_files(declared, address::AbstractString, rules::_StaticRules)
+    for p in declared
+        isnothing(p.values) && (address = _url_with_param(address, p.as, p.value))
+    end
+    keyed = [p for p in declared if !isnothing(p.values)]
+    isempty(keyed) && return "{}", nothing
+    own = any(p -> isnothing(p.value), keyed) ? nothing :
+        _static_variant_target(rules, foldl((a, p) -> _url_with_param(a, p.as, p.value), keyed; init=address))
+    something(_static_url_files_json(keyed, 1, address, rules), "{}"), own
+end
+_static_url_files(declared, ::Nothing, rules::_StaticRules) = "{}", nothing
+function _static_url_files_json(keyed, i, address, rules)
+    if i > length(keyed)
+        target = _static_variant_target(rules, address)
+        return isnothing(target) ? nothing : _md_json_string(target)
+    end
+    p = keyed[i]
+    entries = String[]
+    for v in p.values
+        sub = _static_url_files_json(keyed, i + 1, _url_with_param(address, p.as, v), rules)
+        isnothing(sub) || push!(entries, _md_json_string(v) * ":" * sub)
+    end
+    isempty(entries) ? nothing : "{" * join(entries, ",") * "}"
+end
+
+# A page address htmx writes into the address bar (`hx-push-url`,
+# `hx-replace-url`): its path maps like a link's, and its query and fragment
+# stay, since the page reads them in the browser. `true`, `false` and
+# addresses that are not rooted pass through.
+function _static_page_url(spec::StaticExport, value::AbstractString)
+    startswith(value, "/") && !startswith(value, "//") || return value
+    i = findfirst(in(('?', '#')), value)
+    isnothing(i) && return _static_url(spec, value)
+    target, rest = _static_url(spec, value[1:prevind(value, i)]), value[i:end]
+    occursin('?', target) && startswith(rest, "?") ? target * "&" * rest[2:end] : target * rest
+end
+_static_page_url(spec::StaticExport, value) = value
+
 function _static_walk(node::Node, rules::_StaticRules)
     spec = rules.spec
     # A linked page-runtime block goes back inline, so an exported page needs
@@ -4901,11 +5113,23 @@ function _static_walk(node::Node, rules::_StaticRules)
         end
     end
 
+    # A `url_params` element carries the export's file of each value it
+    # declares, and its `hx-get` names the file of the value it was rendered
+    # with (`_static_url_files`).
+    hx_get_sym = Symbol("hx-get")
+    declared = get(new_attrs, Symbol("data-htmxo-url-params"), nothing)
+    own = nothing
+    if !isnothing(declared)
+        files, own = _static_url_files(_url_params_decode(declared), get(new_attrs, hx_get_sym, nothing), rules)
+        new_attrs[Symbol("data-htmxo-url-files")] = files
+    end
+
     # A mapped `hx-get` takes the caller's target verbatim. An unmapped one
     # with a query string or pointing to a kwargs route is removed; otherwise
     # it is rewritten to the recorded-fragment subtree under `record_base`.
-    hx_get_sym = Symbol("hx-get")
-    if haskey(new_attrs, hx_get_sym)
+    if !isnothing(own)
+        new_attrs[hx_get_sym] = own
+    elseif haskey(new_attrs, hx_get_sym)
         url = new_attrs[hx_get_sym]
         target = _static_url_target(spec, url)
         if !isnothing(target)
@@ -4925,6 +5149,12 @@ function _static_walk(node::Node, rules::_StaticRules)
     for sym in (:href, :src)
         haskey(new_attrs, sym) || continue
         new_attrs[sym] = _static_url(spec, new_attrs[sym])
+    end
+    # A page address htmx writes into the address bar keeps its query, which
+    # the page reads in the browser (`_static_page_url`).
+    for sym in (Symbol("hx-push-url"), Symbol("hx-replace-url"))
+        haskey(new_attrs, sym) || continue
+        new_attrs[sym] = _static_page_url(spec, new_attrs[sym])
     end
 
     if unservable
@@ -5008,9 +5238,9 @@ comes back as an empty fragment.
 """
 static_transform(val; record_base::String="") =
     _static_transform(val, _StaticRules(StaticExport(; record_base),
-                                        _static_kwargs_paths))
+                                        _static_kwargs_paths, _RecordedVariants()))
 static_transform(val, spec::StaticExport) =
-    _static_transform(val, _StaticRules(spec, Set{String}()))
+    _static_transform(val, _StaticRules(spec, Set{String}(), _MappedVariants()))
 
 function _static_transform(val, rules::_StaticRules)
     result = _static_walk(val, rules)
@@ -7114,6 +7344,231 @@ redirect_history_script() = h.script(Raw(raw"""
     var search = recorded.search === requested.search ? landed.search : recorded.search;
     history.path = landed.pathname + search + recorded.hash;
   });
+})();
+"""))
+
+"""
+    url_params_script()
+
+Client runtime of [`url_params`](@ref): elements declared with it follow the
+parameters of the page address, and write their own values into it, on a live
+page and in a static export alike. Inert on pages without such an element.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+url_params_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoUrlParams) return;
+  var SEL = '[data-htmxo-url-params]';
+  var warned = {};
+  function warn(text) {
+    if (warned[text]) return;
+    warned[text] = true;
+    console.warn('url_params: ' + text);
+  }
+  // The parameters an element declares; null when it declares none, or sits
+  // in a docs embed, whose address belongs to the host page.
+  function declared(el) {
+    if (!(el instanceof Element) || !el.hasAttribute('data-htmxo-url-params') ||
+        el.closest('.htmxo-embed')) return null;
+    try {
+      return JSON.parse(el.getAttribute('data-htmxo-url-params')).map(function (p) {
+        return { name: p[0], as: p[1], value: p[2], values: p[3] };
+      });
+    } catch (_) {
+      warn('cannot read the parameters of ' + (el.id ? '#' + el.id : el.tagName.toLowerCase()));
+      return null;
+    }
+  }
+  // A static export's file for each declared value; null on a live page.
+  function files(el) {
+    var json = el.getAttribute('data-htmxo-url-files');
+    if (json === null) return null;
+    try { return JSON.parse(json); } catch (_) { return {}; }
+  }
+  function fileFor(table, ps, vals) {
+    var node = table;
+    for (var i = 0; i < ps.length; i++) {
+      if (!ps[i].values) continue;
+      if (!node || typeof node !== 'object' || vals[i] === null ||
+          !Object.prototype.hasOwnProperty.call(node, vals[i])) return null;
+      node = node[vals[i]];
+    }
+    return typeof node === 'string' ? node : null;
+  }
+  // The values an element shows: those it was rendered with, until a request
+  // loaded it with others.
+  function shown(el, ps) {
+    var loaded = el._htmxoUrlShown || {};
+    return ps.map(function (p) { return p.name in loaded ? loaded[p.name] : p.value; });
+  }
+  // The address's value of a parameter, or null when it names none or one
+  // outside the declared values.
+  function addressValue(p) {
+    var v = new URLSearchParams(location.search).get(p.name);
+    if (v === null) return null;
+    if (p.values && p.values.indexOf(v) < 0) {
+      warn('?' + p.name + '=' + v + ' is not one of its values (' + p.values.join(', ') + '); kept as shown');
+      return null;
+    }
+    return v;
+  }
+  // What an element should show: the address's values, where it names them
+  // and the element can load them.
+  function wanted(ps, table, base) {
+    return ps.map(function (p, i) {
+      if (table && !p.values) return base[i];
+      var v = addressValue(p);
+      return v === null ? base[i] : v;
+    });
+  }
+  function byName(ps, vals) {
+    var out = {};
+    ps.forEach(function (p, i) { out[p.name] = vals[i]; });
+    return out;
+  }
+  function differs(a, b) {
+    return a.some(function (v, i) { return v !== b[i]; });
+  }
+  function carried(params, name) {
+    var v = params ? params[name] : undefined;
+    return v === undefined || v === null ? null : Array.isArray(v) ? String(v[0]) : String(v);
+  }
+
+  // A declared element's own request carries the address's values, unless the
+  // request carries the parameter itself (an `hx-vals` value from a click). In
+  // a static export it goes to that value's file.
+  document.addEventListener('htmx:configRequest', function (e) {
+    var d = e.detail, el = d.elt, ps = declared(el);
+    if (!ps) return;
+    var table = files(el), base = shown(el, ps), address = wanted(ps, table, base);
+    var vals = ps.map(function (p, i) {
+      var own = carried(d.parameters, p.as);
+      return own === null || (table && !p.values) ? address[i] : own;
+    });
+    if (table) {
+      var file = fileFor(table, ps, vals);
+      if (file === null) {
+        if (differs(vals, base)) warn('this export holds no file for ' +
+          ps.map(function (p, i) { return p.name + '=' + vals[i]; }).join('&') + '; kept as shown');
+        vals = base;
+        file = fileFor(table, ps, vals);
+      }
+      if (file !== null) d.path = file;
+      ps.forEach(function (p) { delete d.parameters[p.as]; });
+    } else {
+      var url = new URL(d.path, document.baseURI);
+      ps.forEach(function (p, i) {
+        delete d.parameters[p.as];
+        if (vals[i] === null) url.searchParams.delete(p.as);
+        else url.searchParams.set(p.as, vals[i]);
+      });
+      d.path = url.origin === location.origin ? url.pathname + url.search + url.hash : url.href;
+    }
+    d.htmxoUrlValues = byName(ps, vals);
+    d.htmxoUrlShown = byName(ps, base);
+    el._htmxoUrlSent = JSON.stringify(vals);
+  });
+
+  // An element entering the page (load, swap, Back/Forward) that shows other
+  // values than the address names loads them, unless its own `load` request
+  // already asked for them.
+  function apply(el) {
+    var ps = declared(el);
+    if (!ps) return;
+    var table = files(el), base = shown(el, ps), want = wanted(ps, table, base);
+    if (!differs(want, base) || el._htmxoUrlSent === JSON.stringify(want)) return;
+    var path = table ? fileFor(table, ps, want) : el.getAttribute('hx-get');
+    if (!path) {
+      warn((table ? 'this export holds no file for ' : 'no hx-get to load ') +
+        ps.map(function (p, i) { return p.name + '=' + want[i]; }).join('&'));
+      return;
+    }
+    htmx.ajax('GET', path, { source: el });
+  }
+  // A new version a request swapped in writes its values instead (below).
+  function loaded(el) {
+    var pending = el._htmxoUrlPending;
+    if (!pending) return apply(el);
+    delete el._htmxoUrlPending;
+    var ps = declared(el);
+    if (ps) write(byName(ps, ps.map(function (p) { return p.value; })), pending.before);
+  }
+  document.addEventListener('htmx:load', function (e) {
+    var root = e.target;
+    if (!(root instanceof Element)) return;
+    if (root.matches(SEL)) loaded(root);
+    root.querySelectorAll(SEL).forEach(loaded);
+  });
+
+  // A request that loads a declared element writes its values into the
+  // address: the request's own values, those a new version of the element was
+  // rendered with, or those a request into it asked for. Only a value that
+  // changed what the element showed, or one the address names already, is
+  // written, so a first load leaves the address as it was. The entry is
+  // replaced, keeping htmx's history state and snapshot key in step, after
+  // any `hx-push-url` of the same request. A history restore (no request)
+  // leaves the address alone.
+  function write(values, before) {
+    var url = new URL(location.href);
+    Object.keys(values).forEach(function (n) {
+      if (!url.searchParams.has(n) && before && before[n] === values[n]) return;
+      if (values[n] === null) url.searchParams.delete(n);
+      else url.searchParams.set(n, values[n]);
+    });
+    if (url.href === location.href) return;
+    history.replaceState(history.state, '', url);
+    try { sessionStorage.setItem('htmx-current-path-for-history', url.pathname + url.search); } catch (_) {}
+  }
+  function requested(el, ps, d) {
+    var table = files(el), info = d.pathInfo || {};
+    if (table) {
+      var file = new URL(info.requestPath || '', document.baseURI).href, found = null, fixed = shown(el, ps);
+      (function walk(node, vals, i) {
+        if (found) return;
+        while (i < ps.length && !ps[i].values) { vals = vals.concat([fixed[i]]); i++; }
+        if (i === ps.length) {
+          if (typeof node === 'string' && new URL(node, document.baseURI).href === file) found = vals;
+          return;
+        }
+        if (!node || typeof node !== 'object') return;
+        Object.keys(node).forEach(function (v) { walk(node[v], vals.concat([v]), i + 1); });
+      })(table, [], 0);
+      return found;
+    }
+    var query = new URL(info.finalRequestPath || info.requestPath || '', document.baseURI).searchParams;
+    if (!ps.some(function (p) { return query.has(p.as); })) return null;
+    var base = shown(el, ps);
+    return ps.map(function (p, i) { return query.has(p.as) ? query.get(p.as) : base[i]; });
+  }
+  document.addEventListener('htmx:beforeSwap', function (e) {
+    var d = e.detail || {}, ps = declared(d.target);
+    if (ps && d.requestConfig) d.requestConfig.htmxoUrlBefore = byName(ps, shown(d.target, ps));
+  });
+  document.addEventListener('htmx:afterSwap', function (e) {
+    var d = e.detail || {}, cfg = d.requestConfig;
+    if (!cfg) return;
+    if (cfg.htmxoUrlValues && declared(cfg.elt)) {
+      if (cfg.elt.isConnected) cfg.elt._htmxoUrlShown = cfg.htmxoUrlValues;
+      write(cfg.htmxoUrlValues, cfg.htmxoUrlShown);
+    }
+    var el = e.target, ps = el === cfg.elt ? null : declared(el);
+    if (!ps) return;
+    // A new version of the element, swapped in for the target: until htmx
+    // settles it, it carries the old version's attributes when the two share
+    // an id, so its values are written once it loads (`loaded`).
+    if (el !== d.target) { el._htmxoUrlPending = { before: cfg.htmxoUrlBefore }; return; }
+    // Another element's request into this one.
+    var vals = requested(el, ps, d);
+    if (!vals) return;
+    var before = byName(ps, shown(el, ps));
+    el._htmxoUrlShown = byName(ps, vals);
+    write(el._htmxoUrlShown, before);
+  });
+
+  window.htmxoUrlParams = { apply: apply };
 })();
 """))
 
@@ -10814,8 +11269,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             # The request target is the authoritative external route. Rebuilding
             # it from `chain` loses indexed mount values because chain entries
             # describe the mount signature, not the values parsed from this URL.
-            save_path = isnothing(record_dir) ? nothing :
-                        String(first(split(String(req.target), "?"; limit=2)))
+            save_path = isnothing(record_dir) ? nothing : _record_save_path(req)
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
@@ -13099,6 +13553,11 @@ Returns `app`.
 Distinct requested paths that resolve to the same output file are rejected
 with an error before the later response can overwrite the earlier recording.
 
+A recorded page or fragment holding a [`url_params`](@ref) element with
+declared `values` also gets the fragment of each of those values, recorded
+with `HX-Request: true` at `<record_dir>/hx/<path>@<query>.html` after the
+requested paths; that element's runtime loads them from the address.
+
 Use this in place of the subprocess+HTTP recorder when you can drive an
 app from the same Julia process — much faster (no port, no warmup) and
 deterministic in CI.
@@ -13118,6 +13577,9 @@ function record!(app;
         record_dir=abspath(record_dir),
         source=Ref(""),
         destinations=Dict{String,String}(),
+        # `url_params` values the recorded responses declare (`_record_variant!`).
+        variants=String[],
+        variants_seen=Set{String}(),
     )
     storage[_RECORDING_SESSION_KEY] = session
     try
@@ -13130,6 +13592,12 @@ function record!(app;
             full     && _drive_record_path(router, String(path), Pair{String,String}[])
             hx       && _drive_record_path(router, String(path), ["HX-Request" => "true"])
             markdown && _drive_record_path(router, String(path), ["Accept" => "text/markdown"])
+        end
+        # Recording a value's fragment can declare further values.
+        while !isempty(session.variants)
+            address = popfirst!(session.variants)
+            session.source[] = address
+            _drive_record_path(router, address, ["HX-Request" => "true"]; variant=true)
         end
     finally
         if had_session
@@ -13144,8 +13612,10 @@ end
 # In-process equivalent of an HTTP request: locate the registered handler
 # in the router's trie, invoke it with a synthesized Request. The
 # handler's normal save_response side effects still run.
-function _drive_record_path(router, path::AbstractString, headers)
+function _drive_record_path(router, path::AbstractString, headers; variant::Bool=false)
     req = HTTP.Request("GET", path, headers, UInt8[])
+    # A `url_params` value is saved under its query (`_record_save_path`).
+    variant && (req.context[:htmxo_record_variant] = true)
     found = HTTP.Handlers.gethandler(router, req)
     handler = first(found)
     if handler === HTTP.Handlers.default404 || handler === nothing
@@ -17601,26 +18071,42 @@ grouped by a single name keeps plain keys and needs no decoding. Malformed
 input throws an `ArgumentError`.
 """
 function group_path(key::AbstractString)
-    s = String(key)
-    bad() = throw(ArgumentError("group_path: not a JSON array of strings: $(repr(s))"))
-    out = String[]
-    i = _md_json_skip(s, 1)
-    i <= ncodeunits(s) && s[i] == '[' || bad()
+    bad() = throw(ArgumentError("group_path: not a JSON array of strings: $(repr(key))"))
+    path = _json_string_tree(key, bad)
+    path isa Vector && all(x -> x isa String, path) || bad()
+    String.(path)
+end
+
+# A JSON value built from strings, `null` and arrays only — the shapes the
+# tables and `url_params` write into attributes: a `String`, `nothing` or a
+# `Vector{Any}` of those. Anything else calls `bad()`.
+function _json_string_tree(json::AbstractString, bad)
+    s = String(json)
+    value, i = _json_string_tree_value(s, _md_json_skip(s, 1), bad)
+    _md_json_skip(s, i) > ncodeunits(s) || bad()
+    value
+end
+function _json_string_tree_value(s, i, bad)
+    i <= ncodeunits(s) || bad()
+    s[i] == '"' && return _md_json_read_string(s, i, bad)
+    if s[i] == 'n'
+        startswith(SubString(s, i), "null") || bad()
+        return nothing, i + 4
+    end
+    s[i] == '[' || bad()
+    out = Any[]
     i = _md_json_skip(s, i + 1)
     i <= ncodeunits(s) || bad()
-    if s[i] != ']'
-        while true
-            str, i = _md_json_read_string(s, i, bad)
-            push!(out, str)
-            i = _md_json_skip(s, i)
-            i <= ncodeunits(s) || bad()
-            s[i] == ']' && break
-            s[i] == ',' || bad()
-            i = _md_json_skip(s, i + 1)
-        end
+    s[i] == ']' && return out, i + 1
+    while true
+        value, i = _json_string_tree_value(s, i, bad)
+        push!(out, value)
+        i = _md_json_skip(s, i)
+        i <= ncodeunits(s) || bad()
+        s[i] == ']' && return out, i + 1
+        s[i] == ',' || bad()
+        i = _md_json_skip(s, i + 1)
     end
-    _md_json_skip(s, i + 1) > ncodeunits(s) || bad()
-    out
 end
 
 # Whitespace, quotes, brackets and commas are ASCII, so stepping a byte at a
