@@ -554,20 +554,27 @@ detail_toggle=:label)` row buttons carry it, so column and row names survive.
 
 A semantic element whose HTML peer is a block — any but `SemanticStatus`,
 `SemanticLink`, `SemanticAction` and `SemanticArtifact`, which are inline and
-stay in their line — is its own paragraph among siblings: as a Node's child or
-in a returned vector, it starts on its own line and ends with a blank line, as
-an `h.p` sibling does. Two metrics in a layout `div` read `**A:** 1\n\n**B:** 2`
-rather than `**A:** 1**B:** 2`, and a code fence or a card's heading is no
-longer joined to the text beside it. A lone element keeps its own projection.
-Plain HTML `div` siblings are not covered: HTMX.jl's serializer writes a `div`
-inline.
+stay in their line — is its own paragraph among siblings, as a `div` is: as a
+Node's child or in a vector, text before it is closed as a paragraph and what
+follows it starts a new one. Two metrics in a layout `div` read
+`**A:** 1\n\n**B:** 2` rather than `**A:** 1**B:** 2`, and a code fence or a
+card's heading is no longer joined to the text beside it. A lone element keeps
+its own projection. The elements declare `HTMX.markdown_block`, so HTMX.jl's
+own serializer applies the rule: a direct `repr("text/markdown", node)` reads
+the same as the route's projection. This needs HTMX.jl `21b2d24` or later,
+which also makes plain HTML `div` siblings paragraphs (`one\n\ntwo`); an
+HTMX.jl without `markdown_block` fails to load HTMXObjects with
+`UndefVarError: markdown_block not defined`. A block type of your own declares
+`HTMX.markdown_block(::MyType) = true` the same way. Semantic elements rescued from a
+dropped form are each a paragraph, inline ones included: out of the form they
+share no line with the text around it.
 
 These rules belong to the response's Markdown projection. A type of your own
 whose `show(io, ::MIME"text/markdown", x)` delegates with `show(io, m, x.inner)`
 reaches HTMX.jl's serializer instead, which drops every `<button>` with its
-content. The tables' own column, row and branch labels survive that path too.
-For the rest (dropped chrome, a control's state, your own labelled controls,
-semantic blocks among siblings), delegate with
+content. The tables' own column, row and branch labels survive that path too,
+and so do semantic blocks among siblings. For the rest (dropped chrome, a
+control's state, your own labelled controls), delegate with
 `print(io, HTMXObjects.to_markdown_string(x.inner))`.
 
 A control that shows the reader a state keeps that state in Markdown, with no
@@ -3059,8 +3066,11 @@ the rest:
   "4 SD" links above — writes that value into the address with
   `history.replaceState`, keeping the other parameters and htmx's history
   state. A first load that shows the rendered value leaves the address alone.
-  The app needs no `hx-push-url` for this, and a share button that copies
-  `location.href` copies the view.
+  A request whose route answers through a deferred operation's poller writes
+  the value it asked for when the poller takes the element's place, so the
+  element the polls bring matches the address. The app needs no
+  `hx-push-url` for this, and a share button that copies `location.href`
+  copies the view.
 - **Static exports.** `StaticExport`'s `url_map` is called with the address of
   every declared value (`/voralarme?k=4.0`), so an exporter that writes every
   mapped address writes those too; the element carries each value's file and
