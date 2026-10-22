@@ -14072,7 +14072,11 @@ through unchanged; a value that is itself all-chrome strips to `nothing`.
 A [`SemanticNode`](@ref) is the one exception to the subtree drop: it survives
 wherever it appears, including inside dropped chrome (see
 [`_rescue_semantic!`](@ref)). Its own children are still stripped, so no chrome
-reaches markdown through it.
+reaches markdown through it. Among siblings — a Node's children, or a returned
+sequence — a block-level semantic node (any but a status, link, action or
+artifact) becomes a paragraph block, so it starts on its own line and ends with
+a blank line exactly as an `h.p` sibling does instead of running into the text
+around it.
 
 A chrome element carrying the presence-only `data-htmxo-label` attribute is a
 labelled control: the element is dropped but its (stripped) children stay where
@@ -14091,8 +14095,8 @@ consumer annotation — the automatic counterpart to [`html_only`](@ref), which
 is the explicit per-node opt-out for other HTML-only content.
 """
 _strip_md_chrome(val) = val
-_strip_md_chrome(val::AbstractArray) = filter(!isnothing, _strip_md_chrome.(val))
-_strip_md_chrome(val::Tuple) = filter(!isnothing, _strip_md_chrome.(val))
+_strip_md_chrome(val::AbstractArray) = filter(!isnothing, _strip_md_chrome_sibling.(val))
+_strip_md_chrome(val::Tuple) = filter(!isnothing, _strip_md_chrome_sibling.(val))
 _strip_md_chrome((content, id)::Pair) = let f = _strip_md_chrome(content)
     isnothing(f) ? nothing : f => id
 end
@@ -14161,24 +14165,43 @@ _rescue_semantic!(out, node::Node) =
 # Re-insertable child: a surviving Node passes through; a chrome Node → nothing
 # (dropped) or, when it held semantic nodes, the rescued run. Unlike
 # filter_errors (which prunes non-error text), text / primitive children are
-# KEPT as-is so non-chrome prose survives.
+# KEPT as-is so non-chrome prose survives. A semantic child is stripped like a
+# container at the top level, and a block-level one becomes a block (below).
 _strip_md_chrome_child(child) = child
 _strip_md_chrome_child(child::Node) = _strip_md_chrome(child)
+_strip_md_chrome_child(child::SemanticNode) = let kept = _strip_md_chrome(child)
+    isnothing(kept) ? nothing : _md_sibling_block(kept)
+end
 
-# The rescued run is emitted where the chrome stood. Delimit it so consecutive
-# cards do not run together — a SemanticCard's markdown has no trailing
-# newline, so an undelimited run yields `…detail### Next title`.
+# An element of a returned sequence strips like any value; a semantic one is
+# also a block among its siblings, exactly as a Node child is.
+_strip_md_chrome_sibling(val) = _strip_md_chrome(val)
+_strip_md_chrome_sibling(val::SemanticNode) = _strip_md_chrome_child(val)
+
+# A block-level semantic element is a Markdown block among its siblings. Its own
+# `show` writes it as if it opened the document, and HTMX.jl's serializer
+# splices a non-Node child into the running line, so siblings ran together:
+# `**A:** 1**B:** 2` for two metrics in a layout `div`, `### T2` mid-line after
+# a card, and a closing code fence followed on its own line by the next
+# element's text, which leaves the fence open. Inside a `<p>` the serializer
+# starts it on its own line, closing any inline run before it, and ends it with
+# a blank line — exactly as an `h.p` sibling. The block elements are the ones
+# whose HTML peer is a block (div, p, pre, dl, table, article, section,
+# details); a status, link, action or artifact is a `span` or an `<a>` in HTML
+# and stays in its line here too.
+_md_block(::SemanticNode) = true
+_md_block(::Union{SemanticStatus,SemanticLink,SemanticAction,SemanticArtifact}) = false
+_md_sibling_block(value::SemanticNode) = _md_block(value) ? h.p(value) : value
+
+# The rescued run is emitted where the chrome stood. Every element in it is a
+# block of its own — pulled out of a form, it no longer shares a line with
+# anything — so consecutive cards do not run together into
+# `…detail### Next title`.
 function _rescued_md_run(node::Node)
     rescued = Any[]
     _rescue_semantic!(rescued, HTMX.children(node))
     isempty(rescued) && return nothing
-    run = Any["\n\n"]
-    for value in rescued
-        length(run) == 1 || push!(run, "\n\n")
-        push!(run, value)
-    end
-    push!(run, "\n")
-    run
+    Any[h.p(value) for value in rescued]
 end
 
 # A control marked `data-htmxo-label` wraps a label that belongs to the
