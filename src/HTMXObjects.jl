@@ -13955,7 +13955,8 @@ function htmxoTableSearch(target, query) {
 }
 
 // The leaves of a group whose rows have not loaded yet, as `[key, search
-// text]` pairs (`data-htmxo-lazy-leaves`), parsed once per value.
+// text]` pairs (`data-htmxo-lazy-leaves`), parsed once per value. A linked
+// table's leaves whose `link_key` is not their key carry it third.
 function htmxoLazyLeaves(row) {
     const source = row.dataset.htmxoLazyLeaves;
     if (!source) return [];
@@ -15277,7 +15278,7 @@ function htmxoLinkApply(table, reveal) {
     rows.forEach(r => {
         if (r.id.startsWith('detail-') || 'htmxoFiltered' in r.dataset) return;
         if (htmxoLinkKey(r) === state.key) light(r, 0);
-        else if (htmxoLazyLeaves(r).some(([k]) => k === state.key)) light(r, htmxoLinkLazyDepth(r));
+        else if (htmxoLazyLeaves(r).some(([k, , link]) => (link ?? k) === state.key)) light(r, htmxoLinkLazyDepth(r));
     });
     depths.forEach((depth, row) => {
         row.dataset.htmxoLinked = depth ? 'inside' : '';
@@ -15873,8 +15874,9 @@ selected row is tinted and the active row marked with `--htmxo-accent`
 Tables, plots and maps that show the same items name one link group with
 `link="probes"`, and hovering an item in one highlights it in the others, with
 no app script. Each body row is keyed by its `data-htmxo-link-key`, else its
-`data-htmxo-select-key`; [`master_detail_table`](@ref) keys its rows by `key`
-and [`render_table`](@ref) by `link_key(row)`. Hovering or keyboard-focusing
+`data-htmxo-select-key`; [`master_detail_table`](@ref) keys its rows by
+`link_key(item)` (default: its `key`) and [`render_table`](@ref) by
+`link_key(row)`. Hovering or keyboard-focusing
 a keyed row announces it to the page as an `htmxo:link` event on `document`
 with `detail` `{group, key, source}` (`key` is `null` when the hover ends), and
 every table of the group marks its rows with that key (`data-htmxo-linked`),
@@ -16738,10 +16740,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `link`: a link group name, e.g. `link="probes"`: hovering an item's row
   highlights the same item in every other table or plot of that group, and
   hovering it there highlights its rows here (every copy of a leaf listed
-  under several groups). Rows are keyed by `string(key(item))`. A hovered item
-  inside a collapsed group lights up that group's row, with a note on how many
-  levels down it is; nothing opens. See *Hover linking* in
+  under several groups). Rows are keyed by `string(link_key(item))`. A hovered
+  item inside a collapsed group lights up that group's row, with a note on how
+  many levels down it is; nothing opens. See *Hover linking* in
   [`sortable_table`](@ref).
+- `link_key(item)`: with `link`, the item's key in the link group (default:
+  its `key`). Give it when several tables on one page show the same items:
+  each table's `key` stays unique on the page (`key = p -> "trend-" * p.kenn`)
+  while every table names the item by the same `link_key = p -> p.kenn`.
 - `texts`: the words of every built-in control — search, selection bar,
   *Expand all* / *Collapse all*, *Group by* and its pills, the ▸/ⓘ controls'
   accessible names, lazy-detail status lines, the CSV button — as a
@@ -16887,7 +16893,7 @@ function master_detail_table(headers, items;
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
-                             _link_key=key,
+                             link_key=nothing,
                              _rows_only::Bool=false,
                              _toolbar=(),
                              _level_marks::Bool=false,
@@ -16895,12 +16901,15 @@ function master_detail_table(headers, items;
                              _update_scope=nothing,
                              texts::TableTexts=_EN_TABLE_TEXTS,
                              kwargs...)
+    # Refused: a link key with no link group would highlight nothing.
+    isnothing(link) && !isnothing(link_key) && throw(ArgumentError(
+        "master_detail_table: `link_key(item)` keys the rows of the link group `link`; give `link` too"))
     isnothing(groupings) || return _grouped_master_detail_table(headers, items;
         key, master, detail, detail_url, master_attrs, master_class, detail_class,
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, texts, kwargs...)
+        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, link_key, texts, kwargs...)
     all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, update_groups)) || throw(ArgumentError(
         "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
@@ -16948,12 +16957,13 @@ function master_detail_table(headers, items;
             return visit_children(descendants, safe, level, ancestors_open && branch_open)
         attrs = Dict{Symbol,Any}(Symbol(k) => v
                                  for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
-        # `link`: the row's item key for hover linking (a group row has none).
-        link_key = isnothing(link) ? nothing : _link_key(item)
-        if !isnothing(link_key)
+        # `link`: the row's item key for hover linking, `link_key(item)` else
+        # its `key` (a group row has none).
+        item_link = isnothing(link) ? nothing : something(link_key, key)(item)
+        if !isnothing(item_link)
             any(k -> _md_attr_name(k) === Symbol("data-htmxo-link-key"), keys(attrs)) && throw(ArgumentError(
-                "master_detail_table: with `link`, a row's `data-htmxo-link-key` is its `key`; `master_attrs` may not set it"))
-            attrs[Symbol("data-htmxo-link-key")] = string(link_key)
+                "master_detail_table: with `link`, a row's `data-htmxo-link-key` is its `link_key` (default: its `key`); `master_attrs` may not set it"))
+            attrs[Symbol("data-htmxo-link-key")] = string(item_link)
         end
         if !isnothing(children)
             attrs[:data_htmxo_parent] = parent
@@ -17421,7 +17431,7 @@ end
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
         group_by_url, group_rows_url, group_rows, group_summary, update_rows, update_groups, selectable,
-        select_form, select_value, select_submit, search_text, link, texts, kwargs...)
+        select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
     names = String[string(first(g)) for g in groupings]
@@ -17600,9 +17610,11 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         update && (attrs[:data_htmxo_lazy_rows] = url)
         # Leaves not loaded yet still count: the search reaches their text
         # (with their keys at the levels below), the count counts each once,
-        # and a selection keeps their keys (and submits their values).
+        # a selection keeps their keys (and submits their values), and a
+        # hover lights the group by their `link_key`, a third entry when given.
         attrs[:data_htmxo_lazy_leaves] = "[" * join(("[" * _md_json_string(string(key(m))) * "," *
-            _md_json_string(join([[k for d in length(g.path)+1:nlevels for k in _md_group_keys(fns[d](m))]; leaf_text(m)], " ")) * "]"
+            _md_json_string(join([[k for d in length(g.path)+1:nlevels for k in _md_group_keys(fns[d](m))]; leaf_text(m)], " ")) *
+            (isnothing(link) || isnothing(link_key) ? "" : "," * _md_json_string(string(link_key(m)))) * "]"
             for m in g.members), ",") * "]"
         if !isnothing(selectable)
             attrs[:data_htmxo_select_members] = "{" * join((string(_md_json_string(string(key(m))), ":",
@@ -17647,8 +17659,10 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
         update_rows = update ? rendered : nothing,
-        # A leaf is linked by its own key, under whichever group it is listed.
-        link, _link_key = x -> x isa _MDGroup ? nothing : key(x.item),
+        # A leaf is linked by its `link_key` (default: its own key), under
+        # whichever group it is listed; a group row has none.
+        link, link_key = isnothing(link) ? nothing :
+            (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
