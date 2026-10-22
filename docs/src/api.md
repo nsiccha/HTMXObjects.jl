@@ -550,12 +550,23 @@ data_htmxo_label="")`): Markdown drops the control and keeps that label in its
 place. Sortable column headers and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
 
+A semantic element whose HTML peer is a block — any but `SemanticStatus`,
+`SemanticLink`, `SemanticAction` and `SemanticArtifact`, which are inline and
+stay in their line — is its own paragraph among siblings: as a Node's child or
+in a returned vector, it starts on its own line and ends with a blank line, as
+an `h.p` sibling does. Two metrics in a layout `div` read `**A:** 1\n\n**B:** 2`
+rather than `**A:** 1**B:** 2`, and a code fence or a card's heading is no
+longer joined to the text beside it. A lone element keeps its own projection.
+Plain HTML `div` siblings are not covered: HTMX.jl's serializer writes a `div`
+inline.
+
 These rules belong to the response's Markdown projection. A type of your own
 whose `show(io, ::MIME"text/markdown", x)` delegates with `show(io, m, x.inner)`
 reaches HTMX.jl's serializer instead, which drops every `<button>` with its
 content. The tables' own column, row and branch labels survive that path too.
-For the rest (dropped chrome, a control's state, your own labelled controls),
-delegate with `print(io, HTMXObjects.to_markdown_string(x.inner))`.
+For the rest (dropped chrome, a control's state, your own labelled controls,
+semantic blocks among siblings), delegate with
+`print(io, HTMXObjects.to_markdown_string(x.inner))`.
 
 A control that shows the reader a state keeps that state in Markdown, with no
 annotation:
