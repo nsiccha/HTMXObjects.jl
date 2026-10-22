@@ -15195,6 +15195,127 @@ if (!window.htmxoSelectionBound) {
 // htmx load event: restore what is already in the document.
 if (document.body) htmxoSelectionRestore(document.body);
 
+// --- Hover linking: `link` on sortable_table / render_table / master_detail_table ---
+// Tables, plots and maps showing the same items name one link group. A hover
+// (or keyboard focus) on an item announces its key to the page as an
+// `htmxo:link` event on `document`, detail {group, key, source} (key null
+// when the hover ends), and every participant of the group highlights its
+// items with that key. Anything joins by listening for the event and
+// dispatching it; `htmxoLink(group, key)` dispatches it from page script. The
+// latest key per group is kept, so a table rendered, regrouped or filtered
+// later shows it too.
+window.htmxoLinkState = window.htmxoLinkState || new Map();
+function htmxoLink(group, key, source) {
+    document.dispatchEvent(new CustomEvent('htmxo:link', {detail:
+        {group: String(group), key: key == null ? null : String(key), source: source || null}}));
+}
+// A row's item key: `data-htmxo-link-key`, else its selection key.
+function htmxoLinkKey(row) { return row.dataset.htmxoLinkKey ?? row.dataset.htmxoSelectKey; }
+// The keyed body row of a linked table that holds `el`, as {group, key, row},
+// else null. A detail row stands for its master, and the rows of a table
+// nested in a detail for the row around them.
+function htmxoLinkRow(el) {
+    for (let tr = el && el.closest ? el.closest('tr') : null; tr; tr = tr.parentElement.closest('tr')) {
+        const table = tr.parentElement.parentElement;
+        if (!table || !table.matches('table[data-htmxo-link]') || tr.parentElement !== table.tBodies[0]) continue;
+        const row = tr.id.startsWith('detail-') ? document.getElementById('row-' + tr.id.slice(7)) : tr;
+        const key = row ? htmxoLinkKey(row) : null;
+        return key == null ? null : {group: table.dataset.htmxoLink, key, row};
+    }
+    return null;
+}
+// The pointer or the focus moved from `from` to `to`: the row it left ends
+// its hover, unless another row of its group takes over, and the row it
+// entered announces its key.
+function htmxoLinkMove(to, from) {
+    const left = htmxoLinkRow(from), entered = htmxoLinkRow(to);
+    if (left && entered && left.row === entered.row) return;
+    if (left && !(entered && entered.group === left.group)) htmxoLink(left.group, null, left.row);
+    if (entered) htmxoLink(entered.group, entered.key, entered.row);
+}
+// How many levels a group row whose rows have not loaded sits above its
+// leaves: the grouping levels below its own (`data-htmxo-grouped` holds a
+// JSON list of the levels, else names the one grouping).
+function htmxoLinkLazyDepth(row) {
+    const wrapper = row.closest('[data-htmxo-grouped]');
+    const grouped = wrapper ? wrapper.dataset.htmxoGrouped : '';
+    const levels = grouped.startsWith('[') ? JSON.parse(grouped).length : 1;
+    return Math.max(1, levels + 1 - Number(row.getAttribute('aria-level') || 1));
+}
+// Scroll `row` into view inside the nearest scroll box around it, never the
+// page: a hover on a plot must not move the plot away from the pointer.
+function htmxoLinkReveal(row) {
+    for (let box = row.parentElement; box && box !== document.body && box !== document.documentElement; box = box.parentElement) {
+        if (box.scrollHeight <= box.clientHeight || !/auto|scroll/.test(getComputedStyle(box).overflowY)) continue;
+        const r = row.getBoundingClientRect(), b = box.getBoundingClientRect();
+        if (r.top < b.top || r.bottom > b.bottom) box.scrollTop += (r.top + r.bottom - b.top - b.bottom) / 2;
+        return;
+    }
+}
+// Mark the rows of `table` that hold its group's current key. A highlight
+// never changes the table: a row inside a collapsed group or branch lights up
+// the innermost shown row above it instead (`data-htmxo-linked="inside"`, its
+// first cell noting how many levels down the item is), and a row the search
+// or a filter hides lights up nothing. With `reveal`, the first lit row
+// scrolls into view inside the table's own scroll box.
+function htmxoLinkApply(table, reveal) {
+    const body = table.tBodies[0];
+    if (!body) return;
+    body.querySelectorAll(':scope > tr[data-htmxo-linked]').forEach(r => {
+        delete r.dataset.htmxoLinked;
+        if (r.cells[0]) delete r.cells[0].dataset.htmxoLinkedNote;
+    });
+    const state = window.htmxoLinkState.get(table.dataset.htmxoLink);
+    if (!state || state.key == null) return;
+    const rows = Array.from(body.rows);
+    const byId = new Map(rows.filter(r => r.id).map(r => [r.id, r]));
+    const depths = new Map();
+    const light = (row, depth) => {
+        for (; row && row.hidden; depth++) row = byId.get(row.dataset.htmxoParent);
+        if (row && !(depths.get(row) <= depth)) depths.set(row, depth);
+    };
+    rows.forEach(r => {
+        if (r.id.startsWith('detail-') || 'htmxoFiltered' in r.dataset) return;
+        if (htmxoLinkKey(r) === state.key) light(r, 0);
+        else if (htmxoLazyLeaves(r).some(([k]) => k === state.key)) light(r, htmxoLinkLazyDepth(r));
+    });
+    depths.forEach((depth, row) => {
+        row.dataset.htmxoLinked = depth ? 'inside' : '';
+        if (depth && row.cells[0]) row.cells[0].dataset.htmxoLinkedNote =
+            htmxoText(table, depth > 1 ? 'linked_deep' : 'linked_inside', {levels: depth});
+    });
+    const first = reveal && rows.find(r => depths.has(r));
+    if (first) htmxoLinkReveal(first);
+}
+// Show the current keys again in the linked tables in or around `elt`.
+function htmxoLinkRestore(elt) {
+    if (!elt || !elt.querySelectorAll) return;
+    const tables = new Set(elt.querySelectorAll('table[data-htmxo-link]'));
+    const around = elt.closest && elt.closest('table[data-htmxo-link]');
+    if (around) tables.add(around);
+    tables.forEach(t => htmxoLinkApply(t, false));
+}
+if (!window.htmxoLinkBound) {
+    window.htmxoLinkBound = true;
+    document.addEventListener('pointerover', e => htmxoLinkMove(e.target, e.relatedTarget));
+    document.addEventListener('pointerout', e => { if (!e.relatedTarget) htmxoLinkMove(null, e.target); });
+    document.addEventListener('focusin', e => htmxoLinkMove(e.target, e.relatedTarget));
+    document.addEventListener('focusout', e => { if (!e.relatedTarget) htmxoLinkMove(null, e.target); });
+    document.addEventListener('htmxo:link', e => {
+        const d = e.detail || {};
+        if (d.group == null) return;
+        const group = String(d.group);
+        window.htmxoLinkState.set(group, {key: d.key == null ? null : String(d.key), source: d.source || null});
+        // The tables the hover did not start in bring their match into view.
+        document.querySelectorAll('table[data-htmxo-link]').forEach(t => {
+            if (t.dataset.htmxoLink === group) htmxoLinkApply(t, !(d.source && t.contains(d.source)));
+        });
+    });
+    document.addEventListener('htmxo:table-filtered', e => htmxoLinkRestore(e.target));
+    document.addEventListener('htmxo:regrouped', e => htmxoLinkRestore(e.target));
+    document.addEventListener('htmx:load', e => htmxoLinkRestore(e.target));
+}
+
 // Read a table's CURRENT client-side sort state. `target` is a CSS selector
 // or an element (the <table>, or any node inside or around it). Returns
 // {sort_col, sort_dir} — 1-based column index, 'asc'|'desc' — or {} when the
@@ -15268,6 +15389,15 @@ function sortable_table_styles()
 }
 .htmxo-sortable-table tbody tr[id^="row-"][onclick] > td { cursor: pointer; }
 .htmxo-sortable-table tbody tr[id^="detail-"] > td { padding: 0; border: none; }
+/* Hover linking (`link=`): the rows holding the hovered item are tinted and
+   outlined; a shown row that holds it in a collapsed group gets a dashed
+   outline, labelled on its top edge by the first cell's note. Neither moves
+   the layout or covers the row's own text. */
+table[data-htmxo-link] > tbody > tr[data-htmxo-linked] { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: -2px; }
+table[data-htmxo-link] > tbody > tr[data-htmxo-linked=""] > td { background-color: var(--htmxo-linked-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 18%, transparent)); }
+table[data-htmxo-link] > tbody > tr[data-htmxo-linked="inside"] { outline-style: dashed; }
+table[data-htmxo-link] > tbody > tr > td[data-htmxo-linked-note] { position: relative; }
+table[data-htmxo-link] > tbody > tr > td[data-htmxo-linked-note]::after { content: attr(data-htmxo-linked-note); position: absolute; z-index: 1; inset-inline-start: .5rem; top: 0; transform: translateY(-50%); padding: 0 .5em; border: 1px dashed var(--htmxo-accent, Highlight); border-radius: 1em; background: var(--pico-background-color, Canvas); color: var(--pico-color, CanvasText); font-size: .7em; line-height: 1.5; white-space: nowrap; pointer-events: none; }
 """))
 end
 
@@ -15340,9 +15470,11 @@ end
 The words a table's built-in controls show: the search field, its count and
 empty state, the selection bar, *Expand all* / *Collapse all*, the *Group by*
 control, lazy-detail status lines, the CSV button, the toggle of its
-caption's long text (`more`, as in [`caption_texts`](@ref)) and the number
+caption's long text (`more`, as in [`caption_texts`](@ref)), the number
 separators of group summaries (`decimal`, `thousands`; see `group_summary` in
-[`master_detail_table`](@ref)). Build one with
+[`master_detail_table`](@ref)) and the note on a row that holds a hovered item
+in a collapsed group (`linked_inside`, `linked_deep`; see *Hover linking* in
+[`sortable_table`](@ref)). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -15352,7 +15484,7 @@ browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
 *Client-side search* in [`sortable_table`](@ref)); `selected`,
 `selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
 texts take `{name}` (the grouping), `group_level` also `{level}`;
-`rows_failed` takes `{status}`.
+`rows_failed` takes `{status}`; `linked_deep` takes `{levels}`.
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -15384,6 +15516,8 @@ struct TableTexts
     more::String                # the caption's long-text toggle (`CaptionTexts`)
     decimal::String             # a group summary's decimal mark
     thousands::String           # a group summary's thousands separator
+    linked_inside::String       # note: the hovered item is in this collapsed row
+    linked_deep::String         # note: ... several levels down
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -15391,7 +15525,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     selected = (:count,), selected_filtered = (:count,), selected_collapsed = (:count,),
     group_add = (:name,), group_add_inner = (:name,), group_level = (:level, :name),
     group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
-    rows_failed = (:status,),
+    rows_failed = (:status,), linked_deep = (:levels,),
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -15425,6 +15559,8 @@ const _TABLE_TEXT_LOCALES = (
         more = _CAPTION_TEXT_LOCALES.en.more,
         decimal = ".",
         thousands = ",",
+        linked_inside = "↳ inside",
+        linked_deep = "↳ {levels} levels down",
     ),
     de = (
         search = "Suche",
@@ -15456,6 +15592,8 @@ const _TABLE_TEXT_LOCALES = (
         more = _CAPTION_TEXT_LOCALES.de.more,
         decimal = ",",
         thousands = ".",
+        linked_inside = "↳ darin",
+        linked_deep = "↳ {levels} Ebenen tiefer",
     ),
 )
 
@@ -15500,7 +15638,7 @@ _with_table_texts(node, texts::TableTexts) = texts == _EN_TABLE_TEXTS ? node :
 _table_count_text(texts::TableTexts, shown, total) = _table_text(texts, :count; shown, total)
 
 """
-    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, kwargs...)
+    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
@@ -15522,6 +15660,10 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   [`sortable_table`](@ref)
 - `search_text(row)`: optional replacement for a row's searchable text, called
   with each Tables.jl row
+- `link`, `link_key(row)`: hover-link the rows with the other tables and plots
+  of the link group `link`, each row keyed by `link_key` of its Tables.jl row
+  (e.g. `link="probes", link_key=r -> r.kenn`); see *Hover linking* in
+  [`sortable_table`](@ref)
 - `texts`: the words of the built-in controls, a [`TableTexts`](@ref) from
   [`table_texts`](@ref) (default English); see [`sortable_table`](@ref)
 - Extra kwargs are forwarded to `h.table()`
@@ -15539,18 +15681,21 @@ page = htmx(
 )
 ```
 """
-function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, kwargs...)
+function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
+    isnothing(link) == isnothing(link_key) || throw(ArgumentError(
+        "render_table: `link` names the group and `link_key(row)` keys each row; give both or neither"))
     cols = Tables.columnnames(Tables.columns(table))
 
     body_rows = [
         h.tr([h.td(isnothing(cell) ? string(Tables.getcolumn(row, c)) : cell(Tables.getcolumn(row, c), c, ri))
               for c in cols]...;
-             (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...)
+             (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
+             (isnothing(link_key) ? (;) : (; data_htmxo_link_key=string(link_key(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
     sortable_table([string(c) for c in cols], body_rows;
-        id, sortable, download, download_filename, caption, class, kwargs...)
+        id, sortable, download, download_filename, caption, class, link, kwargs...)
 end
 
 """
@@ -15558,7 +15703,7 @@ end
                    download=false, download_filename=nothing, caption=nothing,
                    default_sort=nothing, header_groups=nothing,
                    searchable=false, selectable=nothing,
-                   select_form=nothing, texts=table_texts(), kwargs...)
+                   select_form=nothing, link=nothing, texts=table_texts(), kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -15613,6 +15758,10 @@ wrapper instead of widening the page.
   selection submits (e.g. `selectable="rows"`). See *Row selection* below.
 - `select_form`: the `id` of the form those inputs submit with; they carry
   the HTML `form` attribute, so the table need not sit inside the form.
+- `link`: a link group name (e.g. `link="probes"`): hovering a row highlights
+  the same item in every other table or plot of that group, and theirs
+  highlight its row. Rows are keyed by `data-htmxo-link-key` (else
+  `data-htmxo-select-key`). See *Hover linking* below.
 - `texts`: the words of the table's built-in controls (the search label,
   count and empty state, the selection bar, the CSV button, lazy-detail
   status lines), as a [`TableTexts`](@ref) from [`table_texts`](@ref), e.g.
@@ -15720,6 +15869,41 @@ selected row is tinted and the active row marked with `--htmxo-accent`
 (override the tint with `--htmxo-selected-row`). Selection needs
 [`sortable_table_js`](@ref) on the page.
 
+# Hover linking
+Tables, plots and maps that show the same items name one link group with
+`link="probes"`, and hovering an item in one highlights it in the others, with
+no app script. Each body row is keyed by its `data-htmxo-link-key`, else its
+`data-htmxo-select-key`; [`master_detail_table`](@ref) keys its rows by `key`
+and [`render_table`](@ref) by `link_key(row)`. Hovering or keyboard-focusing
+a keyed row announces it to the page as an `htmxo:link` event on `document`
+with `detail` `{group, key, source}` (`key` is `null` when the hover ends), and
+every table of the group marks its rows with that key (`data-htmxo-linked`),
+including each copy of a leaf that a regrouped table lists under several
+groups. A detail row counts as its master. Anything else joins the group by
+listening for that event and dispatching it on its own hover; page script
+announces a key with `htmxoLink(group, key)` (`null` clears). Keys compare as
+strings.
+
+```julia
+master_detail_table(headers, probes; key=p -> p.kenn, master=cells, detail=info,
+    groupings, searchable=true, link="probes")
+```
+
+A highlight never changes the table:
+
+- a row inside a collapsed group or branch lights up the innermost shown row
+  above it instead, with a dashed outline and a note on how far down the item
+  is (`linked_inside`, `linked_deep` in [`TableTexts`](@ref): "↳ inside",
+  "↳ 2 levels down");
+- a row that the search or a filter hides lights up nothing;
+- a lit row out of view scrolls into view only inside the table's own scroll
+  box, never the page, and only when the hover started outside the table.
+
+The latest key of each group is kept (`window.htmxoLinkState`), so a table
+that is re-rendered, regrouped or filtered shows it again. Override the tint
+with `--htmxo-linked-row`. Hover linking needs [`sortable_table_js`](@ref) and
+[`sortable_table_styles`](@ref) on the page.
+
 # Example
 ```julia
 rows = [h.tr(h.td(h.code(name)),
@@ -15755,8 +15939,10 @@ function sortable_table(headers, rows;
                         caption=nothing, default_sort=nothing, role="grid",
                         header_groups=nothing,
                         searchable::Bool=false, search_query::AbstractString="",
-                        selectable=nothing, select_form=nothing,
+                        selectable=nothing, select_form=nothing, link=nothing,
                         texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true, kwargs...)
+    isnothing(link) || link isa Union{AbstractString,Symbol} && !isempty(string(link)) || throw(ArgumentError(
+        "sortable_table: link must be the non-empty name of a link group; got $(repr(link))"))
     if !isnothing(default_sort) && !sortable
         error("sortable_table: default_sort requires sortable=true (nothing reads the marker otherwise)")
     end
@@ -15778,7 +15964,8 @@ function sortable_table(headers, rows;
 
     grouped = isnothing(header_groups) ? nothing : _grouped_thead(th_nodes, header_groups)
     thead = isnothing(grouped) ? h.thead(h.tr(th_nodes...)) : first(grouped)
-    table_node = h.table(; class=table_class, role, kwargs...)(
+    link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
+    table_node = h.table(; class=table_class, role, link_attrs..., kwargs...)(
         thead,
         h.tbody(rows...; body_attrs...),
     )
@@ -16279,7 +16466,7 @@ _md_attr_name(key) = Symbol(replace(string(key), '_' => '-'))
 # expansion state and place in a hierarchy.
 const _MD_ROW_ATTRS = Symbol.(("id", "onclick", "aria-expanded", "aria-level", "hidden",
     "data-htmxo-parent", "data-htmxo-tree-open", "data-htmxo-detail-open",
-    "data-htmxo-search", "data-htmxo-tree-row-toggle"))
+    "data-htmxo-search", "data-htmxo-tree-row-toggle", "data-htmxo-link-key"))
 
 # A row's own attributes join `attrs`, the row attributes `master_attrs` gave.
 # Neither may set what the other sets, nor what the helper writes itself:
@@ -16548,6 +16735,13 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   [`sortable_table`](@ref)`(...; searchable=true)`; see its *Client-side search*.
 - `search_text(item)`: optional replacement for a row's searchable text; useful
   for metadata absent from its visible cells. It does not affect sorting.
+- `link`: a link group name, e.g. `link="probes"`: hovering an item's row
+  highlights the same item in every other table or plot of that group, and
+  hovering it there highlights its rows here (every copy of a leaf listed
+  under several groups). Rows are keyed by `string(key(item))`. A hovered item
+  inside a collapsed group lights up that group's row, with a note on how many
+  levels down it is; nothing opens. See *Hover linking* in
+  [`sortable_table`](@ref).
 - `texts`: the words of every built-in control — search, selection bar,
   *Expand all* / *Collapse all*, *Group by* and its pills, the ▸/ⓘ controls'
   accessible names, lazy-detail status lines, the CSV button — as a
@@ -16692,6 +16886,8 @@ function master_detail_table(headers, items;
                              group_summary=nothing,
                              update_rows=nothing,
                              update_groups=nothing,
+                             link=nothing,
+                             _link_key=key,
                              _rows_only::Bool=false,
                              _toolbar=(),
                              _level_marks::Bool=false,
@@ -16704,7 +16900,7 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, update_rows, update_groups, texts, kwargs...)
+        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, texts, kwargs...)
     all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, update_groups)) || throw(ArgumentError(
         "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
@@ -16752,6 +16948,13 @@ function master_detail_table(headers, items;
             return visit_children(descendants, safe, level, ancestors_open && branch_open)
         attrs = Dict{Symbol,Any}(Symbol(k) => v
                                  for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
+        # `link`: the row's item key for hover linking (a group row has none).
+        link_key = isnothing(link) ? nothing : _link_key(item)
+        if !isnothing(link_key)
+            any(k -> _md_attr_name(k) === Symbol("data-htmxo-link-key"), keys(attrs)) && throw(ArgumentError(
+                "master_detail_table: with `link`, a row's `data-htmxo-link-key` is its `key`; `master_attrs` may not set it"))
+            attrs[Symbol("data-htmxo-link-key")] = string(link_key)
+        end
         if !isnothing(children)
             attrs[:data_htmxo_parent] = parent
             attrs[:aria_level] = string(level)
@@ -16881,7 +17084,7 @@ function master_detail_table(headers, items;
     # gets one from its root keys, which are unique on the page.
     body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
-    table = sortable_table(headers, rows; table_attrs..., texts, _stamp_texts=false, kwargs...)
+    table = sortable_table(headers, rows; table_attrs..., texts, link, _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries.
@@ -17218,7 +17421,7 @@ end
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
         group_by_url, group_rows_url, group_rows, group_summary, update_rows, update_groups, selectable,
-        select_form, select_value, select_submit, search_text, texts, kwargs...)
+        select_form, select_value, select_submit, search_text, link, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
     names = String[string(first(g)) for g in groupings]
@@ -17444,6 +17647,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
         update_rows = update ? rendered : nothing,
+        # A leaf is linked by its own key, under whichever group it is listed.
+        link, _link_key = x -> x isa _MDGroup ? nothing : key(x.item),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
