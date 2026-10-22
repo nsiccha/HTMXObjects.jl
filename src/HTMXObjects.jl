@@ -3280,7 +3280,9 @@ a real link in Markdown, rather than as a bare stringified URL.
 With `external=true` the link leaves the app: it opens in a new tab
 (`target="_blank"`, `rel="noopener"`), carries a trailing `↗` glyph, and keeps
 that marker in the Markdown (`[label ↗](target)`) and plain (`label ↗ (target)`)
-peers.
+peers. A [`StaticExport`](@ref) still hands its address to `url_map` like any
+`href`, so an in-app address opened in a new tab is mapped into the bundle; an
+address outside the app gets `nothing` back and stays as given.
 
 With `code=true` the label is an identifier — a repo slug, a branch name, a
 SHA — and keeps its code styling: `<a …><code>label</code> ↗</a>` in HTML and
@@ -4654,8 +4656,10 @@ alone, so concurrent ordinary requests are unaffected.
 - `url_map` — `nothing`, or a function from an address (the full attribute
   value, query included: `"/report/figure?doc=a&name=b"`) to a static target
   `String` or `nothing`. It is consulted for every `hx-get`, `href`, and `src`,
-  and for every address a route body passes to [`static_url`](@ref) (one
-  inside a script or a JSON payload, which the walk cannot see).
+  semantic elements' included (a [`SemanticLink`](@ref)'s `href`, `external=true`
+  too, and a [`SemanticAction`](@ref)'s `hx-get`), and for every address a
+  route body passes to [`static_url`](@ref) (one inside a script or a JSON
+  payload, which the walk cannot see).
   A `String` replaces the attribute verbatim — relative targets such as
   `"embeds/fig-a.html"` are emitted as given — and the element stays live.
   `nothing` falls back to the default rules below. Any other return value
