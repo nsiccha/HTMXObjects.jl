@@ -1740,12 +1740,20 @@ response pipeline: an HTMX request gets **200** with the standard error article
 and an `X-HTMXO-Error-Id` header, a non-HTMX request gets **500**. That is the
 discriminator to recover against — not the status alone.
 
-This is distinct from *submitted-value* failures. `HTMXObjects.MissingRequiredParam`
-and `HTMXObjects.InvalidDomainValue` (raised when a form posts a value outside its
-current domain) map to **400** on a non-HTMX request and render a `Bad Request`
-article; under HTMX they too stay 200. As caller faults they are not recorded:
-no error log, no `X-HTMXO-Error-Id`, no `__on_error__`. Neither type is
-exported, so catching one needs the qualified name. A route body raises its own
+This is distinct from *submitted-value* failures. `HTMXObjects.MissingRequiredParam`,
+`HTMXObjects.InvalidDomainValue` (raised when a submitted value is outside its
+current domain: a declared `@options` domain, `Bool`, an `Enum`, or an indexed
+mount's admissible keys) and `HTMXObjects.InvalidParamValue` (raised when the
+declared type rejects the value: `?n=abc` for `n::Int`, `?b=300` for
+`b::UInt8`, a repeated value for a scalar; its message names the parameter,
+the value and the expected type) map to **400** on a non-HTMX request and
+render a `Bad Request` article; under HTMX they too stay 200. This holds
+wherever the value is converted: a route keyword or path parameter, `@param`,
+`@header`, or an indexed `@include` segment. As caller faults they are not
+recorded: no error log, no `X-HTMXO-Error-Id`, no `__on_error__`. None of the
+three is exported, so catching one needs the qualified name. A declared type
+with no `parse` method at all is not a caller fault but a declaration bug, and
+stays a recorded 500. A route body raises its own
 caller fault — an unknown id (`404`), an argument out of range (`400`) — with
 the exported `CallerFault(status, message)`, which is answered the same way with
 its own status.

@@ -2205,7 +2205,7 @@ end
     bad_req = HTTP.Request("GET", "/nested/show?count=not-an-int",
                            ["X-Session" => "session-a"])
     bad_handler = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, bad_req))
-    @test bad_handler(bad_req).status == 500
+    @test bad_handler(bad_req).status == 400
 
     ws_req = HTTP.Request("GET", "/nested/stream/4?suffix=ok", ["X-Session" => "session-b"])
     chain_info = DynamicObjects.metafirst(ProviderApp, :nested)
@@ -5985,8 +5985,10 @@ into a scalar parameter.
     @test cp(v, Vector{String}) === v
     @test cp("only", Vector{String}) == ["only"]
     @test isempty(cp("", Vector{String}))
-    @test_throws ErrorException cp(["first", "second"], String)
-    @test_throws ErrorException cp(["42"], Int)
+    # refused: a repeated value cannot collapse into a scalar; an
+    # `ArgumentError`, so `_convert_submitted` answers it as a 400 caller fault
+    @test_throws ArgumentError cp(["first", "second"], String)
+    @test_throws ArgumentError cp(["42"], Int)
 end
 
 @testitem "_convert_param for Symbol" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
@@ -7952,9 +7954,13 @@ end
     @test contains(stage, "stage=review")
     @test contains(stage, "SelStage")
 
-    # A value outside a closed domain is rejected, not parsed into existence.
-    @test drive("/dataset/no_such_node").status >= 400
-    @test drive("/compilation/no_such_stage").status >= 400
+    # A value outside a closed domain is rejected, not parsed into existence,
+    # and the rejection is the caller's fault: a 400 naming the admissible keys.
+    rejected = drive("/dataset/no_such_node")
+    @test rejected.status == 400
+    @test contains(String(rejected.body),
+                   "allowed values: &quot;synthetic_depot&quot;, &quot;real_survey&quot;")
+    @test drive("/compilation/no_such_stage").status == 400
 
     # A scalar mount with no domain keeps the ordinary parse path.
     @test contains(String(drive("/chains/3").body), "stage=3")
@@ -11962,11 +11968,12 @@ end
         @test got[3] == "event: close\ndata: "
 
         # Arguments are validated before the stream starts: a bad request is
-        # an ordinary error response (which also stops EventSource retries).
+        # an ordinary error response (which also stops EventSource retries),
+        # and an unparseable value is the caller's fault: 400, not recorded.
         r, body = stream("/ticks?n=many")
-        @test r.status == 500
+        @test r.status == 400
         @test !startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
-        @test HTTP.header(r, "X-HTMXO-Error-Id", "") != ""
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") == ""
 
         _, body = stream("/resume", ["Last-Event-ID" => "41"])
         @test frames(body)[1] == "event: done\ndata: resumed after 41"

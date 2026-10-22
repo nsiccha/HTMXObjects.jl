@@ -63,6 +63,104 @@ using TestItemRunner
     @test contains(unnamed, "<header>Request refused</header>")
 end
 
+# A submitted value its declared type rejects is a caller fault wherever it is
+# converted: a keyword, a path parameter, `@param`, `@header`, an indexed
+# mount segment. Before, only a closed domain (`Bool`, an `Enum`) answered 400;
+# `?n=abc` for `n::Int` was a recorded 500, before the route body could run
+# (snag unparseable-type-9e5d9bc6: the KB's `version::Int` keyword woke its
+# error triage for a caller slip). A type with no `parse` method at all is the
+# declaration's fault, and is the server-fault control.
+@testitem "a submitted value its declared type rejects is a 400, not recorded" tags=[:unit, :server] begin
+    using HTMXObjects, HTTP, Logging
+    import HTMXObjects: h
+
+    struct BadValueUnparsed end
+    @enum BadValueStage draft final
+    @htmx struct BadValueChain
+        chain::Any
+        @get index() = h.p("chain=$(chain)")
+    end
+    hooked = String[]
+    @htmx struct BadValueApp
+        __on_error__ = (err, uid, path) -> push!(hooked, uid)
+        @param bv_k::Int = 0
+        @header x_bv_count::Int = 0
+        @get bv_last(; n::Int=-1) = h.p("n=$n")
+        @post bv_trees(; version::Int=-1) = h.p("version=$version")
+        @get bv_item(id::Int) = h.p("id=$id")
+        @get bv_small(; b::UInt8=0x00) = h.p("b=$b")
+        @get bv_ratio(; r::Float64=0.0) = h.p("r=$r")
+        @get bv_many(; xs::Vector{Int}=Int[]) = h.p("xs=$xs")
+        @get bv_flag(; f::Bool=false) = h.p("f=$f")
+        @get bv_param() = h.p("k=$(bv_k)")
+        @get bv_header() = h.p("count=$(x_bv_count)")
+        @post bv_upload(; file::Upload) = h.p("file=$(file.filename)")
+        @get bv_unparsed(; x::BadValueUnparsed) = h.p("unreachable")
+        @include bv_chains(chain::Integer) = BadValueChain(chain)
+        @include bv_stages(stage::BadValueStage) = BadValueChain(stage)
+    end
+    route!(BadValueApp())
+    form = ["Content-Type" => "application/x-www-form-urlencoded"]
+    body_text(r) = String(r.body isa AbstractString ? r.body : copy(r.body))
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            # The answer names the parameter, the submitted value and the type.
+            rejected = [
+                (dispatch(:GET, "/bv_last?n=abc"), "parameter n: &quot;abc&quot;; expected Int64"),
+                (dispatch(:POST, "/bv_trees"; body="version=unknown", headers=form),
+                 "parameter version: &quot;unknown&quot;; expected Int64"),
+                (dispatch(:GET, "/bv_item/abc"), "parameter id: &quot;abc&quot;; expected Int64"),
+                (dispatch(:GET, "/bv_small?b=300"), "expected UInt8 (overflow parsing"),
+                (dispatch(:GET, "/bv_ratio?r=x"), "parameter r: &quot;x&quot;; expected Float64"),
+                (dispatch(:GET, "/bv_many?xs=1&xs=z"), "expected Vector{Int64}"),
+                (dispatch(:GET, "/bv_last?n=1&n=2"), "expected one value, got 2"),
+                (dispatch(:GET, "/bv_param?bv_k=abc"), "parameter bv_k: &quot;abc&quot;"),
+                (dispatch(:GET, "/bv_header"; headers=["X-BV-Count" => "abc"]),
+                 "parameter x_bv_count: &quot;abc&quot;"),
+                (dispatch(:POST, "/bv_upload"; body="file=notes.txt", headers=form),
+                 "expected an uploaded file"),
+                (dispatch(:GET, "/bv_chains/abc"), "parameter chain: &quot;abc&quot;; expected Integer"),
+                # A closed domain still lists what is allowed instead of a type.
+                (dispatch(:GET, "/bv_flag?f=maybe"), "allowed values: false, true"),
+                (dispatch(:GET, "/bv_stages/nope"),
+                 "parameter stage: &quot;nope&quot;; allowed values: &quot;draft&quot;, &quot;final&quot;"),
+            ]
+            for (response, message) in rejected
+                @test response.status == 400
+                @test !HTTP.hasheader(response, "X-HTMXO-Error-Id")
+                @test contains(body_text(response), "<header>Bad Request</header>")
+                @test contains(body_text(response), message)
+            end
+            fragment = dispatch(:GET, "/bv_last?n=abc"; headers=["HX-Request" => "true"])
+            @test fragment.status == 200
+            @test contains(body_text(fragment), "aria-invalid=\"true\"")
+            @test !HTTP.hasheader(fragment, "X-HTMXO-Error-Id")
+            @test isempty(readdir(dir))
+            @test isempty(hooked)
+
+            # Valid values still reach the bodies.
+            @test contains(body_text(dispatch(:GET, "/bv_last?n=5")), "n=5")
+            @test contains(body_text(dispatch(:GET, "/bv_item/7")), "id=7")
+            @test contains(body_text(dispatch(:GET, "/bv_chains/3")), "chain=3")
+            @test contains(body_text(dispatch(:GET, "/bv_stages/final")), "chain=final")
+            @test contains(body_text(dispatch(:GET, "/bv_header"; headers=["X-BV-Count" => "4"])), "count=4")
+
+            # A declared type that cannot be parsed from text at all is the
+            # server's fault: still a recorded 500.
+            unparsed = dispatch(:GET, "/bv_unparsed?x=a")
+            @test unparsed.status == 500
+            uid = HTTP.header(unparsed, "X-HTMXO-Error-Id", "")
+            @test !isempty(uid)
+            @test readdir(dir) == ["$uid.log"]
+            @test hooked == [uid]
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+end
+
 # An `__error__` hook that returns a `MIMEResponse` answers with it: a JSON
 # API's error stays JSON, with the status the error would have had (500 for a
 # server fault, 400 for a caller fault), instead of the escaped repr inside the
@@ -374,6 +472,13 @@ end
             flag = quiet("/et_flag?b=maybe"; headers=hx)
             @test contains(String(flag.body),
                 "<p>Ungültiger Wert für b: &quot;maybe&quot;; zulässige Werte: false, true</p>")
+            # A value the declared type rejects names the type in the app's
+            # words; the parser's reason stays as Julia writes it.
+            unparsed = quiet("/et_needs?n=abc")
+            @test unparsed.status == 400
+            @test !HTTP.hasheader(unparsed, "X-HTMXO-Error-Id")
+            @test contains(String(unparsed.body),
+                "<header>Ungültige Anfrage</header><p>Ungültiger Wert für n: &quot;abc&quot;; erwartet Int64 (")
 
             english = quiet("/en_boom")
             english_uid = HTTP.header(english, "X-HTMXO-Error-Id", "")
