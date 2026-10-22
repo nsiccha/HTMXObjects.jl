@@ -24,7 +24,7 @@ export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
-export safely, record_error, ERROR_DIR, CallerFault
+export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or
@@ -1330,10 +1330,11 @@ end
     _inject_dunder_props!(struct_expr)
 
 Ensure that `@htmx` struct bodies always declare `__parent__`, `__mount_step__`,
-`__prefix__`, `__req__`, `__appdata__`, `__route__`, and `__on_error__` as
-properties so route bodies can reference them and so the `__parent__` chain
-threads request context, appdata, the mount prefix, the per-request route URL,
-and the error hook down through `@include`d sub-structs.
+`__prefix__`, `__req__`, `__appdata__`, `__route__`, `__on_error__`, and
+`__error_texts__` as properties so route bodies can reference them and so the
+`__parent__` chain threads request context, appdata, the mount prefix, the
+per-request route URL, the error hook, and the error answers' texts down through
+`@include`d sub-structs.
 
 Defaults:
 - `__parent__ = nothing` — set by `@include` desugar to point at the enclosing struct.
@@ -1349,8 +1350,8 @@ Defaults:
   `__prefix__` and recomputes it, which a construction-time constant cannot
   survive (a retained semantic root then served root-relative URLs from its
   second request on).
-- `__req__` / `__appdata__` / `__on_error__` — fall through `__parent__` if
-  present, else `nothing`. `__req__` is supplied by HTMXO at request-handler
+- `__req__` / `__appdata__` / `__on_error__` / `__error_texts__` — fall through
+  `__parent__` if present, else `nothing`. `__req__` is supplied by HTMXO at request-handler
   construction. `__appdata__` is supplied by the user — the conventional pattern
   is to override the default inside the root `@htmx struct` body
   (`__appdata__ = APP_DATA` with `const APP_DATA = AppData()` at module scope) so
@@ -1358,7 +1359,9 @@ Defaults:
   `__on_error__` is the optional post-error side-effect hook (see
   `_default_error_render`); defining it once on the root `@htmx struct` body
   propagates it to every route — including `@include`d upstream structs the app
-  cannot edit.
+  cannot edit. `__error_texts__` is the [`ErrorTexts`](@ref) the error articles
+  are written in (`nothing` = English); `__error_texts__ = error_texts(:de)` on
+  the root reaches every route the same way.
 - `__route__ = ""` — defaults to empty; `_register_route_handler` sets it to
   the current request's path (query string stripped, **mount-prefix-aware**:
   the request `__prefix__` is prepended when a path-stripping proxy removed it,
@@ -1381,6 +1384,7 @@ function _inject_dunder_props!(struct_expr)
     has_mount_step = false
     has_route = false
     has_on_error = false
+    has_error_texts = false
     for arg in body.args
         arg isa Expr || continue
         if Meta.isexpr(arg, :macrocall) && arg.args[1] in route_macros
@@ -1399,6 +1403,7 @@ function _inject_dunder_props!(struct_expr)
         name === :__mount_step__ && (has_mount_step = true)
         name === :__route__    && (has_route = true)
         name === :__on_error__ && (has_on_error = true)
+        name === :__error_texts__ && (has_error_texts = true)
     end
     prepend = Any[]
     has_parent   || push!(prepend, :(__parent__ = nothing))
@@ -1409,6 +1414,7 @@ function _inject_dunder_props!(struct_expr)
     has_appdata  || push!(prepend, :(__appdata__  = isnothing(__parent__) ? nothing : __parent__.__appdata__))
     has_route    || push!(prepend, :(__route__    = isnothing(__parent__) ? "" : __parent__.__route__))
     has_on_error || push!(prepend, :(__on_error__ = isnothing(__parent__) ? nothing : __parent__.__on_error__))
+    has_error_texts || push!(prepend, :(__error_texts__ = isnothing(__parent__) ? nothing : __parent__.__error_texts__))
     if !isempty(prepend)
         body.args = vcat(prepend, body.args)
     end
@@ -2811,7 +2817,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=())
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -2824,6 +2830,10 @@ so a ws or sse stream refused by an auth gateway reloads the page on the
 gateway's `HX-Refresh` instead of reconnecting forever.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
+`error_texts`, an [`ErrorTexts`](@ref) such as `error_texts(:de)`, is the
+language of the failed-request toasts ([`toast_script`](@ref)); pass the root's
+`__error_texts__` from `__page__` so the toasts match the error articles.
+`nothing` (the default) keeps them English.
 Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
 it defaults to `false` — the bundle is served only by the KB app, so standalone
 pages omit the fetch.
@@ -2889,6 +2899,7 @@ function htmx(args...;
     overlay              = false,
     extra_head          = (),
     treebars_assets     = true,
+    error_texts         = nothing,
 )
     _check_assets_mode(assets)
     mount = _runtime_mount(runtime, assets)
@@ -2906,7 +2917,8 @@ function htmx(args...;
     isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
-    html = preload ? h.html(; hx_ext="preload") : h.html
+    html_attrs = (; (preload ? (; hx_ext="preload") : (;))..., _error_texts_attrs(error_texts)...)
+    html = isempty(html_attrs) ? h.html : h.html(; html_attrs...)
     HTMLDocument(html(
         head(
             h.meta(charset="utf-8"),
@@ -2960,7 +2972,7 @@ function htmx(args...;
 end
 
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline)
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -2974,13 +2986,14 @@ with
     # or with extras:
     __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
 
-`assets` and `runtime` forward to [`htmx`](@ref): `pico_page(content;
+`assets`, `runtime` and `error_texts` forward to [`htmx`](@ref): `pico_page(content;
 assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
 page (vendor mode needs pico at its exact pin, not the floating `"2"`
 default), and adding `runtime=:linked` makes its whole head cacheable.
 """
-pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime)
+pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline,
+        error_texts=nothing) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts)
 
 # --- Route registration and recording ---
 
@@ -5330,6 +5343,10 @@ poll on an indexed property whose body reads no request context. The default
 is rejected for `scope=:request` because request scope already has exactly one
 request per root.
 
+Both forms without a `factory` build each new root from the instance given to
+[`route!`](@ref): its fixed fields and constructor keyword overrides, plus the
+request. A custom `factory` builds its own roots.
+
 The managed store is deliberately process-local. A distributed/multipod job
 store remains an application/runtime adapter expressed by the factory form.
 """
@@ -5529,9 +5546,42 @@ function RootProvider(factory; scope::Symbol=:request, key=nothing)
     RootProvider{typeof(factory),typeof(keyfn)}(factory, scope, keyfn)
 end
 
+# Every root HTMXObjects builds for a request — the fresh per-request root and a
+# new entry in a managed store — comes from the instance `route!` was given: its
+# fixed fields and the keyword overrides it was constructed with
+# (`App(; dir=…)`) are passed to the new root alongside the request. Nothing the
+# instance computed is carried over; each root computes its own properties, so
+# a default the instance did not override is still evaluated per root.
 _default_root_factory(RootT, context::OperationContext) =
-    RootT(; __req__=context.request, __route__=context.route,
-          _prefix_kw(context.prefix)...)
+    _root_from(get(_root_templates, RootT, nothing), RootT, context)
+
+_root_from(::Nothing, RootT, context::OperationContext) =
+    RootT(; _root_request_kw(context)...)
+
+function _root_from(template, RootT, context::OperationContext)
+    fixed, overrides = _construction_inputs(template)
+    RootT(fixed...; overrides..., _root_request_kw(context)...)
+end
+
+_root_request_kw(context::OperationContext) =
+    (; __req__=context.request, __route__=context.route, _prefix_kw(context.prefix)...)
+
+# Request and mount context, which a root takes from its own request and never
+# from the instance it was built from.
+const _REQUEST_CONTEXT_INPUTS = (:__req__, :__route__, :__prefix__, :__parent__, :__status__)
+
+# A DynamicObject's construction inputs: its fixed fields (every field but the
+# trailing property cache, as `DynamicObjects.remake` copies them) and the
+# keyword overrides it was created with (`PropertyCache.seed`). `remake` itself
+# would also carry the instance's settled memos into every request root and
+# keeps the overrides only as memos (DynamicObjects snag
+# `remake-drops-the-295be6c2`).
+function _construction_inputs(obj)
+    T = typeof(obj)
+    fixed = Any[getfield(obj, name) for name in fieldnames(T)[1:end-1]]
+    seed = getfield(obj, :cache).seed
+    fixed, Base.structdiff(seed, NamedTuple{_REQUEST_CONTEXT_INPUTS})
+end
 
 mutable struct _RetainedRoot
     value::Any
@@ -5616,6 +5666,24 @@ function _evict_managed_root!(factory::_ManagedRootFactory, scope::Symbol)
     _managed_root_release_event(factory, oldest_key, entry, scope, :lru)
 end
 
+# `route!` with another instance of a type already served from this store: the
+# retained roots were built from the earlier instance, so the next request
+# builds a new one from the current instance instead. A retained root that IS
+# the routed instance stays: `semantic_app(app)` before `route!(app)` retains
+# `app` itself, and requests then share its caches.
+function _forget_managed_roots!(provider::RootProvider, RootT, routed)
+    factory = provider.factory
+    factory isa _ManagedRootFactory || return nothing
+    released = lock(factory.lock) do
+        Any[(delete!(factory.entries, key);
+             _managed_root_release_event(factory, key, entry, provider.scope, :reroute))
+            for (key, entry) in collect(factory.entries)
+            if first(key) === RootT && entry.value !== routed]
+    end
+    _notify_managed_root_releases(released)
+    nothing
+end
+
 function _prime_managed_root!(root, seen=Base.IdSet())
     root in seen && return root
     push!(seen, root)
@@ -5691,6 +5759,8 @@ _normalize_root_provider(factory) = RootProvider(factory)
 # Companion registry rather than another field on `_registered_types`: that
 # const's NamedTuple value type is frozen under Julia 1.10/Revise.
 const _root_providers = Dict{DataType,Any}()
+# The instance each root type was routed with (`_default_root_factory`).
+const _root_templates = Dict{DataType,Any}()
 const _operation_policies = Dict{DataType,OperationPolicy}()
 const _semantic_root_types = Set{Type}()
 # Convert a string value to the target type. Strings pass through as-is.
@@ -7233,22 +7303,20 @@ function Base.showerror(io::IO, e::ReviseMissedEdits)
     print(io, "See 'Revise freshness' below for the same data.")
 end
 
+# The message of a fault whose article shows it is written by
+# `_caller_fault_message` from the app's `ErrorTexts`; `showerror` (error logs,
+# stack traces) always writes the English texts.
 struct MissingRequiredParam <: Exception
     name::Symbol
 end
-function Base.showerror(io::IO, e::MissingRequiredParam)
-    print(io, "Missing required parameter: ", e.name)
-end
+Base.showerror(io::IO, e::MissingRequiredParam) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
 
 struct InvalidDomainValue <: Exception
     name::Symbol
     value
     allowed
 end
-function Base.showerror(io::IO, e::InvalidDomainValue)
-    print(io, "Invalid value for parameter ", e.name, ": ", repr(e.value))
-    isempty(e.allowed) || print(io, "; allowed values: ", join(repr.(e.allowed), ", "))
-end
+Base.showerror(io::IO, e::InvalidDomainValue) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
 
 """
     CallerFault(status, message)
@@ -7284,9 +7352,10 @@ struct CallerFault <: Exception
 end
 Base.showerror(io::IO, e::CallerFault) = print(io, e.message)
 
-# Standard reason phrases (RFC 9110, plus 429). A caller fault's article is
-# titled with one; the toast runtime names a failed request's status from the
-# same table when the browser has no reason phrase (HTTP/2).
+# Standard reason phrases (RFC 9110, plus 429), the `reasons` of the English
+# `ErrorTexts`. A caller fault's article is titled with one; the toast runtime
+# names a failed request's status from the same table when the browser has no
+# reason phrase (HTTP/2).
 const _REASON_PHRASES = Dict{Int,String}(
     400 => "Bad Request", 401 => "Unauthorized", 402 => "Payment Required",
     403 => "Forbidden", 404 => "Not Found", 405 => "Method Not Allowed",
@@ -7303,8 +7372,6 @@ const _REASON_PHRASES = Dict{Int,String}(
     500 => "Internal Server Error", 501 => "Not Implemented", 502 => "Bad Gateway",
     503 => "Service Unavailable", 504 => "Gateway Timeout",
 )
-const _REASON_PHRASES_JS = "{" * join(("$code: '$phrase'"
-    for (code, phrase) in sort!(collect(_REASON_PHRASES))), ", ") * "}"
 
 """
     OperationResultUnavailable(route, verb)
@@ -7320,11 +7387,7 @@ struct OperationResultUnavailable <: Exception
     route::Symbol
     verb::Symbol
 end
-function Base.showerror(io::IO, e::OperationResultUnavailable)
-    print(io, "The result of this ", e.verb, " ", e.route,
-          " submission is no longer available. It ran at most once and was ",
-          "not repeated; reload to see the current state.")
-end
+Base.showerror(io::IO, e::OperationResultUnavailable) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
 
 """
     OperationStalled(label, verb, elapsed, bound, rerun_url)
@@ -7344,18 +7407,7 @@ struct OperationStalled <: Exception
     bound::Float64
     rerun_url::Union{Nothing,String}
 end
-function Base.showerror(io::IO, e::OperationStalled)
-    print(io, e.label, " has been running for ", _human_seconds(e.elapsed),
-          ", longer than its ", _human_seconds(e.bound), " stall bound, so ",
-          "this page stopped waiting for it. The computation was not cancelled ",
-          "and may still finish in the background. ")
-    if e.rerun_url === nothing
-        print(io, "The ", e.verb, " submission was not repeated; reload to see ",
-              "the current state.")
-    else
-        print(io, "Run again starts a fresh computation with the same arguments.")
-    end
-end
+Base.showerror(io::IO, e::OperationStalled) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
 
 function _human_seconds(t::Real)
     s = floor(Int, t)
@@ -7365,6 +7417,245 @@ function _human_seconds(t::Real)
     h, m = divrem(m, 60)
     m == 0 ? "$(h) h" : "$(h) h $(m) min"
 end
+
+# --- Locale texts ---
+
+# A texts struct `T` for `locale` from `locales` (one NamedTuple of texts per
+# locale), with any texts replaced by keyword. `fname` names the public
+# constructor in errors; `placeholders` lists the `{names}` each text may hold.
+function _locale_texts(::Type{T}, fname, locales, placeholders, locale::Symbol; texts...) where {T}
+    haskey(locales, locale) || throw(ArgumentError(string(fname, ": unknown locale ",
+        repr(locale), "; available: ", join(repr.(keys(locales)), ", "))))
+    names = fieldnames(T)
+    for name in keys(texts)
+        name in names || throw(ArgumentError(string(fname, ": unknown text ", repr(name),
+            "; texts are ", join(names, ", "))))
+    end
+    table = getfield(locales, locale)
+    merged = merge(table, (; (k => _locale_text_value(table[k], v) for (k, v) in pairs(texts))...))
+    for name in names
+        merged[name] isa AbstractString || continue
+        allowed = get(placeholders, name, ())
+        for m in eachmatch(r"\{([A-Za-z_]+)\}", merged[name])
+            Symbol(m[1]) in allowed || throw(ArgumentError(string(fname, ": ", name, " has no placeholder {",
+                m[1], "}", isempty(allowed) ? "" : string("; it takes ", join(("{$p}" for p in allowed), ", ")))))
+        end
+    end
+    T((merged[name] for name in names)...)
+end
+
+# Texts keyed by HTTP status (`ErrorTexts.reasons`): immutable, sorted pairs.
+const _StatusTexts = Tuple{Vararg{Pair{Int,String}}}
+_status_texts(table) = Tuple(sort!(collect(Pair{Int,String}, table); by=first))
+
+# A text given by keyword is its string; a status table given by keyword
+# replaces the statuses it names and keeps the locale's others.
+_locale_text_value(::AbstractString, v) = string(v)
+_locale_text_value(table::_StatusTexts, v) =
+    _status_texts(merge!(Dict{Int,String}(table), Dict{Int,String}(Int(k) => string(x) for (k, x) in v)))
+
+# A text with its `{placeholders}` filled in from `values`.
+_fill_text(template::AbstractString; values...) =
+    replace(template, r"\{([A-Za-z_]+)\}" => m -> string(values[Symbol(m[2:end-1])]))
+
+"""
+    ErrorTexts
+
+The words of HTMXObjects' error answers: the article that points at a
+recorded server fault (`error`, `server_fault`), the caller-fault articles
+(titled with their status's reason phrase from `reasons`, or `refused` for a
+status without one), the framework's own caller-fault messages, a stalled
+operation's terminal (`run_again`, `progress`) and the page shell's
+failed-request toasts (`request_failed`, `no_response`, `timed_out`,
+`dismiss`, and `reasons` again). Build one with [`error_texts`](@ref).
+
+Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
+`@htmx` threads `__error_texts__` down the `__parent__` chain like
+`__on_error__`, so every `@include`d struct, `safely` panel and polled
+operation of the app answers in it. Pass the same value to the page shell,
+`htmx(...; error_texts)` or `pico_page(...; error_texts)`, for the toasts.
+
+A text in braces is a placeholder the framework fills in: `server_fault` takes
+`{id}`, the recorded error id, and must keep it; `missing_param` takes
+`{name}`; `invalid_value` takes `{name}` and `{value}`, followed when the
+parameter has a closed domain by `"; "` and `allowed_values` with `{allowed}`;
+`result_unavailable_detail` takes `{verb}` and `{route}`; `stalled_detail` takes
+`{label}`, `{elapsed}` and `{bound}`, followed by `stalled_rerun` for a read or
+`stalled_not_repeated` (`{verb}`) for a mutation. An app's own
+[`CallerFault`](@ref) message is shown as written. Error logs, `@error` lines
+and `showerror` stay English.
+"""
+struct ErrorTexts
+    error::String                      # heading of a recorded server fault
+    server_fault::String               # its line, with the error id
+    refused::String                    # heading of a 4xx without a reason phrase
+    missing_param::String              # a required parameter is missing
+    invalid_value::String              # a submitted value is outside its domain
+    allowed_values::String             # ... and the values it takes
+    result_unavailable::String         # heading: a mutation's result is gone
+    result_unavailable_detail::String
+    stalled::String                    # heading: an operation passed its stall bound
+    stalled_detail::String
+    stalled_rerun::String              # ... for a read, which Run again repeats
+    stalled_not_repeated::String       # ... for a mutation, which is not repeated
+    run_again::String                  # button: request a stalled read again
+    progress::String                   # a stalled operation's open progress tree
+    request_failed::String             # toast: an answer htmx does not swap
+    no_response::String                # toast: no answer at all
+    timed_out::String                  # toast: the request timed out
+    dismiss::String                    # accessible name of a toast's × button
+    reasons::_StatusTexts              # reason phrase per HTTP status
+end
+
+const _ERROR_TEXT_PLACEHOLDERS = (
+    server_fault = (:id,), missing_param = (:name,), invalid_value = (:name, :value),
+    allowed_values = (:allowed,), result_unavailable_detail = (:verb, :route),
+    stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
+)
+
+const _ERROR_TEXT_LOCALES = (
+    en = (
+        error = "Error",
+        server_fault = "Something went wrong. Error ID: {id}",
+        refused = "Request refused",
+        missing_param = "Missing required parameter: {name}",
+        invalid_value = "Invalid value for parameter {name}: {value}",
+        allowed_values = "allowed values: {allowed}",
+        result_unavailable = "Result unavailable",
+        result_unavailable_detail = "The result of this {verb} {route} submission is no longer available. It ran at most once and was not repeated; reload to see the current state.",
+        stalled = "Operation stalled",
+        stalled_detail = "{label} has been running for {elapsed}, longer than its {bound} stall bound, so this page stopped waiting for it. The computation was not cancelled and may still finish in the background.",
+        stalled_rerun = "Run again starts a fresh computation with the same arguments.",
+        stalled_not_repeated = "The {verb} submission was not repeated; reload to see the current state.",
+        run_again = "Run again",
+        progress = "Progress",
+        request_failed = "Request failed",
+        no_response = "Request failed: no response (network error or server unreachable)",
+        timed_out = "Request timed out",
+        dismiss = "Dismiss",
+        reasons = _status_texts(_REASON_PHRASES),
+    ),
+    de = (
+        error = "Fehler",
+        server_fault = "Etwas ist schiefgegangen. Fehler-ID: {id}",
+        refused = "Anfrage abgelehnt",
+        missing_param = "Pflichtangabe fehlt: {name}",
+        invalid_value = "Ungültiger Wert für {name}: {value}",
+        allowed_values = "zulässige Werte: {allowed}",
+        result_unavailable = "Ergebnis nicht mehr verfügbar",
+        result_unavailable_detail = "Das Ergebnis dieser Übermittlung ({verb} {route}) ist nicht mehr verfügbar. Sie wurde höchstens einmal ausgeführt und nicht wiederholt; laden Sie die Seite neu, um den aktuellen Stand zu sehen.",
+        stalled = "Vorgang hängt",
+        stalled_detail = "{label} läuft seit {elapsed}, länger als die Grenze von {bound}, daher wartet diese Seite nicht mehr darauf. Die Berechnung wurde nicht abgebrochen und kann im Hintergrund noch fertig werden.",
+        stalled_rerun = "„Erneut ausführen“ startet eine neue Berechnung mit denselben Argumenten.",
+        stalled_not_repeated = "Die {verb}-Übermittlung wurde nicht wiederholt; laden Sie die Seite neu, um den aktuellen Stand zu sehen.",
+        run_again = "Erneut ausführen",
+        progress = "Fortschritt",
+        request_failed = "Anfrage fehlgeschlagen",
+        no_response = "Anfrage fehlgeschlagen: keine Antwort (Netzwerkfehler oder Server nicht erreichbar)",
+        timed_out = "Zeitüberschreitung der Anfrage",
+        dismiss = "Schließen",
+        reasons = _status_texts(Dict(
+            400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
+            403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
+            406 => "Nicht annehmbar", 407 => "Proxy-Authentifizierung erforderlich",
+            408 => "Zeitüberschreitung der Anfrage", 409 => "Konflikt", 410 => "Nicht mehr verfügbar",
+            411 => "Länge erforderlich", 412 => "Vorbedingung fehlgeschlagen",
+            413 => "Inhalt zu groß", 414 => "URI zu lang",
+            415 => "Nicht unterstützter Medientyp", 416 => "Bereich nicht erfüllbar",
+            417 => "Erwartung fehlgeschlagen", 421 => "Fehlgeleitete Anfrage",
+            422 => "Nicht verarbeitbarer Inhalt", 423 => "Gesperrt", 424 => "Fehlgeschlagene Abhängigkeit",
+            425 => "Zu früh", 426 => "Upgrade erforderlich", 428 => "Vorbedingung erforderlich",
+            429 => "Zu viele Anfragen", 431 => "Header-Felder zu groß",
+            451 => "Aus rechtlichen Gründen nicht verfügbar",
+            500 => "Interner Serverfehler", 501 => "Nicht implementiert", 502 => "Fehlerhaftes Gateway",
+            503 => "Dienst nicht verfügbar", 504 => "Gateway-Zeitüberschreitung",
+        )),
+    ),
+)
+
+"""
+    error_texts(locale::Symbol=:en; texts...)
+
+The [`ErrorTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
+replaced by keyword. `reasons` replaces the reason phrases of the statuses it
+names and keeps the locale's others:
+
+```julia
+@htmx struct App
+    __error_texts__ = error_texts(:de)   # inherited by every @include'd struct
+    __page__(content) = pico_page(content; error_texts=__error_texts__)
+    # ...
+end
+
+error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
+    reasons=Dict(404 => "Unbekannt"))
+```
+
+An unknown locale or text name, a placeholder a text does not take, or a
+`server_fault` without `{id}` throws an `ArgumentError`.
+"""
+function error_texts(locale::Symbol=:en; texts...)
+    t = _locale_texts(ErrorTexts, :error_texts, _ERROR_TEXT_LOCALES, _ERROR_TEXT_PLACEHOLDERS, locale; texts...)
+    occursin("{id}", t.server_fault) || throw(ArgumentError(
+        "error_texts: server_fault must keep {id}, the recorded error id that ties the article to its error log"))
+    t
+end
+
+const _EN_ERROR_TEXTS = error_texts(:en)
+
+# The texts an error answer for `obj` is written in: its `__error_texts__`,
+# which `@htmx` threads down the `__parent__` chain, or English for an object
+# without one (`safely(f)` with no `obj`, a plain struct) or set to `nothing`.
+_error_texts(obj) = hasproperty(obj, :__error_texts__) ?
+    _error_texts_value(getproperty(obj, :__error_texts__)) : _EN_ERROR_TEXTS
+_error_texts(::Nothing) = _EN_ERROR_TEXTS
+_error_texts_value(texts::ErrorTexts) = texts
+_error_texts_value(::Nothing) = _EN_ERROR_TEXTS
+_error_texts_value(texts) = throw(ArgumentError(string(
+    "__error_texts__ must be an ErrorTexts, e.g. error_texts(:de); got ", repr(texts))))
+
+# The texts the page shell's toast runtime writes, as the JSON object it reads.
+_toast_texts_json(texts::ErrorTexts) = string("{",
+    join((string(_md_json_string(string(n)), ":", _md_json_string(getfield(texts, n)))
+          for n in (:request_failed, :no_response, :timed_out, :dismiss)), ","),
+    ",\"reasons\":{",
+    join((string(_md_json_string(string(code)), ":", _md_json_string(phrase))
+          for (code, phrase) in texts.reasons), ","), "}}")
+
+# The `<html>` attributes that carry a page's toast texts; English is the
+# runtime's own default, so an English page stays byte-identical.
+_error_texts_attrs(::Nothing) = (;)
+_error_texts_attrs(texts::ErrorTexts) = texts == _EN_ERROR_TEXTS ? (;) :
+    (; data_htmxo_error_texts=_toast_texts_json(texts))
+_error_texts_attrs(texts) = throw(ArgumentError(string(
+    "htmx: error_texts must be an ErrorTexts, e.g. error_texts(:de), or nothing; got ", repr(texts))))
+
+# The reason phrase `texts` gives `status`, or `nothing`.
+function _reason_phrase(texts::ErrorTexts, status::Integer)
+    for (code, phrase) in texts.reasons
+        code == status && return phrase
+    end
+    nothing
+end
+
+# A fault's message for the reader, in `texts`.
+_caller_fault_message(e::MissingRequiredParam, texts::ErrorTexts) =
+    _fill_text(texts.missing_param; name=e.name)
+function _caller_fault_message(e::InvalidDomainValue, texts::ErrorTexts)
+    message = _fill_text(texts.invalid_value; name=e.name, value=repr(e.value))
+    isempty(e.allowed) ? message :
+        string(message, "; ", _fill_text(texts.allowed_values; allowed=join(repr.(e.allowed), ", ")))
+end
+_caller_fault_message(e::CallerFault, ::ErrorTexts) = e.message
+_caller_fault_message(e::OperationResultUnavailable, texts::ErrorTexts) =
+    _fill_text(texts.result_unavailable_detail; verb=e.verb, route=e.route)
+function _caller_fault_message(e::OperationStalled, texts::ErrorTexts)
+    detail = _fill_text(texts.stalled_detail; label=e.label,
+        elapsed=_human_seconds(e.elapsed), bound=_human_seconds(e.bound))
+    string(detail, " ", e.rerun_url === nothing ?
+        _fill_text(texts.stalled_not_repeated; verb=e.verb) : texts.stalled_rerun)
+end
+_caller_fault_message(e, ::ErrorTexts) = sprint(showerror, e)
 
 function _check_revise_errors!()
     # Both checks: queue errors (Revise tried but failed) and missed edits
@@ -7474,11 +7765,15 @@ fallback and just need the trace recorded.
 record_error(err, bt, req) = _record_error(err, bt, req)
 
 """
-    _default_error_render(uid, path)
+    _default_error_render(uid, path, texts=_EN_ERROR_TEXTS)
 
 Default rendering for a caught error — a small article pointing at the recorded
-error id. Override by defining `__error__` on the route's enclosing struct
-(or, to disable catching entirely, set `__error__ = rethrow`).
+error id, in `texts` (an [`ErrorTexts`](@ref); the app sets it once as
+`__error_texts__ = error_texts(:de)` on its root struct). Override by defining
+`__error__` on the route's enclosing struct (or, to disable catching entirely,
+set `__error__ = rethrow`); a hook that takes two arguments,
+`__error__(err, uid)`, also receives the recorded error id (`nothing` for an
+unrecorded caller fault).
 
 To run an extra side effect *after* an error is recorded — notifying an
 external service, incrementing a metric — define `__on_error__(err, uid, path)`
@@ -7497,20 +7792,31 @@ same string is already in the server log, including it here lets the
 developer / agent open the file in one step from the in-browser article.
 In prod (Revise not loaded), keep just the uid.
 """
-function _default_error_render(uid, path)
+function _default_error_render(uid, path, texts::ErrorTexts=_EN_ERROR_TEXTS)
     if _revise_module() !== nothing
         h.article(
-            h.header("Error"),
+            h.header(texts.error),
             h.p("HTMXObjects caught an error: ", h.code(path));
             aria_invalid="true",
         )
     else
         h.article(
-            h.header("Error"),
-            h.p("Something went wrong. Error ID: ", h.code(uid));
+            h.header(texts.error),
+            _error_id_line(texts.server_fault, uid);
             aria_invalid="true",
         )
     end
+end
+
+# The `server_fault` line, its `{id}` a code span holding the error id.
+function _error_id_line(template::AbstractString, uid)
+    parts = split(template, "{id}")
+    line = Any[]
+    for (i, part) in enumerate(parts)
+        isempty(part) || push!(line, String(part))
+        i < length(parts) && push!(line, h.code(uid))
+    end
+    h.p(line...)
 end
 
 # `__on_error__` is auto-injected into every `@htmx` struct (default `nothing`,
@@ -7520,8 +7826,10 @@ end
 # an extra command once HTMXObjects' built-in logging has run. A failure inside
 # the hook is logged, never swallowed silently. A caller fault is not recorded
 # (`uid === nothing`, see `_maybe_record_error`) and fires no hook. Then invoke
-# the user's `__error__` render hook if present, else fall back to the default.
-# `__error__` is called with just the exception, so `__error__ = rethrow` works.
+# the user's `__error__` render hook if present, else fall back to the default
+# article in the object's `__error_texts__`. `__error__` is called with the
+# exception, plus the recorded error id when it takes two arguments, so
+# `__error__ = rethrow` works.
 function _invoke_error_handler(obj, err, uid, path)
     if uid !== nothing && obj !== nothing && hasproperty(obj, :__on_error__)
         hook = getproperty(obj, :__on_error__)
@@ -7534,32 +7842,49 @@ function _invoke_error_handler(obj, err, uid, path)
         end
     end
     if obj !== nothing && hasproperty(obj, :__error__)
-        return getproperty(obj, :__error__)(err)
+        hook = getproperty(obj, :__error__)
+        return _error_hook_takes_id(obj, hook, err, uid) ? hook(err, uid) : hook(err)
     end
+    texts = _error_texts(obj)
     inner = unwrap_error(err)
-    title = _caller_fault_title(inner)
+    title = _caller_fault_title(inner, texts)
     # An unrecorded caller fault has no error id to point at: one whose type
     # names no title reads under a plain one.
-    title === nothing && uid === nothing && (title = "Request refused")
+    title === nothing && uid === nothing && (title = texts.refused)
     if title !== nothing
         return h.article(
             h.header(title),
-            h.p(sprint(showerror, inner));
+            h.p(_caller_fault_message(inner, texts));
             aria_invalid="true",
         )
     end
-    _default_error_render(uid, path)
+    _default_error_render(uid, path, texts)
+end
+
+# Whether `obj`'s `__error__` hook takes the recorded error id as a second
+# argument. A method property (`__error__(err, uid) = …`) declares its
+# arguments in its DynamicObjects signature; its value forwards any arguments,
+# so asking that value would always answer yes. A value property
+# (`__error__ = f`) declares none, and the callable answers for itself.
+function _error_hook_takes_id(obj, hook, err, uid)
+    T = typeof(obj)
+    sig = hasmethod(DynamicObjects.meta, Tuple{Type{T}}) ?
+        Base.invokelatest(DynamicObjects.property_signature, T, :__error__) : nothing
+    positional = sig === nothing ? () : sig.positional
+    isempty(positional) && return applicable(hook, err, uid)
+    length(positional) >= 2 || any(arg -> arg.vararg, positional)
 end
 
 # Faults whose message is written for the reader — caller faults, and a
 # stalled operation — render it under a plain title instead of the
 # server-fault error page.
-_caller_fault_title(::Union{MissingRequiredParam,InvalidDomainValue}) =
-    "Bad Request"
-_caller_fault_title(e::CallerFault) = get(_REASON_PHRASES, e.status, "Request refused")
-_caller_fault_title(::OperationResultUnavailable) = "Result unavailable"
-_caller_fault_title(::OperationStalled) = "Operation stalled"
-_caller_fault_title(_err) = nothing
+_caller_fault_title(::Union{MissingRequiredParam,InvalidDomainValue}, texts::ErrorTexts) =
+    something(_reason_phrase(texts, 400), texts.refused)
+_caller_fault_title(e::CallerFault, texts::ErrorTexts) =
+    something(_reason_phrase(texts, e.status), texts.refused)
+_caller_fault_title(::OperationResultUnavailable, texts::ErrorTexts) = texts.result_unavailable
+_caller_fault_title(::OperationStalled, texts::ErrorTexts) = texts.stalled
+_caller_fault_title(_err, ::ErrorTexts) = nothing
 
 """
     _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[])
@@ -12629,6 +12954,19 @@ Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` route decla
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) on
 [`ROUTER`](@ref). Returns `app`.
 
+Requests are served from `app`: every root HTMXObjects builds for a request —
+a fresh one per request by default, or a new entry of a managed
+[`RootRetention`](@ref) store, `semantic_app`'s automatic one included —
+receives `app`'s fixed fields and the keyword overrides it was constructed
+with, alongside the request. So `route!(App(; dir=root))` serves `dir=root`,
+and a type with a required fixed field routes as `route!(App(dir))`.
+Properties `app` did not override are still computed per root, and nothing
+`app` itself computed is shared with requests — unless `semantic_app(app)`
+rendered before `route!(app)`: its automatic store then retains `app` itself,
+remounted per request. A custom `root_provider` factory builds its own roots. Calling `route!` again with another instance
+serves later requests from that one; a managed store drops the roots it built
+from the earlier instance.
+
 Mutation routes (`@post`, `@put`, `@patch`, `@delete`) execute their route body
 fresh for every request, even when a managed `root_provider` retains the root
 and the submitted arguments are identical. GET/WS/SSE routes and any child
@@ -12643,7 +12981,7 @@ properties a mutation reads keep their own DynamicObjects cache semantics.
 - `root_provider` — a [`RootProvider`](@ref), including its managed
   [`RootRetention`](@ref) form, or a callable `factory(RootT, context)`, used by
   HTTP, WebSocket, and SSE operations. `nothing` preserves the historic
-  fresh-root-per-request behavior.
+  fresh-root-per-request behavior, each root built from `app` as above.
 - `operation_policy` — an [`OperationPolicy`](@ref) selecting blocking,
   polling, or HTMX-aware automatic execution. **Defaults to
   `OperationPolicy(:auto)`**, so an app that declares nothing already serves
@@ -12671,6 +13009,8 @@ function route!(obj; prefix="", record_dir=nothing, record_base="",
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
     _root_providers[T] = provider
+    get(_root_templates, T, nothing) === obj || _forget_managed_roots!(provider, T, obj)
+    _root_templates[T] = obj
     _operation_policies[T] = policy
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
     _register_routes(T; prefix, record_dir, record_base, root_provider=provider,
@@ -13453,28 +13793,6 @@ struct CaptionSpec
 end
 CaptionSpec(; title, short="", long=nothing) = CaptionSpec(title, short, long)
 
-# A texts struct `T` for `locale` from `locales` (one NamedTuple of texts per
-# locale), with any texts replaced by keyword. `fname` names the public
-# constructor in errors; `placeholders` lists the `{names}` each text may hold.
-function _locale_texts(::Type{T}, fname, locales, placeholders, locale::Symbol; texts...) where {T}
-    haskey(locales, locale) || throw(ArgumentError(string(fname, ": unknown locale ",
-        repr(locale), "; available: ", join(repr.(keys(locales)), ", "))))
-    names = fieldnames(T)
-    for name in keys(texts)
-        name in names || throw(ArgumentError(string(fname, ": unknown text ", repr(name),
-            "; texts are ", join(names, ", "))))
-    end
-    merged = merge(getfield(locales, locale), (; (k => string(v) for (k, v) in pairs(texts))...))
-    for name in names
-        allowed = get(placeholders, name, ())
-        for m in eachmatch(r"\{([A-Za-z_]+)\}", merged[name])
-            Symbol(m[1]) in allowed || throw(ArgumentError(string(fname, ": ", name, " has no placeholder {",
-                m[1], "}", isempty(allowed) ? "" : string("; it takes ", join(("{$p}" for p in allowed), ", ")))))
-        end
-    end
-    T((merged[name] for name in names)...)
-end
-
 """
     CaptionTexts
 
@@ -13958,7 +14276,8 @@ function htmxoTableSearch(target, query) {
 }
 
 // The leaves of a group whose rows have not loaded yet, as `[key, search
-// text]` pairs (`data-htmxo-lazy-leaves`), parsed once per value.
+// text]` pairs (`data-htmxo-lazy-leaves`), parsed once per value. A linked
+// table's leaves whose `link_key` is not their key carry it third.
 function htmxoLazyLeaves(row) {
     const source = row.dataset.htmxoLazyLeaves;
     if (!source) return [];
@@ -15280,7 +15599,7 @@ function htmxoLinkApply(table, reveal) {
     rows.forEach(r => {
         if (r.id.startsWith('detail-') || 'htmxoFiltered' in r.dataset) return;
         if (htmxoLinkKey(r) === state.key) light(r, 0);
-        else if (htmxoLazyLeaves(r).some(([k]) => k === state.key)) light(r, htmxoLinkLazyDepth(r));
+        else if (htmxoLazyLeaves(r).some(([k, , link]) => (link ?? k) === state.key)) light(r, htmxoLinkLazyDepth(r));
     });
     depths.forEach((depth, row) => {
         row.dataset.htmxoLinked = depth ? 'inside' : '';
@@ -15622,8 +15941,7 @@ const _EN_TABLE_TEXTS = table_texts(:en)
 
 # A table text with its placeholders filled in. The browser runtime's
 # `htmxoText` fills the same templates from the same values.
-_table_text(texts::TableTexts, name::Symbol; values...) =
-    replace(getfield(texts, name), r"\{([A-Za-z_]+)\}" => m -> string(values[Symbol(m[2:end-1])]))
+_table_text(texts::TableTexts, name::Symbol; values...) = _fill_text(getfield(texts, name); values...)
 
 # The texts as the JSON object `htmxoText` reads.
 _table_texts_json(texts::TableTexts) =
@@ -15876,8 +16194,9 @@ selected row is tinted and the active row marked with `--htmxo-accent`
 Tables, plots and maps that show the same items name one link group with
 `link="probes"`, and hovering an item in one highlights it in the others, with
 no app script. Each body row is keyed by its `data-htmxo-link-key`, else its
-`data-htmxo-select-key`; [`master_detail_table`](@ref) keys its rows by `key`
-and [`render_table`](@ref) by `link_key(row)`. Hovering or keyboard-focusing
+`data-htmxo-select-key`; [`master_detail_table`](@ref) keys its rows by
+`link_key(item)` (default: its `key`) and [`render_table`](@ref) by
+`link_key(row)`. Hovering or keyboard-focusing
 a keyed row announces it to the page as an `htmxo:link` event on `document`
 with `detail` `{group, key, source}` (`key` is `null` when the hover ends), and
 every table of the group marks its rows with that key (`data-htmxo-linked`),
@@ -16741,10 +17060,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `link`: a link group name, e.g. `link="probes"`: hovering an item's row
   highlights the same item in every other table or plot of that group, and
   hovering it there highlights its rows here (every copy of a leaf listed
-  under several groups). Rows are keyed by `string(key(item))`. A hovered item
-  inside a collapsed group lights up that group's row, with a note on how many
-  levels down it is; nothing opens. See *Hover linking* in
+  under several groups). Rows are keyed by `string(link_key(item))`. A hovered
+  item inside a collapsed group lights up that group's row, with a note on how
+  many levels down it is; nothing opens. See *Hover linking* in
   [`sortable_table`](@ref).
+- `link_key(item)`: with `link`, the item's key in the link group (default:
+  its `key`). Give it when several tables on one page show the same items:
+  each table's `key` stays unique on the page (`key = p -> "trend-" * p.kenn`)
+  while every table names the item by the same `link_key = p -> p.kenn`.
 - `texts`: the words of every built-in control — search, selection bar,
   *Expand all* / *Collapse all*, *Group by* and its pills, the ▸/ⓘ controls'
   accessible names, lazy-detail status lines, the CSV button — as a
@@ -16890,7 +17213,7 @@ function master_detail_table(headers, items;
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
-                             _link_key=key,
+                             link_key=nothing,
                              _rows_only::Bool=false,
                              _toolbar=(),
                              _level_marks::Bool=false,
@@ -16898,12 +17221,15 @@ function master_detail_table(headers, items;
                              _update_scope=nothing,
                              texts::TableTexts=_EN_TABLE_TEXTS,
                              kwargs...)
+    # Refused: a link key with no link group would highlight nothing.
+    isnothing(link) && !isnothing(link_key) && throw(ArgumentError(
+        "master_detail_table: `link_key(item)` keys the rows of the link group `link`; give `link` too"))
     isnothing(groupings) || return _grouped_master_detail_table(headers, items;
         key, master, detail, detail_url, master_attrs, master_class, detail_class,
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, texts, kwargs...)
+        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, link_key, texts, kwargs...)
     all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, update_groups)) || throw(ArgumentError(
         "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
@@ -16951,12 +17277,13 @@ function master_detail_table(headers, items;
             return visit_children(descendants, safe, level, ancestors_open && branch_open)
         attrs = Dict{Symbol,Any}(Symbol(k) => v
                                  for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
-        # `link`: the row's item key for hover linking (a group row has none).
-        link_key = isnothing(link) ? nothing : _link_key(item)
-        if !isnothing(link_key)
+        # `link`: the row's item key for hover linking, `link_key(item)` else
+        # its `key` (a group row has none).
+        item_link = isnothing(link) ? nothing : something(link_key, key)(item)
+        if !isnothing(item_link)
             any(k -> _md_attr_name(k) === Symbol("data-htmxo-link-key"), keys(attrs)) && throw(ArgumentError(
-                "master_detail_table: with `link`, a row's `data-htmxo-link-key` is its `key`; `master_attrs` may not set it"))
-            attrs[Symbol("data-htmxo-link-key")] = string(link_key)
+                "master_detail_table: with `link`, a row's `data-htmxo-link-key` is its `link_key` (default: its `key`); `master_attrs` may not set it"))
+            attrs[Symbol("data-htmxo-link-key")] = string(item_link)
         end
         if !isnothing(children)
             attrs[:data_htmxo_parent] = parent
@@ -17424,7 +17751,7 @@ end
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
         group_by_url, group_rows_url, group_rows, group_summary, update_rows, update_groups, selectable,
-        select_form, select_value, select_submit, search_text, link, texts, kwargs...)
+        select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
     names = String[string(first(g)) for g in groupings]
@@ -17603,9 +17930,11 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         update && (attrs[:data_htmxo_lazy_rows] = url)
         # Leaves not loaded yet still count: the search reaches their text
         # (with their keys at the levels below), the count counts each once,
-        # and a selection keeps their keys (and submits their values).
+        # a selection keeps their keys (and submits their values), and a
+        # hover lights the group by their `link_key`, a third entry when given.
         attrs[:data_htmxo_lazy_leaves] = "[" * join(("[" * _md_json_string(string(key(m))) * "," *
-            _md_json_string(join([[k for d in length(g.path)+1:nlevels for k in _md_group_keys(fns[d](m))]; leaf_text(m)], " ")) * "]"
+            _md_json_string(join([[k for d in length(g.path)+1:nlevels for k in _md_group_keys(fns[d](m))]; leaf_text(m)], " ")) *
+            (isnothing(link) || isnothing(link_key) ? "" : "," * _md_json_string(string(link_key(m)))) * "]"
             for m in g.members), ",") * "]"
         if !isnothing(selectable)
             attrs[:data_htmxo_select_members] = "{" * join((string(_md_json_string(string(key(m))), ":",
@@ -17650,8 +17979,10 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
         update_rows = update ? rendered : nothing,
-        # A leaf is linked by its own key, under whichever group it is listed.
-        link, _link_key = x -> x isa _MDGroup ? nothing : key(x.item),
+        # A leaf is linked by its `link_key` (default: its own key), under
+        # whichever group it is listed; a group row has none.
+        link, link_key = isnothing(link) ? nothing :
+            (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
@@ -22477,7 +22808,9 @@ The page shell's notification runtime, which [`htmx`](@ref) includes:
   HTML title/heading that says more: "Request failed (HTTP 413 Request Entity
   Too Large)", "Request failed (HTTP 409 Conflict): already stopped",
   "Request failed: no response (network error or server unreachable)",
-  "Request timed out". HTMXObjects' own error articles are 2xx answers that
+  "Request timed out" — in the page's `htmx(...; error_texts)`, so
+  `error_texts(:de)` writes "Anfrage fehlgeschlagen (HTTP 502 Fehlerhaftes
+  Gateway)". HTMXObjects' own error articles are 2xx answers that
   land in the target, so they raise none. A request the page aborted, an
   answer that navigates (`HX-Redirect`, `HX-Refresh`, `HX-Location`), an error
   answer an app's `htmx.config.responseHandling` swaps in, and pollers
@@ -22498,6 +22831,15 @@ toast_script() = h.script(Raw(raw"""
     if (window.__htmxoToastBound) return;
     window.__htmxoToastBound = true;
     var DURATION = { success: 4000, info: 4000, error: 8000 };
+    // The page's error texts (`htmx(...; error_texts)` puts them on <html>),
+    // or English.
+    var ENGLISH = """ * _toast_texts_json(_EN_ERROR_TEXTS) * raw""";
+    var textsRaw = null, textsRead = ENGLISH;
+    function texts() {
+        var raw = document.documentElement.getAttribute('data-htmxo-error-texts');
+        if (raw !== textsRaw) { textsRaw = raw; textsRead = raw ? JSON.parse(raw) : ENGLISH; }
+        return textsRead;
+    }
     // The live region exists before the first message, so screen readers
     // announce it; a swap that replaced the body gets a fresh one.
     function region() {
@@ -22527,7 +22869,7 @@ toast_script() = h.script(Raw(raw"""
         var close = document.createElement('button');
         close.type = 'button';
         close.className = 'htmxo-toast-close';
-        close.setAttribute('aria-label', 'Dismiss');
+        close.setAttribute('aria-label', texts().dismiss);
         close.textContent = '×';
         t.appendChild(msg);
         t.appendChild(close);
@@ -22575,8 +22917,9 @@ toast_script() = h.script(Raw(raw"""
     }
     function squash(text) { return (text || '').replace(/\s+/g, ' ').trim(); }
     // Over HTTP/2 `statusText` is empty, so the reason comes from the answer's
-    // own `<title>` (a gateway's "413 Request Entity Too Large") or this table.
-    var REASONS = """ * _REASON_PHRASES_JS * raw""";
+    // own `<title>` (a gateway's "413 Request Entity Too Large") or the texts'
+    // table; a page in another language names the status from its table first,
+    // since `statusText` and gateway titles are English.
     function failureText(xhr) {
         var type = header(xhr, 'Content-Type') || '', body = xhr.responseText || '';
         var plain = '', title = '', heading = '';
@@ -22587,10 +22930,11 @@ toast_script() = h.script(Raw(raw"""
             title = squash(doc.title);
             heading = h ? squash(h.textContent) : '';
         }
-        var reason = squash(xhr.statusText);
+        var t = texts();
+        var reason = (t !== ENGLISH && t.reasons[xhr.status]) || squash(xhr.statusText);
         var named = title.match(/^(\d{3})\s+(.+)$/);
         if (!reason && named && +named[1] === xhr.status) reason = named[2];
-        if (!reason) reason = REASONS[xhr.status] || '';
+        if (!reason) reason = t.reasons[xhr.status] || '';
         var line = 'HTTP ' + xhr.status + (reason ? ' ' + reason : '');
         // A title or heading that names this status code, in any wording, is
         // the status line again, not a detail.
@@ -22600,7 +22944,7 @@ toast_script() = h.script(Raw(raw"""
         }
         var detail = plain && plain.length <= 300 ? plain :
             [title, heading].filter(function(text) { return text && text.length <= 200 && !restates(text); })[0];
-        return 'Request failed (' + line + ')' + (detail ? ': ' + detail : '');
+        return t.request_failed + ' (' + line + ')' + (detail ? ': ' + detail : '');
     }
     // How a finished htmx request ended: `success`; `failure`, with the text
     // that says why; `neutral`, for a request the page aborted or an answer
@@ -22611,8 +22955,8 @@ toast_script() = h.script(Raw(raw"""
     // `responseHandling`): it is on screen already.
     function outcome(evt) {
         var d = evt.detail || {}, xhr = d.xhr;
-        if (evt.type === 'htmx:sendError') return { state: 'failure', text: 'Request failed: no response (network error or server unreachable)' };
-        if (evt.type === 'htmx:timeout') return { state: 'failure', text: 'Request timed out' };
+        if (evt.type === 'htmx:sendError') return { state: 'failure', text: texts().no_response };
+        if (evt.type === 'htmx:timeout') return { state: 'failure', text: texts().timed_out };
         if (evt.type === 'htmx:sendAbort') return { state: 'neutral' };
         if (!xhr || !xhr.status) return { state: 'pending' };
         if (d.successful === true) return { state: 'success' };
