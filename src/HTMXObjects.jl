@@ -2317,7 +2317,7 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
         segment_expr = :($(_percent_decode_lenient)(__parts__[__base_segments__ + $i]))
         convert_call = ptype === nothing ?
             :($(_convert_param)($segment_expr, nothing)) :
-            :($(_convert_param)($segment_expr, $ptype))
+            :($(_convert_submitted)($segment_expr, $ptype, $(QuoteNode(pname))))
         push!(pos_stmts, :($i <= __n_params__ && push!(__idx__, $convert_call)))
     end
 
@@ -5209,6 +5209,12 @@ updates the struct.
   (`GET` / `DELETE` → `queryparams`, `POST` / `PUT` / `PATCH` → `formparams`).
   Both parsers preserve multi-value keys, so a `Vector`-typed kwarg receives
   every repeated value (`?tag=a&tag=b` or repeated `image=a&image=b` body fields).
+- A submitted value its declared type rejects — `?page=abc` for `page::Int`, a
+  path segment, `@param`, `@header` or indexed-mount key that does not parse, a
+  repeated value for a scalar — is the caller's fault: a `400` (`200` under
+  HTMX) naming the parameter, the value and the expected type (for `Bool` or an
+  `Enum`, the allowed values), not recorded as an error. A declared type with no
+  `parse` method is the declaration's fault and stays a recorded `500`.
 - `@post` / `@put` / `@patch` / `@delete` execute fresh on every request,
   including identical submissions on a retained root. `@get`, `@ws`, `@sse`,
   and properties read inside a mutation retain their own declared cache policy.
@@ -5794,8 +5800,14 @@ _convert_param(val::AbstractString, ::Type{AbstractFloat}) = parse(Float64, val)
 _convert_param(val::AbstractString, ::Type{Real}) = parse(Float64, val)
 _convert_param(val::AbstractString, T::Type) = parse(T, val)
 _convert_param(val::AbstractVector, ::Nothing) = val  # multi-value, no type annotation → keep as vector
+# A repeated value for a scalar parameter is something the request sent, so it
+# is an `ArgumentError` like any other value the type rejects (a 400 through
+# `_convert_submitted`), not a server fault.
+_single_value_error(val) = ArgumentError(string(
+    "expected one value, got ", length(val),
+    "; a parameter that accepts repeated values declares a Vector type"))
 _convert_param(val::AbstractVector, T::Type{<:AbstractString}) =
-    error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
+    throw(_single_value_error(val))
 # Multi-value + an element-typed Vector annotation (`::Vector{Int}`): honour the
 # element type by running every entry through the SAME scalar conversion the
 # `::Int` path uses (`_convert_param` dispatches on the element type `T`, so
@@ -5808,8 +5820,7 @@ function _convert_param(val::AbstractVector, ::Type{V}) where {T, V<:AbstractVec
     convert(V, _convert_param.(val, T))
 end
 _convert_param(val::AbstractVector, T::Type{<:AbstractVector}) = val  # bare ::Vector / ::AbstractVector (no element type) → keep as-is
-_convert_param(val::AbstractVector, T::Type) =
-    error("expected single value for parameter (got $(length(val)) values: $(val)); use Vector type annotation if repeated values are intended")
+_convert_param(val::AbstractVector, T::Type) = throw(_single_value_error(val))
 # Single (or empty) value declared as an element-typed Vector: wrap the one
 # converted element (empty → an empty `V`).
 _convert_param(val::AbstractString, ::Type{V}) where {T, V<:AbstractVector{T}} =
@@ -5819,6 +5830,38 @@ _convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? 
 # is already covered by the `_convert_param(val, ::Nothing) = val` catch-all above.
 _convert_param(val::Upload, ::Type{Upload}) = val
 _convert_param(val::Upload, T::Type{<:AbstractVector}) = [val]  # single file declared as a Vector
+# A text field where a file was declared (a urlencoded form, a hand-built
+# request): the request sent the wrong kind of value.
+_convert_param(val::AbstractString, ::Type{Upload}) =
+    throw(ArgumentError("expected an uploaded file, got a text value"))
+
+# The declared type rejected the submitted value: its `parse`, or one of the
+# decoders above, threw. A type with no `parse` method at all (`MethodError`)
+# is the declaration's fault, not the caller's, and stays a server fault.
+_rejects_value(::Union{ArgumentError,OverflowError}) = true
+_rejects_value(_err) = false
+_rejection_reason(err::Union{ArgumentError,OverflowError}) = err.msg
+
+"""
+    _convert_submitted(val, T, name) -> value
+
+`_convert_param` for a value the request submitted under `name` (a keyword,
+path segment, `@param`, `@header` or indexed-mount segment). A value the
+declared type rejects is the caller's fault, answered 400 and not recorded:
+`InvalidDomainValue` when the type implies a closed domain (`Bool`, an `Enum`)
+so the answer lists the allowed values, otherwise `InvalidParamValue` naming
+the expected type.
+"""
+function _convert_submitted(val, T, name)
+    try
+        _convert_param(val, T)
+    catch err
+        _rejects_value(err) || rethrow()
+        allowed = _inferred_param_domain(T)
+        allowed === nothing || throw(InvalidDomainValue(Symbol(name), val, allowed))
+        throw(InvalidParamValue(Symbol(name), val, T, _rejection_reason(err)))
+    end
+end
 
 # Determine whether kwargs come from queryparams (GET/DELETE) or formparams (POST/PUT/PATCH).
 const _queryparams_verbs = Set(["GET", "DELETE"])
@@ -5843,25 +5886,24 @@ _inferred_param_domain(::Type{T}) where {T<:Base.Enum} = instances(T)
 Low-level parameter lookup shared by `_extract_param` and the route-macro's
 generated `_extract_args` methods. Given a precomputed primary source dict and
 optional fallback dict (e.g. queryparams for POST), look up `name`, apply
-`_convert_param(value, T)` when present, or return the `_NO_DEFAULT` sentinel
-when the key is absent/empty so callers can decide between default or error.
+`_convert_submitted(value, T, name)` when present, or return the `_NO_DEFAULT`
+sentinel when the key is absent/empty so callers can decide between default or
+error.
 """
 function _lookup_param(src, fallback, name, T)
+    v = _submitted_raw(src, fallback, name)
+    v === _NO_DEFAULT ? v : _convert_submitted(v, T, name)
+end
+
+# The raw submitted value for `name`, or `_NO_DEFAULT` when it is absent or empty
+# in both the primary source and the fallback.
+function _submitted_raw(src, fallback, name)
     key = String(name)
     v = get(src, key, nothing)
     if (v === nothing || v == "") && fallback !== nothing
         v = get(fallback, key, nothing)
     end
-    (v === nothing || v == "") && return _NO_DEFAULT
-    try
-        _convert_param(v, T)
-    catch err
-        # A value outside a type-inferred closed domain is a caller fault.
-        allowed = _inferred_param_domain(T)
-        allowed !== nothing && err isa ArgumentError &&
-            throw(InvalidDomainValue(Symbol(name), v, allowed))
-        rethrow()
-    end
+    (v === nothing || v == "") ? _NO_DEFAULT : v
 end
 
 # A submitted option carries only its stable wire value. Recover the
@@ -5876,7 +5918,7 @@ end
 
 function _convert_option_param(options, val::AbstractString, name, T)
     records = _declared_param_options(options, name)
-    records === nothing && return _convert_param(val, T)
+    records === nothing && return _convert_submitted(val, T, name)
     allowed = Any[option.value for option in records
                   if !get(option, :disabled, false)]
     for candidate in allowed
@@ -5896,23 +5938,11 @@ function _convert_option_param(options, val::AbstractString, name, T)
         throw(InvalidDomainValue(Symbol(name), converted, allowed))
     converted
 end
-_convert_option_param(options, val, name, T) = _convert_param(val, T)
+_convert_option_param(options, val, name, T) = _convert_submitted(val, T, name)
 
 function _lookup_option_param(options, src, fallback, name, T)
-    key = String(name)
-    v = get(src, key, nothing)
-    if (v === nothing || v == "") && fallback !== nothing
-        v = get(fallback, key, nothing)
-    end
-    (v === nothing || v == "") && return _NO_DEFAULT
-    try
-        _convert_option_param(options, v, name, T)
-    catch err
-        allowed = _inferred_param_domain(T)
-        allowed !== nothing && err isa ArgumentError &&
-            throw(InvalidDomainValue(Symbol(name), v, allowed))
-        rethrow()
-    end
+    v = _submitted_raw(src, fallback, name)
+    v === _NO_DEFAULT ? v : _convert_option_param(options, v, name, T)
 end
 
 """
@@ -5965,7 +5995,7 @@ empty. Throws `MissingRequiredParam(name)` if no default was supplied and the he
 """
 function _extract_header(req, name, T, default=_NO_DEFAULT)
     v = HTTP.header(req, _kwarg_to_header_name(name), "")
-    v_or_sentinel = isempty(v) ? _NO_DEFAULT : _convert_param(v, T)
+    v_or_sentinel = isempty(v) ? _NO_DEFAULT : _convert_submitted(v, T, name)
     _resolve_extracted(v_or_sentinel, default, name)
 end
 
@@ -7318,6 +7348,21 @@ struct InvalidDomainValue <: Exception
 end
 Base.showerror(io::IO, e::InvalidDomainValue) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
 
+# A submitted value its declared open-domain type rejects (`?n=abc` for
+# `n::Int`, `?b=300` for `b::UInt8`, a repeated value for a scalar). The
+# closed-domain counterpart (`Bool`, an `Enum`) is `InvalidDomainValue`, which
+# can list what is allowed instead of naming a type.
+struct InvalidParamValue <: Exception
+    name::Symbol
+    value
+    type
+    reason::String
+end
+Base.showerror(io::IO, e::InvalidParamValue) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
+# Every submitted-value fault: answered 400, titled with the app's 400 reason
+# phrase (`Bad Request` in English).
+const _SubmittedValueFault = Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue}
+
 """
     CallerFault(status, message)
 
@@ -7478,7 +7523,9 @@ operation of the app answers in it. Pass the same value to the page shell,
 A text in braces is a placeholder the framework fills in: `server_fault` takes
 `{id}`, the recorded error id, and must keep it; `missing_param` takes
 `{name}`; `invalid_value` takes `{name}` and `{value}`, followed when the
-parameter has a closed domain by `"; "` and `allowed_values` with `{allowed}`;
+parameter has a closed domain by `"; "` and `allowed_values` with `{allowed}`,
+or when its declared type rejected the value by `"; "` and `expected_type` with
+`{type}` (then the parser's own reason, as Julia writes it, in parentheses);
 `result_unavailable_detail` takes `{verb}` and `{route}`; `stalled_detail` takes
 `{label}`, `{elapsed}` and `{bound}`, followed by `stalled_rerun` for a read or
 `stalled_not_repeated` (`{verb}`) for a mutation. An app's own
@@ -7492,6 +7539,7 @@ struct ErrorTexts
     missing_param::String              # a required parameter is missing
     invalid_value::String              # a submitted value is outside its domain
     allowed_values::String             # ... and the values it takes
+    expected_type::String              # ... or the type it must parse as
     result_unavailable::String         # heading: a mutation's result is gone
     result_unavailable_detail::String
     stalled::String                    # heading: an operation passed its stall bound
@@ -7509,7 +7557,8 @@ end
 
 const _ERROR_TEXT_PLACEHOLDERS = (
     server_fault = (:id,), missing_param = (:name,), invalid_value = (:name, :value),
-    allowed_values = (:allowed,), result_unavailable_detail = (:verb, :route),
+    allowed_values = (:allowed,), expected_type = (:type,),
+    result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
 )
 
@@ -7521,6 +7570,7 @@ const _ERROR_TEXT_LOCALES = (
         missing_param = "Missing required parameter: {name}",
         invalid_value = "Invalid value for parameter {name}: {value}",
         allowed_values = "allowed values: {allowed}",
+        expected_type = "expected {type}",
         result_unavailable = "Result unavailable",
         result_unavailable_detail = "The result of this {verb} {route} submission is no longer available. It ran at most once and was not repeated; reload to see the current state.",
         stalled = "Operation stalled",
@@ -7542,6 +7592,7 @@ const _ERROR_TEXT_LOCALES = (
         missing_param = "Pflichtangabe fehlt: {name}",
         invalid_value = "Ungültiger Wert für {name}: {value}",
         allowed_values = "zulässige Werte: {allowed}",
+        expected_type = "erwartet {type}",
         result_unavailable = "Ergebnis nicht mehr verfügbar",
         result_unavailable_detail = "Das Ergebnis dieser Übermittlung ({verb} {route}) ist nicht mehr verfügbar. Sie wurde höchstens einmal ausgeführt und nicht wiederholt; laden Sie die Seite neu, um den aktuellen Stand zu sehen.",
         stalled = "Vorgang hängt",
@@ -7645,6 +7696,11 @@ function _caller_fault_message(e::InvalidDomainValue, texts::ErrorTexts)
     message = _fill_text(texts.invalid_value; name=e.name, value=repr(e.value))
     isempty(e.allowed) ? message :
         string(message, "; ", _fill_text(texts.allowed_values; allowed=join(repr.(e.allowed), ", ")))
+end
+function _caller_fault_message(e::InvalidParamValue, texts::ErrorTexts)
+    message = string(_fill_text(texts.invalid_value; name=e.name, value=repr(e.value)),
+        "; ", _fill_text(texts.expected_type; type=e.type))
+    isempty(e.reason) ? message : string(message, " (", e.reason, ")")
 end
 _caller_fault_message(e::CallerFault, ::ErrorTexts) = e.message
 _caller_fault_message(e::OperationResultUnavailable, texts::ErrorTexts) =
@@ -7878,7 +7934,7 @@ end
 # Faults whose message is written for the reader — caller faults, and a
 # stalled operation — render it under a plain title instead of the
 # server-fault error page.
-_caller_fault_title(::Union{MissingRequiredParam,InvalidDomainValue}, texts::ErrorTexts) =
+_caller_fault_title(::_SubmittedValueFault, texts::ErrorTexts) =
     something(_reason_phrase(texts, 400), texts.refused)
 _caller_fault_title(e::CallerFault, texts::ErrorTexts) =
     something(_reason_phrase(texts, e.status), texts.refused)
@@ -7908,7 +7964,7 @@ return an `HTTP.Response` — honoring markdown mode, HTMX fragment mode, and
 # from wherever it is defined — including a `routes/*.jl` bundle included after
 # this file — and stays hot-reloadable, exactly like `_finalized_response`.
 _error_status_code(err) = _unwrapped_status_code(unwrap_error(err))
-_unwrapped_status_code(::Union{MissingRequiredParam,InvalidDomainValue}) = 400
+_unwrapped_status_code(::_SubmittedValueFault) = 400
 _unwrapped_status_code(e::CallerFault) = e.status
 _unwrapped_status_code(::OperationResultUnavailable) = 410
 _unwrapped_status_code(::OperationStalled) = 504
@@ -11324,16 +11380,19 @@ not the string `"synthetic_depot"`. An option is a node, not its label, and the
 application should not have to flatten one to select the other.
 
 A segment outside the domain is rejected rather than parsed: a closed domain
-that silently admits an unlisted value is not a domain. The rejection carries
-the admissible values, since for a closed set that is the useful error.
+that silently admits an unlisted value is not a domain. The rejection is an
+`InvalidDomainValue` carrying the admissible wire values, since for a closed set
+that is the useful error; like any invalid submitted value it answers 400.
 
-With no domain, the ordinary `_convert_param` parse applies unchanged, which is
-what every scalar mount keeps doing.
+With no domain, the ordinary scalar parse applies (`_convert_submitted`, so a
+segment the type rejects is a 400 too), which is what every scalar mount keeps
+doing.
 """
 function _resolve_index_arg(parent, param, raw, T)
     raw = _percent_decode_lenient(raw)
+    name = something(param, Symbol("path segment"))
     candidates = _index_candidates(parent, param, T)
-    isnothing(candidates) && return _convert_param(raw, T)
+    isnothing(candidates) && return _convert_submitted(raw, T, name)
     target = String(raw)
     for candidate in candidates
         _option_wire_string(candidate) == target && return candidate
@@ -11349,11 +11408,7 @@ function _resolve_index_arg(parent, param, raw, T)
     isnothing(converted) || for candidate in candidates
         candidate == converted && return candidate
     end
-    throw(ArgumentError(string(
-        "no ", param === nothing ? "option" : param, " matching ", repr(target),
-        "; admissible values are ",
-        isempty(candidates) ? "none" :
-        join((repr(_option_wire_string(c)) for c in candidates), ", "))))
+    throw(InvalidDomainValue(name, target, map(_option_wire_string, collect(candidates))))
 end
 
 function _chain_steps(root, chain::AbstractVector, req::HTTP.Request, root_segs::Int)
@@ -19238,7 +19293,8 @@ function _operation_refresh_values(req, route, base::Int, n_params::Int)
         if param.source === :path
             path_index += 1
             path_index <= n_params || continue
-            value = _convert_param(_percent_decode_lenient(parts[base + path_index]), param.type)
+            value = _convert_submitted(_percent_decode_lenient(parts[base + path_index]),
+                                       param.type, param.name)
             values[param.name] = value
             push!(idx_vals, value)
         else
