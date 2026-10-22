@@ -8416,8 +8416,9 @@ end
 end
 
 @testitem "a block semantic element is its own paragraph among siblings in markdown" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
-    # HTMX.jl splices a non-Node child into the running line, so semantic
-    # elements in a layout `div` ran together in every Markdown read.
+    # HTMX.jl splices a non-Node child into the running line unless it
+    # declares `HTMX.markdown_block`, so semantic elements in a layout `div`
+    # ran together in every Markdown read.
     import CommonMark
     md = HTMXObjects.to_markdown_string
     metric(label, value) = SemanticMetric(label, value)
@@ -8425,12 +8426,24 @@ end
     # The reported facts bar, text on either side, a returned vector, and a
     # group, whose last member text after it used to join.
     @test md(h.div(; class="facts")(metric("A", "1"), metric("B", "2"))) ==
-        "**A:** 1\n\n**B:** 2\n\n"
-    @test md(h.div("lead text", metric("A", "1"))) == "lead text\n\n**A:** 1\n\n"
+        "**A:** 1\n\n**B:** 2"
+    @test md(h.div("lead text", metric("A", "1"))) == "lead text\n\n**A:** 1"
     @test md(h.div(metric("A", "1"), "after")) == "**A:** 1\n\nafter"
-    @test md([metric("A", "1"), metric("B", "2")]) == "**A:** 1\n\n**B:** 2\n\n"
+    @test md([metric("A", "1"), metric("B", "2")]) == "**A:** 1\n\n**B:** 2"
     @test md(h.div(SemanticGroup(metric("A", "1"), metric("B", "2")), "after")) ==
         "**A:** 1\n\n**B:** 2\n\nafter"
+    # The element itself is the block, so HTMX.jl's own serializer delimits
+    # it too: a direct `repr`, which skips `to_markdown_string`, reads the same.
+    @test repr("text/markdown", h.div(metric("A", "1"), metric("B", "2"))) ==
+        "**A:** 1\n\n**B:** 2"
+    @test repr("text/markdown", [metric("A", "1"), metric("B", "2")]) ==
+        "**A:** 1\n\n**B:** 2"
+    @test HTMXObjects.HTMX.markdown_block(metric("A", "1"))
+    @test !HTMXObjects.HTMX.markdown_block(SemanticStatus(:ok))
+    # Plain `div` siblings are paragraphs as well, and a list item holding a
+    # block stays a tight list.
+    @test md(h.div(h.div("one"), h.div("two"))) == "one\n\ntwo"
+    @test md(h.ul(h.li(metric("A", "1")), h.li(metric("B", "2")))) == "- **A:** 1\n- **B:** 2\n"
 
     # Not just spacing: run together, a closing fence followed by text on its
     # line leaves the fence open, a card's heading lands mid-line, and a table
@@ -8438,11 +8451,11 @@ end
     # is its own.
     html(text) = CommonMark.html(HTMXObjects.markdown_parser()(text))
     code = md(h.div(SemanticCode("julia", "x = 1"), metric("A", "1")))
-    @test code == "```julia\nx = 1\n```\n\n**A:** 1\n\n"
+    @test code == "```julia\nx = 1\n```\n\n**A:** 1"
     @test html(code) == "<pre><code class=\"language-julia\">x = 1\n</code></pre>\n" *
         "<p><strong>A:</strong> 1</p>\n"
     cards = md(h.div(SemanticCard("T1", metric("A", "1")), SemanticCard("T2", metric("B", "2"))))
-    @test cards == "### T1\n\n**A:** 1\n\n### T2\n\n**B:** 2\n\n"
+    @test cards == "### T1\n\n**A:** 1\n\n### T2\n\n**B:** 2"
     @test contains(html(cards), "<h3>T2</h3>")
     fields_table = html(md(h.div(SemanticFields(a=1), SemanticTable((x=[1, 2], y=[3, 4])))))
     @test contains(fields_table, "</ul>\n<table>")
@@ -8465,6 +8478,9 @@ end
     # Cards rescued out of a form are blocks between the text around the form.
     @test md(h.div("lead", h.form(h.input(), SemanticCard("T1", "d1"),
         SemanticCard("T2", "d2")), "tail")) == "lead\n\n### T1\n\nd1\n\n### T2\n\nd2\n\ntail"
+    # So are inline ones: out of the form, they no longer share its line.
+    @test md(h.div("lead", h.form(SemanticStatus(:ok), SemanticAction("Go", "/go")), "tail")) ==
+        "lead\n\n✓ **ok**\n\n[Go](/go)\n\ntail"
 end
 
 @testitem "render_markdown renders CommonMark and links bare URLs by default" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
