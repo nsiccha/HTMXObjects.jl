@@ -67,7 +67,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
-| `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, not recorded as an error |
+| `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, recorded like every error answer |
 | `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles and failure toasts (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
@@ -675,13 +675,13 @@ too. Passing the same value to the page shell translates the
 [failure toasts](#failure-toasts). Any text can be replaced by keyword, and
 `reasons` replaces the phrases of the statuses it names:
 `error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
-reasons=Dict(404 => "Unbekannt"))`. `server_fault` must keep `{id}`.
+reasons=Dict(404 => "Unbekannt"))`. `server_fault` and `error_id` (the
+error-id line that ends a caller fault's article) must keep `{id}`.
 
 An app's own `CallerFault` message is shown as written. Error logs, `@error`
 lines and `showerror` stay English. A custom `__error__`
 hook that takes two arguments, `__error__(err, uid)`, receives the recorded
-error id as well (`nothing` for an unrecorded caller fault), so its own
-article or JSON body can carry it.
+error id as well, so its own article or JSON body can carry it.
 
 ```@docs
 ErrorTexts
@@ -1777,11 +1777,12 @@ declared type rejects the value: `?n=abc` for `n::Int`, `?b=300` for
 the value and the expected type) map to **400** on a non-HTMX request and
 render a `Bad Request` article; under HTMX they too stay 200. This holds
 wherever the value is converted: a route keyword or path parameter, `@param`,
-`@header`, or an indexed `@include` segment. As caller faults they are not
-recorded: no error log, no `X-HTMXO-Error-Id`, no `__on_error__`. None of the
-three is exported, so catching one needs the qualified name. A declared type
-with no `parse` method at all is not a caller fault but a declaration bug, and
-stays a recorded 500. A route body raises its own
+`@header`, or an indexed `@include` segment. Like every error answer they are
+recorded: an error log whose header says `status:    400`, the error id in the
+article and in `X-HTMXO-Error-Id`, and `__on_error__`. None of the three is
+exported, so catching one needs the qualified name. A declared type with no
+`parse` method at all is not a caller fault but a declaration bug, and stays a
+500. A route body raises its own
 caller fault — an unknown id (`404`), an argument out of range (`400`) — with
 the exported `CallerFault(status, message)`, which is answered the same way with
 its own status.
@@ -2722,8 +2723,9 @@ as later requests; a different key selects a different retained graph. Explicit
 POST body parameters must be passed as `query_url` overrides (§URL helpers).
 
 Check both the response status and `X-HTMXO-Error-Id`: an HTMX error fragment can
-have status 200. A caller fault (`4xx`, a missing parameter say) is not recorded
-and carries no error id; its HTMX fragment is the `aria-invalid="true"` article.
+have status 200. A caller fault (`4xx`, a missing parameter say) carries an error
+id like a server fault; its error log's `status:` line tells the two apart, and
+its HTMX fragment is the `aria-invalid="true"` article.
 A successful progress response means submission, not batch
 completion. Omitting the HX header under `:auto`, requesting static export, or
 calling an unmarked heavy property directly does not select this queued transport.

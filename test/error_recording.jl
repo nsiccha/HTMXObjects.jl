@@ -1,12 +1,13 @@
 using TestItemRunner
 
-# Caller faults (4xx) are answered, not recorded: no error log or `@error`
-# line, no `X-HTMXO-Error-Id`, no `__on_error__` (user decision `1danmww`). A
-# late poll of a mutation whose result the server no longer holds is one: a KB
-# tab's restored poller polled a spent token after a deploy and its 410 woke
-# the error triage (snag spent-mutation-p-80878aaf). A server fault in the same
-# app is the control: it is still recorded.
-@testitem "caller faults are answered, not recorded as errors" tags=[:unit, :server] begin
+# Every error answer is recorded, a caller fault (4xx) like a server fault: an
+# error log whose header names the status, the `@error` line, the error id in
+# the article and in `X-HTMXO-Error-Id`, and `__on_error__` (user decision
+# `06kz9d3`, replacing `1danmww`). Before, a 4xx left no trace, so Bruno's
+# "Missing required parameter" answers could not be forwarded with
+# `bruno-error` (snag bruno-s-mac-app-827adcee). The header also says where an
+# htmx request came from and which fields a form body submitted (names only).
+@testitem "caller faults are recorded like server faults, with their status" tags=[:unit, :server] begin
     using HTMXObjects, HTTP, Logging
     import HTMXObjects: h
 
@@ -16,51 +17,92 @@ using TestItemRunner
         @get fault_needs(; n::Int) = h.p("n=$n")
         @get fault_boom() = error("server fault")
         @post fault_save() = h.p("saved")
+        @post fault_pin(; pinniness::Int) = h.p("pinniness=$pinniness")
     end
     route!(CallerFaultApp())
     hx = ["HX-Request" => "true"]
+    form = ["Content-Type" => "application/x-www-form-urlencoded"]
     old_dir = HTMXObjects.ERROR_DIR[]
     mktempdir() do dir
         HTMXObjects.ERROR_DIR[] = dir
+        recorded(r) = HTTP.header(r, "X-HTMXO-Error-Id", "")
+        log_of(r) = read(joinpath(dir, recorded(r) * ".log"), String)
+        header_of(r) = first(split(log_of(r), "\n\n"))
         try
-            missing_n = @test_logs min_level=Logging.Error dispatch(:GET, "/fault_needs")
+            missing_n = @test_logs (:error, r"HTMXObjects caught an error") match_mode=:any dispatch(:GET, "/fault_needs")
             @test missing_n.status == 400
-            @test contains(String(missing_n.body), "Bad Request")
-            @test !HTTP.hasheader(missing_n, "X-HTMXO-Error-Id")
-            fragment = @test_logs min_level=Logging.Error dispatch(:GET, "/fault_needs"; headers=hx)
-            @test fragment.status == 200
-            @test contains(String(fragment.body), "aria-invalid=\"true\"")
-            @test !HTTP.hasheader(fragment, "X-HTMXO-Error-Id")
+            body = String(missing_n.body)
+            @test contains(body, "<header>Bad Request</header>")
+            @test contains(body, "Missing required parameter: n")
+            @test !isempty(recorded(missing_n))
+            @test contains(body, "Error ID: <code>$(recorded(missing_n))</code>")
+            head = header_of(missing_n)
+            @test contains(head, "\nstatus:    400\n")
+            @test contains(head, "\nmethod:    GET\ntarget:    /fault_needs")
+            @test !contains(head, "page:") && !contains(head, "body_params:")
+            @test contains(log_of(missing_n), "Missing required parameter: n")
+
+            # An htmx request names the page, the sending element and the
+            # swap target; a form post names the fields its body carried.
+            context = vcat(hx, form, ["HX-Current-URL" => "http://app.test/report?k=4",
+                "HX-Trigger" => "pin-form", "HX-Target" => "pin-panel"])
+            posted = dispatch(:POST, "/fault_pin"; body="pinness=3&dataset=a", headers=context)
+            @test posted.status == 200
+            @test contains(String(posted.body), "aria-invalid=\"true\"")
+            head = header_of(posted)
+            @test contains(head, "\nstatus:    400\nmethod:    POST\ntarget:    /fault_pin\n")
+            @test contains(head, "\npage:      http://app.test/report?k=4\n")
+            @test contains(head, "\ntrigger:   pin-form\n")
+            @test contains(head, "\nswap_target: pin-panel\n")
+            @test endswith(head, "\nbody_params: dataset, pinness")
+            @test !contains(head, "=3")
+            empty_post = dispatch(:POST, "/fault_pin"; headers=vcat(hx, form))
+            @test endswith(header_of(empty_post), "\nbody_params: (none)")
+
+            # A late poll of a mutation whose result the server no longer holds.
             spent = "/fault_save?__htmxo_poll=1&__htmxo_operation=$(repeat("0", 64))&__htmxo_verb=POST"
-            gone = @test_logs min_level=Logging.Error dispatch(:GET, spent; headers=hx)
+            gone = dispatch(:GET, spent; headers=hx)
             @test gone.status == 286
             @test contains(String(gone.body), "Result unavailable")
-            @test !HTTP.hasheader(gone, "X-HTMXO-Error-Id")
-            @test dispatch(:GET, spent).status == 410
-            @test isempty(readdir(dir))
-            @test isempty(hooked)
+            @test contains(header_of(gone), "\nstatus:    410\n")
+            gone_plain = dispatch(:GET, spent)
+            @test gone_plain.status == 410
+            @test !isempty(recorded(gone_plain))
 
             boom = dispatch(:GET, "/fault_boom")
             @test boom.status == 500
-            uid = HTTP.header(boom, "X-HTMXO-Error-Id", "")
-            @test !isempty(uid)
-            @test readdir(dir) == ["$uid.log"]
-            @test hooked == [uid]
+            @test contains(header_of(boom), "\nstatus:    500\n")
+            uids = recorded.([missing_n, posted, empty_post, gone, gone_plain, boom])
+            @test allunique(uids)
+            @test sort(readdir(dir)) == sort(uids .* ".log")
+            @test hooked == uids
         finally
             HTMXObjects.ERROR_DIR[] = old_dir
         end
     end
     # A refused resource operation is a caller fault titled with its reason
-    # phrase, not the server-fault page that points at an error id; a 4xx with
-    # no standard phrase reads under a plain title.
+    # phrase and ending in its error id; a 4xx with no standard phrase reads
+    # under a plain title.
     refused = repr("text/html", HTMXObjects._invoke_error_handler(
-        nothing, HTMXObjects._resource_refused(409, "Conflict"), nothing, nothing))
+        nothing, HTMXObjects._resource_refused(409, "Conflict"), "u409", nothing))
     @test contains(refused, "<header>Conflict</header>")
     @test contains(refused, "resource operation refused (409): Conflict")
-    @test !contains(refused, "Error ID")
+    @test contains(refused, "<p>Error ID: <code>u409</code></p>")
+    @test !contains(refused, "Something went wrong")
     unnamed = repr("text/html", HTMXObjects._invoke_error_handler(
-        nothing, CallerFault(499, "client closed"), nothing, nothing))
+        nothing, CallerFault(499, "client closed"), "u499", nothing))
     @test contains(unnamed, "<header>Request refused</header>")
+    # `record_error` (a caught, recovered-from error) names no status.
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            uid, path = @test_logs (:error, r"HTMXObjects caught an error") match_mode=:any record_error(
+                ErrorException("handled"), backtrace(), nothing)
+            @test !contains(read(path, String), "status:")
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
 end
 
 # A submitted value its declared type rejects is a caller fault wherever it is
@@ -70,7 +112,7 @@ end
 # (snag unparseable-type-9e5d9bc6: the KB's `version::Int` keyword woke its
 # error triage for a caller slip). A type with no `parse` method at all is the
 # declaration's fault, and is the server-fault control.
-@testitem "a submitted value its declared type rejects is a 400, not recorded" tags=[:unit, :server] begin
+@testitem "a submitted value its declared type rejects is a 400, recorded with its status" tags=[:unit, :server] begin
     using HTMXObjects, HTTP, Logging
     import HTMXObjects: h
 
@@ -127,18 +169,21 @@ end
                 (dispatch(:GET, "/bv_stages/nope"),
                  "parameter stage: &quot;nope&quot;; allowed values: &quot;draft&quot;, &quot;final&quot;"),
             ]
+            status_of(uid) = match(r"\nstatus: +(\d+)\n", read(joinpath(dir, uid * ".log"), String))[1]
             for (response, message) in rejected
                 @test response.status == 400
-                @test !HTTP.hasheader(response, "X-HTMXO-Error-Id")
+                uid = HTTP.header(response, "X-HTMXO-Error-Id", "")
+                @test status_of(uid) == "400"
                 @test contains(body_text(response), "<header>Bad Request</header>")
                 @test contains(body_text(response), message)
+                @test contains(body_text(response), "Error ID: <code>$uid</code>")
             end
             fragment = dispatch(:GET, "/bv_last?n=abc"; headers=["HX-Request" => "true"])
             @test fragment.status == 200
             @test contains(body_text(fragment), "aria-invalid=\"true\"")
-            @test !HTTP.hasheader(fragment, "X-HTMXO-Error-Id")
-            @test isempty(readdir(dir))
-            @test isempty(hooked)
+            @test status_of(HTTP.header(fragment, "X-HTMXO-Error-Id", "")) == "400"
+            @test length(readdir(dir)) == length(rejected) + 1
+            @test length(hooked) == length(rejected) + 1
 
             # Valid values still reach the bodies.
             @test contains(body_text(dispatch(:GET, "/bv_last?n=5")), "n=5")
@@ -148,13 +193,12 @@ end
             @test contains(body_text(dispatch(:GET, "/bv_header"; headers=["X-BV-Count" => "4"])), "count=4")
 
             # A declared type that cannot be parsed from text at all is the
-            # server's fault: still a recorded 500.
+            # server's fault: a 500.
             unparsed = dispatch(:GET, "/bv_unparsed?x=a")
             @test unparsed.status == 500
             uid = HTTP.header(unparsed, "X-HTMXO-Error-Id", "")
-            @test !isempty(uid)
-            @test readdir(dir) == ["$uid.log"]
-            @test hooked == [uid]
+            @test status_of(uid) == "500"
+            @test last(hooked) == uid
         finally
             HTMXObjects.ERROR_DIR[] = old_dir
         end
@@ -206,13 +250,13 @@ end
                 @test isfile(joinpath(dir, "$uid.log"))
             end
 
-            missing_n = @test_logs min_level=Logging.Error dispatch(:GET, "/json_needs")
+            missing_n = @test_logs (:error,) match_mode=:any dispatch(:GET, "/json_needs")
             @test missing_n.status == 400
             @test content_type(missing_n) == "application/json"
             @test String(missing_n.body) == "{\"error\":\"unknown item\"}"
-            @test !HTTP.hasheader(missing_n, "X-HTMXO-Error-Id")
+            @test isfile(joinpath(dir, HTTP.header(missing_n, "X-HTMXO-Error-Id", "") * ".log"))
 
-            swapped = @test_logs min_level=Logging.Error dispatch(:GET, "/json_needs"; headers=hx)
+            swapped = @test_logs (:error,) match_mode=:any dispatch(:GET, "/json_needs"; headers=hx)
             @test (swapped.status, content_type(swapped)) == (200, "application/json")
 
             own = @test_logs (:error,) match_mode=:any dispatch(:GET, "/own_status_item")
@@ -225,10 +269,11 @@ end
 
 # A route body throws `CallerFault(status, message)` when the request is at
 # fault: an unknown resource id, an argument out of range. It is answered like
-# a missing parameter, with its own status and message and no error record
-# (snag json-api-errors-056cb64e: ODLPlaus's unknown probe id and out-of-range
-# float were recorded 500s).
-@testitem "a route body's CallerFault is answered with its status, not recorded" tags=[:unit, :server] begin
+# a missing parameter, with its own status and message, and recorded with that
+# status (snag json-api-errors-056cb64e: ODLPlaus's unknown probe id and
+# out-of-range float were 500s; user decision `06kz9d3`: every error answer is
+# recorded).
+@testitem "a route body's CallerFault is answered and recorded with its status" tags=[:unit, :server] begin
     using HTMXObjects, HTTP, Logging
     import HTMXObjects: h
 
@@ -258,33 +303,40 @@ end
         try
             @test contains(String(dispatch(:GET, "/cf_probe/a1").body), "probe a1")
 
-            missing_probe = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_probe/zz")
+            status_of(r) = match(r"\nstatus: +(\d+)\n",
+                read(joinpath(dir, HTTP.header(r, "X-HTMXO-Error-Id", "") * ".log"), String))[1]
+            missing_probe = @test_logs (:error,) match_mode=:any dispatch(:GET, "/cf_probe/zz")
             @test missing_probe.status == 404
             body = String(missing_probe.body)
             @test contains(body, "<header>Not Found</header>")
             @test contains(body, "unknown probe zz")
-            @test !HTTP.hasheader(missing_probe, "X-HTMXO-Error-Id")
+            @test contains(body, "Error ID: <code>$(HTTP.header(missing_probe, "X-HTMXO-Error-Id", ""))</code>")
+            @test status_of(missing_probe) == "404"
 
-            plain = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_probe/zz?plain")
+            plain = @test_logs (:error,) match_mode=:any dispatch(:GET, "/cf_probe/zz?plain")
             @test plain.status == 404
             @test contains(String(plain.body), "unknown probe zz")
 
-            swapped = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_probe/zz"; headers=hx)
+            swapped = @test_logs (:error,) match_mode=:any dispatch(:GET, "/cf_probe/zz"; headers=hx)
             @test swapped.status == 200
+            @test status_of(swapped) == "404"
             @test contains(String(swapped.body), "aria-invalid=\"true\"")
             @test contains(String(swapped.body), "unknown probe zz")
 
-            out_of_range = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_window?p_min=2")
+            out_of_range = @test_logs (:error,) match_mode=:any dispatch(:GET, "/cf_window?p_min=2")
             @test out_of_range.status == 400
+            @test status_of(out_of_range) == "400"
             @test contains(String(out_of_range.body), "<header>Bad Request</header>")
             @test contains(String(out_of_range.body), "p_min must be in [0, 1], got 2.0")
 
-            json = @test_logs min_level=Logging.Error dispatch(:GET, "/cf_json/zz")
+            json = @test_logs (:error,) match_mode=:any dispatch(:GET, "/cf_json/zz")
             @test (json.status, HTTP.header(json, "Content-Type"), String(json.body)) ==
                 (404, "application/json", "{\"status\":404,\"error\":\"unknown probe zz\"}")
+            @test status_of(json) == "404"
 
-            @test isempty(readdir(dir))
-            @test isempty(hooked)
+            # Five recorded answers; the JSON app defines no `__on_error__`.
+            @test length(readdir(dir)) == 5
+            @test length(hooked) == 4
         finally
             HTMXObjects.ERROR_DIR[] = old_dir
         end
@@ -391,9 +443,9 @@ end
     end
 
     # The answer follows `_route_error_response`'s rule: htmx keeps the
-    # swapping status, any other request takes the error's own, and an
-    # unrecorded caller fault carries no id. Without a noted failure the
-    # answer is untouched.
+    # swapping status, any other request takes the error's own, a caller fault
+    # included, and every noted failure carries its id. Without a noted failure
+    # the answer is untouched.
     function stamped(headers, err, uid)
         req = HTTP.Request("GET", "/doomed_now", headers, UInt8[])
         isnothing(err) || HTMXObjects._note_operation_failure!(req, err, uid)
@@ -405,7 +457,7 @@ end
     page = Pair{String,String}[]
     @test stamped(hx, ErrorException("x"), "abc") == (200, "abc")
     @test stamped(page, ErrorException("x"), "abc") == (500, "abc")
-    @test stamped(page, CallerFault(404, "gone"), nothing) == (404, "")
+    @test stamped(page, CallerFault(404, "gone"), "def") == (404, "def")
     @test stamped(hx, nothing, nothing) == (200, "")
 end
 
@@ -465,7 +517,8 @@ end
                 "Fehler-ID: <code>$child_uid</code></p>")
 
             probe = quiet("/et_probe/x"; headers=hx)
-            @test contains(String(probe.body), "<header>Nicht gefunden</header><p>Sonde x unbekannt</p>")
+            @test contains(String(probe.body), "<header>Nicht gefunden</header><p>Sonde x unbekannt</p>" *
+                "<p>Fehler-ID: <code>$(HTTP.header(probe, "X-HTMXO-Error-Id", ""))</code></p></article>")
             needs = quiet("/et_needs")
             @test needs.status == 400
             @test contains(String(needs.body), "<header>Ungültige Anfrage</header><p>Pflichtangabe fehlt: n</p>")
@@ -476,16 +529,19 @@ end
             # words; the parser's reason stays as Julia writes it.
             unparsed = quiet("/et_needs?n=abc")
             @test unparsed.status == 400
-            @test !HTTP.hasheader(unparsed, "X-HTMXO-Error-Id")
             @test contains(String(unparsed.body),
                 "<header>Ungültige Anfrage</header><p>Ungültiger Wert für n: &quot;abc&quot;; erwartet Int64 (")
+            @test contains(String(unparsed.body),
+                "<p>Fehler-ID: <code>$(HTTP.header(unparsed, "X-HTMXO-Error-Id", ""))</code></p>")
 
             english = quiet("/en_boom")
             english_uid = HTTP.header(english, "X-HTMXO-Error-Id", "")
             @test String(english.body) == "<article aria-invalid=\"true\"><header>Error</header>" *
                 "<p>Something went wrong. Error ID: <code>$english_uid</code></p></article>"
-            @test contains(String(quiet("/en_needs").body),
-                "<header>Bad Request</header><p>Missing required parameter: n</p>")
+            en_needs = quiet("/en_needs")
+            @test String(en_needs.body) == "<article aria-invalid=\"true\"><header>Bad Request</header>" *
+                "<p>Missing required parameter: n</p>" *
+                "<p>Error ID: <code>$(HTTP.header(en_needs, "X-HTMXO-Error-Id", ""))</code></p></article>"
         finally
             HTMXObjects.ERROR_DIR[] = old_dir
         end
@@ -525,9 +581,11 @@ end
         "Die POST-Übermittlung wurde nicht wiederholt; laden Sie die Seite neu, um den aktuellen Stand zu sehen."
     # A 4xx with no reason phrase reads under the plain `refused` title.
     @test contains(repr("text/html", HTMXObjects._invoke_error_handler(
-        nothing, CallerFault(499, "abgebrochen"), nothing, nothing)), "<header>Request refused</header>")
+        nothing, CallerFault(499, "abgebrochen"), "u1", nothing)), "<header>Request refused</header>")
     # refused: the article must keep the recorded error id that ties it to its log (snag error-articles-i-c4c9b7f6)
     @test_throws ArgumentError error_texts(:de; server_fault="Etwas ist schiefgegangen.")
+    # refused: a caller fault's article must keep its error id too (decision `06kz9d3`)
+    @test_throws ArgumentError error_texts(:de; error_id="Fehler")
     @test_throws ArgumentError error_texts(:fr)
     @test_throws ArgumentError error_texts(:de; bogus="x")
     @test_throws ArgumentError error_texts(:de; missing_param="{param} fehlt")
@@ -536,7 +594,7 @@ end
 end
 
 # A custom `__error__` hook that takes two arguments also receives the
-# recorded error id (`nothing` for an unrecorded caller fault), so a hook in
+# recorded error id (a caller fault's too), so a hook in
 # the app's own wording — or a JSON API's error body — keeps it. A
 # one-argument hook is called as before (snag error-articles-i-c4c9b7f6).
 @testitem "a two-argument __error__ hook receives the recorded error id" tags=[:unit, :server] begin
@@ -574,7 +632,9 @@ end
             uid = HTTP.header(boom, "X-HTMXO-Error-Id", "")
             @test !isempty(uid) && contains(String(boom.body), "<p>id=$uid</p>")
             probe = with_logger(NullLogger()) do; dispatch(:GET, "/two_probe/x"); end
-            @test probe.status == 404 && contains(String(probe.body), "<p>id=none</p>")
+            probe_uid = HTTP.header(probe, "X-HTMXO-Error-Id", "")
+            @test probe.status == 404 && !isempty(probe_uid) &&
+                contains(String(probe.body), "<p>id=$probe_uid</p>")
             one = with_logger(NullLogger()) do; dispatch(:GET, "/one_boom"); end
             @test one.status == 500 && contains(String(one.body), "<p>one argument</p>")
             method = with_logger(NullLogger()) do; dispatch(:GET, "/one_method_boom"); end
