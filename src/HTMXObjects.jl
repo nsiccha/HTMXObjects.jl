@@ -4256,6 +4256,17 @@ end
 Base.show(io::IO, mime::MIME"text/markdown", alt::SemanticAlternatives) =
     _semantic_show_leaf(io, mime, first(alt.views))
 
+# Each projection above writes its element as if it opened the document, so
+# among siblings HTMX.jl's serializer must delimit it, or they run together:
+# `**A:** 1**B:** 2` for two metrics in a layout `div`, `### T2` mid-line after
+# a card, and a closing code fence followed on its own line by the next
+# element's text, which leaves the fence open. The block elements are the ones
+# whose HTML peer is a block (div, p, pre, dl, table, article, section,
+# details); a status, link, action or artifact is a `span` or an `<a>` in HTML
+# and stays in its line here too.
+HTMX.markdown_block(::SemanticNode) = true
+HTMX.markdown_block(::Union{SemanticStatus,SemanticLink,SemanticAction,SemanticArtifact}) = false
+
 function Base.show(io::IO, mime::MIME"text/plain", fields::SemanticFields)
     for (key, value) in fields.pairs
         print(io, key, ": ")
@@ -4964,8 +4975,10 @@ alike:
   link that swaps a new version of it in — the value is written into the
   address (`history.replaceState`; other parameters and htmx's history state
   stay). A first load that shows the rendered value leaves the address as it
-  is. Reload, Back and a copied link then show the same view; no
-  `hx-push-url` is needed for it.
+  is. A request whose route answers through a deferred operation's poller
+  writes the value it asked for when the poller takes the element's place, so
+  the element the polls bring matches the address. Reload, Back and a copied
+  link then show the same view; no `hx-push-url` is needed for it.
 - **Static exports.** A static export calls `url_map` with the address of every
   declared value (the element's `hx-get` with that value) and gives the element
   each value's file, so an exporter that follows mapped addresses writes them and
@@ -5458,8 +5471,9 @@ updates the struct.
   path segment, `@param`, `@header` or indexed-mount key that does not parse, a
   repeated value for a scalar — is the caller's fault: a `400` (`200` under
   HTMX) naming the parameter, the value and the expected type (for `Bool` or an
-  `Enum`, the allowed values), not recorded as an error. A declared type with no
-  `parse` method is the declaration's fault and stays a recorded `500`.
+  `Enum`, the allowed values), recorded like every error answer with its
+  status. A declared type with no `parse` method is the declaration's fault
+  and stays a `500`.
 - `@post` / `@put` / `@patch` / `@delete` execute fresh on every request,
   including identical submissions on a retained root. `@get`, `@ws`, `@sse`,
   and properties read inside a mutation retain their own declared cache policy.
@@ -6092,7 +6106,7 @@ _rejection_reason(err::Union{ArgumentError,OverflowError}) = err.msg
 
 `_convert_param` for a value the request submitted under `name` (a keyword,
 path segment, `@param`, `@header` or indexed-mount segment). A value the
-declared type rejects is the caller's fault, answered 400 and not recorded:
+declared type rejects is the caller's fault, answered 400:
 `InvalidDomainValue` when the type implies a closed domain (`Bool`, an `Enum`)
 so the answer lists the allowed values, otherwise `InvalidParamValue` naming
 the expected type.
@@ -6553,7 +6567,7 @@ struct _SSEFailure
 end
 
 function _sse_failure(err, bt, req, error_obj)
-    uid, path = _maybe_record_error(err, bt, req)
+    uid, path = _record_error(err, bt, req)
     _SSEFailure(_invoke_error_handler(error_obj, err, uid, path))
 end
 
@@ -7558,6 +7572,18 @@ url_params_script() = h.script(Raw(raw"""
     var base = shown(el, ps);
     return ps.map(function (p, i) { return query.has(p.as) ? query.get(p.as) : base[i]; });
   }
+  // Another element's request replaced a declared element with content that
+  // declares nothing: a deferred operation's poller, whose own polls bring the
+  // element later. The request's values are written now, as the element's own
+  // request writes them; otherwise the element arriving through the polls
+  // shows another value than the address and loads the old one again (snag
+  // url-params-outer-1b61cafa).
+  function standIn(el, cfg, d) {
+    var t = d.target, ps = declared(t);
+    if (!ps || t === cfg.elt || t === el || t.isConnected) return;
+    var vals = requested(t, ps, d);
+    if (vals) write(byName(ps, vals), byName(ps, shown(t, ps)));
+  }
   document.addEventListener('htmx:beforeSwap', function (e) {
     var d = e.detail || {}, ps = declared(d.target);
     if (ps && d.requestConfig) d.requestConfig.htmxoUrlBefore = byName(ps, shown(d.target, ps));
@@ -7570,7 +7596,7 @@ url_params_script() = h.script(Raw(raw"""
       write(cfg.htmxoUrlValues, cfg.htmxoUrlShown);
     }
     var el = e.target, ps = el === cfg.elt ? null : declared(el);
-    if (!ps) return;
+    if (!ps) return standIn(el, cfg, d);
     // A new version of the element, swapped in for the target: until htmx
     // settles it, it carries the old version's attributes when the two share
     // an id, so its values are written once it loads (`loaded`).
@@ -7841,12 +7867,12 @@ resource id (`404`), an argument out of range (`400`), a refused operation
 (`403`, `409`). The answer has `status` (`200` under HTMX, so the swap still
 happens) and shows `message`: in the default article, titled with the status's
 reason phrase (`Not Found`), or through the struct's `__error__` hook, which
-reads `status` and `message` from `unwrap_error(err)`. Like a missing
-parameter it is not recorded: no error log, no `@error` line, no
-`X-HTMXO-Error-Id`, no `__on_error__`.
+reads `status` and `message` from `unwrap_error(err)`. Like every error
+answer it is recorded: an error log whose header names `status`, the
+`@error` line, `X-HTMXO-Error-Id`, the error id in the article, and
+`__on_error__`.
 
-`status` must be a 4xx. A server fault is an ordinary exception, which is
-recorded.
+`status` must be a 4xx. A server fault is an ordinary exception.
 
 ```julia
 @get probe(kenn::String) = begin
@@ -7979,8 +8005,9 @@ _fill_text(template::AbstractString; values...) =
 The words of HTMXObjects' error answers: the article that points at a
 recorded server fault (`error`, `server_fault`), the caller-fault articles
 (titled with their status's reason phrase from `reasons`, or `refused` for a
-status without one), the framework's own caller-fault messages, a stalled
-operation's terminal (`run_again`, `progress`) and the page shell's
+status without one, and ending in `error_id`), the framework's own caller-fault
+messages, a stalled operation's terminal (`run_again`, `progress`) and the page
+shell's
 failed-request toasts (`request_failed`, `no_response`, `timed_out`,
 `dismiss`, and `reasons` again). Build one with [`error_texts`](@ref).
 
@@ -7990,9 +8017,9 @@ Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
 operation of the app answers in it. Pass the same value to the page shell,
 `htmx(...; error_texts)` or `pico_page(...; error_texts)`, for the toasts.
 
-A text in braces is a placeholder the framework fills in: `server_fault` takes
-`{id}`, the recorded error id, and must keep it; `missing_param` takes
-`{name}`; `invalid_value` takes `{name}` and `{value}`, followed when the
+A text in braces is a placeholder the framework fills in: `server_fault` and
+`error_id` take `{id}`, the recorded error id, and must keep it;
+`missing_param` takes `{name}`; `invalid_value` takes `{name}` and `{value}`, followed when the
 parameter has a closed domain by `"; "` and `allowed_values` with `{allowed}`,
 or when its declared type rejected the value by `"; "` and `expected_type` with
 `{type}` (then the parser's own reason, as Julia writes it, in parentheses);
@@ -8005,6 +8032,7 @@ and `showerror` stay English.
 struct ErrorTexts
     error::String                      # heading of a recorded server fault
     server_fault::String               # its line, with the error id
+    error_id::String                   # a titled error article's error-id line
     refused::String                    # heading of a 4xx without a reason phrase
     missing_param::String              # a required parameter is missing
     invalid_value::String              # a submitted value is outside its domain
@@ -8026,7 +8054,7 @@ struct ErrorTexts
 end
 
 const _ERROR_TEXT_PLACEHOLDERS = (
-    server_fault = (:id,), missing_param = (:name,), invalid_value = (:name, :value),
+    server_fault = (:id,), error_id = (:id,), missing_param = (:name,), invalid_value = (:name, :value),
     allowed_values = (:allowed,), expected_type = (:type,),
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
@@ -8036,6 +8064,7 @@ const _ERROR_TEXT_LOCALES = (
     en = (
         error = "Error",
         server_fault = "Something went wrong. Error ID: {id}",
+        error_id = "Error ID: {id}",
         refused = "Request refused",
         missing_param = "Missing required parameter: {name}",
         invalid_value = "Invalid value for parameter {name}: {value}",
@@ -8058,6 +8087,7 @@ const _ERROR_TEXT_LOCALES = (
     de = (
         error = "Fehler",
         server_fault = "Etwas ist schiefgegangen. Fehler-ID: {id}",
+        error_id = "Fehler-ID: {id}",
         refused = "Anfrage abgelehnt",
         missing_param = "Pflichtangabe fehlt: {name}",
         invalid_value = "Ungültiger Wert für {name}: {value}",
@@ -8113,12 +8143,14 @@ error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
 ```
 
 An unknown locale or text name, a placeholder a text does not take, or a
-`server_fault` without `{id}` throws an `ArgumentError`.
+`server_fault` or `error_id` without `{id}` throws an `ArgumentError`.
 """
 function error_texts(locale::Symbol=:en; texts...)
     t = _locale_texts(ErrorTexts, :error_texts, _ERROR_TEXT_LOCALES, _ERROR_TEXT_PLACEHOLDERS, locale; texts...)
-    occursin("{id}", t.server_fault) || throw(ArgumentError(
-        "error_texts: server_fault must keep {id}, the recorded error id that ties the article to its error log"))
+    for name in (:server_fault, :error_id)
+        occursin("{id}", getfield(t, name)) || throw(ArgumentError(string("error_texts: ", name,
+            " must keep {id}, the recorded error id that ties the article to its error log")))
+    end
     t
 end
 
@@ -8206,23 +8238,57 @@ function _check_revise_errors!()
 end
 
 """
-    _record_error(err, bt, req) -> (uid, path)
+    _record_error(err, bt, req; status=_error_status_code(err)) -> (uid, path)
 
 Write a detailed error report to `joinpath(ERROR_DIR[], "<uid>.log")` and return
 both the short uid and the full file path. Also emits an `@error` log entry
 that includes the full path so the recorded file is one click away in the
-terminal/log viewer.
+terminal/log viewer. `status` is the error's HTTP status (`400` for a missing
+parameter, `500` for a server fault; an htmx request is still answered `200`),
+so a reader of the log tells a caller fault from a server fault without
+parsing the trace; `nothing` (a caught, recovered-from error,
+[`record_error`](@ref)) leaves it out.
 """
-_print_req_meta(io, req::HTTP.Request) =
-    (println(io, "method:    ", req.method); println(io, "target:    ", req.target))
+function _record_error end
+
+# One `key: value` line of an error log's header. Readers (the KB's error
+# sweep, Bruno's `bruno-error`) read the header up to its first blank line and
+# pick the keys they know, so keys stay `[A-Za-z_]+`.
+_print_log_field(io, key, value) = println(io, rpad(string(key, ":"), 10), " ", value)
+
+# The request lines of an error log: what was asked; for an htmx request, where
+# it was asked from (the browser's address, the element that sent it, the
+# element its answer replaces); and for a body-carrying verb, the names of the
+# fields its body submitted. Never their values: a body can carry anything an
+# app collects.
+function _print_req_meta(io, req::HTTP.Request)
+    _print_log_field(io, :method, req.method)
+    _print_log_field(io, :target, req.target)
+    for (key, value) in ((:page, hx_current_url(req)), (:trigger, hx_trigger(req)),
+            (:swap_target, hx_target(req)))
+        isempty(value) || _print_log_field(io, key, value)
+    end
+    req.method in _queryparams_verbs || _print_log_field(io, :body_params, _body_param_names(req))
+end
 _print_req_meta(args...) = nothing
+
+# The submitted field names, sorted; `(none)` for an empty body. A body that
+# fails to parse is named as such, so the original error is still recorded.
+function _body_param_names(req::HTTP.Request)
+    names = try
+        sort!(collect(keys(bodyparams(req))))
+    catch err
+        return string("(unreadable: ", sprint(showerror, err; context=:limit => true), ")")
+    end
+    isempty(names) ? "(none)" : join(names, ", ")
+end
 
 # PropertyComputationError's 2-arg showerror prints its own filtered backtrace;
 # don't append `bt` for it. All other error types use the standard 3-arg form.
 _show_err(io, err::PropertyComputationError, _bt) = showerror(io, err)
 _show_err(io, err, bt) = showerror(io, err, bt)
 
-function _record_error(err, bt, req)
+function _record_error(err, bt, req; status=_error_status_code(err))
     dir = ERROR_DIR[]
     isempty(dir) && (dir = joinpath(tempdir(), "htmxo_errors"))
     isdir(dir) || mkpath(dir)
@@ -8230,8 +8296,9 @@ function _record_error(err, bt, req)
     path = joinpath(dir, uid * ".log")
     open(path, "w") do io
         println(io, "# HTMXObjects error")
-        println(io, "uid:       ", uid)
-        println(io, "timestamp: ", Libc.strftime("%Y-%m-%dT%H:%M:%S", time()))
+        _print_log_field(io, :uid, uid)
+        _print_log_field(io, :timestamp, Libc.strftime("%Y-%m-%dT%H:%M:%S", time()))
+        status === nothing || _print_log_field(io, :status, status)
         _print_req_meta(io, req)
         println(io)
         # PropertyComputationError's 2-arg showerror already prints the cause's
@@ -8288,7 +8355,7 @@ fallback and just need the trace recorded.
         placeholder_for(fig)                             # request still succeeds
     end
 """
-record_error(err, bt, req) = _record_error(err, bt, req)
+record_error(err, bt, req) = _record_error(err, bt, req; status=nothing)
 
 """
     _default_error_render(uid, path, texts=_EN_ERROR_TEXTS)
@@ -8298,8 +8365,7 @@ error id, in `texts` (an [`ErrorTexts`](@ref); the app sets it once as
 `__error_texts__ = error_texts(:de)` on its root struct). Override by defining
 `__error__` on the route's enclosing struct (or, to disable catching entirely,
 set `__error__ = rethrow`); a hook that takes two arguments,
-`__error__(err, uid)`, also receives the recorded error id (`nothing` for an
-unrecorded caller fault).
+`__error__(err, uid)`, also receives the recorded error id.
 
 To run an extra side effect *after* an error is recorded — notifying an
 external service, incrementing a metric — define `__on_error__(err, uid, path)`
@@ -8308,9 +8374,8 @@ struct (defaulting through `__parent__`, like `__appdata__`), so a single
 root-level definition propagates to every route — including `@include`d
 upstream structs the app cannot edit. It is invoked for its side effect only
 (return value ignored) and does not replace the error article; a failure inside
-it is logged, not swallowed. Fires for both route errors and `safely`-wrapped
-widget errors, but not for a caller fault (a `4xx` answer), which is not
-recorded.
+it is logged, not swallowed. Fires for every recorded error: route errors,
+`safely`-wrapped widget errors, and caller faults (a `4xx` answer) alike.
 
 In dev (Revise loaded), include the full log path so the article matches
 the `@error` line on stderr (`HTMXObjects caught an error: <path>`) — the
@@ -8334,7 +8399,8 @@ function _default_error_render(uid, path, texts::ErrorTexts=_EN_ERROR_TEXTS)
     end
 end
 
-# The `server_fault` line, its `{id}` a code span holding the error id.
+# The `server_fault` (or `error_id`) line, its `{id}` a code span holding the
+# error id.
 function _error_id_line(template::AbstractString, uid)
     parts = split(template, "{id}")
     line = Any[]
@@ -8350,14 +8416,13 @@ end
 # `nothing`. When non-nothing, invoke it as a side effect (return value ignored)
 # after the error is recorded but before rendering — the hook point for running
 # an extra command once HTMXObjects' built-in logging has run. A failure inside
-# the hook is logged, never swallowed silently. A caller fault is not recorded
-# (`uid === nothing`, see `_maybe_record_error`) and fires no hook. Then invoke
-# the user's `__error__` render hook if present, else fall back to the default
-# article in the object's `__error_texts__`. `__error__` is called with the
-# exception, plus the recorded error id when it takes two arguments, so
-# `__error__ = rethrow` works.
+# the hook is logged, never swallowed silently. Then invoke the user's
+# `__error__` render hook if present, else fall back to the default article in
+# the object's `__error_texts__`. `__error__` is called with the exception, plus
+# the recorded error id when it takes two arguments, so `__error__ = rethrow`
+# works.
 function _invoke_error_handler(obj, err, uid, path)
-    if uid !== nothing && obj !== nothing && hasproperty(obj, :__on_error__)
+    if obj !== nothing && hasproperty(obj, :__on_error__)
         hook = getproperty(obj, :__on_error__)
         if hook !== nothing
             try
@@ -8374,13 +8439,11 @@ function _invoke_error_handler(obj, err, uid, path)
     texts = _error_texts(obj)
     inner = unwrap_error(err)
     title = _caller_fault_title(inner, texts)
-    # An unrecorded caller fault has no error id to point at: one whose type
-    # names no title reads under a plain one.
-    title === nothing && uid === nothing && (title = texts.refused)
     if title !== nothing
         return h.article(
             h.header(title),
-            h.p(_caller_fault_message(inner, texts));
+            h.p(_caller_fault_message(inner, texts)),
+            _error_id_line(texts.error_id, uid);
             aria_invalid="true",
         )
     end
@@ -8442,15 +8505,6 @@ _unwrapped_status_code(_err) = 500
 _with_error_status(req, resp::HTTP.Response, err) =
     is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
-# Caller faults (4xx: a missing or invalid submitted value, a refused resource
-# operation, a mutation result the server no longer holds) are answered, not
-# recorded: no error log or `@error` line, no `X-HTMXO-Error-Id`, no
-# `__on_error__` (user decision `1danmww`). Server faults (5xx, a stalled
-# operation included) keep the full record.
-_records_error(err) = !(400 <= _error_status_code(err) < 500)
-_maybe_record_error(err, bt, req) =
-    _records_error(err) ? _record_error(err, bt, req) : (nothing, nothing)
-
 # A hook that returns a finished response answers the request as it is: no
 # `wrap`, no Markdown projection, no `__page__` shell, so a JSON API's error
 # stays JSON. An `HTTP.Response` chose its own status and keeps it. Any other
@@ -8478,13 +8532,17 @@ function _stamp_error_id(resp::HTTP.Response, uid)
     HTTP.setheader(resp, "X-HTMXO-Error-Id" => uid)
     resp
 end
-_stamp_error_id(resp::HTTP.Response, ::Nothing) = resp
 
 # `wrap` shapes the rendered failure for whatever receives it — a live poller
 # needs it inside its terminal node (`OperationStalled`, Treebars extension).
+# Every error answer is recorded, a caller fault (4xx: a missing or invalid
+# submitted value, an app's `CallerFault`, a mutation result the server no
+# longer holds) as well as a server fault, so every error article the user sees
+# has an error log they can forward; the log's `status:` line tells the two
+# apart (user decision `06kz9d3`, replacing `1danmww`'s unrecorded 4xx).
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[],
         wrap=identity)
-    uid, path = _maybe_record_error(err, bt, req)
+    uid, path = _record_error(err, bt, req)
     _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _hook_response(req, err_val, err)
@@ -8523,7 +8581,7 @@ function safely(f; obj=nothing, req=nothing)
         return f()
     catch err
         bt = catch_backtrace()
-        uid, path = _maybe_record_error(err, bt, req)
+        uid, path = _record_error(err, bt, req)
         return _invoke_error_handler(obj, err, uid, path)
     end
 end
@@ -14089,9 +14147,10 @@ wherever it appears, including inside dropped chrome (see
 [`_rescue_semantic!`](@ref)). Its own children are still stripped, so no chrome
 reaches markdown through it. Among siblings — a Node's children, or a returned
 sequence — a block-level semantic node (any but a status, link, action or
-artifact) becomes a paragraph block, so it starts on its own line and ends with
-a blank line exactly as an `h.p` sibling does instead of running into the text
-around it.
+artifact) is a paragraph of its own, as a `div` is, instead of running into the
+text around it: it declares `HTMX.markdown_block`, which HTMX.jl's serializer
+consults for every child, so a direct `repr("text/markdown", node)` reads the
+same.
 
 A chrome element carrying the presence-only `data-htmxo-label` attribute is a
 labelled control: the element is dropped but its (stripped) children stay where
@@ -14110,8 +14169,8 @@ consumer annotation — the automatic counterpart to [`html_only`](@ref), which
 is the explicit per-node opt-out for other HTML-only content.
 """
 _strip_md_chrome(val) = val
-_strip_md_chrome(val::AbstractArray) = filter(!isnothing, _strip_md_chrome_sibling.(val))
-_strip_md_chrome(val::Tuple) = filter(!isnothing, _strip_md_chrome_sibling.(val))
+_strip_md_chrome(val::AbstractArray) = filter(!isnothing, _strip_md_chrome.(val))
+_strip_md_chrome(val::Tuple) = filter(!isnothing, _strip_md_chrome.(val))
 _strip_md_chrome((content, id)::Pair) = let f = _strip_md_chrome(content)
     isnothing(f) ? nothing : f => id
 end
@@ -14181,42 +14240,20 @@ _rescue_semantic!(out, node::Node) =
 # (dropped) or, when it held semantic nodes, the rescued run. Unlike
 # filter_errors (which prunes non-error text), text / primitive children are
 # KEPT as-is so non-chrome prose survives. A semantic child is stripped like a
-# container at the top level, and a block-level one becomes a block (below).
+# container at the top level.
 _strip_md_chrome_child(child) = child
-_strip_md_chrome_child(child::Node) = _strip_md_chrome(child)
-_strip_md_chrome_child(child::SemanticNode) = let kept = _strip_md_chrome(child)
-    isnothing(kept) ? nothing : _md_sibling_block(kept)
-end
-
-# An element of a returned sequence strips like any value; a semantic one is
-# also a block among its siblings, exactly as a Node child is.
-_strip_md_chrome_sibling(val) = _strip_md_chrome(val)
-_strip_md_chrome_sibling(val::SemanticNode) = _strip_md_chrome_child(val)
-
-# A block-level semantic element is a Markdown block among its siblings. Its own
-# `show` writes it as if it opened the document, and HTMX.jl's serializer
-# splices a non-Node child into the running line, so siblings ran together:
-# `**A:** 1**B:** 2` for two metrics in a layout `div`, `### T2` mid-line after
-# a card, and a closing code fence followed on its own line by the next
-# element's text, which leaves the fence open. Inside a `<p>` the serializer
-# starts it on its own line, closing any inline run before it, and ends it with
-# a blank line — exactly as an `h.p` sibling. The block elements are the ones
-# whose HTML peer is a block (div, p, pre, dl, table, article, section,
-# details); a status, link, action or artifact is a `span` or an `<a>` in HTML
-# and stays in its line here too.
-_md_block(::SemanticNode) = true
-_md_block(::Union{SemanticStatus,SemanticLink,SemanticAction,SemanticArtifact}) = false
-_md_sibling_block(value::SemanticNode) = _md_block(value) ? h.p(value) : value
+_strip_md_chrome_child(child::Union{Node,SemanticNode}) = _strip_md_chrome(child)
 
 # The rescued run is emitted where the chrome stood. Every element in it is a
 # block of its own — pulled out of a form, it no longer shares a line with
 # anything — so consecutive cards do not run together into
-# `…detail### Next title`.
+# `…detail### Next title`. A `div` delimits it: a status or action, inline by
+# `HTMX.markdown_block`, would otherwise join the text around the form.
 function _rescued_md_run(node::Node)
     rescued = Any[]
     _rescue_semantic!(rescued, HTMX.children(node))
     isempty(rescued) && return nothing
-    Any[h.p(value) for value in rescued]
+    Any[h.div(value) for value in rescued]
 end
 
 # A control marked `data-htmxo-label` wraps a label that belongs to the

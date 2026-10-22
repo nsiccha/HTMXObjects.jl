@@ -67,7 +67,7 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
-| `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, not recorded as an error |
+| `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, recorded like every error answer |
 | `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles and failure toasts (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
@@ -554,20 +554,27 @@ detail_toggle=:label)` row buttons carry it, so column and row names survive.
 
 A semantic element whose HTML peer is a block — any but `SemanticStatus`,
 `SemanticLink`, `SemanticAction` and `SemanticArtifact`, which are inline and
-stay in their line — is its own paragraph among siblings: as a Node's child or
-in a returned vector, it starts on its own line and ends with a blank line, as
-an `h.p` sibling does. Two metrics in a layout `div` read `**A:** 1\n\n**B:** 2`
-rather than `**A:** 1**B:** 2`, and a code fence or a card's heading is no
-longer joined to the text beside it. A lone element keeps its own projection.
-Plain HTML `div` siblings are not covered: HTMX.jl's serializer writes a `div`
-inline.
+stay in their line — is its own paragraph among siblings, as a `div` is: as a
+Node's child or in a vector, text before it is closed as a paragraph and what
+follows it starts a new one. Two metrics in a layout `div` read
+`**A:** 1\n\n**B:** 2` rather than `**A:** 1**B:** 2`, and a code fence or a
+card's heading is no longer joined to the text beside it. A lone element keeps
+its own projection. The elements declare `HTMX.markdown_block`, so HTMX.jl's
+own serializer applies the rule: a direct `repr("text/markdown", node)` reads
+the same as the route's projection. This needs HTMX.jl `21b2d24` or later,
+which also makes plain HTML `div` siblings paragraphs (`one\n\ntwo`); an
+HTMX.jl without `markdown_block` fails to load HTMXObjects with
+`UndefVarError: markdown_block not defined`. A block type of your own declares
+`HTMX.markdown_block(::MyType) = true` the same way. Semantic elements rescued from a
+dropped form are each a paragraph, inline ones included: out of the form they
+share no line with the text around it.
 
 These rules belong to the response's Markdown projection. A type of your own
 whose `show(io, ::MIME"text/markdown", x)` delegates with `show(io, m, x.inner)`
 reaches HTMX.jl's serializer instead, which drops every `<button>` with its
-content. The tables' own column, row and branch labels survive that path too.
-For the rest (dropped chrome, a control's state, your own labelled controls,
-semantic blocks among siblings), delegate with
+content. The tables' own column, row and branch labels survive that path too,
+and so do semantic blocks among siblings. For the rest (dropped chrome, a
+control's state, your own labelled controls), delegate with
 `print(io, HTMXObjects.to_markdown_string(x.inner))`.
 
 A control that shows the reader a state keeps that state in Markdown, with no
@@ -668,13 +675,13 @@ too. Passing the same value to the page shell translates the
 [failure toasts](#failure-toasts). Any text can be replaced by keyword, and
 `reasons` replaces the phrases of the statuses it names:
 `error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
-reasons=Dict(404 => "Unbekannt"))`. `server_fault` must keep `{id}`.
+reasons=Dict(404 => "Unbekannt"))`. `server_fault` and `error_id` (the
+error-id line that ends a caller fault's article) must keep `{id}`.
 
 An app's own `CallerFault` message is shown as written. Error logs, `@error`
 lines and `showerror` stay English. A custom `__error__`
 hook that takes two arguments, `__error__(err, uid)`, receives the recorded
-error id as well (`nothing` for an unrecorded caller fault), so its own
-article or JSON body can carry it.
+error id as well, so its own article or JSON body can carry it.
 
 ```@docs
 ErrorTexts
@@ -1770,11 +1777,12 @@ declared type rejects the value: `?n=abc` for `n::Int`, `?b=300` for
 the value and the expected type) map to **400** on a non-HTMX request and
 render a `Bad Request` article; under HTMX they too stay 200. This holds
 wherever the value is converted: a route keyword or path parameter, `@param`,
-`@header`, or an indexed `@include` segment. As caller faults they are not
-recorded: no error log, no `X-HTMXO-Error-Id`, no `__on_error__`. None of the
-three is exported, so catching one needs the qualified name. A declared type
-with no `parse` method at all is not a caller fault but a declaration bug, and
-stays a recorded 500. A route body raises its own
+`@header`, or an indexed `@include` segment. Like every error answer they are
+recorded: an error log whose header says `status:    400`, the error id in the
+article and in `X-HTMXO-Error-Id`, and `__on_error__`. None of the three is
+exported, so catching one needs the qualified name. A declared type with no
+`parse` method at all is not a caller fault but a declaration bug, and stays a
+500. A route body raises its own
 caller fault — an unknown id (`404`), an argument out of range (`400`) — with
 the exported `CallerFault(status, message)`, which is answered the same way with
 its own status.
@@ -2715,8 +2723,9 @@ as later requests; a different key selects a different retained graph. Explicit
 POST body parameters must be passed as `query_url` overrides (§URL helpers).
 
 Check both the response status and `X-HTMXO-Error-Id`: an HTMX error fragment can
-have status 200. A caller fault (`4xx`, a missing parameter say) is not recorded
-and carries no error id; its HTMX fragment is the `aria-invalid="true"` article.
+have status 200. A caller fault (`4xx`, a missing parameter say) carries an error
+id like a server fault; its error log's `status:` line tells the two apart, and
+its HTMX fragment is the `aria-invalid="true"` article.
 A successful progress response means submission, not batch
 completion. Omitting the HX header under `:auto`, requesting static export, or
 calling an unmarked heavy property directly does not select this queued transport.
@@ -3057,8 +3066,11 @@ the rest:
   "4 SD" links above — writes that value into the address with
   `history.replaceState`, keeping the other parameters and htmx's history
   state. A first load that shows the rendered value leaves the address alone.
-  The app needs no `hx-push-url` for this, and a share button that copies
-  `location.href` copies the view.
+  A request whose route answers through a deferred operation's poller writes
+  the value it asked for when the poller takes the element's place, so the
+  element the polls bring matches the address. The app needs no
+  `hx-push-url` for this, and a share button that copies `location.href`
+  copies the view.
 - **Static exports.** `StaticExport`'s `url_map` is called with the address of
   every declared value (`/voralarme?k=4.0`), so an exporter that writes every
   mapped address writes those too; the element carries each value's file and
