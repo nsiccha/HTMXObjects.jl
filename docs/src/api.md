@@ -3064,8 +3064,11 @@ the rest:
   "4 SD" links above — writes that value into the address with
   `history.replaceState`, keeping the other parameters and htmx's history
   state. A first load that shows the rendered value leaves the address alone.
-  The app needs no `hx-push-url` for this, and a share button that copies
-  `location.href` copies the view.
+  A request whose route answers through a deferred operation's poller writes
+  the value it asked for when the poller takes the element's place, so the
+  element the polls bring matches the address. The app needs no
+  `hx-push-url` for this, and a share button that copies `location.href`
+  copies the view.
 - **Static exports.** `StaticExport`'s `url_map` is called with the address of
   every declared value (`/voralarme?k=4.0`), so an exporter that writes every
   mapped address writes those too; the element carries each value's file and

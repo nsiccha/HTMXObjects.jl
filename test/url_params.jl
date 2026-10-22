@@ -1,7 +1,7 @@
 @testmodule UrlParamsFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
-    export UrlParamsApp, KS, PROBES, alarms_view, bundle, bundle_name
+    export UrlParamsApp, SlowUrlParamsApp, KS, PROBES, alarms_view, bundle, bundle_name
 
     const KS = (3.0, 4.0, 5.0)
     const PROBES = ("a", "b", "c")
@@ -94,6 +94,54 @@
         "Probe"
         @get probe(; kenn::String="a") = h.p("probe $kenn"; class="probe")
         @get index() = h.div(alarms_view(3.0), probe_pane(), pane_button(), h.script(Raw(DRIVER)))
+    end
+
+    # Checks for the browser item over `SlowUrlParamsApp`, reported to
+    # `/complete`: a link to a value its route answers through a poller ends
+    # showing that value, with it in the address.
+    const SLOW_DRIVER = raw"""
+    window.addEventListener('error', event => {
+      fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+    });
+    window.addEventListener('load', async function () {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      async function until(cond, label) {
+        for (let n = 0; n < 400 && !cond(); n++) await sleep(25);
+        if (!cond()) throw new Error('timed out: ' + label + ' (shows ' +
+          text('#alarms .k') + ', address ' + location.search + ')');
+        await sleep(60);
+      }
+      const text = sel => (document.querySelector(sel) || {}).textContent;
+      const param = n => new URLSearchParams(location.search).get(n);
+      try {
+        await until(() => text('#alarms .k') === 'k=4.0', 'k=4.0 from the address');
+        document.getElementById('k5').click();
+        await until(() => document.querySelector('.treebar-poller-inner'), 'the poller');
+        await until(() => text('#alarms .k') === 'k=5.0', 'k=5.0 through the poller');
+        await until(() => param('k') === '5.0', 'k=5.0 written');
+        // Nothing takes it back: the address and the list stay at 5.0.
+        await sleep(1500);
+        if (text('#alarms .k') !== 'k=5.0' || param('k') !== '5.0')
+          throw new Error('reverted to ' + text('#alarms .k') + ', address ' + location.search);
+        document.getElementById('k3').click();
+        await until(() => text('#alarms .k') === 'k=3.0' && param('k') === '3.0', 'k=3.0 written');
+        fetch('/complete?status=passed');
+      } catch (err) {
+        fetch('/complete?status=' + encodeURIComponent(String(err)));
+      }
+    });
+    """
+
+    # The same list from a route that answers k = 5.0 more slowly than the
+    # `:auto` grace, so a request for it swaps a poller in, whose polls bring
+    # the list (snag url-params-outer-1b61cafa).
+    @htmx struct SlowUrlParamsApp
+        __page__(content) = htmx(h.main(content); assets="/test-assets", sse_version=nothing,
+            ws_version=nothing, preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false, overlay=false)
+        "Alarms"
+        @fresh @get alarms(; k::Float64=3.0) = (k == 5.0 && sleep(0.8); alarms_view(k))
+        @get index() = h.div(alarms_view(3.0), h.script(Raw(SLOW_DRIVER)))
     end
 
     # The bundle file of an app address, flat, query folded into the name.
@@ -271,6 +319,63 @@ end
             @test isempty(missing_files)
         finally
             close(server)
+        end
+    end
+end
+
+@testitem "a link to a value answered through a poller writes it into the address" setup=[UrlParamsFixture] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets, Treebars
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        # The plain poller, whose terminal unwraps to the list, and the kept
+        # terminal tree, which holds it.
+        for keep_terminal_tree in (false, true)
+            HTMXObjects._clear_operation_polls!()
+            route!(SlowUrlParamsApp(); operation_policy=OperationPolicy(:auto; keep_terminal_tree))
+            receipt = Channel{String}(1)
+            requests = String[]
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+                path = HTTP.URI(req.target).path
+                path == "/test-assets/htmx.min.js" &&
+                    return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+                path == "/favicon.ico" && return HTTP.Response(204)
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                push!(requests, String(req.target))
+                dispatch(req.method, String(req.target); headers=collect(req.headers))
+            end
+            try
+                page = "http://127.0.0.1:$port/?k=4.0"
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $page`
+                    process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 30; pollint=0.05) === :ok
+                        outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                        @test outcome == "/complete?status=passed"
+                        outcome == "/complete?status=passed" ||
+                            @info "url_params through a poller" keep_terminal_tree outcome requests=join(requests, "\n")
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+                # The list loaded k = 4.0 once, for the address; the poller's
+                # result was not followed by a request for the old value.
+                loads = filter(t -> !contains(t, "__htmxo_poll=1"), requests)
+                @test loads == ["/?k=4.0", "/alarms?k=4.0", "/alarms?k=5.0", "/alarms?k=3.0"]
+                @test any(t -> startswith(t, "/alarms?k=5.0&__htmxo_poll=1"), requests)
+            finally
+                close(server)
+            end
         end
     end
 end
