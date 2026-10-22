@@ -49,8 +49,16 @@
     # refused: `active` naming no tab is a programming error, not a fallback.
     @test_throws ArgumentError tabset("A" => h.p("a"); active="nope")
 
-    # Every `htmx()` page carries the runtime.
-    @test contains(html(htmx(h.p("x"))), "window.htmxoTabset = ")
+    # Every `htmx()` page carries the runtime, and a static export keeps it
+    # with the tabset's names and call, so a bundle opens the URL's tab too.
+    page = htmx(tabset("A" => h.p("a"), "B" => h.p("b"); id="t6"))
+    @test contains(html(page), "window.htmxoTabset = ")
+    for controls in (:disable, :remove)
+        exported = html(static_transform(page, StaticExport(; controls)))
+        @test contains(exported, "window.htmxoTabset = ")
+        @test contains(exported, "data-tab-param=\"tab\"") && contains(exported, "data-tab-name=\"b\"")
+        @test contains(exported, "(document.currentScript.parentElement)</script></div>")
+    end
 end
 
 @testitem "tabset keeps its open tab in the URL in a real browser" setup=[HTMXOTestImports] tags=[:browser] begin
@@ -63,7 +71,8 @@ end
 
         # Step 1 clicks tabs and opens step 2 with the URL they wrote; step 2
         # checks that the page shows those tabs, then leaves through an htmx
-        # link and comes back; step 3 names a tab nobody has.
+        # link and comes back; step 3 names a tab nobody has; step 4 opens the
+        # page's static export with tabs in its URL.
         driver = h.script(Raw(raw"""
         window.htmxoWarnings = [];
         const htmxoWarn = console.warn;
@@ -116,10 +125,19 @@ end
                 check('state-kept', history.state && history.state.htmx === true && location.search === '?step=2&tab=voralarme&view=eins&emb=zwei');
                 await report();
                 location.href = '/?step=3&tab=nope';
-            } else {
+            } else if (step === '3') {
                 await wait(() => window.htmxoWarnings.length);
                 check('unknown-default', open('ts') === 'voralarme' && shown('ts') === 'ts-tab-1');
                 check('unknown-warns', window.htmxoWarnings.length === 1 && window.htmxoWarnings[0].includes('no tab is named "nope"'));
+                await report();
+                location.href = '/export?step=4&tab=stoerungen&view=zwei';
+            } else {
+                // A static file ignores its query string: the browser alone opens the tabs.
+                check('export-restored', open('ts') === 'stoerungen' && shown('ts') === 'ts-tab-2');
+                check('export-restored-lazy', open('view') === 'zwei' && await wait(() => document.getElementById('lazy-zwei')));
+                check('export-hidden-default-not-loaded', !document.getElementById('lazy-eins'));
+                tab('ts', 'voralarme').click();
+                check('export-click-records', location.search === '?step=4&tab=voralarme&view=zwei');
                 await report();
             }
         });
@@ -131,10 +149,17 @@ end
             h.a("away"; id="away", href="#", hx_get="/other", hx_target="#main", hx_push_url="true"))
         page = repr("text/html", htmx(body; assets=:vendor, extra_head=(driver,),
             feedback=false, compose=false, thread=false, treebars_assets=false, preload_version=nothing))
+        exported = repr("text/html", static_transform(htmx(body; assets=:vendor, extra_head=(driver,),
+            feedback=false, compose=false, thread=false, treebars_assets=false, preload_version=nothing,
+            runtime=:linked), StaticExport()))
+        @test contains(exported, "window.htmxoTabset = ") && !contains(exported, "tabset_script.js")
         vendorfiles()
-        lazy = Dict(name => Threads.Atomic{Int}(0) for name in ("stoerungen", "eins", "zwei"))
+        # Lazy loads per (page step, tab), the step read from htmx's
+        # HX-Current-URL: a load a navigation cuts short counts for its own step.
+        lazy = Dict{Tuple{String,String},Int}()
+        lazy_lock = ReentrantLock()
         history_misses = Threads.Atomic{Int}(0)
-        reports = Channel{Tuple{String,String,Dict{String,Int}}}(3)
+        reports = Channel{Tuple{String,String,Dict{String,Int}}}(4)
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
@@ -145,16 +170,22 @@ end
                 HTTP.hasheader(req, "HX-History-Restore-Request") && Threads.atomic_add!(history_misses, 1)
                 return HTTP.Response(200, ["Content-Type" => "text/html"], page)
             end
+            path == "/export" && return HTTP.Response(200, ["Content-Type" => "text/html"], exported)
             path == "/favicon.ico" && return HTTP.Response(204)
             path == "/other" && return HTTP.Response(200, ["Content-Type" => "text/html"], "<p id=\"other\">other</p>")
             if startswith(path, "/lazy/")
                 name = path[7:end]
-                Threads.atomic_add!(lazy[name], 1)
+                m = match(r"[?&]step=(\d)", HTTP.header(req, "HX-Current-URL", ""))
+                step = isnothing(m) ? "?" : m[1]
+                lock(() -> lazy[(step, name)] = get(lazy, (step, name), 0) + 1, lazy_lock)
                 return HTTP.Response(200, ["Content-Type" => "text/html"], "<p id=\"lazy-$name\">$name</p>")
             end
             if path == "/report"
                 q = HTTP.queryparams(uri)
-                put!(reports, (q["step"], q["checks"], Dict(k => v[] for (k, v) in lazy)))
+                counts = lock(lazy_lock) do
+                    Dict(name => get(lazy, (q["step"], name), 0) for name in ("stoerungen", "eins", "zwei"))
+                end
+                put!(reports, (q["step"], q["checks"], counts))
                 return HTTP.Response(204)
             end
             startswith(path, "/vendor/") && return dispatch(:GET, req.target; headers=collect(req.headers))
@@ -166,8 +197,8 @@ end
                 cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --password-store=basic --user-data-dir=$profile $url`
                 process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
                 try
-                    @test timedwait(() -> Base.n_avail(reports) == 3 || process_exited(process), 90; pollint=0.05) === :ok
-                    for (step, n) in (("1", 6), ("2", 11), ("3", 2))
+                    @test timedwait(() -> Base.n_avail(reports) == 4 || process_exited(process), 90; pollint=0.05) === :ok
+                    for (step, n) in (("1", 6), ("2", 11), ("3", 2), ("4", 4))
                         isready(reports) || break
                         got, checks, counts = take!(reports)
                         @test got == step
@@ -177,11 +208,16 @@ end
                             @test endswith(line, ":true")
                         end
                         if step == "1"
-                            # `eins` is the second tabset's shown default.
-                            @test counts == Dict("stoerungen" => 1, "eins" => 1, "zwei" => 0)
+                            @test counts["stoerungen"] == 1
+                            @test counts["zwei"] == 0
                         elseif step == "2"
-                            # Step 2 loaded the hidden default `eins` once, on its click.
-                            @test counts["eins"] == 2 && counts["zwei"] == 1
+                            # The URL's `zwei` loaded once; the hidden default
+                            # `eins` once, on its click.
+                            @test counts["zwei"] == 1
+                            @test counts["eins"] == 1
+                        elseif step == "4"
+                            @test counts["zwei"] == 1
+                            @test counts["eins"] == 0
                         end
                     end
                     @test history_misses[] == 0
