@@ -52,6 +52,23 @@ end
 # accept the probe syntactically anyway.
 _treebars_tracks_jobs() = isdefined(Treebars, :htmx_render_board)
 
+# Treebars renders a failed operation's terminal itself: it records the error
+# through `HTMXObjects.safely`, which hands the recorded error to
+# `_invoke_error_handler` with the `error_obj` given to `polling_fetchindex`.
+# This stand-in for the route's error context reports that error to the
+# transport (`_operation_failed`), so the terminal's answer carries its uid,
+# then renders exactly what the route's own context renders.
+struct _OperationErrorContext{O,T}
+    obj::O
+    transport::T
+end
+
+function HTMXObjects._invoke_error_handler(ctx::_OperationErrorContext, err,
+        uid, path)
+    HTMXObjects._operation_failed(ctx.transport, err, uid)
+    HTMXObjects._invoke_error_handler(ctx.obj, err, uid, path)
+end
+
 function _operation_treebars_kwargs(call_kwargs, transport,
         treebars_tracks_jobs::Bool)
     treebars_transport = (
@@ -59,7 +76,7 @@ function _operation_treebars_kwargs(call_kwargs, transport,
         label=transport.label,
         poll_interval=transport.poll_interval,
         keep_progress=transport.keep_progress,
-        error_obj=transport.error_obj,
+        error_obj=_OperationErrorContext(transport.error_obj, transport),
         req=transport.req,
     )
     kwargs = merge(call_kwargs, treebars_transport)
