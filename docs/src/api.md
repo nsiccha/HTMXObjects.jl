@@ -60,6 +60,8 @@ HTMXObjects declares `HTMX = "1"` — it renders through `HTMX.Raw` and relies o
 | `StaticExport(; url_map, controls, record_base, runtime)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
 | `static_url(req, address)` | The address to embed where the static walk cannot rewrite it (a script, a JSON payload, a Vega spec's `data.url`): what an `src` with that value becomes under a static `dispatch`, `address` unchanged otherwise — see [Request-scoped static export](#request-scoped-static-export) |
+| `url_params(; name = value, …, values)` | Attributes that let parameters in the page address drive an element that loads with `hx-get`, on a live page and in a static export — see [Page address parameters](#page-address-parameters) |
+| `url_params_script()` | The browser runtime of `url_params`; `htmx()` pages carry it |
 | `hx_response(...)` | Build a response with HTMX-specific response headers (HX-Trigger, HX-Redirect, HX-Push-Url, HX-Refresh, HX-Reswap, HX-Retarget, HX-Reselect, HX-Location), and the page shell's success toast (`toast=`, see [Success toasts](#success-toasts)) |
 | `redirect_to(req, location; status=303, query=true)` | Redirect a moved or aliased route to its canonical URL, for direct loads and htmx requests alike — see [Moved routes](#moved-routes) |
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
@@ -2945,7 +2947,7 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
 
 | `StaticExport` keyword | Meaning |
 |------------------------|---------|
-| `url_map` | `nothing`, or `address -> target`. Called with the full value of every `hx-get`, `href`, and `src` (query included), and with every address a route body passes to `static_url`. A `String` replaces the attribute verbatim — relative targets such as `"embeds/qoi.html"` are emitted as given — and the element stays live; `nothing` takes the default rules; anything else throws. |
+| `url_map` | `nothing`, or `address -> target`. Called with the full value of every `hx-get`, `href`, and `src` (query included), with every address a route body passes to `static_url`, with the address of every value a `url_params` element declares, and with the path of an `hx-push-url`/`hx-replace-url` address, which keeps its query (see [Page address parameters](#page-address-parameters)). A `String` replaces the attribute verbatim — relative targets such as `"embeds/qoi.html"` are emitted as given — and the element stays live; `nothing` takes the default rules; anything else throws. |
 | `controls` | `:disable` (default) strips `hx-post`/`hx-put`/`hx-patch`/`hx-delete` and unmapped query-string `hx-get`s and greys the element out, as recording does. `:remove` drops those elements with their subtree, so the output carries no non-GET attribute and no greyed element. |
 | `record_base` | Prefix the default rules prepend to rooted addresses an unmapped attribute keeps (`hx-get` under `<record_base>/hx`). Empty by default: unchanged. |
 | `runtime` | `:inline` (default) puts a `runtime=:linked` page's runtime back inline, so each file stands alone. `:linked` keeps the links, rewritten by `url_map`/`record_base` like any `src`/`href`, for a bundle that carries the runtime once: `copy_vendorfiles(dir)` writes it next to the libraries, so the page's `assets` prefix addresses both. |
@@ -2992,3 +2994,72 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
   poller: `sync=wants_markdown(__req__) || static_export(__req__) !== nothing`.
 - `parent=` works as for any dispatch: the blocking execution nests under the
   caller's node.
+
+## Page address parameters
+
+A page that reads parameters from its address (`/?k=4.0&messstelle=…`) keeps
+working when they are applied in the browser rather than read by the server:
+a static export has no server to read them, and a link, a reload or Back
+should show the same view either way. Declare on each element that loads its
+content with `hx-get` which address parameters drive it:
+
+```julia
+alarms(k) = h.div(id="voralarme", hx_get="/voralarme", hx_trigger="none", hx_swap="outerHTML";
+                  url_params(k = k; values = (k = (3.0, 4.0, 5.0),))...)(
+    alarms_view(k),
+    (h.a("$x SD"; href="#", hx_get="/voralarme?k=$x", hx_target="#voralarme",
+         hx_swap="outerHTML") for x in (3.0, 4.0, 5.0))...)
+
+probe_pane(default) = h.div(id="pane", hx_get="/messstelle",
+    hx_trigger="load, aov:click[detail.id=='karte'] from:body",
+    hx_vals="js:{...(event?.detail?.datum?.kenn ? {kenn: event.detail.datum.kenn} : {})}";
+    url_params(messstelle = default => :kenn; values = (messstelle = all_kenns,))...)
+```
+
+| Declaration | Meaning |
+|-------------|---------|
+| `k = k` | The address parameter `k` drives the element, which was rendered for `k` (`nothing`: rendered without one). |
+| `messstelle = kenn => :kenn` | The address says `messstelle`, the element's requests send `kenn`. |
+| `values = (k = domain,)` | The values a static export writes a file for, and the only ones the browser accepts from the address. A parameter without a domain follows the address on a live page only. |
+
+The page runtime (`url_params_script`, carried by every `htmx()` page) does
+the rest:
+
+- **Address → element.** When the element enters the page (load, an htmx swap,
+  Back/Forward) and the address names another value than the one it shows,
+  it requests its `hx-get` again with the address's value. A `load`-triggered
+  element sends the address's value with its first request, so it loads once.
+  Its other requests (polling, a refresh) carry the address's value too,
+  unless the request carries the parameter itself, as the probe pane's map
+  click does. A value outside `values` keeps the element as it is and logs a
+  console warning.
+- **Element → address.** A request that loads the element with a new value —
+  its own, or another element's whose `hx-target` is this one, like the
+  "4 SD" links above — writes that value into the address with
+  `history.replaceState`, keeping the other parameters and htmx's history
+  state. A first load that shows the rendered value leaves the address alone.
+  The app needs no `hx-push-url` for this, and a share button that copies
+  `location.href` copies the view.
+- **Static exports.** `StaticExport`'s `url_map` is called with the address of
+  every declared value (`/voralarme?k=4.0`), so an exporter that writes every
+  mapped address writes those too; the element carries each value's file and
+  its `hx-get` names the file of the value it was rendered with. `record!`
+  records them itself as `<record_dir>/hx/<path>@<query>.html`. A value with
+  no file keeps the element as it is.
+- **Pushed addresses.** A static export maps the path of an `hx-push-url` or
+  `hx-replace-url` address like an `href` and keeps its query (`/?k=4.0` →
+  `index.html?k=4.0`), because the page reads the query in the browser.
+
+Two details of the markup:
+
+- An element that shows its content from the start, like `alarms` above,
+  needs a trigger that never fires (`hx_trigger="none"`). With `hx-get` and no
+  trigger, htmx loads it on every click inside it, such as a click on one of
+  its own links.
+- `hx-vals` that take a value from an event leave the parameter out when there
+  is none, as `probe_pane` does. An `undefined` value is sent as the text
+  `undefined`, and a default written there would override the address.
+
+A tab strip records its open tab itself: see `tabset`'s `url_param`. Inside a
+docs embed (`.htmxo-embed`) the address belongs to the host page and is left
+alone.
