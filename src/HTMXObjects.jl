@@ -5652,14 +5652,17 @@ end
 
 # `route!` with another instance of a type already served from this store: the
 # retained roots were built from the earlier instance, so the next request
-# builds a new one from the current instance instead.
-function _forget_managed_roots!(provider::RootProvider, RootT)
+# builds a new one from the current instance instead. A retained root that IS
+# the routed instance stays: `semantic_app(app)` before `route!(app)` retains
+# `app` itself, and requests then share its caches.
+function _forget_managed_roots!(provider::RootProvider, RootT, routed)
     factory = provider.factory
     factory isa _ManagedRootFactory || return nothing
     released = lock(factory.lock) do
         Any[(delete!(factory.entries, key);
              _managed_root_release_event(factory, key, entry, provider.scope, :reroute))
-            for (key, entry) in collect(factory.entries) if first(key) === RootT]
+            for (key, entry) in collect(factory.entries)
+            if first(key) === RootT && entry.value !== routed]
     end
     _notify_managed_root_releases(released)
     nothing
@@ -12687,8 +12690,9 @@ receives `app`'s fixed fields and the keyword overrides it was constructed
 with, alongside the request. So `route!(App(; dir=root))` serves `dir=root`,
 and a type with a required fixed field routes as `route!(App(dir))`.
 Properties `app` did not override are still computed per root, and nothing
-`app` itself computed is shared with requests. A custom `root_provider`
-factory builds its own roots. Calling `route!` again with another instance
+`app` itself computed is shared with requests — unless `semantic_app(app)`
+rendered before `route!(app)`: its automatic store then retains `app` itself,
+remounted per request. A custom `root_provider` factory builds its own roots. Calling `route!` again with another instance
 serves later requests from that one; a managed store drops the roots it built
 from the earlier instance.
 
@@ -12734,7 +12738,7 @@ function route!(obj; prefix="", record_dir=nothing, record_base="",
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
     _root_providers[T] = provider
-    get(_root_templates, T, nothing) === obj || _forget_managed_roots!(provider, T)
+    get(_root_templates, T, nothing) === obj || _forget_managed_roots!(provider, T, obj)
     _root_templates[T] = obj
     _operation_policies[T] = policy
     !isnothing(record_dir) && empty!(_static_kwargs_paths)

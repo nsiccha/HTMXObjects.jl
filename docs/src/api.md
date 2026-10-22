@@ -1729,7 +1729,9 @@ route!(SimApp(; bundles_dir=root))   # every request reads `root`
 A type with a required fixed field routes the same way (`route!(App(dir))`).
 Properties the instance did not override are still computed per root, so a
 default that reads `ENV` is read again by each fresh root. Nothing the instance
-computed itself is shared with requests. Calling `route!` again with another
+computed itself is shared with requests, unless `semantic_app(app)` rendered
+before `route!(app)`: the automatic store then retains `app` itself, remounted
+per request. Calling `route!` again with another
 instance serves later requests from that one; a managed store drops the roots
 it built from the earlier instance. A custom `RootProvider(factory)` builds its
 own roots. Before HTMXObjects `4472df4`, `route!` used only the instance's type,
