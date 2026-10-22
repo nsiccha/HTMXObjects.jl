@@ -33,7 +33,7 @@ export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
 export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
-export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
@@ -2710,6 +2710,7 @@ _runtime_blocks() = (
     live_thread_script = (:js, live_thread_script),
     utility_styles = (:css, htmxo_utility_styles),
     tabset_styles = (:css, tabset_styles),
+    tabset_script = (:js, tabset_script),
     comparison_styles = (:css, comparison_styles),
     editor_styles = (:css, editor_styles),
     comparison = (:js, comparison_js),
@@ -2926,6 +2927,8 @@ function htmx(args...;
             # layout-shift to guard (no skeleton/placeholder needed).
             (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
             _runtime_heads(mount, :utility_styles, :tabset_styles,
+                # A tabset's open tab follows the page URL; inert without one.
+                :tabset_script,
                 :comparison_styles, :editor_styles,
                 # Route-named success toasts and `window.htmxoToast`; inert
                 # until a response or a script raises one.
@@ -22763,6 +22766,94 @@ tabset_styles() = h.style(Raw("""
 }
 """))
 
+"""
+    tabset_script()
+
+JS that keeps a [`tabset`](@ref)'s open tab in the page URL. A tab click
+replaces the tabset's URL parameter with the tab's name, and a page opened
+with that parameter — reloaded, reached with Back, or a shared link — shows the
+named tab. Auto-included by `htmx()`; inject manually via `extra_head` (next to
+[`tabset_styles`](@ref)) if you're building your own `<head>`.
+"""
+tabset_script() = h.script(Raw("""
+(() => {
+    if (window.htmxoTabset) return;
+    const links = ts => Array.from(ts.querySelectorAll(':scope > nav a[data-tab-name]'));
+    const panelOf = (ts, a) => ts.querySelector(':scope > .tab-panel[data-panel="' + a.dataset.panel + '"]');
+    const recording = ts => Boolean(ts.dataset.tabParam) && !ts.closest('.htmxo-embed');
+
+    // Shows tab `a` before htmx has processed the tabset. A lazy panel that is
+    // shown loads itself once visible, a hidden one from its tab's first click
+    // (`_tabset_panel` / `_tabset_lazy_link_attrs`), so those attributes move
+    // with the tab and htmx arms the right ones: the default tab's lazy panel
+    // is never fetched for a tab the URL hides.
+    const open = (ts, a) => {
+        const from = links(ts).find(l => l.classList.contains('contrast'));
+        const shown = from && panelOf(ts, from), target = panelOf(ts, a);
+        if (shown && shown.hasAttribute('hx-get')) {
+            from.setAttribute('hx-get', shown.getAttribute('hx-get'));
+            from.setAttribute('hx-target', '#' + shown.id);
+            from.setAttribute('hx-swap', 'innerHTML');
+            from.setAttribute('hx-trigger', 'click once');
+            if (ts.dataset.tabPreload) from.setAttribute('preload', ts.dataset.tabPreload);
+            ['hx-get', 'hx-trigger', 'hx-swap'].forEach(n => shown.removeAttribute(n));
+        }
+        if (a.hasAttribute('hx-get')) {
+            target.setAttribute('hx-get', a.getAttribute('hx-get'));
+            target.setAttribute('hx-trigger', 'intersect once');
+            target.setAttribute('hx-swap', 'innerHTML');
+            ['hx-get', 'hx-target', 'hx-swap', 'hx-trigger', 'preload'].forEach(n => a.removeAttribute(n));
+        }
+        links(ts).forEach(l => { l.classList.remove('contrast'); l.classList.add('secondary'); });
+        a.classList.remove('secondary');
+        a.classList.add('contrast');
+        ts.querySelectorAll(':scope > .tab-panel').forEach(p => p.classList.add('u-hidden'));
+        target.classList.remove('u-hidden');
+    };
+
+    // Called by the script each tabset renders as its last child, so it runs
+    // while the tabset is inserted: during parsing, or on an htmx swap before
+    // htmx's settle-time processing. The URL's tab shows from the start.
+    const warned = new Set();
+    window.htmxoTabset = ts => {
+        if (!recording(ts)) return;
+        const key = ts.dataset.tabParam;
+        const name = new URLSearchParams(location.search).get(key);
+        if (name === null) return;
+        const a = links(ts).find(l => l.dataset.tabName === name);
+        if (a) { if (!a.classList.contains('contrast')) open(ts, a); return; }
+        // Tabsets that share a parameter share its value: warn only when no
+        // tabset on the page has a tab of that name.
+        setTimeout(() => {
+            const known = Array.from(document.querySelectorAll('.tabset > nav a[data-tab-name]')).some(l =>
+                l.dataset.tabName === name && l.closest('.tabset').dataset.tabParam === key);
+            if (known || warned.has(key + '=' + name)) return;
+            warned.add(key + '=' + name);
+            console.warn('tabset: no tab is named "' + name + '" (?' + key + '=); showing the default tab');
+        }, 0);
+    };
+
+    // A tab click records its name. Capture phase, because the tab's hyperscript
+    // halts the click. The history entry is replaced, not pushed, and keeps its
+    // state: htmx 2 restores an entry on Back/Forward only when that state says
+    // `htmx`. htmx files its Back snapshot of this page under the path it keeps
+    // in sessionStorage (`saveCurrentPageToHistory`), so that path follows the
+    // address too; where storage is blocked htmx keeps the path in memory and
+    // refetches the page on Back instead, which shows the same tab.
+    document.addEventListener('click', e => {
+        const a = e.target instanceof Element ? e.target.closest('.tabset > nav a[data-tab-name]') : null;
+        if (!a) return;
+        const ts = a.closest('.tabset');
+        if (!recording(ts)) return;
+        const url = new URL(location.href);
+        url.searchParams.set(ts.dataset.tabParam, a.dataset.tabName);
+        if (url.href === location.href) return;
+        history.replaceState(history.state, '', url);
+        if (window.htmx) try { sessionStorage.setItem('htmx-current-path-for-history', url.pathname + url.search); } catch (_) {}
+    }, true);
+})();
+"""))
+
 _tabset_panel_id(id, i) = "$id-tab-$i"
 
 # String content = URL → lazy. The initially active panel loads itself once it
@@ -22791,6 +22882,8 @@ end
 
 # A lazy tab that starts hidden fetches its panel from the tab link itself, on
 # the first click only — which is also what lets `preload` warm it on hover.
+# `tabset_script` moves these attributes and the panel's when a page opened
+# with the tab in its URL shows another tab than `active`; keep the two alike.
 _tabset_lazy_link_attrs(content::AbstractString, i, active, id, preload) =
     i == active ? (;) : (;
         hx_get=content,
@@ -22801,10 +22894,68 @@ _tabset_lazy_link_attrs(content::AbstractString, i, active, id, preload) =
     )
 _tabset_lazy_link_attrs(content, i, active, id, preload) = (;)
 
+# A tab's name in the URL unless `names` gives one: its label lowercased, with
+# ä ö ü ß spelled ae oe ue ss, other accents dropped, and every other run of
+# characters one `-` ("Güte der Messungen (K-40)" → "guete-der-messungen-k-40").
+# A label that is not text, or keeps no letter or digit, is named by position.
+function _tabset_slug(label::AbstractString, i)
+    s = replace(lowercase(label), "ä" => "ae", "ö" => "oe", "ü" => "ue", "ß" => "ss")
+    s = strip(replace(Base.Unicode.normalize(s; stripmark=true), r"[^a-z0-9]+" => "-"), '-')
+    isempty(s) ? string(i) : String(s)
+end
+_tabset_slug(label, i) = string(i)
+
+_tabset_names(tabs, ::Nothing) = [_tabset_slug(label, i) for (i, (label, _)) in enumerate(tabs)]
+function _tabset_names(tabs, names)
+    length(names) == length(tabs) || throw(ArgumentError(
+        "tabset: `names` has $(length(names)) entries for $(length(tabs)) tabs"))
+    String[string(name) for name in names]
+end
+
+# One name per tab, each its own: the URL and `active` pick a tab by it.
+function _tabset_checked_names(names)
+    for (i, name) in enumerate(names)
+        isempty(name) && throw(ArgumentError("tabset: tab $i has an empty name; give it one with `names=`"))
+        j = findfirst(==(name), names)
+        j == i || throw(ArgumentError(
+            "tabset: tabs $j and $i are both named \"$name\"; tell them apart with `names=`"))
+    end
+    names
+end
+
+_tabset_active_index(active::Integer, names) = active
+function _tabset_active_index(active::AbstractString, names)
+    i = findfirst(==(active), names)
+    isnothing(i) && throw(ArgumentError(
+        "tabset: no tab is named \"$active\"; the names are $(join(repr.(names), ", "))"))
+    i
+end
+
+# What lets `tabset_script` keep the open tab in the URL: the key on the
+# tabset (with the `preload` trigger a lazy tab regains when the URL opens
+# another one), each tab's name, and the call that shows the URL's tab.
+_tabset_url_attrs(::Nothing, preload) = (;)
+function _tabset_url_attrs(url_param::AbstractString, preload)
+    isempty(url_param) && throw(ArgumentError("tabset: `url_param` is empty; pass `nothing` to keep the tab out of the URL"))
+    trigger = _preload_attrs(preload)
+    (; data_tab_param=url_param, (isempty(trigger) ? (;) : (; data_tab_preload=trigger.preload))...)
+end
+_tabset_name_attrs(::Nothing, names, i) = (;)
+_tabset_name_attrs(url_param, names, i) = (; data_tab_name=names[i])
+
+# Runs while the tabset is inserted — during parsing, or on an htmx swap
+# before htmx and hyperscript process it (`tabset_script`).
+const _TABSET_URL_RESTORE = "(window.htmxoTabset || (ts => ts.closest('.htmxo-embed') || " *
+    "console.warn('tabset: tabset_script() is not on this page, so the open tab is not kept in the URL')))" *
+    "(document.currentScript.parentElement)"
+_tabset_url_restore(::Nothing) = ()
+_tabset_url_restore(url_param) = (h.script(Raw(_TABSET_URL_RESTORE)),)
+
 include("comparison.jl")
 
 """
-    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))", preload=nothing)
+    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))", preload=nothing,
+           url_param="tab", names=nothing)
 
 Client-side tabs using Pico CSS nav + hyperscript.
 
@@ -22823,31 +22974,57 @@ Mixed (eager + lazy):
 
 `preload=true` starts fetching a lazy tab while the pointer rests on it (see
 [`hx_link`](@ref) for the other values and what the route does with it).
+
+The open tab lives in the page URL: a tab click replaces the URL's `tab`
+parameter with the tab's name (no new history entry), and a page opened with
+`?tab=<name>` — reloaded, reached with Back, or a shared link — shows that tab.
+The browser does both, so the app's routes need not read `?tab=`. A tab's name
+is its label lowercased, with umlauts spelled out and every other run of
+characters a `-` (`"Güte der Messungen (K-40)"` → `guete-der-messungen-k-40`);
+a label that is not text is named by its position. `names=["guete", "sonden", …]`
+names the tabs instead. Two tabs with one name are an `ArgumentError` while the
+URL or `active` picks tabs by name.
+`url_param="insitu"` gives a tabset its own parameter; tabsets that share one
+share its value, so give each tabset on a page its own when they should keep
+their tabs apart. `url_param=nothing` leaves the URL alone. Inside a docs embed
+(`.htmxo-embed`) the URL is the host page's and is left alone too.
+
+`active` picks the tab shown when the URL names none, by position or by name
+(`active="sonden"`). Keeping the tab in the URL needs [`tabset_script`](@ref),
+which [`htmx`](@ref) pages carry.
 """
-tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing) = h.div(; id, class="tabset")(
-    h.nav(
-        h.ul([
-            h.li(h.a(label;
-                href="#",
-                class = i == active ? "contrast" : "secondary",
-                _="on click
-                    halt the event
-                    remove .contrast from <a/> in closest <nav/>
-                    add .secondary to <a/> in closest <nav/>
-                    remove .secondary from me
-                    add .contrast to me
-                    set panel to my @data-panel
-                    add .u-hidden to <div.tab-panel/> in closest <div/>
-                    remove .u-hidden from <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
-                ",
-                data_panel="tab-$i",
-                _tabset_lazy_link_attrs(content, i, active, id, preload)...,
-            ))
-            for (i, (label, content)) in enumerate(tabs)
-        ]...)
-    ),
-    [_tabset_panel(content, i, active, id) for (i, (_, content)) in enumerate(tabs)]...
-)
+function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing,
+                url_param="tab", names=nothing)
+    tab_names = isnothing(url_param) && isnothing(names) && active isa Integer ? nothing :
+        _tabset_checked_names(_tabset_names(tabs, names))
+    active = _tabset_active_index(active, tab_names)
+    h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload)...)(
+        h.nav(
+            h.ul([
+                h.li(h.a(label;
+                    href="#",
+                    class = i == active ? "contrast" : "secondary",
+                    _="on click
+                        halt the event
+                        remove .contrast from <a/> in closest <nav/>
+                        add .secondary to <a/> in closest <nav/>
+                        remove .secondary from me
+                        add .contrast to me
+                        set panel to my @data-panel
+                        add .u-hidden to <div.tab-panel/> in closest <div/>
+                        remove .u-hidden from <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
+                    ",
+                    data_panel="tab-$i",
+                    _tabset_name_attrs(url_param, tab_names, i)...,
+                    _tabset_lazy_link_attrs(content, i, active, id, preload)...,
+                ))
+                for (i, (label, content)) in enumerate(tabs)
+            ]...)
+        ),
+        [_tabset_panel(content, i, active, id) for (i, (_, content)) in enumerate(tabs)]...,
+        _tabset_url_restore(url_param)...
+    )
+end
 
 """
     htmx_tabset(items; active=nothing, target="#content", preload=nothing, ...)
