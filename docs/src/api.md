@@ -542,6 +542,7 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
+| `pdf_report(page_or_markdown, path; title, lang)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 | `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
 
@@ -637,6 +638,53 @@ keep links plain — the
 cache single-flights the drain, backs off, and logs with the cause — so first
 paint never waits; the next render (a poll cycle, a push refresh) picks the
 metadata up. `?plain` carries `[label](href)` either way.
+
+### Accessible PDF reports — `pdf_report` {#pdf-report}
+
+`pdf_report` writes a page's Markdown projection as an accessible PDF:
+PDF/UA-1 (ISO 14289-1), the format German federal agencies require under
+BITV 2.0. The PDF has a tagged structure tree, a document title and language,
+table header cells, captions attached to their tables and figures, alt text on
+images and equations, and link annotations.
+
+```julia
+page = h.article(h.h1("Ergebnisse"),
+    render_table(df; caption=CaptionSpec(; title="Arbeitsplätze", short="Je Gemeinde.")))
+pdf_report(page, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE")
+
+# The Markdown of a mounted route works the same way:
+md = String(dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"]).body)
+pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resources="figures")
+```
+
+- **Engine:** Quarto's Typst engine with `pdf-standard: ua-1`, plus a filter
+  that gives every equation its TeX source as alt text. It needs a Quarto whose
+  Typst supports PDF/UA-1 (verified with Quarto 1.10.18 and its Typst 0.15.1),
+  found on `PATH` or passed as `quarto=`. A PDF that does not declare PDF/UA-1
+  is an error, not a result.
+- **`title`** is the document title, which PDF/UA requires; Quarto also prints
+  it as the title block above the content.
+- **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
+  Without one, Quarto's template labels the document with the region `US`.
+  Mark a part in another language with a `::: {lang="en"}` block in Markdown.
+- **`resources`** is the directory relative paths (images) resolve against; it
+  defaults to the PDF's directory. `pdf_report` removes its temporary `.qmd`,
+  Quarto's intermediate files and the `.quarto` cache from it, also on failure.
+- **Images need alt text.** Typst refuses a PDF/UA document with an image that
+  has none, and `pdf_report` throws with Typst's message, for example
+  `PDF/UA-1 error: missing alt text` with the source line. In hand-written
+  Markdown, give an image its alt text as an attribute,
+  `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
+  paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
+  whose image has no alt text.
+
+Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
+Whether the alt texts describe the figures and the reading order makes sense
+is still for a person to check.
+
+```@docs
+pdf_report
+```
 
 ## Error handling and tagging
 
