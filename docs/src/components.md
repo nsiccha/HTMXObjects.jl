@@ -360,12 +360,26 @@ master_detail_table(["Probe", "Land", "P(anomaly)"], probes;
 render_table(summary; link="probes", link_key=r -> r.kenn)
 ```
 
-- **Keys.** `master_detail_table` keys each item row by its `key` (as a
-  string, not the sanitised row id), including every copy of a leaf that a
-  regrouped table lists under several groups; group rows have no key.
-  `render_table` keys rows by `link_key(row)`. Hand-built `sortable_table` rows
-  carry `data-htmxo-link-key`, or are keyed by their `data-htmxo-select-key`.
-  A detail row counts as its master. Keys compare as strings.
+- **Keys.** `master_detail_table` keys each item row by `link_key(item)`,
+  which defaults to its `key` (as a string, not the sanitised row id),
+  including every copy of a leaf that a regrouped table lists under several
+  groups; group rows have no key. `render_table` keys rows by `link_key(row)`.
+  Hand-built `sortable_table` rows carry `data-htmxo-link-key`, or are keyed
+  by their `data-htmxo-select-key`. A detail row counts as its master. Keys
+  compare as strings.
+- **Several tables of the same items.** A `master_detail_table`'s `key` names
+  its row and detail ids, so it must be unique on the page. When two tables on
+  one page show the same items, keep each table's `key` unique and give both
+  the same `link_key`:
+
+  ```julia
+  master_detail_table(headers, probes; key=p -> p.kenn, master=cells,
+      detail=probe_fragment, link="probes")
+  master_detail_table(headers, trending; key=p -> "trend-" * p.kenn, master=cells,
+      detail=probe_fragment, link="probes", link_key=p -> p.kenn)
+  ```
+
+  `link_key` without `link` throws, since it would highlight nothing.
 - **The event.** Hovering or keyboard-focusing a keyed row dispatches
   `htmxo:link` on `document` with `detail` `{group, key, source}`; when the
   hover ends, `key` is `null`. Every linked table listens for it and marks the
