@@ -789,17 +789,18 @@ worked examples.
 
 ### Where errors go — `/tmp/htmxo_errors/<uid>.log`
 
-**Every caught server fault writes a full report to
-`/tmp/htmxo_errors/<uid>.log` by default.** That is the first place to
-look when a route returns the framework's error article. A caller fault — a
-`4xx` answer such as a missing or invalid submitted value, a `CallerFault` a
-route body threw, a refused resource operation, or a mutation result the server
-no longer holds — is answered with
-its article and status but not recorded: no log file, no `@error` line, no
-`X-HTMXO-Error-Id`, no `__on_error__`. The in-browser
-article only shows the short `<uid>` — the uid, ISO timestamp, request
-method + target, and full `showerror(io, err, bt)` backtrace all live in
-the log file on disk.
+**Every error answer writes a full report to
+`/tmp/htmxo_errors/<uid>.log` by default** — a server fault and a caller
+fault (a `4xx` answer such as a missing or invalid submitted value, a
+`CallerFault` a route body threw, a refused resource operation, or a mutation
+result the server no longer holds) alike. That is the first place to look when
+a route returns the framework's error article. The in-browser article only
+shows the short `<uid>`; the log file on disk holds the uid, ISO timestamp,
+the error's HTTP `status` (`400`, `500`, …), the request method and target, for
+an htmx request the browser's address (`page`), the sending element
+(`trigger`) and the swap target (`swap_target`), for a form post the names of
+the submitted fields (`body_params`, never their values), and the full
+`showerror(io, err, bt)` backtrace.
 
 ```
 /tmp/htmxo_errors/<uid>.log          ← default; tempdir() + "htmxo_errors"
@@ -859,9 +860,9 @@ When the request itself is at fault — an unknown resource id, an argument out
 of range, a refused operation — throw `CallerFault(status, message)` with a
 `4xx` status. It is answered like a missing parameter: that status (200 under
 HTMX), the message in an article titled with the status's reason phrase
-(`Not Found`) or in your `__error__` hook's rendering, and no error log, no
-`@error` line, no `X-HTMXO-Error-Id`, no `__on_error__`. A server fault stays an
-ordinary exception; `CallerFault` refuses a status outside `4xx`.
+(`Not Found`) or in your `__error__` hook's rendering, and recorded like any
+error answer, its log naming that status. A server fault stays an ordinary
+exception; `CallerFault` refuses a status outside `4xx`.
 
 ```julia
 @get probe(kenn::String) = begin
@@ -883,8 +884,8 @@ The hook receives the exception wrapped like any route error, so read it with
     # Custom rendering:
     __error__(err) = h.article(h.header("Oops"), h.p(sprint(showerror, err)))
 
-    # ...or with the recorded error id (`nothing` for a caller fault):
-    # __error__(err, uid) = h.article(h.header("Oops"), h.p("Error ", h.code(something(uid, "–"))))
+    # ...or with the recorded error id:
+    # __error__(err, uid) = h.article(h.header("Oops"), h.p("Error ", h.code(uid)))
 end
 ```
 

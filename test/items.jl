@@ -12021,11 +12021,11 @@ end
 
         # Arguments are validated before the stream starts: a bad request is
         # an ordinary error response (which also stops EventSource retries),
-        # and an unparseable value is the caller's fault: 400, not recorded.
+        # and an unparseable value is the caller's fault: a recorded 400.
         r, body = stream("/ticks?n=many")
         @test r.status == 400
         @test !startswith(HTTP.header(r, "Content-Type", ""), "text/event-stream")
-        @test HTTP.header(r, "X-HTMXO-Error-Id", "") == ""
+        @test HTTP.header(r, "X-HTMXO-Error-Id", "") != ""
 
         _, body = stream("/resume", ["Last-Event-ID" => "41"])
         @test frames(body)[1] == "event: done\ndata: resumed after 41"
