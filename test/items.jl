@@ -8415,6 +8415,58 @@ end
     @test !contains(markdown, "<button")
 end
 
+@testitem "a block semantic element is its own paragraph among siblings in markdown" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # HTMX.jl splices a non-Node child into the running line, so semantic
+    # elements in a layout `div` ran together in every Markdown read.
+    import CommonMark
+    md = HTMXObjects.to_markdown_string
+    metric(label, value) = SemanticMetric(label, value)
+
+    # The reported facts bar, text on either side, a returned vector, and a
+    # group, whose last member text after it used to join.
+    @test md(h.div(; class="facts")(metric("A", "1"), metric("B", "2"))) ==
+        "**A:** 1\n\n**B:** 2\n\n"
+    @test md(h.div("lead text", metric("A", "1"))) == "lead text\n\n**A:** 1\n\n"
+    @test md(h.div(metric("A", "1"), "after")) == "**A:** 1\n\nafter"
+    @test md([metric("A", "1"), metric("B", "2")]) == "**A:** 1\n\n**B:** 2\n\n"
+    @test md(h.div(SemanticGroup(metric("A", "1"), metric("B", "2")), "after")) ==
+        "**A:** 1\n\n**B:** 2\n\nafter"
+
+    # Not just spacing: run together, a closing fence followed by text on its
+    # line leaves the fence open, a card's heading lands mid-line, and a table
+    # right after a fields list continues the list. Parsed back, each block
+    # is its own.
+    html(text) = CommonMark.html(HTMXObjects.markdown_parser()(text))
+    code = md(h.div(SemanticCode("julia", "x = 1"), metric("A", "1")))
+    @test code == "```julia\nx = 1\n```\n\n**A:** 1\n\n"
+    @test html(code) == "<pre><code class=\"language-julia\">x = 1\n</code></pre>\n" *
+        "<p><strong>A:</strong> 1</p>\n"
+    cards = md(h.div(SemanticCard("T1", metric("A", "1")), SemanticCard("T2", metric("B", "2"))))
+    @test cards == "### T1\n\n**A:** 1\n\n### T2\n\n**B:** 2\n\n"
+    @test contains(html(cards), "<h3>T2</h3>")
+    fields_table = html(md(h.div(SemanticFields(a=1), SemanticTable((x=[1, 2], y=[3, 4])))))
+    @test contains(fields_table, "</ul>\n<table>")
+
+    # A status, link, action or artifact is inline in HTML and stays in its line.
+    @test md(h.p("state: ", SemanticStatus(:ok; detail="fine"), " done")) ==
+        "state: ✓ **ok** — fine done\n\n"
+    @test md(h.p("see ", SemanticLink("docs", "/docs"), " now")) == "see [docs](/docs) now\n\n"
+    # A table cell is one line: its blocks fold into `<br>` like any cell's.
+    @test contains(md(h.table(h.tr(h.th("k")), h.tr(h.td(metric("A", "1"), metric("B", "2"))))),
+        "| **A:** 1<br>**B:** 2 |")
+    # A lone element keeps its standalone projection.
+    @test md(metric("A", "1")) == "**A:** 1"
+
+    # A semantic container inside a Node is chrome-stripped too, as it already
+    # was at the top level: the form inside the group no longer leaks.
+    leaked = md(h.div(SemanticGroup(h.form(h.textarea("SECRET")), "keep")))
+    @test !contains(leaked, "SECRET")
+    @test contains(leaked, "keep")
+    # Cards rescued out of a form are blocks between the text around the form.
+    @test md(h.div("lead", h.form(h.input(), SemanticCard("T1", "d1"),
+        SemanticCard("T2", "d2")), "tail")) == "lead\n\n### T1\n\nd1\n\n### T2\n\nd2\n\ntail"
+end
+
 @testitem "render_markdown renders CommonMark and links bare URLs by default" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     # Intra-word underscores stay verbatim — the stdlib parser deleted them.
     html = repr("text/html",
