@@ -28,7 +28,7 @@ export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or
-export wants_markdown, wants_errors, markdown_response, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
@@ -14370,6 +14370,125 @@ end
 Create a `text/markdown` HTTP response from a string.
 """
 markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; charset=utf-8"], body=text)
+
+# --- Accessible PDF export ---
+
+# Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
+# this Quarto filter gives each one its TeX source.
+const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
+
+# A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
+# Typst template defaults the region to "US", so `de` alone would label a
+# German report `de-US`.
+const _PDF_REPORT_LANG = r"^[A-Za-z]{2,3}(-[A-Za-z]{4})?-([A-Za-z]{2}|[0-9]{3})$"
+
+# The XMP entry Typst writes into a PDF/UA-1 file, and only into one.
+const _PDFUA1_MARKER = "<pdfuaid:part>1</pdfuaid:part>"
+
+# Quarto keeps a font cache in `<dir>/.quarto`, which `pdf_report` removes when
+# it created it; one render per process at a time keeps that safe.
+const _PDF_REPORT_LOCK = ReentrantLock()
+
+_yaml_string(s) = "\"" * escape_string(s, '"') * "\""
+
+_pdf_report_qmd(markdown; title, lang) = """
+    ---
+    title: $(_yaml_string(title))
+    lang: $(_yaml_string(lang))
+    format:
+      typst:
+        pdf-standard: [ua-1]
+    filters:
+      - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
+    ---
+
+    """ * markdown
+
+"""
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
+    pdf_report(value, pdf_path; kwargs...) -> pdf_path
+
+Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
+input is Markdown, typically a page's own projection: a `value` such as an
+`h.article(...)` is converted with `to_markdown_string`, and the body of
+`dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"])` is passed as
+it is. Tables, figures and captions keep their structure: header rows become
+table header cells, captions stay attached to their table or figure.
+
+`title` is the document title, which PDF/UA requires; Quarto also prints it as
+the title block above the content. `lang` is a language tag with its region
+(`"de-DE"`, `"en-GB"`): Quarto's template would otherwise label the document
+with the region `US`. Mark a part in another language with a
+`::: {lang="en"}` block, which tags it English (Quarto keeps the document's
+region on it). `resources` is the directory relative paths in the Markdown
+(images) resolve against.
+
+The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
+filter that gives every equation its TeX source as alt text. Every image needs
+alt text: Typst refuses a PDF/UA document with an image that has none. A
+Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
+supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
+Typst 0.15.1).
+
+Throws an `ArgumentError` for a blank `title`, a `lang` without region or a
+missing `resources` directory, and an error carrying Quarto's output when
+Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
+the offending source line), or writes a PDF that does not declare PDF/UA-1. The
+temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
+from `resources`, also when the render fails.
+
+Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
+alt texts and the reading order are still yours to check by hand.
+
+```julia
+page = h.article(h.h1("Results"), render_table(df; caption=CaptionSpec(; title="Scores")))
+pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB")
+```
+"""
+function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
+                    title::AbstractString, lang::AbstractString,
+                    resources::AbstractString=dirname(abspath(pdf_path)),
+                    quarto::AbstractString="quarto")
+    isempty(strip(title)) &&
+        throw(ArgumentError("pdf_report: `title` is blank; PDF/UA-1 requires a document title"))
+    occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
+        "pdf_report: `lang` must be a language tag with its region, such as \"de-DE\" or \"en-GB\" " *
+        "(got $(repr(lang))); without one Quarto labels the document with the region US"))
+    isdir(resources) ||
+        throw(ArgumentError("pdf_report: `resources` is not a directory: $(repr(resources))"))
+    exe = Sys.which(quarto)
+    isnothing(exe) && error("pdf_report: Quarto not found (`quarto=$(repr(quarto))`); " *
+        "install a Quarto whose Typst supports PDF/UA-1 (verified: 1.10.18) or pass its path as `quarto=`")
+    lock(_PDF_REPORT_LOCK) do
+        cache_dir = joinpath(resources, ".quarto")
+        had_cache = ispath(cache_dir)
+        base = tempname(resources; cleanup=false)
+        qmd, pdf = base * ".qmd", base * ".pdf"
+        try
+            write(qmd, _pdf_report_qmd(markdown; title, lang))
+            output = IOBuffer()
+            proc = run(pipeline(ignorestatus(Cmd(`$exe render $(basename(qmd)) --to typst`; dir=resources));
+                                stdout=output, stderr=output))
+            log = replace(String(take!(output)), r"\e\[[0-9;]*m" => "")
+            success(proc) && isfile(pdf) ||
+                error("pdf_report: Quarto could not render the report (exit code $(proc.exitcode)):\n$log")
+            occursin(_PDFUA1_MARKER, read(pdf, String)) || error(
+                "pdf_report: Quarto wrote a PDF that does not declare PDF/UA-1, so its Typst does not apply " *
+                "`pdf-standard: ua-1`; use a newer Quarto (verified: 1.10.18). Quarto's output:\n$log")
+            mkpath(dirname(abspath(pdf_path)))
+            mv(pdf, pdf_path; force=true)
+        finally
+            rm(qmd; force=true)
+            rm(pdf; force=true)
+            rm(base * ".typ"; force=true)  # left behind when Typst refuses the document
+            rm(base * "_files"; force=true, recursive=true)
+            had_cache || rm(cache_dir; force=true, recursive=true)
+        end
+    end
+    return pdf_path
+end
+pdf_report(value, pdf_path::AbstractString; kwargs...) =
+    pdf_report(to_markdown_string(value), pdf_path; kwargs...)
 
 # --- Captions ---
 
