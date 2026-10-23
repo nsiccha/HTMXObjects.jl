@@ -16985,6 +16985,10 @@ The JS reads the closest `<table>` relative to the clicked button, serializes th
 visible header cells and body rows to CSV (escaping `"`, `,`, and newlines), and
 triggers a Blob download. A header exports its column name only: the sort
 indicator arrows (` ▲`/` ▼`) and a [`ColumnSpec`](@ref)'s `ⓘ` marker are left out.
+A cell exports the lines it shows: a `<br>` or the edge of a block element (`div`,
+`p`, `li`, …) ends a line, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))`
+exports the quoted two-line field `"6,28\\n6,01–6,55"`, not `6,286,01–6,55`. A header's lines
+join with a space, since a column name stays one name.
 """
 function download_table_js()
     h.script(Raw(raw"""
@@ -16995,12 +16999,32 @@ function downloadTableCsv(btn, filename) {
         s = String(s);
         return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
+    // The lines a cell shows. textContent runs them together
+    // (`<strong>6,28</strong><br><small>6,01–6,55</small>` reads
+    // "6,286,01–6,55"), so a `<br>` and the edges of a block element end a
+    // line, and white space inside a line collapses as the browser shows it.
+    const BLOCK = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|SUMMARY|TABLE|TR|UL)$/;
+    const lines = node => {
+        let out = '';
+        const walk = n => {
+            for (const c of n.childNodes) {
+                if (c.nodeType === Node.TEXT_NODE) out += c.nodeValue.replace(/\s+/g, ' ');
+                else if (c.nodeType !== Node.ELEMENT_NODE) continue;
+                else if (c.tagName === 'BR') out += '\n';
+                else if (BLOCK.test(c.tagName)) { out += '\n'; walk(c); out += '\n'; }
+                else walk(c);
+            }
+        };
+        walk(node);
+        return out.split('\n').map(l => l.trim()).filter(l => l);
+    };
     // A header's column name: its sort caret and explanation marker are
-    // presentation, not part of the name.
+    // presentation, not part of the name, and a name shown on two lines is
+    // still one name.
     const name = th => {
         const copy = th.cloneNode(true);
         copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help').forEach(e => e.remove());
-        return copy.textContent.trim();
+        return lines(copy).join(' ');
     };
     const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
     const groupNames = [];
@@ -17018,8 +17042,9 @@ function downloadTableCsv(btn, filename) {
             return esc(group ? group + ' / ' + name(th) : name(th));
         });
     // A master/detail first cell holds its row controls beside the content;
-    // export the content only, as sorting and search read it.
-    const text = td => (td.querySelector(':scope > [data-htmxo-row-label]') || td).textContent.trim();
+    // export the content only, as sorting and search read it. A cell's lines
+    // stay lines of one quoted field.
+    const text = td => lines(td.querySelector(':scope > [data-htmxo-row-label]') || td).join('\n');
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
         .map(tr =>

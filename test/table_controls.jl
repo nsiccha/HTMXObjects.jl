@@ -309,3 +309,47 @@ end
         end
     end
 end
+
+@testitem "CSV download keeps the lines a cell shows" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', async function() {
+                const createURL = URL.createObjectURL, anchorClick = HTMLAnchorElement.prototype.click;
+                let blob = null;
+                URL.createObjectURL = b => { blob = b; return 'blob:test'; };
+                HTMLAnchorElement.prototype.click = function() {};
+                try { downloadTableCsv(document.getElementById('lines'), 'lines.csv'); } finally {
+                    URL.createObjectURL = createURL; HTMLAnchorElement.prototype.click = anchorClick;
+                }
+                document.body.dataset.csv = blob ? await blob.text() : '';
+                document.body.dataset.done = '1';
+            });
+            """))
+        # A mean over its range (MietspiegelBayes' table cell), block children,
+        # source line breaks inside a text, a unit and a quote.
+        rows = [h.tr(h.td("gut"), h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55")),
+                     h.td(h.div("a"), h.div("b, \"c\"")), h.td("\n   x\n   y  "), h.td("6,28 €/m²"))]
+        table = sortable_table(["Wohnlage", h.th("Baujahr", h.br(), "bis 1918"), "Liste", "Text", "Miete"], rows;
+            id="lines", download=false)
+        page = string("<!doctype html><html><head><meta charset=\"utf-8\">", repr("text/html", sortable_table_js()),
+            repr("text/html", download_table_js()), "</head><body>", repr("text/html", table),
+            repr("text/html", driver), "</body></html>")
+        dom = mktempdir() do directory
+            fixture = joinpath(directory, "page.html")
+            write(fixture, page)
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        @test contains(dom, "data-done=\"1\"")
+        csv = match(r"data-csv=\"([^\"]*)\"", dom)
+        @test !isnothing(csv)
+        expected = "Wohnlage,Baujahr bis 1918,Liste,Text,Miete\ngut,\"6,28\n6,01–6,55\",\"a\nb, \"\"c\"\"\",x y,\"6,28 €/m²\""
+        unescape(s) = replace(s, "&quot;" => "\"", "&#10;" => "\n", "&amp;" => "&", "&lt;" => "<", "&gt;" => ">")
+        @test unescape(csv.captures[1]) == expected
+    end
+end
