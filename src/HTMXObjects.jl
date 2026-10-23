@@ -23370,7 +23370,7 @@ pico_bridge() = h.style(Raw("""
     --htmxo-error:   var(--pico-color-red-550, #e76f51);
     /* Pico has no root-level border color: `--pico-border-color` exists only
        on form controls and buttons, and its divider color
-       (`--pico-muted-border-color`) is too faint for the 2px tab frames. */
+       (`--pico-muted-border-color`) is too faint for a status banner's edge. */
     --htmxo-border:  currentColor;
     --htmxo-muted:   var(--pico-muted-color, color-mix(in srgb, currentColor 60%, transparent));
     /* Pico raises this in steps from 576 px up to 131.25% from 1536 px. Its
@@ -25038,51 +25038,65 @@ document.body.addEventListener('htmx:afterRequest', function(e) {
 """
     tabset_styles()
 
-CSS that turns `tabset(...)`'s Pico `<nav>` + `.tab-panel` markup into a
-classic tab strip: the active tab's border-bottom replaces the nav's
-horizontal rule along its own width, producing one continuous line.
+CSS that draws `tabset(...)`'s `<nav>` + `.tab-panel` markup as an underline
+tab bar: a thin rule under the tabs, the other tabs in the muted text color
+(`--htmxo-muted`), and the open tab in the text color with an accent
+underline (`--htmxo-accent`) over the rule. The panel below is unframed.
+The rule's color is `--htmxo-tab-rule`, by default the text color at 20%;
+set it on `.tabset` (or `:root`) to change it.
 
 Scoped to `.tabset` on the outer `<div>`, so plain `<nav><ul>` menus elsewhere
-are untouched. Auto-included by `htmx()`; inject manually via `extra_head`
-if you're building your own `<head>`.
+are untouched, and complete without Pico. Intentionally unlayered: Pico
+spaces `nav li` and `nav a` unlayered, and an unlayered declaration beats
+every `@layer htmxo` one regardless of specificity, so layered rules left the
+open tab floating above its rule. Auto-included by `htmx()`; inject manually
+via `extra_head` if you're building your own `<head>`.
 """
 tabset_styles() = h.style(Raw("""
-@layer htmxo {
 .tabset > nav {
+    display: block;
     margin: 0;
-    padding: 0 0 0 1rem;
-    border-bottom: 2px solid var(--htmxo-border);
+    padding: 0;
+    box-shadow: inset 0 -1px 0 var(--htmxo-tab-rule, color-mix(in srgb, currentColor 20%, transparent));
 }
-.tabset > nav ul {
-    align-self: flex-end;
-    gap: 0.25rem;
+.tabset > nav > ul {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0;
     margin: 0;
     padding: 0;
     list-style: none;
 }
-.tabset > nav ul li {
-    padding: 0;
-    margin: 0;
-}
-.tabset > nav ul li a {
+.tabset > nav > ul > li {
     display: block;
-    padding: 0.5rem 1rem;
-    border: 2px solid transparent;
-    border-bottom: none;
-    border-radius: 0.35rem 0.35rem 0 0;
-    background: transparent;
-    text-decoration: none;
+    margin: 0;
+    padding: 0;
 }
-.tabset > nav ul li a.contrast {
-    border-color: var(--htmxo-border);
+.tabset > nav > ul > li > a {
+    display: block;
+    margin: 0;
+    padding: 0.6rem 1rem;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0.25rem 0.25rem 0 0;
+    background: transparent;
+    color: var(--htmxo-muted);
+    text-decoration: none;
+    transition: color 0.15s ease-in-out, border-color 0.15s ease-in-out, background-color 0.15s ease-in-out;
+}
+.tabset > nav > ul > li > a:hover {
+    color: inherit;
+    border-bottom-color: color-mix(in srgb, currentColor 35%, transparent);
+    background: color-mix(in srgb, currentColor 6%, transparent);
+}
+.tabset > nav > ul > li > a.contrast {
+    color: inherit;
+    border-bottom-color: var(--htmxo-accent);
     background: transparent;
 }
 .tabset > .tab-panel {
-    padding: 1rem;
-    border: 2px solid var(--htmxo-border);
-    border-top: none;
-    border-radius: 0 0 0.35rem 0.35rem;
-}
+    padding: 1rem 0 0;
 }
 """))
 

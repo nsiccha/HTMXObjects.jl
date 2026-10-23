@@ -923,7 +923,11 @@ htmx_tabset(
 )
 ```
 
-Drop `tabset_styles()` once per page to style the active-tab indicator.
+A `tabset` shows as an underline tab bar: a thin rule under the tabs, the other
+tabs in the muted text color, and the open tab in the text color with an accent
+underline (`--htmxo-accent`). The panel below is unframed. `htmx()` pages carry
+these styles, `tabset_styles()`; a page with its own `<head>` adds them. Set
+`--htmxo-tab-rule` on `.tabset` to change the rule's color.
 
 A `tabset`'s open tab lives in the page URL. A tab click replaces the URL's
 `tab` parameter with the tab's name (the history entry is replaced, not added),
