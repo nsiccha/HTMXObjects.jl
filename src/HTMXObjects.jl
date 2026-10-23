@@ -202,7 +202,7 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   `time - operation GET /path?x=1 ok compute=12.4s answered=477.0s polls=23`.
   An access-log line covers one request, and a slow page is many of them; this
   line states the whole operation: how it ended (`ok`, `failed`, `stalled`,
-  `abandoned`, `evicted`), how long its computation ran, how long the client
+  `abandoned`, `evicted`, `unclaimed`), how long its computation ran, how long the client
   took to receive the answer, and how many polls reached it. Records are
   logged at `Info` with `_group=:operation`. The setting is process-wide
   ([`HTMXObjects.OPERATION_LOG`](@ref)).
@@ -213,6 +213,8 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   recorded as jobs either way.
 - `compress=true` (the default) gzips text responses for clients that accept
   gzip (see below). Pass `false` to send every body as the route produced it.
+- `prestart=true` (the default) starts a page's load-triggered fragments with
+  the page (see below). Pass `false` to leave each one to the browser's request.
 - `revise` — `:lazy` applies pending Revise revisions before each request;
   `:eager` also applies them in the background as soon as a file changes. Both
   need `using Revise` before the app is loaded.
@@ -237,6 +239,24 @@ alone: HEAD answers, `206` and `Content-Range` answers, responses that
 already carry `Content-Encoding` or `Cache-Control: no-transform`, streamed
 bodies (`@sse`, `IO`), and WebSocket upgrades. [`dispatch`](@ref) and static
 recording do not go through `serve` and always see the uncompressed body.
+
+With `prestart=true`, a response a browser receives — a page navigation
+(`Accept: text/html`) or an htmx request — starts the operations of its
+load-triggered fragments while it is being rendered: every element with an
+`hx-get` to this server whose `hx-trigger` is only `load` (as
+[`lazy`](@ref) renders), unless it or an enclosing element carries `hx-vals`,
+`hx-vars`, `hx-include`, `hx-headers` or `hx-request`, which only the browser
+can evaluate. Each such request runs through `middleware` with the page
+request's headers (cookies and authorization included), and the fragment's
+`hx-get` gains the operation's token, so the browser's request joins the
+running operation instead of starting it. Only a read that the route's
+[`OperationPolicy`](@ref) answers by polling is started; any other route, a
+`revealed` or `intersect` trigger, and a request that differs from the
+prestart are left to the browser. At most 24 fragments of one response and 96
+not yet requested across the server are started; an operation no browser asks
+for within ten minutes is dropped and logged as `unclaimed`. `middleware`
+receives each prestart request as well, through its own composition without
+the access log, the runtime tracker or Revise.
 
 `parallel` chooses where each request is handled:
 - `false` (default) — on HTTP.jl's own connection task. HTTP.jl 2 spawns that
@@ -268,7 +288,8 @@ with `auto`. To size both pools equally, compute shell-side:
 function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
-        runtime_tracking::Bool=true, compress::Bool=true, kwargs...)
+        runtime_tracking::Bool=true, compress::Bool=true, prestart::Bool=true,
+        kwargs...)
     kwargs = _drop_oxygen_kwargs(kwargs)
     revise in (nothing, :none, :lazy, :eager) ||
         throw(ArgumentError("`revise` must be nothing, :lazy or :eager, got $(repr(revise))"))
@@ -278,7 +299,9 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
 
     OPERATION_LOG[] = operation_log
     tracker = runtime_tracking ? runtime_tracker() : nothing
-    handle = _stream_handler(_request_pipeline(middleware, access_log, Revise, tracker),
+    _PRESTART_APP[] = prestart ? _prestart_pipeline(middleware) : nothing
+    handle = _stream_handler(
+        _served_middleware(_request_pipeline(middleware, access_log, Revise, tracker)),
         check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
@@ -312,8 +335,16 @@ function terminate()
     _EAGER_REVISE_STOP[] = nothing
     server = _SERVER[]
     _SERVER[] = nothing
+    _PRESTART_APP[] = nothing
     server !== nothing && isopen(server) && close(server)
     return nothing
+end
+
+# Marks a request as one `serve` received, which is the only kind whose
+# response prestarts its fragments (`_prestart_wanted`).
+_served_middleware(handler) = function (req::HTTP.Request)
+    req.context[:htmxo_served] = true
+    handler(req)
 end
 
 # `serve` keywords that only configured Oxygen, which HTMXObjects no longer
@@ -622,13 +653,15 @@ request's access-log line.
   token, and with the values of credential-like parameters replaced by `…`.
 - `outcome` — `:ok` (it answered its result), `:failed` (it answered a
   failure), `:stalled` (it answered `OperationStalled` at its stall bound),
-  `:abandoned` (no request reached it for ten minutes, so it was dropped) or
-  `:evicted` (dropped to make room for newer operations).
+  `:abandoned` (no request reached it for ten minutes, so it was dropped),
+  `:evicted` (dropped to make room for newer operations) or `:unclaimed` (the
+  server started it for a page's load-triggered fragment, see
+  [`serve`](@ref)'s `prestart`, and no browser ever asked for it).
 - `started_at` — when it started, in Unix seconds.
 - `compute` — seconds from its start until the computation finished or failed,
   measured on the server; `NaN` while it still runs.
 - `answered` — seconds from its start until the client received the answer that
-  ended it; `NaN` for `:abandoned` and `:evicted`. Clients poll at their own
+  ended it; `NaN` for `:abandoned`, `:evicted` and `:unclaimed`. Clients poll at their own
   pace (a browser slows timers in background tabs), so `answered` can exceed
   `compute` by however long the client was not asking.
 - `last_seen` — seconds from its start until the last request that reached it.
@@ -664,14 +697,15 @@ Default `operation_log` formatter:
 `time - operation METHOD target outcome compute=… answered=… polls=…`, with
 seconds to one decimal and `-` for an unknown value. An operation that was not
 answered (`:abandoned`, `:evicted`) adds `last_poll=…`, the age at its last
-request.
+request; an `:unclaimed` one was never requested, so it has none.
 """
 function _default_operation_log(io::IO, r::OperationRecord)
     print(io, _access_log_timestamp(), " - operation ", r.method, " ", r.target,
         " ", r.outcome, " compute=", _operation_log_seconds(r.compute),
         " answered=", _operation_log_seconds(r.answered),
         " polls=", r.polls)
-    isnan(r.answered) && print(io, " last_poll=", _operation_log_seconds(r.last_seen))
+    isnan(r.answered) && r.outcome !== :unclaimed &&
+        print(io, " last_poll=", _operation_log_seconds(r.last_seen))
 end
 
 _operation_log_seconds(seconds::Real) =
@@ -5752,6 +5786,234 @@ _static_response_value(::Nothing, val) = val
 _static_response_value(spec::StaticExport, val) =
     static_transform(_html_value(val), spec)
 
+# What a rendered response serializes: the static export's transform, then the
+# prestart of its load-triggered fragments.
+_prepared_response_value(req::HTTP.Request, val) =
+    _prestart_fragments(req, _static_response_value(req, val))
+
+# --- Prestarted fragments ---
+#
+# A load-triggered fragment (`lazy(url)`, `hx-get` with `hx-trigger="load"`) is
+# requested as soon as htmx starts on the page, which is only after the page
+# arrived and its scripts ran. While rendering a response for a browser, the
+# server starts the operations of those fragments itself and adds their token
+# to each `hx-get`, so the browser's request joins the running operation (as
+# an attach, `_execute_operation_resume`) instead of starting it. Nothing runs
+# that the browser would not request: only an `hx-get` the server can repeat
+# exactly qualifies — a load-only trigger, an address on this server, and no
+# `hx-vals`, `hx-vars`, `hx-include`, `hx-headers` or `hx-request` on it or an
+# enclosing element in the response. A request that does not match the
+# prestart (other arguments, other session) is computed fresh, as before.
+
+# The request pipeline a prestart runs through: the app's `middleware` around
+# the router, as `serve` composed it; `nothing` outside `serve` or with
+# `serve(; prestart=false)`, which turns prestarts off.
+const _PRESTART_APP = Ref{Any}(nothing)
+# Prestarts per response, and unclaimed prestarts held at once: past either the
+# browser starts the rest itself.
+const _PRESTART_LIMIT = 24
+const _PRESTART_LIVE_LIMIT = 96
+
+_prestart_pipeline(middleware) =
+    foldr((m, app) -> m(app), middleware; init=_fallback_middleware(_prestart_router))
+
+# `ROUTER` for a prestart: an `@htmx` route only. Any other handler (an `@sse`
+# or `@ws` route, one an app registered on `ROUTER` itself) would run inline
+# while the page renders, so the browser's own request goes there.
+function _prestart_router(req::HTTP.Request)
+    handler = first(HTTP.Handlers.gethandler(ROUTER, req))
+    handler isa _OperationRoute || return HTTP.Response(404)
+    ROUTER(req)
+end
+
+_prestart_slot(req::HTTP.Request) = get(req.context, :htmxo_prestart, nothing)
+_prestart_slot(_) = nothing
+
+# A response is prestarted only when it goes to a browser that will run its
+# htmx: a page navigation (`Accept: text/html`, as the page-load deferral reads
+# it) or an htmx request. A script, a static export, an in-process `dispatch`
+# and the server's own prewarm requests get the response as rendered.
+function _prestart_wanted(req::HTTP.Request)
+    _PRESTART_APP[] === nothing && return false
+    get(req.context, :htmxo_served, false) === true || return false
+    _prestart_slot(req) === nothing || return false
+    static_export(req) === nothing || return false
+    _operation_prewarm_request(req) && return false
+    is_htmx(req) || _operation_rich_page_request(req)
+end
+
+struct _PrestartWalk
+    req::HTTP.Request
+    current_url::String
+    count::Base.RefValue{Int}
+end
+
+function _prestart_fragments(req::HTTP.Request, val)
+    _prestart_wanted(req) || return val
+    value = _html_value(val)
+    walk = _PrestartWalk(req, _prestart_current_url(req), Ref(0))
+    walked = _prestart_walk(value, walk, false)
+    walked === nothing ? val : walked
+end
+
+# Each method returns the rewritten value, or `nothing` when nothing in it
+# changed, so an untouched subtree is returned as it was.
+_prestart_walk(val, walk, blocked) = nothing
+_prestart_walk(doc::HTMLDocument, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(doc.root, walk, blocked), HTMLDocument)
+_prestart_walk(val::HtmlOnly, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(val.content, walk, blocked), HtmlOnly)
+_prestart_walk(val::_LabelledControl, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(val.control, walk, blocked), _LabelledControl)
+_prestart_walk((content, id)::Pair, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(content, walk, blocked), walked -> walked => id)
+_prestart_rewrap(::Nothing, wrap) = nothing
+_prestart_rewrap(walked, wrap) = wrap(walked)
+
+function _prestart_walk(items::Union{AbstractVector,Tuple}, walk, blocked)
+    changed = nothing
+    for (i, item) in enumerate(items)
+        walked = _prestart_walk(item, walk, blocked)
+        walked === nothing && continue
+        changed === nothing && (changed = collect(Any, items))
+        changed[i] = walked
+    end
+    changed === nothing ? nothing : (items isa Tuple ? Tuple(changed) : changed)
+end
+
+const _PRESTART_INHERITED = Symbol.(["hx-vals", "hx-vars", "hx-include",
+    "hx-headers", "hx-request", "data-hx-vals", "data-hx-vars",
+    "data-hx-include", "data-hx-headers", "data-hx-request"])
+
+function _prestart_walk(node::Node, walk::_PrestartWalk, blocked::Bool)
+    attrs = HTMX.attrs(node)
+    blocked = blocked || any(attr -> haskey(attrs, attr), _PRESTART_INHERITED)
+    new_attrs = nothing
+    url = blocked ? nothing : _prestart_candidate(attrs)
+    if url !== nothing
+        token = _prestart!(walk, url, attrs)
+        if token !== nothing
+            new_attrs = copy(attrs)
+            new_attrs[Symbol("hx-get")] =
+                _operation_marker_url(url, "__htmxo_operation", token)
+        end
+    end
+    children = HTMX.children(node)
+    new_children = _prestart_walk(children, walk, blocked)
+    new_attrs === nothing && new_children === nothing && return nothing
+    Node(HTMX.tag(node), something(new_attrs, attrs),
+         something(new_children, children))
+end
+
+# The address of a load-triggered `hx-get` to this server, or `nothing`.
+function _prestart_candidate(attrs)
+    url = get(attrs, Symbol("hx-get"), nothing)
+    trigger = get(attrs, Symbol("hx-trigger"), nothing)
+    (url isa AbstractString && trigger isa AbstractString) || return nothing
+    _prestart_load_only(trigger) || return nothing
+    startswith(url, "/") && !startswith(url, "//") || return nothing
+    # Already joined to an operation (a direct page's placeholder, a poller),
+    # or a form refresh.
+    occursin("__htmxo_", url) && return nothing
+    String(url)
+end
+
+# Every trigger is `load`, optionally `once` or with a `delay:`. A filter, a
+# second event or `every` would send the request again, or not at all.
+_prestart_load_only(trigger::AbstractString) =
+    all(spec -> occursin(r"^load(\s+(once|delay:\d+(\.\d+)?(ms|s)?))*$", strip(spec)),
+        split(trigger, ','))
+
+_prestart_live_count() = lock(_operation_poll_lock) do
+    count(entry -> entry.prestarted && entry.polls == 0, values(_operation_polls))
+end
+
+# Starts one fragment through the app's pipeline; its token, or `nothing` when
+# nothing was started (over a limit, refused by middleware, an unknown route,
+# a route answered inline, a failure).
+function _prestart!(walk::_PrestartWalk, url::String, attrs)
+    app = _PRESTART_APP[]
+    app === nothing && return nothing
+    walk.count[] >= _PRESTART_LIMIT && return nothing
+    _prestart_live_count() >= _PRESTART_LIVE_LIMIT && return nothing
+    route = _prestart_route_target(walk.req, url)
+    route === nothing && return nothing
+    walk.count[] += 1
+    request = HTTP.Request("GET", route, _prestart_headers(walk, attrs), UInt8[])
+    slot = Ref{Union{Nothing,String}}(nothing)
+    request.context[:htmxo_prestart] = slot
+    response = try
+        app(request)
+    catch err
+        @warn "Prestarting a load-triggered fragment failed; the browser's request computes it" url exception=(err, catch_backtrace())
+        return nothing
+    end
+    response isa HTTP.Response && response.status == 204 ? slot[] : nothing
+end
+
+# The address `url` reaches this server under. Behind a proxy that strips the
+# mount prefix (`X-Forwarded-Prefix`) on the way in, the rendered address
+# carries the prefix and the router knows it without; an address outside the
+# prefix goes to another server through that proxy (`nothing`).
+function _prestart_route_target(req::HTTP.Request, url::String)
+    prefix = _request_prefix(req, "")
+    isempty(prefix) && return url
+    path = _request_route_path(req)
+    (path == prefix || startswith(path, prefix * "/")) && return url
+    startswith(url, prefix) || return nothing
+    rest = url[nextind(url, lastindex(prefix)):end]
+    isempty(rest) && return "/"
+    first(rest) == '/' && return rest
+    first(rest) == '?' ? "/" * rest : nothing
+end
+
+# The headers of the browser's request for this fragment, as far as the server
+# can know them: the page request's own (cookies, authorization, language),
+# without those that describe that request's body or caching, plus htmx's.
+const _PRESTART_DROPPED_HEADERS = Set(["accept", "accept-encoding",
+    "content-type", "content-length", "content-encoding", "transfer-encoding",
+    "if-none-match", "if-modified-since", "range", "expect", "connection",
+    "upgrade", "te", "keep-alive", "last-event-id", "cache-control", "pragma"])
+
+function _prestart_headers(walk::_PrestartWalk, attrs)
+    headers = Pair{String,String}[]
+    for (name, value) in walk.req.headers
+        key = lowercase(name)
+        (key in _PRESTART_DROPPED_HEADERS || startswith(key, "hx-") ||
+         startswith(key, "sec-fetch-") || startswith(key, "htmxo-")) && continue
+        push!(headers, String(name) => String(value))
+    end
+    push!(headers, "Accept" => "*/*", "HX-Request" => "true")
+    isempty(walk.current_url) || push!(headers, "HX-Current-URL" => walk.current_url)
+    id = get(attrs, :id, nothing)
+    id isa AbstractString && !isempty(id) && push!(headers, "HX-Trigger" => String(id))
+    target = _prestart_target_id(get(attrs, Symbol("hx-target"), nothing), id)
+    target === nothing || push!(headers, "HX-Target" => target)
+    headers
+end
+
+_prestart_target_id(::Nothing, id) = _prestart_target_id("this", id)
+function _prestart_target_id(target::AbstractString, id)
+    target == "this" && return id isa AbstractString && !isempty(id) ? String(id) : nothing
+    occursin(r"^#[A-Za-z][-\w]*$", target) ? String(target[2:end]) : nothing
+end
+_prestart_target_id(_, id) = nothing
+
+# The page the fragment's request will come from: an htmx request's own page,
+# or the address of the page being sent.
+function _prestart_current_url(req::HTTP.Request)
+    current = HTTP.header(req, "HX-Current-URL")
+    isempty(current) || return String(current)
+    host = HTTP.header(req, "X-Forwarded-Host", HTTP.header(req, "Host"))
+    isempty(host) && return ""
+    scheme = HTTP.header(req, "X-Forwarded-Proto", "http")
+    target = String(req.target)
+    qi = findfirst('?', target)
+    query = isnothing(qi) ? "" : target[qi:end]
+    string(scheme, "://", host,
+           _request_route_path(req, _request_prefix(req, "")), query)
+end
+
 # --- Convenience helpers ---
 
 # The `preload` keyword shared by the navigation components: `nothing`/`false`
@@ -6747,7 +7009,8 @@ end
 # framework's standard error article (see `_check_revise_errors!`) — this is
 # the single chokepoint for all HTTP route registrations, so the check
 # applies uniformly to plain, indexed, `@include`'d, and WebSocket routes.
-function _register_handler(method, path, handler; resume_only::Bool=false)
+function _register_handler(method, path, handler; resume_only::Bool=false,
+        operation::Bool=false)
     http_method = get(_TRANSPORT_HTTP_METHODS, method, method)
     wrapped = function(req)
         _runtime_note_route!(req, method, path)
@@ -6758,12 +7021,20 @@ function _register_handler(method, path, handler; resume_only::Bool=false)
         end
         handler(req)
     end
+    operation && (wrapped = _OperationRoute(wrapped))
     if http_method == "GET" && !resume_only
         _register_get_route!(path, wrapped)
     else
         HTTP.register!(ROUTER, http_method, path, wrapped)
     end
 end
+
+# The handler of an `@htmx` route, which runs its property through
+# `_run_operation`; a prestart reaches no other handler (`_prestart_router`).
+struct _OperationRoute{F}
+    handler::F
+end
+(route::_OperationRoute)(req) = route.handler(req)
 
 # Every GET route goes on `ROUTER` and on its `_GET_ROUTER` mirror; the
 # resume-only GETs of mutation paths go on `ROUTER` alone. A GET route an app
@@ -9194,6 +9465,9 @@ end
 # apart (user decision `06kz9d3`, replacing `1danmww`'s unrecorded 4xx).
 function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[],
         wrap=identity)
+    # A prestart that fails before its operation starts starts nothing; the
+    # browser's own request fails the same way and records it once.
+    _prestart_slot(req) === nothing || return HTTP.Response(500)
     uid, path = _record_error(err, bt, req)
     _runtime_note_error!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
@@ -9315,14 +9589,14 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     # either direction.
     wrapper = _page_wrapper(obj)
     (isnothing(wrapper) || isempty(_page_chain_to_apply(Any[obj], req; root=obj))) &&
-        return to_response(_static_response_value(req, val))
+        return to_response(_prepared_response_value(req, val))
 
     # Full page wrap for direct browser navigation. Normalize first so
     # `__page__` receives the same renderable the HX branch above sent —
     # otherwise a plain value reaches the wrapper as a bare Node child and
     # renders as `show(::MIME"text/plain")` text in full-page mode while
     # rendering structurally over HX.
-    to_response(_static_response_value(req,
+    to_response(_prepared_response_value(req,
         _apply_page(obj, wrapper, _html_value(val))))
 end
 
@@ -10574,13 +10848,16 @@ mutable struct _OperationPollEntry
     retained::Bool
     recorded::Bool
     finished_at::Threads.Atomic{Float64}
+    # Started while the server rendered the response that holds its fragment
+    # (`_prestart_fragments`), before any browser asked for it.
+    prestarted::Bool
 end
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job) =
     _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job, false, nothing,
-        0, false, false, Threads.Atomic{Float64}(NaN))
+        0, false, false, Threads.Atomic{Float64}(NaN), false)
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at) =
@@ -10814,6 +11091,10 @@ function _record_operation_end!(entry::_OperationPollEntry, outcome::Symbol;
         now::Real=_operation_poll_now())
     format = OPERATION_LOG[]
     format === nothing && return nothing
+    # A prestart no browser joined was dropped unclaimed, not abandoned
+    # mid-poll: nothing ever asked for its result.
+    entry.prestarted && entry.polls == 0 && outcome in (:abandoned, :evicted) &&
+        (outcome = :unclaimed)
     claimed = lock(_operation_poll_lock) do
         (entry.retained && !entry.recorded) || return false
         entry.recorded = true
@@ -10833,7 +11114,7 @@ _record_operation_ends!(entries, outcome::Symbol) =
 
 function _operation_record(entry::_OperationPollEntry, outcome::Symbol, now::Real)
     finished = entry.finished_at[]
-    answered = outcome in (:abandoned, :evicted) ? NaN : now - entry.created_at
+    answered = outcome in (:abandoned, :evicted, :unclaimed) ? NaN : now - entry.created_at
     # An answered operation has finished. Its watcher may not have stamped the
     # time yet when the answer comes the instant the computation ends.
     compute = !isnan(finished) ? finished - entry.created_at :
@@ -10980,6 +11261,9 @@ const _preload_ops = Dict{Any,_OperationPollEntry}()
 
 struct _PreloadSkipped end
 const _PRELOAD_SKIPPED = _PreloadSkipped()
+# The answer of a prestart request (`_execute_prestart`), started or not.
+struct _Prestarted end
+const _PRESTARTED = _Prestarted()
 
 _preload_request(req::HTTP.Request) = HTTP.header(req, "HX-Preloaded", "") == "true"
 
@@ -11518,9 +11802,14 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
     page_load_id = _operation_page_load_id(req)
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
+    # The browser's own request for a prestarted fragment is answered as if it
+    # had started the operation itself: within the grace period its value,
+    # bare, and otherwise a poller.
+    first_attach = entry.prestarted && _operation_attach_request(req)
     # A prewarm follow-up takes the path of a poll whose operation is still
     # running even when it has finished: on one thread it always has.
-    probe = _operation_prewarm_request(req) ? (ready=false, value=nothing) :
+    probe = (_operation_prewarm_request(req) || first_attach) ?
+        (ready=false, value=nothing) :
         _operation_ready_probe(policy,
             value -> _finish_operation_poll(token, value), entry.started;
             replace_page_load)
@@ -11536,12 +11825,12 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         poll_interval=policy.poll_interval,
         keep_progress=_operation_treebars_keep(policy),
         keep_terminal_tree=policy.keep_terminal_tree,
-        settle_bare=false,
+        settle_bare=first_attach,
         page_load_id,
         replace_page_load,
         error_obj=entry.error_obj,
         req=entry.request,
-        grace_period=0.0,
+        grace_period=first_attach ? _operation_grace_period(policy, req) : 0.0,
         retain=() -> nothing,
         cleanup=() -> _delete_operation_poll!(token),
         ended=outcome -> _record_operation_end!(entry, outcome),
@@ -11660,6 +11949,10 @@ function _execute_operation(policy::OperationPolicy, descriptor, target, name,
         return _execute_preload(descriptor, target, name, verb_inst, idx_vals,
                                 kw_pairs, req; queued)
     end
+    slot = _prestart_slot(req)
+    slot === nothing || return _execute_prestart(policy, descriptor, target,
+        name, verb_inst, idx_vals, kw_pairs, req, slot; page_shell, direct,
+        queued)
     mode = _operation_execution_mode(
         policy, descriptor, req, verb_inst; page_shell, direct)
     _runtime_note_mode!(req, mode)
@@ -11846,6 +12139,48 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
     started
 end
 
+# A prestart (`_prestart_fragments`) starts the operation the browser's
+# load-triggered request would start, and retains it under a fresh token the
+# way a slow polled request does, so that request joins it as an attach. It
+# starts only what that request would run in the background: a read the
+# root's policy answers by polling. Anything else is left to the browser's own
+# request, and the slot stays empty. The answer itself is discarded.
+function _execute_prestart(policy::OperationPolicy, descriptor, target, name,
+        verb_inst, idx_vals, kw_pairs, req, slot::Base.RefValue;
+        page_shell::Bool=false, direct::Bool=false, queued::Bool=false)
+    mode = _operation_execution_mode(
+        policy, descriptor, req, verb_inst; page_shell, direct)
+    (mode === :polling && _operation_verb_transport(verb_inst) === :read &&
+        !_operation_poll_request(req) && !_operation_attach_request(req)) ||
+        return _PRESTARTED
+    _runtime_note_mode!(req, :prestart)
+    context = get(target, :context, nothing)
+    prop = getproperty(target.leaf, name)
+    keys = (verb_inst, idx_vals...)
+    call_kwargs = NamedTuple(kw_pairs)
+    _with_runtime_job(req, descriptor, name, context, prop, keys, call_kwargs;
+                      leaf=target.leaf, track=queued) do job
+        start = _operation_start(req, queued)
+        started = _execute_materialization(target, name, verb_inst, idx_vals,
+            kw_pairs; fetch=_operation_background_fetch(start), start,
+            declared_fresh=_operation_declared_fresh(descriptor))
+        prop, keys, call_kwargs =
+            _operation_poll_source(started, prop, keys, call_kwargs)
+        token = _new_operation_poll_token()
+        now = _operation_poll_now()
+        signature = _operation_poll_signature(
+            target, typeof(target.leaf), name, verb_inst, idx_vals, kw_pairs)
+        entry = _OperationPollEntry(
+            token, signature, prop, keys, call_kwargs, started,
+            target.leaf, req, now, now, job)
+        entry.stall_after = _operation_stall_after(policy, queued)
+        entry.prestarted = true
+        _retain_operation!(entry, descriptor, name; track=queued)
+        slot[] = token
+    end
+    _PRESTARTED
+end
+
 # The common typed pass-through runner. Route code never manually reads query,
 # form, multipart, or WebSocket upgrade parameters: the emitted `_extract_args`
 # method validates/coerces them, then the verb-keyed DO property is invoked.
@@ -12000,6 +12335,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                                        preload, direct, queued)
             val = operation.value
             val === _PRELOAD_SKIPPED && return _preload_skipped_response()
+            val === _PRESTARTED && return HTTP.Response(204)
             running = _operation_running_answer(val)
 
             # The request target is the authoritative external route. Rebuilding
@@ -12030,7 +12366,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                 _route_error_response(req, err, bt; error_obj=leaf, page_chain)
             end
         end
-    end; resume_only)
+    end; resume_only, operation=!resume_only)
 end
 
 # Build the URL path for a route property. `prefix` is the enclosing mount
@@ -12858,7 +13194,7 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
     # only the levels below the swap target for a partial swap, none when the
     # target's position cannot be established (`_page_chain_skip`).
     chain = _page_chain_to_apply(page_chain, req; root)
-    isempty(chain) && return to_response(_static_response_value(req, val))
+    isempty(chain) && return to_response(_prepared_response_value(req, val))
     # Apply page wrappers: innermost (last) wraps first, then each outer one.
     # Normalized first, so a plain value renders the same structurally in
     # full-page mode as the bare-fragment branch above already returns.
@@ -12867,7 +13203,7 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
         wrapper = _page_wrapper(obj)
         isnothing(wrapper) || (val = _apply_page(obj, wrapper, val))
     end
-    to_response(_static_response_value(req, val))
+    to_response(_prepared_response_value(req, val))
 end
 
 # Register routes from a nested @include struct with chained property access through the parent.

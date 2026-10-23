@@ -2526,6 +2526,51 @@ Every resumed poll carries `X-HTMXO-Operation-Age: <whole seconds since the
 operation started>`, so a script that follows a poller can bound its own
 waiting too.
 
+#### Fragments that start with the page
+
+A load-triggered fragment — [`lazy`](@ref)`(url)`, or any element with an
+`hx-get` and `hx-trigger="load"` — used to start computing only when the
+browser asked for it: after the page had arrived, its scripts had run and htmx
+had started. [`serve`](@ref) now starts those operations while it renders the
+page, with no change to the app:
+
+```julia
+@htmx struct App
+    @get index() = h.main(h.h1("Overview"), lazy("/summary"), lazy("/history"))
+    @get summary() = slow_summary()      # starts with the page
+    @get history() = slow_history()      # starts with the page
+end
+```
+
+For every such element in a response a browser receives (a page navigation,
+`Accept: text/html`, or an htmx swap), the server runs the fragment's
+request through the app's `middleware`, with the page request's cookies,
+authorization and language, and adds the operation's token to the element's
+`hx-get`. The browser's request then joins the running operation: within the
+grace period it gets the finished fragment, otherwise a poller for the same
+operation. Nothing is computed twice, and a failure renders the same error
+article it would have rendered for the browser's own request.
+
+Only what the server can repeat exactly is started:
+
+- the trigger is `load` alone (optionally `once` or with a `delay:`); `revealed`,
+  `intersect`, `every` and filtered triggers stay the browser's;
+- the address is on this server (`/…`, not `//host/…` or `https://…`);
+- neither the element nor an enclosing element carries `hx-vals`, `hx-vars`,
+  `hx-include`, `hx-headers` or `hx-request`, which only the browser evaluates;
+- the route is an `@htmx` read that the route's [`OperationPolicy`](@ref)
+  answers by polling: `@direct` routes, mutations, `@sse`/`@ws` routes and
+  handlers registered on [`ROUTER`](@ref) directly are left alone.
+
+At most 24 fragments of one response, and 96 not yet requested across the
+server, are started. One that no browser asks for is dropped after ten minutes
+and logged as `unclaimed` (see below). A request whose arguments or session
+differ from the prestart's computes its own answer, as before. Behind a proxy
+that strips the mount prefix (`X-Forwarded-Prefix`), the prefixed address
+reaches the route without it. Scripts, [`dispatch`](@ref) calls, static
+exports and Markdown reads get the response as rendered. Pass
+`serve(; prestart=false)` to leave every fragment to the browser.
+
 #### How long operations took
 
 The access log writes one line per request, and a polled operation is many
@@ -2540,11 +2585,12 @@ ends, next to the access log:
 
 - The outcome is `ok` (the operation answered its result), `failed` (it
   answered a failure), `stalled` (it answered `OperationStalled`), `abandoned`
-  (no request reached it for ten minutes, so it was dropped) or `evicted`
-  (dropped to make room for newer operations). An abandoned or evicted
-  operation is written when the registry drops it, so its line appears at
-  least ten minutes after the last request that reached it, and only while
-  the process keeps running.
+  (no request reached it for ten minutes, so it was dropped), `evicted`
+  (dropped to make room for newer operations) or `unclaimed` (a page started
+  it for a load-triggered fragment, and no browser asked for it). An
+  abandoned, evicted or unclaimed operation is written when the registry
+  drops it, so its line appears at least ten minutes after the last request
+  that reached it, and only while the process keeps running.
 - `compute` is the time from the start until the computation finished or
   failed, measured on the server (`-` while it still runs).
 - `answered` is the time from the start until the client received the answer
