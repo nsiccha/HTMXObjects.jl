@@ -2548,6 +2548,8 @@ page, with no change to the app:
 end
 ```
 
+Building the address with [`route_url`](@ref) (`lazy(route_url(__self__, :summary))`) also checks it when the page renders.
+
 For every such element in a response a browser receives (a page navigation,
 `Accept: text/html`, or an htmx swap), the server runs the fragment's
 request through the app's `middleware`, with the page request's cookies,
@@ -2748,6 +2750,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `post_form(url, children...; …)` / `get_form(url, …)` | Complete inline form with hidden inputs + submit button |
 | `hidden_inputs(; key=val, …)`   | A `Vector{Node}` of `<input type="hidden">` elements    |
 | `query_url(path; …)` / `@query_url`  | URL with encoded query string, type-safe                |
+| `route_url(self, :name, args…; …)` | An own GET route's address, checked when it is built (a missing route or a bad argument throws) |
 | `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group` | Form input widgets (label, select, radio, number, checkbox, textarea, autocomplete, …) |
 | `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
 | `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |

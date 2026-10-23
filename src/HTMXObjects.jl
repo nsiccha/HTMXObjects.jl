@@ -32,7 +32,7 @@ export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_er
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
-export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
+export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
@@ -14917,7 +14917,13 @@ _recording_run_phase(f, phase) = _recording_run_phase_impl[](f, phase)
 _recording_polling(args...; kwargs...) = _recording_polling_impl[](args...; kwargs...)
 
 # Called by @htmx macro expansion — re-registers routes when Revise updates the struct
+# `route_url`'s lookups (`_route_link`), cleared whenever a struct is
+# (re)defined, since its routes may have changed.
+const _route_links = Dict{Any,Any}()
+const _route_links_lock = ReentrantLock()
+
 function _reroute!(T::DataType)
+    lock(() -> empty!(_route_links), _route_links_lock)
     if haskey(_registered_types, T)
         args = _registered_types[T]
         _register_routes(T; args.prefix, args.record_dir,
@@ -20667,6 +20673,120 @@ query_url(path; kwargs...) = begin
         _push_qparam!(parts, k, v)
     end
     isempty(parts) ? path : path * (occursin('?', path) ? "&" : "?") * join(parts, "&")
+end
+
+"""
+    route_url(self, name::Symbol, args...; kwargs...) -> String
+
+The address of the GET route `name` that `self`'s struct declares, called with
+the path arguments `args` and the query arguments `kwargs`, checked when the
+address is built. A struct with no GET route `name`, the wrong number of path
+arguments, a keyword the route does not read, a required keyword left out, or a
+value that would not parse back as its declared type throws an `ArgumentError`
+naming the struct and the route. A page that links to one of its own fragments
+therefore fails when it renders, instead of when the browser asks for the
+fragment.
+
+```julia
+@htmx struct App
+    @get index() = h.main(h.h1("Overview"),
+        lazy(route_url(__self__, :usage_line; n=3); id="usage"))
+    @get usage_line(; n::Int=1) = slow_usage(n)
+end
+```
+
+The address carries `self`'s mount prefix (an `@include` mount, a proxy's
+`X-Forwarded-Prefix`), as `__self__/"usage_line"` does, and `:index` is the
+mount's own address. It goes wherever an own-route address goes: `lazy`,
+`hx_get`, `href`. A `nothing` keyword is left out, as in [`query_url`](@ref).
+"""
+function route_url(self, name::Symbol, args...; kwargs...)
+    T = typeof(self)
+    route = _route_link(T, name, _route_link_parents(self))
+    route === nothing && throw(ArgumentError(string("route_url: ", nameof(T),
+        " has no GET route `", name, "`")))
+    length(args) == length(route.path) || throw(ArgumentError(string(
+        "route_url: ", nameof(T), ".", name, " takes ", length(route.path),
+        " path argument", length(route.path) == 1 ? "" : "s", " (",
+        join((p.name for p in route.path), ", "), "), got ", length(args))))
+    for (param, value) in zip(route.path, args)
+        _route_link_check(T, name, param, value)
+    end
+    given = Dict{Symbol,Any}(k => v for (k, v) in pairs(kwargs))
+    for (key, value) in given
+        param = get(route.query, key, nothing)
+        param === nothing && throw(ArgumentError(string("route_url: ", nameof(T), ".",
+            name, " has no parameter `", key, "`; it reads ",
+            isempty(route.query) ? "none" : join(sort!(collect(keys(route.query))), ", "))))
+        value === nothing || _route_link_check(T, name, param, value)
+    end
+    for (key, param) in route.query
+        param.required && get(given, key, nothing) === nothing && throw(ArgumentError(
+            string("route_url: ", nameof(T), ".", name, " requires `", key, "`")))
+    end
+    segments = String[]
+    prefix = strip(self.__prefix__, '/')
+    isempty(prefix) || push!(segments, prefix)
+    name === :index || push!(segments, String(name))
+    append!(segments, _url_segment.(args))
+    query_url("/" * join(segments, "/"); kwargs...)
+end
+
+# What `route_url` checks a call against: the route's path parameters, in
+# order, and the query parameters it reads (its keywords and the `@param`s its
+# struct and enclosing structs declare), by name. One walk per struct, route
+# and enclosing chain, held in `_route_links`.
+function _route_link(T, name::Symbol, parents)
+    lock(_route_links_lock) do
+        get!(_route_links, (T, name, parents)) do
+            found = nothing
+            _walk_route_meta(T, (_, _, _) -> nothing, (route, info, method) -> begin
+                route === name && method == "GET" && (found = (info, method))
+            end)
+            found === nothing && return nothing
+            info, method = found
+            path, keywords = _reflect_call_params(T, info, method)
+            query = Dict{Symbol,Any}(p.name => p for p in keywords)
+            for p in _reflect_param_props(T, method, collect(Any, parents))
+                haskey(query, p.name) || (query[p.name] = p)
+            end
+            (; path, query)
+        end
+    end
+end
+
+# The types of the structs `self` is mounted under, outermost first, as the
+# route walk sees them (`__parent__`), for the `@param`s they pass down.
+function _route_link_parents(self)
+    parents = Any[]
+    node = self
+    for _ in 1:32
+        hasproperty(node, :__parent__) || break
+        node = getproperty(node, :__parent__)
+        node === nothing && break
+        pushfirst!(parents, typeof(node))
+    end
+    Tuple(parents)
+end
+
+# A value the route would not parse back as its declared type. A type the
+# request parser has no conversion for is not checked here; the route's own
+# request reports it.
+function _route_link_check(T, name, param, value)
+    type = param.type
+    type isa Type || return nothing
+    type = Base.nonnothingtype(type)
+    value isa type && return nothing
+    wire = value isa AbstractVector ? String[_option_wire_string(v) for v in value] :
+           _option_wire_string(value)
+    try
+        _convert_param(wire, type)
+    catch err
+        err isa MethodError && return nothing
+        throw(ArgumentError(string("route_url: ", nameof(T), ".", name, "'s `",
+            param.name, "` is a ", type, "; got ", repr(value))))
+    end
+    nothing
 end
 
 """
