@@ -738,6 +738,35 @@ cache single-flights the drain, backs off, and logs with the cause — so first
 paint never waits; the next render (a poll cycle, a push refresh) picks the
 metadata up. `?plain` carries `[label](href)` either way.
 
+### Link targets in Markdown {#markdown-id-targets}
+
+Markdown has no syntax for an element id, so the target of a `[text](#X)`
+link is written as inline HTML. `render_markdown`, and with it every
+`SemanticProse`, renders two such forms as real, empty elements; all other
+raw HTML stays escaped text:
+
+```markdown
+| Prior | Term |
+|---|---|
+| <span id="prior-1"></span>P1 | normal(0, 1) |
+
+The intercept's prior is [P1](#prior-1).
+```
+
+- **The forms:** `<span id="X"></span>` and `<a id="X"></a>`, the closing tag
+  right after the opening one, no other attribute, and an id of a letter
+  followed by letters, digits, `_` or `-`. They work in prose, headings, list
+  items and table cells. An `<a id>` target inside a link's text stays text,
+  because an `<a>` inside an `<a>` is invalid HTML.
+- **Everything else stays escaped:** another attribute, content between the
+  tags, single quotes, an id such as `1x` or `a.b`, an unpaired tag, any other
+  element.
+- **The Markdown projection writes the tags back as written.** Pandoc reads
+  `<span id="X"></span>` as a span with that id, so in a [`pdf_report`](#pdf-report)
+  the link resolves too. It drops `<a id="X"></a>`, and Typst then refuses the
+  report (`label <X> does not exist`), so write the span form in content that
+  may become a PDF.
+
 ### Accessible PDF reports — `pdf_report` {#pdf-report}
 
 `pdf_report` writes a page's Markdown projection as an accessible PDF:
