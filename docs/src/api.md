@@ -648,7 +648,7 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
-| `pdf_report(page_or_markdown, path; title, lang, metadata)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
+| `pdf_report(page_or_markdown, path; title, lang, metadata, base_url)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 | `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
 
@@ -864,7 +864,7 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   Quarto's Typst format. A NamedTuple writes `_` as `-` (`toc_depth=2` is
   `toc-depth: 2`); dictionary keys are written as given. Values are strings,
   numbers, Bools, dates, vectors, and NamedTuples or dictionaries for nested
-  options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`,
+  options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`, `from`,
   `pdf-standard` and `filters` belong to `pdf_report`; setting one through
   `metadata` is an `ArgumentError`.
 - **`date`** is printed in the title block. A `Date` or `DateTime`, an ISO date
@@ -892,6 +892,19 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `resources` when there is one (the site-root URL of an exported page), else
   the absolute path. `pdf_report` removes its temporary `.qmd`, Quarto's
   intermediate files and the `.quarto` cache from it, also on failure.
+- **Links a PDF cannot open** are written as their text. A link to a URL with
+  a scheme (`https:`, `mailto:`) or to an `#id` stays a link. A link with no
+  target stays only as its label: `[Bayern]()`, the Markdown of an `<a>`
+  without `href`, and `[Bayern](#)`, that of a script-driven `<a href="#">`.
+  Typst refuses both. A site address (`/region/11`, `region/11`, `?r=1`) is
+  written as its text too, because in a PDF it would point at a file next to
+  the PDF.
+- **`base_url`** (`"https://example.org/app"`) is the address the Markdown's
+  `/` stands for. With it, a link starting with `/` links to `base_url`
+  followed by the path (`https://example.org/app/region/11`), so a report's
+  site links open the live app. A relative address has no page address to
+  follow, so it is still written as its text. A `base_url` that is not an
+  absolute URL, or that carries a query or fragment, is an `ArgumentError`.
 - **Images need alt text.** Typst refuses a PDF/UA document with an image that
   has none or has `alt=""`, and `pdf_report` throws with Typst's message, for
   example `PDF/UA-1 error: missing alt text` with the source line. In a page,
@@ -902,6 +915,21 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
   whose image has no alt text.
+- **Addresses are links.** A web or mail address written as text becomes a
+  link to itself: an address with a scheme (`https://…`, `mailto:…`), a mail
+  address, an address starting with `www.` (linked with `https://`) and a code
+  span that is an address and nothing else. PAC (PDF Accessibility Checker)
+  fails a PDF that shows an address without a link ("Link in text does not
+  have a 'Link' element"). An address inside a code block, or in a code span
+  with other text (`curl https://…`), stays text, and PAC reports it (todo
+  `14awnkw`).
+- **Images are figures of their own.** An image alone in its paragraph, or in
+  a figure, is tagged as a figure of its own rather than one inside a
+  paragraph: Pandoc and Quarto set every image in a box, which Typst put in a
+  paragraph, and PAC warns about a figure inside a paragraph ("Possibly
+  inappropriate use of a 'Figure' structure element"). An image within a line
+  of text, such as an icon, stays in its paragraph, and PAC still warns about
+  it: Typst tags every image as a block figure (todo `14awnkw`).
 - **Long tables:** a table longer than the rest of its page continues on the
   next page, with its header row repeated on each page. A caption above a table
   moves to the next page with its first rows rather than stay alone at the

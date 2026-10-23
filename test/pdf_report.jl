@@ -13,20 +13,61 @@ using TestItemRunner
         papersize: "a4"
         format:
           typst:
+            from: markdown+autolink_bare_uris
             pdf-standard: [ua-1]
             include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST))]
         filters:
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
             at: post-render
+          - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_FIGURES_FILTER))
+            at: post-render
           - $(HTMXObjects._yaml_string(filter))
           - $(HTMXObjects._yaml_string(images))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
+          - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_LINKS_FILTER))
         ---
 
         # Ergebnisse
         """
     @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
-          isfile(HTMXObjects._PDF_REPORT_DATE_FILTER)
+          isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
+          isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER)
+end
+
+@testitem "pdf_report hands base_url to the link filter" tags=[:unit] begin
+    using HTMXObjects
+
+    key = HTMXObjects._PDF_REPORT_BASE_URL_KEY
+    frontmatter(; kw...) =
+        split(HTMXObjects._pdf_report_qmd("# R\n"; title="R", lang="de-DE", kw...), "\n---\n")[1]
+    @test !occursin(key, frontmatter())
+    # The address the Markdown's `/` stands for, without its trailing `/`,
+    # escaped so that Pandoc keeps it as text.
+    for base in ("https://example.org/p/App", "https://example.org/p/App/")
+        @test occursin("\nlang: \"de-DE\"\n$key: " *
+                       HTMXObjects._yaml_string("https\\:\\/\\/example\\.org\\/p\\/App") * "\n",
+                       frontmatter(; base_url=base))
+    end
+    @test occursin("\n$key: ", frontmatter(; base_url="http://localhost:8080"))
+
+    refusal(; kw...) = try
+        pdf_report("# R\n", joinpath(tempdir(), "never.pdf"); title="R", lang="de-DE",
+                   quarto="htmxo-no-such-quarto", kw...)
+    catch e
+        e
+    end
+    # refused: a `/` path joins onto an absolute address; without a scheme and
+    # host, or with a query or fragment, the joined link would open nothing
+    for base in ("example.org/app", "/p/App", "https://", "https://example.org/a b",
+                 "https://example.org/app?x=1", "https://example.org/app#top")
+        err = refusal(; base_url=base)
+        @test err isa ArgumentError && occursin("base_url", err.msg)
+    end
+    # refused: the key is pdf_report's own; the address goes in as `base_url=`
+    err = refusal(; metadata=Dict(key => "https://example.org"))
+    @test err isa ArgumentError && occursin("base_url=", err.msg)
+    passed = refusal(; base_url="https://example.org/app")
+    @test passed isa ErrorException && occursin("Quarto not found", passed.msg)
 end
 
 @testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
@@ -111,10 +152,11 @@ end
         e
     end
     # refused: PDF/UA-1 needs pdf_report's title, language, ua-1 standard and equation alt text
-    # (snag pdf-report-docum-5afe7187)
+    # (snag pdf-report-docum-5afe7187), and PAC its reader that links addresses (snag
+    # ran-pac-2026-26-7da3df82)
     for (metadata, says) in [(title="X",) => "title=", (lang="en-US",) => "lang=",
                              (pdf_standard=String[],) => "ua-1", Dict("format" => "html") => "ua-1",
-                             (filters=["mine.lua"],) => "alt text"]
+                             (filters=["mine.lua"],) => "alt text", (from="markdown",) => "PAC"]
         err = refusal(; metadata)
         @test err isa ArgumentError && occursin(says, err.msg)
     end
@@ -353,6 +395,61 @@ end
     end
 end
 
+@testitem "pdf_report links addresses and tags a lone image as a figure of its own" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        # PAC (PDF Accessibility Checker) fails an address shown as text without a
+        # link and warns about a Figure inside a P, where veraPDF passes both: the
+        # data-source URLs and the maps of a veraPDF-clean report (snag
+        # ran-pac-2026-26-7da3df82). Typst writes the structure tree and the link
+        # annotations uncompressed, `N 0 obj <</Type/StructElem/S/<type>…`.
+        figure_parents(bytes) = sort([match(Regex("(?m)^$(m[1]) 0 obj\\s*<</Type/StructElem/S/(\\w+)"), bytes).captures[1]
+                                      for m in eachmatch(r"/Type/StructElem/S/Figure/P (\d+) 0 R", bytes)])
+        uris(bytes) = sort(unique(m[1] for m in eachmatch(r"/URI\(([^)]*)\)", bytes)))
+
+        mktempdir() do dir
+            write(joinpath(dir, "bars.svg"),
+                  """<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10"/></svg>""")
+            md = """
+                # Quellen
+
+                Daten: https://www.regionalstatistik.de/genesis/online. Kontakt info@example.de oder www.example.de, auch (www.example.org/karte).
+
+                Kein Link: awww.example.de und `curl https://example.org/api`. Ein Link: `https://example.org/code`.
+
+                | Quelle | Lizenz |
+                |---|---|
+                | BKG | dl-de/by-2-0 (© BKG, Datenquellen: https://sg.geodatenzentrum.de/web_public/gdz/datenquellen/Datenquellen_vg_nuts.pdf) |
+
+                ![](bars.svg){alt="Zwei gleich hohe Balken."}
+
+                Ein Symbol ![](bars.svg){alt="Balken" width="0.5cm"} im Text.
+
+                ![Balken je Land](bars.svg){alt="Zwei Balken je Land."}
+
+                """ * HTMXObjects.to_markdown_string(with_caption(CaptionSpec(; title="Balken je Kreis"),
+                                                                 h.img(; src="bars.svg", alt="Zwei Balken.")))
+            out = joinpath(dir, "quellen.pdf")
+            @test pdf_report(md, out; title="Quellen", lang="de-DE") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) && occursin("/StructTreeRoot", bytes)
+            # Every address is a link to itself, `www.` with `https://`, without the
+            # punctuation after it; a code span with more than an address stays text.
+            @test uris(bytes) == sort(["https://www.regionalstatistik.de/genesis/online", "mailto:info@example.de",
+                                       "https://www.example.de", "https://www.example.org/karte",
+                                       "https://example.org/code",
+                                       "https://sg.geodatenzentrum.de/web_public/gdz/datenquellen/Datenquellen_vg_nuts.pdf"])
+            # The lone image, the one `with_caption` writes and Quarto's captioned
+            # figure are figures of their own; the image within the line of text
+            # stays in its paragraph, as before.
+            @test figure_parents(bytes) == ["Div", "Document", "Document", "P"]
+        end
+    end
+end
+
 @testitem "pdf_report breaks a captioned table across pages" tags=[:quarto] begin
     if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
         @test_skip true
@@ -424,6 +521,92 @@ end
                 table_pages = unique(vcat(row.(1:n)...))
                 @test length(table_pages) >= 2
                 @test onpage(r"Land\s+Wert") == table_pages
+            end
+        end
+    end
+end
+
+@testitem "pdf_report writes a link a PDF cannot open as its text" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        md = """
+            # Links {#oben}
+
+            Länder: [Bayern]() · [Hessen](#) · [Berlin](/region/11) · [Bremen](region/04) · [Sortiert](?sort=name)
+            · [Quelle](https://example.org/daten) · [Post](mailto:info@example.org) · [Nach oben](#oben)
+            """
+        # Typst, as Pandoc writes it after the filter. Without it Typst got
+        # `#link("")[Bayern]` (`URL must not be empty`), `#link()[Hessen]`
+        # (`expected string, … found content`) and `#link("./region/11")[Berlin]`,
+        # a link relative to the PDF file (snag pdf-report-of-a-bc600825).
+        typst(md; base=nothing) = mktempdir() do dir
+            write(joinpath(dir, "links.md"), md)
+            meta = isnothing(base) ? `` : `-M $(HTMXObjects._PDF_REPORT_BASE_URL_KEY)=$base`
+            read(`$quarto pandoc -f markdown -t typst --wrap=none $meta --lua-filter=$(HTMXObjects._PDF_REPORT_LINKS_FILTER)
+                  $(joinpath(dir, "links.md"))`, String)
+        end
+        kept = ["#link(\"https://example.org/daten\")[Quelle]", "#link(\"mailto:info@example.org\")[Post]",
+                "#link(<oben>)[Nach oben]"]
+        plain = typst(md)
+        @test all(k -> occursin(k, plain), kept)
+        @test count("#link(", plain) == length(kept)
+        @test occursin("Länder: Bayern · Hessen · Berlin · Bremen · Sortiert", plain)
+        based = typst(md; base="https://example.org/p/App")
+        @test all(k -> occursin(k, based), kept)
+        @test occursin("#link(\"https://example.org/p/App/region/11\")[Berlin]", based)
+        @test count("#link(", based) == length(kept) + 1
+        @test occursin("Bayern · Hessen · #link(", based) && occursin("· Bremen · Sortiert", based)
+        # A link written as its text that shows an address is then linked like
+        # any other address in the text.
+        @test occursin("Seite: #link(\"https://www.example.org\")[www.example.org]",
+                       typst("Seite: [www.example.org](www.example.org)\n"))
+
+        pdfua(path) = let bytes = read(path, String)
+            startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+        end
+        # The URI links of a PDF, by poppler's `pdfinfo -url`; `nothing` without it.
+        function uris(path)
+            isnothing(Sys.which("pdfinfo")) && return nothing
+            out = IOBuffer()
+            success(run(pipeline(ignorestatus(`pdfinfo -url $path`); stdout=out, stderr=devnull))) || return nothing
+            sort!([last(split(l)) for l in split(String(take!(out)), '\n') if occursin("Annotation", l)])
+        end
+        mktempdir() do dir
+            # A page whose links are an htmx-only `<a>` without `href`, the
+            # `href="#"` of a script-driven one and a site path.
+            page = h.article(h.h1("Regionen"), h.p("Länder: ",
+                h.a("Bayern"; hx_get="/region/09", hx_target="#karte"), " · ",
+                h.a("Hessen"; href="#", hx_get="/region/06", onclick="event.preventDefault()"), " · ",
+                h.a("Berlin"; href="/region/11"), " · ", h.a("Quelle"; href="https://example.org/daten")))
+            for (base, links) in [nothing => ["https://example.org/daten"],
+                                  "https://example.org/p/App/" =>
+                                      ["https://example.org/daten", "https://example.org/p/App/region/11"]]
+                out = joinpath(dir, "regionen.pdf")
+                @test pdf_report(page, out; title="Regionen", lang="de-DE", base_url=base) == out
+                @test pdfua(out)
+                found = uris(out)
+                if isnothing(found)
+                    @test_skip "pdfinfo -url (poppler ≥ 22) lists the links"
+                else
+                    @test found == links
+                end
+                if isnothing(Sys.which("pdftotext"))
+                    @test_skip "pdftotext (poppler-utils) reads the text layer"
+                else
+                    text = replace(read(`pdftotext -enc UTF-8 $out -`, String), r"\s+" => " ")
+                    @test occursin("Länder: Bayern · Hessen · Berlin · Quelle", text)
+                end
+            end
+            out = joinpath(dir, "links.pdf")
+            @test pdf_report(md, out; title="Links", lang="de-DE") == out
+            @test pdfua(out)
+            found = uris(out)
+            if !isnothing(found)
+                @test found == ["https://example.org/daten", "mailto:info@example.org"]
             end
         end
     end
