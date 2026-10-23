@@ -878,6 +878,13 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
   whose image has no alt text.
+- **Long tables:** a table longer than the rest of its page continues on the
+  next page, with its header row repeated on each page. A caption above a table
+  moves to the next page with its first rows rather than stay alone at the
+  bottom of a page. A captioned table is a Typst figure, which does not break
+  across pages, so a bundled Typst rule makes it breakable: before it, a
+  captioned table taller than a page printed its last rows over each other and
+  the page number.
 - **Quotes:** typographic quotes read as written: `„Titel“`, `‚Wort‘` and
   `“title”` stay those characters in the PDF, as in the page. Straight quotes
   (`"Titel"`, `'Wort'`) become the quotes of `lang`, so `„Titel“` in a

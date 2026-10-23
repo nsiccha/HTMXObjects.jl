@@ -23,3 +23,12 @@
   show raw: set text(hyphenate: false)
   cell
 })
+
+// A captioned table is a figure (`quarto-float-tbl`, or Typst's `table` kind),
+// and a figure does not break across pages: a table taller than a page printed
+// its last rows over the page bottom. Breakable, it continues on the next page
+// like an uncaptioned table, its header row repeated; a caption above a table
+// moves along with the first rows rather than stay alone at a page bottom.
+#show figure.where(kind: "quarto-float-tbl"): set block(breakable: true)
+#show figure.where(kind: table): set block(breakable: true)
+#show figure.caption.where(position: top): it => block(sticky: true, it)
