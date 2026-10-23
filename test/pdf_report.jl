@@ -210,18 +210,14 @@ end
             end
             rm(de); rm(joinpath(dir, "de.md"))
 
-            # An `h.img` with alt text alone in its block: HTMX.jl writes it as
-            # `![alt](src)`, which Pandoc reads as a figure whose caption is the
-            # alt text and whose image has none, so Typst refuses the PDF. Flip
-            # to `@test` once HTMX.jl writes the alt as an attribute.
-            @test_broken try
-                pdf_report(with_caption(CaptionSpec(; title="Balken"),
-                        h.img(; src="bars.svg", alt="Two bars of equal height."); id="fig-bars"),
-                    joinpath(dir, "img.pdf"); title="R", lang="en-GB")
-                pdfua(joinpath(dir, "img.pdf"))
-            catch
-                false
-            end
+            # An `h.img` with alt text alone in its block: HTMX.jl writes the alt
+            # as an attribute, `![](bars.svg){alt="…"}`, so Pandoc keeps it on the
+            # image rather than reading `![alt](src)` as an implicit figure whose
+            # image has none, and Typst accepts the PDF.
+            img = with_caption(CaptionSpec(; title="Balken"),
+                h.img(; src="bars.svg", alt="Two bars of equal height."); id="fig-bars")
+            @test pdf_report(img, joinpath(dir, "img.pdf"); title="R", lang="en-GB") == joinpath(dir, "img.pdf")
+            @test pdfua(joinpath(dir, "img.pdf"))
 
             # Images Typst cannot read from `resources` as written: an absolute
             # path (outside or inside it), a `file:` URL and a relative path that
