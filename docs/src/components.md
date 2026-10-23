@@ -1046,6 +1046,17 @@ hx_link("/settings"; hx_target="#main", hx_push_url="true")("Settings")
 hx_link("/report/42"; hx_target="#main", preload=true)("Report")  # starts on hover
 ```
 
+### Opening a link in a new tab {#new-tab-links}
+
+A click on an htmx link swaps in place. A Ctrl/Cmd-click, Shift-click or
+middle-click on one with a real `href` — `hx_link`, `nav_sidebar` and
+`htmxo_breadcrumb` render one — opens that address in a new tab or window and
+leaves the page as it is, as on any link. htmx alone would swap in place for
+Ctrl/Cmd/Shift too, so the [`htmx`](@ref) shell carries
+[`modifier_click_script`](@ref), which keeps those clicks from htmx; a link
+without an `href`, or with `href="#…"`, stays htmx's. Give an app's own
+`hx-get` link the page address as its `href` to get this.
+
 ### `htmx_or(full_page_fn, req, fragment)`
 
 Inside a route body, return `fragment` for HTMX requests and call `full_page_fn()` for direct browser navigation. Typically used with do-block syntax:

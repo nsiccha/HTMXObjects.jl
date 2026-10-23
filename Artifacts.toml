@@ -1,7 +1,8 @@
 # Vendored `htmx()` head assets: exact npm release tarballs backing
 # `assets=:vendor` (see `_VENDOR_ASSETS` in src/HTMXObjects.jl). Each tarball's
 # served file is byte-identical to the CDN file at the pinned version
-# (verified 2026-09-28; re-verify with `cmp` against the CDN URL on any bump).
+# (verified 2026-09-28; KaTeX's 62 served files 2026-10-23 against jsdelivr;
+# re-verify with `cmp` against the CDN URL on any bump).
 # Downloads are lazy (`LazyArtifacts`): CDN users fetch nothing.
 
 [htmx]
@@ -45,3 +46,10 @@ git-tree-sha1 = "55e1d3708f80736c0ceacabc23f8b7aa4f2d5b94"
 [[pico.download]]
 url = "https://registry.npmjs.org/@picocss/pico/-/pico-2.1.1.tgz"
 sha256 = "4affbb56f49df6d5325610b06762156f1dcdbc6ef57cea5c136d7e8a00a8cd24"
+
+[katex]
+lazy = true
+git-tree-sha1 = "1d407929285782f62be1dbeff21349b266ebe725"
+[[katex.download]]
+url = "https://registry.npmjs.org/katex/-/katex-0.19.0.tgz"
+sha256 = "d8e49f2fea6eeed7cdae2cf4fd48e2f1d348758aa9e5740715e4533c2c96d1ee"
