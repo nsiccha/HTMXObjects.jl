@@ -114,6 +114,19 @@ redirect_to
 redirect_history_script
 ```
 
+### Links that open in a new tab
+
+htmx takes over every click on an `<a href>` that carries `hx-get`,
+Ctrl/Cmd- and Shift-clicks included, so such a link swapped in place where
+the browser would open a new tab or window. The shell's
+[`modifier_click_script`](@ref) hands those clicks back to the browser: a
+plain click still swaps in place, a modifier click opens the `href`
+([components](components.md#new-tab-links)).
+
+```@docs
+modifier_click_script
+```
+
 ## The page shell
 
 A route's return value is a *fragment*. On direct browser navigation the
@@ -136,6 +149,32 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 `throwOnError: false` does not suppress it).
 
 Fragments are not documents and never carry a doctype.
+
+### The page's language {#page-lang}
+
+`lang` declares the language the page is written in, as a BCP 47 tag on
+`<html lang>` (WCAG 2.1 success criterion 3.1.1, *Language of Page*, which
+BITV 2.0 also requires). Screen readers then pronounce the page in that
+language, and CSS `hyphens: auto` hyphenates it with that language's rules:
+
+```julia
+@htmx struct App
+    __error_texts__ = error_texts(:de)
+    __page__(content) = HTMXObjects.pico_page(content; lang="de", error_texts=__error_texts__)
+    # ...
+end
+```
+
+`htmx(...; lang)` takes the same keyword. A region or script is optional
+(`"de"`, `"de-CH"`, `"sr-Latn"`). The tag is checked when the page is built: a
+language name such as `"German"`, an underscore form such as `"de_DE"` or an
+empty string throws an `ArgumentError`, because a browser accepts any value and
+would read the page as an unknown language. `nothing` (the default) writes no
+`lang` attribute, and the page is unchanged. `lang` is independent of
+`error_texts`, which chooses only the words of the framework's error articles
+and toasts. Static exports and `record!` bundles carry the attribute, since it
+is part of the page. Mark a part in another language with `lang` on its own
+element (`h.blockquote(cited; lang="en")`).
 
 ### Text size, page width and buttons under Pico {#pico-page-size}
 
@@ -249,7 +288,7 @@ shell's reading of an `htmx:afterRequest`, `htmx:sendError`, `htmx:timeout`
 or `htmx:sendAbort` event: `{state, text}`, where `state` is `"success"`,
 `"failure"`, `"neutral"` or `"pending"`.
 
-### Offline pages — `assets=:vendor`
+### Offline pages — `assets=:vendor` {#offline-pages}
 
 By default the shell loads its JS/CSS from a CDN. A standalone app that must
 run fully offline (air-gapped) vendors those files instead: `vendorfiles()`
@@ -277,6 +316,14 @@ matching head nodes (scripts, plus a stylesheet link for `:pico`, htmx before
 its extensions) for a hand-built `HTMLDocument`. `base` is used as given, so
 a relative prefix addresses the copies relative to the page. The `htmx()`
 shell accepts the same relative string as `assets=`.
+
+KaTeX, which typesets [Markdown math](#markdown-math), is a directory:
+`vendorfiles()` serves `/vendor/katex/katex.min.css`, `…/katex.min.js` and the
+`…/katex/fonts/` its stylesheet loads, and `copy_vendorfiles` writes them to
+`dir/katex/` (the default `packages` include `:katex`). The shell names them
+in an inert template; nothing is fetched until a page shows math.
+`vendor_head(base; packages=(:katex,))` returns that template, for a
+hand-built head that also adds `math_script()` and `math_styles()`.
 
 ```julia
 copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico))
@@ -542,7 +589,7 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
-| `pdf_report(page_or_markdown, path; title, lang)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
+| `pdf_report(page_or_markdown, path; title, lang, metadata)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 | `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
 
@@ -600,14 +647,15 @@ For authoring Markdown that renders to HTML — the reverse direction:
 
 | Export | Purpose |
 |--------|---------|
-| `render_markdown(text; rules, context)` | CommonMark (+ GFM tables/strikethrough/task lists) Markdown → `h` node tree, with inline text rules |
+| `render_markdown(text; rules, context, math)` | CommonMark (+ GFM tables/strikethrough/task lists, TeX math) Markdown → `h` node tree, with inline text rules |
 | `MarkdownRule(pattern, build)` | One rule: a `Regex` plus `build(match, context)` producing the replacement node(s) |
 | `MARKDOWN_URL_RULE` | Stock rule linking bare `http(s)://` URLs; the default registry |
 | `MarkdownRenderer` / `DefaultMarkdownRenderer()` | Renderer supertype / the stock renderer; subtype and add `markdown_node` overrides |
 | `markdown_node(renderer, kind, node, rules, context)` | Per-node-kind override point (plus the single-node `markdown_node(renderer, node, ...)` form) |
 | `markdown_children(renderer, node, rules, context)` | Joined-run children render, for override recursion |
 | `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
-| `markdown_parser(; extra_rules)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
+| `markdown_parser(; extra_rules, math)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
+| `math_script()` / `math_styles()` | The browser runtime that typesets Markdown math with KaTeX; `htmx()` pages carry both |
 | `decorated_link(label, href, entry; class, attrs, base)` | `base` attrs always; `attrs(entry)` merged over them once known |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
@@ -628,6 +676,54 @@ renderer at every depth. `markdown_children` and `markdown_text_run` are the
 recursion helpers for override authors; `parser_rules=` registers extra
 CommonMark parser rules, and `render_markdown(::CommonMark.Node)` renders an
 already-parsed tree.
+
+### Math in Markdown {#markdown-math}
+
+`render_markdown`, and with it every `SemanticProse`, typesets TeX math: `$…$`
+or `\(…\)` inline, and `$$…$$`, `\[…\]` or a ```` ```math ```` fence for
+display. A paragraph that is a single display formula (BRM's model
+descriptions write each equation that way) becomes a block of its own.
+Nothing has to be wired per app:
+
+```julia
+SemanticProse(BRM.brm_description_markdown(BRM.brm_description(d)))
+```
+
+- **The TeX is kept byte for byte.** The parser captures the bytes between
+  the delimiters before CommonMark's escapes run, so `\_` stays `\_` and `\\`
+  stays `\\` (plain CommonMark would turn `log\_theta` into `log_theta`).
+  Code spans and fences never become math.
+- **Money stays text.** Dollar signs follow pandoc's rules: an opening `$` is
+  followed by a non-space, and a closing `$` is preceded by one and not
+  followed by a digit, so `costs $5 and $10` and `$1,234.00/$56.00` are prose
+  while `$x_1$` is math. Inline math holds no backtick, and `\$` is a literal
+  dollar.
+- **The browser typesets it.** Each formula renders as an element marked
+  `htmxo-math` (`data-htmxo-math="inline"` or `"display"`) that carries its
+  TeX as text. The shell's `math_script` typesets every marked element with
+  KaTeX's `renderToString` (`throwOnError: false`, `trust: false`), on load
+  and after every htmx swap; it never rescans the page's text for
+  delimiters. Until KaTeX arrives, or where it cannot load, the formula shows
+  its source in a monospace font (`math_styles`).
+- **KaTeX loads only for pages that show math.** The `htmx()` shell carries an
+  inert `<template id="htmxo-katex">` naming KaTeX's stylesheet and script;
+  the runtime adds them the first time a formula appears. `katex_version`
+  selects the release (default the vendored pin, `0.19.0`): from jsdelivr
+  under `assets=:cdn` (not cdnjs, whose KaTeX font files were measured one
+  byte short), from the vendor mount under `assets=:vendor` (see
+  [Offline pages](#offline-pages)). `katex_version=nothing`
+  leaves the template out; the runtime then uses a KaTeX the page loaded
+  itself (`window.katex`), or leaves the source showing.
+- **Markdown reads it back as `$…$` / `$$…$$`**, whichever delimiters the
+  source used, so `?plain`, Quarto and [`pdf_report`](#pdf-report) see
+  ordinary dollar math. A `SemanticProse` projects its source unchanged.
+- **`math=false` opts out** (`render_markdown(text; math=false)`,
+  `SemanticProse(markdown; math=false)`, `markdown_parser(; math=false)`):
+  every `$` and `\(` is then text, as before.
+
+An app that renders math nodes its own way adds `markdown_node` methods for
+`CommonMark.Math` / `CommonMark.DisplayMath` on its renderer; a
+`parser_rules=[CommonMark.DollarMathRule()]` workaround is no longer needed.
 
 Deferred decoration pairs a [`MarkdownRule`](@ref) with a DynamicObjects
 `BackgroundCache` in batch mode: the build function reads `cache[key]` on the
@@ -654,7 +750,9 @@ pdf_report(page, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE")
 
 # The Markdown of a mounted route works the same way:
 md = String(dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"]).body)
-pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resources="figures")
+pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resources="figures",
+           metadata=(subtitle="Entwurf", date="22.10.2026", toc=true,
+                     margin=(x="2cm", y="2cm"), fontsize="10pt"))
 ```
 
 - **Engine:** Quarto's Typst engine with `pdf-standard: ua-1`, plus a filter
@@ -666,17 +764,51 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   it as the title block above the content.
 - **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
   Without one, Quarto's template labels the document with the region `US`.
-  Mark a part in another language with a `::: {lang="en"}` block in Markdown.
+  Mark a part in another language with a `::: {lang="en"}` block in Markdown,
+  or with `h.div(; lang="en")` in a page, which HTMX.jl writes as that block
+  (HTMX ≥ `00bb3da`; older HTMX drops `lang`).
+- **`metadata`** sets the other document options: a NamedTuple or an
+  `AbstractDict` of Quarto front-matter keys, such as `subtitle`, `author`,
+  `date`, `toc`, `papersize`, `margin` and `fontsize`, or any other option of
+  Quarto's Typst format. A NamedTuple writes `_` as `-` (`toc_depth=2` is
+  `toc-depth: 2`); dictionary keys are written as given. Values are strings,
+  numbers, Bools, dates, vectors, and NamedTuples or dictionaries for nested
+  options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`,
+  `pdf-standard` and `filters` belong to `pdf_report`; setting one through
+  `metadata` is an `ArgumentError`.
+- **Paper:** the size `lang`'s region uses. That is US Letter for the regions
+  Unicode CLDR lists for it (US, CA, MX and others in the Americas) and A4
+  everywhere else, so a `de-DE` report is A4 without asking.
+  `metadata=(papersize="us-letter",)` or any other Typst paper name overrides
+  it.
+- **No YAML block in the Markdown.** Quarto merges a YAML metadata block found
+  in the Markdown over the front matter `pdf_report` writes, which would
+  replace the title, the language and the equation filter. `pdf_report`
+  refuses Markdown that carries one; pass its options as `metadata=`.
 - **`resources`** is the directory relative paths (images) resolve against; it
-  defaults to the PDF's directory. `pdf_report` removes its temporary `.qmd`,
-  Quarto's intermediate files and the `.quarto` cache from it, also on failure.
+  defaults to the PDF's directory. An image can also be an absolute path, a
+  `file:` URL, a relative path outside `resources`, an `http(s)` URL or a
+  `data:` URI: the render reads it into a temporary copy, because Typst reads
+  only files inside `resources`. A path starting with `/` names the file under
+  `resources` when there is one (the site-root URL of an exported page), else
+  the absolute path. `pdf_report` removes its temporary `.qmd`, Quarto's
+  intermediate files and the `.quarto` cache from it, also on failure.
 - **Images need alt text.** Typst refuses a PDF/UA document with an image that
-  has none, and `pdf_report` throws with Typst's message, for example
-  `PDF/UA-1 error: missing alt text` with the source line. In hand-written
+  has none or has `alt=""`, and `pdf_report` throws with Typst's message, for
+  example `PDF/UA-1 error: missing alt text` with the source line. In a page,
+  HTMX.jl writes `h.img(; src, alt)` as `![](src){alt="…"}` (HTMX ≥
+  `00bb3da`; older HTMX writes `![alt](src)`, so a lone `h.img`, also inside
+  `with_caption`, fails the export). In hand-written
   Markdown, give an image its alt text as an attribute,
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
   whose image has no alt text.
+- **Quotes:** typographic quotes read as written: `„Titel“`, `‚Wort‘` and
+  `“title”` stay those characters in the PDF, as in the page. Straight quotes
+  (`"Titel"`, `'Wort'`) become the quotes of `lang`, so `„Titel“` in a
+  `de-DE` report. A bundled filter does this: Pandoc's Typst writer alone
+  turns `“ ” ‘ ’` into straight quotes, so a German `„Titel“` came out
+  `„Titel„` and `‚Wort‘` came out `‚Wort’`.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense
@@ -1323,6 +1455,8 @@ SemanticAlternatives
 MarkdownRule
 MARKDOWN_URL_RULE
 render_markdown
+math_script
+math_styles
 MarkdownRenderer
 DefaultMarkdownRenderer
 markdown_node
@@ -1439,7 +1573,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 
 | Element | Holds |
 |---------|-------|
-| `SemanticProse(markdown)` | A run of prose, authored as Markdown |
+| `SemanticProse(markdown; math=true)` | A run of prose, authored as Markdown; its TeX math is typeset |
 | `SemanticFields(; facts...)` | Labelled facts |
 | `SemanticTable(source)` | Any Tables.jl-compatible source |
 | `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
@@ -1496,8 +1630,9 @@ Four points where a projection is deliberately not a translation of the HTML:
   by the whole body. Wrapping the children in markup instead would force the
   subtree down the HTML→Markdown path and lose every peer projection under it.
 - **`SemanticProse`'s HTML peer renders its Markdown**, through
-  [`render_markdown`](@ref) (CommonMark plus bare-URL linking), which escapes
-  inline markup — so prose cannot smuggle HTML through. Its HXML peer is the
+  [`render_markdown`](@ref) (CommonMark plus bare-URL linking and
+  [TeX math](#markdown-math)), which escapes inline markup — so prose cannot
+  smuggle HTML through. Its HXML peer is the
   source as plain text.
 - **`SemanticAlternatives` projects its default view alone** outside HTML.
   Collapsed views have no text analogue, so Markdown, plain and HXML carry the
@@ -1517,6 +1652,19 @@ GFM pipe table whose rows each stay one line: a `|` in a header or cell is
 escaped as `\|` (GFM splits a cell at every unescaped pipe, code spans included),
 and a line break becomes an inline `<br>` — the same cell rule HTMX.jl applies
 to `render_table`'s `h.table`.
+
+Sections nest as an outline. A `SemanticSection`'s title is `<h2>` / `##` at
+the top of a document, below its title, and one level deeper inside each
+enclosing section, also through markup in between (an `h.div`, generated form
+chrome, a card) and in a static export. `<h6>` / `######` is the deepest; a
+section nested further keeps it. A `SemanticCard`'s title is its `<header>` in
+HTML, not a heading, so a card opens no level of the HTML outline. In Markdown
+it is a heading one level below the section holding the card, and `###` outside
+any section, where a card sits below the page's `##` headings; the card's own
+content continues one level below it. The level follows nesting within one
+render: a section answered by a response of its own (a lazily loaded detail, an
+`hx-get` result) starts at `<h2>` again, and an `HTMLSnapshot` keeps the HTML
+it rendered when it was made.
 
 `anchor`, where present, becomes the HTML `id` — a document address, so an
 element can be cited from elsewhere. An unaddressed element emits no attribute
