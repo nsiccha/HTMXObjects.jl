@@ -14410,11 +14410,93 @@ const _PDF_REPORT_LOCK = ReentrantLock()
 
 _yaml_string(s) = "\"" * escape_string(s, '"') * "\""
 
-_pdf_report_qmd(markdown; title, lang) = """
+# Regions that use US Letter (Unicode CLDR supplementalData `paperSize`); every
+# other region uses A4. Quarto's Typst template would print every report on US
+# Letter.
+const _LETTER_REGIONS = Set(split("BZ CA CL CO CR GT MX NI PA PH PR SV US VE"))
+
+_pdf_report_paper(lang) =
+    uppercase(match(_PDF_REPORT_LANG, lang).captures[2]) in _LETTER_REGIONS ? "us-letter" : "a4"
+
+# Front-matter keys `pdf_report` sets itself, and where each comes from.
+const _PDF_REPORT_OWN_KEYS = Dict(
+    "title" => "pass it as `title=`",
+    "lang" => "pass it as `lang=`",
+    "format" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
+    "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
+    "filters" => "pdf_report runs the filter that gives equations alt text",
+)
+
+const _PDF_REPORT_METADATA_KEY = r"^[A-Za-z][A-Za-z0-9_-]*$"
+
+# NamedTuple field names spell Quarto's hyphenated keys with `_` (`toc_depth` →
+# `toc-depth`), as `hx_get` spells `hx-get`; dictionary keys are written as given.
+_metadata_pairs(m::NamedTuple) = Pair{String,Any}[replace(string(k), '_' => '-') => v for (k, v) in pairs(m)]
+_metadata_pairs(m::AbstractDict) = Pair{String,Any}[string(k) => v for (k, v) in m]
+_metadata_pairs(m) = throw(ArgumentError(
+    "pdf_report: `metadata` must be a NamedTuple or an AbstractDict of Quarto front-matter keys, got $(typeof(m))"))
+
+# A metadata value as a YAML flow value (YAML reads JSON-style values as they are).
+_yaml_value(v::Bool) = string(v)
+_yaml_value(v::Integer) = string(v)
+_yaml_value(v::AbstractFloat) = isfinite(v) ? string(v) :
+    throw(ArgumentError("pdf_report: `metadata` value $v is not a finite number"))
+_yaml_value(v::Union{AbstractString,Symbol}) = _yaml_string(string(v))
+_yaml_value(v::Union{Dates.Date,Dates.DateTime}) = _yaml_string(string(v))
+_yaml_value(v::Union{AbstractVector,Tuple}) = "[" * join(map(_yaml_value, v), ", ") * "]"
+_yaml_value(v::Union{NamedTuple,AbstractDict}) =
+    "{" * join(("$(_yaml_string(k)): $(_yaml_value(x))" for (k, x) in _metadata_pairs(v)), ", ") * "}"
+_yaml_value(v) = throw(ArgumentError(
+    "pdf_report: `metadata` values must be strings, numbers, Bools, dates, vectors, " *
+    "NamedTuples or dictionaries, got $(typeof(v))"))
+
+function _pdf_report_front_matter(metadata, lang)
+    entries = _metadata_pairs(metadata)
+    for (i, (key, _)) in enumerate(entries)
+        occursin(_PDF_REPORT_METADATA_KEY, key) || throw(ArgumentError(
+            "pdf_report: `metadata` key $(repr(key)) is not a Quarto front-matter key"))
+        haskey(_PDF_REPORT_OWN_KEYS, key) && throw(ArgumentError(
+            "pdf_report: `metadata` cannot set `$key`: $(_PDF_REPORT_OWN_KEYS[key])"))
+        # a dictionary can name one key twice, as `:toc` and `"toc"`
+        any(==(key) ∘ first, entries[1:i-1]) &&
+            throw(ArgumentError("pdf_report: `metadata` sets `$key` twice"))
+    end
+    any(==("papersize") ∘ first, entries) || pushfirst!(entries, "papersize" => _pdf_report_paper(lang))
+    join(("$key: $(_yaml_value(value))\n" for (key, value) in entries))
+end
+
+# The line of a YAML metadata block in `markdown`, or `nothing`: Pandoc reads a
+# `---` line that starts the document or follows a blank line, is followed by a
+# `key:` line and is closed by `---` or `...` as one, and Quarto lets it
+# override the front matter `pdf_report` writes above it.
+function _markdown_metadata_block(markdown)
+    lines = split(markdown, '\n')
+    fence = nothing
+    for (i, line) in enumerate(lines)
+        m = match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if !isnothing(fence)
+            !isnothing(m) && startswith(m.captures[1], fence) && (fence = nothing)
+        elseif !isnothing(m)
+            fence = m.captures[1]
+        elseif rstrip(line) == "---" && (i == 1 || isempty(strip(lines[i-1]))) &&
+               i < length(lines) && occursin(r"^[A-Za-z0-9_-]+\s*:", lines[i+1]) &&
+               any(j -> rstrip(lines[j]) in ("---", "..."), i+2:length(lines))
+            return i
+        end
+    end
+    nothing
+end
+
+function _pdf_report_qmd(markdown; title, lang, metadata=(;))
+    line = _markdown_metadata_block(markdown)
+    isnothing(line) || throw(ArgumentError(
+        "pdf_report: the Markdown has a YAML metadata block (line $line). Quarto would let it override " *
+        "`title`, `lang` and the equation alt-text filter; pass its options as `metadata=` instead"))
+    """
     ---
     title: $(_yaml_string(title))
     lang: $(_yaml_string(lang))
-    format:
+    $(_pdf_report_front_matter(metadata, lang))format:
       typst:
         pdf-standard: [ua-1]
     filters:
@@ -14422,9 +14504,10 @@ _pdf_report_qmd(markdown; title, lang) = """
     ---
 
     """ * markdown
+end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
     pdf_report(value, pdf_path; kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
@@ -14442,6 +14525,19 @@ with the region `US`. Mark a part in another language with a
 region on it). `resources` is the directory relative paths in the Markdown
 (images) resolve against.
 
+`metadata` sets the report's other document options, as a NamedTuple or an
+`AbstractDict` of Quarto front-matter keys: `subtitle`, `author`, `date`, `toc`,
+`papersize`, `margin`, `fontsize`, or any other option Quarto's Typst format
+documents. A NamedTuple writes `_` as `-` (`toc_depth=2` is `toc-depth: 2`);
+dictionary keys are written as given. Values are strings, numbers, Bools,
+dates, vectors, and NamedTuples or dictionaries for nested options
+(`margin=(x="2cm", y="2cm")`). The paper is the one `lang`'s region uses: US
+Letter for the regions Unicode CLDR lists for it (US, CA, MX and others in the
+Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
+`format`, `pdf-standard` and `filters` belong to `pdf_report` and cannot be set
+through `metadata`. The Markdown itself must not carry a YAML metadata block:
+Quarto would let it override `title`, `lang` and the equation filter.
+
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
 filter that gives every equation its TeX source as alt text. Every image needs
 alt text: Typst refuses a PDF/UA document with an image that has none. A
@@ -14449,8 +14545,10 @@ Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
 supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
 Typst 0.15.1).
 
-Throws an `ArgumentError` for a blank `title`, a `lang` without region or a
-missing `resources` directory, and an error carrying Quarto's output when
+Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
+`metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
+metadata block in the Markdown or a missing `resources` directory, all before
+running Quarto, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
@@ -14461,11 +14559,12 @@ alt texts and the reading order are still yours to check by hand.
 
 ```julia
 page = h.article(h.h1("Results"), render_table(df; caption=CaptionSpec(; title="Scores")))
-pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB")
+pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB",
+           metadata=(subtitle="Draft", date=Dates.today(), toc=true, fontsize="10pt"))
 ```
 """
 function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
-                    title::AbstractString, lang::AbstractString,
+                    title::AbstractString, lang::AbstractString, metadata=(;),
                     resources::AbstractString=dirname(abspath(pdf_path)),
                     quarto::AbstractString="quarto")
     isempty(strip(title)) &&
@@ -14473,6 +14572,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
         "pdf_report: `lang` must be a language tag with its region, such as \"de-DE\" or \"en-GB\" " *
         "(got $(repr(lang))); without one Quarto labels the document with the region US"))
+    document = _pdf_report_qmd(markdown; title, lang, metadata)
     isdir(resources) ||
         throw(ArgumentError("pdf_report: `resources` is not a directory: $(repr(resources))"))
     exe = Sys.which(quarto)
@@ -14484,7 +14584,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
         base = tempname(resources; cleanup=false)
         qmd, pdf = base * ".qmd", base * ".pdf"
         try
-            write(qmd, _pdf_report_qmd(markdown; title, lang))
+            write(qmd, document)
             output = IOBuffer()
             proc = run(pipeline(ignorestatus(Cmd(`$exe render $(basename(qmd)) --to typst`; dir=resources));
                                 stdout=output, stderr=output))

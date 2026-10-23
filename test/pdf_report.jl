@@ -9,6 +9,7 @@ using TestItemRunner
         ---
         title: "Bericht \\"A\\" \\\\ 2026"
         lang: "de-DE"
+        papersize: "a4"
         format:
           typst:
             pdf-standard: [ua-1]
@@ -18,6 +19,78 @@ using TestItemRunner
 
         # Ergebnisse
         """
+end
+
+@testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
+    using HTMXObjects, Dates
+
+    qmd(lang; metadata=(;)) = HTMXObjects._pdf_report_qmd("# R\n"; title="R", lang, metadata)
+    frontmatter(lang; metadata=(;)) = split(qmd(lang; metadata), "\n---\n")[1]
+
+    @test occursin("""
+        lang: "de-DE"
+        papersize: "a4"
+        subtitle: "Mietspiegel \\"2026\\""
+        date: "2026-10-22"
+        toc: true
+        toc-depth: 2
+        margin: {"x": "2cm", "y": "2cm"}
+        fontsize: "10pt"
+        author: ["A", "B"]
+        columns: 1
+        format:
+        """, qmd("de-DE"; metadata=(subtitle="Mietspiegel \"2026\"", date=Date(2026, 10, 22), toc=true,
+                                    toc_depth=2, margin=(x="2cm", y="2cm"), fontsize="10pt",
+                                    author=["A", "B"], columns=1)))
+    # Dictionary keys are written as given.
+    @test occursin("\ntoc-title: \"Inhalt\"\n", qmd("de-DE"; metadata=Dict("toc-title" => "Inhalt")))
+
+    # US Letter for the regions Unicode CLDR lists for it, A4 everywhere else.
+    @test occursin("papersize: \"a4\"", frontmatter("en-GB"))
+    @test occursin("papersize: \"a4\"", frontmatter("es-419"))
+    @test occursin("papersize: \"us-letter\"", frontmatter("en-US"))
+    @test occursin("papersize: \"us-letter\"", frontmatter("es-mx"))
+    @test occursin("papersize: \"us-letter\"", frontmatter("fr-CA"))
+    # An explicit papersize wins, written once.
+    fm = frontmatter("de-DE"; metadata=(papersize="a5",))
+    @test occursin("papersize: \"a5\"", fm) && count("papersize", fm) == 1
+end
+
+@testitem "pdf_report refuses metadata and Markdown that would override its own front matter" tags=[:unit] begin
+    using HTMXObjects
+
+    refusal(md="# R\n"; metadata=(;)) = try
+        pdf_report(md, joinpath(tempdir(), "never.pdf"); title="R", lang="de-DE", metadata,
+                   quarto="htmxo-no-such-quarto")
+    catch e
+        e
+    end
+    # refused: PDF/UA-1 needs pdf_report's title, language, ua-1 standard and equation alt text
+    # (snag pdf-report-docum-5afe7187)
+    for (metadata, says) in [(title="X",) => "title=", (lang="en-US",) => "lang=",
+                             (pdf_standard=String[],) => "ua-1", Dict("format" => "html") => "ua-1",
+                             (filters=["mine.lua"],) => "alt text"]
+        err = refusal(; metadata)
+        @test err isa ArgumentError && occursin(says, err.msg)
+    end
+    @test refusal(; metadata=Dict("not a key" => 1)) isa ArgumentError
+    @test refusal(; metadata=Dict(:toc => true, "toc" => false)) isa ArgumentError
+    @test refusal(; metadata=(fontsize=Inf,)) isa ArgumentError
+    @test refusal(; metadata=(toc=1im,)) isa ArgumentError
+    @test refusal(; metadata=["toc" => true]) isa ArgumentError
+
+    # refused: Quarto merges a YAML block in the Markdown over the generated front
+    # matter, so it would silently replace title and lang (snag pdf-report-docum-5afe7187)
+    err = refusal("---\nlang: en-US\n---\n\n# R\n")
+    @test err isa ArgumentError && occursin("YAML metadata block (line 1)", err.msg)
+    @test refusal("# R\n\n---\nsubtitle: x\n...\n") isa ArgumentError
+    # A thematic break, a table and a fenced example are not metadata blocks: these
+    # get past the checks to the missing Quarto.
+    for md in ["# R\n\n---\n\nText.\n", "| a | b |\n|---|---|\n| 1 | 2 |\n",
+               "# R\n\n```yaml\n---\ntitle: x\n---\n```\n", "# R\n\n~~~~\n---\ntitle: x\n---\n~~~~\n"]
+        passed = refusal(md)
+        @test passed isa ErrorException && occursin("Quarto not found", passed.msg)
+    end
 end
 
 @testitem "pdf_report checks its arguments before running Quarto" tags=[:unit] begin
@@ -52,6 +125,8 @@ end
             startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) &&
                 occursin("/StructTreeRoot", bytes)
         end
+        mediabox(path) = match(r"/MediaBox\s*\[([^\]]*)\]", read(path, String)).captures[1]
+        a4, letter = "0 0 595.2756 841.8898", "0 0 612 792"
         svg = """<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10"/></svg>"""
 
         mktempdir() do dir
@@ -66,6 +141,19 @@ end
             out = joinpath(dir, "out", "bericht.pdf")
             @test pdf_report(page, out; title="Bericht", lang="de-DE", resources=dir) == out
             @test pdfua(out)
+            @test mediabox(out) == a4
+
+            # Document options, and the paper each region uses unless one is given.
+            opts = joinpath(dir, "out", "optionen.pdf")
+            @test pdf_report("# A\n\nText.\n\n# B\n\nText.\n", opts; title="Bericht", lang="de-DE",
+                             metadata=(subtitle="Entwurf", date="22.10.2026", toc=true,
+                                       margin=(x="2cm", y="2cm"), fontsize="10pt")) == opts
+            @test pdfua(opts) && mediabox(opts) == a4
+            us = joinpath(dir, "out", "us.pdf")
+            @test pdf_report("# R\n", us; title="R", lang="en-US") == us
+            @test mediabox(us) == letter
+            @test pdf_report("# R\n", us; title="R", lang="en-US", metadata=(papersize="a4",)) == us
+            @test mediabox(us) == a4
 
             # An image with alt text, a German part and display math.
             md = """
