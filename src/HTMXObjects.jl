@@ -27,7 +27,7 @@ export decorated_link
 export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
-export hx_link, htmx_or
+export hx_link, htmx_or, modifier_click_script
 export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
@@ -2722,6 +2722,7 @@ _runtime_blocks() = (
     comparison = (:js, comparison_js),
     stream_probe = (:js, stream_probe_script),
     redirect_history = (:js, redirect_history_script),
+    modifier_click = (:js, modifier_click_script),
     live_region = (:js, live_region_script),
     treebars_styles = (:css, () -> _polling_page_asset(1)),
     treebars_script = (:js, () -> _polling_page_asset(2)),
@@ -2828,7 +2829,9 @@ loads only alongside the shell's own htmx (an extension must follow htmx).
 client (a `ws-connect` element); it loads only alongside the shell's own
 htmx for the same reason. The shell always carries [`stream_probe_script`](@ref),
 so a ws or sse stream refused by an auth gateway reloads the page on the
-gateway's `HX-Refresh` instead of reconnecting forever.
+gateway's `HX-Refresh` instead of reconnecting forever. It also carries
+[`modifier_click_script`](@ref): a Ctrl/Cmd- or Shift-click on an htmx link
+with a real `href` opens that address in a new tab or window, as on any link.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
 `error_texts`, an [`ErrorTexts`](@ref) such as `error_texts(:de)`, is the
@@ -2955,6 +2958,9 @@ function htmx(args...;
                 # A followed redirect records its destination where an
                 # `hx-push-url` names the requested page; inert otherwise.
                 :redirect_history,
+                # A Ctrl/Cmd- or Shift-click on an htmx link opens its `href`
+                # in a new tab or window, as on any link; inert otherwise.
+                :modifier_click,
                 # Discover-mode live regions keep one reconnecting stream behind
                 # this runtime; inert on pages without one.
                 :live_region,
@@ -5301,7 +5307,9 @@ _preload_attrs(preload::Union{AbstractString,Symbol}) = (preload=String(preload)
     hx_link(url; preload=nothing, kwargs...)
 
 Create an `h.a` with both `href` and `hx-get` set to `url`. Extra kwargs
-(`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`.
+(`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`. A click swaps
+in place; a Ctrl/Cmd-, Shift- or middle-click opens `url` in a new tab or
+window (on an [`htmx`](@ref) page, see [`modifier_click_script`](@ref)).
 
 `preload=true` fetches the link's target when the pointer rests on it (a string
 such as `"mousedown"` picks another trigger of htmx's
@@ -7373,6 +7381,56 @@ redirect_history_script() = h.script(Raw(raw"""
     var search = recorded.search === requested.search ? landed.search : recorded.search;
     history.path = landed.pathname + search + recorded.hash;
   });
+})();
+"""))
+
+"""
+    modifier_click_script()
+
+Client runtime that gives Ctrl-, Cmd- and Shift-clicks on htmx links back to
+the browser. htmx takes over every click on an `<a href>` that carries
+`hx-get` (or another request attribute), modifier clicks included, and swaps
+in place; its own exemption covers only Ctrl/Cmd-clicks on boosted links. With
+this runtime, a Ctrl/Cmd- or Shift-click on such a link — as
+[`nav_sidebar`](@ref), [`htmxo_breadcrumb`](@ref) and [`hx_link`](@ref)
+render — opens its `href` in a new tab or window and leaves the page as it
+is: no request, no swap, no history entry. The click stops before any of the
+link's own click handlers (such as `nav_sidebar`'s active-link highlight). A
+plain click still swaps in place, and a middle-click, which htmx never sees,
+still opens the `href`.
+
+Left to htmx: links without an `href`, an `href` of `#…` or `javascript:`, a
+link whose `hx-trigger` does not name `click`, and a click whose default an
+earlier handler already prevented.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+modifier_click_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoModifierClick) return;
+  window.htmxoModifierClick = true;
+  var REQUEST = ['get', 'post', 'put', 'patch', 'delete'].map(function (verb) {
+    return '[hx-' + verb + '],[data-hx-' + verb + ']';
+  }).join(',');
+  // htmx prevents the default of a click on a link it requests from before any
+  // `hx-trigger` filter runs. Seen first (capture phase on the document), a
+  // click that asks for a new tab or window stops here and keeps its default.
+  document.addEventListener('click', function (e) {
+    if (!(e instanceof MouseEvent) || e.defaultPrevented) return;
+    if (!(e.ctrlKey || e.metaKey || e.shiftKey || e.button > 0)) return;
+    var link = e.target instanceof Element ? e.target.closest('a[href]') : null;
+    if (!link) return;
+    var href = link.getAttribute('href').trim();
+    if (href === '' || href.charAt(0) === '#' || /^javascript:/i.test(href)) return;
+    // htmx cancels a click for the link itself or an element inside it.
+    var source = e.target.closest(REQUEST);
+    if (!source || !link.contains(source)) return;
+    var trigger = source.getAttribute('hx-trigger') || source.getAttribute('data-hx-trigger');
+    if (trigger && !/(^|[\s,])click\b/.test(trigger)) return;
+    e.stopImmediatePropagation();
+  }, true);
 })();
 """))
 
@@ -24169,6 +24227,9 @@ end
 
 Render a Pico CSS sidebar `<aside>` with HTMX-enabled navigation links.
 Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active styling.
+A click swaps the page into `target` and records its address; a Ctrl/Cmd-,
+Shift- or middle-click opens it in a new tab or window instead (on an
+[`htmx`](@ref) page, see [`modifier_click_script`](@ref)).
 `preload=true` starts fetching a page while the pointer rests on its link (see
 [`hx_link`](@ref)).
 
@@ -24199,6 +24260,12 @@ Render a Pico-styled breadcrumb `<nav>`. Each `item` is a tuple
 `(label, frag_url, push_url)`. When `frag_url` is `nothing`, the segment
 renders as plain text (the current page). Otherwise it's an `<a>` that issues
 `hx-get=frag_url` into `target` and updates the URL bar via `hx-push-url=push_url`.
+The link's `href` is the address it records — `push_url`, or `frag_url` for
+`push_url="true"` — so a Ctrl/Cmd-, Shift- or middle-click opens that page in a
+new tab or window (on an [`htmx`](@ref) page, see
+[`modifier_click_script`](@ref)), and the link is reachable by keyboard. A
+segment that records no address (`push_url` `nothing` or `"false"`) has no
+`href`.
 `preload=true` starts fetching a segment while the pointer rests on it (see
 [`hx_link`](@ref)).
 
@@ -24217,11 +24284,19 @@ function htmxo_breadcrumb(items; target="#content", preload=nothing)
             push!(parts, h.span(label; aria_current="page"))
         else
             push!(parts, h.a(label;
+                _breadcrumb_href(frag_url, push_url)...,
                 hx_get=frag_url, hx_target=target, hx_swap="innerHTML",
                 hx_push_url=push_url, _preload_attrs(preload)...))
         end
     end
     h.nav(parts...; class="htmxo-breadcrumb", aria_label="breadcrumb")
+end
+
+# A breadcrumb segment's `href` is the address its `hx-push-url` records.
+_breadcrumb_href(frag_url, ::Nothing) = (;)
+function _breadcrumb_href(frag_url, push_url)
+    recorded = string(push_url)
+    recorded == "false" ? (;) : (href = recorded == "true" ? frag_url : push_url,)
 end
 
 """

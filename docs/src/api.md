@@ -114,6 +114,19 @@ redirect_to
 redirect_history_script
 ```
 
+### Links that open in a new tab
+
+htmx takes over every click on an `<a href>` that carries `hx-get`,
+Ctrl/Cmd- and Shift-clicks included, so such a link swapped in place where
+the browser would open a new tab or window. The shell's
+[`modifier_click_script`](@ref) hands those clicks back to the browser: a
+plain click still swaps in place, a modifier click opens the `href`
+([components](components.md#new-tab-links)).
+
+```@docs
+modifier_click_script
+```
+
 ## The page shell
 
 A route's return value is a *fragment*. On direct browser navigation the
