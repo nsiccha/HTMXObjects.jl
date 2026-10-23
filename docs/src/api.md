@@ -275,7 +275,7 @@ shell's reading of an `htmx:afterRequest`, `htmx:sendError`, `htmx:timeout`
 or `htmx:sendAbort` event: `{state, text}`, where `state` is `"success"`,
 `"failure"`, `"neutral"` or `"pending"`.
 
-### Offline pages — `assets=:vendor`
+### Offline pages — `assets=:vendor` {#offline-pages}
 
 By default the shell loads its JS/CSS from a CDN. A standalone app that must
 run fully offline (air-gapped) vendors those files instead: `vendorfiles()`
@@ -303,6 +303,14 @@ matching head nodes (scripts, plus a stylesheet link for `:pico`, htmx before
 its extensions) for a hand-built `HTMLDocument`. `base` is used as given, so
 a relative prefix addresses the copies relative to the page. The `htmx()`
 shell accepts the same relative string as `assets=`.
+
+KaTeX, which typesets [Markdown math](#markdown-math), is a directory:
+`vendorfiles()` serves `/vendor/katex/katex.min.css`, `…/katex.min.js` and the
+`…/katex/fonts/` its stylesheet loads, and `copy_vendorfiles` writes them to
+`dir/katex/` (the default `packages` include `:katex`). The shell names them
+in an inert template; nothing is fetched until a page shows math.
+`vendor_head(base; packages=(:katex,))` returns that template, for a
+hand-built head that also adds `math_script()` and `math_styles()`.
 
 ```julia
 copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico))
@@ -626,14 +634,15 @@ For authoring Markdown that renders to HTML — the reverse direction:
 
 | Export | Purpose |
 |--------|---------|
-| `render_markdown(text; rules, context)` | CommonMark (+ GFM tables/strikethrough/task lists) Markdown → `h` node tree, with inline text rules |
+| `render_markdown(text; rules, context, math)` | CommonMark (+ GFM tables/strikethrough/task lists, TeX math) Markdown → `h` node tree, with inline text rules |
 | `MarkdownRule(pattern, build)` | One rule: a `Regex` plus `build(match, context)` producing the replacement node(s) |
 | `MARKDOWN_URL_RULE` | Stock rule linking bare `http(s)://` URLs; the default registry |
 | `MarkdownRenderer` / `DefaultMarkdownRenderer()` | Renderer supertype / the stock renderer; subtype and add `markdown_node` overrides |
 | `markdown_node(renderer, kind, node, rules, context)` | Per-node-kind override point (plus the single-node `markdown_node(renderer, node, ...)` form) |
 | `markdown_children(renderer, node, rules, context)` | Joined-run children render, for override recursion |
 | `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
-| `markdown_parser(; extra_rules)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
+| `markdown_parser(; extra_rules, math)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
+| `math_script()` / `math_styles()` | The browser runtime that typesets Markdown math with KaTeX; `htmx()` pages carry both |
 | `decorated_link(label, href, entry; class, attrs, base)` | `base` attrs always; `attrs(entry)` merged over them once known |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
@@ -654,6 +663,54 @@ renderer at every depth. `markdown_children` and `markdown_text_run` are the
 recursion helpers for override authors; `parser_rules=` registers extra
 CommonMark parser rules, and `render_markdown(::CommonMark.Node)` renders an
 already-parsed tree.
+
+### Math in Markdown {#markdown-math}
+
+`render_markdown`, and with it every `SemanticProse`, typesets TeX math: `$…$`
+or `\(…\)` inline, and `$$…$$`, `\[…\]` or a ```` ```math ```` fence for
+display. A paragraph that is a single display formula (BRM's model
+descriptions write each equation that way) becomes a block of its own.
+Nothing has to be wired per app:
+
+```julia
+SemanticProse(BRM.brm_description_markdown(BRM.brm_description(d)))
+```
+
+- **The TeX is kept byte for byte.** The parser captures the bytes between
+  the delimiters before CommonMark's escapes run, so `\_` stays `\_` and `\\`
+  stays `\\` (plain CommonMark would turn `log\_theta` into `log_theta`).
+  Code spans and fences never become math.
+- **Money stays text.** Dollar signs follow pandoc's rules: an opening `$` is
+  followed by a non-space, and a closing `$` is preceded by one and not
+  followed by a digit, so `costs $5 and $10` and `$1,234.00/$56.00` are prose
+  while `$x_1$` is math. Inline math holds no backtick, and `\$` is a literal
+  dollar.
+- **The browser typesets it.** Each formula renders as an element marked
+  `htmxo-math` (`data-htmxo-math="inline"` or `"display"`) that carries its
+  TeX as text. The shell's `math_script` typesets every marked element with
+  KaTeX's `renderToString` (`throwOnError: false`, `trust: false`), on load
+  and after every htmx swap; it never rescans the page's text for
+  delimiters. Until KaTeX arrives, or where it cannot load, the formula shows
+  its source in a monospace font (`math_styles`).
+- **KaTeX loads only for pages that show math.** The `htmx()` shell carries an
+  inert `<template id="htmxo-katex">` naming KaTeX's stylesheet and script;
+  the runtime adds them the first time a formula appears. `katex_version`
+  selects the release (default the vendored pin, `0.19.0`): from jsdelivr
+  under `assets=:cdn` (not cdnjs, whose KaTeX font files were measured one
+  byte short), from the vendor mount under `assets=:vendor` (see
+  [Offline pages](#offline-pages)). `katex_version=nothing`
+  leaves the template out; the runtime then uses a KaTeX the page loaded
+  itself (`window.katex`), or leaves the source showing.
+- **Markdown reads it back as `$…$` / `$$…$$`**, whichever delimiters the
+  source used, so `?plain`, Quarto and [`pdf_report`](#pdf-report) see
+  ordinary dollar math. A `SemanticProse` projects its source unchanged.
+- **`math=false` opts out** (`render_markdown(text; math=false)`,
+  `SemanticProse(markdown; math=false)`, `markdown_parser(; math=false)`):
+  every `$` and `\(` is then text, as before.
+
+An app that renders math nodes its own way adds `markdown_node` methods for
+`CommonMark.Math` / `CommonMark.DisplayMath` on its renderer; a
+`parser_rules=[CommonMark.DollarMathRule()]` workaround is no longer needed.
 
 Deferred decoration pairs a [`MarkdownRule`](@ref) with a DynamicObjects
 `BackgroundCache` in batch mode: the build function reads `cache[key]` on the
@@ -1369,6 +1426,8 @@ SemanticAlternatives
 MarkdownRule
 MARKDOWN_URL_RULE
 render_markdown
+math_script
+math_styles
 MarkdownRenderer
 DefaultMarkdownRenderer
 markdown_node
@@ -1485,7 +1544,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 
 | Element | Holds |
 |---------|-------|
-| `SemanticProse(markdown)` | A run of prose, authored as Markdown |
+| `SemanticProse(markdown; math=true)` | A run of prose, authored as Markdown; its TeX math is typeset |
 | `SemanticFields(; facts...)` | Labelled facts |
 | `SemanticTable(source)` | Any Tables.jl-compatible source |
 | `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
@@ -1542,8 +1601,9 @@ Four points where a projection is deliberately not a translation of the HTML:
   by the whole body. Wrapping the children in markup instead would force the
   subtree down the HTML→Markdown path and lose every peer projection under it.
 - **`SemanticProse`'s HTML peer renders its Markdown**, through
-  [`render_markdown`](@ref) (CommonMark plus bare-URL linking), which escapes
-  inline markup — so prose cannot smuggle HTML through. Its HXML peer is the
+  [`render_markdown`](@ref) (CommonMark plus bare-URL linking and
+  [TeX math](#markdown-math)), which escapes inline markup — so prose cannot
+  smuggle HTML through. Its HXML peer is the
   source as plain text.
 - **`SemanticAlternatives` projects its default view alone** outside HTML.
   Collapsed views have no text analogue, so Markdown, plain and HXML carry the
