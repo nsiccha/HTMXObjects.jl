@@ -764,7 +764,9 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   it as the title block above the content.
 - **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
   Without one, Quarto's template labels the document with the region `US`.
-  Mark a part in another language with a `::: {lang="en"}` block in Markdown.
+  Mark a part in another language with a `::: {lang="en"}` block in Markdown,
+  or with `h.div(; lang="en")` in a page, which HTMX.jl writes as that block
+  (HTMX ≥ `00bb3da`; older HTMX drops `lang`).
 - **`metadata`** sets the other document options: a NamedTuple or an
   `AbstractDict` of Quarto front-matter keys, such as `subtitle`, `author`,
   `date`, `toc`, `papersize`, `margin` and `fontsize`, or any other option of
@@ -792,8 +794,11 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   the absolute path. `pdf_report` removes its temporary `.qmd`, Quarto's
   intermediate files and the `.quarto` cache from it, also on failure.
 - **Images need alt text.** Typst refuses a PDF/UA document with an image that
-  has none, and `pdf_report` throws with Typst's message, for example
-  `PDF/UA-1 error: missing alt text` with the source line. In hand-written
+  has none or has `alt=""`, and `pdf_report` throws with Typst's message, for
+  example `PDF/UA-1 error: missing alt text` with the source line. In a page,
+  HTMX.jl writes `h.img(; src, alt)` as `![](src){alt="…"}` (HTMX ≥
+  `00bb3da`; older HTMX writes `![alt](src)`, so a lone `h.img`, also inside
+  `with_caption`, fails the export). In hand-written
   Markdown, give an image its alt text as an attribute,
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
