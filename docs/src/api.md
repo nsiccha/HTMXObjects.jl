@@ -1624,6 +1624,19 @@ escaped as `\|` (GFM splits a cell at every unescaped pipe, code spans included)
 and a line break becomes an inline `<br>` — the same cell rule HTMX.jl applies
 to `render_table`'s `h.table`.
 
+Sections nest as an outline. A `SemanticSection`'s title is `<h2>` / `##` at
+the top of a document, below its title, and one level deeper inside each
+enclosing section, also through markup in between (an `h.div`, generated form
+chrome, a card) and in a static export. `<h6>` / `######` is the deepest; a
+section nested further keeps it. A `SemanticCard`'s title is its `<header>` in
+HTML, not a heading, so a card opens no level of the HTML outline. In Markdown
+it is a heading one level below the section holding the card, and `###` outside
+any section, where a card sits below the page's `##` headings; the card's own
+content continues one level below it. The level follows nesting within one
+render: a section answered by a response of its own (a lazily loaded detail, an
+`hx-get` result) starts at `<h2>` again, and an `HTMLSnapshot` keeps the HTML
+it rendered when it was made.
+
 `anchor`, where present, becomes the HTML `id` — a document address, so an
 element can be cited from elsewhere. An unaddressed element emits no attribute
 at all rather than `id=""`.
