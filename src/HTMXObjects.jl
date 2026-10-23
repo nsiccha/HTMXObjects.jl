@@ -3170,6 +3170,23 @@ const _NO_PAGE_META = (; lang=nothing, title=nothing)
 _page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
 _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
 
+"""
+    HTMXObjects.page_lang() -> Union{String,Nothing}
+
+The language of the answer being produced: the BCP 47 tag that the route's
+mount chain declares with `__lang__` (the innermost declaration wins), or
+`nothing` when none declares one, or outside a route.
+
+It holds on the request's own task, while the route's property runs and while
+its answer is rendered (a poller, the page shell, an error page). So code that
+writes words of its own can write them in the page's language. Treebars'
+progress trees and the `:auto` pollers do, through `treebar_texts`. A
+computation that runs in the background (an `:auto` or `@queued` operation's
+body, a task the route spawns) runs on another task and sees `nothing`: read
+the value before handing work off.
+"""
+page_lang() = _page_meta().lang
+
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
@@ -12329,10 +12346,14 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             # node through the request context; real HTTP requests never
             # carry this key (context is server-side, not client-controlled).
             parent_progress = dispatch_parent(req)
-            operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
-                                       operation_policy,
-                                       parent_progress=parent_progress,
-                                       preload, direct, queued)
+            # The declared page language holds while the operation runs, so a
+            # poller it renders writes in it (`page_lang`).
+            operation = _with_page_meta(page_meta) do
+                _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
+                               operation_policy,
+                               parent_progress=parent_progress,
+                               preload, direct, queued)
+            end
             val = operation.value
             val === _PRELOAD_SKIPPED && return _preload_skipped_response()
             val === _PRESTARTED && return HTTP.Response(204)

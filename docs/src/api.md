@@ -211,6 +211,18 @@ page German. Error pages carry the declarations too. A declaration that is not
 a language tag, or a title that is not a non-empty string, fails the route with
 an `ArgumentError` naming the struct, before the route body runs.
 
+The declared language also sets the language of Treebars' progress words: the
+`:auto` poller of a slow route on a `__lang__ = "de"` page says "Läuft" and
+"— 6 s bisher" rather than "Polling" and "— 6s so far" (Treebars ≥ `2386bb1`,
+whose renderers follow the page language unless given `texts=`). Code that
+writes words of its own reads the language with
+[`HTMXObjects.page_lang`](@ref), on the request's task while the route runs
+and its answer is rendered.
+
+```@docs
+HTMXObjects.page_lang
+```
+
 ### Tables on every page — `tables=true` {#page-tables}
 
 The shell also carries the tables' runtime, so a table from `render_table`,
