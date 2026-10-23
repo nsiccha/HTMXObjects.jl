@@ -212,14 +212,14 @@ end
             else
                 # Quarto alone printed "Invalid Date" for 22.10.2026 and 2026-05-10
                 # for 05.10.2026 (snag pdf-report-metad-89ac6032).
-                @test occursin("22.10.2026", read(`pdftotext $opts -`, String))
+                @test occursin("22.10.2026", read(`pdftotext -enc UTF-8 $opts -`, String))
                 for (date, shown) in [(date="05.10.2026",) => "05.10.2026",
                                       (date="1. Oktober 2026",) => "1. Oktober 2026",
                                       (date=Date(2026, 10, 5), date_format="long") => "5. Oktober 2026",
                                       (date="2026-10-05", date_format="DD.MM.YYYY") => "05.10.2026"]
                     dated = joinpath(dir, "out", "datum.pdf")
                     @test pdf_report("# R\n", dated; title="R", lang="de-DE", metadata=date) == dated
-                    @test pdfua(dated) && occursin(shown, read(`pdftotext $dated -`, String))
+                    @test pdfua(dated) && occursin(shown, read(`pdftotext -enc UTF-8 $dated -`, String))
                     rm(dated)
                 end
             end
@@ -303,7 +303,9 @@ end
                 @test_skip "pdftotext (poppler-utils) reads the text layer"
             else
                 # Typst's hyphenation shows as a soft hyphen in the text layer.
-                text = read(`pdftotext $tab -`, String)
+                # -layout keeps one at a line end: xpdf's pdftotext (the one on
+                # the Windows runner) otherwise joins the word it split.
+                text = read(`pdftotext -enc UTF-8 -layout $tab -`, String)
                 @test occursin("Verhältniswahr\u00ad", text)
                 cells = text[findfirst("Studienarm", text).start:end]
                 pieces = [m[1] for m in eachmatch(r"(\p{L}+)\u00ad", cells)]
@@ -411,7 +413,7 @@ end
             if isnothing(Sys.which("pdftotext"))
                 @test_skip "pdftotext (poppler-utils) reads the text of each page"
             else
-                texts = split(read(`pdftotext -layout $out -`, String), '\f'; keepempty=false)
+                texts = split(read(`pdftotext -enc UTF-8 -layout $out -`, String), '\f'; keepempty=false)
                 onpage(pattern) = findall(t -> occursin(pattern, t), texts)
                 row(i) = onpage(Regex("Land $i\\s+$i\\s*\\n"))
                 # Every row once; the table starts on page 1 below the lines,
