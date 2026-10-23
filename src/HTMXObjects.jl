@@ -3173,8 +3173,9 @@ abstract type SemanticNode end
 A titled semantic summary. Children may be any other semantic node, another
 renderable value, or plain data.
 
-`anchor`, when non-empty, becomes the HTML `id` — a document address, so a card
-can be cited from elsewhere.
+`anchor`, when non-empty, becomes the HTML `id` and, in Markdown, the title
+heading's identifier (`### Title {#anchor}`) — a document address, so a card
+can be cited from elsewhere, also in a [`pdf_report`](@ref).
 
 In HTML the title is the card's `<header>`, not a heading, so a card opens no
 level of the HTML outline. In Markdown it is a heading one level below the
@@ -3207,7 +3208,9 @@ Store source code without choosing markup. `language` is converted to a
 `Symbol` and becomes the HTML language class / Markdown fence info string.
 
 `anchor`, when non-empty, becomes the HTML `id`, so a code block that is cited
-from elsewhere has a document address.
+from elsewhere has a document address. In Markdown the block is wrapped in a
+fenced div carrying it (`::: {#anchor}`), so a link to it resolves in a
+[`pdf_report`](@ref) too.
 """
 struct SemanticCode <: SemanticNode
     language::Symbol
@@ -3451,6 +3454,10 @@ The level follows the nesting: a section's title is `<h2>` / `##` at the top
 of a document, below its title, and one level deeper inside each enclosing
 section, through any markup in between (an `h.div` or a card holding the inner
 section). `<h6>` / `######` is the deepest; a section nested deeper keeps it.
+
+`anchor`, when non-empty, becomes the HTML `id` and, in Markdown, the title
+heading's identifier (`## Title {#anchor}`), so a link to `#anchor` jumps to
+the section in the browser and in a [`pdf_report`](@ref) alike.
 """
 struct SemanticSection <: SemanticNode
     title::String
@@ -3574,6 +3581,19 @@ end
 # emits no attribute at all instead of `id=""`.
 _semantic_anchor_attrs(anchor::AbstractString) =
     isempty(anchor) ? (;) : (; id=anchor)
+
+# The Markdown peer of an anchor: Pandoc's identifier attribute, so a link to
+# `#anchor` resolves where the Markdown is rendered. Typst refuses a link to a
+# label that does not exist, so without it `pdf_report` failed on every
+# in-document link. Pandoc's `#id` shorthand takes letters, digits and `_.:-`;
+# any other id is written `id="…"`, which Pandoc reads to the same identifier.
+_markdown_anchor_attr(anchor::AbstractString) =
+    occursin(r"^[\p{L}\p{N}_.:-]+$", anchor) ? "{#$anchor}" :
+    "{id=\"" * replace(anchor, '\\' => "\\\\", '"' => "\\\"", r"\R" => " ") * "\"}"
+
+# Appended to a heading line: the heading carries its element's anchor.
+_markdown_heading_anchor(anchor::AbstractString) =
+    isempty(anchor) ? "" : " " * _markdown_anchor_attr(anchor)
 
 _semantic_metric_text(metric::SemanticMetric) = isempty(metric.unit) ?
     string(metric.value) : string(metric.value, " ", metric.unit)
@@ -4409,9 +4429,14 @@ function _semantic_inline_code(text)
     fence * text * fence
 end
 
+# A code block has no heading to carry its anchor, and Pandoc's Typst writer
+# drops an identifier on the fence itself, so an anchored block is wrapped in a
+# fenced div that carries it.
 function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
     fence = _semantic_code_fence(code.text)
+    isempty(code.anchor) || print(io, "::: ", _markdown_anchor_attr(code.anchor), '\n')
     print(io, fence, code.language, '\n', code.text, '\n', fence)
+    isempty(code.anchor) || print(io, "\n:::")
 end
 
 Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
@@ -4420,7 +4445,8 @@ Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
 
 Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
     _semantic_heading(_semantic_card_level()) do level
-        print(io, _semantic_heading_sigil(level), " ", card.title)
+        print(io, _semantic_heading_sigil(level), " ", card.title,
+            _markdown_heading_anchor(card.anchor))
         isempty(card.children) || print(io, "\n\n")
         _semantic_show_children(io, mime, card.children, "\n\n")
     end
@@ -4475,7 +4501,8 @@ end
 
 Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_heading_level()) do level
-        print(io, _semantic_heading_sigil(level), " ", section.title)
+        print(io, _semantic_heading_sigil(level), " ", section.title,
+            _markdown_heading_anchor(section.anchor))
         isempty(section.children) || print(io, "\n\n")
         _semantic_show_children(io, mime, section.children, "\n\n")
     end
@@ -15016,6 +15043,12 @@ Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
 from `resources`, also when the render fails.
+
+A link within the report (`[…](#id)`) needs its target in the Markdown: Typst
+refuses a link to a label that does not exist (`label <id> does not exist in the
+document`). The `anchor` of a [`SemanticSection`](@ref), [`SemanticCard`](@ref)
+or [`SemanticCode`](@ref) is written as the target's identifier, so
+`SemanticLink("Abschnitt 1", "#a1")` reaches `SemanticSection(…; anchor="a1")`.
 
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.

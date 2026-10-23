@@ -817,6 +817,21 @@ Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense
 is still for a person to check.
 
+**Links within the report.** A link to `#id` needs an element with that
+identifier in the Markdown: Typst refuses a link to a label that does not exist,
+and `pdf_report` throws with its message, `label <id> does not exist in the
+document`. Give the target a semantic `anchor`: `SemanticSection`,
+`SemanticCard` and `SemanticCode` write it as their identifier (see
+[The semantic element vocabulary](@ref)), so the link jumps to the section in
+the browser and in the PDF alike:
+
+```julia
+page = h.article(
+    h.p("Die Datenlage steht in ", SemanticLink("Abschnitt A1", "#abschnitt-a1"), "."),
+    SemanticSection("A1 Datenlage", SemanticProse("…"); anchor="abschnitt-a1"))
+pdf_report(page, "angebot.pdf"; title="Konzept", lang="de-DE")
+```
+
 ```@docs
 pdf_report
 ```
@@ -1671,7 +1686,13 @@ it rendered when it was made.
 
 `anchor`, where present, becomes the HTML `id` — a document address, so an
 element can be cited from elsewhere. An unaddressed element emits no attribute
-at all rather than `id=""`.
+at all rather than `id=""`. The Markdown peer keeps the address as a Pandoc
+identifier, so a `[…](#anchor)` link resolves wherever the Markdown is rendered
+(Quarto, [`pdf_report`](#pdf-report)): a section or card writes it on its
+title heading (`## Title {#anchor}`), and a code block, which has no heading,
+inside a fenced div (`::: {#anchor}` … `:::`). An anchor outside Pandoc's
+`#id` shorthand (letters, digits, `_`, `.`, `:`, `-`) is written as
+`{id="…"}`, which Pandoc reads to the same identifier.
 
 Most elements project into the HTML element whose native rendering already
 carries their meaning — `article` for a card, `section` for a division, `dl` for
