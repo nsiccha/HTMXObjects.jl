@@ -14,6 +14,7 @@ using TestItemRunner
         format:
           typst:
             pdf-standard: [ua-1]
+            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST))]
         filters:
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
             at: post-render
@@ -23,7 +24,7 @@ using TestItemRunner
 
         # Ergebnisse
         """
-    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER)
+    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST)
 end
 
 @testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
@@ -211,6 +212,39 @@ end
                 @test occursin("„gerades“", text) && occursin("‚einfache‘", text)
             end
             rm(de); rm(joinpath(dir, "de.md"))
+
+            # Table cells are set ragged-right and hyphenate only a word wider
+            # than its column; the body stays justified and hyphenated. Quarto's
+            # template justified the cells too, so Typst split words that fit
+            # on the next line: Me-dian, Verhält-nis.
+            tables = """
+                Der Fließtext bleibt im Blocksatz und wird wie bisher getrennt, damit die Zeilen gleichmäßig lang sind und der Bericht ordentlich aussieht. Hier steht ein langer Satz mit Verhältniswahrscheinlichkeiten und Messstellenvergleichen.
+
+                | Studienarm | Methode | Bayes: Verhältnis zur Referenz [95 %] | Klassisch: Median Verhältnis | Klassisch: Bland–Altman-Mittel |
+                |---|---|---|---|---|
+                | Kreatinin | Bland–Altman nach Grubbs-Ausschluss | 0,986 [0,946; 1,02] | 0,991 | 0,987 |
+
+                | Methode | n | Median Verhältnis | Bland–Altman (95-%-Grenzen) | Passing–Bablok Steigung | Anteil Ausreißer bzw. kontaminiert | Prädiktive 95-%-Grenzen |
+                |---|---|---|---|---|---|---|
+                | Kontaminationswahrscheinlichkeit | 48 | 0,986 | 0,987 (0,912 bis 1,07) | Messstellenvergleich | 4 % [1 %; 9 %] | `verylongidentifiername` |
+                """
+            tab = joinpath(dir, "tabellen.pdf")
+            @test pdf_report(tables, tab; title="Methodenvergleich", lang="de-DE") == tab
+            @test pdfua(tab)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                # Typst's hyphenation shows as a soft hyphen in the text layer.
+                text = read(`pdftotext $tab -`, String)
+                @test occursin("Verhältniswahr\u00ad", text)
+                cells = text[findfirst("Studienarm", text).start:end]
+                pieces = [m[1] for m in eachmatch(r"(\p{L}+)\u00ad", cells)]
+                @test "Kontami" in pieces && "kon" in pieces
+                too_wide = "Kontaminationswahrscheinlichkeit kontaminiert Messstellenvergleich"
+                @test all(p -> occursin(p, too_wide), pieces)
+                @test occursin("verylongidentifiername", cells)
+            end
+            rm(tab)
 
             # An `h.img` with alt text alone in its block: HTMX.jl writes the alt
             # as an attribute, `![](bars.svg){alt="…"}`, so Pandoc keeps it on the
