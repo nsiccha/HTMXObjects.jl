@@ -176,6 +176,41 @@ and toasts. Static exports and `record!` bundles carry the attribute, since it
 is part of the page. Mark a part in another language with `lang` on its own
 element (`h.blockquote(cited; lang="en")`).
 
+`title` writes the page's `<title>` the same way: `pico_page(content;
+title="Kalibrierung")`. A page has one `<title>`, so a `title` together with an
+`h.title` in `extra_head` throws an `ArgumentError`.
+
+A struct can declare the language and title of its own pages instead, as
+`__lang__` and `__title__`. This is how an app whose subtrees are in different
+languages gives each page its own: the document is built by the root's
+`__page__`, which cannot see the subtree a request lands in, so the subtree
+says it itself:
+
+```julia
+@htmx struct Presentation
+    lang::Symbol
+    __lang__ = string(lang)
+    __title__ = lang === :de ? "Präsentation" : "Presentation"
+    # ...
+end
+
+@htmx struct App
+    __lang__ = "en"
+    __title__ = "Workbench"
+    __page__(content) = HTMXObjects.pico_page(content)
+    @include extern(lang::Symbol) = Presentation(lang)
+end
+```
+
+`/extern/de` is then `<html lang="de">` with `<title>Präsentation</title>`, and
+the root's own pages are English with the title `Workbench`. The innermost
+struct on a route's mount chain that declares a value wins; `nothing` keeps
+the enclosing one. The shell uses the declarations only when its own `lang` or
+`title` keyword is not given, so a shell that passes `lang="de"` makes every
+page German. Error pages carry the declarations too. A declaration that is not
+a language tag, or a title that is not a non-empty string, fails the route with
+an `ArgumentError` naming the struct, before the route body runs.
+
 ### Text size, page width and buttons under Pico {#pico-page-size}
 
 Pico ties the text size and the page width to the window: it raises the root
