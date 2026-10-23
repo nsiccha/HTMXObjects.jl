@@ -693,15 +693,15 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   defaults to the PDF's directory. `pdf_report` removes its temporary `.qmd`,
   Quarto's intermediate files and the `.quarto` cache from it, also on failure.
 - **Images need alt text.** Typst refuses a PDF/UA document with an image that
-  has none, and `pdf_report` throws with Typst's message, for example
-  `PDF/UA-1 error: missing alt text` with the source line. In hand-written
+  has none or has `alt=""`, and `pdf_report` throws with Typst's message, for
+  example `PDF/UA-1 error: missing alt text` with the source line. In a page,
+  HTMX.jl writes `h.img(; src, alt)` as `![](src){alt="…"}` (HTMX ≥
+  `00bb3da`; older HTMX writes `![alt](src)`, so a lone `h.img`, also inside
+  `with_caption`, fails the export). In hand-written
   Markdown, give an image its alt text as an attribute,
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
-  whose image has no alt text. In a page, HTMX.jl writes `h.img(; src, alt)`
-  that way (HTMX ≥ `00bb3da`; older HTMX writes `![alt](src)`, so a lone
-  `h.img`, also inside `with_caption`, fails the export). An image without
-  alt text or with `alt=""` still fails it.
+  whose image has no alt text.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense
