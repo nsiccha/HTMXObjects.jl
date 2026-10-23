@@ -118,6 +118,29 @@ query_url("/results"; q="hello", limit=10)
 @query_url index                             # → query_url("/")
 ```
 
+### `route_url(self, :name, args…; key=val…)` — an own route's checked address
+
+```julia
+@htmx struct App
+    @get index() = h.main(lazy(route_url(__self__, :usage_line; n=3)))
+    @get usage_line(; n::Int=1) = slow_usage(n)
+    @get item(id::Int; format::String="html") = render_item(id, format)
+end
+
+route_url(app, :item, 42; format="json")     # "/item/42?format=json"
+route_url(app, :itme, 42)                     # ArgumentError: App has no GET route `itme`
+route_url(app, :usage_line; n="many")         # ArgumentError: App.usage_line's `n` is a Int64; got "many"
+```
+
+The address of a GET route of `self`'s struct, with its path arguments and
+query arguments, checked when it is built. A missing route, the wrong number of
+path arguments, an unknown or missing required keyword, or a value that would
+not parse as its declared type throws an `ArgumentError`. A page that links to
+one of its own fragments therefore fails when it renders, not when the browser
+asks for the fragment. The address carries `self`'s mount prefix and a proxy's
+`X-Forwarded-Prefix`, as `__self__/"name"` does. A struct's `@param`s are
+keywords of each of its routes; `nothing` values are left out.
+
 ## Tables
 
 ### `render_table(table; …)` — sortable HTML table with optional CSV download
@@ -1048,10 +1071,10 @@ status_badge(:custom; classes=Dict(:custom => "u-text-accent"))    # custom pale
 ### `lazy(url, content…; tag=h.div, swap="outerHTML", …)` — lazy-load on view
 
 ```julia
-lazy("/heavy_panel/42"; tag=h.section, id="heavy")
+lazy(route_url(__self__, :heavy_panel, 42); tag=h.section, id="heavy")
 ```
 
-Renders an empty container with `hx-get=…` + `hx-trigger="load"` so the panel populates once it scrolls into view (or immediately on page load).
+Renders a container with `hx-get=…` + `hx-trigger="load"`, which the browser requests as soon as the page has loaded. A page [`serve`](@ref) sends starts that request's operation while it renders, so the panel is ready sooner ([Fragments that start with the page](api.md)). Build the address with `route_url`, so a missing route fails when the page renders.
 
 ### `live_thread` — infinite, live-updating thread
 
