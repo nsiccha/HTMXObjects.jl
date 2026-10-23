@@ -8280,11 +8280,14 @@ end
     # The resting rule still stands beneath the in-flight one.
     @test contains(css, "[hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }")
 
-    # All five verbs carry the in-flight rule, each excluding background
-    # pollers (`hx-trigger` containing `every`) — the same exclusion the
-    # `request_feedback` script applies, so a polling region never dims.
+    # All five verbs carry the in-flight rule, each excluding the requests the
+    # page sends by itself — pollers (`every`), lazy `load` fragments,
+    # `revealed` and `intersect` — the same exclusion the `request_feedback`
+    # script applies, so neither a polling region nor a lazy placeholder dims
+    # (snag lazy-load-succes-a0c68d63).
     for verb in ("get", "post", "put", "patch", "delete")
-        @test contains(css, "[hx-$(verb)]:not([hx-trigger*=\"every\"]).htmx-request")
+        @test contains(css, "[hx-$(verb)]:not([hx-trigger*=\"every\"], [hx-trigger^=\"load\"], " *
+            "[hx-trigger*=\"revealed\"], [hx-trigger*=\"intersect\"]).htmx-request")
     end
     @test contains(css, "cursor: progress")
     # Plain literals, no theme variables: the rule must hold on hand-built

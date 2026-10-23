@@ -1033,6 +1033,13 @@ a timeout) flashes red, and the shell's
 [failure toast](api.md#failure-toasts) says why. A request the page aborted, or
 an answer that navigates, only clears the outline.
 
+Only requests the reader started are marked. A request the page sends by
+itself draws no outline, and its element does not dim: a poll, a preload, and
+an element's own `load`, `revealed` or `intersect` trigger — `lazy(url)`, a
+deferred page's placeholder, a `tabset`'s shown lazy panel, an infinite-scroll
+sentinel. So a page that loads its main content lazily just shows it. A failure
+among them still raises the failure toast.
+
 ## Links and links-as-actions
 
 ### `hx_link(url; …)` — `<a>` that uses `hx-get` (HTMX boost-style)
