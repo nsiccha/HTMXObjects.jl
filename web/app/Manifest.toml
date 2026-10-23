@@ -411,8 +411,8 @@ version = "0.11.3"
 
 [[deps.Treebars]]
 deps = ["Dates", "OrderedCollections"]
-git-tree-sha1 = "69c8517562abb403c0b2a6fa18a6aad6a073789d"
-repo-rev = "2386bb179601cc61d5e5dac70a5ecaa7075ddcc0"
+git-tree-sha1 = "36d6b94ee84397ac977f3fd2299534ef6d9aacb7"
+repo-rev = "de253533c2e6d4884815100988630746c6801017"
 repo-url = "/home/niko/github/nsiccha/Treebars.jl"
 uuid = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 version = "0.1.0"

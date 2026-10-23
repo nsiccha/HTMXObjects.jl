@@ -2637,9 +2637,30 @@ again with no change to the app:
 - while the stream is open, a poller's timer polls go out at most once a
   second, to keep its progress tree current.
 
+With Treebars ≥ `2b6a0f7`, whose page script can apply an answer that did not
+come from a poll, the stream carries the answers too, and a streamed poller
+sends no polls at all:
+
+- once a second the server renders each running poller's answer by polling the
+  operation through `middleware` and the router itself, with the stream
+  request's headers and its `Referer` as the page's address, and sends it as
+  `progress`; the page applies it with Treebars' `treebarUpdatePoller`;
+- when the computation ends it renders the final answer the same way and sends
+  it as `result`, so the result reaches the page without another request;
+- a final answer that needs htmx's own response handling (any status but
+  `286`, an `HX-*` header, a recorded error's id, a toast) is sent as `ready`,
+  and the poll the page then sends gets the answer the stream already rendered,
+  so nothing is computed twice;
+- a poller inside a live-refresh reporter keeps its own polls and fetches its
+  result;
+- `middleware` sees each render as a GET of the poll address, with
+  `req.context[:htmxo_push]` set, and the operation log's `polls=` counts
+  them.
+
 A stream that drops leaves the pollers polling at their own pace while the
-browser reconnects; a refused one is retried with backoff. Pass
-`serve(; operation_stream=false)` to leave every poller to its polls.
+browser reconnects (Treebars' `treebarPollerLost` hands them back); a refused
+one is retried with backoff. Pass `serve(; operation_stream=false)` to leave
+every poller to its polls.
 
 #### How long operations took
 
