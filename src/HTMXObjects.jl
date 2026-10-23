@@ -14877,6 +14877,11 @@ const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "
 # `file:` URL or a relative path that leaves `resources`.
 const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-images.lua")
 
+# Quarto's Typst template justifies the whole document, tables included, and
+# Typst then hyphenates them; these rules set table cells ragged-right and
+# hyphenate only a word wider than its column.
+const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
+
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
 # German report `de-US`.
@@ -14980,6 +14985,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
     $(_pdf_report_front_matter(metadata, lang))format:
       typst:
         pdf-standard: [ua-1]
+        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST))]
     filters:
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
@@ -15029,11 +15035,13 @@ Quarto would let it override `title`, `lang` and the equation filter.
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
 filter that gives every equation its TeX source as alt text. Typographic quotes
 read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
-become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Every image needs
-alt text: Typst refuses a PDF/UA document with an image that has none. A
-Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
-supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
-Typst 0.15.1).
+become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Tables are set
+ragged-right, while the body text stays justified: a word in a table cell is
+hyphenated only when it is wider than its column, and code never is. Every
+image needs alt text: Typst refuses a PDF/UA document with an image that has
+none. A Quarto program (`quarto`, found on `PATH` or given as a path) whose
+Typst supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its
+bundled Typst 0.15.1).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
