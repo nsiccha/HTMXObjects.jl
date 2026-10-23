@@ -3170,6 +3170,23 @@ const _NO_PAGE_META = (; lang=nothing, title=nothing)
 _page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
 _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
 
+"""
+    HTMXObjects.page_lang() -> Union{String,Nothing}
+
+The language of the answer being produced: the BCP 47 tag that the route's
+mount chain declares with `__lang__` (the innermost declaration wins), or
+`nothing` when none declares one, or outside a route.
+
+It holds on the request's own task, while the route's property runs and while
+its answer is rendered (a poller, the page shell, an error page). So code that
+writes words of its own can write them in the page's language. Treebars'
+progress trees and the `:auto` pollers do, through `treebar_texts`. A
+computation that runs in the background (an `:auto` or `@queued` operation's
+body, a task the route spawns) runs on another task and sees `nothing`: read
+the value before handing work off.
+"""
+page_lang() = _page_meta().lang
+
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
@@ -12329,10 +12346,14 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             # node through the request context; real HTTP requests never
             # carry this key (context is server-side, not client-controlled).
             parent_progress = dispatch_parent(req)
-            operation = _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
-                                       operation_policy,
-                                       parent_progress=parent_progress,
-                                       preload, direct, queued)
+            # The declared page language holds while the operation runs, so a
+            # poller it renders writes in it (`page_lang`).
+            operation = _with_page_meta(page_meta) do
+                _run_operation(target, LeafT, name, verb_inst, req, base, n_params;
+                               operation_policy,
+                               parent_progress=parent_progress,
+                               preload, direct, queued)
+            end
             val = operation.value
             val === _PRELOAD_SKIPPED && return _preload_skipped_response()
             val === _PRESTARTED && return HTTP.Response(204)
@@ -15431,6 +15452,12 @@ const _PDF_REPORT_LINKS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto",
 const _PDF_REPORT_BASE_URL_KEY = "htmxobjects-base-url"
 const _PDF_REPORT_READER = "markdown+autolink_bare_uris"
 
+# A Lua filter cannot call a Julia `url_map`, so `pdf_report` first lists the
+# document's link targets with this Pandoc writer, asks `url_map` about each and
+# writes the answers under `_PDF_REPORT_URL_MAP_KEY` for the links filter.
+const _PDF_REPORT_LINK_TARGETS_WRITER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-link-targets.lua")
+const _PDF_REPORT_URL_MAP_KEY = "htmxobjects-url-map"
+
 # Pandoc and Quarto set an image in a box, which Typst puts in a paragraph, so an
 # image alone in its paragraph or figure was tagged as a Figure inside a P, and
 # PAC warns about each one; this filter sets such an image in a Typst block.
@@ -15481,6 +15508,7 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "filters" => "pdf_report runs the filter that gives equations alt text",
     _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
     _PDF_REPORT_BASE_URL_KEY => "pass the address as `base_url=`",
+    _PDF_REPORT_URL_MAP_KEY => "pass the function as `url_map=`",
 )
 
 const _PDF_REPORT_METADATA_KEY = r"^[A-Za-z][A-Za-z0-9_-]*$"
@@ -15572,7 +15600,44 @@ function _pdf_report_base_url(base_url::AbstractString)
     "$_PDF_REPORT_BASE_URL_KEY: $(_yaml_string(_markdown_literal(rstrip(base_url, '/'))))\n"
 end
 
-function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
+# What a link opens under `url_map`: an absolute URL, or "" for the links
+# filter's own rules.
+const _PDF_REPORT_URL = r"^[A-Za-z][A-Za-z0-9+.-]+:\S+$"
+
+_pdf_report_mapped_url(::Nothing, target) = ""
+function _pdf_report_mapped_url(url::AbstractString, target)
+    occursin(_PDF_REPORT_URL, url) || throw(ArgumentError(
+        "pdf_report: `url_map` must return an absolute URL, which a PDF can open, or `nothing`; " *
+        "got $(repr(url)) for the link target $(repr(target))"))
+    String(url)
+end
+_pdf_report_mapped_url(url, target) = throw(ArgumentError(
+    "pdf_report: `url_map` must return a String or nothing; got $(repr(url)) for the link target $(repr(target))"))
+
+# The link targets of the `.qmd` `document`, as Quarto's Pandoc reads them
+# (`--eol=lf`: on Windows a native line end would stay on each target).
+function _pdf_report_link_targets(exe, document)
+    output, errors = IOBuffer(), IOBuffer()
+    proc = run(pipeline(ignorestatus(`$exe pandoc -f $_PDF_REPORT_READER -t $_PDF_REPORT_LINK_TARGETS_WRITER --eol=lf`);
+                        stdin=IOBuffer(document), stdout=output, stderr=errors))
+    success(proc) || error("pdf_report: Pandoc could not list the report's links for `url_map` " *
+        "(exit code $(proc.exitcode)):\n$(String(take!(errors)))")
+    String[t for t in split(String(take!(output)), '\n') if !isempty(t)]
+end
+
+# `url_map`'s answer for each link target of `document`, or `nothing` without one.
+_pdf_report_urls(::Nothing, exe, document) = nothing
+_pdf_report_urls(url_map, exe, document) =
+    [target => _pdf_report_mapped_url(url_map(target), target) for target in _pdf_report_link_targets(exe, document)]
+
+_pdf_report_url_map(::Nothing) = ""
+# The keys are written as given (Pandoc reads a metadata key as text); the URLs
+# are escaped, since it reads a metadata string as Markdown.
+_pdf_report_url_map(urls) = isempty(urls) ? "$_PDF_REPORT_URL_MAP_KEY: {}\n" :
+    "$_PDF_REPORT_URL_MAP_KEY:\n" *
+    join("  $(_yaml_string(target)): $(_yaml_string(_markdown_literal(url)))\n" for (target, url) in urls)
+
+function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, urls=nothing)
     line = _markdown_metadata_block(markdown)
     isnothing(line) || throw(ArgumentError(
         "pdf_report: the Markdown has a YAML metadata block (line $line). Quarto would let it override " *
@@ -15581,7 +15646,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
     ---
     title: $(_yaml_string(title))
     lang: $(_yaml_string(lang))
-    $(_pdf_report_base_url(base_url))$(_pdf_report_front_matter(metadata, lang))format:
+    $(_pdf_report_base_url(base_url))$(_pdf_report_url_map(urls))$(_pdf_report_front_matter(metadata, lang))format:
       typst:
         from: $(_PDF_REPORT_READER)
         pdf-standard: [ua-1]
@@ -15602,7 +15667,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
 end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
     pdf_report(value, pdf_path; kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
@@ -15674,7 +15739,8 @@ Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
 `date_format` next to a text `date`, a `base_url` that is not an absolute URL,
 a YAML metadata block in the Markdown or a missing `resources` directory, all
-before running Quarto, and an error carrying Quarto's output when
+before running Quarto, a `url_map` answer that is neither an absolute URL nor
+`nothing` before rendering, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
@@ -15696,6 +15762,28 @@ to it. `base_url` (`"https://example.org/app"`) is the address the Markdown's
 by the path (`https://example.org/app/region/11`). A relative address has no
 page address to follow and is still written as its text.
 
+`url_map` says where links open when the site the report links to does not
+serve each address under the app's own name, as a static snapshot that stores
+`/api/v1/ap3/anomalien?p_min=0.9` as `api-v1-ap3-anomalien-p_min-0.9.json`. It
+is a function from a link's target, as the Markdown writes it (query included;
+a site address, a relative address, an `#id` or a URL), to a URL or `nothing`.
+`pdf_report` calls it before rendering, once for each target of a link in the
+Markdown or in the document options (an address with a scheme in the text is a
+link too, a `[…]()` has no target); Pandoc reads a space in a target as `%20`.
+A `String` answer is the URL the link opens and must be absolute
+(`"https://example.org/odl/api-v1-ap3-anomalien-p_min-0.9.json"`); `nothing`
+leaves the link to the rules above. This is the shape of `StaticExport`'s
+`url_map`, except that a PDF cannot open a relative target. A `www.` address
+or a code span that is an address is linked to itself after that, without
+`url_map`.
+
+```julia
+snapshot = "https://example.org/odl"
+snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
+pdf_report(md, "konzept.pdf"; title="Konzept", lang="de-DE", base_url=snapshot,
+           url_map = a -> startswith(a, "/api/") ? "\$snapshot/\$(snapshot_file(a))" : nothing)
+```
+
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.
 
@@ -15707,7 +15795,7 @@ pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB",
 """
 function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     title::AbstractString, lang::AbstractString, metadata=(;),
-                    base_url::Union{Nothing,AbstractString}=nothing,
+                    base_url::Union{Nothing,AbstractString}=nothing, url_map=nothing,
                     resources::AbstractString=dirname(abspath(pdf_path)),
                     quarto::AbstractString="quarto")
     isempty(strip(title)) &&
@@ -15721,6 +15809,8 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     exe = Sys.which(quarto)
     isnothing(exe) && error("pdf_report: Quarto not found (`quarto=$(repr(quarto))`); " *
         "install a Quarto whose Typst supports PDF/UA-1 (verified: 1.10.18) or pass its path as `quarto=`")
+    urls = _pdf_report_urls(url_map, exe, document)
+    isnothing(urls) || (document = _pdf_report_qmd(markdown; title, lang, metadata, base_url, urls))
     lock(_PDF_REPORT_LOCK) do
         cache_dir = joinpath(resources, ".quarto")
         had_cache = ispath(cache_dir)
