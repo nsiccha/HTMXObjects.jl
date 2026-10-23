@@ -962,6 +962,12 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   too, which stretched narrow cells with wide gaps and split words such as
   `Me-dian`. Code is never hyphenated, so a code span wider than its column
   runs into the next one.
+- **Line breaks in table cells** stay line breaks. A pipe table row is one
+  line, so the Markdown writes a cell's line break as an inline `<br>`
+  (`| Goslar | 27.268<br>25.501–28.966 |`), as HTMX.jl does for `h.br()` in a
+  cell and `SemanticTable` for a line break in a value. Pandoc's Typst writer
+  drops raw HTML, so the two lines ran together (`27.26825.501–28.966`); a
+  bundled filter reads every `<br>` as a line break.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense
