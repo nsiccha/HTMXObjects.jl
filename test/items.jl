@@ -5026,8 +5026,11 @@ end
         # Copies are writable, so a re-copy overwrites in place; the runtime
         # is skipped on request.
         @test copy_vendorfiles(out; packages=["htmx"], runtime=false) == [joinpath(out, "htmx.min.js")]
-        # The default copies all six pins.
-        @test length(filter(isfile, copy_vendorfiles(joinpath(dir, "all"); runtime=false))) == 6
+        # The default copies all seven pins: six library files, and KaTeX's
+        # stylesheet, script and 60 fonts in their own directory.
+        copied = copy_vendorfiles(joinpath(dir, "all"); runtime=false)
+        @test length(filter(isfile, copied)) == 6 + 2 + 60
+        @test count(f -> dirname(f) == joinpath(dir, "all"), copied) == 6
         @test_throws ArgumentError copy_vendorfiles(dir; packages=(:jquery,))
     end
 
@@ -5053,18 +5056,18 @@ end
     @test !contains(page, "https://")
 end
 
-@testitem "vendor artifacts stay lazy: install selects none, vendor load selects six" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+@testitem "vendor artifacts stay lazy: install selects none, vendor load selects seven" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     using Artifacts, TOML
     toml = joinpath(pkgdir(HTMXObjects), "Artifacts.toml")
     meta = TOML.parsefile(toml)
-    names = ("htmx", "htmx-ext-sse", "htmx-ext-ws", "htmx-ext-preload", "hyperscript", "pico")
+    names = ("htmx", "htmx-ext-sse", "htmx-ext-ws", "htmx-ext-preload", "hyperscript", "pico", "katex")
     # Every table carries the flag: one unflagged entry downloads at install.
     @test Set(keys(meta)) == Set(names)
     for n in names
         @test get(meta[n], "lazy", false) === true
     end
     # Ordinary installation (what Pkg resolves) fetches nothing; explicit
-    # vendor loading resolves the same six with identical metadata.
+    # vendor loading resolves the same seven with identical metadata.
     @test isempty(Artifacts.select_downloadable_artifacts(toml))
     explicit = Artifacts.select_downloadable_artifacts(toml; include_lazy=true)
     @test Set(keys(explicit)) == Set(names)
@@ -5311,10 +5314,11 @@ end
     html = repr("text/html", transformed)
     @test !contains(html, "hx-post")
     @test contains(html, "data-static-disabled")
+    # A recording served from the site root loads the fragment it recorded.
     link = h.a("About"; hx_get="/about")
     transformed_link = static_transform(link)
     html_link = repr("text/html", transformed_link)
-    @test contains(html_link, "hx-get=\"/about\"")
+    @test contains(html_link, "hx-get=\"/hx/about.html\"")
     @test !contains(html_link, "data-static-disabled")
     del_btn = h.button("Delete"; hx_delete="/item/1")
     transformed_del = static_transform(del_btn)
@@ -8280,11 +8284,14 @@ end
     # The resting rule still stands beneath the in-flight one.
     @test contains(css, "[hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete] { cursor: pointer; }")
 
-    # All five verbs carry the in-flight rule, each excluding background
-    # pollers (`hx-trigger` containing `every`) — the same exclusion the
-    # `request_feedback` script applies, so a polling region never dims.
+    # All five verbs carry the in-flight rule, each excluding the requests the
+    # page sends by itself — pollers (`every`), lazy `load` fragments,
+    # `revealed` and `intersect` — the same exclusion the `request_feedback`
+    # script applies, so neither a polling region nor a lazy placeholder dims
+    # (snag lazy-load-succes-a0c68d63).
     for verb in ("get", "post", "put", "patch", "delete")
-        @test contains(css, "[hx-$(verb)]:not([hx-trigger*=\"every\"]).htmx-request")
+        @test contains(css, "[hx-$(verb)]:not([hx-trigger*=\"every\"], [hx-trigger^=\"load\"], " *
+            "[hx-trigger*=\"revealed\"], [hx-trigger*=\"intersect\"]).htmx-request")
     end
     @test contains(css, "cursor: progress")
     # Plain literals, no theme variables: the rule must hold on hand-built
@@ -8494,7 +8501,7 @@ end
     # parent in every peer, not its sibling.
     tender = SemanticSection("AP 2: Modell", SemanticProse("…"),
         SemanticSection("Im Prototyp", SemanticProse("Bayes-Regression")); anchor="tender-ap-2")
-    @test md(tender) == "## AP 2: Modell\n\n…\n\n### Im Prototyp\n\nBayes-Regression"
+    @test md(tender) == "## AP 2: Modell {#tender-ap-2}\n\n…\n\n### Im Prototyp\n\nBayes-Regression"
     @test contains(html(tender), "<h2>AP 2: Modell</h2>")
     @test contains(html(tender), "<h3>Im Prototyp</h3>")
     @test contains(repr("application/vnd.hyperview+xml", tender),
@@ -11530,6 +11537,36 @@ end
                                                 StaticExport(; url_map=_ -> 42))
 end
 
+@testitem "a recording's hx-get names the fragment file it recorded" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: h
+    # Lazy tabs in a recorded page load the fragments `record!` wrote, as a
+    # plain static server (`python -m http.server`) resolves their addresses:
+    # decoded, with no `.html` added. Before, they kept the live address or
+    # gained only `<record_base>/hx/`, which only a host serving `/x` as
+    # `x.html` answered (snag record-lazy-tab-81f10ec0).
+    @htmx struct LazyTabsRecording
+        @get index() = tabset("Moretti" => "/arm/moretti2021", "Two words" => "/arm/a%20b",
+                              "Home" => "/")
+        @get arm(id) = h.p("arm ", id)
+    end
+    paths = ["/", "/arm/moretti2021", "/arm/a%20b"]
+    for (record_base, prefix) in (("", ""), ("/", ""), ("/b", "/b"), (".", "."))
+        mktempdir() do dir
+            record!(LazyTabsRecording(); record_dir=dir, record_base, paths, markdown=false)
+            page = read(joinpath(dir, "index.html"), String)
+            gets = [String(m[1]) for m in eachmatch(r"hx-get=\"([^\"]*)\"", page)]
+            @test sort(gets) == sort(prefix .* ["/hx/arm/moretti2021.html", "/hx/arm/a%2520b.html",
+                                                "/hx/index.html"])
+            for url in gets
+                file = joinpath(dir, HTTP.URIs.unescapeuri(chopprefix(url, prefix * "/")))
+                @test isfile(file)
+            end
+            # The file is named by the requested path, the route reads it decoded.
+            @test occursin("arm a b", read(joinpath(dir, "hx", "arm", "a%20b.html"), String))
+        end
+    end
+end
+
 @testitem "static export walks html_only content" setup=[HTMXOTestImports] tags=[:unit] begin
     import HTMXObjects: h, to_markdown_string
     # `html_only` content is HTML like any other subtree: its controls are
@@ -11541,7 +11578,7 @@ end
     based = static_transform(frag; record_base="/b")
     html = repr("text/html", based)
     @test !contains(html, "hx-post") && count("data-static-disabled", html) == 1
-    @test contains(html, "href=\"/b/doc\"") && contains(html, "hx-get=\"/b/hx/fig\"")
+    @test contains(html, "href=\"/b/doc\"") && contains(html, "hx-get=\"/b/hx/fig.html\"")
     @test to_markdown_string(based) == to_markdown_string(frag)
     removed = repr("text/html", static_transform(frag, StaticExport(; controls=:remove)))
     @test !contains(removed, "Delete") && !contains(removed, "disabled")

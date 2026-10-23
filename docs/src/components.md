@@ -136,6 +136,8 @@ Columns are auto-detected from the table (any `Tables.jl`-compatible source). Ot
 
 The `htmx(...)` / `pico_page` page shell carries the client-side sorting and CSV download (`sortable_table_js()` and `download_table_js()`), together with the table styles and the caption layout, so a table works with nothing added to the page ([Tables on every page](api.md#page-tables)). A page whose `<head>` you build yourself includes those helpers once.
 
+The CSV holds the text each cell shows. A cell shown on several lines (a `<br>`, or block children such as `div` or `p`) exports one quoted field with those lines, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))` becomes a field holding the two lines `6,28` and `6,01–6,55`, rather than `6,286,01–6,55`. A header shown on two lines exports its lines joined by a space.
+
 #### Reading and restoring the sort state
 
 `sortTable` marks the active `<th>` with both `data-sort-dir="asc"|"desc"` and
@@ -443,9 +445,9 @@ A table with other texts than English carries them as one `data-htmxo-texts`
 attribute on its outermost element; an English table is unchanged. Pass the
 same `texts` wherever the table is rendered again (lazy group rows, row
 updates, regrouping), and to the `sortable_table` that holds hand-built
-`master_detail_pair` rows. Markdown and CSV output leave these controls out;
-the one text Markdown keeps is a lazy detail's placeholder (`loading`), which
-follows `texts=` there too.
+`master_detail_pair` rows. Markdown and CSV output leave these controls out,
+and a lazy detail's placeholder (`loading`) too: Markdown writes no detail
+row (see [Details in Markdown](#master-detail-markdown)).
 
 ## Layout / widgets
 
@@ -489,7 +491,10 @@ beside the cell's content, which may be a link; the row click remains a pointer
 shortcut. Every branch and detail control is a native button carrying
 `aria-controls`/`aria-expanded`, so it supports keyboard activation, as do
 auto-wired sort headers. Sorting, search and CSV export read the cell's content,
-not its controls. `initially_open` accepts a Boolean or
+not its controls. However narrow the first column, its controls stay on their
+label's line: the cell never wraps between a control and its label, only the
+label's own text wraps. To keep a label on one line, give its content
+`white-space: nowrap`, not the cell. `initially_open` accepts a Boolean or
 predicate and controls both branch expansion and leaf detail expansion. Groups
 without a detail body or URL have no companion or request. Keys must be unique
 after sanitisation throughout the tree and page.
@@ -535,6 +540,38 @@ A row clicked the moment a swap inserts its table still loads its detail: htmx
 binds inserted elements only when the swap settles, so the expand binds the slot
 itself first. An expand that sends no request (an `htmx:confirm` listener that
 declines it, say) leaves the slot unlatched, and the next expand tries again.
+
+#### Details in Markdown {#master-detail-markdown}
+
+A `?plain` reader or a PDF from [`pdf_report`](api.md) cannot click a row open,
+so the Markdown of a `master_detail_table` is the table of its master rows,
+followed by each eager detail under its row's label in bold (the label's words,
+without links or emphasis), in row order:
+
+```text
+| LB | Abschnitt |
+| --- | --- |
+| LB § 3.2 | AP 2 |
+| LB § 5.1 |  |
+
+**LB § 3.2**
+
+detail for lb-3-2
+```
+
+- A detail row is never a row of the Markdown table, in every Markdown read: `?plain`,
+  `Accept: text/markdown`, `to_markdown_string`, and an app type whose own
+  `show(io, MIME"text/markdown"(), x)` hands the table to HTMX.jl.
+- A detail whose Markdown is empty writes nothing: `nothing`, `html_only(…)`, or a
+  form. So do lazy details (`detail_url`), which are not on the page, as
+  `lazy(url)` writes nothing. Wrap a detail in `html_only` to keep it out of
+  Markdown and PDFs.
+- A captioned table's details follow its figure, and a leaf listed under several
+  groups is written once.
+- Hand-built `master_detail_pair` rows in a `sortable_table` lose their
+  one-cell rows too, but their details are not written after the table. Use
+  `master_detail_table`, or write the content after the table yourself.
+- The HTML is unchanged, and `?error` still finds an error inside a detail row.
 
 #### Regroupable tables {#table-regrouping}
 
@@ -1034,6 +1071,13 @@ a timeout) flashes red, and the shell's
 [failure toast](api.md#failure-toasts) says why. A request the page aborted, or
 an answer that navigates, only clears the outline.
 
+Only requests the reader started are marked. A request the page sends by
+itself draws no outline, and its element does not dim: a poll, a preload, and
+an element's own `load`, `revealed` or `intersect` trigger — `lazy(url)`, a
+deferred page's placeholder, a `tabset`'s shown lazy panel, an infinite-scroll
+sentinel. So a page that loads its main content lazily just shows it. A failure
+among them still raises the failure toast.
+
 ## Links and links-as-actions
 
 ### `hx_link(url; …)` — `<a>` that uses `hx-get` (HTMX boost-style)
@@ -1044,6 +1088,17 @@ an answer that navigates, only clears the outline.
 hx_link("/settings"; hx_target="#main", hx_push_url="true")("Settings")
 hx_link("/report/42"; hx_target="#main", preload=true)("Report")  # starts on hover
 ```
+
+### Opening a link in a new tab {#new-tab-links}
+
+A click on an htmx link swaps in place. A Ctrl/Cmd-click, Shift-click or
+middle-click on one with a real `href` — `hx_link`, `nav_sidebar` and
+`htmxo_breadcrumb` render one — opens that address in a new tab or window and
+leaves the page as it is, as on any link. htmx alone would swap in place for
+Ctrl/Cmd/Shift too, so the [`htmx`](@ref) shell carries
+[`modifier_click_script`](@ref), which keeps those clicks from htmx; a link
+without an `href`, or with `href="#…"`, stays htmx's. Give an app's own
+`hx-get` link the page address as its `href` to get this.
 
 ### `htmx_or(full_page_fn, req, fragment)`
 

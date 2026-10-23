@@ -4,7 +4,8 @@ using TestItemRunner
     using HTMXObjects
 
     filter = HTMXObjects._PDFUA_MATH_ALT_FILTER
-    @test isfile(filter)
+    images = HTMXObjects._PDF_REPORT_IMAGES_FILTER
+    @test isfile(filter) && isfile(images)
     @test HTMXObjects._pdf_report_qmd("# Ergebnisse\n"; title="Bericht \"A\" \\ 2026", lang="de-DE") == """
         ---
         title: "Bericht \\"A\\" \\\\ 2026"
@@ -14,11 +15,15 @@ using TestItemRunner
           typst:
             pdf-standard: [ua-1]
         filters:
+          - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
+            at: post-render
           - $(HTMXObjects._yaml_string(filter))
+          - $(HTMXObjects._yaml_string(images))
         ---
 
         # Ergebnisse
         """
+    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER)
 end
 
 @testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
@@ -182,18 +187,62 @@ end
             @test err isa ErrorException && occursin("missing alt text", err.msg)
             @test sort(readdir(dir)) == ["bars.svg", "md.pdf", "out"]
 
-            # An `h.img` with alt text alone in its block: HTMX.jl writes it as
-            # `![alt](src)`, which Pandoc reads as a figure whose caption is the
-            # alt text and whose image has none, so Typst refuses the PDF. Flip
-            # to `@test` once HTMX.jl writes the alt as an attribute.
-            @test_broken try
-                pdf_report(with_caption(CaptionSpec(; title="Balken"),
-                        h.img(; src="bars.svg", alt="Two bars of equal height."); id="fig-bars"),
-                    joinpath(dir, "img.pdf"); title="R", lang="en-GB")
-                pdfua(joinpath(dir, "img.pdf"))
-            catch
-                false
+            # Typographic quotes read as written, in the text and the title;
+            # straight ones become the quotes of `lang`. Pandoc's Typst writer
+            # alone turned “ and ‘ into straight quotes, which Typst opened
+            # anew: „Lieferflächen für Berlin„ and ‚einfache’.
+            german = "Der Leitfaden „Lieferflächen für Berlin“ gilt. Ein \"gerades\" Paar und ‚einfache‘ Zeichen."
+            write(joinpath(dir, "de.md"), german)
+            typst = read(`$(Sys.which("quarto")) pandoc -f markdown -t typst
+                          --lua-filter=$(HTMXObjects._PDF_REPORT_QUOTES_FILTER) $(joinpath(dir, "de.md"))`, String)
+            @test occursin("„Lieferflächen für Berlin“", typst) && occursin("‚einfache‘", typst)
+            @test occursin("\"gerades\"", typst)  # left to Typst's quotes for `lang`
+            de = joinpath(dir, "de.pdf")
+            @test pdf_report(h.article(h.p(german)), de; title="Bericht „Q“", lang="de-DE") == de
+            @test pdfua(de)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                text = read(`pdftotext $de -`, String)
+                @test occursin("Bericht „Q“", text)
+                @test occursin("„Lieferflächen für Berlin“", text)
+                @test occursin("„gerades“", text) && occursin("‚einfache‘", text)
             end
+            rm(de); rm(joinpath(dir, "de.md"))
+
+            # An `h.img` with alt text alone in its block: HTMX.jl writes the alt
+            # as an attribute, `![](bars.svg){alt="…"}`, so Pandoc keeps it on the
+            # image rather than reading `![alt](src)` as an implicit figure whose
+            # image has none, and Typst accepts the PDF.
+            img = with_caption(CaptionSpec(; title="Balken"),
+                h.img(; src="bars.svg", alt="Two bars of equal height."); id="fig-bars")
+            @test pdf_report(img, joinpath(dir, "img.pdf"); title="R", lang="en-GB") == joinpath(dir, "img.pdf")
+            @test pdfua(joinpath(dir, "img.pdf"))
+
+            # Images Typst cannot read from `resources` as written: an absolute
+            # path (outside or inside it), a `file:` URL and a relative path that
+            # leaves it. A site-root path names the file under `resources`.
+            report = joinpath(dir, "bericht")
+            mkpath(joinpath(report, "assets"))
+            cp(joinpath(dir, "bars.svg"), joinpath(report, "assets", "bars.svg"))
+            slash(path) = replace(path, '\\' => '/')  # Markdown reads `\` as an escape
+            bars = slash(joinpath(dir, "bars.svg"))
+            @testset "image $src" for src in (bars, "file://" * (startswith(bars, "/") ? "" : "/") * bars,
+                    "../bars.svg", slash(joinpath(report, "assets", "bars.svg")), "/assets/bars.svg")
+                out = joinpath(report, "bericht.pdf")
+                @test pdf_report("# Bericht\n\n![]($src){alt=\"Zwei gleich hohe Balken.\"}\n", out;
+                                 title="Bericht", lang="de-DE") == out
+                @test pdfua(out)
+                rm(out)
+            end
+            err = try
+                pdf_report("# R\n\n![]($(slash(joinpath(dir, "fehlt.svg")))){alt=\"Balken.\"}\n",
+                           joinpath(report, "r.pdf"); title="R", lang="de-DE")
+            catch e
+                e
+            end
+            @test err isa ErrorException && occursin("fehlt.svg", err.msg)
+            @test readdir(report) == ["assets"]
         end
     end
 end

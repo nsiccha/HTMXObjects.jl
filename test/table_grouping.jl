@@ -1791,9 +1791,11 @@ end
     @test !contains(table_rows(replace(page, store => "")), "data-htmxo-leaf=\"p1\"")
     # Deep enough indentation for every level the pills can nest.
     @test contains(html(grouped(group_by=["party"])), "tr[aria-level=\"4\"]") && !contains(html(grouped(group_by="party")), "tr[aria-level=\"3\"]")
-    # Markdown: the summaries, none of the browser's scaffolding.
+    # Markdown: the summaries, none of the browser's scaffolding. "Acme Prime"
+    # names its group row, its leaf row and, after the table, that leaf's detail.
     md = to_markdown_string(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount)]))
-    @test contains(md, "-100") && !contains(md, "template") && count("Acme Prime", md) == 2
+    @test contains(md, "-100") && !contains(md, "template") && count("Acme Prime", md) == 3
+    @test contains(md, "\n\n**Acme Prime**\n\nmemo 3\n\n")
     # Refused: an unknown reduce or digits, the wrong number of functions, a
     # column that is not a header or is the first, a column named twice,
     # something other than a ColumnSummary, a value that is not a number.

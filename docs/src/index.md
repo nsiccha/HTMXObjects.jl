@@ -937,9 +937,16 @@ route!(app; record_dir="site")
 ```
 
 Every response is saved to disk mirroring the URL path (`/post/42` →
-`site/post/42.html`). `static_transform` walks the Node tree, `html_only(...)`
-content included, and:
+`site/post/42.html`; an HTMX request's fragment → `site/hx/post/42.html`).
+`static_transform` walks the Node tree, `html_only(...)` content included, and:
 
+- Points each remaining rooted `hx-get` at the fragment file the recording
+  writes for it: `hx-get="/post/42"` → `<record_base>/hx/post/42.html`, so a
+  lazy part (a `tabset` URL tab, an `hx_link` target) loads from the bundle
+  once its path is recorded. `record_base` is the prefix the bundle is served
+  under (`record!(app; record_dir, record_base, paths)`); empty means the
+  site root.
+- Prefixes rooted `href`/`src` addresses with `record_base`.
 - Strips `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes.
 - Strips `hx-get` attributes whose URL contains `?` or points at a
   kwargs-only route.
@@ -951,6 +958,11 @@ After recording, replay with any static server:
 ```bash
 python -m http.server --directory site
 ```
+
+Links between recorded pages (`href`, `hx-push-url`) keep the page's path
+(`/post/42`, not `/post/42.html`), so following one needs a host that serves
+`/post/42` from `post/42.html`, such as GitHub Pages; `python -m http.server`
+answers 404 for it.
 
 `route!(app; record_dir)` and `record!` re-register the app's handlers, so they
 cannot run while the same process serves other requests. To export individual

@@ -20,14 +20,14 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
     semantic_card, SemanticTexts, semantic_texts
-export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
+export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
 export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
-export hx_link, htmx_or
+export hx_link, htmx_or, modifier_click_script
 export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
@@ -2480,8 +2480,13 @@ const _HYPERSCRIPT_VERSION = "0.9.14"
 # Vendor pin only: the CDN surface stays `nothing` (`htmx()`) / floating
 # `"2"` (`pico_page`), so vendor mode serves pico solely at this exact pin.
 const _PICO_VERSION = "2.1.1"
+# KaTeX typesets the math `render_markdown` marks (`math_script`). The shell
+# only names where it lives; the runtime fetches it when a page shows math.
+const _KATEX_VERSION = "0.19.0"
 
 # pkg => (path inside its artifact, served filename, pinned version).
+# KaTeX is a directory: its stylesheet finds its fonts relative to itself, so
+# it is served as `katex/…` with the `fonts/` beside it (`_vendor_files`).
 # The artifact itself resolves through `_vendor_artifact` below — the
 # `artifact"..."` macro needs a literal, so one method per asset.
 const _VENDOR_ASSETS = (
@@ -2497,6 +2502,8 @@ const _VENDOR_ASSETS = (
         file="_hyperscript.min.js", version=_HYPERSCRIPT_VERSION),
     pico=(relpath=joinpath("package", "css", "pico.min.css"),
         file="pico.min.css", version=_PICO_VERSION),
+    katex=(relpath=joinpath("package", "dist"),
+        file="katex", version=_KATEX_VERSION),
 )
 
 _vendor_artifact(::Val{:htmx}) = artifact"htmx"
@@ -2505,6 +2512,7 @@ _vendor_artifact(::Val{:ws}) = artifact"htmx-ext-ws"
 _vendor_artifact(::Val{:preload}) = artifact"htmx-ext-preload"
 _vendor_artifact(::Val{:hyperscript}) = artifact"hyperscript"
 _vendor_artifact(::Val{:pico}) = artifact"pico"
+_vendor_artifact(::Val{:katex}) = artifact"katex"
 
 # Single validation point for the `assets` mode, so an unknown mode fails
 # even when every version kwarg is `nothing` and no URL is built.
@@ -2537,6 +2545,17 @@ end
 # library a script. Shared by the `htmx()` shell and `vendor_head`.
 _head_asset_node(::Val{:pico}, src) = h.link(rel="stylesheet", href=src)
 _head_asset_node(::Val, src) = h.script(src=src)
+# KaTeX is not loaded by the head: `src` names its directory, and the
+# template holds the two files `math_script` adds once the page shows math.
+# Template content is inert, so a page without math fetches nothing, and a
+# static export rewrites its `href`/`src` like any other address. A pinned
+# `?v=` (a linked shell) rides on each file, not on the directory.
+function _head_asset_node(::Val{:katex}, src)
+    i = findfirst('?', src)
+    dir, query = isnothing(i) ? (src, "") : (src[1:prevind(src, i)], src[i:end])
+    h.template(h.link(rel="stylesheet", href=dir * "/katex.min.css" * query),
+        h.script(src=dir * "/katex.min.js" * query); id="htmxo-katex")
+end
 
 # htmx extensions register themselves against a loaded htmx, so they need
 # htmx loaded before them.
@@ -2565,8 +2584,12 @@ vendorfiles()                                  # → GET /vendor/htmx.min.js, �
 __page__(content) = htmx(content; assets=:vendor)
 ```
 
-The first call downloads the pinned npm tarballs from Artifacts.toml (one
-3.2 MB fetch, cached in the depot); further calls re-read from disk. Files
+KaTeX, which typesets Markdown math ([`render_markdown`](@ref)), is served
+as a directory, `/<mountdir>/katex/katex.min.css`, `…/katex.min.js` and the
+`…/katex/fonts/` its stylesheet loads.
+
+The first call downloads the pinned npm tarballs from Artifacts.toml (about
+4.7 MB, cached in the depot); further calls re-read from disk. Files
 are served with [`staticfiles`](@ref)-style content types. A custom
 `mountdir` (or a second mount elsewhere) pairs with the matching
 `assets="/<mountdir>"` prefix on [`htmx`](@ref)/[`pico_page`](@ref).
@@ -2582,11 +2605,12 @@ function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
     prefix = strip(mountdir, '/')
     route(file) = isempty(prefix) ? "/$file" : "/$prefix/$file"
     for pkg in keys(_VENDOR_ASSETS)
-        spec = _VENDOR_ASSETS[pkg]
-        path = _vendor_file(pkg)
-        body = read(path)
-        handler = req -> _vendor_file_response(req, path, body, spec.version, headers)
-        _register_get_route!(route(spec.file), handler)
+        version = _VENDOR_ASSETS[pkg].version
+        for (file, path) in _vendor_files(pkg)
+            body = read(path)
+            handler = req -> _vendor_file_response(req, path, body, version, headers)
+            _register_get_route!(route(file), handler)
+        end
     end
     # The runtime is rendered per request, so a Revise edit or a Treebars
     # extension loaded after this call is served as the shell links it.
@@ -2624,12 +2648,25 @@ _etag_matches(if_none_match, etag) =
 # The pinned file inside its (lazily downloaded) artifact.
 _vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[pkg].relpath)
 
+# Every file a package serves, as `served path => file`, in a stable order:
+# one for a library, KaTeX's stylesheet, script and fonts for `:katex`.
+_vendor_files(pkg::Symbol) = _vendor_files(Val(pkg))
+_vendor_files(::Val{P}) where {P} = [_VENDOR_ASSETS[P].file => _vendor_file(P)]
+function _vendor_files(::Val{:katex})
+    dir, served = _vendor_file(:katex), _VENDOR_ASSETS[:katex].file
+    fonts = sort!(readdir(joinpath(dir, "fonts")))
+    [[served * "/" * f => joinpath(dir, f) for f in ("katex.min.css", "katex.min.js")];
+     [served * "/fonts/" * f => joinpath(dir, "fonts", f) for f in fonts]]
+end
+
 """
-    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico), runtime=true) -> Vector{String}
+    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex), runtime=true) -> Vector{String}
 
 Copy the vendored head assets — the same files [`vendorfiles`](@ref)
 serves — into `dir` (created if missing), for a static bundle that has no
-routes to serve them from. `packages` selects which pinned libraries to copy.
+routes to serve them from. `packages` selects which pinned libraries to copy;
+`:katex` is the directory `dir/katex/` (stylesheet, script and fonts) that
+typesets Markdown math on pages whose `assets` prefix names `dir`.
 With `runtime=true` (the default) HTMXObjects' own page runtime is copied
 too, to `dir/htmxo/<name>.css|js` — the files a `runtime=:linked` page links
 (see [`htmx`](@ref)), including the Treebars poll assets while that
@@ -2653,10 +2690,12 @@ page = HTMLDocument(h.html(
 function copy_vendorfiles(dir::AbstractString; packages=keys(_VENDOR_ASSETS), runtime::Bool=true)
     pkgs = _vendor_packages(packages)
     mkpath(dir)
-    libraries = map(pkgs) do pkg
-        dest = joinpath(dir, _VENDOR_ASSETS[pkg].file)
-        write(dest, read(_vendor_file(pkg)))
-        dest
+    libraries = String[]
+    for pkg in pkgs, (file, path) in _vendor_files(pkg)
+        dest = joinpath(dir, split(file, '/')...)
+        mkpath(dirname(dest))
+        write(dest, read(path))
+        push!(libraries, dest)
     end
     runtime || return libraries
     mkpath(joinpath(dir, "htmxo"))
@@ -2679,7 +2718,10 @@ wrote next to the page, and a rooted one (`"/vendor"`) matches a
 An extension (`:sse`, `:ws`, `:preload`) without `:htmx` is an
 `ArgumentError`. The tags load the libraries only: `:preload` still needs
 `hx-ext="preload"` on an ancestor and [`preload_runtime_js`](@ref), which the
-[`htmx`](@ref) shell adds for you.
+[`htmx`](@ref) shell adds for you. `:katex` loads nothing by itself: it is the
+inert `<template id="htmxo-katex">` naming `<base>/katex/`, from which
+[`math_script`](@ref) loads KaTeX once the page shows math, so a hand-built
+head that wants typeset math adds `math_script()` and `math_styles()` too.
 """
 function vendor_head(base::AbstractString="vendor"; packages=(:htmx,))
     pkgs = _vendor_packages(packages)
@@ -2722,6 +2764,7 @@ _runtime_blocks() = (
     comparison = (:js, comparison_js),
     stream_probe = (:js, stream_probe_script),
     redirect_history = (:js, redirect_history_script),
+    modifier_click = (:js, modifier_click_script),
     live_region = (:js, live_region_script),
     treebars_styles = (:css, () -> _polling_page_asset(1)),
     treebars_script = (:js, () -> _polling_page_asset(2)),
@@ -2730,6 +2773,8 @@ _runtime_blocks() = (
     mutation_poll = (:js, mutation_poll_script),
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
+    math_styles = (:css, math_styles),
+    math_script = (:js, math_script),
     # The table runtime. `htmx(...; tables=true)` carries it together with
     # `sortable_table_styles`, `caption_style` and `download_table` below.
     table_runtime = (:js, _table_runtime_js),
@@ -2831,7 +2876,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -2845,7 +2890,9 @@ loads only alongside the shell's own htmx (an extension must follow htmx).
 client (a `ws-connect` element); it loads only alongside the shell's own
 htmx for the same reason. The shell always carries [`stream_probe_script`](@ref),
 so a ws or sse stream refused by an auth gateway reloads the page on the
-gateway's `HX-Refresh` instead of reconnecting forever.
+gateway's `HX-Refresh` instead of reconnecting forever. It also carries
+[`modifier_click_script`](@ref): a Ctrl/Cmd- or Shift-click on an htmx link
+with a real `href` opens that address in a new tab or window, as on any link.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
 
@@ -2866,6 +2913,13 @@ still lists them does not ship them twice. A changed or attributed copy stays.
 language of the failed-request toasts ([`toast_script`](@ref)); pass the root's
 `__error_texts__` from `__page__` so the toasts match the error articles.
 `nothing` (the default) keeps them English.
+`katex_version` is the KaTeX release that typesets Markdown math
+([`render_markdown`](@ref) marks it, [`math_script`](@ref) renders it). The
+shell never loads KaTeX itself: it carries an inert template naming KaTeX's
+stylesheet and script, which the runtime adds the first time the page shows
+math, on load or after a swap, so a page without math fetches nothing. Pass
+`nothing` to leave the template out; math then shows as its TeX source, unless
+the page loads KaTeX itself (`window.katex`), which the runtime then uses.
 Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
 it defaults to `false` — the bundle is served only by the KB app, so standalone
 pages omit the fetch.
@@ -2922,6 +2976,7 @@ function htmx(args...;
     hyperscript_version = _HYPERSCRIPT_VERSION,
     preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
+    katex_version       = _KATEX_VERSION,
     assets              = :cdn,
     runtime             = :inline,
     feedback             = true,
@@ -2950,6 +3005,9 @@ function htmx(args...;
         _runtime_head(:preload_runtime, mount))
     isnothing(hyperscript_version) || push!(cdn, _head_asset_node(Val(:hyperscript), _head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets; versioned)))
     isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets; versioned)))
+    # jsdelivr, not cdnjs: cdnjs was measured serving KaTeX 0.16.21's fonts
+    # one byte short, which browsers reject as invalid font data.
+    isnothing(katex_version)       || push!(cdn, _head_asset_node(Val(:katex), _head_asset_src(:katex, katex_version, "https://cdn.jsdelivr.net/npm/katex@$(katex_version)/dist", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
@@ -2982,6 +3040,9 @@ function htmx(args...;
         # A followed redirect records its destination where an
         # `hx-push-url` names the requested page; inert otherwise.
         :redirect_history,
+        # A Ctrl/Cmd- or Shift-click on an htmx link opens its `href`
+        # in a new tab or window, as on any link; inert otherwise.
+        :modifier_click,
         # Discover-mode live regions keep one reconnecting stream behind
         # this runtime; inert on pages without one.
         :live_region,
@@ -2991,6 +3052,10 @@ function htmx(args...;
         # `url_params` elements follow the page address and write
         # their values into it; inert on pages without one.
         :url_params,
+        # Markdown math (`render_markdown`) is typeset by KaTeX, which
+        # this runtime loads from the `katex_version` template the
+        # first time the page shows math; inert on pages without any.
+        :math_styles, :math_script,
         # The tables' sort, search, selection, tree, regroup, linking and
         # CSV controls with their styles and captions; inert on pages
         # without a table.
@@ -3147,8 +3212,9 @@ abstract type SemanticNode end
 A titled semantic summary. Children may be any other semantic node, another
 renderable value, or plain data.
 
-`anchor`, when non-empty, becomes the HTML `id` — a document address, so a card
-can be cited from elsewhere.
+`anchor`, when non-empty, becomes the HTML `id` and, in Markdown, the title
+heading's identifier (`### Title {#anchor}`) — a document address, so a card
+can be cited from elsewhere, also in a [`pdf_report`](@ref).
 
 In HTML the title is the card's `<header>`, not a heading, so a card opens no
 level of the HTML outline. In Markdown it is a heading one level below the
@@ -3181,7 +3247,9 @@ Store source code without choosing markup. `language` is converted to a
 `Symbol` and becomes the HTML language class / Markdown fence info string.
 
 `anchor`, when non-empty, becomes the HTML `id`, so a code block that is cited
-from elsewhere has a document address.
+from elsewhere has a document address. In Markdown the block is wrapped in a
+fenced div carrying it (`::: {#anchor}`), so a link to it resolves in a
+[`pdf_report`](@ref) too.
 """
 struct SemanticCode <: SemanticNode
     language::Symbol
@@ -3272,16 +3340,19 @@ struct SemanticUnavailable <: SemanticNode
 end
 
 """
-    SemanticProse(markdown)
+    SemanticProse(markdown; math=true)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
 are the source itself; the HTML projection renders it through
-[`render_markdown`](@ref) (CommonMark plus bare-URL linking), which escapes
-inline markup, so prose cannot smuggle HTML through.
+[`render_markdown`](@ref) (CommonMark plus bare-URL linking and TeX math),
+which escapes inline markup, so prose cannot smuggle HTML through. Its
+`\$…\$` / `\$\$…\$\$` math is typeset in the browser; `math=false` shows every
+`\$` as text.
 """
 struct SemanticProse <: SemanticNode
     markdown::String
-    SemanticProse(markdown) = new(String(markdown))
+    math::Bool
+    SemanticProse(markdown; math::Bool=true) = new(String(markdown), math)
 end
 
 """
@@ -3422,6 +3493,10 @@ The level follows the nesting: a section's title is `<h2>` / `##` at the top
 of a document, below its title, and one level deeper inside each enclosing
 section, through any markup in between (an `h.div` or a card holding the inner
 section). `<h6>` / `######` is the deepest; a section nested deeper keeps it.
+
+`anchor`, when non-empty, becomes the HTML `id` and, in Markdown, the title
+heading's identifier (`## Title {#anchor}`), so a link to `#anchor` jumps to
+the section in the browser and in a [`pdf_report`](@ref) alike.
 """
 struct SemanticSection <: SemanticNode
     title::String
@@ -3545,6 +3620,19 @@ end
 # emits no attribute at all instead of `id=""`.
 _semantic_anchor_attrs(anchor::AbstractString) =
     isempty(anchor) ? (;) : (; id=anchor)
+
+# The Markdown peer of an anchor: Pandoc's identifier attribute, so a link to
+# `#anchor` resolves where the Markdown is rendered. Typst refuses a link to a
+# label that does not exist, so without it `pdf_report` failed on every
+# in-document link. Pandoc's `#id` shorthand takes letters, digits and `_.:-`;
+# any other id is written `id="…"`, which Pandoc reads to the same identifier.
+_markdown_anchor_attr(anchor::AbstractString) =
+    occursin(r"^[\p{L}\p{N}_.:-]+$", anchor) ? "{#$anchor}" :
+    "{id=\"" * replace(anchor, '\\' => "\\\\", '"' => "\\\"", r"\R" => " ") * "\"}"
+
+# Appended to a heading line: the heading carries its element's anchor.
+_markdown_heading_anchor(anchor::AbstractString) =
+    isempty(anchor) ? "" : " " * _markdown_anchor_attr(anchor)
 
 _semantic_metric_text(metric::SemanticMetric) = isempty(metric.unit) ?
     string(metric.value) : string(metric.value, " ", metric.unit)
@@ -3941,6 +4029,96 @@ markdown_node(r::MarkdownRenderer, t::CommonMark.TableCell, n, rules, context) =
 _md_cell_align_attrs(align::Symbol) =
     align === :none ? (;) : (; style="text-align: $(String(align))")
 
+# --- TeX math ---
+#
+# The parser decides what is math, so a browser never has to guess: the rule
+# captures the bytes between the delimiters VERBATIM, before escape or
+# emphasis processing can touch them (`\_` stays `\_`, `\\` stays `\\`), and
+# code spans and fences are node kinds it never sees. Each formula becomes one
+# marked element carrying its TeX as text, which `math_script` typesets; until
+# it does, or where KaTeX cannot load, the reader sees the source.
+#
+# Dollar signs follow pandoc's rules, because prose uses `$` for money: an
+# opening `$` is followed by a non-space, a closing `$` is preceded by one and
+# not followed by a digit, and inline math never contains a backtick. So
+# `costs $5 and $10`, `$1,234.00/$56.00` and `$5 (see `x$`)` stay text, while
+# `$x$` and `$\alpha_1$` are math. `$$…$$` is display math anywhere, and a
+# paragraph that is only `$$…$$` (or `\[…\]`) is a display block, as is a
+# ```` ```math ```` fence. `\(…\)` and `\[…\]` are the LaTeX delimiters, tried
+# before CommonMark's backslash escapes, which still apply to every other `\`.
+struct _MarkdownMathRule end
+
+# The non-space edges of inline dollar math: any character but `$`, a
+# backslash, a backtick or whitespace, or a backslash pair (`\$`, `\,`).
+const _MD_DOLLAR_EDGE = raw"(?:[^$\\`\s]|\\[^\n])"
+const _MD_MATH_INLINE = (
+    (Regex("^\\\$\\\$(.+?)\\\$\\\$", "s"), true),
+    (Regex("^\\\$(" * _MD_DOLLAR_EDGE * "(?:(?:[^\$\\\\`]|\\\\[^\\n])*?" *
+           _MD_DOLLAR_EDGE * ")?)\\\$(?!\\d)", "s"), false),
+    (r"^\\\[(.+?)\\\]"s, true),
+    (r"^\\\((.+?)\\\)"s, false),
+)
+
+function _parse_markdown_math(p::CommonMark.InlineParser, block::CommonMark.Node)
+    for (rx, display) in _MD_MATH_INLINE
+        m = match(rx, p)
+        isnothing(m) && continue
+        tex = strip(m.captures[1])
+        isempty(tex) && continue
+        CommonMark.consume(p, m)
+        child = CommonMark.Node(CommonMark.Math(startswith(m.match, '$'), display))
+        child.literal = String(tex)
+        CommonMark.append_child(block, child)
+        return true
+    end
+    # Not math: the `$` becomes text, and a `\` goes to the escape rule.
+    false
+end
+
+CommonMark.inline_rule(::_MarkdownMathRule) =
+    CommonMark.Rule(_parse_markdown_math, 0.5, "\$\\")
+
+# A paragraph that is exactly one display formula is a block of its own.
+const _MD_MATH_BLOCK = (r"^\$\$(.+)\$\$$"s => "\$\$", r"^\\\[(.+)\\\]$"s => "\\]")
+CommonMark.block_modifier(::_MarkdownMathRule) =
+    CommonMark.Rule(1.5) do parser, node
+        if node.t isa CommonMark.CodeBlock && node.t.info == "math"
+            node.t = CommonMark.DisplayMath()
+            node.literal = strip(node.literal, '\n')
+        elseif node.t isa CommonMark.Paragraph
+            literal = strip(node.literal)
+            for (rx, closer) in _MD_MATH_BLOCK
+                m = match(rx, literal)
+                isnothing(m) && continue
+                # `$$a$$ and $$b$$` is two formulas in prose, not one block.
+                tex = strip(m[1])
+                (isempty(tex) || occursin(closer, tex)) && continue
+                node.t = CommonMark.DisplayMath(startswith(literal, '$'))
+                node.literal = String(tex)
+                break
+            end
+        end
+        return nothing
+    end
+
+# One formula: its TeX as escaped text, between `$` delimiters that only the
+# Markdown projection writes, so `?plain` reads `$x$` / `$$…$$` and the HTML
+# carries the bare source. Inline display math stays a `span` (a `div` would
+# close the paragraph it sits in); a display block is a `div`.
+_markdown_math(tex::AbstractString, display::Bool) = display ?
+    h.span(markdown_only("\$\$"), String(tex), markdown_only("\$\$");
+        class="htmxo-math htmxo-math-display", data_htmxo_math="display") :
+    h.span(markdown_only("\$"), String(tex), markdown_only("\$");
+        class="htmxo-math", data_htmxo_math="inline")
+_markdown_math_block(tex::AbstractString) =
+    h.div(markdown_only("\$\$\n"), String(tex), markdown_only("\n\$\$");
+        class="htmxo-math htmxo-math-display", data_htmxo_math="display")
+
+markdown_node(::MarkdownRenderer, t::CommonMark.Math, n, rules, context) =
+    _markdown_math(n.literal, t.display)
+markdown_node(::MarkdownRenderer, ::CommonMark.DisplayMath, n, rules, context) =
+    _markdown_math_block(n.literal)
+
 # Raw HTML in free text is almost never intentional and must never be
 # injected into the page. A bare `String` child renders escaped, so inline
 # HTML stays visible literal text and block HTML shows as a source block.
@@ -3957,19 +4135,21 @@ function markdown_node(r::MarkdownRenderer, t, n, rules, context)
 end
 
 """
-    markdown_parser(; extra_rules=[]) -> CommonMark.Parser
+    markdown_parser(; extra_rules=[], math=true) -> CommonMark.Parser
 
 Fresh parser per render: `Parser` holds mutable rule state. Enables the GFM
-trio (pipe tables, strikethrough, task lists) plus caller-supplied
-`extra_rules` — rule instances like `CommonMark.TableRule()`, enabled in
-order. Pair with the [`render_markdown`](@ref) AST entry point to inspect the
-tree before rendering it.
+trio (pipe tables, strikethrough, task lists), TeX math unless `math=false`
+(see [`render_markdown`](@ref)), plus caller-supplied `extra_rules` — rule
+instances like `CommonMark.TableRule()`, enabled in order. Pair with the
+[`render_markdown`](@ref) AST entry point to inspect the tree before
+rendering it.
 """
-function markdown_parser(; extra_rules::AbstractVector=[])
+function markdown_parser(; extra_rules::AbstractVector=[], math::Bool=true)
     parser = CommonMark.Parser()
     CommonMark.enable!(parser, CommonMark.TableRule())
     CommonMark.enable!(parser, CommonMark.StrikethroughRule())
     CommonMark.enable!(parser, CommonMark.TaskListRule())
+    math && CommonMark.enable!(parser, _MarkdownMathRule())
     for rule in extra_rules
         CommonMark.enable!(parser, rule)
     end
@@ -3978,15 +4158,29 @@ end
 
 """
     render_markdown(text; rules=nothing, context=nothing,
-                    renderer=DefaultMarkdownRenderer(), parser_rules=[]) -> Node
+                    renderer=DefaultMarkdownRenderer(), parser_rules=[],
+                    math=true) -> Node
     render_markdown(ast::CommonMark.Node; rules=nothing, context=nothing,
                     renderer=DefaultMarkdownRenderer()) -> Node
 
 Parse `text` as Markdown — CommonMark plus the GFM pipe-table,
-strikethrough and task-list extensions — and render it into an `h` node
-tree: a `div` wrapping one node per block. The AST form renders an
+strikethrough and task-list extensions, and TeX math — and render it into an
+`h` node tree: a `div` wrapping one node per block. The AST form renders an
 already-parsed tree instead, so a caller can inspect it first (parse with
 [`markdown_parser`](@ref) for the same stock extensions).
+
+Math is `\$…\$` or `\\(…\\)` inline and `\$\$…\$\$`, `\\[…\\]` or a
+```` ```math ```` fence for display. The TeX is kept byte for byte (`\\_`
+stays `\\_`), and code spans and fences never become math. Dollar signs
+follow pandoc's rules, so money stays text: an opening `\$` must be
+followed by a non-space and a closing `\$` preceded by one and not followed
+by a digit (`costs \$5 and \$10` is text, `\$x_1\$` is math); inline
+math holds no backtick, and `\\\$` is a literal dollar. Each formula renders
+as an element marked `htmxo-math` that carries its TeX as text; the
+[`htmx`](@ref) shell's [`math_script`](@ref) typesets it with KaTeX, and
+until then, or without KaTeX, the reader sees the source. The Markdown
+projection writes it back as `\$…\$` / `\$\$…\$\$`. `math=false` parses no
+math, so every `\$` and `\\(` is text as before.
 
 `rules` is the inline text-rule registry: a [`MarkdownRule`](@ref), or a
 vector of them, matched against each joined text run outside links, code
@@ -4000,7 +4194,7 @@ whole render.
 `renderer` is the [`MarkdownRenderer`](@ref) the walk recurses through: pass
 an app subtype with [`markdown_node`](@ref) overrides for the node kinds the
 app renders its own way. `parser_rules` adds CommonMark parser rule
-instances (like `CommonMark.TableRule()`) beyond the stock trio.
+instances (like `CommonMark.TableRule()`) beyond the stock ones.
 
 The `?plain` projection stays faithful: rules and overrides build ordinary
 nodes, which the tag-dispatched markdown serializer projects back
@@ -4014,8 +4208,8 @@ the HTML the parser would emit.
 """
 function render_markdown(text::AbstractString; rules=nothing, context=nothing,
                          renderer::MarkdownRenderer=DefaultMarkdownRenderer(),
-                         parser_rules::AbstractVector=[])
-    render_markdown(markdown_parser(; extra_rules=parser_rules)(String(text));
+                         parser_rules::AbstractVector=[], math::Bool=true)
+    render_markdown(markdown_parser(; extra_rules=parser_rules, math)(String(text));
         rules=rules, context=context, renderer=renderer)
 end
 
@@ -4076,7 +4270,7 @@ end
 # its source. `render_markdown` builds real nodes (never `Raw` markup), and `h`
 # escapes ordinary text children exactly once, so prose cannot smuggle HTML in.
 _semantic_prose_node(prose::SemanticProse) = h.div(
-    render_markdown(prose.markdown); class="htmxo-semantic-prose")
+    render_markdown(prose.markdown; math=prose.math); class="htmxo-semantic-prose")
 
 # Delegates to the one table renderer rather than hand-building a second
 # `h.table`. Sorting and download are interactive chrome, not part of a semantic
@@ -4274,9 +4468,14 @@ function _semantic_inline_code(text)
     fence * text * fence
 end
 
+# A code block has no heading to carry its anchor, and Pandoc's Typst writer
+# drops an identifier on the fence itself, so an anchored block is wrapped in a
+# fenced div that carries it.
 function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
     fence = _semantic_code_fence(code.text)
+    isempty(code.anchor) || print(io, "::: ", _markdown_anchor_attr(code.anchor), '\n')
     print(io, fence, code.language, '\n', code.text, '\n', fence)
+    isempty(code.anchor) || print(io, "\n:::")
 end
 
 Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
@@ -4285,7 +4484,8 @@ Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
 
 Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
     _semantic_heading(_semantic_card_level()) do level
-        print(io, _semantic_heading_sigil(level), " ", card.title)
+        print(io, _semantic_heading_sigil(level), " ", card.title,
+            _markdown_heading_anchor(card.anchor))
         isempty(card.children) || print(io, "\n\n")
         _semantic_show_children(io, mime, card.children, "\n\n")
     end
@@ -4340,7 +4540,8 @@ end
 
 Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_heading_level()) do level
-        print(io, _semantic_heading_sigil(level), " ", section.title)
+        print(io, _semantic_heading_sigil(level), " ", section.title,
+            _markdown_heading_anchor(section.anchor))
         isempty(section.children) || print(io, "\n\n")
         _semantic_show_children(io, mime, section.children, "\n\n")
     end
@@ -4630,6 +4831,23 @@ _strip_md_chrome(c::_LabelledControl) = _strip_md_chrome(c.control)
 _strip_md_chrome_child(c::_LabelledControl) = _strip_md_chrome_child(c.control)
 _rescue_semantic!(out, c::_LabelledControl) = _rescue_semantic!(out, c.control)
 
+# A `detail-<key>` companion row in a `sortable_table` body. HTML (and HXML)
+# write the row; Markdown writes nothing, with every serializer: HTMX.jl's
+# table writer makes a pipe-table line of each `<tr>` child of a `<tbody>` and
+# skips anything else, so a consumer's own `show(io, MIME"text/markdown"(), x)`
+# leaves the companion out too. A master/detail table writes its eager details
+# after the table instead (`_MDDetailsMarkdown`). `?error` and static export see
+# through to the row.
+struct _MDCompanionRow
+    row::Node
+end
+Base.show(io::IO, m::MIME"text/html", c::_MDCompanionRow) = show(io, m, c.row)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", c::_MDCompanionRow) =
+    show(io, m, c.row)
+Base.show(::IO, ::MIME"text/markdown", ::_MDCompanionRow) = nothing
+filter_errors(c::_MDCompanionRow) = filter_errors(c.row)
+_filter_errors_child(c::_MDCompanionRow) = _filter_errors_child(c.row)
+
 
 """
     _save_typed_response(record_dir, url_path, response)
@@ -4657,6 +4875,15 @@ function _save_typed_response(record_dir::String, url_path::String, response::HT
     save_response(record_dir, url_path, response; ext)
 end
 
+# The file a recording writes for `url_path`, as a path below the recording's
+# root: the path plus `ext`, except that a trailing slash means "directory
+# entry", so `/foo/` and `/` (and an empty path) map to an `index<ext>` in the
+# matching directory. Without that, `/hx/` would become `hx/<ext>`, which a
+# static server cannot serve. A recorded `hx-get` names the same file
+# (`_recorded_fragment_url`).
+_record_file_path(url_path::AbstractString, ext::AbstractString) =
+    isempty(url_path) || endswith(url_path, '/') ? url_path * "index" * ext : url_path * ext
+
 """
     save_response(record_dir, url_path, response; ext=".html")
 
@@ -4667,19 +4894,7 @@ static file server. Pass `ext=".md"` for markdown recordings (under the
 the extension from the response's Content-Type.
 """
 function save_response(record_dir::String, url_path::String, response::HTTP.Response; ext::String=".html")
-    rel = lstrip(url_path, '/')
-    # Trailing slash means "directory entry" — the URL `/foo/` and `/` both
-    # map to a synthetic `index<ext>` under the matching directory. Without
-    # this, `/hx/` becomes `hx/<ext>`, which is wrong (server can't serve it
-    # cleanly and `cleanUrls` defeats it).
-    file = if isempty(rel)
-        "index" * ext
-    elseif endswith(rel, '/')
-        rel * "index" * ext
-    else
-        rel * ext
-    end
-    dest = joinpath(record_dir, file)
+    dest = joinpath(record_dir, lstrip(_record_file_path(url_path, ext), '/'))
     _guard_record_destination!(record_dir, dest)
     mkpath(dirname(dest))
     body = response.body
@@ -4882,15 +5097,17 @@ end
 """
 static_export(req::HTTP.Request) = get(req.context, :htmxo_static_export, nothing)
 
-# Who names the file of each value a `url_params` element declares: the spec's
-# `url_map` for a request-scoped export, the recording rule for `record!`.
+# Who names the file of each value a `url_params` element declares, and of an
+# unmapped rooted `hx-get`: the spec's `url_map` and default rule for a
+# request-scoped export, the recording rule (the file `record!` writes) for a
+# recording.
 struct _MappedVariants end
 struct _RecordedVariants end
 
 # What a static walk consults: the spec, the rooted `hx-get` paths a static
 # server cannot vary by query — `route!`'s recording registry for the recording
 # form of `static_transform`, nothing for a request-scoped export — and who
-# names a declared URL parameter's files.
+# names the files of a declared URL parameter's values and of fragments.
 struct _StaticRules{S<:StaticExport,V}
     spec::S
     unservable::Set{String}
@@ -4951,7 +5168,8 @@ html_escape(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;"
 
 Walk a Node tree and make it static-safe under `rules`:
 - `hx-get`, `href`, `src`: a `url_map` target replaces the value verbatim;
-  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`)
+  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`; in a
+  recording, the fragment file it records, `<record_base>/hx/<path>.html`)
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
 - Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
   routes) or names one of `rules.unservable` (kwargs routes)
@@ -5165,8 +5383,25 @@ _static_variant_target(rules::_StaticRules{<:StaticExport,_MappedVariants}, addr
     _static_url_target(rules.spec, address)
 _static_variant_target(rules::_StaticRules{<:StaticExport,_RecordedVariants}, address) =
     _record_variant!(address) ?
-        rstrip(rules.spec.record_base, '/') * "/hx" * replace(_record_variant_save_path(address), "%" => "%25") * ".html" :
+        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address)) :
         nothing
+
+# The address of the fragment a recording saves for `save_path`: the file
+# `save_response` writes below `hx/`, under `record_base` (empty: the site
+# root). A `%` in the path is part of the file's name, so it is escaped for
+# the static server that decodes the address.
+_recorded_fragment_url(record_base::AbstractString, save_path::AbstractString) =
+    rstrip(record_base, '/') * replace(_record_file_path("/hx" * save_path, ".html"), "%" => "%25")
+
+# What an unmapped, servable `hx-get` becomes: for a request-scoped export the
+# default rule (`record_base` and `/hx` before a rooted address); for a
+# recording the file it records for that address, so the bundle loads it from
+# any static server, not only from one that serves `/foo` as `foo.html`.
+_static_hx_url(rules::_StaticRules{<:StaticExport,_MappedVariants}, url) =
+    _rewrite_hx_url(url, rules.spec.record_base)
+_static_hx_url(rules::_StaticRules{<:StaticExport,_RecordedVariants}, url) =
+    startswith(url, "/") && !startswith(url, "//") ?
+        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(url)) : url
 
 # A recorded `url_params` value's file, below the recording's `hx/`: its
 # path, then `@` and its query, so each value has its own file beside the
@@ -5250,7 +5485,7 @@ function _static_walk(node::Node, rules::_StaticRules)
 
     # A mapped `hx-get` takes the caller's target verbatim. An unmapped one
     # with a query string or pointing to a kwargs route is removed; otherwise
-    # it is rewritten to the recorded-fragment subtree under `record_base`.
+    # it names its fragment under `record_base` (`_static_hx_url`).
     if !isnothing(own)
         new_attrs[hx_get_sym] = own
     elseif haskey(new_attrs, hx_get_sym)
@@ -5262,7 +5497,7 @@ function _static_walk(node::Node, rules::_StaticRules)
             delete!(new_attrs, hx_get_sym)
             unservable = true
         else
-            new_attrs[hx_get_sym] = _rewrite_hx_url(url, spec.record_base)
+            new_attrs[hx_get_sym] = _static_hx_url(rules, url)
         end
     end
 
@@ -5313,6 +5548,11 @@ function _static_walk(c::_LabelledControl, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
 end
 _static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
+function _static_walk(c::_MDCompanionRow, rules::_StaticRules)
+    walked = _static_walk(c.row, rules)
+    walked === _STATIC_REMOVED ? walked : _MDCompanionRow(walked)
+end
+_static_walk_child(c::_MDCompanionRow, rules) = _static_walk(c, rules)
 # A semantic element has no attributes until its HTML peer is built, so the
 # export walks that peer: a `SemanticLink`'s `href` (`external=true` included),
 # a `SemanticAction`'s `hx-get`, prose links, and every element a semantic
@@ -5365,12 +5605,13 @@ pages only).
 The keyword form is the recording form used by `record!` / `route!(;
 record_dir)`: it also strips `hx-get` addresses naming a kwargs route that
 recording registered. `record_base` is the URL prefix where the recording
-will be served (e.g. `/HTMXObjects.jl/dev/examples/counter`). Each rooted
-`hx-get="/foo"` becomes `hx-get="<record_base>/hx/foo"` so HTMX-driven
-sub-fetches resolve to the recorded fragment under
-`<record_dir>/hx/foo.html`. Empty `record_base` (default) skips rewriting —
-useful when recording for a root-served deployment, though that's rare in
-practice.
+will be served (e.g. `/HTMXObjects.jl/dev/examples/counter`); empty (the
+default) means the site root. Each rooted `hx-get="/foo"` names the fragment
+file the recording writes, `hx-get="<record_base>/hx/foo.html"` (`/foo/`:
+`<record_base>/hx/foo/index.html`), so HTMX-driven sub-fetches load the
+recorded fragment `<record_dir>/hx/foo.html` from any static server,
+including one that does not serve `/foo` from `foo.html`. Rooted
+`href`/`src` addresses gain `record_base` and keep their path as written.
 
 The [`StaticExport`](@ref) form reads nothing but the spec — its `url_map`,
 `controls`, and `record_base` — and is what `dispatch(...; static=spec)`
@@ -5414,7 +5655,9 @@ _preload_attrs(preload::Union{AbstractString,Symbol}) = (preload=String(preload)
     hx_link(url; preload=nothing, kwargs...)
 
 Create an `h.a` with both `href` and `hx-get` set to `url`. Extra kwargs
-(`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`.
+(`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`. A click swaps
+in place; a Ctrl/Cmd-, Shift- or middle-click opens `url` in a new tab or
+window (on an [`htmx`](@ref) page, see [`modifier_click_script`](@ref)).
 
 `preload=true` fetches the link's target when the pointer rests on it (a string
 such as `"mousedown"` picks another trigger of htmx's
@@ -7490,6 +7733,56 @@ redirect_history_script() = h.script(Raw(raw"""
 """))
 
 """
+    modifier_click_script()
+
+Client runtime that gives Ctrl-, Cmd- and Shift-clicks on htmx links back to
+the browser. htmx takes over every click on an `<a href>` that carries
+`hx-get` (or another request attribute), modifier clicks included, and swaps
+in place; its own exemption covers only Ctrl/Cmd-clicks on boosted links. With
+this runtime, a Ctrl/Cmd- or Shift-click on such a link — as
+[`nav_sidebar`](@ref), [`htmxo_breadcrumb`](@ref) and [`hx_link`](@ref)
+render — opens its `href` in a new tab or window and leaves the page as it
+is: no request, no swap, no history entry. The click stops before any of the
+link's own click handlers (such as `nav_sidebar`'s active-link highlight). A
+plain click still swaps in place, and a middle-click, which htmx never sees,
+still opens the `href`.
+
+Left to htmx: links without an `href`, an `href` of `#…` or `javascript:`, a
+link whose `hx-trigger` does not name `click`, and a click whose default an
+earlier handler already prevented.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+modifier_click_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoModifierClick) return;
+  window.htmxoModifierClick = true;
+  var REQUEST = ['get', 'post', 'put', 'patch', 'delete'].map(function (verb) {
+    return '[hx-' + verb + '],[data-hx-' + verb + ']';
+  }).join(',');
+  // htmx prevents the default of a click on a link it requests from before any
+  // `hx-trigger` filter runs. Seen first (capture phase on the document), a
+  // click that asks for a new tab or window stops here and keeps its default.
+  document.addEventListener('click', function (e) {
+    if (!(e instanceof MouseEvent) || e.defaultPrevented) return;
+    if (!(e.ctrlKey || e.metaKey || e.shiftKey || e.button > 0)) return;
+    var link = e.target instanceof Element ? e.target.closest('a[href]') : null;
+    if (!link) return;
+    var href = link.getAttribute('href').trim();
+    if (href === '' || href.charAt(0) === '#' || /^javascript:/i.test(href)) return;
+    // htmx cancels a click for the link itself or an element inside it.
+    var source = e.target.closest(REQUEST);
+    if (!source || !link.contains(source)) return;
+    var trigger = source.getAttribute('hx-trigger') || source.getAttribute('data-hx-trigger');
+    if (trigger && !/(^|[\s,])click\b/.test(trigger)) return;
+    e.stopImmediatePropagation();
+  }, true);
+})();
+"""))
+
+"""
     url_params_script()
 
 Client runtime of [`url_params`](@ref): elements declared with it follow the
@@ -7724,6 +8017,120 @@ url_params_script() = h.script(Raw(raw"""
 
   window.htmxoUrlParams = { apply: apply };
 })();
+"""))
+
+"""
+    math_script()
+
+Client runtime that typesets the TeX math [`render_markdown`](@ref) marks:
+every `.htmxo-math` element, rendered with KaTeX's `renderToString`
+(`throwOnError: false`, `trust: false`) on load and after every htmx swap.
+Only marked elements are typeset; the page's text is never rescanned for
+delimiters, so code stays literal.
+
+KaTeX itself is loaded on demand: the first time the page shows math, the
+runtime adds the stylesheet and script named by the [`htmx`](@ref) shell's
+`<template id="htmxo-katex">` (`katex_version`) and typesets once KaTeX
+arrives. A page without math fetches nothing. Without that template the
+runtime uses a KaTeX the page loaded itself (`window.katex`), and otherwise
+leaves each formula showing its TeX source, styled by [`math_styles`](@ref).
+A KaTeX that fails to load is reported in the console.
+
+`window.htmxoMath.typeset(root)` typesets math a script added outside htmx.
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+math_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoMath) return;
+  var loading = false;
+  function marked(scope) {
+    var els = Array.prototype.slice.call(scope.querySelectorAll('.htmxo-math'));
+    if (scope.matches && scope.matches('.htmxo-math')) els.unshift(scope);
+    return els;
+  }
+  // The source is kept in data-htmxo-tex before KaTeX replaces the content;
+  // data-htmxo-math-done marks what is typeset, so a swap that brings the
+  // server's source back is typeset again.
+  function typeset(scope) {
+    marked(scope).forEach(function (el) {
+      if (el.hasAttribute('data-htmxo-math-done')) return;
+      var tex = el.getAttribute('data-htmxo-tex');
+      if (tex === null) {
+        tex = el.textContent;
+        el.setAttribute('data-htmxo-tex', tex);
+      }
+      try {
+        el.innerHTML = window.katex.renderToString(tex, {
+          displayMode: el.getAttribute('data-htmxo-math') === 'display',
+          throwOnError: false,
+          trust: false,
+        });
+        el.setAttribute('data-htmxo-math-done', '');
+      } catch (err) {
+        el.textContent = tex;
+        console.warn('math: cannot typeset ' + JSON.stringify(tex) + ': ' + err);
+      }
+    });
+  }
+  // KaTeX from the shell's template, added once; its load typesets the page.
+  function load() {
+    var template = document.getElementById('htmxo-katex');
+    if (loading || !template || !template.content) return;
+    loading = true;
+    var css = template.content.querySelector('link[href]');
+    var js = template.content.querySelector('script[src]');
+    if (css) {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = css.getAttribute('href');
+      document.head.appendChild(link);
+    }
+    if (!js) return;
+    var script = document.createElement('script');
+    script.src = js.getAttribute('src');
+    script.onload = function () { typeset(document); };
+    script.onerror = function () {
+      console.warn('math: KaTeX did not load from ' + script.src + '; formulas show their TeX source');
+    };
+    document.head.appendChild(script);
+  }
+  function run(root) {
+    var scope = root && root.querySelectorAll ? root : document;
+    if (marked(scope).length === 0) return;
+    if (window.katex) typeset(scope); else load();
+  }
+  window.htmxoMath = { typeset: run };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { run(document); });
+  } else {
+    run(document);
+  }
+  document.addEventListener('htmx:load', function (e) { run(e.target); });
+  document.addEventListener('htmx:afterSettle', function (e) { run(e.target); });
+})();
+"""))
+
+"""
+    math_styles()
+
+`<style>` block for the math [`math_script`](@ref) typesets: a display
+formula is a block that scrolls sideways when it is wider than its column,
+and a formula not typeset (yet, or without KaTeX) shows its TeX source in a
+monospace font, so it reads as source rather than prose. Scoped under
+`@layer htmxo`, so host stylesheets win. Auto-included by [`htmx`](@ref).
+"""
+math_styles() = h.style(Raw("""
+@layer htmxo {
+.htmxo-math-display { display: block; overflow-x: auto; overflow-y: hidden; }
+.htmxo-math:not([data-htmxo-math-done]) {
+    font-family: monospace;
+    font-size: 0.9em;
+    white-space: pre-wrap;
+}
+.htmxo-math-display:not([data-htmxo-math-done]) { margin: 1em 0; }
+}
 """))
 
 # --- Error handling ---
@@ -13736,6 +14143,15 @@ default `:auto` policy would answer with a Treebars poller — and a poller
 written to disk has nothing to poll. Static export wants the finished HTML.
 Returns `app`.
 
+`record_base` is the URL prefix the recording will be served under (empty:
+the site root). A recorded `hx-get="/foo"` names the fragment file the
+`hx=true` variant writes, `<record_base>/hx/foo.html`, so a lazy part (a
+`tabset` URL tab, an `hx_link` target) loads on any static server once its
+path is among `paths`. Links between pages (`href`, `hx-push-url`) keep the
+recorded page's path, `<record_base>/foo`: following one needs a host that
+serves `/foo` from `foo.html` (GitHub Pages does; `python -m http.server`
+does not).
+
 Distinct requested paths that resolve to the same output file are rejected
 with an error before the later response can overwrite the earlier recording.
 
@@ -14486,9 +14902,19 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 
 # --- Accessible PDF export ---
 
+# Pandoc's Typst writer turns “ ” ‘ ’ into straight quotes for Typst to quote
+# by `lang`, so a German „…“ came out „…„; this filter, run last, passes them
+# to Typst as written.
+const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
+
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
 # this Quarto filter gives each one its TeX source.
 const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
+
+# Typst reads only files inside `resources`, and Quarto turns `/abs/x.png` into
+# `./abs/x.png`; this filter brings in an image given as an absolute path, a
+# `file:` URL or a relative path that leaves `resources`.
+const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-images.lua")
 
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
@@ -14594,7 +15020,10 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
       typst:
         pdf-standard: [ua-1]
     filters:
+      - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
+        at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
+      - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
     ---
 
     """ * markdown
@@ -14616,8 +15045,12 @@ the title block above the content. `lang` is a language tag with its region
 (`"de-DE"`, `"en-GB"`): Quarto's template would otherwise label the document
 with the region `US`. Mark a part in another language with a
 `::: {lang="en"}` block, which tags it English (Quarto keeps the document's
-region on it). `resources` is the directory relative paths in the Markdown
-(images) resolve against.
+region on it). `resources` is the directory relative image paths in the
+Markdown resolve against. An image can also be an absolute path, a `file:` URL,
+a relative path outside `resources`, an `http(s)` URL or a `data:` URI; the
+render reads it into a temporary copy, since Typst reads only files inside
+`resources`. A path starting with `/` names the file under `resources` when
+there is one (the site-root URL of an exported page), else the absolute path.
 
 `metadata` sets the report's other document options, as a NamedTuple or an
 `AbstractDict` of Quarto front-matter keys: `subtitle`, `author`, `date`, `toc`,
@@ -14633,7 +15066,9 @@ through `metadata`. The Markdown itself must not carry a YAML metadata block:
 Quarto would let it override `title`, `lang` and the equation filter.
 
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
-filter that gives every equation its TeX source as alt text. Every image needs
+filter that gives every equation its TeX source as alt text. Typographic quotes
+read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
+become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Every image needs
 alt text: Typst refuses a PDF/UA document with an image that has none. A
 Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
 supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
@@ -14647,6 +15082,12 @@ Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
 from `resources`, also when the render fails.
+
+A link within the report (`[…](#id)`) needs its target in the Markdown: Typst
+refuses a link to a label that does not exist (`label <id> does not exist in the
+document`). The `anchor` of a [`SemanticSection`](@ref), [`SemanticCard`](@ref)
+or [`SemanticCode`](@ref) is written as the target's identifier, so
+`SemanticLink("Abschnitt 1", "#a1")` reaches `SemanticSection(…; anchor="a1")`.
 
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.
@@ -16677,6 +17118,10 @@ The JS reads the closest `<table>` relative to the clicked button, serializes th
 visible header cells and body rows to CSV (escaping `"`, `,`, and newlines), and
 triggers a Blob download. A header exports its column name only: the sort
 indicator arrows (` ▲`/` ▼`) and a [`ColumnSpec`](@ref)'s `ⓘ` marker are left out.
+A cell exports the lines it shows: a `<br>` or the edge of a block element (`div`,
+`p`, `li`, …) ends a line, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))`
+exports the quoted two-line field `"6,28\\n6,01–6,55"`, not `6,286,01–6,55`. A header's lines
+join with a space, since a column name stays one name.
 """
 function download_table_js()
     h.script(Raw(raw"""
@@ -16687,12 +17132,32 @@ function downloadTableCsv(btn, filename) {
         s = String(s);
         return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
+    // The lines a cell shows. textContent runs them together
+    // (`<strong>6,28</strong><br><small>6,01–6,55</small>` reads
+    // "6,286,01–6,55"), so a `<br>` and the edges of a block element end a
+    // line, and white space inside a line collapses as the browser shows it.
+    const BLOCK = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|SUMMARY|TABLE|TR|UL)$/;
+    const lines = node => {
+        let out = '';
+        const walk = n => {
+            for (const c of n.childNodes) {
+                if (c.nodeType === Node.TEXT_NODE) out += c.nodeValue.replace(/\s+/g, ' ');
+                else if (c.nodeType !== Node.ELEMENT_NODE) continue;
+                else if (c.tagName === 'BR') out += '\n';
+                else if (BLOCK.test(c.tagName)) { out += '\n'; walk(c); out += '\n'; }
+                else walk(c);
+            }
+        };
+        walk(node);
+        return out.split('\n').map(l => l.trim()).filter(l => l);
+    };
     // A header's column name: its sort caret and explanation marker are
-    // presentation, not part of the name.
+    // presentation, not part of the name, and a name shown on two lines is
+    // still one name.
     const name = th => {
         const copy = th.cloneNode(true);
         copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help').forEach(e => e.remove());
-        return copy.textContent.trim();
+        return lines(copy).join(' ');
     };
     const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
     const groupNames = [];
@@ -16710,8 +17175,9 @@ function downloadTableCsv(btn, filename) {
             return esc(group ? group + ' / ' + name(th) : name(th));
         });
     // A master/detail first cell holds its row controls beside the content;
-    // export the content only, as sorting and search read it.
-    const text = td => (td.querySelector(':scope > [data-htmxo-row-label]') || td).textContent.trim();
+    // export the content only, as sorting and search read it. A cell's lines
+    // stay lines of one quoted field.
+    const text = td => lines(td.querySelector(':scope > [data-htmxo-row-label]') || td).join('\n');
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
         .map(tr =>
@@ -16994,7 +17460,9 @@ wrapper instead of widening the page.
 - `rows`: `Vector{<:Node}` of pre-built `h.tr(...)` rows. The caller controls
   every `<td>`, including `data-sort-value` for semantic sort keys (see
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
-  `id="detail-X"` for the paired-row pattern.
+  `id="detail-X"` for the paired-row pattern. A `detail-X` row is no row of
+  the Markdown table; [`master_detail_table`](@ref) writes eager details
+  after the table instead.
 - `header_groups`: optional `label => first:last` pairs for a two-row header,
   for example `["Primal" => 2:4, "Gradient" => 5:7]`. Each range spans at
   least two adjacent leaf columns and groups cannot overlap. Uncovered leaf
@@ -17230,9 +17698,11 @@ function sortable_table(headers, rows;
     grouped = isnothing(header_groups) ? nothing : _grouped_thead(th_nodes, header_groups)
     thead = isnothing(grouped) ? h.thead(h.tr(th_nodes...)) : first(grouped)
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
+    # A `detail-<key>` companion is no row of the Markdown table.
+    body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
     table_node = h.table(; class=table_class, role, link_attrs..., kwargs...)(
         thead,
-        h.tbody(rows...; body_attrs...),
+        h.tbody(body_rows...; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
@@ -17247,7 +17717,7 @@ function sortable_table(headers, rows;
             isnothing(label) && (label = strip(repr("text/markdown", th_nodes[i])))
             h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
         end
-        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(rows...))
+        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(body_rows...))
         h.div(; class="table-wrap")(html_only(table_node),
             markdown_only(repr("text/markdown", flat_table)))
     end
@@ -17906,6 +18376,41 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     (master, detail)
 end
 
+# The eager details of a master/detail table, which Markdown writes after the
+# table, since a `?plain` reader or a PDF cannot click a row open. Each detail
+# whose Markdown is not empty follows under its master row's label in bold, as
+# `SemanticDisclosure` writes a summary and its body. A lazy detail is not on
+# the page and writes nothing, like `lazy(url)`; a companion row is no row of
+# the table (`_MDCompanionRow`). HTML and HXML write nothing, and the Markdown
+# is built only when it is asked for.
+struct _MDDetailsMarkdown
+    details::Vector{Pair{Vector{Any},Any}}   # master row label => detail body
+end
+Base.show(::IO, ::MIME"text/html", ::_MDDetailsMarkdown) = nothing
+Base.show(::IO, ::MIME"application/vnd.hyperview+xml", ::_MDDetailsMarkdown) = nothing
+HTMX.markdown_block(::_MDDetailsMarkdown) = true
+function Base.show(io::IO, m::MIME"text/markdown", d::_MDDetailsMarkdown)
+    blocks = Any[]
+    for (label, body) in d.details
+        text = rstrip(lstrip(==('\n'), to_markdown_string(body)))
+        isempty(strip(text)) && continue
+        name = _md_label_text(label)
+        push!(blocks, isempty(name) ? text : SemanticDisclosure(name, Any[text]))
+    end
+    show(io, m, SemanticGroup(blocks))
+end
+
+# The words of a row label, without its markup: `**` around a link or a
+# `<strong>` would not read as one bold label.
+function _md_label_text(label)
+    io = IOBuffer()
+    _md_label_words!(io, _strip_md_chrome(h.span(label...)))
+    strip(replace(String(take!(io)), r"\s+" => " "))
+end
+_md_label_words!(io, x) = _semantic_show_leaf(io, MIME"text/markdown"(), x)
+_md_label_words!(io, x::Node) = HTMX.tag(x) === :br ? print(io, ' ') :
+    foreach(c -> _md_label_words!(io, c), HTMX.children(x))
+
 """
     master_detail_table(headers, items;
                         key, master, detail=nothing, detail_url=nothing,
@@ -18122,6 +18627,12 @@ than rendering every collapsed detail up front), pass `detail_url` — the
 proven single-flight + click-to-retry slot, no hand-rolled `htmx.ajax` glue
 or custom onclick needed. Without it, detail bodies are eager.
 
+In Markdown (`?plain`, `to_markdown_string`, [`pdf_report`](@ref)) the table
+holds the master rows only. Each eager detail whose Markdown is not empty
+follows the table (a captioned table's figure) under its row's label in bold,
+in row order, once per item; an `html_only` detail and a lazy one write
+nothing. See *Details in Markdown* in `docs/src/components.md`.
+
 The tree rows, Expand all / Collapse all, sorting and search run on
 [`sortable_table_js`](@ref), and the master/detail hover and detail-cell reset
 rules come from [`sortable_table_styles`](@ref). The rows' click and lazy-load
@@ -18164,6 +18675,7 @@ function master_detail_table(headers, items;
                              _level_marks::Bool=false,
                              _max_level::Int=0,
                              _update_scope=nothing,
+                             _detail_key=key,
                              texts::TableTexts=_EN_TABLE_TEXTS,
                              kwargs...)
     # Refused: a link key with no link group would highlight nothing.
@@ -18203,6 +18715,10 @@ function master_detail_table(headers, items;
     placed = Pair{String,Tuple{String,String}}[]
     # The leaves of lazy branches, which the search count counts unloaded.
     pending = String[]
+    # The eager details Markdown writes after the table, each item's once
+    # (`_detail_key`: a leaf listed under several groups is one item).
+    details = Pair{Vector{Any},Any}[]
+    detailed = Set{String}()
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
         descendants = isnothing(children) ? () : children(item)
@@ -18282,6 +18798,10 @@ function master_detail_table(headers, items;
         controls = Any[]
         trailing_controls = Any[]
         label = Any[HTMX.children(first_cell)...]
+        if !isnothing(body) && isnothing(url) && !(string(_detail_key(item)) in detailed)
+            push!(detailed, string(_detail_key(item)))
+            push!(details, label => body)
+        end
         if branch && branches_collapsible
             # An update names the child rows it renders; the runtime then
             # recomputes the list from the rows on the page.
@@ -18362,7 +18882,12 @@ function master_detail_table(headers, items;
     table = sortable_table(headers, rows; table_attrs..., texts, link, _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
-    # controls every master/detail table now carries.
+    # controls every master/detail table now carries. A narrow first column
+    # must not break between those controls and the label: the cell does not
+    # wrap, only the label's text (or its label button's) does, and
+    # `text-wrap-mode` leaves an app's `white-space` collapsing alone. Engines
+    # disagree on which style governs a break beside an atomic button, so a
+    # control after the label and a glyph before it are joined by U+2060.
     rules = """
     [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle] { width: auto; margin: 0 .35em 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: inherit; vertical-align: baseline; }
     [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
@@ -18390,20 +18915,23 @@ function master_detail_table(headers, items;
     [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
     tr[aria-busy="true"] [data-htmxo-tree-toggle] { cursor: progress; opacity: .6; }
     [data-htmxo-row-label] > [data-htmxo-tree-label] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; text-align: start; white-space: normal; font: inherit; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸"; display: inline-block; margin-right: .35em; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾"; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸\\2060"; margin-right: .35em; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾\\2060"; }
     [data-htmxo-row-label] > [data-htmxo-tree-label]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
     [data-htmxo-hierarchy] [data-htmxo-row-label] > [data-htmxo-detail-toggle] { color: inherit; text-decoration: none; font: inherit; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸"; display: inline-block; margin-right: .35em; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾"; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸\\2060"; margin-right: .35em; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾\\2060"; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
     td > button[data-htmxo-disclosure]:hover { color: var(--pico-primary, LinkText); }
     td > button[data-htmxo-disclosure]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    td:has(> [data-htmxo-row-label]) { text-wrap-mode: nowrap; }
+    td > [data-htmxo-row-label]:not(:has(> [data-htmxo-label])) { text-wrap-mode: wrap; }
+    td > [data-htmxo-row-label]:has(+ button)::after { content: "\\2060"; }
     """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
                   for level in 2:max(max_level[], _max_level)), "\n")
-    table = h.div(h.style(Raw(rules)), table)
+    table = h.div(h.style(Raw(rules)), table, (isempty(details) ? () : (_MDDetailsMarkdown(details),))...)
     # A hierarchy always carries the (possibly hidden) search scaffold: its
     # branch toggles and the search share one visibility pass.
     tools = Any[_toolbar...]
@@ -18939,6 +19467,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
+        _detail_key = x -> x isa _MDGroup ? gid(x.path) : string(key(x.item)),
         update_rows = update ? rendered : nothing,
         # A leaf is linked by its `link_key` (default: its own key), under
         # whichever group it is listed; a group row has none.
@@ -22829,21 +23358,24 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
    triggering element (core `requestClass` — no HTMXObjects JS needed), so
    this rule fires on every page carrying this block, including hand-built
    shells that skip `request_feedback()`. `cursor: progress` plus a subtle
-   dim, in plain literals so it holds without `htmxo_theme()`. Pollers
-   (`hx-trigger` containing `every`) are background work, not user-triggered
-   feedback, so they keep their resting style — the same exclusion the
-   `request_feedback` script applies.
+   dim, in plain literals so it holds without `htmxo_theme()`. Requests the
+   page sends by itself — pollers (`hx-trigger` containing `every`) and
+   elements whose trigger is `load` (lazy fragments), `revealed` or
+   `intersect` — keep their resting style: the reader started nothing. The
+   `request_feedback` script applies the same exclusion per request; CSS sees
+   only the attribute, so a trigger list counts as `load` when it begins with
+   it.
    INTENTIONALLY UNLAYERED: Pico styles `<button>` (and other controls)
    unlayered, and an unlayered declaration beats every layered one
    regardless of specificity — inside `@layer htmxo` the cursor would never
    apply on buttons (the opacity would, Pico sets none). The resting `[hx-*]`
    rule above stays layered: at rest it agrees with Pico's `pointer`, so
    there is nothing to beat. */
-[hx-get]:not([hx-trigger*="every"]).htmx-request,
-[hx-post]:not([hx-trigger*="every"]).htmx-request,
-[hx-put]:not([hx-trigger*="every"]).htmx-request,
-[hx-patch]:not([hx-trigger*="every"]).htmx-request,
-[hx-delete]:not([hx-trigger*="every"]).htmx-request {
+[hx-get]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-post]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-put]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-patch]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request {
     cursor: progress;
     opacity: 0.7;
 }
@@ -22921,8 +23453,16 @@ an inherited `hx-target`, an extended selector such as `next .result`,
 `closest tr` or `find output`, an `htmx.ajax` target, and an `HX-Retarget`
 response all mark the element the response actually lands in. A target that an
 `outerHTML` swap has already replaced is marked through its same-id
-replacement; otherwise the requesting element's own `hx-target` CSS selector is
-used, then the requesting element itself.
+replacement, else through the elements the swap put in its place; otherwise the
+requesting element's own `hx-target` CSS selector is used, then the requesting
+element itself. The requesting element is the one that sent the request, never
+the ancestor htmx reports the request's end on once that element's own swap
+removed it.
+
+Only requests the reader started are marked. A request the page sends by
+itself — a poll (`hx-trigger` with `every`), a preload, or the requesting
+element's own `load`, `revealed` or `intersect` trigger (a `lazy` fragment, a deferred page's placeholder, a `tabset`'s shown lazy panel) — draws
+no outline; a failure among them still raises the shell's failure toast.
 
 Success and failure are read as [`toast_script`](@ref)'s
 `window.htmxoRequestOutcome` reads them, so the red flash and the shell's
@@ -22933,31 +23473,61 @@ flashes red for every request htmx does not report as successful.
 """
 request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
-    function getTarget(evt) {
-        var elt = evt.detail.elt;
+    // The element that sent the request. Once its own swap has removed it,
+    // htmx reports the request's end a second time on the closest ancestor
+    // still in the page, as `detail.elt`; the request config keeps the sender.
+    function requester(evt) {
+        var config = evt.detail.requestConfig;
+        return (config && config.elt) || evt.detail.elt;
+    }
+    // The elements an outerHTML swap put in place of its target, by request:
+    // htmx announces each with afterSwap before the request ends.
+    var replacements = new WeakMap();
+    document.body.addEventListener('htmx:afterSwap', function(e) {
+        var d = e.detail;
+        if (!d.xhr || !d.target || d.target.isConnected) return;
+        var list = replacements.get(d.xhr) || [];
+        list.push(e.target);
+        replacements.set(d.xhr, list);
+    });
+    function getTargets(evt) {
+        var elt = requester(evt);
         var resolved = evt.detail.target;
-        if (resolved && resolved.isConnected) return resolved;
+        if (resolved && resolved.isConnected) return [resolved];
         // afterRequest follows the swap: an outerHTML swap has replaced the
-        // resolved node, so mark its replacement when it kept the id.
+        // resolved node, so mark its replacement when it kept the id, else
+        // what the swap put in its place.
         if (resolved && resolved.id) {
             var replaced = document.getElementById(resolved.id);
-            if (replaced) return replaced;
+            if (replaced) return [replaced];
         }
+        var swapped = (evt.detail.xhr && replacements.get(evt.detail.xhr) || [])
+            .filter(function(el) { return el.isConnected; });
+        if (swapped.length) return swapped;
         var targetSel = elt.getAttribute('hx-target');
         if (targetSel) {
-            if (targetSel === 'this') return elt;
+            if (targetSel === 'this') return [elt];
             var found = null;
             try { found = document.querySelector(targetSel); } catch (_) {}
-            if (found) return found;
+            if (found) return [found];
         }
-        return elt;
+        return [elt];
     }
     function isPolling(elt) {
         var trigger = elt.getAttribute('hx-trigger') || '';
         return trigger.indexOf('every') !== -1;
     }
-    function isPollingRelated(elt) {
-        return isPolling(elt) || (elt.querySelector && !!elt.querySelector('[hx-trigger*="every"]'));
+    // A request the page sends by itself rather than one the reader started:
+    // a poll, or the element's own `load`, `revealed` or `intersect` trigger
+    // (a lazy fragment, a tab's shown panel, an infinite-scroll sentinel).
+    // There is nothing to confirm, so it draws no outline.
+    function isAutomatic(e, elt) {
+        if (isPolling(elt)) return true;
+        var config = e.detail.requestConfig;
+        var trigger = config && config.triggeringEvent;
+        if (trigger) return trigger.type === 'revealed' || trigger.type === 'intersect';
+        // htmx sends a `load` trigger's request without an event.
+        return /(^|,)\\s*load(?![\\w:-])/.test(elt.getAttribute('hx-trigger') || '');
     }
     // htmx dispatches a preload's beforeRequest before the preload extension
     // cancels it, and no afterRequest follows: marking it would leave the
@@ -22985,15 +23555,14 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(function() { clearFeedback(el); }, state === 'success' ? 1000 : 2000);
     }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
-        var elt = e.detail.elt;
-        if (isPolling(elt) || isPreload(e)) return;
-        var t = getTarget(e);
-        clearFeedback(t);
-        t.classList.add('htmx-request-active');
-        if (t !== elt) {
-            clearFeedback(elt);
-            elt.classList.add('htmx-request-active');
-        }
+        var elt = requester(e);
+        if (isAutomatic(e, elt) || isPreload(e)) return;
+        var targets = getTargets(e);
+        if (targets.indexOf(elt) < 0) targets.push(elt);
+        targets.forEach(function(t) {
+            clearFeedback(t);
+            t.classList.add('htmx-request-active');
+        });
     });
     document.body.addEventListener('htmx:oobAfterSwap', function(e) {
         var t = e.detail.target || e.detail.elt;
@@ -23003,13 +23572,13 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(function() { clearFeedback(t); }, 1000);
     });
     function finished(e) {
-        var elt = e.detail.elt;
-        if (isPollingRelated(elt)) return;
+        var elt = requester(e);
+        if (isAutomatic(e, elt)) return;
         var state = outcome(e);
         if (state === 'pending') return;
-        var t = getTarget(e);
-        mark(t, state);
-        if (t !== elt) mark(elt, state);
+        var targets = getTargets(e);
+        if (targets.indexOf(elt) < 0) targets.push(elt);
+        targets.forEach(function(t) { mark(t, state); });
     }
     ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout', 'htmx:sendAbort'].forEach(function(name) {
         document.body.addEventListener(name, finished);
@@ -24395,6 +24964,9 @@ end
 
 Render a Pico CSS sidebar `<aside>` with HTMX-enabled navigation links.
 Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active styling.
+A click swaps the page into `target` and records its address; a Ctrl/Cmd-,
+Shift- or middle-click opens it in a new tab or window instead (on an
+[`htmx`](@ref) page, see [`modifier_click_script`](@ref)).
 `preload=true` starts fetching a page while the pointer rests on its link (see
 [`hx_link`](@ref)).
 
@@ -24425,6 +24997,12 @@ Render a Pico-styled breadcrumb `<nav>`. Each `item` is a tuple
 `(label, frag_url, push_url)`. When `frag_url` is `nothing`, the segment
 renders as plain text (the current page). Otherwise it's an `<a>` that issues
 `hx-get=frag_url` into `target` and updates the URL bar via `hx-push-url=push_url`.
+The link's `href` is the address it records — `push_url`, or `frag_url` for
+`push_url="true"` — so a Ctrl/Cmd-, Shift- or middle-click opens that page in a
+new tab or window (on an [`htmx`](@ref) page, see
+[`modifier_click_script`](@ref)), and the link is reachable by keyboard. A
+segment that records no address (`push_url` `nothing` or `"false"`) has no
+`href`.
 `preload=true` starts fetching a segment while the pointer rests on it (see
 [`hx_link`](@ref)).
 
@@ -24443,11 +25021,19 @@ function htmxo_breadcrumb(items; target="#content", preload=nothing)
             push!(parts, h.span(label; aria_current="page"))
         else
             push!(parts, h.a(label;
+                _breadcrumb_href(frag_url, push_url)...,
                 hx_get=frag_url, hx_target=target, hx_swap="innerHTML",
                 hx_push_url=push_url, _preload_attrs(preload)...))
         end
     end
     h.nav(parts...; class="htmxo-breadcrumb", aria_label="breadcrumb")
+end
+
+# A breadcrumb segment's `href` is the address its `hx-push-url` records.
+_breadcrumb_href(frag_url, ::Nothing) = (;)
+function _breadcrumb_href(frag_url, push_url)
+    recorded = string(push_url)
+    recorded == "false" ? (;) : (href = recorded == "true" ? frag_url : push_url,)
 end
 
 """
