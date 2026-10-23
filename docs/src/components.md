@@ -490,7 +490,10 @@ beside the cell's content, which may be a link; the row click remains a pointer
 shortcut. Every branch and detail control is a native button carrying
 `aria-controls`/`aria-expanded`, so it supports keyboard activation, as do
 auto-wired sort headers. Sorting, search and CSV export read the cell's content,
-not its controls. `initially_open` accepts a Boolean or
+not its controls. However narrow the first column, its controls stay on their
+label's line: the cell never wraps between a control and its label, only the
+label's own text wraps. To keep a label on one line, give its content
+`white-space: nowrap`, not the cell. `initially_open` accepts a Boolean or
 predicate and controls both branch expansion and leaf detail expansion. Groups
 without a detail body or URL have no companion or request. Keys must be unique
 after sanitisation throughout the tree and page.

@@ -18694,7 +18694,12 @@ function master_detail_table(headers, items;
     table = sortable_table(headers, rows; table_attrs..., texts, link, _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
-    # controls every master/detail table now carries.
+    # controls every master/detail table now carries. A narrow first column
+    # must not break between those controls and the label: the cell does not
+    # wrap, only the label's text (or its label button's) does, and
+    # `text-wrap-mode` leaves an app's `white-space` collapsing alone. Engines
+    # disagree on which style governs a break beside an atomic button, so a
+    # control after the label and a glyph before it are joined by U+2060.
     rules = """
     [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle] { width: auto; margin: 0 .35em 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: inherit; vertical-align: baseline; }
     [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
@@ -18722,17 +18727,20 @@ function master_detail_table(headers, items;
     [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
     tr[aria-busy="true"] [data-htmxo-tree-toggle] { cursor: progress; opacity: .6; }
     [data-htmxo-row-label] > [data-htmxo-tree-label] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; text-align: start; white-space: normal; font: inherit; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸"; display: inline-block; margin-right: .35em; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾"; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸\\2060"; margin-right: .35em; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾\\2060"; }
     [data-htmxo-row-label] > [data-htmxo-tree-label]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
     [data-htmxo-hierarchy] [data-htmxo-row-label] > [data-htmxo-detail-toggle] { color: inherit; text-decoration: none; font: inherit; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸"; display: inline-block; margin-right: .35em; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾"; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸\\2060"; margin-right: .35em; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾\\2060"; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
     td > button[data-htmxo-disclosure]:hover { color: var(--pico-primary, LinkText); }
     td > button[data-htmxo-disclosure]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    td:has(> [data-htmxo-row-label]) { text-wrap-mode: nowrap; }
+    td > [data-htmxo-row-label]:not(:has(> [data-htmxo-label])) { text-wrap-mode: wrap; }
+    td > [data-htmxo-row-label]:has(+ button)::after { content: "\\2060"; }
     """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
                   for level in 2:max(max_level[], _max_level)), "\n")
     table = h.div(h.style(Raw(rules)), table)
