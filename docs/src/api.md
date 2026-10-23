@@ -62,6 +62,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `static_url(req, address)` | The address to embed where the static walk cannot rewrite it (a script, a JSON payload, a Vega spec's `data.url`): what an `src` with that value becomes under a static `dispatch`, `address` unchanged otherwise — see [Request-scoped static export](#request-scoped-static-export) |
 | `url_params(; name = value, …, values)` | Attributes that let parameters in the page address drive an element that loads with `hx-get`, on a live page and in a static export — see [Page address parameters](#page-address-parameters) |
 | `url_params_script()` | The browser runtime of `url_params`; `htmx()` pages carry it |
+| `url_anchor_script()` | Scrolls to the element the address's `#id` names when an htmx swap brings it after the page loaded; `htmx()` pages carry it — see [Page address parameters](#page-address-parameters) |
 | `hx_response(...)` | Build a response with HTMX-specific response headers (HX-Trigger, HX-Redirect, HX-Push-Url, HX-Refresh, HX-Reswap, HX-Retarget, HX-Reselect, HX-Location), and the page shell's success toast (`toast=`, see [Success toasts](#success-toasts)) |
 | `redirect_to(req, location; status=303, query=true)` | Redirect a moved or aliased route to its canonical URL, for direct loads and htmx requests alike — see [Moved routes](#moved-routes) |
 | `hx_link(href, label; ...)` | Render a link that uses `hx-get` + `hx-push-url` (HTMX boost-style) |
@@ -3571,3 +3572,12 @@ Two details of the markup:
 A tab strip records its open tab itself: see `tabset`'s `url_param`. Inside a
 docs embed (`.htmxo-embed`) the address belongs to the host page and is left
 alone.
+
+The address's `#id` reaches lazily loaded parts too. The browser scrolls to
+the element it names while the page loads, which is too early for an element
+inside a fragment the page loads afterwards. `url_anchor_script()`, which
+every `htmx()` page carries, scrolls to that element once the swap that
+brings it has settled, and keeps it in view while content loads into it —
+after a fresh navigation, until the reader scrolls, clicks or types. So
+`/?tab=trends#odl-tabs` lands on the tabset `odl-tabs` and opens its `trends`
+tab, even when the tabset arrives in a fragment.
