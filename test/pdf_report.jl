@@ -25,13 +25,14 @@ using TestItemRunner
           - $(HTMXObjects._yaml_string(images))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_LINKS_FILTER))
+          - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_BREAKS_FILTER))
         ---
 
         # Ergebnisse
         """
     @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
           isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
-          isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER)
+          isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER)
 end
 
 @testitem "pdf_report hands base_url to the link filter" tags=[:unit] begin
@@ -607,6 +608,58 @@ end
             found = uris(out)
             if !isnothing(found)
                 @test found == ["https://example.org/daten", "mailto:info@example.org"]
+            end
+        end
+    end
+end
+
+@testitem "pdf_report keeps a line break in a table cell" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        # A pipe table row is one line, so a cell's line break is an inline
+        # `<br>`. Pandoc's Typst writer drops raw HTML: without the filter Typst
+        # got `[27.26825.501--28.966]` (snag pdf-report-on-ma-981f47e0).
+        md = """
+            | Region | Arbeitsplätze |
+            |---|---|
+            | Goslar | 27.268<br>25.501–28.966 |
+            | Harz | 1<br/>2 |
+            | Brocken | 3<BR />4 |
+
+            Eins<br>zwei.
+            """
+        typst = mktempdir() do dir
+            write(joinpath(dir, "breaks.md"), md)
+            read(`$quarto pandoc -f markdown -t typst --wrap=none --lua-filter=$(HTMXObjects._PDF_REPORT_BREAKS_FILTER)
+                  $(joinpath(dir, "breaks.md"))`, String)
+        end
+        @test occursin("[27.268 \\ 25.501--28.966]", typst)
+        @test occursin("[1 \\ 2]", typst) && occursin("[3 \\ 4]", typst)
+        @test occursin("Eins \\ zwei.", typst)
+
+        pdfua(path) = let bytes = read(path, String)
+            startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+        end
+        mktempdir() do dir
+            # The cell of a page: a median, a line break and its interval.
+            page = h.article(h.h1("Regionen"), h.table(
+                h.thead(h.tr(h.th("Region"), h.th("Arbeitsplätze"))),
+                h.tbody(h.tr(h.td("Goslar"), h.td("27.268", h.br(), h.small("25.501–28.966"))))))
+            @test occursin("27.268<br>25.501–28.966", HTMXObjects.to_markdown_string(page))
+            out = joinpath(dir, "regionen.pdf")
+            @test pdf_report(page, out; title="Regionen", lang="de-DE") == out
+            @test pdfua(out)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                text = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+                @test !occursin("27.26825.501", text)
+                lines = strip.(split(text, '\n'))
+                @test any(l -> endswith(l, "27.268"), lines) && any(==("25.501–28.966"), lines)
             end
         end
     end
