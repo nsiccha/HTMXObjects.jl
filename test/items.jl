@@ -5314,10 +5314,11 @@ end
     html = repr("text/html", transformed)
     @test !contains(html, "hx-post")
     @test contains(html, "data-static-disabled")
+    # A recording served from the site root loads the fragment it recorded.
     link = h.a("About"; hx_get="/about")
     transformed_link = static_transform(link)
     html_link = repr("text/html", transformed_link)
-    @test contains(html_link, "hx-get=\"/about\"")
+    @test contains(html_link, "hx-get=\"/hx/about.html\"")
     @test !contains(html_link, "data-static-disabled")
     del_btn = h.button("Delete"; hx_delete="/item/1")
     transformed_del = static_transform(del_btn)
@@ -11536,6 +11537,36 @@ end
                                                 StaticExport(; url_map=_ -> 42))
 end
 
+@testitem "a recording's hx-get names the fragment file it recorded" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: h
+    # Lazy tabs in a recorded page load the fragments `record!` wrote, as a
+    # plain static server (`python -m http.server`) resolves their addresses:
+    # decoded, with no `.html` added. Before, they kept the live address or
+    # gained only `<record_base>/hx/`, which only a host serving `/x` as
+    # `x.html` answered (snag record-lazy-tab-81f10ec0).
+    @htmx struct LazyTabsRecording
+        @get index() = tabset("Moretti" => "/arm/moretti2021", "Two words" => "/arm/a%20b",
+                              "Home" => "/")
+        @get arm(id) = h.p("arm ", id)
+    end
+    paths = ["/", "/arm/moretti2021", "/arm/a%20b"]
+    for (record_base, prefix) in (("", ""), ("/", ""), ("/b", "/b"), (".", "."))
+        mktempdir() do dir
+            record!(LazyTabsRecording(); record_dir=dir, record_base, paths, markdown=false)
+            page = read(joinpath(dir, "index.html"), String)
+            gets = [String(m[1]) for m in eachmatch(r"hx-get=\"([^\"]*)\"", page)]
+            @test sort(gets) == sort(prefix .* ["/hx/arm/moretti2021.html", "/hx/arm/a%2520b.html",
+                                                "/hx/index.html"])
+            for url in gets
+                file = joinpath(dir, HTTP.URIs.unescapeuri(chopprefix(url, prefix * "/")))
+                @test isfile(file)
+            end
+            # The file is named by the requested path, the route reads it decoded.
+            @test occursin("arm a b", read(joinpath(dir, "hx", "arm", "a%20b.html"), String))
+        end
+    end
+end
+
 @testitem "static export walks html_only content" setup=[HTMXOTestImports] tags=[:unit] begin
     import HTMXObjects: h, to_markdown_string
     # `html_only` content is HTML like any other subtree: its controls are
@@ -11547,7 +11578,7 @@ end
     based = static_transform(frag; record_base="/b")
     html = repr("text/html", based)
     @test !contains(html, "hx-post") && count("data-static-disabled", html) == 1
-    @test contains(html, "href=\"/b/doc\"") && contains(html, "hx-get=\"/b/hx/fig\"")
+    @test contains(html, "href=\"/b/doc\"") && contains(html, "hx-get=\"/b/hx/fig.html\"")
     @test to_markdown_string(based) == to_markdown_string(frag)
     removed = repr("text/html", static_transform(frag, StaticExport(; controls=:remove)))
     @test !contains(removed, "Delete") && !contains(removed, "disabled")

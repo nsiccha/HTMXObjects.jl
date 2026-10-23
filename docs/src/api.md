@@ -2609,7 +2609,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 | `default_gallery_card(item)`   | The default card (title, description, code), built on `gallery_card` |
 | `htmxo_gallery_styles()`       | The gallery stylesheet (`gallery_grid` includes it; for galleries an app composes itself) |
 | `gallery_toolbar`, `gallery_controls_script` | Toolbar widget + JS for filter/group controls in the grid |
-| `record!(app; record_dir, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants |
+| `record!(app; record_dir, record_base, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants. A recorded rooted `hx-get` names the fragment file it writes (`<record_base>/hx/<path>.html`; empty `record_base` = site root), so lazy parts load on any static server |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
 | `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
 | `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline. Returned by an `__error__` hook, it is the error answer as it is, with the error's status (500, 400 for a caller fault, 200 under HTMX) |
