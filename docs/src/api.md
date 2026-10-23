@@ -667,7 +667,7 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
 - **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
   Without one, Quarto's template labels the document with the region `US`.
   Mark a part in another language with a `::: {lang="en"}` block in Markdown.
-- **`resources`** is the directory relative image paths resolve against; it
+- **`resources`** is the directory relative paths (images) resolve against; it
   defaults to the PDF's directory. An image can also be an absolute path, a
   `file:` URL, a relative path outside `resources`, an `http(s)` URL or a
   `data:` URI: the render reads it into a temporary copy, because Typst reads
