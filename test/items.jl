@@ -8483,6 +8483,61 @@ end
         "lead\n\n✓ **ok**\n\n[Go](/go)\n\ntail"
 end
 
+@testitem "a nested section opens the next heading level in every peer" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    import CommonMark
+    md = HTMXObjects.to_markdown_string
+    html(value) = repr("text/html", value)
+    outline(markdown) = [m.captures[1] for m in eachmatch(r"<(h\d)>",
+        CommonMark.html(HTMXObjects.markdown_parser()(markdown)))]
+
+    # The reported tender section: the sub-section is one level below its
+    # parent in every peer, not its sibling.
+    tender = SemanticSection("AP 2: Modell", SemanticProse("…"),
+        SemanticSection("Im Prototyp", SemanticProse("Bayes-Regression")); anchor="tender-ap-2")
+    @test md(tender) == "## AP 2: Modell\n\n…\n\n### Im Prototyp\n\nBayes-Regression"
+    @test contains(html(tender), "<h2>AP 2: Modell</h2>")
+    @test contains(html(tender), "<h3>Im Prototyp</h3>")
+    @test contains(repr("application/vnd.hyperview+xml", tender),
+        "<text style=\"h3\">Im Prototyp</text>")
+
+    # Unnested, a section and the cards it holds read as before.
+    @test md(SemanticSection("S", SemanticCard("C", "c"))) == "## S\n\n### C\n\nc"
+    @test md(SemanticCard("C", "c")) == "### C\n\nc"
+    @test contains(html(SemanticSection("S", "s")), "<h2>S</h2>")
+
+    # Markup between a section and the one it holds keeps the level, and so
+    # does generated form chrome on a page.
+    through = SemanticSection("Outer", h.div(SemanticSection("Inner", "x")))
+    @test contains(html(through), "<h3>Inner</h3>")
+    @test md(through) == "## Outer\n\n### Inner\n\nx"
+    @test outline(md(h.div(h.h1("R"),
+        h.form(h.input(), SemanticSection("A", SemanticSection("B", "b")))))) ==
+        ["h1", "h2", "h3"]
+
+    # A card's Markdown title is a heading one below the section holding it,
+    # and its content continues below that. In HTML the card title is no
+    # heading, so a section inside a card keeps the level around the card.
+    deep = SemanticSection("A", SemanticSection("B", SemanticCard("C", SemanticSection("D", "d"))))
+    @test md(deep) == "## A\n\n### B\n\n#### C\n\n##### D\n\nd"
+    @test contains(html(deep), "<h3>B</h3>") && contains(html(deep), "<h4>D</h4>")
+    @test md(SemanticCard("K", SemanticSection("S", "s"))) == "### K\n\n#### S\n\ns"
+    @test contains(html(SemanticCard("K", SemanticSection("S", "s"))), "<h2>S</h2>")
+
+    # Six levels at most: a deeper section keeps the sixth.
+    nested = foldr((title, inner) -> SemanticSection(title, inner), string.(1:7); init="x")
+    @test outline(md(nested)) == ["h2", "h3", "h4", "h5", "h6", "h6", "h6"]
+    @test count("<h6>", html(nested)) == 3 && !contains(html(nested), "<h7")
+
+    # A static export builds the inner section at its level too.
+    @test contains(html(static_transform(through, StaticExport())), "<h3>Inner</h3>")
+
+    # The level is scoped to the render, also when a child fails to render.
+    struct FailingChild end
+    Base.show(::IO, ::MIME"text/html", ::FailingChild) = error("boom")
+    @test_throws ErrorException html(SemanticSection("S", SemanticSection("T", FailingChild())))
+    @test contains(html(SemanticSection("S", "s")), "<h2>S</h2>")
+end
+
 @testitem "render_markdown renders CommonMark and links bare URLs by default" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     # Intra-word underscores stay verbatim — the stdlib parser deleted them.
     html = repr("text/html",

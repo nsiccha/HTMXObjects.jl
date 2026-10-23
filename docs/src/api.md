@@ -137,6 +137,32 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 
 Fragments are not documents and never carry a doctype.
 
+### The page's language {#page-lang}
+
+`lang` declares the language the page is written in, as a BCP 47 tag on
+`<html lang>` (WCAG 2.1 success criterion 3.1.1, *Language of Page*, which
+BITV 2.0 also requires). Screen readers then pronounce the page in that
+language, and CSS `hyphens: auto` hyphenates it with that language's rules:
+
+```julia
+@htmx struct App
+    __error_texts__ = error_texts(:de)
+    __page__(content) = HTMXObjects.pico_page(content; lang="de", error_texts=__error_texts__)
+    # ...
+end
+```
+
+`htmx(...; lang)` takes the same keyword. A region or script is optional
+(`"de"`, `"de-CH"`, `"sr-Latn"`). The tag is checked when the page is built: a
+language name such as `"German"`, an underscore form such as `"de_DE"` or an
+empty string throws an `ArgumentError`, because a browser accepts any value and
+would read the page as an unknown language. `nothing` (the default) writes no
+`lang` attribute, and the page is unchanged. `lang` is independent of
+`error_texts`, which chooses only the words of the framework's error articles
+and toasts. Static exports and `record!` bundles carry the attribute, since it
+is part of the page. Mark a part in another language with `lang` on its own
+element (`h.blockquote(cited; lang="en")`).
+
 ### Tables on every page — `tables=true` {#page-tables}
 
 The shell also carries the tables' runtime, so a table from `render_table`,
@@ -566,7 +592,7 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
-| `pdf_report(page_or_markdown, path; title, lang)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
+| `pdf_report(page_or_markdown, path; title, lang, metadata)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 | `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
 
@@ -678,7 +704,9 @@ pdf_report(page, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE")
 
 # The Markdown of a mounted route works the same way:
 md = String(dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"]).body)
-pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resources="figures")
+pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resources="figures",
+           metadata=(subtitle="Entwurf", date="22.10.2026", toc=true,
+                     margin=(x="2cm", y="2cm"), fontsize="10pt"))
 ```
 
 - **Engine:** Quarto's Typst engine with `pdf-standard: ua-1`, plus a filter
@@ -691,6 +719,24 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
 - **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
   Without one, Quarto's template labels the document with the region `US`.
   Mark a part in another language with a `::: {lang="en"}` block in Markdown.
+- **`metadata`** sets the other document options: a NamedTuple or an
+  `AbstractDict` of Quarto front-matter keys, such as `subtitle`, `author`,
+  `date`, `toc`, `papersize`, `margin` and `fontsize`, or any other option of
+  Quarto's Typst format. A NamedTuple writes `_` as `-` (`toc_depth=2` is
+  `toc-depth: 2`); dictionary keys are written as given. Values are strings,
+  numbers, Bools, dates, vectors, and NamedTuples or dictionaries for nested
+  options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`,
+  `pdf-standard` and `filters` belong to `pdf_report`; setting one through
+  `metadata` is an `ArgumentError`.
+- **Paper:** the size `lang`'s region uses. That is US Letter for the regions
+  Unicode CLDR lists for it (US, CA, MX and others in the Americas) and A4
+  everywhere else, so a `de-DE` report is A4 without asking.
+  `metadata=(papersize="us-letter",)` or any other Typst paper name overrides
+  it.
+- **No YAML block in the Markdown.** Quarto merges a YAML metadata block found
+  in the Markdown over the front matter `pdf_report` writes, which would
+  replace the title, the language and the equation filter. `pdf_report`
+  refuses Markdown that carries one; pass its options as `metadata=`.
 - **`resources`** is the directory relative paths (images) resolve against; it
   defaults to the PDF's directory. `pdf_report` removes its temporary `.qmd`,
   Quarto's intermediate files and the `.quarto` cache from it, also on failure.
@@ -1541,6 +1587,19 @@ GFM pipe table whose rows each stay one line: a `|` in a header or cell is
 escaped as `\|` (GFM splits a cell at every unescaped pipe, code spans included),
 and a line break becomes an inline `<br>` — the same cell rule HTMX.jl applies
 to `render_table`'s `h.table`.
+
+Sections nest as an outline. A `SemanticSection`'s title is `<h2>` / `##` at
+the top of a document, below its title, and one level deeper inside each
+enclosing section, also through markup in between (an `h.div`, generated form
+chrome, a card) and in a static export. `<h6>` / `######` is the deepest; a
+section nested further keeps it. A `SemanticCard`'s title is its `<header>` in
+HTML, not a heading, so a card opens no level of the HTML outline. In Markdown
+it is a heading one level below the section holding the card, and `###` outside
+any section, where a card sits below the page's `##` headings; the card's own
+content continues one level below it. The level follows nesting within one
+render: a section answered by a response of its own (a lazily loaded detail, an
+`hx-get` result) starts at `<h2>` again, and an `HTMLSnapshot` keeps the HTML
+it rendered when it was made.
 
 `anchor`, where present, becomes the HTML `id` — a document address, so an
 element can be cited from elsewhere. An unaddressed element emits no attribute

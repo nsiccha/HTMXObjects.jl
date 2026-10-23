@@ -2831,10 +2831,14 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
+`lang` is the page's language as a BCP 47 tag (`"de"`, `"de-CH"`, `"en-GB"`),
+written as `<html lang>`: screen readers pronounce the page in it and CSS
+`hyphens: auto` hyphenates by it. `nothing` (the default) writes no `lang`
+attribute; a string that is not a language tag throws an `ArgumentError`.
 `sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
 loads only alongside the shell's own htmx (an extension must follow htmx).
 `ws_version` is htmx's WebSocket extension, which `@ws` routes need on the
@@ -2930,6 +2934,7 @@ function htmx(args...;
     extra_head          = (),
     treebars_assets     = true,
     error_texts         = nothing,
+    lang                = nothing,
 )
     _check_assets_mode(assets)
     mount = _runtime_mount(runtime, assets)
@@ -2947,7 +2952,8 @@ function htmx(args...;
     isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
-    html_attrs = (; (preload ? (; hx_ext="preload") : (;))..., _error_texts_attrs(error_texts)...)
+    html_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
+        _error_texts_attrs(error_texts)...)
     html = isempty(html_attrs) ? h.html : h.html(; html_attrs...)
     # The runtime blocks the shell carries, before and after the overlay
     # bootstrap.
@@ -3014,8 +3020,20 @@ function htmx(args...;
     ))
 end
 
+# The `<html>` attribute that carries the page's language. A BCP 47 tag is a
+# two- or three-letter ISO 639 language plus optional subtags of letters and
+# digits (script, region, variant), so a language name such as "German" is
+# refused; a page without one carries no attribute, so its output is unchanged.
+const _HTML_LANG = r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$"
+_lang_attrs(::Nothing) = (;)
+_lang_attrs(lang::AbstractString) = occursin(_HTML_LANG, lang) ? (; lang=String(lang)) :
+    throw(ArgumentError(string("htmx: lang must be a BCP 47 language tag such as \"de\" or ",
+        "\"de-CH\", or nothing for no lang attribute; got ", repr(lang))))
+_lang_attrs(lang) = throw(ArgumentError(string(
+    "htmx: lang must be a BCP 47 language tag string such as \"de\", or nothing; got ", repr(lang))))
+
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, tables=true, error_texts=nothing)
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, tables=true, error_texts=nothing, lang=nothing)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -3029,14 +3047,15 @@ with
     # or with extras:
     __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
 
-`assets`, `runtime`, `tables` and `error_texts` forward to [`htmx`](@ref): `pico_page(content;
+`assets`, `runtime`, `tables`, `error_texts` and `lang` forward to [`htmx`](@ref): `pico_page(content;
 assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
 page (vendor mode needs pico at its exact pin, not the floating `"2"`
 default), and adding `runtime=:linked` makes its whole head cacheable.
+`pico_page(content; lang="de", error_texts=__error_texts__)` is a German page.
 """
 pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline,
-        tables=true, error_texts=nothing) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, tables, error_texts)
+        tables=true, error_texts=nothing, lang=nothing) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, tables, error_texts, lang)
 
 # --- Route registration and recording ---
 
@@ -3130,6 +3149,12 @@ renderable value, or plain data.
 
 `anchor`, when non-empty, becomes the HTML `id` — a document address, so a card
 can be cited from elsewhere.
+
+In HTML the title is the card's `<header>`, not a heading, so a card opens no
+level of the HTML outline. In Markdown it is a heading one level below the
+[`SemanticSection`](@ref) holding the card, and `###` outside any section,
+where a card sits below the page's `##` headings; the card's own content,
+nested sections included, continues one level below it.
 """
 struct SemanticCard <: SemanticNode
     title::String
@@ -3392,6 +3417,11 @@ SemanticArtifact(name, mime, bytes=nothing; target=nothing) =
 
 A document-level division — it opens a heading level, unlike
 [`SemanticCard`](@ref), which is a self-contained summary.
+
+The level follows the nesting: a section's title is `<h2>` / `##` at the top
+of a document, below its title, and one level deeper inside each enclosing
+section, through any markup in between (an `h.div` or a card holding the inner
+section). `<h6>` / `######` is the deepest; a section nested deeper keeps it.
 """
 struct SemanticSection <: SemanticNode
     title::String
@@ -4095,11 +4125,35 @@ _semantic_html_node(action::SemanticAction) = h.a(
 _semantic_html_node(artifact::SemanticArtifact) = h.a(
     artifact.name; href=_semantic_artifact_href(artifact),
     download=artifact.name, type=artifact.mime, class="htmxo-semantic-artifact")
+# The heading level a `SemanticSection` opens where it renders: 2 at the top of
+# a document (below its title), one more inside each enclosing heading. It is a
+# dynamic scope rather than an `IOContext` key, because it must reach every
+# division a section holds: through an `h.div` (HTMX.jl's Markdown serializer
+# re-wraps an `IO` it is handed, splitting its stream state), into a table cell
+# rendered to a buffer of its own, and through the static-export walk, which
+# builds HTML peers with no `IO` at all.
+const _SEMANTIC_HEADING_LEVEL = :htmxo_semantic_heading_level
+
+_semantic_heading_level() = get(task_local_storage(), _SEMANTIC_HEADING_LEVEL, 2)
+
+# Runs `f(level)` for a heading at `level`, with everything below it one deeper.
+_semantic_heading(f, level) =
+    task_local_storage(() -> f(level), _SEMANTIC_HEADING_LEVEL, level + 1)
+
+# A card's Markdown title sits at the level a section would open there, and at
+# `###` outside any section, below the page's `##` headings (an operation's
+# title, say). Its HTML title is not a heading, so only Markdown asks for this.
+_semantic_card_level() = max(_semantic_heading_level(), 3)
+
+# HTML and Markdown have six heading levels; a deeper division keeps the sixth.
+_semantic_heading_tag(level) = Symbol(:h, min(level, 6))
+_semantic_heading_sigil(level) = "#"^min(level, 6)
+
 _semantic_html_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)), card.children...;
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
-_semantic_html_node(section::SemanticSection) = h.section(
-    h.h2(section.title), section.children...;
+_semantic_html_node(section::SemanticSection, level=_semantic_heading_level()) = h.section(
+    h(_semantic_heading_tag(level), section.title), section.children...;
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
 _semantic_html_node(group::SemanticGroup) = h.div(
     group.children...; class="htmxo-semantic-group")
@@ -4136,8 +4190,11 @@ _semantic_hxml_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)),
     map(_semantic_hxml_child, card.children)...;
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
-_semantic_hxml_node(section::SemanticSection) = h.section(
-    h.h2(section.title), map(_semantic_hxml_child, section.children)...;
+# Children are classified here, before serializing, so a nested section must
+# already see the level below this one.
+_semantic_hxml_node(section::SemanticSection, level=_semantic_heading_level()) = h.section(
+    h(_semantic_heading_tag(level), section.title),
+    _semantic_heading(_ -> map(_semantic_hxml_child, section.children), level)...;
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
 _semantic_hxml_node(group::SemanticGroup) = h.div(
     map(_semantic_hxml_child, group.children)...; class="htmxo-semantic-group")
@@ -4154,12 +4211,21 @@ _semantic_hxml_node(alt::SemanticAlternatives) =
 # delegates every format to its layer's own `show` (below).
 for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
           SemanticUnavailable, SemanticProse, SemanticTable, SemanticMetric,
-          SemanticLink, SemanticAction, SemanticArtifact, SemanticSection,
+          SemanticLink, SemanticAction, SemanticArtifact,
           SemanticGroup, SemanticDisclosure, SemanticAlternatives)
     @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
         show(io, mime, _semantic_html_node(value))
     @eval Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", value::$T) =
         show(io, mime, _semantic_hxml_node(value))
+end
+# A section's peer is built at the level it opens here and shown with its
+# children one level below: they render inside its `show`, not before it.
+for (mime, peer) in ((MIME"text/html", :_semantic_html_node),
+                     (MIME"application/vnd.hyperview+xml", :_semantic_hxml_node))
+    @eval Base.show(io::IO, mime::$mime, section::SemanticSection) =
+        _semantic_heading(_semantic_heading_level()) do level
+            show(io, mime, $peer(section, level))
+        end
 end
 
 _semantic_show_leaf(io::IO, mime::MIME, value) =
@@ -4217,11 +4283,12 @@ Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
     io, _semantic_status_glyph(status.state), " **", status.state, "**",
     isempty(status.detail) ? "" : " — $(status.detail)")
 
-function Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard)
-    print(io, "### ", card.title)
-    isempty(card.children) || print(io, "\n\n")
-    _semantic_show_children(io, mime, card.children, "\n\n")
-end
+Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
+    _semantic_heading(_semantic_card_level()) do level
+        print(io, _semantic_heading_sigil(level), " ", card.title)
+        isempty(card.children) || print(io, "\n\n")
+        _semantic_show_children(io, mime, card.children, "\n\n")
+    end
 
 # Same shape as the status peer above, for the same reason: the marker carries
 # the meaning, the reason carries the why.
@@ -4271,11 +4338,12 @@ function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
     end
 end
 
-function Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection)
-    print(io, "## ", section.title)
-    isempty(section.children) || print(io, "\n\n")
-    _semantic_show_children(io, mime, section.children, "\n\n")
-end
+Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
+    _semantic_heading(_semantic_heading_level()) do level
+        print(io, _semantic_heading_sigil(level), " ", section.title)
+        isempty(section.children) || print(io, "\n\n")
+        _semantic_show_children(io, mime, section.children, "\n\n")
+    end
 
 Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
     _semantic_show_children(io, mime, group.children, "\n\n")
@@ -5253,6 +5321,12 @@ _static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
 _static_walk(value::SemanticNode, rules::_StaticRules) =
     _static_walk(_semantic_html_node(value), rules)
 _static_walk_child(value::SemanticNode, rules) = _static_walk(value, rules)
+# The sections a section holds are built while its children are walked, so the
+# walk runs one heading level below it, as its `show` does.
+_static_walk(section::SemanticSection, rules::_StaticRules) =
+    _semantic_heading(_semantic_heading_level()) do level
+        _static_walk(_semantic_html_node(section, level), rules)
+    end
 # A plot owns no markup: its layer renders itself, and an address inside its
 # spec goes through `static_url`.
 _static_walk(plot::SemanticPlot, ::_StaticRules) = plot
@@ -14430,11 +14504,93 @@ const _PDF_REPORT_LOCK = ReentrantLock()
 
 _yaml_string(s) = "\"" * escape_string(s, '"') * "\""
 
-_pdf_report_qmd(markdown; title, lang) = """
+# Regions that use US Letter (Unicode CLDR supplementalData `paperSize`); every
+# other region uses A4. Quarto's Typst template would print every report on US
+# Letter.
+const _LETTER_REGIONS = Set(split("BZ CA CL CO CR GT MX NI PA PH PR SV US VE"))
+
+_pdf_report_paper(lang) =
+    uppercase(match(_PDF_REPORT_LANG, lang).captures[2]) in _LETTER_REGIONS ? "us-letter" : "a4"
+
+# Front-matter keys `pdf_report` sets itself, and where each comes from.
+const _PDF_REPORT_OWN_KEYS = Dict(
+    "title" => "pass it as `title=`",
+    "lang" => "pass it as `lang=`",
+    "format" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
+    "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
+    "filters" => "pdf_report runs the filter that gives equations alt text",
+)
+
+const _PDF_REPORT_METADATA_KEY = r"^[A-Za-z][A-Za-z0-9_-]*$"
+
+# NamedTuple field names spell Quarto's hyphenated keys with `_` (`toc_depth` →
+# `toc-depth`), as `hx_get` spells `hx-get`; dictionary keys are written as given.
+_metadata_pairs(m::NamedTuple) = Pair{String,Any}[replace(string(k), '_' => '-') => v for (k, v) in pairs(m)]
+_metadata_pairs(m::AbstractDict) = Pair{String,Any}[string(k) => v for (k, v) in m]
+_metadata_pairs(m) = throw(ArgumentError(
+    "pdf_report: `metadata` must be a NamedTuple or an AbstractDict of Quarto front-matter keys, got $(typeof(m))"))
+
+# A metadata value as a YAML flow value (YAML reads JSON-style values as they are).
+_yaml_value(v::Bool) = string(v)
+_yaml_value(v::Integer) = string(v)
+_yaml_value(v::AbstractFloat) = isfinite(v) ? string(v) :
+    throw(ArgumentError("pdf_report: `metadata` value $v is not a finite number"))
+_yaml_value(v::Union{AbstractString,Symbol}) = _yaml_string(string(v))
+_yaml_value(v::Union{Dates.Date,Dates.DateTime}) = _yaml_string(string(v))
+_yaml_value(v::Union{AbstractVector,Tuple}) = "[" * join(map(_yaml_value, v), ", ") * "]"
+_yaml_value(v::Union{NamedTuple,AbstractDict}) =
+    "{" * join(("$(_yaml_string(k)): $(_yaml_value(x))" for (k, x) in _metadata_pairs(v)), ", ") * "}"
+_yaml_value(v) = throw(ArgumentError(
+    "pdf_report: `metadata` values must be strings, numbers, Bools, dates, vectors, " *
+    "NamedTuples or dictionaries, got $(typeof(v))"))
+
+function _pdf_report_front_matter(metadata, lang)
+    entries = _metadata_pairs(metadata)
+    for (i, (key, _)) in enumerate(entries)
+        occursin(_PDF_REPORT_METADATA_KEY, key) || throw(ArgumentError(
+            "pdf_report: `metadata` key $(repr(key)) is not a Quarto front-matter key"))
+        haskey(_PDF_REPORT_OWN_KEYS, key) && throw(ArgumentError(
+            "pdf_report: `metadata` cannot set `$key`: $(_PDF_REPORT_OWN_KEYS[key])"))
+        # a dictionary can name one key twice, as `:toc` and `"toc"`
+        any(==(key) ∘ first, entries[1:i-1]) &&
+            throw(ArgumentError("pdf_report: `metadata` sets `$key` twice"))
+    end
+    any(==("papersize") ∘ first, entries) || pushfirst!(entries, "papersize" => _pdf_report_paper(lang))
+    join(("$key: $(_yaml_value(value))\n" for (key, value) in entries))
+end
+
+# The line of a YAML metadata block in `markdown`, or `nothing`: Pandoc reads a
+# `---` line that starts the document or follows a blank line, is followed by a
+# `key:` line and is closed by `---` or `...` as one, and Quarto lets it
+# override the front matter `pdf_report` writes above it.
+function _markdown_metadata_block(markdown)
+    lines = split(markdown, '\n')
+    fence = nothing
+    for (i, line) in enumerate(lines)
+        m = match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if !isnothing(fence)
+            !isnothing(m) && startswith(m.captures[1], fence) && (fence = nothing)
+        elseif !isnothing(m)
+            fence = m.captures[1]
+        elseif rstrip(line) == "---" && (i == 1 || isempty(strip(lines[i-1]))) &&
+               i < length(lines) && occursin(r"^[A-Za-z0-9_-]+\s*:", lines[i+1]) &&
+               any(j -> rstrip(lines[j]) in ("---", "..."), i+2:length(lines))
+            return i
+        end
+    end
+    nothing
+end
+
+function _pdf_report_qmd(markdown; title, lang, metadata=(;))
+    line = _markdown_metadata_block(markdown)
+    isnothing(line) || throw(ArgumentError(
+        "pdf_report: the Markdown has a YAML metadata block (line $line). Quarto would let it override " *
+        "`title`, `lang` and the equation alt-text filter; pass its options as `metadata=` instead"))
+    """
     ---
     title: $(_yaml_string(title))
     lang: $(_yaml_string(lang))
-    format:
+    $(_pdf_report_front_matter(metadata, lang))format:
       typst:
         pdf-standard: [ua-1]
     filters:
@@ -14442,9 +14598,10 @@ _pdf_report_qmd(markdown; title, lang) = """
     ---
 
     """ * markdown
+end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
     pdf_report(value, pdf_path; kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
@@ -14462,6 +14619,19 @@ with the region `US`. Mark a part in another language with a
 region on it). `resources` is the directory relative paths in the Markdown
 (images) resolve against.
 
+`metadata` sets the report's other document options, as a NamedTuple or an
+`AbstractDict` of Quarto front-matter keys: `subtitle`, `author`, `date`, `toc`,
+`papersize`, `margin`, `fontsize`, or any other option Quarto's Typst format
+documents. A NamedTuple writes `_` as `-` (`toc_depth=2` is `toc-depth: 2`);
+dictionary keys are written as given. Values are strings, numbers, Bools,
+dates, vectors, and NamedTuples or dictionaries for nested options
+(`margin=(x="2cm", y="2cm")`). The paper is the one `lang`'s region uses: US
+Letter for the regions Unicode CLDR lists for it (US, CA, MX and others in the
+Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
+`format`, `pdf-standard` and `filters` belong to `pdf_report` and cannot be set
+through `metadata`. The Markdown itself must not carry a YAML metadata block:
+Quarto would let it override `title`, `lang` and the equation filter.
+
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
 filter that gives every equation its TeX source as alt text. Every image needs
 alt text: Typst refuses a PDF/UA document with an image that has none. A
@@ -14469,8 +14639,10 @@ Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
 supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
 Typst 0.15.1).
 
-Throws an `ArgumentError` for a blank `title`, a `lang` without region or a
-missing `resources` directory, and an error carrying Quarto's output when
+Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
+`metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
+metadata block in the Markdown or a missing `resources` directory, all before
+running Quarto, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
@@ -14481,11 +14653,12 @@ alt texts and the reading order are still yours to check by hand.
 
 ```julia
 page = h.article(h.h1("Results"), render_table(df; caption=CaptionSpec(; title="Scores")))
-pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB")
+pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB",
+           metadata=(subtitle="Draft", date=Dates.today(), toc=true, fontsize="10pt"))
 ```
 """
 function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
-                    title::AbstractString, lang::AbstractString,
+                    title::AbstractString, lang::AbstractString, metadata=(;),
                     resources::AbstractString=dirname(abspath(pdf_path)),
                     quarto::AbstractString="quarto")
     isempty(strip(title)) &&
@@ -14493,6 +14666,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
         "pdf_report: `lang` must be a language tag with its region, such as \"de-DE\" or \"en-GB\" " *
         "(got $(repr(lang))); without one Quarto labels the document with the region US"))
+    document = _pdf_report_qmd(markdown; title, lang, metadata)
     isdir(resources) ||
         throw(ArgumentError("pdf_report: `resources` is not a directory: $(repr(resources))"))
     exe = Sys.which(quarto)
@@ -14504,7 +14678,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
         base = tempname(resources; cleanup=false)
         qmd, pdf = base * ".qmd", base * ".pdf"
         try
-            write(qmd, _pdf_report_qmd(markdown; title, lang))
+            write(qmd, document)
             output = IOBuffer()
             proc = run(pipeline(ignorestatus(Cmd(`$exe render $(basename(qmd)) --to typst`; dir=resources));
                                 stdout=output, stderr=output))
