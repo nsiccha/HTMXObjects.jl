@@ -2589,6 +2589,33 @@ reaches the route without it. Scripts, [`dispatch`](@ref) calls, static
 exports and Markdown reads get the response as rendered. Pass
 `serve(; prestart=false)` to leave every fragment to the browser.
 
+#### Results that arrive when the operation ends
+
+A poller used to learn that its operation had finished at its next poll, so
+the result reached the page up to one `poll_interval` plus one round trip
+late, and each running poller cost the server a request five times a second.
+[`serve`](@ref) now gives each page one event stream for its running pollers,
+again with no change to the app:
+
+- every running `:auto` poller it renders is marked
+  `data-htmxo-operation-stream`, and the shell's runtime opens one
+  `EventSource` for the operations of the marked pollers on the page (at most
+  32; the rest poll as before), on the page's own address with
+  `__htmxo_operations=<token>,…`;
+- the server answers that request after `middleware` and before routing, so an
+  auth gateway sees it like the page and no route is needed, and sends
+  `ready` with an operation's token the moment its computation finishes or
+  fails (`gone` for one it no longer holds); it closes once every operation has
+  been sent;
+- on `ready` the poller sends its poll at once, so the answer is swapped,
+  ended (`286`) and recorded exactly as a poll's answer is;
+- while the stream is open, a poller's timer polls go out at most once a
+  second, to keep its progress tree current.
+
+A stream that drops leaves the pollers polling at their own pace while the
+browser reconnects; a refused one is retried with backoff. Pass
+`serve(; operation_stream=false)` to leave every poller to its polls.
+
 #### How long operations took
 
 The access log writes one line per request, and a polled operation is many

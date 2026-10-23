@@ -100,17 +100,23 @@ end
 # current-arguments recovery behavior.
 const _ISOLATED_REQUEST = (hx_params="none", hx_vals="unset", hx_vars="unset")
 
-_isolate_auto_poll_params(response) =
+# The polling element of a poller `serve` renders while it answers operation
+# streams also carries `data-htmxo-operation-stream`, which tells the page's
+# runtime to follow its operation on the page's stream
+# (`HTMXObjects.operation_stream_script`).
+_isolate_auto_poll_params(response, stream::Bool=false) =
     HTMXObjects._operation_running_answer(response) ?
-        _isolate_polling_inner(response) : response
+        _isolate_polling_inner(response, stream) : response
 
-function _isolate_polling_inner(poller)
+function _isolate_polling_inner(poller, stream::Bool=false)
     HTMX = HTMXObjects.HTMX
     children = copy(HTMX.children(poller))
     inner = findfirst(_polling_inner, children)
     inner === nothing && error(
         "Treebars' running poller has no `.treebar-poller-inner` child to isolate")
-    children[inner] = children[inner](; _ISOLATED_REQUEST...)
+    children[inner] = stream ?
+        children[inner](; _ISOLATED_REQUEST..., data_htmxo_operation_stream="") :
+        children[inner](; _ISOLATED_REQUEST...)
     HTMXObjects.Node(HTMX.tag(poller), HTMX.attrs(poller), children)
 end
 
@@ -286,7 +292,7 @@ function __init__()
             # is its failure terminal.
             HTMXObjects._operation_running_answer(responded) ||
                 HTMXObjects._operation_ended(transport, :failed)
-            _isolate_auto_poll_params(responded)
+            _isolate_auto_poll_params(responded, get(transport, :stream, false))
         end
 
     # Job boards (`jobs_board`, the runtime dashboard): a keyed Treebars board,
