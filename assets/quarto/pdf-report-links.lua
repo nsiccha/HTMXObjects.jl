@@ -8,6 +8,11 @@
 -- pass links a link starting with `/` to `htmxobjects-base-url` followed by the
 -- path when one is given, and writes any other such link as its text.
 --
+-- When `pdf_report` is given a `url_map`, it calls it with every link's target
+-- before the render and writes the answers under `htmxobjects-url-map`: a URL
+-- the link then opens, or "" for the rules above. A target missing there was
+-- never asked about, so the first pass stops rather than guess.
+--
 -- PAC fails a PDF whose text shows a web or mail address that is not a link
 -- ("Link in text does not have a 'Link' element"). `pdf_report` reads the
 -- Markdown with Pandoc's `autolink_bare_uris`, which links an address with a
@@ -19,7 +24,8 @@
 if not FORMAT:match('typst') then return {} end
 
 local BASE = 'htmxobjects-base-url'
-local base
+local URLS = 'htmxobjects-url-map'
+local base, urls
 
 local function opens(target)
   -- a one-letter "scheme" is a Windows drive: a local file a viewer may open
@@ -27,6 +33,17 @@ local function opens(target)
 end
 
 local function link_or_text(el)
+  if urls and el.target ~= '' then
+    local url = urls[el.target]
+    if url == nil then
+      error('pdf_report: url_map was not asked about the link target ' .. el.target ..
+            ', which the render reads but Pandoc did not find in the document before it')
+    end
+    if url ~= '' then
+      el.target = url
+      return el
+    end
+  end
   if opens(el.target) then return nil end
   if base and el.target:match('^/') and not el.target:match('^//') then
     el.target = base .. el.target
@@ -92,7 +109,14 @@ return {
   {
     Meta = function(meta)
       base = meta[BASE] and pandoc.utils.stringify(meta[BASE]) or nil
+      if meta[URLS] then
+        urls = {}
+        for target, url in pairs(meta[URLS]) do
+          urls[target] = pandoc.utils.stringify(url)
+        end
+      end
       meta[BASE] = nil
+      meta[URLS] = nil
       return meta
     end,
   },

@@ -71,6 +71,47 @@ end
     @test passed isa ErrorException && occursin("Quarto not found", passed.msg)
 end
 
+@testitem "pdf_report hands url_map's answers to the link filter" tags=[:unit] begin
+    using HTMXObjects
+
+    key = HTMXObjects._PDF_REPORT_URL_MAP_KEY
+    frontmatter(; kw...) =
+        split(HTMXObjects._pdf_report_qmd("# R\n"; title="R", lang="de-DE", kw...), "\n---\n")[1]
+    @test !occursin(key, frontmatter())
+    # A target is written as given (Pandoc reads a metadata key as text), its URL
+    # escaped so that Pandoc keeps it as text, and "" leaves the link to the
+    # filter's own rules.
+    @test occursin("\nlang: \"de-DE\"\n$key:\n" *
+                   "  \"/api/v1/x?p=0.9\": " * HTMXObjects._yaml_string("https\\:\\/\\/example\\.org\\/x\\.json") * "\n" *
+                   "  \"#oben\": \"\"\n",
+                   frontmatter(; urls=["/api/v1/x?p=0.9" => "https://example.org/x.json", "#oben" => ""]))
+    # A report without links still says that a url_map was given.
+    @test occursin("\n$key: {}\n", frontmatter(; urls=Pair{String,String}[]))
+
+    answer(url) = HTMXObjects._pdf_report_mapped_url(url, "/api/x")
+    @test answer(nothing) == ""
+    @test answer("https://example.org/odl/api-x.json") == "https://example.org/odl/api-x.json"
+    @test answer(SubString("mailto:info@example.org", 1)) == "mailto:info@example.org"
+    # refused: a PDF opens only an absolute URL; a relative target (StaticExport's
+    # bundle file, say) would point at a file next to the PDF
+    for url in ("api-x.json", "/odl/api-x.json", "C:x", "https://example.org/a b", "")
+        err = try answer(url) catch e e end
+        @test err isa ArgumentError && occursin("absolute URL", err.msg) && occursin("/api/x", err.msg)
+    end
+    # refused: an answer is a URL or nothing, as StaticExport's url_map
+    err = try answer(:x) catch e e end
+    @test err isa ArgumentError && occursin("String or nothing", err.msg)
+
+    # refused: the key is pdf_report's own; the function goes in as `url_map=`
+    err = try
+        pdf_report("# R\n", joinpath(tempdir(), "never.pdf"); title="R", lang="de-DE",
+                   quarto="htmxo-no-such-quarto", metadata=Dict(key => "x"))
+    catch e
+        e
+    end
+    @test err isa ArgumentError && occursin("url_map=", err.msg)
+end
+
 @testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
     using HTMXObjects, Dates
 
@@ -609,6 +650,106 @@ end
             if !isnothing(found)
                 @test found == ["https://example.org/daten", "mailto:info@example.org"]
             end
+        end
+    end
+end
+
+@testitem "pdf_report links a target where url_map says" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        snapshot = "https://example.org/odl"
+        # A static snapshot that stores `/api/v1/ap3/anomalien?p_min=0.9` as
+        # `api-v1-ap3-anomalien-p_min-0.9.json` (snag pdf-report-markd-23652624).
+        snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
+        asked = String[]
+        url_map(a) = (push!(asked, a);
+                      startswith(a, "/api/") ? "$snapshot/$(snapshot_file(a))" :
+                      a == "region/04" ? "$snapshot/region.html?r=04" : nothing)
+        md = """
+            # Schnittstelle {#oben}
+
+            Anomalien: [JSON](/api/v1/ap3/anomalien?p_min=0.9) · [Seite](/schnittstelle) · [Bremen](region/04)
+            · [Bayern]() · [Quelle](https://example.org/daten) · [Nach oben](#oben) · [noch einmal](/api/v1/ap3/anomalien?p_min=0.9)
+
+            | Antwort | Adresse |
+            |---|---|
+            | Stationen | [Liste](/api/v1/stationen) |
+            """
+        targets = ["/api/v1/ap3/anomalien?p_min=0.9", "/schnittstelle", "region/04",
+                   "https://example.org/daten", "#oben", "/api/v1/stationen"]
+        document = HTMXObjects._pdf_report_qmd(md; title="Konzept [Start](/start)", lang="de-DE", base_url=snapshot)
+        # The title's link is read with the document's, each target once.
+        @test HTMXObjects._pdf_report_link_targets(quarto, document) == ["/start"; targets]
+
+        # Typst, as Pandoc writes it after the filter, with url_map's answers.
+        typst(urls) = mktempdir() do dir
+            path = joinpath(dir, "links.qmd")
+            write(path, HTMXObjects._pdf_report_qmd(md; title="Konzept", lang="de-DE", base_url=snapshot, urls))
+            out, err = IOBuffer(), IOBuffer()
+            proc = run(pipeline(ignorestatus(`$quarto pandoc -f markdown -t typst --wrap=none
+                                              --lua-filter=$(HTMXObjects._PDF_REPORT_LINKS_FILTER) $path`);
+                                stdout=out, stderr=err))
+            success(proc) ? String(take!(out)) : String(take!(err))
+        end
+        answers = [t => HTMXObjects._pdf_report_mapped_url(url_map(t), t) for t in targets]
+        mapped = typst(answers)
+        json = "$snapshot/api-v1-ap3-anomalien-p_min-0.9.json"
+        @test count("#link(\"$json\")", mapped) == 2
+        @test occursin("#link(\"$snapshot/api-v1-stationen.json\")[Liste]", mapped)
+        # nothing leaves a link to base_url, its text, or itself
+        @test occursin("#link(\"$snapshot/schnittstelle\")[Seite]", mapped)
+        @test occursin("#link(\"$snapshot/region.html?r=04\")[Bremen]", mapped)
+        @test occursin("· Bayern · #link(\"https://example.org/daten\")[Quelle]", mapped)
+        @test occursin("#link(<oben>)[Nach oben]", mapped)
+        @test !occursin("htmxobjects-url-map", mapped)
+        # A target the render reads but nobody asked url_map about stops the
+        # filter rather than taking a rule url_map was never consulted on.
+        stopped = typst(answers[2:end])
+        @test occursin("url_map was not asked about the link target /api/v1/ap3/anomalien?p_min=0.9", stopped)
+
+        pdfua(path) = let bytes = read(path, String)
+            startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+        end
+        mktempdir() do dir
+            out = joinpath(dir, "konzept.pdf")
+            empty!(asked)
+            @test pdf_report(md, out; title="Konzept", lang="de-DE", base_url=snapshot, url_map) == out
+            @test pdfua(out)
+            # once per target, in the order they appear
+            @test asked == targets
+            if isnothing(Sys.which("pdfinfo"))
+                @test_skip "pdfinfo -url (poppler ≥ 22) lists the links"
+            else
+                io = IOBuffer()
+                if success(run(pipeline(ignorestatus(`pdfinfo -url $out`); stdout=io, stderr=devnull)))
+                    found = sort!([last(split(l)) for l in split(String(take!(io)), '\n') if occursin("Annotation", l)])
+                    @test found == sort!([json, json, "$snapshot/schnittstelle", "$snapshot/region.html?r=04",
+                                          "https://example.org/daten", "$snapshot/api-v1-stationen.json"])
+                else
+                    @test_skip "pdfinfo -url (poppler ≥ 22) lists the links"
+                end
+            end
+            # refused: a PDF cannot open a relative answer; nothing is rendered
+            rm(out)
+            err = try
+                pdf_report(md, out; title="Konzept", lang="de-DE", url_map = a -> "api.json")
+            catch e
+                e
+            end
+            @test err isa ArgumentError && occursin("absolute URL", err.msg)
+            @test readdir(dir) == []
+            # An error in url_map itself reaches the caller.
+            err = try
+                pdf_report(md, out; title="Konzept", lang="de-DE", url_map = a -> error("no map for $a"))
+            catch e
+                e
+            end
+            @test err isa ErrorException && occursin("no map for /api/v1/ap3/anomalien?p_min=0.9", err.msg)
+            @test readdir(dir) == []
         end
     end
 end
