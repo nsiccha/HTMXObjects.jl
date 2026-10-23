@@ -11,9 +11,10 @@
     # The call that shows the URL's tab is the tabset's last child, so it runs
     # once the tabset is in the document and before htmx processes it.
     @test endswith(s, "(document.currentScript.parentElement)</script></div>")
-    # Markdown keeps the tabs and drops the script.
+    # Markdown keeps the tabs and drops the script. A tab links to `#`, so
+    # HTMX writes it as its label, not as a link.
     md = repr("text/markdown", tabset("A" => h.p("a"), "B" => h.p("b")))
-    @test contains(md, "[A](#)") && !contains(md, "htmxoTabset")
+    @test startswith(md, "- A\n- B\n") && !contains(md, "](") && !contains(md, "htmxoTabset")
 
     # A label that is not text, or keeps no letter or digit, is named by position.
     @test names(html(tabset(h.span("x") => h.p("a"), "∑" => h.p("b"), "Ärger ẞtraße" => h.p("c"), "Café" => h.p("d")))) ==
