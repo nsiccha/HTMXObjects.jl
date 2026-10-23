@@ -4064,9 +4064,44 @@ markdown_node(::MarkdownRenderer, ::CommonMark.DisplayMath, n, rules, context) =
 # injected into the page. A bare `String` child renders escaped, so inline
 # HTML stays visible literal text and block HTML shows as a source block.
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlInline, n, rules, context) =
-    n.literal
+    _md_html_inline(n)
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlBlock, n, rules, context) =
     h.pre(n.literal)
+
+# The one exception is an empty link target, `<span id="X"></span>` or
+# `<a id="X"></a>`: Markdown has no syntax for an element id, so inline HTML is
+# how an author names the destination of a `[text](#X)` link (BRM model
+# descriptions mark their prior-table rows this way). The parser hands over
+# the two tags as adjacent `HtmlInline` nodes. Only that exact pair, with no
+# other attribute and an id made of a letter and then letters, digits, `_` or
+# `-`, becomes an empty element; every other tag stays escaped text. The
+# opening node renders the element, for the HTML peer only; the closing node
+# writes both tags back as they were, for the Markdown projection only, where
+# Pandoc reads them as a labelled span. An `<a>` target inside a link stays
+# text, because an `<a>` inside an `<a>` is invalid HTML.
+const _MD_ID_TARGET = r"^<(span|a) id=\"([A-Za-z][A-Za-z0-9_-]*)\">$"
+
+_md_html_inline_at(n::CommonMark.Node) =
+    n !== CommonMark.NULL_NODE && n.t isa CommonMark.HtmlInline
+
+# The target's opening tag, or `nothing` when `open`/`close` are not one.
+function _md_id_target(open::CommonMark.Node, close::CommonMark.Node)
+    (_md_html_inline_at(open) && _md_html_inline_at(close)) || return nothing
+    m = match(_MD_ID_TARGET, open.literal)
+    (isnothing(m) || close.literal != "</$(m[1])>") && return nothing
+    m[1] == "a" && _md_in_link(open) && return nothing
+    m
+end
+
+function _md_html_inline(n::CommonMark.Node)
+    target = _md_id_target(n, n.nxt)
+    isnothing(target) ||
+        return html_only(getproperty(h, Symbol(target[1]))(; id=String(target[2])))
+    if isdefined(n, :prv) && !isnothing(_md_id_target(n.prv, n))
+        return markdown_only(n.prv.literal * n.literal)
+    end
+    n.literal
+end
 
 # Loud fallback (dev §1 / §4.5): an unhandled node kind warns and still
 # renders its children, so prose is surfaced, never silently dropped.
@@ -4140,6 +4175,12 @@ instances (like `CommonMark.TableRule()`) beyond the stock ones.
 The `?plain` projection stays faithful: rules and overrides build ordinary
 nodes, which the tag-dispatched markdown serializer projects back
 (`h.a` → `[text](url)`, emphasis → `*text*`, and so on).
+
+Raw HTML stays escaped text, except an empty link target:
+`<span id="X"></span>` or `<a id="X"></a>`, with no other attribute and an id
+of a letter followed by letters, digits, `_` or `-`, renders as that empty
+element, so a `[text](#X)` link reaches it. The Markdown projection writes the
+tags back as written.
 
 Two deliberate cuts: a rule sees
 escape-RESOLVED text (a `\\\\` marker is zero-width, so `\\\\#12` and `#12` are
