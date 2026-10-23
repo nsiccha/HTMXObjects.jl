@@ -2818,10 +2818,14 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing, lang=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
+`lang` is the page's language as a BCP 47 tag (`"de"`, `"de-CH"`, `"en-GB"`),
+written as `<html lang>`: screen readers pronounce the page in it and CSS
+`hyphens: auto` hyphenates by it. `nothing` (the default) writes no `lang`
+attribute; a string that is not a language tag throws an `ArgumentError`.
 `sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
 loads only alongside the shell's own htmx (an extension must follow htmx).
 `ws_version` is htmx's WebSocket extension, which `@ws` routes need on the
@@ -2901,6 +2905,7 @@ function htmx(args...;
     extra_head          = (),
     treebars_assets     = true,
     error_texts         = nothing,
+    lang                = nothing,
 )
     _check_assets_mode(assets)
     mount = _runtime_mount(runtime, assets)
@@ -2918,7 +2923,8 @@ function htmx(args...;
     isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
-    html_attrs = (; (preload ? (; hx_ext="preload") : (;))..., _error_texts_attrs(error_texts)...)
+    html_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
+        _error_texts_attrs(error_texts)...)
     html = isempty(html_attrs) ? h.html : h.html(; html_attrs...)
     HTMLDocument(html(
         head(
@@ -2975,8 +2981,20 @@ function htmx(args...;
     ))
 end
 
+# The `<html>` attribute that carries the page's language. A BCP 47 tag is a
+# two- or three-letter ISO 639 language plus optional subtags of letters and
+# digits (script, region, variant), so a language name such as "German" is
+# refused; a page without one carries no attribute, so its output is unchanged.
+const _HTML_LANG = r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$"
+_lang_attrs(::Nothing) = (;)
+_lang_attrs(lang::AbstractString) = occursin(_HTML_LANG, lang) ? (; lang=String(lang)) :
+    throw(ArgumentError(string("htmx: lang must be a BCP 47 language tag such as \"de\" or ",
+        "\"de-CH\", or nothing for no lang attribute; got ", repr(lang))))
+_lang_attrs(lang) = throw(ArgumentError(string(
+    "htmx: lang must be a BCP 47 language tag string such as \"de\", or nothing; got ", repr(lang))))
+
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing)
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing, lang=nothing)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -2990,14 +3008,15 @@ with
     # or with extras:
     __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
 
-`assets`, `runtime` and `error_texts` forward to [`htmx`](@ref): `pico_page(content;
+`assets`, `runtime`, `error_texts` and `lang` forward to [`htmx`](@ref): `pico_page(content;
 assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
 page (vendor mode needs pico at its exact pin, not the floating `"2"`
 default), and adding `runtime=:linked` makes its whole head cacheable.
+`pico_page(content; lang="de", error_texts=__error_texts__)` is a German page.
 """
 pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline,
-        error_texts=nothing) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts)
+        error_texts=nothing, lang=nothing) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts, lang)
 
 # --- Route registration and recording ---
 

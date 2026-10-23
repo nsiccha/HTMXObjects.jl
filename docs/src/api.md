@@ -137,6 +137,32 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 
 Fragments are not documents and never carry a doctype.
 
+### The page's language {#page-lang}
+
+`lang` declares the language the page is written in, as a BCP 47 tag on
+`<html lang>` (WCAG 2.1 success criterion 3.1.1, *Language of Page*, which
+BITV 2.0 also requires). Screen readers then pronounce the page in that
+language, and CSS `hyphens: auto` hyphenates it with that language's rules:
+
+```julia
+@htmx struct App
+    __error_texts__ = error_texts(:de)
+    __page__(content) = HTMXObjects.pico_page(content; lang="de", error_texts=__error_texts__)
+    # ...
+end
+```
+
+`htmx(...; lang)` takes the same keyword. A region or script is optional
+(`"de"`, `"de-CH"`, `"sr-Latn"`). The tag is checked when the page is built: a
+language name such as `"German"`, an underscore form such as `"de_DE"` or an
+empty string throws an `ArgumentError`, because a browser accepts any value and
+would read the page as an unknown language. `nothing` (the default) writes no
+`lang` attribute, and the page is unchanged. `lang` is independent of
+`error_texts`, which chooses only the words of the framework's error articles
+and toasts. Static exports and `record!` bundles carry the attribute, since it
+is part of the page. Mark a part in another language with `lang` on its own
+element (`h.blockquote(cited; lang="en")`).
+
 ### Text size, page width and buttons under Pico {#pico-page-size}
 
 Pico ties the text size and the page width to the window: it raises the root
