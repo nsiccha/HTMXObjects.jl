@@ -1,4 +1,7 @@
 Manifest.toml
+# The deployed app commits its pinned Manifests (`pin-deps.sh`, KB todo 0lhctb2).
+!web/Manifest.toml
+!web/app/Manifest.toml
 CLAUDE.md
 
 # Auto-generated HTMXObjects recording outputs — not committed to main
