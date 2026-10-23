@@ -215,6 +215,9 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   gzip (see below). Pass `false` to send every body as the route produced it.
 - `prestart=true` (the default) starts a page's load-triggered fragments with
   the page (see below). Pass `false` to leave each one to the browser's request.
+- `operation_stream=true` (the default) gives each page one event stream that
+  announces the end of its pollers' operations (see below). Pass `false` to
+  leave every poller to its own polls.
 - `revise` — `:lazy` applies pending Revise revisions before each request;
   `:eager` also applies them in the background as soon as a file changes. Both
   need `using Revise` before the app is loaded.
@@ -258,6 +261,22 @@ for within ten minutes is dropped and logged as `unclaimed`. `middleware`
 receives each prestart request as well, through its own composition without
 the access log, the runtime tracker or Revise.
 
+With `operation_stream=true`, a page whose `:auto` pollers are running holds
+one event stream for them, so a poller's result arrives when its computation
+ends instead of at its next poll. Each running poller `serve` renders is
+marked `data-htmxo-operation-stream`; the shell's runtime opens the stream as a
+GET of the page's own address with `__htmxo_operations=<token>,…` (up to 32
+operations, the rest poll as before) and `Accept: text/event-stream`. The
+server answers it after `middleware` and before routing, so an auth gateway
+sees it like any request and no route is needed. It sends `ready` with an
+operation's token the moment that computation finishes or fails, and `gone`
+for an operation it no longer holds; once every operation has been sent it
+closes. On `ready` the poller sends its poll at once, so the answer takes the
+path a poll's does (its swap, its 286, its recorded error). While the stream
+is open a poller polls its progress tree at most once a second. A stream that
+drops or is refused leaves its pollers polling at their own pace, and the
+runtime reopens it with backoff.
+
 `parallel` chooses where each request is handled:
 - `false` (default) — on HTTP.jl's own connection task. HTTP.jl 2 spawns that
   task on the `:interactive` threadpool (Julia uses `:default` when there are no
@@ -289,7 +308,7 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
         runtime_tracking::Bool=true, compress::Bool=true, prestart::Bool=true,
-        kwargs...)
+        operation_stream::Bool=true, kwargs...)
     kwargs = _drop_oxygen_kwargs(kwargs)
     revise in (nothing, :none, :lazy, :eager) ||
         throw(ArgumentError("`revise` must be nothing, :lazy or :eager, got $(repr(revise))"))
@@ -300,8 +319,10 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
     OPERATION_LOG[] = operation_log
     tracker = runtime_tracking ? runtime_tracker() : nothing
     _PRESTART_APP[] = prestart ? _prestart_pipeline(middleware) : nothing
+    _OPERATION_STREAM[] = operation_stream
     handle = _stream_handler(
-        _served_middleware(_request_pipeline(middleware, access_log, Revise, tracker)),
+        _served_middleware(_request_pipeline(middleware, access_log, Revise,
+                                             tracker; operation_stream)),
         check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
@@ -336,6 +357,7 @@ function terminate()
     server = _SERVER[]
     _SERVER[] = nothing
     _PRESTART_APP[] = nothing
+    _OPERATION_STREAM[] = false
     server !== nothing && isopen(server) && close(server)
     return nothing
 end
@@ -362,8 +384,10 @@ end
 
 # The request pipeline, outermost first: access log → runtime `tracker` →
 # Revise → caller `middleware` → fallback → `ROUTER`.
-function _request_pipeline(middleware, access_log, Revise, tracker=nothing)
-    app = _fallback_middleware(ROUTER)
+function _request_pipeline(middleware, access_log, Revise, tracker=nothing;
+        operation_stream::Bool=false)
+    app = _fallback_middleware(
+        operation_stream ? _operation_stream_router(ROUTER) : ROUTER)
     for m in reverse(middleware)
         app = m(app)
     end
@@ -2805,6 +2829,7 @@ _runtime_blocks() = (
     live_refresh = (:js, live_refresh_script),
     auto_terminal = (:js, auto_terminal_script),
     mutation_poll = (:js, mutation_poll_script),
+    operation_stream = (:js, operation_stream_script),
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
     math_styles = (:css, math_styles),
@@ -6029,6 +6054,137 @@ function _prestart_current_url(req::HTTP.Request)
     query = isnothing(qi) ? "" : target[qi:end]
     string(scheme, "://", host,
            _request_route_path(req, _request_prefix(req, "")), query)
+end
+
+# --- Operation stream ---
+#
+# A running `:auto` poller polls its operation every `poll_interval`, so its
+# result reaches the page only at the next poll, and each running poller costs
+# the server a request five times a second. Under `serve(; operation_stream=
+# true)` a running poller carries `data-htmxo-operation-stream` (the Treebars
+# extension adds it to the polling element), and `operation_stream_script()`
+# holds one event stream per page for the operations of those pollers. The
+# stream only announces that an operation ended; the poller then fetches the
+# answer with its own poll, so everything that handles a poll's answer still
+# handles it. It is a GET of the page's own address carrying
+# `__htmxo_operations=<token>,…`, answered after `middleware` and before
+# routing: an auth gateway sees it like the page, and a proxy that mounts the
+# app under a prefix passes it like the page.
+
+# Whether `serve` answers operation streams (`serve(; operation_stream=)`).
+const _OPERATION_STREAM = Ref(false)
+const _OPERATION_STREAM_PARAM = "__htmxo_operations"
+# Operations one stream covers. Every token is 64 characters, so 32 keep the
+# stream's address near 2 KB; the page's other pollers poll as before.
+const _OPERATION_STREAM_LIMIT = 32
+
+# Whether a poller rendered for `req` is marked for the page's stream: only one
+# for a request `serve` received, while it answers streams.
+_operation_stream_wanted(req::HTTP.Request) =
+    _OPERATION_STREAM[] && get(req.context, :htmxo_served, false) === true
+_operation_stream_wanted(_) = false
+
+_operation_stream_router(router) = function (req::HTTP.Request)
+    tokens = _operation_stream_tokens(req)
+    tokens === nothing && return router(req)
+    _is_stream_probe(req) && return _stream_probe_response()
+    haskey(req.context, :stream) || return router(req)
+    _serve_sse(req, sse -> _operation_stream_body(sse, tokens))
+end
+
+# The operation tokens a stream request asks for, or `nothing` for any other
+# request: one that is no GET, carries no `__htmxo_operations`, or neither
+# accepts an event stream nor is the stream-failure probe.
+function _operation_stream_tokens(req::HTTP.Request)
+    req.method == "GET" || return nothing
+    occursin(_OPERATION_STREAM_PARAM, req.target) || return nothing
+    value = get(HTTP.queryparams(HTTP.URI(String(req.target))),
+                _OPERATION_STREAM_PARAM, nothing)
+    value === nothing && return nothing
+    (_is_stream_probe(req) ||
+     occursin("text/event-stream", HTTP.header(req, "Accept", ""))) || return nothing
+    tokens = String[]
+    for token in split(value, ',')
+        length(tokens) == _OPERATION_STREAM_LIMIT && break
+        occursin(r"^[0-9a-f]{64}$", token) && !(token in tokens) &&
+            push!(tokens, String(token))
+    end
+    tokens
+end
+
+# `ready <token>` once each operation's computation has finished or failed,
+# `gone <token>` for one the server does not hold (answered, expired, never
+# started here); the body then returns, which closes the stream.
+function _operation_stream_body(sse, tokens::Vector{String})
+    ended = Channel{String}(length(tokens))
+    waiting = 0
+    for token in tokens
+        handle = _operation_stream_handle(token)
+        if handle === nothing
+            HTTP.WebSockets.send(sse, token; event="gone") || return nothing
+        else
+            waiting += 1
+            _operation_stream_watch(handle, token, ended)
+        end
+    end
+    # A write to a page that has left fails at the latest with the keep-alive
+    # comment; closing `ended` then ends a stream whose operations never do.
+    left = Timer(1.0; interval=1.0) do timer
+        isopen(sse) || (close(ended); close(timer))
+    end
+    try
+        while waiting > 0
+            token = try
+                take!(ended)
+            catch err
+                err isa InvalidStateException && return nothing
+                rethrow()
+            end
+            waiting -= 1
+            HTTP.WebSockets.send(sse, token; event="ready") || return nothing
+        end
+    finally
+        close(left)
+    end
+    nothing
+end
+
+# What an operation's computation is behind its token, or `nothing`. A
+# mutation whose answer is cached for replay has ended.
+function _operation_stream_handle(token::String)
+    lock(_operation_poll_lock) do
+        entry = get(_operation_polls, token, nothing)
+        entry isa _OperationPollEntry && return Some(entry.started)
+        haskey(_mutation_terminals, token) ? Some(nothing) : nothing
+    end
+end
+
+# Put `token` into `ended` once `handle`'s computation has ended. One watcher
+# per operation and stream, on the interactive pool when there is one, like the
+# operation-log watcher (`_watch_operation_finish!`).
+function _operation_stream_watch(handle::Some, token::String, ended::Channel{String})
+    started = something(handle)
+    if !(started isa _OperationHandle)
+        put!(ended, token)
+        return nothing
+    end
+    watch = function ()
+        try
+            _runtime_await(started)
+        catch
+            # A failed computation has ended too; the poll answers its failure.
+        end
+        try
+            put!(ended, token)
+        catch err
+            # The page left and its stream closed `ended`.
+            err isa InvalidStateException ||
+                @error "Operation stream watcher failed" exception=(err, catch_backtrace())
+        end
+    end
+    Threads.nthreads(:interactive) > 0 ?
+        Threads.@spawn(:interactive, watch()) : Threads.@spawn(watch())
+    nothing
 end
 
 # --- Convenience helpers ---
@@ -11854,6 +12010,7 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         failed=(err, uid) -> _note_operation_failure!(req, err, uid),
         stalled=_operation_stall(entry, age, descriptor, name, verb_inst, req,
                                  prefix),
+        stream=_operation_stream_wanted(req),
     )
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -11951,7 +12108,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                                                  track=queued),
                  cleanup=() -> _delete_operation_poll!(token),
                  ended=outcome -> _record_operation_end!(entry, outcome),
-                 failed=(err, uid) -> _note_operation_failure!(req, err, uid))
+                 failed=(err, uid) -> _note_operation_failure!(req, err, uid),
+                 stream=_operation_stream_wanted(req))
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
         started, prop, keys, call_kwargs, transport))
@@ -12137,7 +12295,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                                                  track=queued),
                      cleanup=() -> _delete_operation_poll!(token),
                      ended=outcome -> _record_operation_end!(entry, outcome),
-                     failed=(err, uid) -> _note_operation_failure!(req, err, uid))
+                     failed=(err, uid) -> _note_operation_failure!(req, err, uid),
+                     stream=_operation_stream_wanted(req))
         value = _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
             started, prop, keys, call_kwargs, transport))
@@ -23729,7 +23888,7 @@ function _operation_page_blocks(treebars_assets::Bool)
     treebars_assets || return ()
     isempty(_polling_page_assets()) ? () :
         (:treebars_styles, :treebars_script, :live_refresh, :auto_terminal,
-         :mutation_poll)
+         :mutation_poll, :operation_stream)
 end
 
 """
@@ -23765,6 +23924,156 @@ mutation_poll_script() = h.script(Raw(raw"""
     value = value || (window.htmx && htmx.config.defaultSwapStyle) || 'innerHTML';
     d.xhr.setRequestHeader('HTMXO-Swap', String(value).trim().split(/\s+/)[0]);
   });
+})();
+"""))
+
+"""
+    operation_stream_script()
+
+Follow a page's running `:auto` pollers on one event stream, so each poller's
+result arrives when its operation ends instead of at its next poll (see
+[`serve`](@ref)'s `operation_stream`). The script gathers the operations of
+the pollers marked `data-htmxo-operation-stream` (at most 32) and holds one
+`EventSource` on the page's own address with `__htmxo_operations=<token>,…`.
+When the stream reports an operation `ready`, the script sends that poller's
+poll at once (`htmx.ajax` with the polling element as its source, the request
+its own timer would send), so the answer is swapped, ended and recorded as any
+poll's is. While the stream covers a poller, that poller's timer polls go out at
+most once a second, for its progress tree; an operation the stream reports
+`gone` polls as before. A poller that appears later reopens the stream with the
+new set. A dropped stream leaves the pollers polling at their own pace while the
+browser reconnects; a refused one is reported to `htmxoStreamProbe` and
+reopened with the backoff of [`live_region`](@ref)'s discover streams. The
+stream closes itself once every operation it covers has ended.
+
+Automatic — no consumer wiring. The `htmx()` shell installs it alongside the
+Treebars assets; include it once per page when building a `<head>` by hand.
+"""
+operation_stream_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoOperationStream) return;
+  window.__htmxoOperationStream = true;
+  // A streamed poller's timer polls go out at most this often, for its
+  // progress tree; its result is announced on the stream.
+  var PROGRESS_MS = 1000;
+  // Operations one stream covers (64-character tokens: about 2 KB of address).
+  var LIMIT = 32;
+  var state = { source: null, tokens: {}, retries: 0, retry: null, queued: false };
+  var streamed = {};   // token -> the open stream covers it
+  var ended = {};      // token -> the stream reported it ready or gone
+  var lastPoll = {};   // token -> when its last timer poll went out
+  function operationToken(url) {
+    var m = /[?&]__htmxo_operation=([^&#]+)/.exec(url || '');
+    return m ? m[1] : null;
+  }
+  function pollToken(url) {
+    return /[?&]__htmxo_poll=1(&|#|$)/.test(url || '') ? operationToken(url) : null;
+  }
+  function pollers() {
+    return Array.prototype.slice.call(document.querySelectorAll(
+      '.treebar-poller-inner[data-htmxo-operation-stream][hx-get]'));
+  }
+  // The operations of the page's marked pollers that have not ended yet.
+  function wanted() {
+    var list = [], present = {};
+    pollers().forEach(function(el) {
+      var t = pollToken(el.getAttribute('hx-get'));
+      if (!t || present[t]) return;
+      present[t] = true;
+      if (!ended[t] && list.length < LIMIT) list.push(t);
+    });
+    // Forget operations whose pollers have left the page.
+    Object.keys(ended).forEach(function(t) { if (!present[t]) delete ended[t]; });
+    Object.keys(lastPoll).forEach(function(t) { if (!present[t]) delete lastPoll[t]; });
+    return list;
+  }
+  function shut() {
+    var source = state.source;
+    state.source = null;
+    state.tokens = {};
+    streamed = {};
+    if (source) source.close();
+  }
+  function sync() {
+    state.queued = false;
+    var tokens = wanted();
+    if (!tokens.length) { shut(); return; }
+    if (state.retry) return;
+    if (state.source && tokens.every(function(t) { return state.tokens[t]; })) return;
+    shut();
+    open(tokens);
+  }
+  // Pollers arrive in bursts (a page's fragments answer together): gather them.
+  function schedule() {
+    if (state.queued) return;
+    state.queued = true;
+    setTimeout(sync, 50);
+  }
+  function open(tokens) {
+    var source = new EventSource(location.pathname + '?__htmxo_operations=' +
+                                 tokens.join(','));
+    state.source = source;
+    tokens.forEach(function(t) { state.tokens[t] = true; });
+    source.addEventListener('open', function() {
+      if (state.source !== source) return;
+      state.retries = 0;
+      tokens.forEach(function(t) { if (!ended[t]) streamed[t] = true; });
+    });
+    source.addEventListener('ready', function(e) {
+      if (state.source === source) ready(e.data);
+    });
+    source.addEventListener('gone', function(e) {
+      if (state.source !== source) return;
+      ended[e.data] = true;
+      delete streamed[e.data];
+    });
+    source.addEventListener('close', function() {
+      if (state.source !== source) return;
+      shut();
+      schedule();
+    });
+    source.addEventListener('error', function() {
+      if (state.source !== source) return;
+      // While the browser reconnects (CONNECTING), the pollers poll as before.
+      streamed = {};
+      if (source.readyState !== EventSource.CLOSED) return;
+      if (window.htmxoStreamProbe) window.htmxoStreamProbe.failed(source.url);
+      shut();
+      state.retries = Math.max(Math.min(state.retries * 2, 128), 1);
+      state.retry = setTimeout(function() { state.retry = null; sync(); },
+                               state.retries * 500);
+    });
+  }
+  // The operation ended: its poller asks for the answer now.
+  function ready(token) {
+    if (ended[token]) return;
+    ended[token] = true;
+    delete streamed[token];
+    if (!window.htmx) return;
+    pollers().forEach(function(el) {
+      var url = el.getAttribute('hx-get');
+      if (pollToken(url) === token) htmx.ajax('get', url, { source: el });
+    });
+  }
+  // `htmx:confirm` comes before anything else of a request, so a held-back
+  // timer poll is never seen as a request by the page's other listeners.
+  document.addEventListener('htmx:confirm', function(e) {
+    var d = e.detail || {}, token = pollToken(d.path);
+    if (!token || !streamed[token]) return;
+    var now = Date.now();
+    if (lastPoll[token] && now - lastPoll[token] < PROGRESS_MS) {
+      e.preventDefault();
+      return;
+    }
+    lastPoll[token] = now;
+  });
+  document.addEventListener('htmx:load', schedule);
+  document.addEventListener('htmx:afterSettle', schedule);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', schedule);
+  } else {
+    schedule();
+  }
 })();
 """))
 
