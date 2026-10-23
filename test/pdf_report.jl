@@ -4,7 +4,8 @@ using TestItemRunner
     using HTMXObjects
 
     filter = HTMXObjects._PDFUA_MATH_ALT_FILTER
-    @test isfile(filter)
+    quotes = HTMXObjects._PDF_REPORT_QUOTES_FILTER
+    @test isfile(filter) && isfile(quotes)
     @test HTMXObjects._pdf_report_qmd("# Ergebnisse\n"; title="Bericht \"A\" \\ 2026", lang="de-DE") == """
         ---
         title: "Bericht \\"A\\" \\\\ 2026"
@@ -14,6 +15,8 @@ using TestItemRunner
             pdf-standard: [ua-1]
         filters:
           - $(HTMXObjects._yaml_string(filter))
+          - path: $(HTMXObjects._yaml_string(quotes))
+            at: post-render
         ---
 
         # Ergebnisse
@@ -93,6 +96,29 @@ end
             end
             @test err isa ErrorException && occursin("missing alt text", err.msg)
             @test sort(readdir(dir)) == ["bars.svg", "md.pdf", "out"]
+
+            # Typographic quotes read as written, in the text and the title;
+            # straight ones become the quotes of `lang`. Pandoc's Typst writer
+            # alone turned “ and ‘ into straight quotes, which Typst opened
+            # anew: „Lieferflächen für Berlin„ and ‚einfache’.
+            german = "Der Leitfaden „Lieferflächen für Berlin“ gilt. Ein \"gerades\" Paar und ‚einfache‘ Zeichen."
+            write(joinpath(dir, "de.md"), german)
+            typst = read(`$(Sys.which("quarto")) pandoc -f markdown -t typst
+                          --lua-filter=$(HTMXObjects._PDF_REPORT_QUOTES_FILTER) $(joinpath(dir, "de.md"))`, String)
+            @test occursin("„Lieferflächen für Berlin“", typst) && occursin("‚einfache‘", typst)
+            @test occursin("\"gerades\"", typst)  # left to Typst's quotes for `lang`
+            de = joinpath(dir, "de.pdf")
+            @test pdf_report(h.article(h.p(german)), de; title="Bericht „Q“", lang="de-DE") == de
+            @test pdfua(de)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                text = read(`pdftotext $de -`, String)
+                @test occursin("Bericht „Q“", text)
+                @test occursin("„Lieferflächen für Berlin“", text)
+                @test occursin("„gerades“", text) && occursin("‚einfache‘", text)
+            end
+            rm(de); rm(joinpath(dir, "de.md"))
 
             # An `h.img` with alt text alone in its block: HTMX.jl writes it as
             # `![alt](src)`, which Pandoc reads as a figure whose caption is the
