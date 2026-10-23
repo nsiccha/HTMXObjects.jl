@@ -14882,6 +14882,19 @@ const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto"
 # hyphenate only a word wider than its column.
 const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
 
+# Typst reads the date Pandoc writes as markup, so `22. Oktober 2026` became a
+# numbered list; this filter writes the date as text, the date text of
+# `_PDF_REPORT_DATE_TEXT_KEY` when there is one.
+const _PDF_REPORT_DATE_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-date.lua")
+
+# Quarto reads `date` as a date and prints what it parsed: "22.10.2026" as
+# "Invalid Date", "05.10.2026" as 2026-05-10, "Oktober 2026" as 2026-01-01. It
+# reads an ISO date or date-time and its keywords correctly; `pdf_report` writes
+# any other `date` under `_PDF_REPORT_DATE_TEXT_KEY`, which Quarto leaves alone.
+const _PDF_REPORT_ISO_DATE = r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$"
+const _PDF_REPORT_DATE_KEYWORDS = ("today", "now", "last-modified")
+const _PDF_REPORT_DATE_TEXT_KEY = "htmxobjects-date-text"
+
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
 # German report `de-US`.
@@ -14911,6 +14924,7 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "format" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "filters" => "pdf_report runs the filter that gives equations alt text",
+    _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
 )
 
 const _PDF_REPORT_METADATA_KEY = r"^[A-Za-z][A-Za-z0-9_-]*$"
@@ -14936,6 +14950,15 @@ _yaml_value(v) = throw(ArgumentError(
     "pdf_report: `metadata` values must be strings, numbers, Bools, dates, vectors, " *
     "NamedTuples or dictionaries, got $(typeof(v))"))
 
+# Whether a `date` is text Quarto would misread rather than a date it reads.
+_pdf_report_date_text(v::Union{AbstractString,Symbol}) =
+    !(occursin(_PDF_REPORT_ISO_DATE, string(v)) || string(v) in _PDF_REPORT_DATE_KEYWORDS)
+_pdf_report_date_text(v) = false
+
+# Pandoc reads a metadata string as Markdown; escaping every ASCII punctuation
+# character keeps it the text it was (`1. Oktober` no list, `*` no emphasis).
+_markdown_literal(s) = replace(s, r"([!-/:-@\[-`{-~])" => s"\\\1")
+
 function _pdf_report_front_matter(metadata, lang)
     entries = _metadata_pairs(metadata)
     for (i, (key, _)) in enumerate(entries)
@@ -14946,6 +14969,14 @@ function _pdf_report_front_matter(metadata, lang)
         # a dictionary can name one key twice, as `:toc` and `"toc"`
         any(==(key) ∘ first, entries[1:i-1]) &&
             throw(ArgumentError("pdf_report: `metadata` sets `$key` twice"))
+    end
+    i = findfirst(==("date") ∘ first, entries)
+    if !isnothing(i) && _pdf_report_date_text(last(entries[i]))
+        text = string(last(entries[i]))
+        any(==("date-format") ∘ first, entries) && throw(ArgumentError(
+            "pdf_report: `date_format` formats a date, but `date` $(repr(text)) is text, which the report " *
+            "prints as written; pass a `Date` or an ISO date (\"2026-10-22\") to format it"))
+        entries[i] = _PDF_REPORT_DATE_TEXT_KEY => _markdown_literal(text)
     end
     any(==("papersize") ∘ first, entries) || pushfirst!(entries, "papersize" => _pdf_report_paper(lang))
     join(("$key: $(_yaml_value(value))\n" for (key, value) in entries))
@@ -14991,6 +15022,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
         at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
+      - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
     ---
 
     """ * markdown
@@ -15032,6 +15064,16 @@ Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
 through `metadata`. The Markdown itself must not carry a YAML metadata block:
 Quarto would let it override `title`, `lang` and the equation filter.
 
+`date` is printed in the title block. A `Date` or `DateTime`, an ISO date
+(`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
+`"last-modified"` is a date that `date_format` formats: with `lang="de-DE"`,
+`date=Date(2026, 10, 22), date_format="long"` prints `22. Oktober 2026` and
+`date_format="DD.MM.YYYY"` prints `22.10.2026`; without `date_format` it prints
+`2026-10-22`. Any other text is printed as written (`date="22.10.2026"`,
+`date="Oktober 2026"`), and `date_format` next to it is an `ArgumentError`.
+Quarto alone would read such text as a date: `"22.10.2026"` as "Invalid Date",
+`"05.10.2026"` as 10 May.
+
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
 filter that gives every equation its TeX source as alt text. Typographic quotes
 read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
@@ -15044,8 +15086,9 @@ Typst supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its
 bundled Typst 0.15.1).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
-`metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
-metadata block in the Markdown or a missing `resources` directory, all before
+`metadata` key that `pdf_report` sets itself or a value it cannot write, a
+`date_format` next to a text `date`, a YAML metadata block in the Markdown or a
+missing `resources` directory, all before
 running Quarto, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The

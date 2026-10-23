@@ -754,7 +754,7 @@ pdf_report(page, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE")
 # The Markdown of a mounted route works the same way:
 md = String(dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"]).body)
 pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resources="figures",
-           metadata=(subtitle="Entwurf", date="22.10.2026", toc=true,
+           metadata=(subtitle="Entwurf", date=Dates.today(), date_format="long", toc=true,
                      margin=(x="2cm", y="2cm"), fontsize="10pt"))
 ```
 
@@ -779,6 +779,14 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`,
   `pdf-standard` and `filters` belong to `pdf_report`; setting one through
   `metadata` is an `ArgumentError`.
+- **`date`** is printed in the title block. A `Date` or `DateTime`, an ISO date
+  (`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
+  `"last-modified"` is a date that `date_format` formats: in a `de-DE` report
+  `date_format="long"` prints `22. Oktober 2026`, `date_format="DD.MM.YYYY"`
+  prints `22.10.2026`, and without `date_format` it prints `2026-10-22`. Any
+  other text is printed as written (`date="22.10.2026"`, `date="Oktober 2026"`);
+  `date_format` next to it is an `ArgumentError`. Quarto alone would read such
+  text as a date: `"22.10.2026"` as "Invalid Date", `"05.10.2026"` as 10 May.
 - **Paper:** the size `lang`'s region uses. That is US Letter for the regions
   Unicode CLDR lists for it (US, CA, MX and others in the Americas) and A4
   everywhere else, so a `de-DE` report is A4 without asking.
