@@ -2863,14 +2863,20 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing, lang=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
 `lang` is the page's language as a BCP 47 tag (`"de"`, `"de-CH"`, `"en-GB"`),
 written as `<html lang>`: screen readers pronounce the page in it and CSS
-`hyphens: auto` hyphenates by it. `nothing` (the default) writes no `lang`
-attribute; a string that is not a language tag throws an `ArgumentError`.
+`hyphens: auto` hyphenates by it. `title` is the page's `<title>`. Left at
+`nothing`, each takes the `__lang__` / `__title__` that a struct on the
+route's mount chain declares (the innermost declaration wins), so a subtree
+can give its own pages a language and title the root's shell does not know;
+with neither, the page has no `lang` attribute and no `<title>`. A string that
+is not a language tag, or a title that is not a non-empty string, throws an
+`ArgumentError`, and so does a title alongside an `h.title` in `extra_head` (a
+page has one `<title>`).
 `sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
 loads only alongside the shell's own htmx (an extension must follow htmx).
 `ws_version` is htmx's WebSocket extension, which `@ws` routes need on the
@@ -2961,8 +2967,18 @@ function htmx(args...;
     treebars_assets     = true,
     error_texts         = nothing,
     lang                = nothing,
+    title               = nothing,
 )
     _check_assets_mode(assets)
+    declared = _page_meta()
+    isnothing(lang) && (lang = declared.lang)
+    isnothing(title) && (title = declared.title)
+    titles = _title_nodes(title)
+    isempty(titles) || (any(_is_title_node, extra_head) && throw(ArgumentError(string(
+        "htmx: the page has a title (", repr(title), ", from `title=` or a `__title__` ",
+        "declaration) and `extra_head` carries an `h.title` as well; a page has one ",
+        "<title>. Drop the `h.title` from `extra_head` and set the app's default ",
+        "title as `__title__` on the root struct, or pass it as `title=`."))))
     mount = _runtime_mount(runtime, assets)
     versioned = !isnothing(mount)
     cdn = []
@@ -2989,6 +3005,7 @@ function htmx(args...;
             h.meta(charset="utf-8"),
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
             h.meta(name="color-scheme", content="light dark"),
+            titles...,
             cdn...,
             # Theme defaults: declared at zero specificity inside `@layer htmxo`
             # so any subsequent `:root { --htmxo-...: ... }` (host-supplied or
@@ -3058,8 +3075,57 @@ _lang_attrs(lang::AbstractString) = occursin(_HTML_LANG, lang) ? (; lang=String(
 _lang_attrs(lang) = throw(ArgumentError(string(
     "htmx: lang must be a BCP 47 language tag string such as \"de\", or nothing; got ", repr(lang))))
 
+# The page's `<title>`: none without one, so an untitled page is unchanged.
+_title_nodes(::Nothing) = ()
+_title_nodes(title::AbstractString) = isempty(title) ?
+    throw(ArgumentError("htmx: title must be a non-empty string, or nothing for no <title>; got \"\"")) :
+    (h.title(String(title)),)
+_title_nodes(title) = throw(ArgumentError(string(
+    "htmx: title must be a non-empty string, or nothing for no <title>; got ", repr(title))))
+_is_title_node(node) = node isa Node && HTMX.tag(node) === :title
+
+# The page's language and title as the route's mount chain declares them:
+# `__lang__` / `__title__` on any struct from the root to the leaf, the
+# innermost declaration winning, so a subtree mounted under an English root
+# can make its own pages German. The shell reads them as its `lang` / `title`
+# defaults. A dynamic scope rather than keywords, because the shell is a plain
+# function that the root's `__page__` calls, and neither sees the leaf; the
+# response handler sets it around the whole answer, error page included.
+const _PAGE_META = :htmxo_page_meta
+const _NO_PAGE_META = (; lang=nothing, title=nothing)
+
+_page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
+_with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
+
+# Read and checked before the route body runs, so a bad declaration is the
+# route's error, named after its struct, rather than a failure inside the shell.
+function _page_meta_of(objects)
+    lang = title = nothing
+    for obj in objects
+        declared = _page_declaration(obj, :__lang__)
+        isnothing(declared) || (lang = _page_lang_value(obj, declared))
+        declared = _page_declaration(obj, :__title__)
+        isnothing(declared) || (title = _page_title_value(obj, declared))
+    end
+    (; lang, title)
+end
+
+_page_declaration(obj, name) = hasproperty(obj, name) ? getproperty(obj, name) : nothing
+
+_page_lang_value(obj, lang::AbstractString) = occursin(_HTML_LANG, lang) ? String(lang) :
+    _page_declaration_error(obj, :__lang__, "a BCP 47 language tag such as \"de\" or \"de-CH\"", lang)
+_page_lang_value(obj, lang) =
+    _page_declaration_error(obj, :__lang__, "a BCP 47 language tag string such as \"de\"", lang)
+_page_title_value(obj, title::AbstractString) = isempty(title) ?
+    _page_declaration_error(obj, :__title__, "a non-empty string", title) : String(title)
+_page_title_value(obj, title) = _page_declaration_error(obj, :__title__, "a non-empty string", title)
+
+_page_declaration_error(obj, name, wanted, got) = throw(ArgumentError(string(
+    "`", name, "` on ", nameof(typeof(obj)), " must be ", wanted,
+    ", or nothing to keep the enclosing page's; got ", repr(got))))
+
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing, lang=nothing)
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing, lang=nothing, title=nothing)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -3070,18 +3136,20 @@ Pico-CSS HTML page. Replaces the repeated boilerplate
 with
 
     __page__(content) = pico_page(content)
-    # or with extras:
-    __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
+    # or with a title:
+    __page__(content) = pico_page(content; title="My App")
 
-`assets`, `runtime`, `error_texts` and `lang` forward to [`htmx`](@ref): `pico_page(content;
+`assets`, `runtime`, `error_texts`, `lang` and `title` forward to [`htmx`](@ref): `pico_page(content;
 assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
 page (vendor mode needs pico at its exact pin, not the floating `"2"`
 default), and adding `runtime=:linked` makes its whole head cacheable.
 `pico_page(content; lang="de", error_texts=__error_texts__)` is a German page.
+Left out, `lang` and `title` come from the route's `__lang__` / `__title__`
+declarations, as for [`htmx`](@ref).
 """
 pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline,
-        error_texts=nothing, lang=nothing) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts, lang)
+        error_texts=nothing, lang=nothing, title=nothing) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts, lang, title)
 
 # --- Route registration and recording ---
 
@@ -4084,9 +4152,44 @@ markdown_node(::MarkdownRenderer, ::CommonMark.DisplayMath, n, rules, context) =
 # injected into the page. A bare `String` child renders escaped, so inline
 # HTML stays visible literal text and block HTML shows as a source block.
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlInline, n, rules, context) =
-    n.literal
+    _md_html_inline(n)
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlBlock, n, rules, context) =
     h.pre(n.literal)
+
+# The one exception is an empty link target, `<span id="X"></span>` or
+# `<a id="X"></a>`: Markdown has no syntax for an element id, so inline HTML is
+# how an author names the destination of a `[text](#X)` link (BRM model
+# descriptions mark their prior-table rows this way). The parser hands over
+# the two tags as adjacent `HtmlInline` nodes. Only that exact pair, with no
+# other attribute and an id made of a letter and then letters, digits, `_` or
+# `-`, becomes an empty element; every other tag stays escaped text. The
+# opening node renders the element, for the HTML peer only; the closing node
+# writes both tags back as they were, for the Markdown projection only, where
+# Pandoc reads them as a labelled span. An `<a>` target inside a link stays
+# text, because an `<a>` inside an `<a>` is invalid HTML.
+const _MD_ID_TARGET = r"^<(span|a) id=\"([A-Za-z][A-Za-z0-9_-]*)\">$"
+
+_md_html_inline_at(n::CommonMark.Node) =
+    n !== CommonMark.NULL_NODE && n.t isa CommonMark.HtmlInline
+
+# The target's opening tag, or `nothing` when `open`/`close` are not one.
+function _md_id_target(open::CommonMark.Node, close::CommonMark.Node)
+    (_md_html_inline_at(open) && _md_html_inline_at(close)) || return nothing
+    m = match(_MD_ID_TARGET, open.literal)
+    (isnothing(m) || close.literal != "</$(m[1])>") && return nothing
+    m[1] == "a" && _md_in_link(open) && return nothing
+    m
+end
+
+function _md_html_inline(n::CommonMark.Node)
+    target = _md_id_target(n, n.nxt)
+    isnothing(target) ||
+        return html_only(getproperty(h, Symbol(target[1]))(; id=String(target[2])))
+    if isdefined(n, :prv) && !isnothing(_md_id_target(n.prv, n))
+        return markdown_only(n.prv.literal * n.literal)
+    end
+    n.literal
+end
 
 # Loud fallback (dev §1 / §4.5): an unhandled node kind warns and still
 # renders its children, so prose is surfaced, never silently dropped.
@@ -4160,6 +4263,12 @@ instances (like `CommonMark.TableRule()`) beyond the stock ones.
 The `?plain` projection stays faithful: rules and overrides build ordinary
 nodes, which the tag-dispatched markdown serializer projects back
 (`h.a` → `[text](url)`, emphasis → `*text*`, and so on).
+
+Raw HTML stays escaped text, except an empty link target:
+`<span id="X"></span>` or `<a id="X"></a>`, with no other attribute and an id
+of a letter followed by letters, digits, `_` or `-`, renders as that empty
+element, so a `[text](#X)` link reaches it. The Markdown projection writes the
+tags back as written.
 
 Two deliberate cuts: a rule sees
 escape-RESOLVED text (a `\\\\` marker is zero-width, so `\\\\#12` and `#12` are
@@ -5633,15 +5742,17 @@ hx_link(url; preload=nothing, kwargs...) =
 """
     htmx_or(full_page_fn, req, fragment)
 
-Return `fragment` directly for HTMX requests; call `full_page_fn()` and wrap
-its result for direct browser navigation. Typical usage:
+Return `fragment` directly for HTMX swaps; call `full_page_fn()` and wrap
+its result for direct browser navigation, and for htmx's reload of a history
+entry it holds no snapshot of (`HX-History-Restore-Request`), whose answer
+replaces the whole page body. Typical usage:
 
     htmx_or(req, fragment) do
         htmx(h.main(search_input(q), fragment))
     end
 """
 function htmx_or(full_page_fn, req::HTTP.Request, fragment)
-    to_response(is_htmx(req) ? fragment : full_page_fn())
+    to_response(_hx_partial_swap(req) ? fragment : full_page_fn())
 end
 
 # --- HTMX request header inspection ---
@@ -5659,6 +5770,20 @@ hx_trigger(req::HTTP.Request)    = HTTP.header(req, "HX-Trigger",       "")
 hx_current_url(req::HTTP.Request)= HTTP.header(req, "HX-Current-URL",   "")
 """Return the `HX-Prompt` header value (the user's response to `hx-prompt`), or `""`."""
 hx_prompt(req::HTTP.Request)     = HTTP.header(req, "HX-Prompt",        "")
+
+# htmx's reload of a history entry it holds no `sessionStorage` snapshot for
+# (Back/Forward after a miss, `loadHistoryFromServer` in htmx 2): the answer
+# replaces the whole history element (`<body>`), so the request asks for the
+# page at its address. htmx 2 sends `HX-Request: true` on it too, unless the
+# page sets `htmx.config.historyRestoreAsHxRequest = false`.
+_hx_history_restore(req::HTTP.Request) =
+    HTTP.header(req, "HX-History-Restore-Request", "") == "true"
+
+# An htmx request whose answer replaces a region of a page already on screen:
+# every htmx request except a history restore. The fragment-versus-page
+# decisions (page chrome, the error page, the operation transport, `htmx_or`)
+# read this, never `is_htmx` alone.
+_hx_partial_swap(req::HTTP.Request) = is_htmx(req) && !_hx_history_restore(req)
 
 """
     hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location, toast)
@@ -8983,8 +9108,12 @@ _unwrapped_status_code(e::CallerFault) = e.status
 _unwrapped_status_code(::OperationResultUnavailable) = 410
 _unwrapped_status_code(::OperationStalled) = 504
 _unwrapped_status_code(_err) = 500
+# htmx swaps only a 2xx/3xx answer, a history restore's included (it leaves the
+# previous page on screen under the new address otherwise), so an answer htmx
+# will swap keeps 200 and carries its error as content.
 _with_error_status(req, resp::HTTP.Response, err) =
-    is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
+    (is_htmx(req) || _hx_history_restore(req)) ? resp :
+    HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
 # A hook that returns a finished response answers the request as it is: no
 # `wrap`, no Markdown projection, no `__page__` shell, so a JSON API's error
@@ -9032,7 +9161,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     if wants_markdown(req)
         return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val)), err), uid)
     end
-    if !is_htmx(req)
+    if !_hx_partial_swap(req)
         for obj in reverse(page_chain)
             wrapper = _page_wrapper(obj)
             isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
@@ -9113,7 +9242,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
                     HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
                     ext=".md")
             end
-        elseif is_htmx(req)
+        elseif _hx_partial_swap(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
             save_response(record_dir, save_path, to_response(static_transform(_apply_page(obj, wrapper, _html_value(val)); record_base)))
@@ -9139,8 +9268,9 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
 
     # HTMX fragment or no page wrapper defined → return as-is. A single-object
     # chain is the root's own, so `_page_chain_skip` drops it for every swap
-    # made from inside this mount — the same answer `is_htmx(req)` gave — while
-    # still honouring an explicit `?__chrome__=` override in either direction.
+    # made from inside this mount — the same answer `_hx_partial_swap(req)`
+    # gives — while still honouring an explicit `?__chrome__=` override in
+    # either direction.
     wrapper = _page_wrapper(obj)
     (isnothing(wrapper) || isempty(_page_chain_to_apply(Any[obj], req; root=obj))) &&
         return to_response(_static_response_value(req, val))
@@ -9847,8 +9977,9 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     # gate belongs here — the transport underneath (grace fast path,
     # heal-on-unknown-token for reads, no-replay resume for mutations,
     # chrome-free terminal) is what makes the marker-free default safe, not
-    # narrowing who may poll.
-    is_htmx(req) && return :polling
+    # narrowing who may poll. A history restore replaces the whole page, so it
+    # takes the page path, not a bare poller.
+    _hx_partial_swap(req) && return :polling
     page_shell ? :page_load : :blocking
 end
 
@@ -10148,8 +10279,11 @@ function _operation_has_page_shell(target)
     any(_has_page, objects)
 end
 
+# htmx's history-restore request is an `XMLHttpRequest` (`Accept: */*`) whose
+# answer htmx renders as the page.
 _operation_rich_page_request(req::HTTP.Request) =
-    contains(lowercase(HTTP.header(req, "Accept", "")), "text/html")
+    contains(lowercase(HTTP.header(req, "Accept", "")), "text/html") ||
+    _hx_history_restore(req)
 
 # `:auto` spends a small part of the existing request task waiting on the
 # DO Pending handle. The extension returns a fast value directly; only a
@@ -11780,13 +11914,16 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                 !(preload && _preloadable_request(req, verb_inst))
             return _preload_skipped_response()
         end
-        local context, root, leaf, root_target
+        local context, root, leaf, root_target, page_meta
         try
             provider = get(_root_providers, RootT, root_provider)
             root_target = _operation_target(provider, RootT, Symbol[], req,
                                             root_prefix, root_segs, :http)
             context = root_target.context
             root = root_target.root
+            # The root's `__lang__` / `__title__` hold for an answer whose mount
+            # chain cannot be walked; the full chain refines them below.
+            page_meta = _page_meta_of(Any[root])
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -11797,7 +11934,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             catch err
                 bt = catch_backtrace()
                 page_chain = _has_page(root) ? Any[root] : Any[]
-                return _route_error_response(req, err, bt; error_obj=root, page_chain)
+                return _with_page_meta(page_meta) do
+                    _route_error_response(req, err, bt; error_obj=root, page_chain)
+                end
             end
         else
             leaf = root
@@ -11806,6 +11945,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         try
             objects = isempty(chain) ? Any[root] :
                       _chain_steps(root, chain, req, root_segs)
+            page_meta = _page_meta_of(objects)
             target = merge(root_target, (; leaf, objects, chain,
                                            root_segs, request=req))
             # In-process callers (`dispatch`) thread a Treebars progress
@@ -11827,13 +11967,14 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
-                return _stamp_operation_headers(req, _resolve_response_nested(page_chain, req, val;
-                                                root, record_dir, save_path, record_base),
-                                                running)
+                return _stamp_operation_headers(req, _with_page_meta(page_meta) do
+                        _resolve_response_nested(page_chain, req, val;
+                                                 root, record_dir, save_path, record_base)
+                    end, running)
             else
-                return _stamp_operation_headers(req, _resolve_response(leaf, req, val;
-                                                record_dir, save_path, record_base),
-                                                running)
+                return _stamp_operation_headers(req, _with_page_meta(page_meta) do
+                        _resolve_response(leaf, req, val; record_dir, save_path, record_base)
+                    end, running)
             end
         catch err
             # Both are export-contract failures the caller must see at the
@@ -11843,7 +11984,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             page_chain = is_included ?
                 _collect_page_chain(root, chain, req, root_segs) :
                 (_has_page(leaf) ? Any[leaf] : Any[])
-            return _route_error_response(req, err, bt; error_obj=leaf, page_chain)
+            return _with_page_meta(page_meta) do
+                _route_error_response(req, err, bt; error_obj=leaf, page_chain)
+            end
         end
     end; resume_only)
 end
@@ -12571,6 +12714,9 @@ exactly when its mount prefix covers the current location.
 
 * direct browser visit — no current location, so nothing is on screen and the
   whole chain applies.
+* htmx's reload of a history entry it holds no snapshot of (Back/Forward,
+  `HX-History-Restore-Request`, with or without `HX-Request`) — its answer
+  replaces the whole body, so the whole chain applies, as on a direct visit.
 * HTMX swap from inside this root's mount — skip the levels the current location
   is already within, apply the rest.
 * HTMX request with no `HX-Current-URL` (a hand-rolled `fetch`), or one made from
@@ -12585,7 +12731,7 @@ function _page_chain_skip(page_chain, req::HTTP.Request; root=nothing)
     mode = _page_chrome_mode(req)
     mode === :none && return length(page_chain)
     mode === :full && return 0
-    is_htmx(req) || return 0
+    _hx_partial_swap(req) || return 0
     current = _hx_current_path(req)
     isnothing(current) && return length(page_chain)
     root_prefix = isnothing(root) ? nothing : _mount_prefix(root)
@@ -12646,7 +12792,7 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
                     HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
                     ext=".md")
             end
-        elseif is_htmx(req)
+        elseif _hx_partial_swap(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         else
             wrapped = _html_value(val)
@@ -13971,7 +14117,7 @@ function _nav_request(obj)
     req = _req_of(obj)
     req === nothing && return (; path=nothing, mode=:none)
     (; path=String(split(req.target, "?")[1]),
-       mode=wants_markdown(req) ? :markdown : is_htmx(req) ? :fragment : :page)
+       mode=wants_markdown(req) ? :markdown : _hx_partial_swap(req) ? :fragment : :page)
 end
 
 """

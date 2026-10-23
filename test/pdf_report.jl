@@ -272,7 +272,9 @@ end
             if isnothing(Sys.which("pdftotext"))
                 @test_skip "pdftotext (poppler-utils) reads the text layer"
             else
-                text = read(`pdftotext $de -`, String)
+                # pdftotext's default encoding is Latin-1 on Windows, which
+                # writes „ as ,, and “ as ".
+                text = read(`pdftotext -enc UTF-8 $de -`, String)
                 @test occursin("Bericht „Q“", text)
                 @test occursin("„Lieferflächen für Berlin“", text)
                 @test occursin("„gerades“", text) && occursin("‚einfache‘", text)
