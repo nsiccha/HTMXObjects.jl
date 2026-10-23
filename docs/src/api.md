@@ -667,9 +667,14 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
 - **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
   Without one, Quarto's template labels the document with the region `US`.
   Mark a part in another language with a `::: {lang="en"}` block in Markdown.
-- **`resources`** is the directory relative paths (images) resolve against; it
-  defaults to the PDF's directory. `pdf_report` removes its temporary `.qmd`,
-  Quarto's intermediate files and the `.quarto` cache from it, also on failure.
+- **`resources`** is the directory relative image paths resolve against; it
+  defaults to the PDF's directory. An image can also be an absolute path, a
+  `file:` URL, a relative path outside `resources`, an `http(s)` URL or a
+  `data:` URI: the render reads it into a temporary copy, because Typst reads
+  only files inside `resources`. A path starting with `/` names the file under
+  `resources` when there is one (the site-root URL of an exported page), else
+  the absolute path. `pdf_report` removes its temporary `.qmd`, Quarto's
+  intermediate files and the `.quarto` cache from it, also on failure.
 - **Images need alt text.** Typst refuses a PDF/UA document with an image that
   has none, and `pdf_report` throws with Typst's message, for example
   `PDF/UA-1 error: missing alt text` with the source line. In hand-written
