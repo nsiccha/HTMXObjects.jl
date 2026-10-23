@@ -14996,8 +14996,10 @@ const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "
 const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-images.lua")
 
 # Quarto's Typst template justifies the whole document, tables included, and
-# Typst then hyphenates them; these rules set table cells ragged-right and
-# hyphenate only a word wider than its column.
+# Typst then hyphenates them; and a captioned table is a Typst figure, which does
+# not break across pages, so a table taller than a page overprinted the page
+# bottom. These rules set table cells ragged-right, hyphenate only a word wider
+# than its column, and let a captioned table break across pages.
 const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
 
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
@@ -15123,7 +15125,9 @@ input is Markdown, typically a page's own projection: a `value` such as an
 `h.article(...)` is converted with `to_markdown_string`, and the body of
 `dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"])` is passed as
 it is. Tables, figures and captions keep their structure: header rows become
-table header cells, captions stay attached to their table or figure.
+table header cells, captions stay attached to their table or figure. A table
+longer than the rest of its page continues on the next, its header row
+repeated, and a caption above it moves along with its first rows.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region

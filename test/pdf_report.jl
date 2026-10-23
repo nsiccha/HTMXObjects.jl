@@ -280,3 +280,79 @@ end
         end
     end
 end
+
+@testitem "pdf_report breaks a captioned table across pages" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        # The page of the caption and of each row of a 30-row captioned table on
+        # short pages, set below `lead` of space by Quarto's Typst with `rules`
+        # in front, as `pdf_report` includes them.
+        function placement(rules, lead)
+            mktempdir() do dir
+                doc = joinpath(dir, "t.typ")
+                write(doc, rules, """
+                    #set page(width: 300pt, height: 200pt, margin: 20pt)
+                    #v($lead)
+                    #figure(kind: "quarto-float-tbl", supplement: "Tabelle",
+                      caption: figure.caption(position: top, [Cap #context [#metadata(here().page()) <cap>]]),
+                      table(columns: 2, table.header[A][B],
+                        ..range(30).map(i => ([#i], [#context [#metadata(here().page()) <row>]])).flatten()))
+                    """)
+                pages(label) = let out = IOBuffer()
+                    run(pipeline(`$quarto typst eval "query(<$label>).map(it => it.value)" --in $doc`;
+                                 stdout=out, stderr=out))
+                    parse.(Int, split(match(r"\[([\d,\s]*)\]", String(take!(out))).captures[1], ','))
+                end
+                (; caption=only(pages("cap")), rows=pages("row"))
+            end
+        end
+        rules = read(HTMXObjects._PDF_REPORT_TABLES_TYPST, String)
+
+        # The control: without the rules the figure does not break, so all 30
+        # rows land on the one page it moved to, running over its bottom.
+        @test unique(placement("", "20pt").rows) == [2]
+        # With them the table starts below the lead and continues page by page.
+        flowed = placement(rules, "20pt")
+        @test flowed.caption == first(flowed.rows) == 1
+        @test issorted(flowed.rows) && last(flowed.rows) > 2
+        # Room for the caption but not for the header and a row: the caption
+        # moves to the next page with them instead of staying alone, as it does
+        # when the table may break but the caption is not kept with it.
+        moved = placement(rules, "135pt")
+        @test moved.caption == first(moved.rows) == 2
+        break_only = replace(rules, r"^#show figure\.caption.*$"m => "")
+        @test break_only != rules && placement(break_only, "135pt").caption == 1
+
+        # A whole report: a captioned 60-row table after a few lines.
+        mktempdir() do dir
+            n = 60
+            page = h.article((h.p("Zeile $i.") for i in 1:3)...,
+                render_table((Land=["Land $i" for i in 1:n], Wert=collect(1:n));
+                    caption=CaptionSpec(; title="Werte je Land"), id="laender"),
+                h.p("Nach der Tabelle."))
+            out = joinpath(dir, "lang.pdf")
+            @test pdf_report(page, out; title="Bericht", lang="de-DE") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) && occursin("/StructTreeRoot", bytes)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text of each page"
+            else
+                texts = split(read(`pdftotext -layout $out -`, String), '\f'; keepempty=false)
+                onpage(pattern) = findall(t -> occursin(pattern, t), texts)
+                row(i) = onpage(Regex("Land $i\\s+$i\\s*\\n"))
+                # Every row once; the table starts on page 1 below the lines,
+                # where it has room, rather than moving to page 2.
+                @test all(i -> length(row(i)) == 1, 1:n)
+                @test onpage("Werte je Land") == row(1) == onpage("Zeile 3.") == [1]
+                # It continues on the next pages, its header row on each one.
+                table_pages = unique(vcat(row.(1:n)...))
+                @test length(table_pages) >= 2
+                @test onpage(r"Land\s+Wert") == table_pages
+            end
+        end
+    end
+end
