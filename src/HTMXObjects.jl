@@ -4550,6 +4550,15 @@ function _save_typed_response(record_dir::String, url_path::String, response::HT
     save_response(record_dir, url_path, response; ext)
 end
 
+# The file a recording writes for `url_path`, as a path below the recording's
+# root: the path plus `ext`, except that a trailing slash means "directory
+# entry", so `/foo/` and `/` (and an empty path) map to an `index<ext>` in the
+# matching directory. Without that, `/hx/` would become `hx/<ext>`, which a
+# static server cannot serve. A recorded `hx-get` names the same file
+# (`_recorded_fragment_url`).
+_record_file_path(url_path::AbstractString, ext::AbstractString) =
+    isempty(url_path) || endswith(url_path, '/') ? url_path * "index" * ext : url_path * ext
+
 """
     save_response(record_dir, url_path, response; ext=".html")
 
@@ -4560,19 +4569,7 @@ static file server. Pass `ext=".md"` for markdown recordings (under the
 the extension from the response's Content-Type.
 """
 function save_response(record_dir::String, url_path::String, response::HTTP.Response; ext::String=".html")
-    rel = lstrip(url_path, '/')
-    # Trailing slash means "directory entry" — the URL `/foo/` and `/` both
-    # map to a synthetic `index<ext>` under the matching directory. Without
-    # this, `/hx/` becomes `hx/<ext>`, which is wrong (server can't serve it
-    # cleanly and `cleanUrls` defeats it).
-    file = if isempty(rel)
-        "index" * ext
-    elseif endswith(rel, '/')
-        rel * "index" * ext
-    else
-        rel * ext
-    end
-    dest = joinpath(record_dir, file)
+    dest = joinpath(record_dir, lstrip(_record_file_path(url_path, ext), '/'))
     _guard_record_destination!(record_dir, dest)
     mkpath(dirname(dest))
     body = response.body
@@ -4775,15 +4772,17 @@ end
 """
 static_export(req::HTTP.Request) = get(req.context, :htmxo_static_export, nothing)
 
-# Who names the file of each value a `url_params` element declares: the spec's
-# `url_map` for a request-scoped export, the recording rule for `record!`.
+# Who names the file of each value a `url_params` element declares, and of an
+# unmapped rooted `hx-get`: the spec's `url_map` and default rule for a
+# request-scoped export, the recording rule (the file `record!` writes) for a
+# recording.
 struct _MappedVariants end
 struct _RecordedVariants end
 
 # What a static walk consults: the spec, the rooted `hx-get` paths a static
 # server cannot vary by query — `route!`'s recording registry for the recording
 # form of `static_transform`, nothing for a request-scoped export — and who
-# names a declared URL parameter's files.
+# names the files of a declared URL parameter's values and of fragments.
 struct _StaticRules{S<:StaticExport,V}
     spec::S
     unservable::Set{String}
@@ -4844,7 +4843,8 @@ html_escape(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;"
 
 Walk a Node tree and make it static-safe under `rules`:
 - `hx-get`, `href`, `src`: a `url_map` target replaces the value verbatim;
-  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`)
+  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`; in a
+  recording, the fragment file it records, `<record_base>/hx/<path>.html`)
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
 - Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
   routes) or names one of `rules.unservable` (kwargs routes)
@@ -5058,8 +5058,25 @@ _static_variant_target(rules::_StaticRules{<:StaticExport,_MappedVariants}, addr
     _static_url_target(rules.spec, address)
 _static_variant_target(rules::_StaticRules{<:StaticExport,_RecordedVariants}, address) =
     _record_variant!(address) ?
-        rstrip(rules.spec.record_base, '/') * "/hx" * replace(_record_variant_save_path(address), "%" => "%25") * ".html" :
+        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address)) :
         nothing
+
+# The address of the fragment a recording saves for `save_path`: the file
+# `save_response` writes below `hx/`, under `record_base` (empty: the site
+# root). A `%` in the path is part of the file's name, so it is escaped for
+# the static server that decodes the address.
+_recorded_fragment_url(record_base::AbstractString, save_path::AbstractString) =
+    rstrip(record_base, '/') * replace(_record_file_path("/hx" * save_path, ".html"), "%" => "%25")
+
+# What an unmapped, servable `hx-get` becomes: for a request-scoped export the
+# default rule (`record_base` and `/hx` before a rooted address); for a
+# recording the file it records for that address, so the bundle loads it from
+# any static server, not only from one that serves `/foo` as `foo.html`.
+_static_hx_url(rules::_StaticRules{<:StaticExport,_MappedVariants}, url) =
+    _rewrite_hx_url(url, rules.spec.record_base)
+_static_hx_url(rules::_StaticRules{<:StaticExport,_RecordedVariants}, url) =
+    startswith(url, "/") && !startswith(url, "//") ?
+        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(url)) : url
 
 # A recorded `url_params` value's file, below the recording's `hx/`: its
 # path, then `@` and its query, so each value has its own file beside the
@@ -5143,7 +5160,7 @@ function _static_walk(node::Node, rules::_StaticRules)
 
     # A mapped `hx-get` takes the caller's target verbatim. An unmapped one
     # with a query string or pointing to a kwargs route is removed; otherwise
-    # it is rewritten to the recorded-fragment subtree under `record_base`.
+    # it names its fragment under `record_base` (`_static_hx_url`).
     if !isnothing(own)
         new_attrs[hx_get_sym] = own
     elseif haskey(new_attrs, hx_get_sym)
@@ -5155,7 +5172,7 @@ function _static_walk(node::Node, rules::_StaticRules)
             delete!(new_attrs, hx_get_sym)
             unservable = true
         else
-            new_attrs[hx_get_sym] = _rewrite_hx_url(url, spec.record_base)
+            new_attrs[hx_get_sym] = _static_hx_url(rules, url)
         end
     end
 
@@ -5252,12 +5269,13 @@ pages only).
 The keyword form is the recording form used by `record!` / `route!(;
 record_dir)`: it also strips `hx-get` addresses naming a kwargs route that
 recording registered. `record_base` is the URL prefix where the recording
-will be served (e.g. `/HTMXObjects.jl/dev/examples/counter`). Each rooted
-`hx-get="/foo"` becomes `hx-get="<record_base>/hx/foo"` so HTMX-driven
-sub-fetches resolve to the recorded fragment under
-`<record_dir>/hx/foo.html`. Empty `record_base` (default) skips rewriting —
-useful when recording for a root-served deployment, though that's rare in
-practice.
+will be served (e.g. `/HTMXObjects.jl/dev/examples/counter`); empty (the
+default) means the site root. Each rooted `hx-get="/foo"` names the fragment
+file the recording writes, `hx-get="<record_base>/hx/foo.html"` (`/foo/`:
+`<record_base>/hx/foo/index.html`), so HTMX-driven sub-fetches load the
+recorded fragment `<record_dir>/hx/foo.html` from any static server,
+including one that does not serve `/foo` from `foo.html`. Rooted
+`href`/`src` addresses gain `record_base` and keep their path as written.
 
 The [`StaticExport`](@ref) form reads nothing but the spec — its `url_map`,
 `controls`, and `record_base` — and is what `dispatch(...; static=spec)`
@@ -13622,6 +13640,15 @@ first to register the handlers with the recording config. Recording forces
 default `:auto` policy would answer with a Treebars poller — and a poller
 written to disk has nothing to poll. Static export wants the finished HTML.
 Returns `app`.
+
+`record_base` is the URL prefix the recording will be served under (empty:
+the site root). A recorded `hx-get="/foo"` names the fragment file the
+`hx=true` variant writes, `<record_base>/hx/foo.html`, so a lazy part (a
+`tabset` URL tab, an `hx_link` target) loads on any static server once its
+path is among `paths`. Links between pages (`href`, `hx-push-url`) keep the
+recorded page's path, `<record_base>/foo`: following one needs a host that
+serves `/foo` from `foo.html` (GitHub Pages does; `python -m http.server`
+does not).
 
 Distinct requested paths that resolve to the same output file are rejected
 with an error before the later response can overwrite the earlier recording.
