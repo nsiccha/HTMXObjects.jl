@@ -442,8 +442,16 @@ when its mount prefix covers the current location:
 | swap from `/section/view` into `/section/view/detail` | none — the target's own chrome is on screen |
 | swap from `/section/item/a` into `/section/item/b/…` | the new item's level (a different mount prefix) |
 | swap with no `HX-Current-URL` (a hand-rolled `fetch`) | none — position unknown |
+| htmx's reload of a history entry it has no snapshot of (Back/Forward, `HX-History-Restore-Request`) | all levels — the answer replaces the whole body |
 
 A root's own shell is a whole document, so it is never injected into a swap.
+A history restore is not a swap from inside the page: htmx swaps its answer
+into `<body>`, so it gets the whole page, as a direct visit does — with or
+without `HX-Request`, which htmx 2 sends on it unless the page sets
+`htmx.config.historyRestoreAsHxRequest = false`. A route error answers the
+error article inside that page with status 200, because htmx swaps only a
+2xx/3xx restore, and a slow page route answers the shell with its
+load-triggered operation region.
 
 Override per request with `?__chrome__=`:
 
@@ -937,9 +945,16 @@ route!(app; record_dir="site")
 ```
 
 Every response is saved to disk mirroring the URL path (`/post/42` →
-`site/post/42.html`). `static_transform` walks the Node tree, `html_only(...)`
-content included, and:
+`site/post/42.html`; an HTMX request's fragment → `site/hx/post/42.html`).
+`static_transform` walks the Node tree, `html_only(...)` content included, and:
 
+- Points each remaining rooted `hx-get` at the fragment file the recording
+  writes for it: `hx-get="/post/42"` → `<record_base>/hx/post/42.html`, so a
+  lazy part (a `tabset` URL tab, an `hx_link` target) loads from the bundle
+  once its path is recorded. `record_base` is the prefix the bundle is served
+  under (`record!(app; record_dir, record_base, paths)`); empty means the
+  site root.
+- Prefixes rooted `href`/`src` addresses with `record_base`.
 - Strips `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes.
 - Strips `hx-get` attributes whose URL contains `?` or points at a
   kwargs-only route.
@@ -951,6 +966,11 @@ After recording, replay with any static server:
 ```bash
 python -m http.server --directory site
 ```
+
+Links between recorded pages (`href`, `hx-push-url`) keep the page's path
+(`/post/42`, not `/post/42.html`), so following one needs a host that serves
+`/post/42` from `post/42.html`, such as GitHub Pages; `python -m http.server`
+answers 404 for it.
 
 `route!(app; record_dir)` and `record!` re-register the app's handlers, so they
 cannot run while the same process serves other requests. To export individual

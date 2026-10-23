@@ -121,3 +121,152 @@ using TestItemRunner
         end
     end
 end
+
+@testitem "request feedback marks only requests the reader started in a browser" tags=[:browser, :unit] begin
+    # Snag lazy-load-succes-a0c68d63: a lazy fragment (`hx-trigger="load"`,
+    # outerHTML) flashed a success outline around the whole content it loaded.
+    # htmx reports the end of a request whose own swap removed its element on
+    # the closest remaining ancestor, and the script marked that ancestor.
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        # Runs while the page parses, before htmx sends the page's own `load`
+        # requests: every feedback class any element ever receives is recorded,
+        # with the in-flight opacity of each requesting element.
+        driver = h.script(Raw(raw"""
+        var marks = {}, dim = {};
+        function probe(el) { return el.getAttribute && el.getAttribute('data-probe'); }
+        new MutationObserver(function(records) {
+          records.forEach(function(r) {
+            var p = probe(r.target);
+            if (!p || !r.target.isConnected) return;
+            r.target.classList.forEach(function(c) {
+              var m = /^htmx-request-(\w+)$/.exec(c);
+              if (!m) return;
+              marks[p] = marks[p] || [];
+              if (marks[p].indexOf(m[1]) < 0) marks[p].push(m[1]);
+            });
+          });
+        }).observe(document.documentElement, {subtree: true, attributes: true, attributeFilter: ['class']});
+        // htmx adds `htmx-request` (the CSS dim) just before beforeSend.
+        document.addEventListener('htmx:beforeSend', function(e) {
+          var p = probe(e.detail.elt);
+          if (p) dim[p] = getComputedStyle(e.detail.elt).opacity;
+        });
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent(event.message));
+        });
+        window.addEventListener('load', async function() {
+          var sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          var el = p => document.querySelector('[data-probe="' + p + '"]');
+          async function until(p) {
+            for (var i = 0; i < 600 && !el(p); i++) await sleep(25);
+            if (!el(p)) throw new Error('timeout: ' + p);
+          }
+          try {
+            await until('lazy-content');
+            await until('panel-content');
+            await until('poll-content');
+            el('nest').click();
+            await until('nested-content');
+            el('self').click();
+            await until('self-content');
+            await sleep(100);
+            var want = {
+              // The page's own requests: a lazy fragment, a tab panel shown
+              // on screen, a poller's final answer, and a lazy fragment that
+              // arrived with a clicked answer.
+              'lazy': '', 'lazy-wrap': '', 'lazy-content': '', 'panel': '', 'panel-content': '',
+              'poll': '', 'poll-wrap': '', 'poll-content': '', 'nested': '', 'nested-content': '',
+              // Clicked: the button and its target pulse, then flash.
+              'nest': 'active success', 'nest-out': 'active success',
+              // Clicked and replaced by its own answer: what replaced it
+              // flashes, not the element around it.
+              'self': 'active', 'self-content': 'success', 'self-wrap': ''
+            };
+            var wrong = Object.keys(want).filter(function(p) {
+              return (marks[p] || []).sort().join(' ') !== want[p];
+            }).map(function(p) { return p + '=' + (marks[p] || []).join('+'); });
+            // Only the clicked button dims while its request runs.
+            var dims = {lazy: '1', panel: '1', poll: '1', nested: '1', nest: '0.7'};
+            Object.keys(dims).forEach(function(p) {
+              if (dim[p] !== dims[p]) wrong.push('dim ' + p + '=' + dim[p]);
+            });
+            await fetch('/complete?status=' + (wrong.length ? encodeURIComponent('wrong ' + wrong.join(',')) : 'passed'));
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        body = h.main(driver,
+            h.div(h.div(h.p("loading"); data_probe="lazy", hx_get="/frag?n=lazy",
+                        hx_trigger="load", hx_swap="outerHTML"); data_probe="lazy-wrap"),
+            h.div(; data_probe="panel", hx_get="/frag?n=panel", hx_trigger="intersect once",
+                  hx_swap="innerHTML"),
+            h.div(h.div("polling"; data_probe="poll", hx_get="/poll", hx_trigger="every 100ms",
+                        hx_swap="outerHTML"); data_probe="poll-wrap"),
+            h.button("nest"; data_probe="nest", hx_get="/nest", hx_target="#nest-out"),
+            h.div(; id="nest-out", data_probe="nest-out"),
+            h.div(h.button("self"; data_probe="self", hx_get="/frag?n=self", hx_swap="outerHTML");
+                  data_probe="self-wrap"))
+        page = repr("text/html", htmx(body;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
+            compose=false, overlay=false))
+        polls = Threads.Atomic{Int}(0)
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            path = uri.path
+            html(s) = HTTP.Response(200, ["Content-Type" => "text/html"], s)
+            path == "/" && return html(page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/frag"
+                n = get(HTTP.queryparams(uri), "n", "")
+                return html("<p data-probe=\"$n-content\">$n</p>")
+            end
+            path == "/nest" && return html("<div data-probe=\"nested\" hx-get=\"/frag?n=nested\" " *
+                "hx-trigger=\"load\" hx-swap=\"outerHTML\">loading</div>")
+            if path == "/poll"
+                Threads.atomic_add!(polls, 1) < 2 || return html("<p data-probe=\"poll-content\">done</p>")
+                return html("<div data-probe=\"poll\" hx-get=\"/poll\" hx-trigger=\"every 100ms\" " *
+                    "hx-swap=\"outerHTML\">polling</div>")
+            end
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            HTTP.Response(404)
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        @test take!(receipt) == "/complete?status=passed"
+                    else
+                        @info "Browser diagnostics" log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end

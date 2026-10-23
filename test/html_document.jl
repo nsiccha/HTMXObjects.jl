@@ -121,3 +121,105 @@ end
         @test startswith(recorded, "<!DOCTYPE html>\n<html lang=\"de\"")
     end
 end
+
+# `title=` writes the page's one `<title>`; `__lang__` / `__title__` declared on
+# the route's mount chain are the shell's defaults, so a page without either is
+# unchanged (co-report on snag building-a-germa-1f100d09, decision 1d43o5g).
+@testitem "the page shell's title and declared language" tags=[:unit] begin
+    using HTMXObjects
+    page(p) = repr("text/html", p)
+    # A whole element: the toast runtime's inline script names `<title>` in a comment.
+    titles(page) = [m.match for m in eachmatch(r"<title>[^<]*</title>", page)]
+    @test page(htmx(h.p("x"))) == page(htmx(h.p("x"); title=nothing))
+    @test isempty(titles(page(htmx(h.p("x")))))
+    titled = page(htmx(h.p("x"); title="Präsentation & Daten"))
+    @test titles(titled) == ["<title>Präsentation &amp; Daten</title>"]
+    @test contains(titled, "<meta name=\"color-scheme\" content=\"light dark\"><title>Präsentation &amp; Daten</title>")
+    @test contains(page(HTMXObjects.pico_page(h.p("x"); title="App")), "<title>App</title>")
+    # A declared language and title apply when the shell is given none; an
+    # explicit keyword still wins.
+    declared = (; lang="de", title="Seite")
+    @test contains(page(HTMXObjects._with_page_meta(() -> htmx(h.p("x")), declared)),
+        "<html lang=\"de\"")
+    @test contains(page(HTMXObjects._with_page_meta(() -> htmx(h.p("x")), declared)),
+        "<title>Seite</title>")
+    @test contains(page(HTMXObjects._with_page_meta(() -> htmx(h.p("x"); lang="fr", title="Page"), declared)),
+        "<html lang=\"fr\"")
+    @test contains(page(HTMXObjects._with_page_meta(() -> htmx(h.p("x"); lang="fr", title="Page"), declared)),
+        "<title>Page</title>")
+    @test HTMXObjects._page_meta() == HTMXObjects._NO_PAGE_META
+    # refused: an empty or non-string title is no title (no silent errors, dev §1)
+    @test_throws ArgumentError htmx(h.p("x"); title="")
+    @test_throws ArgumentError htmx(h.p("x"); title=:App)
+    # refused: a page has one <title>, so a title beside an `h.title` in
+    # `extra_head` would leave the browser to pick one
+    @test_throws ArgumentError htmx(h.p("x"); title="App", extra_head=(h.title("Other"),))
+    @test_throws ArgumentError HTMXObjects._with_page_meta(declared) do
+        htmx(h.p("x"); extra_head=(h.title("Other"),))
+    end
+    # An `h.title` in `extra_head` alone still works as before.
+    @test titles(page(htmx(h.p("x"); extra_head=(h.title("Other"),)))) == ["<title>Other</title>"]
+end
+
+@testitem "a subtree declares its pages' language and title" tags=[:integration, :server] begin
+    using HTMXObjects
+    @htmx struct PageLangDeck
+        lang::Symbol
+        __lang__ = string(lang)
+        __title__ = lang === :de ? "Präsentation" : "Presentation"
+        __page__(content) = h.div(class="deck")(content)
+        @get index() = h.p(lang === :de ? "Grüß Gott" : "Hello")
+        @get broken() = error("deck failed")
+    end
+    @htmx struct PageLangApp
+        __lang__ = "en"
+        __title__ = "Workbench"
+        __page__(content) = HTMXObjects.pico_page(content)
+        @get home() = h.p("home")
+        @include extern(lang::Symbol) = PageLangDeck(lang)
+    end
+    route!(PageLangApp())
+    full(path) = String(dispatch(:GET, path; headers=["Accept" => "text/html"]).body)
+    head(page) = (match(r"<html[^>]*>", page).match, [m.match for m in eachmatch(r"<title>[^<]*</title>", page)])
+    @test head(full("/extern/de")) == ("<html lang=\"de\" hx-ext=\"preload\">", ["<title>Präsentation</title>"])
+    @test head(full("/extern/en")) == ("<html lang=\"en\" hx-ext=\"preload\">", ["<title>Presentation</title>"])
+    @test head(full("/home")) == ("<html lang=\"en\" hx-ext=\"preload\">", ["<title>Workbench</title>"])
+    @test contains(full("/extern/de"), "Grüß Gott")
+    # A failing route's error page is still the subtree's page.
+    @test head(full("/extern/de/broken")) == ("<html lang=\"de\" hx-ext=\"preload\">", ["<title>Präsentation</title>"])
+    exported = String(dispatch(:GET, "/extern/de"; static=StaticExport()).body)
+    @test head(exported) == ("<html lang=\"de\" hx-ext=\"preload\">", ["<title>Präsentation</title>"])
+    fragment = String(dispatch(:GET, "/extern/de"; headers=["HX-Request" => "true"]).body)
+    @test !contains(fragment, "<html") && !contains(fragment, "<title")
+    mktempdir() do dir
+        record!(PageLangApp(); record_dir=dir, paths=["/extern/de"], full=true, hx=false, markdown=false)
+        recorded = read(only(filter(endswith(".html"), [joinpath(r, f) for (r, _, fs) in walkdir(dir) for f in fs])), String)
+        @test head(recorded) == ("<html lang=\"de\" hx-ext=\"preload\">", ["<title>Präsentation</title>"])
+    end
+
+    # The shell's own keywords still win over a declaration.
+    @htmx struct PageLangFixedApp
+        __page__(content) = HTMXObjects.pico_page(content; lang="fr", title="Fixe")
+        @include deck(lang::Symbol) = PageLangDeck(lang)
+    end
+    route!(PageLangFixedApp())
+    @test head(full("/deck/de")) == ("<html lang=\"fr\" hx-ext=\"preload\">", ["<title>Fixe</title>"])
+
+    # refused: a declaration that is not a language tag fails the route,
+    # named after its struct, before the route body runs (no silent errors, dev §1)
+    @htmx struct PageLangBadApp
+        __lang__ = "German"
+        __page__(content) = HTMXObjects.pico_page(content)
+        @get bad_lang_page() = h.p("never rendered")
+    end
+    route!(PageLangBadApp())
+    bad = dispatch(:GET, "/bad_lang_page"; headers=["Accept" => "text/html"])
+    @test bad.status == 500 && !contains(String(bad.body), "never rendered")
+    err = try
+        HTMXObjects._page_meta_of(Any[PageLangBadApp()])
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError && contains(err.msg, "`__lang__` on PageLangBadApp")
+end

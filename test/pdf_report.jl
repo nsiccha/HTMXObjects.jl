@@ -14,16 +14,19 @@ using TestItemRunner
         format:
           typst:
             pdf-standard: [ua-1]
+            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST))]
         filters:
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
             at: post-render
           - $(HTMXObjects._yaml_string(filter))
           - $(HTMXObjects._yaml_string(images))
+          - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
         ---
 
         # Ergebnisse
         """
-    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER)
+    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
+          isfile(HTMXObjects._PDF_REPORT_DATE_FILTER)
 end
 
 @testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
@@ -59,6 +62,43 @@ end
     # An explicit papersize wins, written once.
     fm = frontmatter("de-DE"; metadata=(papersize="a5",))
     @test occursin("papersize: \"a5\"", fm) && count("papersize", fm) == 1
+end
+
+@testitem "pdf_report keeps a date Quarto reads and prints any other date text as written" tags=[:unit] begin
+    using HTMXObjects, Dates
+
+    frontmatter(metadata) =
+        split(HTMXObjects._pdf_report_qmd("# R\n"; title="R", lang="de-DE", metadata), "\n---\n")[1]
+    text = HTMXObjects._PDF_REPORT_DATE_TEXT_KEY
+
+    # A date Quarto reads correctly stays `date`, for `date_format` to format.
+    for date in (Date(2026, 10, 22), DateTime(2026, 10, 22, 10, 30), "2026-10-22", "2026-10-22 10:30",
+                 "2026-10-22T10:30:00.5+02:00", "today", :now, "last-modified")
+        fm = frontmatter((date=date, date_format="long"))
+        @test occursin("\ndate: \"$date\"\n", fm) && occursin("\ndate-format: \"long\"\n", fm)
+        @test !occursin(text, fm)
+    end
+    # Quarto would misread any other text ("22.10.2026" as Invalid Date,
+    # "05.10.2026" as 10 May), so it goes under the key the date filter prints
+    # as written, its Markdown punctuation escaped so Pandoc keeps the text.
+    @test occursin("\n$text: $(HTMXObjects._yaml_string("05\\.10\\.2026"))\n", frontmatter((date="05.10.2026",)))
+    fm = frontmatter(Dict("date" => "1. Oktober *2026*", "subtitle" => "S"))
+    @test occursin("\n$text: $(HTMXObjects._yaml_string("1\\. Oktober \\*2026\\*"))\n", fm)
+    @test !occursin("\ndate:", fm) && occursin("\nsubtitle: \"S\"\n", fm)
+    for date in ("22.10.2026", "Oktober 2026", "2026-10", "2026-1-5", "10/22/2026", :heute)
+        @test occursin("\n$text: ", frontmatter((date=date,)))
+    end
+    # A date given as Quarto's object form is Quarto's to read.
+    @test occursin("\ndate: {\"value\": \"2026-10-22\", \"format\": \"long\"}\n",
+                   frontmatter((date=(value="2026-10-22", format="long"),)))
+
+    # refused: `date_format` cannot format text, which prints as written
+    # (snag pdf-report-metad-89ac6032, user design decision 1dnvswg)
+    err = try frontmatter((date="22.10.2026", date_format="DD.MM.YYYY")) catch e e end
+    @test err isa ArgumentError && occursin("date_format", err.msg) && occursin("\"22.10.2026\"", err.msg)
+    # refused: the date text key is pdf_report's own; text goes in as `date=`
+    err = try frontmatter(Dict(text => "x")) catch e e end
+    @test err isa ArgumentError && occursin("date=", err.msg)
 end
 
 @testitem "pdf_report refuses metadata and Markdown that would override its own front matter" tags=[:unit] begin
@@ -124,7 +164,7 @@ end
     if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
         @test_skip true
     else
-        using HTMXObjects
+        using HTMXObjects, Dates
 
         pdfua(path) = let bytes = read(path, String)
             startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) &&
@@ -154,6 +194,35 @@ end
                              metadata=(subtitle="Entwurf", date="22.10.2026", toc=true,
                                        margin=(x="2cm", y="2cm"), fontsize="10pt")) == opts
             @test pdfua(opts) && mediabox(opts) == a4
+
+            # The date filter hands Typst the date as a string: written as
+            # markup, `[22. Oktober 2026]` is a numbered list in Typst.
+            template = joinpath(dir, "date.template")
+            write(template, "\$date\$\n")
+            typst_date(key, value) = (write(joinpath(dir, "date.md"), "---\n$key: $(HTMXObjects._yaml_string(value))\n---\n");
+                strip(read(`$(Sys.which("quarto")) pandoc -s -f markdown -t typst --template=$template
+                            --lua-filter=$(HTMXObjects._PDF_REPORT_DATE_FILTER) $(joinpath(dir, "date.md"))`, String)))
+            @test typst_date("date", "22. Oktober 2026") == "#\"22. Oktober 2026\""
+            @test typst_date(HTMXObjects._PDF_REPORT_DATE_TEXT_KEY,
+                             HTMXObjects._markdown_literal("1. Oktober \"*2026*\" \\ #a")) ==
+                  "#\"1. Oktober \\\"*2026*\\\" \\\\ #a\""
+            rm(template); rm(joinpath(dir, "date.md"))
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                # Quarto alone printed "Invalid Date" for 22.10.2026 and 2026-05-10
+                # for 05.10.2026 (snag pdf-report-metad-89ac6032).
+                @test occursin("22.10.2026", read(`pdftotext $opts -`, String))
+                for (date, shown) in [(date="05.10.2026",) => "05.10.2026",
+                                      (date="1. Oktober 2026",) => "1. Oktober 2026",
+                                      (date=Date(2026, 10, 5), date_format="long") => "5. Oktober 2026",
+                                      (date="2026-10-05", date_format="DD.MM.YYYY") => "05.10.2026"]
+                    dated = joinpath(dir, "out", "datum.pdf")
+                    @test pdf_report("# R\n", dated; title="R", lang="de-DE", metadata=date) == dated
+                    @test pdfua(dated) && occursin(shown, read(`pdftotext $dated -`, String))
+                    rm(dated)
+                end
+            end
             us = joinpath(dir, "out", "us.pdf")
             @test pdf_report("# R\n", us; title="R", lang="en-US") == us
             @test mediabox(us) == letter
@@ -203,12 +272,47 @@ end
             if isnothing(Sys.which("pdftotext"))
                 @test_skip "pdftotext (poppler-utils) reads the text layer"
             else
-                text = read(`pdftotext $de -`, String)
+                # pdftotext's default encoding is Latin-1 on Windows, which
+                # writes „ as ,, and “ as ".
+                text = read(`pdftotext -enc UTF-8 $de -`, String)
                 @test occursin("Bericht „Q“", text)
                 @test occursin("„Lieferflächen für Berlin“", text)
                 @test occursin("„gerades“", text) && occursin("‚einfache‘", text)
             end
             rm(de); rm(joinpath(dir, "de.md"))
+
+            # Table cells are set ragged-right and hyphenate only a word wider
+            # than its column; the body stays justified and hyphenated. Quarto's
+            # template justified the cells too, so Typst split words that fit
+            # on the next line: Me-dian, Verhält-nis.
+            tables = """
+                Der Fließtext bleibt im Blocksatz und wird wie bisher getrennt, damit die Zeilen gleichmäßig lang sind und der Bericht ordentlich aussieht. Hier steht ein langer Satz mit Verhältniswahrscheinlichkeiten und Messstellenvergleichen.
+
+                | Studienarm | Methode | Bayes: Verhältnis zur Referenz [95 %] | Klassisch: Median Verhältnis | Klassisch: Bland–Altman-Mittel |
+                |---|---|---|---|---|
+                | Kreatinin | Bland–Altman nach Grubbs-Ausschluss | 0,986 [0,946; 1,02] | 0,991 | 0,987 |
+
+                | Methode | n | Median Verhältnis | Bland–Altman (95-%-Grenzen) | Passing–Bablok Steigung | Anteil Ausreißer bzw. kontaminiert | Prädiktive 95-%-Grenzen |
+                |---|---|---|---|---|---|---|
+                | Kontaminationswahrscheinlichkeit | 48 | 0,986 | 0,987 (0,912 bis 1,07) | Messstellenvergleich | 4 % [1 %; 9 %] | `verylongidentifiername` |
+                """
+            tab = joinpath(dir, "tabellen.pdf")
+            @test pdf_report(tables, tab; title="Methodenvergleich", lang="de-DE") == tab
+            @test pdfua(tab)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                # Typst's hyphenation shows as a soft hyphen in the text layer.
+                text = read(`pdftotext $tab -`, String)
+                @test occursin("Verhältniswahr\u00ad", text)
+                cells = text[findfirst("Studienarm", text).start:end]
+                pieces = [m[1] for m in eachmatch(r"(\p{L}+)\u00ad", cells)]
+                @test "Kontami" in pieces && "kon" in pieces
+                too_wide = "Kontaminationswahrscheinlichkeit kontaminiert Messstellenvergleich"
+                @test all(p -> occursin(p, too_wide), pieces)
+                @test occursin("verylongidentifiername", cells)
+            end
+            rm(tab)
 
             # An `h.img` with alt text alone in its block: HTMX.jl writes the alt
             # as an attribute, `![](bars.svg){alt="…"}`, so Pandoc keeps it on the
@@ -243,6 +347,82 @@ end
             end
             @test err isa ErrorException && occursin("fehlt.svg", err.msg)
             @test readdir(report) == ["assets"]
+        end
+    end
+end
+
+@testitem "pdf_report breaks a captioned table across pages" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        # The page of the caption and of each row of a 30-row captioned table on
+        # short pages, set below `lead` of space by Quarto's Typst with `rules`
+        # in front, as `pdf_report` includes them.
+        function placement(rules, lead)
+            mktempdir() do dir
+                doc = joinpath(dir, "t.typ")
+                write(doc, rules, """
+                    #set page(width: 300pt, height: 200pt, margin: 20pt)
+                    #v($lead)
+                    #figure(kind: "quarto-float-tbl", supplement: "Tabelle",
+                      caption: figure.caption(position: top, [Cap #context [#metadata(here().page()) <cap>]]),
+                      table(columns: 2, table.header[A][B],
+                        ..range(30).map(i => ([#i], [#context [#metadata(here().page()) <row>]])).flatten()))
+                    """)
+                pages(label) = let out = IOBuffer()
+                    run(pipeline(`$quarto typst eval "query(<$label>).map(it => it.value)" --in $doc`;
+                                 stdout=out, stderr=out))
+                    parse.(Int, split(match(r"\[([\d,\s]*)\]", String(take!(out))).captures[1], ','))
+                end
+                (; caption=only(pages("cap")), rows=pages("row"))
+            end
+        end
+        rules = read(HTMXObjects._PDF_REPORT_TABLES_TYPST, String)
+
+        # The control: without the rules the figure does not break, so all 30
+        # rows land on the one page it moved to, running over its bottom.
+        @test unique(placement("", "20pt").rows) == [2]
+        # With them the table starts below the lead and continues page by page.
+        flowed = placement(rules, "20pt")
+        @test flowed.caption == first(flowed.rows) == 1
+        @test issorted(flowed.rows) && last(flowed.rows) > 2
+        # Room for the caption but not for the header and a row: the caption
+        # moves to the next page with them instead of staying alone, as it does
+        # when the table may break but the caption is not kept with it.
+        moved = placement(rules, "135pt")
+        @test moved.caption == first(moved.rows) == 2
+        break_only = replace(rules, r"^#show figure\.caption.*$"m => "")
+        @test break_only != rules && placement(break_only, "135pt").caption == 1
+
+        # A whole report: a captioned 60-row table after a few lines.
+        mktempdir() do dir
+            n = 60
+            page = h.article((h.p("Zeile $i.") for i in 1:3)...,
+                render_table((Land=["Land $i" for i in 1:n], Wert=collect(1:n));
+                    caption=CaptionSpec(; title="Werte je Land"), id="laender"),
+                h.p("Nach der Tabelle."))
+            out = joinpath(dir, "lang.pdf")
+            @test pdf_report(page, out; title="Bericht", lang="de-DE") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) && occursin("/StructTreeRoot", bytes)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text of each page"
+            else
+                texts = split(read(`pdftotext -layout $out -`, String), '\f'; keepempty=false)
+                onpage(pattern) = findall(t -> occursin(pattern, t), texts)
+                row(i) = onpage(Regex("Land $i\\s+$i\\s*\\n"))
+                # Every row once; the table starts on page 1 below the lines,
+                # where it has room, rather than moving to page 2.
+                @test all(i -> length(row(i)) == 1, 1:n)
+                @test onpage("Werte je Land") == row(1) == onpage("Zeile 3.") == [1]
+                # It continues on the next pages, its header row on each one.
+                table_pages = unique(vcat(row.(1:n)...))
+                @test length(table_pages) >= 2
+                @test onpage(r"Land\s+Wert") == table_pages
+            end
         end
     end
 end

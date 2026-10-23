@@ -110,14 +110,13 @@ end
         @test !contains(h, "data-htmxo-texts")
     end
     @test contains(english["search"], ">4 of 4 rows shown<") && contains(english["csv"], "⬇ CSV")
-    # Markdown drops these controls, so it does not change; only a lazy
-    # detail's placeholder is content there, and it follows `texts`.
-    for name in ("search", "select", "csv", "pills_two")
+    # Markdown drops these controls, so it does not change. A lazy detail's
+    # placeholder is not content there either: its detail row writes nothing
+    # (user pick 1mu8842, snag master-detail-ma-e63263bb).
+    for name in ("search", "select", "csv", "pills_two", "flat_lazy")
         @test to_markdown_string(table_variants(texts)[name]) == to_markdown_string(table_variants(table_texts())[name])
     end
-    lazy_md(texts) = to_markdown_string(table_variants(texts)["flat_lazy"])
-    @test contains(lazy_md(texts), "| ⟨loading⟩ |") && contains(lazy_md(table_texts()), "| Loading… |")
-    @test replace(lazy_md(texts), "⟨loading⟩" => "Loading…") == lazy_md(table_texts())
+    @test !contains(to_markdown_string(table_variants(texts)["flat_lazy"]), "⟨loading⟩")
 end
 
 @testitem "a captioned table's long-text toggle follows its texts" tags=[:unit] begin

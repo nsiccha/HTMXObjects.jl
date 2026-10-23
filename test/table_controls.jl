@@ -91,6 +91,9 @@ end
     masters = [m.match for m in eachmatch(r"<tr[^>]*id=\"row-[^\"]*\"[^>]*>", html)]
     @test length(masters) == 2 && all(contains(t, "onclick=") for t in masters)
     @test contains(html, "button[data-htmxo-disclosure]")
+    # The control stays on its label's line; the browser item "row controls
+    # stay on their label's line in a narrow first column" measures it.
+    @test contains(html, "td:has(> [data-htmxo-row-label]) { text-wrap-mode: nowrap; }")
     # Markdown keeps the cell content and drops the control.
     md = to_markdown_string(table())
     @test contains(md, "0001") && contains(md, "0002")
@@ -111,6 +114,97 @@ end
     # element; bare text would otherwise surface as a MethodError (dev §1).
     @test_throws "the first master cell must be a <td> node" master_detail_table(["A"], [1];
         key=identity, master=_ -> ("text",), detail=_ -> "d")
+end
+
+@testitem "row controls stay on their label's line in a narrow first column" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        # The reported shape: short first labels (three-digit sample numbers)
+        # beside seven wide text columns, which squeeze the first column to its
+        # minimum width. Before the fix the ▸ sat above `124`, every row two
+        # lines tall. A long label widens its column, so it gets tables of its
+        # own, which check that labels still wrap.
+        long = "Messstelle 7 am Uferfiltrat Ost"
+        wide = h.td("Grundwassermessstelle Pflanzenschutzmittel Untersuchungsbericht Trinkwasseraufbereitung")
+        headers = ["Nr.", ("Spalte $j" for j in 1:7)...]
+        leaf(key, label) = (; key, label, children=())
+        flat(id, items) = master_detail_table(headers, items; key=x -> id * x.key,
+            master=x -> (h.td(x.label), ntuple(_ -> wide, 7)...), detail=x -> h.p("d"), id)
+        tree(id, items) = master_detail_table(headers, items; key=x -> id * x.key,
+            master=x -> (h.td(x.label), ntuple(_ -> wide, 7)...), children=x -> x.children,
+            detail=x -> h.p("d"), initially_open=true, id)
+        short_flat = [leaf("n$i", string(100 + i)) for i in 1:12]
+        short_tree = [
+            # A plain branch: its label is the branch button, ⓘ follows it.
+            (; key="b1", label="201", children=[leaf("l1", "202"), leaf("l2", h.a("203"; href="#"))]),
+            # A linked branch: a separate ▸ button precedes the link.
+            (; key="b2", label=h.a("205"; href="#"), children=[leaf("l4", "206")])]
+        tables(prefix) = (flat(prefix * "flat", short_flat), tree(prefix * "tree", short_tree))
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', function() {
+                const out = document.body.dataset;
+                const char = (node, i) => { const r = document.createRange();
+                    r.setStart(node, i); r.setEnd(node, i + 1); return r.getBoundingClientRect(); };
+                const sameLine = (a, b) => a.top < b.bottom - 2 && b.top < a.bottom - 2;
+                // Per shown master row: does a control before or after the label,
+                // or the glyph inside a label button, leave the label's line?
+                const measure = id => {
+                    let rows = 0, split = 0, multiline = 0;
+                    for (const row of document.getElementById(id).querySelectorAll(':scope > tr[id^="row-"]')) {
+                        if (row.hidden) continue;
+                        rows++;
+                        const label = row.cells[0].querySelector(':scope > [data-htmxo-row-label]');
+                        const text = document.createTreeWalker(label, NodeFilter.SHOW_TEXT).nextNode();
+                        const first = char(text, 0), last = char(text, text.length - 1);
+                        if (last.top >= first.bottom - 2) multiline++;
+                        const before = label.previousElementSibling, after = label.nextElementSibling;
+                        if (before && before.matches('button') && !sameLine(before.getBoundingClientRect(), first)) split++;
+                        if (after && after.matches('button') && !sameLine(after.getBoundingClientRect(), last)) split++;
+                        const own = label.querySelector(':scope > button');
+                        if (own && getComputedStyle(own, '::before').content !== 'none' &&
+                            first.top >= own.getBoundingClientRect().top + first.height / 2) split++;
+                    }
+                    return [rows, split, multiline];
+                };
+                [out.flatRows, out.flatSplit] = measure('flat');
+                [out.treeRows, out.treeSplit] = measure('tree');
+                [, out.flatLongSplit, out.flatLongMultiline] = measure('flatlong');
+                [, out.treeLongSplit, out.treeLongMultiline] = measure('treelong');
+                // Positive control: the same tables with wrapping restored at every
+                // boundary split their controls, so the column is narrow enough.
+                out.controlFlatSplit = measure('c-flat')[1];
+                out.controlTreeSplit = measure('c-tree')[1];
+                out.done = '1';
+            });
+            """))
+        content = h.main(; class="container")(tables("")...,
+            flat("flatlong", [leaf("n1", "101"), leaf("n2", long)]),
+            tree("treelong", [(; key="b1", label="201", children=[leaf("l1", long)])]),
+            h.style(Raw(".unglued td, .unglued td * { text-wrap-mode: wrap !important; }")),
+            h.div(; class="unglued")(tables("c-")...), driver)
+        dom = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, repr("text/html", htmx(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION, htmx_version=nothing,
+                hyperscript_version=nothing, preload_version=nothing,
+                extra_head=(sortable_table_js(), sortable_table_styles()))))
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,1000 --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        attr(name) = parse(Int, match(Regex("data-$name=\"(\\d+)\""), dom)[1])
+        @test contains(dom, "data-done=\"1\"")
+        @test attr("flat-rows") == 12 && attr("tree-rows") == 5
+        @test attr("flat-split") == 0
+        @test attr("tree-split") == 0
+        @test attr("flat-long-split") == 0 && attr("tree-long-split") == 0
+        @test attr("flat-long-multiline") == 1 && attr("tree-long-multiline") == 1
+        @test attr("control-flat-split") > 0 && attr("control-tree-split") > 0
+    end
 end
 
 @testitem "sort header controls are plain headings on every page shell" tags=[:unit] begin
@@ -257,6 +351,98 @@ end
     response = dispatch(:GET, "/table"; headers=["Accept" => "text/markdown"])
     @test response.status == 200
     @test contains(String(response.body), "| Vessel | Diet |\n| --- | --- |\n| Syringe-50 | 1.0 |")
+end
+
+@testitem "master/detail rows read as one table, eager details after it" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string, filter_errors
+    # Snag master-detail-ma-e63263bb (reporter TenderViews), user pick 1mu8842:
+    # every `detail-<key>` companion used to be a one-cell row of the pipe
+    # table (`|  |`, `| Loading… |`, a whole section folded into a cell), in
+    # `?plain`, a consumer's own `show` and `pdf_report` alike.
+    struct ConsumerTable
+        inner
+    end
+    Base.show(io::IO, m::MIME"text/markdown", t::ConsumerTable) = show(io, m, t.inner)
+    items = [(id="lb-3-2", lb="LB § 3.2", ap="AP 2", grp=["A", "B"]),
+             (id="lb-5-1", lb="LB § 5.1", ap="", grp=["A"])]
+    master = r -> (h.td(r.lb), h.td(r.ap))
+    md_table(; kw...) = master_detail_table(["LB", "Abschnitt"], items; key=r -> r.id, master, kw...)
+    rows = "| LB | Abschnitt |\n| --- | --- |\n| LB § 3.2 | AP 2 |\n| LB § 5.1 |  |\n"
+    # One Markdown whichever serializer writes it.
+    function markdown(t)
+        md = to_markdown_string(t)
+        @test repr("text/markdown", t) == md
+        @test repr("text/markdown", ConsumerTable(t)) == md
+        md
+    end
+
+    # Details with nothing to read write nothing: html_only, nothing, a form,
+    # and lazy ones, which are not on the page.
+    for kw in ((; detail=r -> html_only(SemanticProse("hidden $(r.id)"))),
+               (; detail=r -> nothing),
+               (; detail=r -> h.form(h.input(; name="x", value="v"), h.button("Save"))),
+               (; detail_url=r -> "/sec/$(r.id)"))
+        @test markdown(md_table(; kw...)) == rows * "\n"
+    end
+    # Eager details follow the table, each under its row's label, as a
+    # `SemanticDisclosure` writes its summary and body.
+    eager = md_table(; detail=r -> SemanticProse("detail for $(r.id)"))
+    @test markdown(eager) == rows *
+        "\n**LB § 3.2**\n\ndetail for lb-3-2\n\n**LB § 5.1**\n\ndetail for lb-5-1"
+    section = markdown(md_table(; detail=r -> SemanticSection("AP 2: Modell",
+        Any[SemanticProse("**LB § 3.2**"), SemanticProse("> quote")])))
+    @test startswith(section, rows * "\n**LB § 3.2**\n\n## AP 2: Modell\n\n**LB § 3.2**\n\n> quote\n\n**LB § 5.1**\n\n")
+    # The HTML keeps every companion row; the details are not repeated.
+    html = repr("text/html", eager)
+    @test count("<tr id=\"detail-", html) == 2
+    @test count("detail for lb-3-2", html) == 1
+    @test !contains(html, "**")
+    # What follows the table starts its own paragraph.
+    @test markdown(h.div(eager, h.p("after"))) ==
+        rows * "\n**LB § 3.2**\n\ndetail for lb-3-2\n\n**LB § 5.1**\n\ndetail for lb-5-1\n\nafter\n\n"
+    # A label is its words: no link target or emphasis, html_only left out.
+    linked = md_table(; master=r -> (h.td(h.a(h.strong(r.lb); href="/x/$(r.id)"), h.small(" (1)"),
+                                          html_only(h.span(" badge"))), h.td(r.ap)),
+                      detail=r -> h.p("linked $(r.id)"))
+    @test contains(markdown(linked), "\n\n**LB § 3.2 (1)**\n\nlinked lb-3-2\n\n**LB § 5.1 (1)**\n\nlinked lb-5-1")
+    # A captioned table's details follow its figure.
+    captioned = markdown(md_table(; detail=r -> h.p("cap $(r.id)"), caption=CaptionSpec(; title="Completeness"), id="req"))
+    @test endswith(captioned, "**Completeness**\n:::\n\n**LB § 3.2**\n\ncap lb-3-2\n\n**LB § 5.1**\n\ncap lb-5-1")
+    @test !contains(captioned, "| cap ")
+    # Grouped header columns, the label button, search and selection.
+    for kw in ((; header_groups=["Both" => 1:2]), (; detail_toggle=:label),
+               (; searchable=true, selectable="sel", id="ss"))
+        md = markdown(md_table(; detail=r -> h.p("d $(r.id)"), kw...))
+        @test endswith(md, "\n\n**LB § 3.2**\n\nd lb-3-2\n\n**LB § 5.1**\n\nd lb-5-1")
+        @test count("\n|", md) == 3
+    end
+    # A hierarchy: every row's detail, branches included, in row order.
+    tree = [(id="root", lb="Root", ap="", kids=[(id="leaf1", lb="Leaf 1", ap="x", kids=[]),
+                                                 (id="leaf2", lb="Leaf 2", ap="y", kids=[])])]
+    @test markdown(master_detail_table(["Name", "Val"], tree; key=r -> r.id, master,
+            children=r -> r.kids, detail=r -> h.p("tree $(r.id)"))) ==
+        "| Name | Val |\n| --- | --- |\n| Root |  |\n| Leaf 1 | x |\n| Leaf 2 | y |\n\n" *
+        "**Root**\n\ntree root\n\n**Leaf 1**\n\ntree leaf1\n\n**Leaf 2**\n\ntree leaf2"
+    @test markdown(master_detail_table(["Name", "Val"], tree; key=r -> r.id, master,
+            children=r -> r.kids, detail_url=r -> isempty(r.kids) ? "/t/$(r.id)" : nothing)) ==
+        "| Name | Val |\n| --- | --- |\n| Root |  |\n| Leaf 1 | x |\n| Leaf 2 | y |\n\n"
+    # A leaf listed under two groups is one item: its detail is written once.
+    @test markdown(md_table(; detail=r -> h.p("grp $(r.id)"),
+            groupings=["Group" => r -> r.grp, "None" => nothing])) ==
+        "| LB | Abschnitt |\n| --- | --- |\n| **A** (2) |  |\n| LB § 3.2 | AP 2 |\n| LB § 5.1 |  |\n" *
+        "| **B** (1) |  |\n| LB § 3.2 | AP 2 |\n\n**LB § 3.2**\n\ngrp lb-3-2\n\n**LB § 5.1**\n\ngrp lb-5-1"
+    # Hand-built pairs in a `sortable_table`: no one-cell rows either.
+    pairs = Any[]
+    for r in items
+        append!(pairs, master_detail_pair(r.id, master(r), h.p("pair $(r.id)"), 2))
+    end
+    @test markdown(sortable_table(["LB", "Abschnitt"], pairs; id="hb")) == rows * "\n"
+    @test count("<tr id=\"detail-", repr("text/html", sortable_table(["LB", "Abschnitt"], pairs))) == 2
+    # `?error` still reaches an error inside a detail row.
+    errors = filter_errors(md_table(; detail=r -> h.div(h.p("ok"), h.span("boom $(r.id)"; data_error="true"))))
+    @test count("boom lb-", repr("text/html", errors)) == 2
+    @test contains(repr("text/html", errors), "<tr id=\"detail-lb-3-2\"")
 end
 
 @testitem "explained column headers sort and export their label" setup=[ChromeDump] tags=[:browser] begin
