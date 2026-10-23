@@ -2863,14 +2863,20 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing, lang=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
 `lang` is the page's language as a BCP 47 tag (`"de"`, `"de-CH"`, `"en-GB"`),
 written as `<html lang>`: screen readers pronounce the page in it and CSS
-`hyphens: auto` hyphenates by it. `nothing` (the default) writes no `lang`
-attribute; a string that is not a language tag throws an `ArgumentError`.
+`hyphens: auto` hyphenates by it. `title` is the page's `<title>`. Left at
+`nothing`, each takes the `__lang__` / `__title__` that a struct on the
+route's mount chain declares (the innermost declaration wins), so a subtree
+can give its own pages a language and title the root's shell does not know;
+with neither, the page has no `lang` attribute and no `<title>`. A string that
+is not a language tag, or a title that is not a non-empty string, throws an
+`ArgumentError`, and so does a title alongside an `h.title` in `extra_head` (a
+page has one `<title>`).
 `sse_version` is htmx's SSE extension, which [`sse_region`](@ref) needs; it
 loads only alongside the shell's own htmx (an extension must follow htmx).
 `ws_version` is htmx's WebSocket extension, which `@ws` routes need on the
@@ -2961,8 +2967,18 @@ function htmx(args...;
     treebars_assets     = true,
     error_texts         = nothing,
     lang                = nothing,
+    title               = nothing,
 )
     _check_assets_mode(assets)
+    declared = _page_meta()
+    isnothing(lang) && (lang = declared.lang)
+    isnothing(title) && (title = declared.title)
+    titles = _title_nodes(title)
+    isempty(titles) || (any(_is_title_node, extra_head) && throw(ArgumentError(string(
+        "htmx: the page has a title (", repr(title), ", from `title=` or a `__title__` ",
+        "declaration) and `extra_head` carries an `h.title` as well; a page has one ",
+        "<title>. Drop the `h.title` from `extra_head` and set the app's default ",
+        "title as `__title__` on the root struct, or pass it as `title=`."))))
     mount = _runtime_mount(runtime, assets)
     versioned = !isnothing(mount)
     cdn = []
@@ -2989,6 +3005,7 @@ function htmx(args...;
             h.meta(charset="utf-8"),
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
             h.meta(name="color-scheme", content="light dark"),
+            titles...,
             cdn...,
             # Theme defaults: declared at zero specificity inside `@layer htmxo`
             # so any subsequent `:root { --htmxo-...: ... }` (host-supplied or
@@ -3058,8 +3075,57 @@ _lang_attrs(lang::AbstractString) = occursin(_HTML_LANG, lang) ? (; lang=String(
 _lang_attrs(lang) = throw(ArgumentError(string(
     "htmx: lang must be a BCP 47 language tag string such as \"de\", or nothing; got ", repr(lang))))
 
+# The page's `<title>`: none without one, so an untitled page is unchanged.
+_title_nodes(::Nothing) = ()
+_title_nodes(title::AbstractString) = isempty(title) ?
+    throw(ArgumentError("htmx: title must be a non-empty string, or nothing for no <title>; got \"\"")) :
+    (h.title(String(title)),)
+_title_nodes(title) = throw(ArgumentError(string(
+    "htmx: title must be a non-empty string, or nothing for no <title>; got ", repr(title))))
+_is_title_node(node) = node isa Node && HTMX.tag(node) === :title
+
+# The page's language and title as the route's mount chain declares them:
+# `__lang__` / `__title__` on any struct from the root to the leaf, the
+# innermost declaration winning, so a subtree mounted under an English root
+# can make its own pages German. The shell reads them as its `lang` / `title`
+# defaults. A dynamic scope rather than keywords, because the shell is a plain
+# function that the root's `__page__` calls, and neither sees the leaf; the
+# response handler sets it around the whole answer, error page included.
+const _PAGE_META = :htmxo_page_meta
+const _NO_PAGE_META = (; lang=nothing, title=nothing)
+
+_page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
+_with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
+
+# Read and checked before the route body runs, so a bad declaration is the
+# route's error, named after its struct, rather than a failure inside the shell.
+function _page_meta_of(objects)
+    lang = title = nothing
+    for obj in objects
+        declared = _page_declaration(obj, :__lang__)
+        isnothing(declared) || (lang = _page_lang_value(obj, declared))
+        declared = _page_declaration(obj, :__title__)
+        isnothing(declared) || (title = _page_title_value(obj, declared))
+    end
+    (; lang, title)
+end
+
+_page_declaration(obj, name) = hasproperty(obj, name) ? getproperty(obj, name) : nothing
+
+_page_lang_value(obj, lang::AbstractString) = occursin(_HTML_LANG, lang) ? String(lang) :
+    _page_declaration_error(obj, :__lang__, "a BCP 47 language tag such as \"de\" or \"de-CH\"", lang)
+_page_lang_value(obj, lang) =
+    _page_declaration_error(obj, :__lang__, "a BCP 47 language tag string such as \"de\"", lang)
+_page_title_value(obj, title::AbstractString) = isempty(title) ?
+    _page_declaration_error(obj, :__title__, "a non-empty string", title) : String(title)
+_page_title_value(obj, title) = _page_declaration_error(obj, :__title__, "a non-empty string", title)
+
+_page_declaration_error(obj, name, wanted, got) = throw(ArgumentError(string(
+    "`", name, "` on ", nameof(typeof(obj)), " must be ", wanted,
+    ", or nothing to keep the enclosing page's; got ", repr(got))))
+
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing, lang=nothing)
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing, lang=nothing, title=nothing)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -3070,18 +3136,20 @@ Pico-CSS HTML page. Replaces the repeated boilerplate
 with
 
     __page__(content) = pico_page(content)
-    # or with extras:
-    __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
+    # or with a title:
+    __page__(content) = pico_page(content; title="My App")
 
-`assets`, `runtime`, `error_texts` and `lang` forward to [`htmx`](@ref): `pico_page(content;
+`assets`, `runtime`, `error_texts`, `lang` and `title` forward to [`htmx`](@ref): `pico_page(content;
 assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
 page (vendor mode needs pico at its exact pin, not the floating `"2"`
 default), and adding `runtime=:linked` makes its whole head cacheable.
 `pico_page(content; lang="de", error_texts=__error_texts__)` is a German page.
+Left out, `lang` and `title` come from the route's `__lang__` / `__title__`
+declarations, as for [`htmx`](@ref).
 """
 pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline,
-        error_texts=nothing, lang=nothing) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts, lang)
+        error_texts=nothing, lang=nothing, title=nothing) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts, lang, title)
 
 # --- Route registration and recording ---
 
@@ -4084,9 +4152,44 @@ markdown_node(::MarkdownRenderer, ::CommonMark.DisplayMath, n, rules, context) =
 # injected into the page. A bare `String` child renders escaped, so inline
 # HTML stays visible literal text and block HTML shows as a source block.
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlInline, n, rules, context) =
-    n.literal
+    _md_html_inline(n)
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlBlock, n, rules, context) =
     h.pre(n.literal)
+
+# The one exception is an empty link target, `<span id="X"></span>` or
+# `<a id="X"></a>`: Markdown has no syntax for an element id, so inline HTML is
+# how an author names the destination of a `[text](#X)` link (BRM model
+# descriptions mark their prior-table rows this way). The parser hands over
+# the two tags as adjacent `HtmlInline` nodes. Only that exact pair, with no
+# other attribute and an id made of a letter and then letters, digits, `_` or
+# `-`, becomes an empty element; every other tag stays escaped text. The
+# opening node renders the element, for the HTML peer only; the closing node
+# writes both tags back as they were, for the Markdown projection only, where
+# Pandoc reads them as a labelled span. An `<a>` target inside a link stays
+# text, because an `<a>` inside an `<a>` is invalid HTML.
+const _MD_ID_TARGET = r"^<(span|a) id=\"([A-Za-z][A-Za-z0-9_-]*)\">$"
+
+_md_html_inline_at(n::CommonMark.Node) =
+    n !== CommonMark.NULL_NODE && n.t isa CommonMark.HtmlInline
+
+# The target's opening tag, or `nothing` when `open`/`close` are not one.
+function _md_id_target(open::CommonMark.Node, close::CommonMark.Node)
+    (_md_html_inline_at(open) && _md_html_inline_at(close)) || return nothing
+    m = match(_MD_ID_TARGET, open.literal)
+    (isnothing(m) || close.literal != "</$(m[1])>") && return nothing
+    m[1] == "a" && _md_in_link(open) && return nothing
+    m
+end
+
+function _md_html_inline(n::CommonMark.Node)
+    target = _md_id_target(n, n.nxt)
+    isnothing(target) ||
+        return html_only(getproperty(h, Symbol(target[1]))(; id=String(target[2])))
+    if isdefined(n, :prv) && !isnothing(_md_id_target(n.prv, n))
+        return markdown_only(n.prv.literal * n.literal)
+    end
+    n.literal
+end
 
 # Loud fallback (dev §1 / §4.5): an unhandled node kind warns and still
 # renders its children, so prose is surfaced, never silently dropped.
@@ -4160,6 +4263,12 @@ instances (like `CommonMark.TableRule()`) beyond the stock ones.
 The `?plain` projection stays faithful: rules and overrides build ordinary
 nodes, which the tag-dispatched markdown serializer projects back
 (`h.a` → `[text](url)`, emphasis → `*text*`, and so on).
+
+Raw HTML stays escaped text, except an empty link target:
+`<span id="X"></span>` or `<a id="X"></a>`, with no other attribute and an id
+of a letter followed by letters, digits, `_` or `-`, renders as that empty
+element, so a `[text](#X)` link reaches it. The Markdown projection writes the
+tags back as written.
 
 Two deliberate cuts: a rule sees
 escape-RESOLVED text (a `\\\\` marker is zero-width, so `\\\\#12` and `#12` are
@@ -11805,13 +11914,16 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                 !(preload && _preloadable_request(req, verb_inst))
             return _preload_skipped_response()
         end
-        local context, root, leaf, root_target
+        local context, root, leaf, root_target, page_meta
         try
             provider = get(_root_providers, RootT, root_provider)
             root_target = _operation_target(provider, RootT, Symbol[], req,
                                             root_prefix, root_segs, :http)
             context = root_target.context
             root = root_target.root
+            # The root's `__lang__` / `__title__` hold for an answer whose mount
+            # chain cannot be walked; the full chain refines them below.
+            page_meta = _page_meta_of(Any[root])
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -11822,7 +11934,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             catch err
                 bt = catch_backtrace()
                 page_chain = _has_page(root) ? Any[root] : Any[]
-                return _route_error_response(req, err, bt; error_obj=root, page_chain)
+                return _with_page_meta(page_meta) do
+                    _route_error_response(req, err, bt; error_obj=root, page_chain)
+                end
             end
         else
             leaf = root
@@ -11831,6 +11945,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         try
             objects = isempty(chain) ? Any[root] :
                       _chain_steps(root, chain, req, root_segs)
+            page_meta = _page_meta_of(objects)
             target = merge(root_target, (; leaf, objects, chain,
                                            root_segs, request=req))
             # In-process callers (`dispatch`) thread a Treebars progress
@@ -11852,13 +11967,14 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
 
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
-                return _stamp_operation_headers(req, _resolve_response_nested(page_chain, req, val;
-                                                root, record_dir, save_path, record_base),
-                                                running)
+                return _stamp_operation_headers(req, _with_page_meta(page_meta) do
+                        _resolve_response_nested(page_chain, req, val;
+                                                 root, record_dir, save_path, record_base)
+                    end, running)
             else
-                return _stamp_operation_headers(req, _resolve_response(leaf, req, val;
-                                                record_dir, save_path, record_base),
-                                                running)
+                return _stamp_operation_headers(req, _with_page_meta(page_meta) do
+                        _resolve_response(leaf, req, val; record_dir, save_path, record_base)
+                    end, running)
             end
         catch err
             # Both are export-contract failures the caller must see at the
@@ -11868,7 +11984,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             page_chain = is_included ?
                 _collect_page_chain(root, chain, req, root_segs) :
                 (_has_page(leaf) ? Any[leaf] : Any[])
-            return _route_error_response(req, err, bt; error_obj=leaf, page_chain)
+            return _with_page_meta(page_meta) do
+                _route_error_response(req, err, bt; error_obj=leaf, page_chain)
+            end
         end
     end; resume_only)
 end
@@ -14905,6 +15023,11 @@ const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "
 # `file:` URL or a relative path that leaves `resources`.
 const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-images.lua")
 
+# Quarto's Typst template justifies the whole document, tables included, and
+# Typst then hyphenates them; these rules set table cells ragged-right and
+# hyphenate only a word wider than its column.
+const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
+
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
 # German report `de-US`.
@@ -15008,6 +15131,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
     $(_pdf_report_front_matter(metadata, lang))format:
       typst:
         pdf-standard: [ua-1]
+        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST))]
     filters:
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
@@ -15057,11 +15181,13 @@ Quarto would let it override `title`, `lang` and the equation filter.
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
 filter that gives every equation its TeX source as alt text. Typographic quotes
 read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
-become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Every image needs
-alt text: Typst refuses a PDF/UA document with an image that has none. A
-Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
-supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
-Typst 0.15.1).
+become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Tables are set
+ragged-right, while the body text stays justified: a word in a table cell is
+hyphenated only when it is wider than its column, and code never is. Every
+image needs alt text: Typst refuses a PDF/UA document with an image that has
+none. A Quarto program (`quarto`, found on `PATH` or given as a path) whose
+Typst supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its
+bundled Typst 0.15.1).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
