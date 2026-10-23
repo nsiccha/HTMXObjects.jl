@@ -667,12 +667,6 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
 - **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
   Without one, Quarto's template labels the document with the region `US`.
   Mark a part in another language with a `::: {lang="en"}` block in Markdown.
-- **Quotes:** typographic quotes read as written: `„Titel“`, `‚Wort‘` and
-  `“title”` stay those characters in the PDF, as in the page. Straight quotes
-  (`"Titel"`, `'Wort'`) become the quotes of `lang`, so `„Titel“` in a
-  `de-DE` report. A bundled filter does this: Pandoc's Typst writer alone
-  turns `“ ” ‘ ’` into straight quotes, so a German `„Titel“` came out
-  `„Titel„` and `‚Wort‘` came out `‚Wort’`.
 - **`resources`** is the directory relative paths (images) resolve against; it
   defaults to the PDF's directory. `pdf_report` removes its temporary `.qmd`,
   Quarto's intermediate files and the `.quarto` cache from it, also on failure.
@@ -683,6 +677,12 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
   whose image has no alt text.
+- **Quotes:** typographic quotes read as written: `„Titel“`, `‚Wort‘` and
+  `“title”` stay those characters in the PDF, as in the page. Straight quotes
+  (`"Titel"`, `'Wort'`) become the quotes of `lang`, so `„Titel“` in a
+  `de-DE` report. A bundled filter does this: Pandoc's Typst writer alone
+  turns `“ ” ‘ ’` into straight quotes, so a German `„Titel“` came out
+  `„Titel„` and `‚Wort‘` came out `‚Wort’`.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense

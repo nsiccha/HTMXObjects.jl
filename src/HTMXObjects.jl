@@ -14373,14 +14373,14 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 
 # --- Accessible PDF export ---
 
-# Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
-# this Quarto filter gives each one its TeX source.
-const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
-
 # Pandoc's Typst writer turns “ ” ‘ ’ into straight quotes for Typst to quote
 # by `lang`, so a German „…“ came out „…„; this filter, run last, passes them
 # to Typst as written.
 const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
+
+# Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
+# this Quarto filter gives each one its TeX source.
+const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
 
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
@@ -14404,9 +14404,9 @@ _pdf_report_qmd(markdown; title, lang) = """
       typst:
         pdf-standard: [ua-1]
     filters:
-      - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
+      - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
     ---
 
     """ * markdown

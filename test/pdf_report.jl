@@ -4,8 +4,7 @@ using TestItemRunner
     using HTMXObjects
 
     filter = HTMXObjects._PDFUA_MATH_ALT_FILTER
-    quotes = HTMXObjects._PDF_REPORT_QUOTES_FILTER
-    @test isfile(filter) && isfile(quotes)
+    @test isfile(filter)
     @test HTMXObjects._pdf_report_qmd("# Ergebnisse\n"; title="Bericht \"A\" \\ 2026", lang="de-DE") == """
         ---
         title: "Bericht \\"A\\" \\\\ 2026"
@@ -14,13 +13,14 @@ using TestItemRunner
           typst:
             pdf-standard: [ua-1]
         filters:
-          - $(HTMXObjects._yaml_string(filter))
-          - path: $(HTMXObjects._yaml_string(quotes))
+          - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
             at: post-render
+          - $(HTMXObjects._yaml_string(filter))
         ---
 
         # Ergebnisse
         """
+    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER)
 end
 
 @testitem "pdf_report checks its arguments before running Quarto" tags=[:unit] begin
