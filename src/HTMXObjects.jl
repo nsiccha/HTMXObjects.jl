@@ -27,7 +27,7 @@ export decorated_link
 export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
-export hx_link, htmx_or
+export hx_link, htmx_or, modifier_click_script
 export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
@@ -2764,6 +2764,7 @@ _runtime_blocks() = (
     comparison = (:js, comparison_js),
     stream_probe = (:js, stream_probe_script),
     redirect_history = (:js, redirect_history_script),
+    modifier_click = (:js, modifier_click_script),
     live_region = (:js, live_region_script),
     treebars_styles = (:css, () -> _polling_page_asset(1)),
     treebars_script = (:js, () -> _polling_page_asset(2)),
@@ -2876,7 +2877,9 @@ loads only alongside the shell's own htmx (an extension must follow htmx).
 client (a `ws-connect` element); it loads only alongside the shell's own
 htmx for the same reason. The shell always carries [`stream_probe_script`](@ref),
 so a ws or sse stream refused by an auth gateway reloads the page on the
-gateway's `HX-Refresh` instead of reconnecting forever.
+gateway's `HX-Refresh` instead of reconnecting forever. It also carries
+[`modifier_click_script`](@ref): a Ctrl/Cmd- or Shift-click on an htmx link
+with a real `href` opens that address in a new tab or window, as on any link.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
 `error_texts`, an [`ErrorTexts`](@ref) such as `error_texts(:de)`, is the
@@ -3016,6 +3019,9 @@ function htmx(args...;
                 # A followed redirect records its destination where an
                 # `hx-push-url` names the requested page; inert otherwise.
                 :redirect_history,
+                # A Ctrl/Cmd- or Shift-click on an htmx link opens its `href`
+                # in a new tab or window, as on any link; inert otherwise.
+                :modifier_click,
                 # Discover-mode live regions keep one reconnecting stream behind
                 # this runtime; inert on pages without one.
                 :live_region,
@@ -4786,6 +4792,23 @@ _strip_md_chrome(c::_LabelledControl) = _strip_md_chrome(c.control)
 _strip_md_chrome_child(c::_LabelledControl) = _strip_md_chrome_child(c.control)
 _rescue_semantic!(out, c::_LabelledControl) = _rescue_semantic!(out, c.control)
 
+# A `detail-<key>` companion row in a `sortable_table` body. HTML (and HXML)
+# write the row; Markdown writes nothing, with every serializer: HTMX.jl's
+# table writer makes a pipe-table line of each `<tr>` child of a `<tbody>` and
+# skips anything else, so a consumer's own `show(io, MIME"text/markdown"(), x)`
+# leaves the companion out too. A master/detail table writes its eager details
+# after the table instead (`_MDDetailsMarkdown`). `?error` and static export see
+# through to the row.
+struct _MDCompanionRow
+    row::Node
+end
+Base.show(io::IO, m::MIME"text/html", c::_MDCompanionRow) = show(io, m, c.row)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", c::_MDCompanionRow) =
+    show(io, m, c.row)
+Base.show(::IO, ::MIME"text/markdown", ::_MDCompanionRow) = nothing
+filter_errors(c::_MDCompanionRow) = filter_errors(c.row)
+_filter_errors_child(c::_MDCompanionRow) = _filter_errors_child(c.row)
+
 
 """
     _save_typed_response(record_dir, url_path, response)
@@ -4813,6 +4836,15 @@ function _save_typed_response(record_dir::String, url_path::String, response::HT
     save_response(record_dir, url_path, response; ext)
 end
 
+# The file a recording writes for `url_path`, as a path below the recording's
+# root: the path plus `ext`, except that a trailing slash means "directory
+# entry", so `/foo/` and `/` (and an empty path) map to an `index<ext>` in the
+# matching directory. Without that, `/hx/` would become `hx/<ext>`, which a
+# static server cannot serve. A recorded `hx-get` names the same file
+# (`_recorded_fragment_url`).
+_record_file_path(url_path::AbstractString, ext::AbstractString) =
+    isempty(url_path) || endswith(url_path, '/') ? url_path * "index" * ext : url_path * ext
+
 """
     save_response(record_dir, url_path, response; ext=".html")
 
@@ -4823,19 +4855,7 @@ static file server. Pass `ext=".md"` for markdown recordings (under the
 the extension from the response's Content-Type.
 """
 function save_response(record_dir::String, url_path::String, response::HTTP.Response; ext::String=".html")
-    rel = lstrip(url_path, '/')
-    # Trailing slash means "directory entry" — the URL `/foo/` and `/` both
-    # map to a synthetic `index<ext>` under the matching directory. Without
-    # this, `/hx/` becomes `hx/<ext>`, which is wrong (server can't serve it
-    # cleanly and `cleanUrls` defeats it).
-    file = if isempty(rel)
-        "index" * ext
-    elseif endswith(rel, '/')
-        rel * "index" * ext
-    else
-        rel * ext
-    end
-    dest = joinpath(record_dir, file)
+    dest = joinpath(record_dir, lstrip(_record_file_path(url_path, ext), '/'))
     _guard_record_destination!(record_dir, dest)
     mkpath(dirname(dest))
     body = response.body
@@ -5038,15 +5058,17 @@ end
 """
 static_export(req::HTTP.Request) = get(req.context, :htmxo_static_export, nothing)
 
-# Who names the file of each value a `url_params` element declares: the spec's
-# `url_map` for a request-scoped export, the recording rule for `record!`.
+# Who names the file of each value a `url_params` element declares, and of an
+# unmapped rooted `hx-get`: the spec's `url_map` and default rule for a
+# request-scoped export, the recording rule (the file `record!` writes) for a
+# recording.
 struct _MappedVariants end
 struct _RecordedVariants end
 
 # What a static walk consults: the spec, the rooted `hx-get` paths a static
 # server cannot vary by query — `route!`'s recording registry for the recording
 # form of `static_transform`, nothing for a request-scoped export — and who
-# names a declared URL parameter's files.
+# names the files of a declared URL parameter's values and of fragments.
 struct _StaticRules{S<:StaticExport,V}
     spec::S
     unservable::Set{String}
@@ -5107,7 +5129,8 @@ html_escape(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;"
 
 Walk a Node tree and make it static-safe under `rules`:
 - `hx-get`, `href`, `src`: a `url_map` target replaces the value verbatim;
-  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`)
+  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`; in a
+  recording, the fragment file it records, `<record_base>/hx/<path>.html`)
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
 - Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
   routes) or names one of `rules.unservable` (kwargs routes)
@@ -5321,8 +5344,25 @@ _static_variant_target(rules::_StaticRules{<:StaticExport,_MappedVariants}, addr
     _static_url_target(rules.spec, address)
 _static_variant_target(rules::_StaticRules{<:StaticExport,_RecordedVariants}, address) =
     _record_variant!(address) ?
-        rstrip(rules.spec.record_base, '/') * "/hx" * replace(_record_variant_save_path(address), "%" => "%25") * ".html" :
+        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address)) :
         nothing
+
+# The address of the fragment a recording saves for `save_path`: the file
+# `save_response` writes below `hx/`, under `record_base` (empty: the site
+# root). A `%` in the path is part of the file's name, so it is escaped for
+# the static server that decodes the address.
+_recorded_fragment_url(record_base::AbstractString, save_path::AbstractString) =
+    rstrip(record_base, '/') * replace(_record_file_path("/hx" * save_path, ".html"), "%" => "%25")
+
+# What an unmapped, servable `hx-get` becomes: for a request-scoped export the
+# default rule (`record_base` and `/hx` before a rooted address); for a
+# recording the file it records for that address, so the bundle loads it from
+# any static server, not only from one that serves `/foo` as `foo.html`.
+_static_hx_url(rules::_StaticRules{<:StaticExport,_MappedVariants}, url) =
+    _rewrite_hx_url(url, rules.spec.record_base)
+_static_hx_url(rules::_StaticRules{<:StaticExport,_RecordedVariants}, url) =
+    startswith(url, "/") && !startswith(url, "//") ?
+        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(url)) : url
 
 # A recorded `url_params` value's file, below the recording's `hx/`: its
 # path, then `@` and its query, so each value has its own file beside the
@@ -5406,7 +5446,7 @@ function _static_walk(node::Node, rules::_StaticRules)
 
     # A mapped `hx-get` takes the caller's target verbatim. An unmapped one
     # with a query string or pointing to a kwargs route is removed; otherwise
-    # it is rewritten to the recorded-fragment subtree under `record_base`.
+    # it names its fragment under `record_base` (`_static_hx_url`).
     if !isnothing(own)
         new_attrs[hx_get_sym] = own
     elseif haskey(new_attrs, hx_get_sym)
@@ -5418,7 +5458,7 @@ function _static_walk(node::Node, rules::_StaticRules)
             delete!(new_attrs, hx_get_sym)
             unservable = true
         else
-            new_attrs[hx_get_sym] = _rewrite_hx_url(url, spec.record_base)
+            new_attrs[hx_get_sym] = _static_hx_url(rules, url)
         end
     end
 
@@ -5469,6 +5509,11 @@ function _static_walk(c::_LabelledControl, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
 end
 _static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
+function _static_walk(c::_MDCompanionRow, rules::_StaticRules)
+    walked = _static_walk(c.row, rules)
+    walked === _STATIC_REMOVED ? walked : _MDCompanionRow(walked)
+end
+_static_walk_child(c::_MDCompanionRow, rules) = _static_walk(c, rules)
 # A semantic element has no attributes until its HTML peer is built, so the
 # export walks that peer: a `SemanticLink`'s `href` (`external=true` included),
 # a `SemanticAction`'s `hx-get`, prose links, and every element a semantic
@@ -5521,12 +5566,13 @@ pages only).
 The keyword form is the recording form used by `record!` / `route!(;
 record_dir)`: it also strips `hx-get` addresses naming a kwargs route that
 recording registered. `record_base` is the URL prefix where the recording
-will be served (e.g. `/HTMXObjects.jl/dev/examples/counter`). Each rooted
-`hx-get="/foo"` becomes `hx-get="<record_base>/hx/foo"` so HTMX-driven
-sub-fetches resolve to the recorded fragment under
-`<record_dir>/hx/foo.html`. Empty `record_base` (default) skips rewriting —
-useful when recording for a root-served deployment, though that's rare in
-practice.
+will be served (e.g. `/HTMXObjects.jl/dev/examples/counter`); empty (the
+default) means the site root. Each rooted `hx-get="/foo"` names the fragment
+file the recording writes, `hx-get="<record_base>/hx/foo.html"` (`/foo/`:
+`<record_base>/hx/foo/index.html`), so HTMX-driven sub-fetches load the
+recorded fragment `<record_dir>/hx/foo.html` from any static server,
+including one that does not serve `/foo` from `foo.html`. Rooted
+`href`/`src` addresses gain `record_base` and keep their path as written.
 
 The [`StaticExport`](@ref) form reads nothing but the spec — its `url_map`,
 `controls`, and `record_base` — and is what `dispatch(...; static=spec)`
@@ -5570,7 +5616,9 @@ _preload_attrs(preload::Union{AbstractString,Symbol}) = (preload=String(preload)
     hx_link(url; preload=nothing, kwargs...)
 
 Create an `h.a` with both `href` and `hx-get` set to `url`. Extra kwargs
-(`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`.
+(`hx_target`, `hx_swap`, `class`, etc.) are forwarded to `h.a`. A click swaps
+in place; a Ctrl/Cmd-, Shift- or middle-click opens `url` in a new tab or
+window (on an [`htmx`](@ref) page, see [`modifier_click_script`](@ref)).
 
 `preload=true` fetches the link's target when the pointer rests on it (a string
 such as `"mousedown"` picks another trigger of htmx's
@@ -7642,6 +7690,56 @@ redirect_history_script() = h.script(Raw(raw"""
     var search = recorded.search === requested.search ? landed.search : recorded.search;
     history.path = landed.pathname + search + recorded.hash;
   });
+})();
+"""))
+
+"""
+    modifier_click_script()
+
+Client runtime that gives Ctrl-, Cmd- and Shift-clicks on htmx links back to
+the browser. htmx takes over every click on an `<a href>` that carries
+`hx-get` (or another request attribute), modifier clicks included, and swaps
+in place; its own exemption covers only Ctrl/Cmd-clicks on boosted links. With
+this runtime, a Ctrl/Cmd- or Shift-click on such a link — as
+[`nav_sidebar`](@ref), [`htmxo_breadcrumb`](@ref) and [`hx_link`](@ref)
+render — opens its `href` in a new tab or window and leaves the page as it
+is: no request, no swap, no history entry. The click stops before any of the
+link's own click handlers (such as `nav_sidebar`'s active-link highlight). A
+plain click still swaps in place, and a middle-click, which htmx never sees,
+still opens the `href`.
+
+Left to htmx: links without an `href`, an `href` of `#…` or `javascript:`, a
+link whose `hx-trigger` does not name `click`, and a click whose default an
+earlier handler already prevented.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+modifier_click_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoModifierClick) return;
+  window.htmxoModifierClick = true;
+  var REQUEST = ['get', 'post', 'put', 'patch', 'delete'].map(function (verb) {
+    return '[hx-' + verb + '],[data-hx-' + verb + ']';
+  }).join(',');
+  // htmx prevents the default of a click on a link it requests from before any
+  // `hx-trigger` filter runs. Seen first (capture phase on the document), a
+  // click that asks for a new tab or window stops here and keeps its default.
+  document.addEventListener('click', function (e) {
+    if (!(e instanceof MouseEvent) || e.defaultPrevented) return;
+    if (!(e.ctrlKey || e.metaKey || e.shiftKey || e.button > 0)) return;
+    var link = e.target instanceof Element ? e.target.closest('a[href]') : null;
+    if (!link) return;
+    var href = link.getAttribute('href').trim();
+    if (href === '' || href.charAt(0) === '#' || /^javascript:/i.test(href)) return;
+    // htmx cancels a click for the link itself or an element inside it.
+    var source = e.target.closest(REQUEST);
+    if (!source || !link.contains(source)) return;
+    var trigger = source.getAttribute('hx-trigger') || source.getAttribute('data-hx-trigger');
+    if (trigger && !/(^|[\s,])click\b/.test(trigger)) return;
+    e.stopImmediatePropagation();
+  }, true);
 })();
 """))
 
@@ -14006,6 +14104,15 @@ default `:auto` policy would answer with a Treebars poller — and a poller
 written to disk has nothing to poll. Static export wants the finished HTML.
 Returns `app`.
 
+`record_base` is the URL prefix the recording will be served under (empty:
+the site root). A recorded `hx-get="/foo"` names the fragment file the
+`hx=true` variant writes, `<record_base>/hx/foo.html`, so a lazy part (a
+`tabset` URL tab, an `hx_link` target) loads on any static server once its
+path is among `paths`. Links between pages (`href`, `hx-push-url`) keep the
+recorded page's path, `<record_base>/foo`: following one needs a host that
+serves `/foo` from `foo.html` (GitHub Pages does; `python -m http.server`
+does not).
+
 Distinct requested paths that resolve to the same output file are rejected
 with an error before the later response can overwrite the earlier recording.
 
@@ -16960,6 +17067,10 @@ The JS reads the closest `<table>` relative to the clicked button, serializes th
 visible header cells and body rows to CSV (escaping `"`, `,`, and newlines), and
 triggers a Blob download. A header exports its column name only: the sort
 indicator arrows (` ▲`/` ▼`) and a [`ColumnSpec`](@ref)'s `ⓘ` marker are left out.
+A cell exports the lines it shows: a `<br>` or the edge of a block element (`div`,
+`p`, `li`, …) ends a line, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))`
+exports the quoted two-line field `"6,28\\n6,01–6,55"`, not `6,286,01–6,55`. A header's lines
+join with a space, since a column name stays one name.
 """
 function download_table_js()
     h.script(Raw(raw"""
@@ -16970,12 +17081,32 @@ function downloadTableCsv(btn, filename) {
         s = String(s);
         return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
+    // The lines a cell shows. textContent runs them together
+    // (`<strong>6,28</strong><br><small>6,01–6,55</small>` reads
+    // "6,286,01–6,55"), so a `<br>` and the edges of a block element end a
+    // line, and white space inside a line collapses as the browser shows it.
+    const BLOCK = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|SUMMARY|TABLE|TR|UL)$/;
+    const lines = node => {
+        let out = '';
+        const walk = n => {
+            for (const c of n.childNodes) {
+                if (c.nodeType === Node.TEXT_NODE) out += c.nodeValue.replace(/\s+/g, ' ');
+                else if (c.nodeType !== Node.ELEMENT_NODE) continue;
+                else if (c.tagName === 'BR') out += '\n';
+                else if (BLOCK.test(c.tagName)) { out += '\n'; walk(c); out += '\n'; }
+                else walk(c);
+            }
+        };
+        walk(node);
+        return out.split('\n').map(l => l.trim()).filter(l => l);
+    };
     // A header's column name: its sort caret and explanation marker are
-    // presentation, not part of the name.
+    // presentation, not part of the name, and a name shown on two lines is
+    // still one name.
     const name = th => {
         const copy = th.cloneNode(true);
         copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help').forEach(e => e.remove());
-        return copy.textContent.trim();
+        return lines(copy).join(' ');
     };
     const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
     const groupNames = [];
@@ -16993,8 +17124,9 @@ function downloadTableCsv(btn, filename) {
             return esc(group ? group + ' / ' + name(th) : name(th));
         });
     // A master/detail first cell holds its row controls beside the content;
-    // export the content only, as sorting and search read it.
-    const text = td => (td.querySelector(':scope > [data-htmxo-row-label]') || td).textContent.trim();
+    // export the content only, as sorting and search read it. A cell's lines
+    // stay lines of one quoted field.
+    const text = td => lines(td.querySelector(':scope > [data-htmxo-row-label]') || td).join('\n');
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
         .map(tr =>
@@ -17281,7 +17413,9 @@ wrapper instead of widening the page.
 - `rows`: `Vector{<:Node}` of pre-built `h.tr(...)` rows. The caller controls
   every `<td>`, including `data-sort-value` for semantic sort keys (see
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
-  `id="detail-X"` for the paired-row pattern.
+  `id="detail-X"` for the paired-row pattern. A `detail-X` row is no row of
+  the Markdown table; [`master_detail_table`](@ref) writes eager details
+  after the table instead.
 - `header_groups`: optional `label => first:last` pairs for a two-row header,
   for example `["Primal" => 2:4, "Gradient" => 5:7]`. Each range spans at
   least two adjacent leaf columns and groups cannot overlap. Uncovered leaf
@@ -17514,9 +17648,11 @@ function sortable_table(headers, rows;
     grouped = isnothing(header_groups) ? nothing : _grouped_thead(th_nodes, header_groups)
     thead = isnothing(grouped) ? h.thead(h.tr(th_nodes...)) : first(grouped)
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
+    # A `detail-<key>` companion is no row of the Markdown table.
+    body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
     table_node = h.table(; class=table_class, role, link_attrs..., kwargs...)(
         thead,
-        h.tbody(rows...; body_attrs...),
+        h.tbody(body_rows...; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
@@ -17531,7 +17667,7 @@ function sortable_table(headers, rows;
             isnothing(label) && (label = strip(repr("text/markdown", th_nodes[i])))
             h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
         end
-        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(rows...))
+        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(body_rows...))
         h.div(; class="table-wrap")(html_only(table_node),
             markdown_only(repr("text/markdown", flat_table)))
     end
@@ -18190,6 +18326,41 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     (master, detail)
 end
 
+# The eager details of a master/detail table, which Markdown writes after the
+# table, since a `?plain` reader or a PDF cannot click a row open. Each detail
+# whose Markdown is not empty follows under its master row's label in bold, as
+# `SemanticDisclosure` writes a summary and its body. A lazy detail is not on
+# the page and writes nothing, like `lazy(url)`; a companion row is no row of
+# the table (`_MDCompanionRow`). HTML and HXML write nothing, and the Markdown
+# is built only when it is asked for.
+struct _MDDetailsMarkdown
+    details::Vector{Pair{Vector{Any},Any}}   # master row label => detail body
+end
+Base.show(::IO, ::MIME"text/html", ::_MDDetailsMarkdown) = nothing
+Base.show(::IO, ::MIME"application/vnd.hyperview+xml", ::_MDDetailsMarkdown) = nothing
+HTMX.markdown_block(::_MDDetailsMarkdown) = true
+function Base.show(io::IO, m::MIME"text/markdown", d::_MDDetailsMarkdown)
+    blocks = Any[]
+    for (label, body) in d.details
+        text = rstrip(lstrip(==('\n'), to_markdown_string(body)))
+        isempty(strip(text)) && continue
+        name = _md_label_text(label)
+        push!(blocks, isempty(name) ? text : SemanticDisclosure(name, Any[text]))
+    end
+    show(io, m, SemanticGroup(blocks))
+end
+
+# The words of a row label, without its markup: `**` around a link or a
+# `<strong>` would not read as one bold label.
+function _md_label_text(label)
+    io = IOBuffer()
+    _md_label_words!(io, _strip_md_chrome(h.span(label...)))
+    strip(replace(String(take!(io)), r"\s+" => " "))
+end
+_md_label_words!(io, x) = _semantic_show_leaf(io, MIME"text/markdown"(), x)
+_md_label_words!(io, x::Node) = HTMX.tag(x) === :br ? print(io, ' ') :
+    foreach(c -> _md_label_words!(io, c), HTMX.children(x))
+
 """
     master_detail_table(headers, items;
                         key, master, detail=nothing, detail_url=nothing,
@@ -18406,6 +18577,12 @@ than rendering every collapsed detail up front), pass `detail_url` — the
 proven single-flight + click-to-retry slot, no hand-rolled `htmx.ajax` glue
 or custom onclick needed. Without it, detail bodies are eager.
 
+In Markdown (`?plain`, `to_markdown_string`, [`pdf_report`](@ref)) the table
+holds the master rows only. Each eager detail whose Markdown is not empty
+follows the table (a captioned table's figure) under its row's label in bold,
+in row order, once per item; an `html_only` detail and a lazy one write
+nothing. See *Details in Markdown* in `docs/src/components.md`.
+
 Include [`sortable_table_js`](@ref) on the page (which also brings in
 the master/detail hover + detail-cell reset rules via
 [`sortable_table_styles`](@ref)). The rows' click and lazy-load handlers are
@@ -18446,6 +18623,7 @@ function master_detail_table(headers, items;
                              _level_marks::Bool=false,
                              _max_level::Int=0,
                              _update_scope=nothing,
+                             _detail_key=key,
                              texts::TableTexts=_EN_TABLE_TEXTS,
                              kwargs...)
     # Refused: a link key with no link group would highlight nothing.
@@ -18485,6 +18663,10 @@ function master_detail_table(headers, items;
     placed = Pair{String,Tuple{String,String}}[]
     # The leaves of lazy branches, which the search count counts unloaded.
     pending = String[]
+    # The eager details Markdown writes after the table, each item's once
+    # (`_detail_key`: a leaf listed under several groups is one item).
+    details = Pair{Vector{Any},Any}[]
+    detailed = Set{String}()
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
         descendants = isnothing(children) ? () : children(item)
@@ -18564,6 +18746,10 @@ function master_detail_table(headers, items;
         controls = Any[]
         trailing_controls = Any[]
         label = Any[HTMX.children(first_cell)...]
+        if !isnothing(body) && isnothing(url) && !(string(_detail_key(item)) in detailed)
+            push!(detailed, string(_detail_key(item)))
+            push!(details, label => body)
+        end
         if branch && branches_collapsible
             # An update names the child rows it renders; the runtime then
             # recomputes the list from the rows on the page.
@@ -18644,7 +18830,12 @@ function master_detail_table(headers, items;
     table = sortable_table(headers, rows; table_attrs..., texts, link, _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
-    # controls every master/detail table now carries.
+    # controls every master/detail table now carries. A narrow first column
+    # must not break between those controls and the label: the cell does not
+    # wrap, only the label's text (or its label button's) does, and
+    # `text-wrap-mode` leaves an app's `white-space` collapsing alone. Engines
+    # disagree on which style governs a break beside an atomic button, so a
+    # control after the label and a glyph before it are joined by U+2060.
     rules = """
     [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle] { width: auto; margin: 0 .35em 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: inherit; vertical-align: baseline; }
     [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
@@ -18672,20 +18863,23 @@ function master_detail_table(headers, items;
     [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
     tr[aria-busy="true"] [data-htmxo-tree-toggle] { cursor: progress; opacity: .6; }
     [data-htmxo-row-label] > [data-htmxo-tree-label] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; text-align: start; white-space: normal; font: inherit; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸"; display: inline-block; margin-right: .35em; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾"; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸\\2060"; margin-right: .35em; }
+    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾\\2060"; }
     [data-htmxo-row-label] > [data-htmxo-tree-label]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
     [data-htmxo-hierarchy] [data-htmxo-row-label] > [data-htmxo-detail-toggle] { color: inherit; text-decoration: none; font: inherit; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸"; display: inline-block; margin-right: .35em; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾"; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸\\2060"; margin-right: .35em; }
+    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾\\2060"; }
     [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
     td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
     td > button[data-htmxo-disclosure]:hover { color: var(--pico-primary, LinkText); }
     td > button[data-htmxo-disclosure]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    td:has(> [data-htmxo-row-label]) { text-wrap-mode: nowrap; }
+    td > [data-htmxo-row-label]:not(:has(> [data-htmxo-label])) { text-wrap-mode: wrap; }
+    td > [data-htmxo-row-label]:has(+ button)::after { content: "\\2060"; }
     """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
                   for level in 2:max(max_level[], _max_level)), "\n")
-    table = h.div(h.style(Raw(rules)), table)
+    table = h.div(h.style(Raw(rules)), table, (isempty(details) ? () : (_MDDetailsMarkdown(details),))...)
     # A hierarchy always carries the (possibly hidden) search scaffold: its
     # branch toggles and the search share one visibility pass.
     tools = Any[_toolbar...]
@@ -19221,6 +19415,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
+        _detail_key = x -> x isa _MDGroup ? gid(x.path) : string(key(x.item)),
         update_rows = update ? rendered : nothing,
         # A leaf is linked by its `link_key` (default: its own key), under
         # whichever group it is listed; a group row has none.
@@ -23111,21 +23306,24 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
    triggering element (core `requestClass` — no HTMXObjects JS needed), so
    this rule fires on every page carrying this block, including hand-built
    shells that skip `request_feedback()`. `cursor: progress` plus a subtle
-   dim, in plain literals so it holds without `htmxo_theme()`. Pollers
-   (`hx-trigger` containing `every`) are background work, not user-triggered
-   feedback, so they keep their resting style — the same exclusion the
-   `request_feedback` script applies.
+   dim, in plain literals so it holds without `htmxo_theme()`. Requests the
+   page sends by itself — pollers (`hx-trigger` containing `every`) and
+   elements whose trigger is `load` (lazy fragments), `revealed` or
+   `intersect` — keep their resting style: the reader started nothing. The
+   `request_feedback` script applies the same exclusion per request; CSS sees
+   only the attribute, so a trigger list counts as `load` when it begins with
+   it.
    INTENTIONALLY UNLAYERED: Pico styles `<button>` (and other controls)
    unlayered, and an unlayered declaration beats every layered one
    regardless of specificity — inside `@layer htmxo` the cursor would never
    apply on buttons (the opacity would, Pico sets none). The resting `[hx-*]`
    rule above stays layered: at rest it agrees with Pico's `pointer`, so
    there is nothing to beat. */
-[hx-get]:not([hx-trigger*="every"]).htmx-request,
-[hx-post]:not([hx-trigger*="every"]).htmx-request,
-[hx-put]:not([hx-trigger*="every"]).htmx-request,
-[hx-patch]:not([hx-trigger*="every"]).htmx-request,
-[hx-delete]:not([hx-trigger*="every"]).htmx-request {
+[hx-get]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-post]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-put]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-patch]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request {
     cursor: progress;
     opacity: 0.7;
 }
@@ -23203,8 +23401,16 @@ an inherited `hx-target`, an extended selector such as `next .result`,
 `closest tr` or `find output`, an `htmx.ajax` target, and an `HX-Retarget`
 response all mark the element the response actually lands in. A target that an
 `outerHTML` swap has already replaced is marked through its same-id
-replacement; otherwise the requesting element's own `hx-target` CSS selector is
-used, then the requesting element itself.
+replacement, else through the elements the swap put in its place; otherwise the
+requesting element's own `hx-target` CSS selector is used, then the requesting
+element itself. The requesting element is the one that sent the request, never
+the ancestor htmx reports the request's end on once that element's own swap
+removed it.
+
+Only requests the reader started are marked. A request the page sends by
+itself — a poll (`hx-trigger` with `every`), a preload, or the requesting
+element's own `load`, `revealed` or `intersect` trigger (a `lazy` fragment, a deferred page's placeholder, a `tabset`'s shown lazy panel) — draws
+no outline; a failure among them still raises the shell's failure toast.
 
 Success and failure are read as [`toast_script`](@ref)'s
 `window.htmxoRequestOutcome` reads them, so the red flash and the shell's
@@ -23215,31 +23421,61 @@ flashes red for every request htmx does not report as successful.
 """
 request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
-    function getTarget(evt) {
-        var elt = evt.detail.elt;
+    // The element that sent the request. Once its own swap has removed it,
+    // htmx reports the request's end a second time on the closest ancestor
+    // still in the page, as `detail.elt`; the request config keeps the sender.
+    function requester(evt) {
+        var config = evt.detail.requestConfig;
+        return (config && config.elt) || evt.detail.elt;
+    }
+    // The elements an outerHTML swap put in place of its target, by request:
+    // htmx announces each with afterSwap before the request ends.
+    var replacements = new WeakMap();
+    document.body.addEventListener('htmx:afterSwap', function(e) {
+        var d = e.detail;
+        if (!d.xhr || !d.target || d.target.isConnected) return;
+        var list = replacements.get(d.xhr) || [];
+        list.push(e.target);
+        replacements.set(d.xhr, list);
+    });
+    function getTargets(evt) {
+        var elt = requester(evt);
         var resolved = evt.detail.target;
-        if (resolved && resolved.isConnected) return resolved;
+        if (resolved && resolved.isConnected) return [resolved];
         // afterRequest follows the swap: an outerHTML swap has replaced the
-        // resolved node, so mark its replacement when it kept the id.
+        // resolved node, so mark its replacement when it kept the id, else
+        // what the swap put in its place.
         if (resolved && resolved.id) {
             var replaced = document.getElementById(resolved.id);
-            if (replaced) return replaced;
+            if (replaced) return [replaced];
         }
+        var swapped = (evt.detail.xhr && replacements.get(evt.detail.xhr) || [])
+            .filter(function(el) { return el.isConnected; });
+        if (swapped.length) return swapped;
         var targetSel = elt.getAttribute('hx-target');
         if (targetSel) {
-            if (targetSel === 'this') return elt;
+            if (targetSel === 'this') return [elt];
             var found = null;
             try { found = document.querySelector(targetSel); } catch (_) {}
-            if (found) return found;
+            if (found) return [found];
         }
-        return elt;
+        return [elt];
     }
     function isPolling(elt) {
         var trigger = elt.getAttribute('hx-trigger') || '';
         return trigger.indexOf('every') !== -1;
     }
-    function isPollingRelated(elt) {
-        return isPolling(elt) || (elt.querySelector && !!elt.querySelector('[hx-trigger*="every"]'));
+    // A request the page sends by itself rather than one the reader started:
+    // a poll, or the element's own `load`, `revealed` or `intersect` trigger
+    // (a lazy fragment, a tab's shown panel, an infinite-scroll sentinel).
+    // There is nothing to confirm, so it draws no outline.
+    function isAutomatic(e, elt) {
+        if (isPolling(elt)) return true;
+        var config = e.detail.requestConfig;
+        var trigger = config && config.triggeringEvent;
+        if (trigger) return trigger.type === 'revealed' || trigger.type === 'intersect';
+        // htmx sends a `load` trigger's request without an event.
+        return /(^|,)\\s*load(?![\\w:-])/.test(elt.getAttribute('hx-trigger') || '');
     }
     // htmx dispatches a preload's beforeRequest before the preload extension
     // cancels it, and no afterRequest follows: marking it would leave the
@@ -23267,15 +23503,14 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(function() { clearFeedback(el); }, state === 'success' ? 1000 : 2000);
     }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
-        var elt = e.detail.elt;
-        if (isPolling(elt) || isPreload(e)) return;
-        var t = getTarget(e);
-        clearFeedback(t);
-        t.classList.add('htmx-request-active');
-        if (t !== elt) {
-            clearFeedback(elt);
-            elt.classList.add('htmx-request-active');
-        }
+        var elt = requester(e);
+        if (isAutomatic(e, elt) || isPreload(e)) return;
+        var targets = getTargets(e);
+        if (targets.indexOf(elt) < 0) targets.push(elt);
+        targets.forEach(function(t) {
+            clearFeedback(t);
+            t.classList.add('htmx-request-active');
+        });
     });
     document.body.addEventListener('htmx:oobAfterSwap', function(e) {
         var t = e.detail.target || e.detail.elt;
@@ -23285,13 +23520,13 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(function() { clearFeedback(t); }, 1000);
     });
     function finished(e) {
-        var elt = e.detail.elt;
-        if (isPollingRelated(elt)) return;
+        var elt = requester(e);
+        if (isAutomatic(e, elt)) return;
         var state = outcome(e);
         if (state === 'pending') return;
-        var t = getTarget(e);
-        mark(t, state);
-        if (t !== elt) mark(elt, state);
+        var targets = getTargets(e);
+        if (targets.indexOf(elt) < 0) targets.push(elt);
+        targets.forEach(function(t) { mark(t, state); });
     }
     ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout', 'htmx:sendAbort'].forEach(function(name) {
         document.body.addEventListener(name, finished);
@@ -24677,6 +24912,9 @@ end
 
 Render a Pico CSS sidebar `<aside>` with HTMX-enabled navigation links.
 Each item is a `"Label" => "/path"` pair. Links use hyperscript to toggle active styling.
+A click swaps the page into `target` and records its address; a Ctrl/Cmd-,
+Shift- or middle-click opens it in a new tab or window instead (on an
+[`htmx`](@ref) page, see [`modifier_click_script`](@ref)).
 `preload=true` starts fetching a page while the pointer rests on its link (see
 [`hx_link`](@ref)).
 
@@ -24707,6 +24945,12 @@ Render a Pico-styled breadcrumb `<nav>`. Each `item` is a tuple
 `(label, frag_url, push_url)`. When `frag_url` is `nothing`, the segment
 renders as plain text (the current page). Otherwise it's an `<a>` that issues
 `hx-get=frag_url` into `target` and updates the URL bar via `hx-push-url=push_url`.
+The link's `href` is the address it records — `push_url`, or `frag_url` for
+`push_url="true"` — so a Ctrl/Cmd-, Shift- or middle-click opens that page in a
+new tab or window (on an [`htmx`](@ref) page, see
+[`modifier_click_script`](@ref)), and the link is reachable by keyboard. A
+segment that records no address (`push_url` `nothing` or `"false"`) has no
+`href`.
 `preload=true` starts fetching a segment while the pointer rests on it (see
 [`hx_link`](@ref)).
 
@@ -24725,11 +24969,19 @@ function htmxo_breadcrumb(items; target="#content", preload=nothing)
             push!(parts, h.span(label; aria_current="page"))
         else
             push!(parts, h.a(label;
+                _breadcrumb_href(frag_url, push_url)...,
                 hx_get=frag_url, hx_target=target, hx_swap="innerHTML",
                 hx_push_url=push_url, _preload_attrs(preload)...))
         end
     end
     h.nav(parts...; class="htmxo-breadcrumb", aria_label="breadcrumb")
+end
+
+# A breadcrumb segment's `href` is the address its `hx-push-url` records.
+_breadcrumb_href(frag_url, ::Nothing) = (;)
+function _breadcrumb_href(frag_url, push_url)
+    recorded = string(push_url)
+    recorded == "false" ? (;) : (href = recorded == "true" ? frag_url : push_url,)
 end
 
 """
