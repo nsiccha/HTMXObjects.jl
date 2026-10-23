@@ -648,7 +648,7 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
-| `pdf_report(page_or_markdown, path; title, lang, metadata)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
+| `pdf_report(page_or_markdown, path; title, lang, metadata, base_url)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 | `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
 
@@ -892,6 +892,19 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `resources` when there is one (the site-root URL of an exported page), else
   the absolute path. `pdf_report` removes its temporary `.qmd`, Quarto's
   intermediate files and the `.quarto` cache from it, also on failure.
+- **Links a PDF cannot open** are written as their text. A link to a URL with
+  a scheme (`https:`, `mailto:`) or to an `#id` stays a link. A link with no
+  target stays only as its label: `[Bayern]()`, the Markdown of an `<a>`
+  without `href`, and `[Bayern](#)`, that of a script-driven `<a href="#">`.
+  Typst refuses both. A site address (`/region/11`, `region/11`, `?r=1`) is
+  written as its text too, because in a PDF it would point at a file next to
+  the PDF.
+- **`base_url`** (`"https://example.org/app"`) is the address the Markdown's
+  `/` stands for. With it, a link starting with `/` links to `base_url`
+  followed by the path (`https://example.org/app/region/11`), so a report's
+  site links open the live app. A relative address has no page address to
+  follow, so it is still written as its text. A `base_url` that is not an
+  absolute URL, or that carries a query or fragment, is an `ArgumentError`.
 - **Images need alt text.** Typst refuses a PDF/UA document with an image that
   has none or has `alt=""`, and `pdf_report` throws with Typst's message, for
   example `PDF/UA-1 error: missing alt text` with the source line. In a page,

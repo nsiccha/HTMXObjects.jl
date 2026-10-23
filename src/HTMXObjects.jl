@@ -15077,11 +15077,16 @@ const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto",
 # `_PDF_REPORT_DATE_TEXT_KEY` when there is one.
 const _PDF_REPORT_DATE_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-date.lua")
 
-# PAC fails a PDF whose text shows a web or mail address that is not a link.
-# `pdf_report` reads the Markdown with `autolink_bare_uris`, which links an
-# address with a scheme and a mail address; this filter links a `www.` address
-# and a code span that is an address.
+# Typst refuses a link with no target (`[Bayern]()`, `[Bayern](#)`), and Quarto
+# writes a site address (`/region/11`) relative to the PDF file, where it opens
+# nothing; and PAC fails a PDF whose text shows a web or mail address that is not
+# a link. This filter writes a link a PDF cannot open as its text, or links a `/`
+# path to the `base_url` under `_PDF_REPORT_BASE_URL_KEY`; then it links a `www.`
+# address and a code span that is an address. `pdf_report` reads the Markdown
+# with `autolink_bare_uris`, which links an address with a scheme and a mail
+# address.
 const _PDF_REPORT_LINKS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-links.lua")
+const _PDF_REPORT_BASE_URL_KEY = "htmxobjects-base-url"
 const _PDF_REPORT_READER = "markdown+autolink_bare_uris"
 
 # Pandoc and Quarto set an image in a box, which Typst puts in a paragraph, so an
@@ -15128,6 +15133,7 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "filters" => "pdf_report runs the filter that gives equations alt text",
     _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
+    _PDF_REPORT_BASE_URL_KEY => "pass the address as `base_url=`",
 )
 
 const _PDF_REPORT_METADATA_KEY = r"^[A-Za-z][A-Za-z0-9_-]*$"
@@ -15207,7 +15213,19 @@ function _markdown_metadata_block(markdown)
     nothing
 end
 
-function _pdf_report_qmd(markdown; title, lang, metadata=(;))
+# An absolute URL with a scheme and a host: what a `/` path joins onto.
+const _PDF_REPORT_BASE_URL = r"^[A-Za-z][A-Za-z0-9+.-]*://[^\s/?#]+[^\s]*$"
+
+_pdf_report_base_url(::Nothing) = ""
+function _pdf_report_base_url(base_url::AbstractString)
+    occursin(_PDF_REPORT_BASE_URL, base_url) && !occursin(r"[?#]", base_url) || throw(ArgumentError(
+        "pdf_report: `base_url` must be an absolute URL that a `/` path can follow, such as " *
+        "\"https://example.org/app\" (got $(repr(base_url)))"))
+    # escaped so that Pandoc, which reads a metadata string as Markdown, keeps the address
+    "$_PDF_REPORT_BASE_URL_KEY: $(_yaml_string(_markdown_literal(rstrip(base_url, '/'))))\n"
+end
+
+function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
     line = _markdown_metadata_block(markdown)
     isnothing(line) || throw(ArgumentError(
         "pdf_report: the Markdown has a YAML metadata block (line $line). Quarto would let it override " *
@@ -15216,7 +15234,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
     ---
     title: $(_yaml_string(title))
     lang: $(_yaml_string(lang))
-    $(_pdf_report_front_matter(metadata, lang))format:
+    $(_pdf_report_base_url(base_url))$(_pdf_report_front_matter(metadata, lang))format:
       typst:
         from: $(_PDF_REPORT_READER)
         pdf-standard: [ua-1]
@@ -15236,7 +15254,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
 end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
     pdf_report(value, pdf_path; kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
@@ -15304,9 +15322,9 @@ image within a line of text stays in its paragraph, and PAC still warns about it
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
-`date_format` next to a text `date`, a YAML metadata block in the Markdown or a
-missing `resources` directory, all before
-running Quarto, and an error carrying Quarto's output when
+`date_format` next to a text `date`, a `base_url` that is not an absolute URL,
+a YAML metadata block in the Markdown or a missing `resources` directory, all
+before running Quarto, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
@@ -15317,6 +15335,16 @@ refuses a link to a label that does not exist (`label <id> does not exist in the
 document`). The `anchor` of a [`SemanticSection`](@ref), [`SemanticCard`](@ref)
 or [`SemanticCode`](@ref) is written as the target's identifier, so
 `SemanticLink("Abschnitt 1", "#a1")` reaches `SemanticSection(…; anchor="a1")`.
+
+A link to a URL with a scheme (`https:`, `mailto:`) or to an `#id` stays a link.
+Any other link is a page's link that a PDF cannot open, and is written as its
+text: one with no target (`[Bayern]()`, the Markdown of an `<a>` without
+`href`, or `[Bayern](#)`), which Typst refuses, and a site address
+(`/region/11`, `region/11`, `?r=1`), which in a PDF would point at a file next
+to it. `base_url` (`"https://example.org/app"`) is the address the Markdown's
+`/` stands for: with it, a link starting with `/` links to `base_url` followed
+by the path (`https://example.org/app/region/11`). A relative address has no
+page address to follow and is still written as its text.
 
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.
@@ -15329,6 +15357,7 @@ pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB",
 """
 function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     title::AbstractString, lang::AbstractString, metadata=(;),
+                    base_url::Union{Nothing,AbstractString}=nothing,
                     resources::AbstractString=dirname(abspath(pdf_path)),
                     quarto::AbstractString="quarto")
     isempty(strip(title)) &&
@@ -15336,7 +15365,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
         "pdf_report: `lang` must be a language tag with its region, such as \"de-DE\" or \"en-GB\" " *
         "(got $(repr(lang))); without one Quarto labels the document with the region US"))
-    document = _pdf_report_qmd(markdown; title, lang, metadata)
+    document = _pdf_report_qmd(markdown; title, lang, metadata, base_url)
     isdir(resources) ||
         throw(ArgumentError("pdf_report: `resources` is not a directory: $(repr(resources))"))
     exe = Sys.which(quarto)

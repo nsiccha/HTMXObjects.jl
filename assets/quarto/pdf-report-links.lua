@@ -1,10 +1,39 @@
+-- `pdf_report`'s links, in two passes.
+--
+-- A PDF opens a link to a URL (`https:`, `mailto:`) or to a place in the
+-- document (`#id`). The other links of a web page do not work there: a link
+-- with no target (`[Bayern]()`, an `<a>` without `href`, or a bare `#`), which
+-- Typst refuses, and a site address (`/region/11`, `region/11`, `?r=1`), which
+-- Quarto writes relative to the PDF file, where it opens nothing. The first
+-- pass links a link starting with `/` to `htmxobjects-base-url` followed by the
+-- path when one is given, and writes any other such link as its text.
+--
 -- PAC fails a PDF whose text shows a web or mail address that is not a link
 -- ("Link in text does not have a 'Link' element"). `pdf_report` reads the
 -- Markdown with Pandoc's `autolink_bare_uris`, which links an address with a
--- scheme (`https://…`, `mailto:…`) and a mail address; this filter links the
--- rest PAC reports: an address starting with `www.`, linked with `https://`,
--- and a code span that is an address and nothing else.
+-- scheme (`https://…`, `mailto:…`) and a mail address; the second pass links
+-- the rest PAC reports: an address starting with `www.`, linked with
+-- `https://`, and a code span that is an address and nothing else. It runs
+-- after the first, so the text of a link the first pass removed is linked the
+-- same way.
 if not FORMAT:match('typst') then return {} end
+
+local BASE = 'htmxobjects-base-url'
+local base
+
+local function opens(target)
+  -- a one-letter "scheme" is a Windows drive: a local file a viewer may open
+  return target:match('^#.') or target:match('^%a[%w+.-]*:')
+end
+
+local function link_or_text(el)
+  if opens(el.target) then return nil end
+  if base and el.target:match('^/') and not el.target:match('^//') then
+    el.target = base .. el.target
+    return el
+  end
+  return el.content
+end
 
 -- Characters that end a sentence or a clause rather than an address (GFM's
 -- rule for its `www.` autolinks).
@@ -60,5 +89,13 @@ local function as_is(el)
 end
 
 return {
+  {
+    Meta = function(meta)
+      base = meta[BASE] and pandoc.utils.stringify(meta[BASE]) or nil
+      meta[BASE] = nil
+      return meta
+    end,
+  },
+  { Link = link_or_text },
   { traverse = 'topdown', Str = linked_str, Code = linked_code, Link = as_is, Image = as_is },
 }
