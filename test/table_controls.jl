@@ -353,6 +353,98 @@ end
     @test contains(String(response.body), "| Vessel | Diet |\n| --- | --- |\n| Syringe-50 | 1.0 |")
 end
 
+@testitem "master/detail rows read as one table, eager details after it" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string, filter_errors
+    # Snag master-detail-ma-e63263bb (reporter TenderViews), user pick 1mu8842:
+    # every `detail-<key>` companion used to be a one-cell row of the pipe
+    # table (`|  |`, `| Loading… |`, a whole section folded into a cell), in
+    # `?plain`, a consumer's own `show` and `pdf_report` alike.
+    struct ConsumerTable
+        inner
+    end
+    Base.show(io::IO, m::MIME"text/markdown", t::ConsumerTable) = show(io, m, t.inner)
+    items = [(id="lb-3-2", lb="LB § 3.2", ap="AP 2", grp=["A", "B"]),
+             (id="lb-5-1", lb="LB § 5.1", ap="", grp=["A"])]
+    master = r -> (h.td(r.lb), h.td(r.ap))
+    md_table(; kw...) = master_detail_table(["LB", "Abschnitt"], items; key=r -> r.id, master, kw...)
+    rows = "| LB | Abschnitt |\n| --- | --- |\n| LB § 3.2 | AP 2 |\n| LB § 5.1 |  |\n"
+    # One Markdown whichever serializer writes it.
+    function markdown(t)
+        md = to_markdown_string(t)
+        @test repr("text/markdown", t) == md
+        @test repr("text/markdown", ConsumerTable(t)) == md
+        md
+    end
+
+    # Details with nothing to read write nothing: html_only, nothing, a form,
+    # and lazy ones, which are not on the page.
+    for kw in ((; detail=r -> html_only(SemanticProse("hidden $(r.id)"))),
+               (; detail=r -> nothing),
+               (; detail=r -> h.form(h.input(; name="x", value="v"), h.button("Save"))),
+               (; detail_url=r -> "/sec/$(r.id)"))
+        @test markdown(md_table(; kw...)) == rows * "\n"
+    end
+    # Eager details follow the table, each under its row's label, as a
+    # `SemanticDisclosure` writes its summary and body.
+    eager = md_table(; detail=r -> SemanticProse("detail for $(r.id)"))
+    @test markdown(eager) == rows *
+        "\n**LB § 3.2**\n\ndetail for lb-3-2\n\n**LB § 5.1**\n\ndetail for lb-5-1"
+    section = markdown(md_table(; detail=r -> SemanticSection("AP 2: Modell",
+        Any[SemanticProse("**LB § 3.2**"), SemanticProse("> quote")])))
+    @test startswith(section, rows * "\n**LB § 3.2**\n\n## AP 2: Modell\n\n**LB § 3.2**\n\n> quote\n\n**LB § 5.1**\n\n")
+    # The HTML keeps every companion row; the details are not repeated.
+    html = repr("text/html", eager)
+    @test count("<tr id=\"detail-", html) == 2
+    @test count("detail for lb-3-2", html) == 1
+    @test !contains(html, "**")
+    # What follows the table starts its own paragraph.
+    @test markdown(h.div(eager, h.p("after"))) ==
+        rows * "\n**LB § 3.2**\n\ndetail for lb-3-2\n\n**LB § 5.1**\n\ndetail for lb-5-1\n\nafter\n\n"
+    # A label is its words: no link target or emphasis, html_only left out.
+    linked = md_table(; master=r -> (h.td(h.a(h.strong(r.lb); href="/x/$(r.id)"), h.small(" (1)"),
+                                          html_only(h.span(" badge"))), h.td(r.ap)),
+                      detail=r -> h.p("linked $(r.id)"))
+    @test contains(markdown(linked), "\n\n**LB § 3.2 (1)**\n\nlinked lb-3-2\n\n**LB § 5.1 (1)**\n\nlinked lb-5-1")
+    # A captioned table's details follow its figure.
+    captioned = markdown(md_table(; detail=r -> h.p("cap $(r.id)"), caption=CaptionSpec(; title="Completeness"), id="req"))
+    @test endswith(captioned, "**Completeness**\n:::\n\n**LB § 3.2**\n\ncap lb-3-2\n\n**LB § 5.1**\n\ncap lb-5-1")
+    @test !contains(captioned, "| cap ")
+    # Grouped header columns, the label button, search and selection.
+    for kw in ((; header_groups=["Both" => 1:2]), (; detail_toggle=:label),
+               (; searchable=true, selectable="sel", id="ss"))
+        md = markdown(md_table(; detail=r -> h.p("d $(r.id)"), kw...))
+        @test endswith(md, "\n\n**LB § 3.2**\n\nd lb-3-2\n\n**LB § 5.1**\n\nd lb-5-1")
+        @test count("\n|", md) == 3
+    end
+    # A hierarchy: every row's detail, branches included, in row order.
+    tree = [(id="root", lb="Root", ap="", kids=[(id="leaf1", lb="Leaf 1", ap="x", kids=[]),
+                                                 (id="leaf2", lb="Leaf 2", ap="y", kids=[])])]
+    @test markdown(master_detail_table(["Name", "Val"], tree; key=r -> r.id, master,
+            children=r -> r.kids, detail=r -> h.p("tree $(r.id)"))) ==
+        "| Name | Val |\n| --- | --- |\n| Root |  |\n| Leaf 1 | x |\n| Leaf 2 | y |\n\n" *
+        "**Root**\n\ntree root\n\n**Leaf 1**\n\ntree leaf1\n\n**Leaf 2**\n\ntree leaf2"
+    @test markdown(master_detail_table(["Name", "Val"], tree; key=r -> r.id, master,
+            children=r -> r.kids, detail_url=r -> isempty(r.kids) ? "/t/$(r.id)" : nothing)) ==
+        "| Name | Val |\n| --- | --- |\n| Root |  |\n| Leaf 1 | x |\n| Leaf 2 | y |\n\n"
+    # A leaf listed under two groups is one item: its detail is written once.
+    @test markdown(md_table(; detail=r -> h.p("grp $(r.id)"),
+            groupings=["Group" => r -> r.grp, "None" => nothing])) ==
+        "| LB | Abschnitt |\n| --- | --- |\n| **A** (2) |  |\n| LB § 3.2 | AP 2 |\n| LB § 5.1 |  |\n" *
+        "| **B** (1) |  |\n| LB § 3.2 | AP 2 |\n\n**LB § 3.2**\n\ngrp lb-3-2\n\n**LB § 5.1**\n\ngrp lb-5-1"
+    # Hand-built pairs in a `sortable_table`: no one-cell rows either.
+    pairs = Any[]
+    for r in items
+        append!(pairs, master_detail_pair(r.id, master(r), h.p("pair $(r.id)"), 2))
+    end
+    @test markdown(sortable_table(["LB", "Abschnitt"], pairs; id="hb")) == rows * "\n"
+    @test count("<tr id=\"detail-", repr("text/html", sortable_table(["LB", "Abschnitt"], pairs))) == 2
+    # `?error` still reaches an error inside a detail row.
+    errors = filter_errors(md_table(; detail=r -> h.div(h.p("ok"), h.span("boom $(r.id)"; data_error="true"))))
+    @test count("boom lb-", repr("text/html", errors)) == 2
+    @test contains(repr("text/html", errors), "<tr id=\"detail-lb-3-2\"")
+end
+
 @testitem "explained column headers sort and export their label" setup=[ChromeDump] tags=[:browser] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"

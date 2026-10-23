@@ -4765,6 +4765,23 @@ _strip_md_chrome(c::_LabelledControl) = _strip_md_chrome(c.control)
 _strip_md_chrome_child(c::_LabelledControl) = _strip_md_chrome_child(c.control)
 _rescue_semantic!(out, c::_LabelledControl) = _rescue_semantic!(out, c.control)
 
+# A `detail-<key>` companion row in a `sortable_table` body. HTML (and HXML)
+# write the row; Markdown writes nothing, with every serializer: HTMX.jl's
+# table writer makes a pipe-table line of each `<tr>` child of a `<tbody>` and
+# skips anything else, so a consumer's own `show(io, MIME"text/markdown"(), x)`
+# leaves the companion out too. A master/detail table writes its eager details
+# after the table instead (`_MDDetailsMarkdown`). `?error` and static export see
+# through to the row.
+struct _MDCompanionRow
+    row::Node
+end
+Base.show(io::IO, m::MIME"text/html", c::_MDCompanionRow) = show(io, m, c.row)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", c::_MDCompanionRow) =
+    show(io, m, c.row)
+Base.show(::IO, ::MIME"text/markdown", ::_MDCompanionRow) = nothing
+filter_errors(c::_MDCompanionRow) = filter_errors(c.row)
+_filter_errors_child(c::_MDCompanionRow) = _filter_errors_child(c.row)
+
 
 """
     _save_typed_response(record_dir, url_path, response)
@@ -5465,6 +5482,11 @@ function _static_walk(c::_LabelledControl, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
 end
 _static_walk_child(c::_LabelledControl, rules) = _static_walk(c, rules)
+function _static_walk(c::_MDCompanionRow, rules::_StaticRules)
+    walked = _static_walk(c.row, rules)
+    walked === _STATIC_REMOVED ? walked : _MDCompanionRow(walked)
+end
+_static_walk_child(c::_MDCompanionRow, rules) = _static_walk(c, rules)
 # A semantic element has no attributes until its HTML peer is built, so the
 # export walks that peer: a `SemanticLink`'s `href` (`external=true` included),
 # a `SemanticAction`'s `hx-get`, prose links, and every element a semantic
@@ -17358,7 +17380,9 @@ wrapper instead of widening the page.
 - `rows`: `Vector{<:Node}` of pre-built `h.tr(...)` rows. The caller controls
   every `<td>`, including `data-sort-value` for semantic sort keys (see
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
-  `id="detail-X"` for the paired-row pattern.
+  `id="detail-X"` for the paired-row pattern. A `detail-X` row is no row of
+  the Markdown table; [`master_detail_table`](@ref) writes eager details
+  after the table instead.
 - `header_groups`: optional `label => first:last` pairs for a two-row header,
   for example `["Primal" => 2:4, "Gradient" => 5:7]`. Each range spans at
   least two adjacent leaf columns and groups cannot overlap. Uncovered leaf
@@ -17591,9 +17615,11 @@ function sortable_table(headers, rows;
     grouped = isnothing(header_groups) ? nothing : _grouped_thead(th_nodes, header_groups)
     thead = isnothing(grouped) ? h.thead(h.tr(th_nodes...)) : first(grouped)
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
+    # A `detail-<key>` companion is no row of the Markdown table.
+    body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
     table_node = h.table(; class=table_class, role, link_attrs..., kwargs...)(
         thead,
-        h.tbody(rows...; body_attrs...),
+        h.tbody(body_rows...; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
@@ -17608,7 +17634,7 @@ function sortable_table(headers, rows;
             isnothing(label) && (label = strip(repr("text/markdown", th_nodes[i])))
             h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
         end
-        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(rows...))
+        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(body_rows...))
         h.div(; class="table-wrap")(html_only(table_node),
             markdown_only(repr("text/markdown", flat_table)))
     end
@@ -18267,6 +18293,41 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     (master, detail)
 end
 
+# The eager details of a master/detail table, which Markdown writes after the
+# table, since a `?plain` reader or a PDF cannot click a row open. Each detail
+# whose Markdown is not empty follows under its master row's label in bold, as
+# `SemanticDisclosure` writes a summary and its body. A lazy detail is not on
+# the page and writes nothing, like `lazy(url)`; a companion row is no row of
+# the table (`_MDCompanionRow`). HTML and HXML write nothing, and the Markdown
+# is built only when it is asked for.
+struct _MDDetailsMarkdown
+    details::Vector{Pair{Vector{Any},Any}}   # master row label => detail body
+end
+Base.show(::IO, ::MIME"text/html", ::_MDDetailsMarkdown) = nothing
+Base.show(::IO, ::MIME"application/vnd.hyperview+xml", ::_MDDetailsMarkdown) = nothing
+HTMX.markdown_block(::_MDDetailsMarkdown) = true
+function Base.show(io::IO, m::MIME"text/markdown", d::_MDDetailsMarkdown)
+    blocks = Any[]
+    for (label, body) in d.details
+        text = rstrip(lstrip(==('\n'), to_markdown_string(body)))
+        isempty(strip(text)) && continue
+        name = _md_label_text(label)
+        push!(blocks, isempty(name) ? text : SemanticDisclosure(name, Any[text]))
+    end
+    show(io, m, SemanticGroup(blocks))
+end
+
+# The words of a row label, without its markup: `**` around a link or a
+# `<strong>` would not read as one bold label.
+function _md_label_text(label)
+    io = IOBuffer()
+    _md_label_words!(io, _strip_md_chrome(h.span(label...)))
+    strip(replace(String(take!(io)), r"\s+" => " "))
+end
+_md_label_words!(io, x) = _semantic_show_leaf(io, MIME"text/markdown"(), x)
+_md_label_words!(io, x::Node) = HTMX.tag(x) === :br ? print(io, ' ') :
+    foreach(c -> _md_label_words!(io, c), HTMX.children(x))
+
 """
     master_detail_table(headers, items;
                         key, master, detail=nothing, detail_url=nothing,
@@ -18483,6 +18544,12 @@ than rendering every collapsed detail up front), pass `detail_url` — the
 proven single-flight + click-to-retry slot, no hand-rolled `htmx.ajax` glue
 or custom onclick needed. Without it, detail bodies are eager.
 
+In Markdown (`?plain`, `to_markdown_string`, [`pdf_report`](@ref)) the table
+holds the master rows only. Each eager detail whose Markdown is not empty
+follows the table (a captioned table's figure) under its row's label in bold,
+in row order, once per item; an `html_only` detail and a lazy one write
+nothing. See *Details in Markdown* in `docs/src/components.md`.
+
 Include [`sortable_table_js`](@ref) on the page (which also brings in
 the master/detail hover + detail-cell reset rules via
 [`sortable_table_styles`](@ref)). The rows' click and lazy-load handlers are
@@ -18523,6 +18590,7 @@ function master_detail_table(headers, items;
                              _level_marks::Bool=false,
                              _max_level::Int=0,
                              _update_scope=nothing,
+                             _detail_key=key,
                              texts::TableTexts=_EN_TABLE_TEXTS,
                              kwargs...)
     # Refused: a link key with no link group would highlight nothing.
@@ -18562,6 +18630,10 @@ function master_detail_table(headers, items;
     placed = Pair{String,Tuple{String,String}}[]
     # The leaves of lazy branches, which the search count counts unloaded.
     pending = String[]
+    # The eager details Markdown writes after the table, each item's once
+    # (`_detail_key`: a leaf listed under several groups is one item).
+    details = Pair{Vector{Any},Any}[]
+    detailed = Set{String}()
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
         descendants = isnothing(children) ? () : children(item)
@@ -18641,6 +18713,10 @@ function master_detail_table(headers, items;
         controls = Any[]
         trailing_controls = Any[]
         label = Any[HTMX.children(first_cell)...]
+        if !isnothing(body) && isnothing(url) && !(string(_detail_key(item)) in detailed)
+            push!(detailed, string(_detail_key(item)))
+            push!(details, label => body)
+        end
         if branch && branches_collapsible
             # An update names the child rows it renders; the runtime then
             # recomputes the list from the rows on the page.
@@ -18770,7 +18846,7 @@ function master_detail_table(headers, items;
     td > [data-htmxo-row-label]:has(+ button)::after { content: "\\2060"; }
     """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
                   for level in 2:max(max_level[], _max_level)), "\n")
-    table = h.div(h.style(Raw(rules)), table)
+    table = h.div(h.style(Raw(rules)), table, (isempty(details) ? () : (_MDDetailsMarkdown(details),))...)
     # A hierarchy always carries the (possibly hidden) search scaffold: its
     # branch toggles and the search share one visibility pass.
     tools = Any[_toolbar...]
@@ -19306,6 +19382,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
+        _detail_key = x -> x isa _MDGroup ? gid(x.path) : string(key(x.item)),
         update_rows = update ? rendered : nothing,
         # A leaf is linked by its `link_key` (default: its own key), under
         # whichever group it is listed; a group row has none.

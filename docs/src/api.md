@@ -599,6 +599,9 @@ presence-only `data-htmxo-label` attribute (`h.button(name;
 data_htmxo_label="")`): Markdown drops the control and keeps that label in its
 place. Sortable column headers and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
+A master/detail table's detail rows are never rows of the Markdown table;
+`master_detail_table` writes its eager details after it (see [Details in
+Markdown](components.md#master-detail-markdown)).
 
 A semantic element whose HTML peer is a block — any but `SemanticStatus`,
 `SemanticLink`, `SemanticAction` and `SemanticArtifact`, which are inline and
