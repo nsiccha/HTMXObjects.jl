@@ -8497,7 +8497,7 @@ end
     # parent in every peer, not its sibling.
     tender = SemanticSection("AP 2: Modell", SemanticProse("…"),
         SemanticSection("Im Prototyp", SemanticProse("Bayes-Regression")); anchor="tender-ap-2")
-    @test md(tender) == "## AP 2: Modell\n\n…\n\n### Im Prototyp\n\nBayes-Regression"
+    @test md(tender) == "## AP 2: Modell {#tender-ap-2}\n\n…\n\n### Im Prototyp\n\nBayes-Regression"
     @test contains(html(tender), "<h2>AP 2: Modell</h2>")
     @test contains(html(tender), "<h3>Im Prototyp</h3>")
     @test contains(repr("application/vnd.hyperview+xml", tender),
