@@ -176,6 +176,41 @@ and toasts. Static exports and `record!` bundles carry the attribute, since it
 is part of the page. Mark a part in another language with `lang` on its own
 element (`h.blockquote(cited; lang="en")`).
 
+`title` writes the page's `<title>` the same way: `pico_page(content;
+title="Kalibrierung")`. A page has one `<title>`, so a `title` together with an
+`h.title` in `extra_head` throws an `ArgumentError`.
+
+A struct can declare the language and title of its own pages instead, as
+`__lang__` and `__title__`. This is how an app whose subtrees are in different
+languages gives each page its own: the document is built by the root's
+`__page__`, which cannot see the subtree a request lands in, so the subtree
+says it itself:
+
+```julia
+@htmx struct Presentation
+    lang::Symbol
+    __lang__ = string(lang)
+    __title__ = lang === :de ? "Präsentation" : "Presentation"
+    # ...
+end
+
+@htmx struct App
+    __lang__ = "en"
+    __title__ = "Workbench"
+    __page__(content) = HTMXObjects.pico_page(content)
+    @include extern(lang::Symbol) = Presentation(lang)
+end
+```
+
+`/extern/de` is then `<html lang="de">` with `<title>Präsentation</title>`, and
+the root's own pages are English with the title `Workbench`. The innermost
+struct on a route's mount chain that declares a value wins; `nothing` keeps
+the enclosing one. The shell uses the declarations only when its own `lang` or
+`title` keyword is not given, so a shell that passes `lang="de"` makes every
+page German. Error pages carry the declarations too. A declaration that is not
+a language tag, or a title that is not a non-empty string, fails the route with
+an `ArgumentError` naming the struct, before the route body runs.
+
 ### Tables on every page — `tables=true` {#page-tables}
 
 The shell also carries the tables' runtime, so a table from `render_table`,
@@ -762,6 +797,35 @@ cache single-flights the drain, backs off, and logs with the cause — so first
 paint never waits; the next render (a poll cycle, a push refresh) picks the
 metadata up. `?plain` carries `[label](href)` either way.
 
+### Link targets in Markdown {#markdown-id-targets}
+
+Markdown has no syntax for an element id, so the target of a `[text](#X)`
+link is written as inline HTML. `render_markdown`, and with it every
+`SemanticProse`, renders two such forms as real, empty elements; all other
+raw HTML stays escaped text:
+
+```markdown
+| Prior | Term |
+|---|---|
+| <span id="prior-1"></span>P1 | normal(0, 1) |
+
+The intercept's prior is [P1](#prior-1).
+```
+
+- **The forms:** `<span id="X"></span>` and `<a id="X"></a>`, the closing tag
+  right after the opening one, no other attribute, and an id of a letter
+  followed by letters, digits, `_` or `-`. They work in prose, headings, list
+  items and table cells. An `<a id>` target inside a link's text stays text,
+  because an `<a>` inside an `<a>` is invalid HTML.
+- **Everything else stays escaped:** another attribute, content between the
+  tags, single quotes, an id such as `1x` or `a.b`, an unpaired tag, any other
+  element.
+- **The Markdown projection writes the tags back as written.** Pandoc reads
+  `<span id="X"></span>` as a span with that id, so in a [`pdf_report`](#pdf-report)
+  the link resolves too. It drops `<a id="X"></a>`, and Typst then refuses the
+  report (`label <X> does not exist`), so write the span form in content that
+  may become a PDF.
+
 ### Accessible PDF reports — `pdf_report` {#pdf-report}
 
 `pdf_report` writes a page's Markdown projection as an accessible PDF:
@@ -778,7 +842,7 @@ pdf_report(page, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE")
 # The Markdown of a mounted route works the same way:
 md = String(dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"]).body)
 pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resources="figures",
-           metadata=(subtitle="Entwurf", date="22.10.2026", toc=true,
+           metadata=(subtitle="Entwurf", date=Dates.today(), date_format="long", toc=true,
                      margin=(x="2cm", y="2cm"), fontsize="10pt"))
 ```
 
@@ -803,6 +867,14 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`,
   `pdf-standard` and `filters` belong to `pdf_report`; setting one through
   `metadata` is an `ArgumentError`.
+- **`date`** is printed in the title block. A `Date` or `DateTime`, an ISO date
+  (`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
+  `"last-modified"` is a date that `date_format` formats: in a `de-DE` report
+  `date_format="long"` prints `22. Oktober 2026`, `date_format="DD.MM.YYYY"`
+  prints `22.10.2026`, and without `date_format` it prints `2026-10-22`. Any
+  other text is printed as written (`date="22.10.2026"`, `date="Oktober 2026"`);
+  `date_format` next to it is an `ArgumentError`. Quarto alone would read such
+  text as a date: `"22.10.2026"` as "Invalid Date", `"05.10.2026"` as 10 May.
 - **Paper:** the size `lang`'s region uses. That is US Letter for the regions
   Unicode CLDR lists for it (US, CA, MX and others in the Americas) and A4
   everywhere else, so a `de-DE` report is A4 without asking.
@@ -830,12 +902,26 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
   whose image has no alt text.
+- **Long tables:** a table longer than the rest of its page continues on the
+  next page, with its header row repeated on each page. A caption above a table
+  moves to the next page with its first rows rather than stay alone at the
+  bottom of a page. A captioned table is a Typst figure, which does not break
+  across pages, so a bundled Typst rule makes it breakable: before it, a
+  captioned table taller than a page printed its last rows over each other and
+  the page number.
 - **Quotes:** typographic quotes read as written: `„Titel“`, `‚Wort‘` and
   `“title”` stay those characters in the PDF, as in the page. Straight quotes
   (`"Titel"`, `'Wort'`) become the quotes of `lang`, so `„Titel“` in a
   `de-DE` report. A bundled filter does this: Pandoc's Typst writer alone
   turns `“ ” ‘ ’` into straight quotes, so a German `„Titel“` came out
   `„Titel„` and `‚Wort‘` came out `‚Wort’`.
+- **Tables** are set ragged-right, while the body text stays justified. A word
+  in a table cell is hyphenated only when it is wider than its column, such as
+  `Kontaminationswahrscheinlichkeit` in a narrow column; a word that fits on
+  the next line moves there whole. Quarto's template justified table cells
+  too, which stretched narrow cells with wide gaps and split words such as
+  `Me-dian`. Code is never hyphenated, so a code span wider than its column
+  runs into the next one.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense
