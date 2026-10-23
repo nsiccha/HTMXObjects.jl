@@ -981,8 +981,8 @@ A lazy tab named by the URL loads like the initially active one, once it is
 scrolled into view, and the default tab's lazy panel is not fetched until its
 tab is clicked. A link that should land on the tab names the tabset's `id`
 too, `?tab=stoerungen#odl-tabs`: the browser scrolls to it, and an `htmx()`
-page does the same for a tabset that arrives in a fragment after the page
-loaded (`url_anchor_script()`). Two tabs with one name are an
+page keeps it there while lazy parts load after the page, and scrolls to a
+tabset that arrives in a fragment (`url_anchor_script()`). Two tabs with one name are an
 `ArgumentError` while the URL or `active` picks tabs by name. Inside a docs embed (`.htmxo-embed`) the URL belongs to the
 host page and is left alone. `htmx()` pages carry the script that does
 this, `tabset_script()`; a page with its own `<head>` adds it next to
