@@ -864,7 +864,7 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   Quarto's Typst format. A NamedTuple writes `_` as `-` (`toc_depth=2` is
   `toc-depth: 2`); dictionary keys are written as given. Values are strings,
   numbers, Bools, dates, vectors, and NamedTuples or dictionaries for nested
-  options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`,
+  options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`, `from`,
   `pdf-standard` and `filters` belong to `pdf_report`; setting one through
   `metadata` is an `ArgumentError`.
 - **`date`** is printed in the title block. A `Date` or `DateTime`, an ISO date
@@ -915,6 +915,21 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
   whose image has no alt text.
+- **Addresses are links.** A web or mail address written as text becomes a
+  link to itself: an address with a scheme (`https://…`, `mailto:…`), a mail
+  address, an address starting with `www.` (linked with `https://`) and a code
+  span that is an address and nothing else. PAC (PDF Accessibility Checker)
+  fails a PDF that shows an address without a link ("Link in text does not
+  have a 'Link' element"). An address inside a code block, or in a code span
+  with other text (`curl https://…`), stays text, and PAC reports it (todo
+  `14awnkw`).
+- **Images are figures of their own.** An image alone in its paragraph, or in
+  a figure, is tagged as a figure of its own rather than one inside a
+  paragraph: Pandoc and Quarto set every image in a box, which Typst put in a
+  paragraph, and PAC warns about a figure inside a paragraph ("Possibly
+  inappropriate use of a 'Figure' structure element"). An image within a line
+  of text, such as an icon, stays in its paragraph, and PAC still warns about
+  it: Typst tags every image as a block figure (todo `14awnkw`).
 - **Long tables:** a table longer than the rest of its page continues on the
   next page, with its header row repeated on each page. A caption above a table
   moves to the next page with its first rows rather than stay alone at the

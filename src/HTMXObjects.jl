@@ -15065,13 +15065,6 @@ const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "
 # `file:` URL or a relative path that leaves `resources`.
 const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-images.lua")
 
-# Typst refuses a link with no target (`[Bayern]()`, `[Bayern](#)`), and Quarto
-# writes a site address (`/region/11`) relative to the PDF file, where it opens
-# nothing; this filter writes such links as their text, or links a `/` path to
-# the `base_url` under `_PDF_REPORT_BASE_URL_KEY`.
-const _PDF_REPORT_LINKS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-links.lua")
-const _PDF_REPORT_BASE_URL_KEY = "htmxobjects-base-url"
-
 # Quarto's Typst template justifies the whole document, tables included, and
 # Typst then hyphenates them; and a captioned table is a Typst figure, which does
 # not break across pages, so a table taller than a page overprinted the page
@@ -15083,6 +15076,23 @@ const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto",
 # numbered list; this filter writes the date as text, the date text of
 # `_PDF_REPORT_DATE_TEXT_KEY` when there is one.
 const _PDF_REPORT_DATE_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-date.lua")
+
+# Typst refuses a link with no target (`[Bayern]()`, `[Bayern](#)`), and Quarto
+# writes a site address (`/region/11`) relative to the PDF file, where it opens
+# nothing; and PAC fails a PDF whose text shows a web or mail address that is not
+# a link. This filter writes a link a PDF cannot open as its text, or links a `/`
+# path to the `base_url` under `_PDF_REPORT_BASE_URL_KEY`; then it links a `www.`
+# address and a code span that is an address. `pdf_report` reads the Markdown
+# with `autolink_bare_uris`, which links an address with a scheme and a mail
+# address.
+const _PDF_REPORT_LINKS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-links.lua")
+const _PDF_REPORT_BASE_URL_KEY = "htmxobjects-base-url"
+const _PDF_REPORT_READER = "markdown+autolink_bare_uris"
+
+# Pandoc and Quarto set an image in a box, which Typst puts in a paragraph, so an
+# image alone in its paragraph or figure was tagged as a Figure inside a P, and
+# PAC warns about each one; this filter sets such an image in a Typst block.
+const _PDF_REPORT_FIGURES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-figures.lua")
 
 # Quarto reads `date` as a date and prints what it parsed: "22.10.2026" as
 # "Invalid Date", "05.10.2026" as 2026-05-10, "Oktober 2026" as 2026-01-01. It
@@ -15119,6 +15129,7 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "title" => "pass it as `title=`",
     "lang" => "pass it as `lang=`",
     "format" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
+    "from" => "pdf_report reads the Markdown with web and mail addresses linked, as PAC requires",
     "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "filters" => "pdf_report runs the filter that gives equations alt text",
     _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
@@ -15225,15 +15236,18 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
     lang: $(_yaml_string(lang))
     $(_pdf_report_base_url(base_url))$(_pdf_report_front_matter(metadata, lang))format:
       typst:
+        from: $(_PDF_REPORT_READER)
         pdf-standard: [ua-1]
         include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST))]
     filters:
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
+      - path: $(_yaml_string(_PDF_REPORT_FIGURES_FILTER))
+        at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
-      - $(_yaml_string(_PDF_REPORT_LINKS_FILTER))
       - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
+      - $(_yaml_string(_PDF_REPORT_LINKS_FILTER))
     ---
 
     """ * markdown
@@ -15273,9 +15287,9 @@ dates, vectors, and NamedTuples or dictionaries for nested options
 (`margin=(x="2cm", y="2cm")`). The paper is the one `lang`'s region uses: US
 Letter for the regions Unicode CLDR lists for it (US, CA, MX and others in the
 Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
-`format`, `pdf-standard` and `filters` belong to `pdf_report` and cannot be set
-through `metadata`. The Markdown itself must not carry a YAML metadata block:
-Quarto would let it override `title`, `lang` and the equation filter.
+`format`, `from`, `pdf-standard` and `filters` belong to `pdf_report` and cannot
+be set through `metadata`. The Markdown itself must not carry a YAML metadata
+block: Quarto would let it override `title`, `lang` and the equation filter.
 
 `date` is printed in the title block. A `Date` or `DateTime`, an ISO date
 (`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
@@ -15297,6 +15311,14 @@ image needs alt text: Typst refuses a PDF/UA document with an image that has
 none. A Quarto program (`quarto`, found on `PATH` or given as a path) whose
 Typst supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its
 bundled Typst 0.15.1).
+
+A web or mail address written as text becomes a link to itself, since PAC (PDF
+Accessibility Checker) fails a PDF that shows an address without a link: an
+address with a scheme (`https://…`, `mailto:…`), a mail address, an address
+starting with `www.` (linked with `https://`) and a code span that is an address
+and nothing else. An image alone in its paragraph, or in a figure, is tagged as a
+figure of its own rather than one inside a paragraph, which PAC warns about. An
+image within a line of text stays in its paragraph, and PAC still warns about it.
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
