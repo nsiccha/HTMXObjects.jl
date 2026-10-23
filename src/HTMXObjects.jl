@@ -20,7 +20,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
     semantic_card, SemanticTexts, semantic_texts
-export MarkdownRule, MARKDOWN_URL_RULE, render_markdown
+export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
@@ -2480,8 +2480,13 @@ const _HYPERSCRIPT_VERSION = "0.9.14"
 # Vendor pin only: the CDN surface stays `nothing` (`htmx()`) / floating
 # `"2"` (`pico_page`), so vendor mode serves pico solely at this exact pin.
 const _PICO_VERSION = "2.1.1"
+# KaTeX typesets the math `render_markdown` marks (`math_script`). The shell
+# only names where it lives; the runtime fetches it when a page shows math.
+const _KATEX_VERSION = "0.19.0"
 
 # pkg => (path inside its artifact, served filename, pinned version).
+# KaTeX is a directory: its stylesheet finds its fonts relative to itself, so
+# it is served as `katex/…` with the `fonts/` beside it (`_vendor_files`).
 # The artifact itself resolves through `_vendor_artifact` below — the
 # `artifact"..."` macro needs a literal, so one method per asset.
 const _VENDOR_ASSETS = (
@@ -2497,6 +2502,8 @@ const _VENDOR_ASSETS = (
         file="_hyperscript.min.js", version=_HYPERSCRIPT_VERSION),
     pico=(relpath=joinpath("package", "css", "pico.min.css"),
         file="pico.min.css", version=_PICO_VERSION),
+    katex=(relpath=joinpath("package", "dist"),
+        file="katex", version=_KATEX_VERSION),
 )
 
 _vendor_artifact(::Val{:htmx}) = artifact"htmx"
@@ -2505,6 +2512,7 @@ _vendor_artifact(::Val{:ws}) = artifact"htmx-ext-ws"
 _vendor_artifact(::Val{:preload}) = artifact"htmx-ext-preload"
 _vendor_artifact(::Val{:hyperscript}) = artifact"hyperscript"
 _vendor_artifact(::Val{:pico}) = artifact"pico"
+_vendor_artifact(::Val{:katex}) = artifact"katex"
 
 # Single validation point for the `assets` mode, so an unknown mode fails
 # even when every version kwarg is `nothing` and no URL is built.
@@ -2537,6 +2545,17 @@ end
 # library a script. Shared by the `htmx()` shell and `vendor_head`.
 _head_asset_node(::Val{:pico}, src) = h.link(rel="stylesheet", href=src)
 _head_asset_node(::Val, src) = h.script(src=src)
+# KaTeX is not loaded by the head: `src` names its directory, and the
+# template holds the two files `math_script` adds once the page shows math.
+# Template content is inert, so a page without math fetches nothing, and a
+# static export rewrites its `href`/`src` like any other address. A pinned
+# `?v=` (a linked shell) rides on each file, not on the directory.
+function _head_asset_node(::Val{:katex}, src)
+    i = findfirst('?', src)
+    dir, query = isnothing(i) ? (src, "") : (src[1:prevind(src, i)], src[i:end])
+    h.template(h.link(rel="stylesheet", href=dir * "/katex.min.css" * query),
+        h.script(src=dir * "/katex.min.js" * query); id="htmxo-katex")
+end
 
 # htmx extensions register themselves against a loaded htmx, so they need
 # htmx loaded before them.
@@ -2565,8 +2584,12 @@ vendorfiles()                                  # → GET /vendor/htmx.min.js, �
 __page__(content) = htmx(content; assets=:vendor)
 ```
 
-The first call downloads the pinned npm tarballs from Artifacts.toml (one
-3.2 MB fetch, cached in the depot); further calls re-read from disk. Files
+KaTeX, which typesets Markdown math ([`render_markdown`](@ref)), is served
+as a directory, `/<mountdir>/katex/katex.min.css`, `…/katex.min.js` and the
+`…/katex/fonts/` its stylesheet loads.
+
+The first call downloads the pinned npm tarballs from Artifacts.toml (about
+4.7 MB, cached in the depot); further calls re-read from disk. Files
 are served with [`staticfiles`](@ref)-style content types. A custom
 `mountdir` (or a second mount elsewhere) pairs with the matching
 `assets="/<mountdir>"` prefix on [`htmx`](@ref)/[`pico_page`](@ref).
@@ -2582,11 +2605,12 @@ function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
     prefix = strip(mountdir, '/')
     route(file) = isempty(prefix) ? "/$file" : "/$prefix/$file"
     for pkg in keys(_VENDOR_ASSETS)
-        spec = _VENDOR_ASSETS[pkg]
-        path = _vendor_file(pkg)
-        body = read(path)
-        handler = req -> _vendor_file_response(req, path, body, spec.version, headers)
-        _register_get_route!(route(spec.file), handler)
+        version = _VENDOR_ASSETS[pkg].version
+        for (file, path) in _vendor_files(pkg)
+            body = read(path)
+            handler = req -> _vendor_file_response(req, path, body, version, headers)
+            _register_get_route!(route(file), handler)
+        end
     end
     # The runtime is rendered per request, so a Revise edit or a Treebars
     # extension loaded after this call is served as the shell links it.
@@ -2624,12 +2648,25 @@ _etag_matches(if_none_match, etag) =
 # The pinned file inside its (lazily downloaded) artifact.
 _vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[pkg].relpath)
 
+# Every file a package serves, as `served path => file`, in a stable order:
+# one for a library, KaTeX's stylesheet, script and fonts for `:katex`.
+_vendor_files(pkg::Symbol) = _vendor_files(Val(pkg))
+_vendor_files(::Val{P}) where {P} = [_VENDOR_ASSETS[P].file => _vendor_file(P)]
+function _vendor_files(::Val{:katex})
+    dir, served = _vendor_file(:katex), _VENDOR_ASSETS[:katex].file
+    fonts = sort!(readdir(joinpath(dir, "fonts")))
+    [[served * "/" * f => joinpath(dir, f) for f in ("katex.min.css", "katex.min.js")];
+     [served * "/fonts/" * f => joinpath(dir, "fonts", f) for f in fonts]]
+end
+
 """
-    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico), runtime=true) -> Vector{String}
+    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex), runtime=true) -> Vector{String}
 
 Copy the vendored head assets — the same files [`vendorfiles`](@ref)
 serves — into `dir` (created if missing), for a static bundle that has no
-routes to serve them from. `packages` selects which pinned libraries to copy.
+routes to serve them from. `packages` selects which pinned libraries to copy;
+`:katex` is the directory `dir/katex/` (stylesheet, script and fonts) that
+typesets Markdown math on pages whose `assets` prefix names `dir`.
 With `runtime=true` (the default) HTMXObjects' own page runtime is copied
 too, to `dir/htmxo/<name>.css|js` — the files a `runtime=:linked` page links
 (see [`htmx`](@ref)), including the Treebars poll assets while that
@@ -2653,10 +2690,12 @@ page = HTMLDocument(h.html(
 function copy_vendorfiles(dir::AbstractString; packages=keys(_VENDOR_ASSETS), runtime::Bool=true)
     pkgs = _vendor_packages(packages)
     mkpath(dir)
-    libraries = map(pkgs) do pkg
-        dest = joinpath(dir, _VENDOR_ASSETS[pkg].file)
-        write(dest, read(_vendor_file(pkg)))
-        dest
+    libraries = String[]
+    for pkg in pkgs, (file, path) in _vendor_files(pkg)
+        dest = joinpath(dir, split(file, '/')...)
+        mkpath(dirname(dest))
+        write(dest, read(path))
+        push!(libraries, dest)
     end
     runtime || return libraries
     mkpath(joinpath(dir, "htmxo"))
@@ -2679,7 +2718,10 @@ wrote next to the page, and a rooted one (`"/vendor"`) matches a
 An extension (`:sse`, `:ws`, `:preload`) without `:htmx` is an
 `ArgumentError`. The tags load the libraries only: `:preload` still needs
 `hx-ext="preload"` on an ancestor and [`preload_runtime_js`](@ref), which the
-[`htmx`](@ref) shell adds for you.
+[`htmx`](@ref) shell adds for you. `:katex` loads nothing by itself: it is the
+inert `<template id="htmxo-katex">` naming `<base>/katex/`, from which
+[`math_script`](@ref) loads KaTeX once the page shows math, so a hand-built
+head that wants typeset math adds `math_script()` and `math_styles()` too.
 """
 function vendor_head(base::AbstractString="vendor"; packages=(:htmx,))
     pkgs = _vendor_packages(packages)
@@ -2730,6 +2772,8 @@ _runtime_blocks() = (
     mutation_poll = (:js, mutation_poll_script),
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
+    math_styles = (:css, math_styles),
+    math_script = (:js, math_script),
     # Page helpers the shell does not carry: an app places them itself,
     # usually in `extra_head`, and a linked shell links them there
     # (`_linked_extra_head`).
@@ -2818,7 +2862,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing, lang=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing, lang=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -2839,6 +2883,13 @@ Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
 language of the failed-request toasts ([`toast_script`](@ref)); pass the root's
 `__error_texts__` from `__page__` so the toasts match the error articles.
 `nothing` (the default) keeps them English.
+`katex_version` is the KaTeX release that typesets Markdown math
+([`render_markdown`](@ref) marks it, [`math_script`](@ref) renders it). The
+shell never loads KaTeX itself: it carries an inert template naming KaTeX's
+stylesheet and script, which the runtime adds the first time the page shows
+math, on load or after a swap, so a page without math fetches nothing. Pass
+`nothing` to leave the template out; math then shows as its TeX source, unless
+the page loads KaTeX itself (`window.katex`), which the runtime then uses.
 Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
 it defaults to `false` — the bundle is served only by the KB app, so standalone
 pages omit the fetch.
@@ -2894,6 +2945,7 @@ function htmx(args...;
     hyperscript_version = _HYPERSCRIPT_VERSION,
     preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
+    katex_version       = _KATEX_VERSION,
     assets              = :cdn,
     runtime             = :inline,
     feedback             = true,
@@ -2921,6 +2973,9 @@ function htmx(args...;
         _runtime_head(:preload_runtime, mount))
     isnothing(hyperscript_version) || push!(cdn, _head_asset_node(Val(:hyperscript), _head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets; versioned)))
     isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets; versioned)))
+    # jsdelivr, not cdnjs: cdnjs was measured serving KaTeX 0.16.21's fonts
+    # one byte short, which browsers reject as invalid font data.
+    isnothing(katex_version)       || push!(cdn, _head_asset_node(Val(:katex), _head_asset_src(:katex, katex_version, "https://cdn.jsdelivr.net/npm/katex@$(katex_version)/dist", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
@@ -2969,7 +3024,11 @@ function htmx(args...;
                 :semantic_refresh,
                 # `url_params` elements follow the page address and write
                 # their values into it; inert on pages without one.
-                :url_params)...,
+                :url_params,
+                # Markdown math (`render_markdown`) is typeset by KaTeX, which
+                # this runtime loads from the `katex_version` template the
+                # first time the page shows math; inert on pages without any.
+                :math_styles, :math_script)...,
             # Poller quietness by default: the Treebars stylesheet + script
             # ride every shell while the extension is loaded (no-op without
             # Treebars), ahead of `extra_head` so apps can still override.
@@ -3227,16 +3286,19 @@ struct SemanticUnavailable <: SemanticNode
 end
 
 """
-    SemanticProse(markdown)
+    SemanticProse(markdown; math=true)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
 are the source itself; the HTML projection renders it through
-[`render_markdown`](@ref) (CommonMark plus bare-URL linking), which escapes
-inline markup, so prose cannot smuggle HTML through.
+[`render_markdown`](@ref) (CommonMark plus bare-URL linking and TeX math),
+which escapes inline markup, so prose cannot smuggle HTML through. Its
+`\$…\$` / `\$\$…\$\$` math is typeset in the browser; `math=false` shows every
+`\$` as text.
 """
 struct SemanticProse <: SemanticNode
     markdown::String
-    SemanticProse(markdown) = new(String(markdown))
+    math::Bool
+    SemanticProse(markdown; math::Bool=true) = new(String(markdown), math)
 end
 
 """
@@ -3891,6 +3953,96 @@ markdown_node(r::MarkdownRenderer, t::CommonMark.TableCell, n, rules, context) =
 _md_cell_align_attrs(align::Symbol) =
     align === :none ? (;) : (; style="text-align: $(String(align))")
 
+# --- TeX math ---
+#
+# The parser decides what is math, so a browser never has to guess: the rule
+# captures the bytes between the delimiters VERBATIM, before escape or
+# emphasis processing can touch them (`\_` stays `\_`, `\\` stays `\\`), and
+# code spans and fences are node kinds it never sees. Each formula becomes one
+# marked element carrying its TeX as text, which `math_script` typesets; until
+# it does, or where KaTeX cannot load, the reader sees the source.
+#
+# Dollar signs follow pandoc's rules, because prose uses `$` for money: an
+# opening `$` is followed by a non-space, a closing `$` is preceded by one and
+# not followed by a digit, and inline math never contains a backtick. So
+# `costs $5 and $10`, `$1,234.00/$56.00` and `$5 (see `x$`)` stay text, while
+# `$x$` and `$\alpha_1$` are math. `$$…$$` is display math anywhere, and a
+# paragraph that is only `$$…$$` (or `\[…\]`) is a display block, as is a
+# ```` ```math ```` fence. `\(…\)` and `\[…\]` are the LaTeX delimiters, tried
+# before CommonMark's backslash escapes, which still apply to every other `\`.
+struct _MarkdownMathRule end
+
+# The non-space edges of inline dollar math: any character but `$`, a
+# backslash, a backtick or whitespace, or a backslash pair (`\$`, `\,`).
+const _MD_DOLLAR_EDGE = raw"(?:[^$\\`\s]|\\[^\n])"
+const _MD_MATH_INLINE = (
+    (Regex("^\\\$\\\$(.+?)\\\$\\\$", "s"), true),
+    (Regex("^\\\$(" * _MD_DOLLAR_EDGE * "(?:(?:[^\$\\\\`]|\\\\[^\\n])*?" *
+           _MD_DOLLAR_EDGE * ")?)\\\$(?!\\d)", "s"), false),
+    (r"^\\\[(.+?)\\\]"s, true),
+    (r"^\\\((.+?)\\\)"s, false),
+)
+
+function _parse_markdown_math(p::CommonMark.InlineParser, block::CommonMark.Node)
+    for (rx, display) in _MD_MATH_INLINE
+        m = match(rx, p)
+        isnothing(m) && continue
+        tex = strip(m.captures[1])
+        isempty(tex) && continue
+        CommonMark.consume(p, m)
+        child = CommonMark.Node(CommonMark.Math(startswith(m.match, '$'), display))
+        child.literal = String(tex)
+        CommonMark.append_child(block, child)
+        return true
+    end
+    # Not math: the `$` becomes text, and a `\` goes to the escape rule.
+    false
+end
+
+CommonMark.inline_rule(::_MarkdownMathRule) =
+    CommonMark.Rule(_parse_markdown_math, 0.5, "\$\\")
+
+# A paragraph that is exactly one display formula is a block of its own.
+const _MD_MATH_BLOCK = (r"^\$\$(.+)\$\$$"s => "\$\$", r"^\\\[(.+)\\\]$"s => "\\]")
+CommonMark.block_modifier(::_MarkdownMathRule) =
+    CommonMark.Rule(1.5) do parser, node
+        if node.t isa CommonMark.CodeBlock && node.t.info == "math"
+            node.t = CommonMark.DisplayMath()
+            node.literal = strip(node.literal, '\n')
+        elseif node.t isa CommonMark.Paragraph
+            literal = strip(node.literal)
+            for (rx, closer) in _MD_MATH_BLOCK
+                m = match(rx, literal)
+                isnothing(m) && continue
+                # `$$a$$ and $$b$$` is two formulas in prose, not one block.
+                tex = strip(m[1])
+                (isempty(tex) || occursin(closer, tex)) && continue
+                node.t = CommonMark.DisplayMath(startswith(literal, '$'))
+                node.literal = String(tex)
+                break
+            end
+        end
+        return nothing
+    end
+
+# One formula: its TeX as escaped text, between `$` delimiters that only the
+# Markdown projection writes, so `?plain` reads `$x$` / `$$…$$` and the HTML
+# carries the bare source. Inline display math stays a `span` (a `div` would
+# close the paragraph it sits in); a display block is a `div`.
+_markdown_math(tex::AbstractString, display::Bool) = display ?
+    h.span(markdown_only("\$\$"), String(tex), markdown_only("\$\$");
+        class="htmxo-math htmxo-math-display", data_htmxo_math="display") :
+    h.span(markdown_only("\$"), String(tex), markdown_only("\$");
+        class="htmxo-math", data_htmxo_math="inline")
+_markdown_math_block(tex::AbstractString) =
+    h.div(markdown_only("\$\$\n"), String(tex), markdown_only("\n\$\$");
+        class="htmxo-math htmxo-math-display", data_htmxo_math="display")
+
+markdown_node(::MarkdownRenderer, t::CommonMark.Math, n, rules, context) =
+    _markdown_math(n.literal, t.display)
+markdown_node(::MarkdownRenderer, ::CommonMark.DisplayMath, n, rules, context) =
+    _markdown_math_block(n.literal)
+
 # Raw HTML in free text is almost never intentional and must never be
 # injected into the page. A bare `String` child renders escaped, so inline
 # HTML stays visible literal text and block HTML shows as a source block.
@@ -3907,19 +4059,21 @@ function markdown_node(r::MarkdownRenderer, t, n, rules, context)
 end
 
 """
-    markdown_parser(; extra_rules=[]) -> CommonMark.Parser
+    markdown_parser(; extra_rules=[], math=true) -> CommonMark.Parser
 
 Fresh parser per render: `Parser` holds mutable rule state. Enables the GFM
-trio (pipe tables, strikethrough, task lists) plus caller-supplied
-`extra_rules` — rule instances like `CommonMark.TableRule()`, enabled in
-order. Pair with the [`render_markdown`](@ref) AST entry point to inspect the
-tree before rendering it.
+trio (pipe tables, strikethrough, task lists), TeX math unless `math=false`
+(see [`render_markdown`](@ref)), plus caller-supplied `extra_rules` — rule
+instances like `CommonMark.TableRule()`, enabled in order. Pair with the
+[`render_markdown`](@ref) AST entry point to inspect the tree before
+rendering it.
 """
-function markdown_parser(; extra_rules::AbstractVector=[])
+function markdown_parser(; extra_rules::AbstractVector=[], math::Bool=true)
     parser = CommonMark.Parser()
     CommonMark.enable!(parser, CommonMark.TableRule())
     CommonMark.enable!(parser, CommonMark.StrikethroughRule())
     CommonMark.enable!(parser, CommonMark.TaskListRule())
+    math && CommonMark.enable!(parser, _MarkdownMathRule())
     for rule in extra_rules
         CommonMark.enable!(parser, rule)
     end
@@ -3928,15 +4082,29 @@ end
 
 """
     render_markdown(text; rules=nothing, context=nothing,
-                    renderer=DefaultMarkdownRenderer(), parser_rules=[]) -> Node
+                    renderer=DefaultMarkdownRenderer(), parser_rules=[],
+                    math=true) -> Node
     render_markdown(ast::CommonMark.Node; rules=nothing, context=nothing,
                     renderer=DefaultMarkdownRenderer()) -> Node
 
 Parse `text` as Markdown — CommonMark plus the GFM pipe-table,
-strikethrough and task-list extensions — and render it into an `h` node
-tree: a `div` wrapping one node per block. The AST form renders an
+strikethrough and task-list extensions, and TeX math — and render it into an
+`h` node tree: a `div` wrapping one node per block. The AST form renders an
 already-parsed tree instead, so a caller can inspect it first (parse with
 [`markdown_parser`](@ref) for the same stock extensions).
+
+Math is `\$…\$` or `\\(…\\)` inline and `\$\$…\$\$`, `\\[…\\]` or a
+```` ```math ```` fence for display. The TeX is kept byte for byte (`\\_`
+stays `\\_`), and code spans and fences never become math. Dollar signs
+follow pandoc's rules, so money stays text: an opening `\$` must be
+followed by a non-space and a closing `\$` preceded by one and not followed
+by a digit (`costs \$5 and \$10` is text, `\$x_1\$` is math); inline
+math holds no backtick, and `\\\$` is a literal dollar. Each formula renders
+as an element marked `htmxo-math` that carries its TeX as text; the
+[`htmx`](@ref) shell's [`math_script`](@ref) typesets it with KaTeX, and
+until then, or without KaTeX, the reader sees the source. The Markdown
+projection writes it back as `\$…\$` / `\$\$…\$\$`. `math=false` parses no
+math, so every `\$` and `\\(` is text as before.
 
 `rules` is the inline text-rule registry: a [`MarkdownRule`](@ref), or a
 vector of them, matched against each joined text run outside links, code
@@ -3950,7 +4118,7 @@ whole render.
 `renderer` is the [`MarkdownRenderer`](@ref) the walk recurses through: pass
 an app subtype with [`markdown_node`](@ref) overrides for the node kinds the
 app renders its own way. `parser_rules` adds CommonMark parser rule
-instances (like `CommonMark.TableRule()`) beyond the stock trio.
+instances (like `CommonMark.TableRule()`) beyond the stock ones.
 
 The `?plain` projection stays faithful: rules and overrides build ordinary
 nodes, which the tag-dispatched markdown serializer projects back
@@ -3964,8 +4132,8 @@ the HTML the parser would emit.
 """
 function render_markdown(text::AbstractString; rules=nothing, context=nothing,
                          renderer::MarkdownRenderer=DefaultMarkdownRenderer(),
-                         parser_rules::AbstractVector=[])
-    render_markdown(markdown_parser(; extra_rules=parser_rules)(String(text));
+                         parser_rules::AbstractVector=[], math::Bool=true)
+    render_markdown(markdown_parser(; extra_rules=parser_rules, math)(String(text));
         rules=rules, context=context, renderer=renderer)
 end
 
@@ -4026,7 +4194,7 @@ end
 # its source. `render_markdown` builds real nodes (never `Raw` markup), and `h`
 # escapes ordinary text children exactly once, so prose cannot smuggle HTML in.
 _semantic_prose_node(prose::SemanticProse) = h.div(
-    render_markdown(prose.markdown); class="htmxo-semantic-prose")
+    render_markdown(prose.markdown; math=prose.math); class="htmxo-semantic-prose")
 
 # Delegates to the one table renderer rather than hand-building a second
 # `h.table`. Sorting and download are interactive chrome, not part of a semantic
@@ -7630,6 +7798,120 @@ url_params_script() = h.script(Raw(raw"""
 
   window.htmxoUrlParams = { apply: apply };
 })();
+"""))
+
+"""
+    math_script()
+
+Client runtime that typesets the TeX math [`render_markdown`](@ref) marks:
+every `.htmxo-math` element, rendered with KaTeX's `renderToString`
+(`throwOnError: false`, `trust: false`) on load and after every htmx swap.
+Only marked elements are typeset; the page's text is never rescanned for
+delimiters, so code stays literal.
+
+KaTeX itself is loaded on demand: the first time the page shows math, the
+runtime adds the stylesheet and script named by the [`htmx`](@ref) shell's
+`<template id="htmxo-katex">` (`katex_version`) and typesets once KaTeX
+arrives. A page without math fetches nothing. Without that template the
+runtime uses a KaTeX the page loaded itself (`window.katex`), and otherwise
+leaves each formula showing its TeX source, styled by [`math_styles`](@ref).
+A KaTeX that fails to load is reported in the console.
+
+`window.htmxoMath.typeset(root)` typesets math a script added outside htmx.
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+math_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoMath) return;
+  var loading = false;
+  function marked(scope) {
+    var els = Array.prototype.slice.call(scope.querySelectorAll('.htmxo-math'));
+    if (scope.matches && scope.matches('.htmxo-math')) els.unshift(scope);
+    return els;
+  }
+  // The source is kept in data-htmxo-tex before KaTeX replaces the content;
+  // data-htmxo-math-done marks what is typeset, so a swap that brings the
+  // server's source back is typeset again.
+  function typeset(scope) {
+    marked(scope).forEach(function (el) {
+      if (el.hasAttribute('data-htmxo-math-done')) return;
+      var tex = el.getAttribute('data-htmxo-tex');
+      if (tex === null) {
+        tex = el.textContent;
+        el.setAttribute('data-htmxo-tex', tex);
+      }
+      try {
+        el.innerHTML = window.katex.renderToString(tex, {
+          displayMode: el.getAttribute('data-htmxo-math') === 'display',
+          throwOnError: false,
+          trust: false,
+        });
+        el.setAttribute('data-htmxo-math-done', '');
+      } catch (err) {
+        el.textContent = tex;
+        console.warn('math: cannot typeset ' + JSON.stringify(tex) + ': ' + err);
+      }
+    });
+  }
+  // KaTeX from the shell's template, added once; its load typesets the page.
+  function load() {
+    var template = document.getElementById('htmxo-katex');
+    if (loading || !template || !template.content) return;
+    loading = true;
+    var css = template.content.querySelector('link[href]');
+    var js = template.content.querySelector('script[src]');
+    if (css) {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = css.getAttribute('href');
+      document.head.appendChild(link);
+    }
+    if (!js) return;
+    var script = document.createElement('script');
+    script.src = js.getAttribute('src');
+    script.onload = function () { typeset(document); };
+    script.onerror = function () {
+      console.warn('math: KaTeX did not load from ' + script.src + '; formulas show their TeX source');
+    };
+    document.head.appendChild(script);
+  }
+  function run(root) {
+    var scope = root && root.querySelectorAll ? root : document;
+    if (marked(scope).length === 0) return;
+    if (window.katex) typeset(scope); else load();
+  }
+  window.htmxoMath = { typeset: run };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { run(document); });
+  } else {
+    run(document);
+  }
+  document.addEventListener('htmx:load', function (e) { run(e.target); });
+  document.addEventListener('htmx:afterSettle', function (e) { run(e.target); });
+})();
+"""))
+
+"""
+    math_styles()
+
+`<style>` block for the math [`math_script`](@ref) typesets: a display
+formula is a block that scrolls sideways when it is wider than its column,
+and a formula not typeset (yet, or without KaTeX) shows its TeX source in a
+monospace font, so it reads as source rather than prose. Scoped under
+`@layer htmxo`, so host stylesheets win. Auto-included by [`htmx`](@ref).
+"""
+math_styles() = h.style(Raw("""
+@layer htmxo {
+.htmxo-math-display { display: block; overflow-x: auto; overflow-y: hidden; }
+.htmxo-math:not([data-htmxo-math-done]) {
+    font-family: monospace;
+    font-size: 0.9em;
+    white-space: pre-wrap;
+}
+.htmxo-math-display:not([data-htmxo-math-done]) { margin: 1em 0; }
+}
 """))
 
 # --- Error handling ---

@@ -5026,8 +5026,11 @@ end
         # Copies are writable, so a re-copy overwrites in place; the runtime
         # is skipped on request.
         @test copy_vendorfiles(out; packages=["htmx"], runtime=false) == [joinpath(out, "htmx.min.js")]
-        # The default copies all six pins.
-        @test length(filter(isfile, copy_vendorfiles(joinpath(dir, "all"); runtime=false))) == 6
+        # The default copies all seven pins: six library files, and KaTeX's
+        # stylesheet, script and 60 fonts in their own directory.
+        copied = copy_vendorfiles(joinpath(dir, "all"); runtime=false)
+        @test length(filter(isfile, copied)) == 6 + 2 + 60
+        @test count(f -> dirname(f) == joinpath(dir, "all"), copied) == 6
         @test_throws ArgumentError copy_vendorfiles(dir; packages=(:jquery,))
     end
 
@@ -5053,18 +5056,18 @@ end
     @test !contains(page, "https://")
 end
 
-@testitem "vendor artifacts stay lazy: install selects none, vendor load selects six" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+@testitem "vendor artifacts stay lazy: install selects none, vendor load selects seven" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     using Artifacts, TOML
     toml = joinpath(pkgdir(HTMXObjects), "Artifacts.toml")
     meta = TOML.parsefile(toml)
-    names = ("htmx", "htmx-ext-sse", "htmx-ext-ws", "htmx-ext-preload", "hyperscript", "pico")
+    names = ("htmx", "htmx-ext-sse", "htmx-ext-ws", "htmx-ext-preload", "hyperscript", "pico", "katex")
     # Every table carries the flag: one unflagged entry downloads at install.
     @test Set(keys(meta)) == Set(names)
     for n in names
         @test get(meta[n], "lazy", false) === true
     end
     # Ordinary installation (what Pkg resolves) fetches nothing; explicit
-    # vendor loading resolves the same six with identical metadata.
+    # vendor loading resolves the same seven with identical metadata.
     @test isempty(Artifacts.select_downloadable_artifacts(toml))
     explicit = Artifacts.select_downloadable_artifacts(toml; include_lazy=true)
     @test Set(keys(explicit)) == Set(names)
