@@ -908,14 +908,15 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   span that is an address and nothing else. PAC (PDF Accessibility Checker)
   fails a PDF that shows an address without a link ("Link in text does not
   have a 'Link' element"). An address inside a code block, or in a code span
-  with other text (`curl https://…`), stays text, and PAC reports it.
-- **Images stand on their own.** An image alone in its paragraph, or in a
-  figure, is tagged as a figure of its own rather than one inside a paragraph:
-  Pandoc and Quarto set every image in a box, which Typst put in a paragraph,
-  and PAC warns about a figure inside a paragraph ("Possibly inappropriate use
-  of a 'Figure' structure element"). An image within a line of text, such as an
-  icon, stays in its paragraph, and PAC still warns about it, so give an image
-  its own paragraph.
+  with other text (`curl https://…`), stays text, and PAC reports it (todo
+  `14awnkw`).
+- **Images are figures of their own.** An image alone in its paragraph, or in
+  a figure, is tagged as a figure of its own rather than one inside a
+  paragraph: Pandoc and Quarto set every image in a box, which Typst put in a
+  paragraph, and PAC warns about a figure inside a paragraph ("Possibly
+  inappropriate use of a 'Figure' structure element"). An image within a line
+  of text, such as an icon, stays in its paragraph, and PAC still warns about
+  it: Typst tags every image as a block figure (todo `14awnkw`).
 - **Long tables:** a table longer than the rest of its page continues on the
   next page, with its header row repeated on each page. A caption above a table
   moves to the next page with its first rows rather than stay alone at the
