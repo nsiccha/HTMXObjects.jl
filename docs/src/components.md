@@ -136,6 +136,8 @@ Columns are auto-detected from the table (any `Tables.jl`-compatible source). Ot
 
 Drop `sortable_table_js()` and `download_table_js()` once per page (typically inside `__page__`) to enable the client-side sorting and CSV download.
 
+The CSV holds the text each cell shows. A cell shown on several lines (a `<br>`, or block children such as `div` or `p`) exports one quoted field with those lines, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))` becomes a field holding the two lines `6,28` and `6,01–6,55`, rather than `6,286,01–6,55`. A header shown on two lines exports its lines joined by a space.
+
 #### Reading and restoring the sort state
 
 `sortTable` marks the active `<th>` with both `data-sort-dir="asc"|"desc"` and
@@ -1050,6 +1052,17 @@ among them still raises the failure toast.
 hx_link("/settings"; hx_target="#main", hx_push_url="true")("Settings")
 hx_link("/report/42"; hx_target="#main", preload=true)("Report")  # starts on hover
 ```
+
+### Opening a link in a new tab {#new-tab-links}
+
+A click on an htmx link swaps in place. A Ctrl/Cmd-click, Shift-click or
+middle-click on one with a real `href` — `hx_link`, `nav_sidebar` and
+`htmxo_breadcrumb` render one — opens that address in a new tab or window and
+leaves the page as it is, as on any link. htmx alone would swap in place for
+Ctrl/Cmd/Shift too, so the [`htmx`](@ref) shell carries
+[`modifier_click_script`](@ref), which keeps those clicks from htmx; a link
+without an `href`, or with `href="#…"`, stays htmx's. Give an app's own
+`hx-get` link the page address as its `href` to get this.
 
 ### `htmx_or(full_page_fn, req, fragment)`
 
