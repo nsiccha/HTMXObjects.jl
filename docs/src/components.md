@@ -132,11 +132,11 @@ render_table([
 )
 ```
 
-Columns are auto-detected from the table (any `Tables.jl`-compatible source). Other useful kwargs: `id`, `caption`, `cell` (per-cell render override), `class` (default `"striped"`).
+Columns are auto-detected from the table (any `Tables.jl`-compatible source). Other useful kwargs: `id`, `caption`, `cell` (per-cell render override), `class` (default `"striped"`). A float is written in the table's language and sorts by its exact value; see [Numbers in table cells](#table-numbers).
 
 Drop `sortable_table_js()` and `download_table_js()` once per page (typically inside `__page__`) to enable the client-side sorting and CSV download.
 
-The CSV holds the text each cell shows. A cell shown on several lines (a `<br>`, or block children such as `div` or `p`) exports one quoted field with those lines, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))` becomes a field holding the two lines `6,28` and `6,01–6,55`, rather than `6,286,01–6,55`. A header shown on two lines exports its lines joined by a space.
+The CSV holds the text each cell shows, except in a number cell, which exports its exact number (see [Numbers in table cells](#table-numbers)). A cell shown on several lines (a `<br>`, or block children such as `div` or `p`) exports one quoted field with those lines, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))` becomes a field holding the two lines `6,28` and `6,01–6,55`, rather than `6,286,01–6,55`. A header shown on two lines exports its lines joined by a space.
 
 #### Reading and restoring the sort state
 
@@ -447,6 +447,53 @@ updates, regrouping), and to the `sortable_table` that holds hand-built
 the one text Markdown keeps is a lazy detail's placeholder (`loading`), which
 follows `texts=` there too.
 
+#### Numbers in table cells {#table-numbers}
+
+A table writes its numbers in its language: `texts = table_texts(:de)` writes
+`0,156`, `1.234.567` and `3,81·10⁻⁵`, the English default `0.156`,
+`1,234,567` and `3.81·10⁻⁵`. Each number cell keeps the exact value, so the
+table sorts by the number, not by the text (`parseFloat` would read German
+`0,156` as 0), and the ⬇ CSV download writes the number (`3.81e-5`), which a
+spreadsheet or R/Python reads.
+
+- **By themselves.** A float in a `render_table` column, and a bare float among
+  the cells `master` returns (`master_detail_table`, `master_detail_pair`),
+  becomes such a cell, written with the table's own `texts`. Integers, Bools
+  and text stay as written: an integer column is as often a year, an id or a
+  postcode (`2024`, `10115`) as a count, which would read `2.024` and
+  `10.115`. A custom `cell=` renderer writes its own content.
+- **In cells you build.** `number_cell(x; texts, digits, sigdigits, attrs...)`
+  returns the `<td>`, for `sortable_table` rows or a `master` cell that needs
+  attributes; pass it the table's `texts`. `format_number(x; texts, digits,
+  sigdigits)` returns the text alone.
+
+```julia
+const DE = table_texts(:de)
+rows = [h.tr(h.td(f.name), number_cell(f.share; texts=DE, sigdigits=3),
+             number_cell(f.count; texts=DE)) for f in facilities]
+sortable_table(["Einrichtung", "Anteil", "Anzahl"], rows; texts=DE)
+format_number(1234567.25; texts=DE, digits=1)   # "1.234.567,3"
+```
+
+How much is written:
+
+- With neither keyword, every digit Julia prints: `0.15623` writes `0,15623`,
+  `2.0` writes `2`. A float below 10⁻⁴ or from 10¹⁵ up (in absolute value)
+  is a power of ten with superscript digits, `3,81·10⁻⁵`, which reads the same
+  in HTML, Markdown, a `pdf_report` and a pasted copy.
+- `sigdigits = 3` rounds to three significant digits first, as
+  `round(x; sigdigits = 3)` does: `0,156`, `1.230.000`.
+- `digits = 2` writes exactly two decimals (0 to 10), halves away from zero,
+  the same way as a [group summary](#table-regrouping): `0,16`. It never
+  switches to a power of ten.
+
+`missing` and `nothing` write `–` (no sort key, an empty CSV field); `Inf`,
+`-Inf` and `NaN` write `∞`, `-∞` and `NaN`. The cell carries its value twice:
+`data-sort-value` for sorting and `data-htmxo-number` for the CSV. A cell you
+build yourself can carry them too, for example a number with a unit:
+`h.td("6,28 €/m²"; data_sort_value = string(x), data_htmxo_number = string(x))`
+sorts by `x` and exports `6.28`.
+
 ## Layout / widgets
 
 ### Hierarchical master/detail tables
@@ -571,7 +618,8 @@ transactions_table(group_by="Counterparty") = master_detail_table(
   A leaf whose function returns `nothing` or `missing` is left out. The
   browser computes the summaries again for every grouping the reader picks,
   rounded to `digits` decimals and written with the table's `decimal` and
-  `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`). Group rows
+  `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`); the CSV
+  download writes the same decimals as a number (`1234.5`). Group rows
   sort among themselves by the same columns; leaves sort within their group.
 - **The same leaves.** Leaf rows render through `master`, `detail` /
   `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
@@ -1081,6 +1129,7 @@ manual.)
 | `fmt_time(2.5)` | `"2.5 s"` (auto-picks unit)     |
 | `fmt_bytes(1572864)` | `"1.5 MB"` (auto-picks unit) |
 | `fmt_number(1234567)` | `"1.23M"`                  |
+| `format_number(1234567.25; texts=table_texts(:de))` | `"1.234.567,25"` (the table's language; see [Numbers in table cells](#table-numbers)) |
 
 ## Editor widgets (Git integration)
 

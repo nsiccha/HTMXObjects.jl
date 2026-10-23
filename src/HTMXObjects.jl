@@ -28,7 +28,7 @@ export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
@@ -4457,9 +4457,12 @@ Base.show(io::IO, ::MIME"text/markdown", artifact::SemanticArtifact) = print(
 # A Markdown table row is one line, and GFM splits a cell at every `|`, code
 # spans included. So a cell's line breaks fold into an inline `<br>` and its
 # `|` is escaped as `\|` — the rule HTMX.jl applies to an `h.table`'s cells, so
-# a `SemanticTable` reads the same as a `render_table` of the same source.
+# a `SemanticTable` reads the same as a `render_table` of the same source, a
+# float included (`format_number`). The tab-separated plain peer is data, like
+# the ⬇ CSV, and keeps the exact value.
 _semantic_table_cell(value) =
     replace(replace(strip(string(value)), r"\s*\n\s*" => "<br>"), "|" => "\\|")
+_semantic_table_cell(value::AbstractFloat) = format_number(value)
 
 function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
     cells = _semantic_table_columns(table.source)
@@ -16469,8 +16472,8 @@ function htmxoGroupDragEnd(e) {
 // several groups gets a copy per group; leaves the grouping leaves out wait in
 // `template[data-htmxo-unplaced]`. The wrapper's `data-htmxo-regroup` says how
 // (grouping names, flat name, nested or not, the `group_summary` columns).
-// Keep `htmxoRegroup`, `htmxoFormatNumber` and `htmxoGroupPillsSync` in step
-// with that function, `_md_format_number` and `_md_group_pills`.
+// Keep `htmxoRegroup`, `htmxoFixed` and `htmxoGroupPillsSync` in step
+// with that function, `_format_fixed` and `_md_group_pills`.
 function htmxoRegroupConfig(wrapper) {
     if (wrapper.htmxoRegroupSource !== wrapper.dataset.htmxoRegroup) {
         wrapper.htmxoRegroupSource = wrapper.dataset.htmxoRegroup;
@@ -16488,7 +16491,7 @@ function htmxoJsonString(s) {
 }
 function htmxoJsonList(xs) { return '[' + xs.map(htmxoJsonString).join(',') + ']'; }
 // A group summary over its leaves' inputs (`_md_summary_value`), folded left
-// to right, and written as the table writes numbers (`_md_format_number`).
+// to right, and written as the table writes numbers (`_format_fixed`).
 function htmxoSummaryValue(reduce, inputs) {
     if (reduce === 'count') return inputs.length;
     if (reduce === 'ratio') {
@@ -16503,17 +16506,16 @@ function htmxoSummaryValue(reduce, inputs) {
     const sum = xs.reduce((a, b) => a + b);
     return reduce === 'mean' ? sum / xs.length : sum;
 }
-function htmxoFormatNumber(el, x, digits) {
-    if (x === null || x === undefined) return '';
+function htmxoFixed(x, digits, decimal, thousands) {
     const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
     const s = BigInt(scaled).toString().padStart(digits + 1, '0');
-    const whole = s.slice(0, s.length - digits), thousands = htmxoText(el, 'thousands');
+    const whole = s.slice(0, s.length - digits);
     let out = x < 0 && scaled !== 0 ? '-' : '';
     for (let i = 0; i < whole.length; i++) {
         if (i > 0 && (whole.length - i) % 3 === 0) out += thousands;
         out += whole[i];
     }
-    return digits > 0 ? out + htmxoText(el, 'decimal') + s.slice(s.length - digits) : out;
+    return digits > 0 ? out + decimal + s.slice(s.length - digits) : out;
 }
 // Give a leaf's rows the row key `safe`: the ids, the row's own toggle call
 // (`master_detail_toggle_js`) and the controls naming its detail.
@@ -16605,9 +16607,17 @@ function htmxoRegroup(wrapper, levels) {
         if ('htmxoSearch' in row.dataset) row.dataset.htmxoSearch = name;
         row.querySelector('[data-htmxo-group-label]').textContent = name;
         row.querySelector('[data-htmxo-group-count]').textContent = '(' + list.length + ')';
+        // `_md_summary_cell`: the shown summary, and the CSV's number.
         cfg.summary.forEach((s, i) => {
-            row.querySelector('[data-htmxo-group-summary="' + i + '"]').textContent =
-                htmxoFormatNumber(table, htmxoSummaryValue(s.reduce, list.map(m => m.values[i])), s.digits);
+            const cell = row.querySelector('[data-htmxo-group-summary="' + i + '"]');
+            const x = htmxoSummaryValue(s.reduce, list.map(m => m.values[i]));
+            if (x === null) {
+                cell.textContent = '';
+                cell.removeAttribute('data-htmxo-number');
+            } else {
+                cell.textContent = htmxoFixed(x, s.digits, htmxoText(table, 'decimal'), htmxoText(table, 'thousands'));
+                cell.dataset.htmxoNumber = htmxoFixed(x, s.digits, '.', '');
+            }
         });
         fresh.add(row);
         return id;
@@ -16988,7 +16998,13 @@ indicator arrows (` ▲`/` ▼`) and a [`ColumnSpec`](@ref)'s `ⓘ` marker are l
 A cell exports the lines it shows: a `<br>` or the edge of a block element (`div`,
 `p`, `li`, …) ends a line, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))`
 exports the quoted two-line field `"6,28\\n6,01–6,55"`, not `6,286,01–6,55`. A header's lines
-join with a space, since a column name stays one name.
+join with a space, since a column name stays one name. A cell with a
+`data-htmxo-number` attribute exports that number instead of the text it shows:
+a [`number_cell`](@ref) (`3.81e-5` for a cell that shows `3,81·10⁻⁵`, an empty
+field for one that shows `–`) and a group summary of [`ColumnSummary`](@ref)
+(its decimals, with a `.` and no thousands separator). A cell you build
+yourself, such as a number with a unit (`6,28 €/m²`), can carry it too:
+`h.td(text; data_sort_value=string(x), data_htmxo_number=string(x))`.
 """
 function download_table_js()
     h.script(Raw(raw"""
@@ -17041,10 +17057,12 @@ function downloadTableCsv(btn, filename) {
             const group = grouped ? groupNames[Number(th.dataset.htmxoSortCol) - 1] : '';
             return esc(group ? group + ' / ' + name(th) : name(th));
         });
-    // A master/detail first cell holds its row controls beside the content;
-    // export the content only, as sorting and search read it. A cell's lines
-    // stay lines of one quoted field.
-    const text = td => lines(td.querySelector(':scope > [data-htmxo-row-label]') || td).join('\n');
+    // A number cell (`number_cell`, a group summary) exports its number, not
+    // the text it shows in the table's language. A master/detail first cell
+    // holds its row controls beside the content; export the content only, as
+    // sorting and search read it. A cell's lines stay lines of one quoted field.
+    const text = td => td.dataset.htmxoNumber ??
+        lines(td.querySelector(':scope > [data-htmxo-row-label]') || td).join('\n');
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
         .map(tr =>
@@ -17070,8 +17088,9 @@ The words a table's built-in controls show: the search field, its count and
 empty state, the selection bar, *Expand all* / *Collapse all*, the *Group by*
 control, lazy-detail status lines, the CSV button, the toggle of its
 caption's long text (`more`, as in [`caption_texts`](@ref)), the number
-separators of group summaries (`decimal`, `thousands`; see `group_summary` in
-[`master_detail_table`](@ref)) and the note on a row that holds a hovered item
+separators of the numbers the table writes (`decimal`, `thousands`: its float
+cells and [`number_cell`](@ref)s, see [`format_number`](@ref), and the group
+sums of `group_summary` in [`master_detail_table`](@ref)) and the note on a row that holds a hovered item
 in a collapsed group (`linked_inside`, `linked_deep`; see *Hover linking* in
 [`sortable_table`](@ref)). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
@@ -17113,8 +17132,8 @@ struct TableTexts
     rows_missing::String        # toast: a lazy group's response held no rows
     csv::String                 # the CSV download button
     more::String                # the caption's long-text toggle (`CaptionTexts`)
-    decimal::String             # a group summary's decimal mark
-    thousands::String           # a group summary's thousands separator
+    decimal::String             # the decimal mark of the numbers the table writes
+    thousands::String           # their thousands separator
     linked_inside::String       # note: the hovered item is in this collapsed row
     linked_deep::String         # note: ... several levels down
 end
@@ -17252,7 +17271,12 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 - `download_filename`: filename for the CSV download (default: `id * ".csv"`
   when `id` is supplied, otherwise `"table.csv"`)
 - `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
-- `cell(value, column_name, row_index)`: custom cell renderer (default: `string(value)`)
+- `cell(value, column_name, row_index)`: custom renderer of a cell's content.
+  By default a float is a [`number_cell`](@ref) in the table's language
+  (`texts`): `0.15623` shows `0,15623` with `texts=table_texts(:de)`,
+  `3.81e-5` shows `3,81·10⁻⁵`, and the cell sorts and exports to CSV by its
+  exact value. Any other value shows as `string(value)`, integers included,
+  since an integer column is as often a year, an id or a postcode as a count.
 - `class`: table CSS class (default `"striped"`)
 - `searchable`: client-side search over the rows (default `false`); see
   [`sortable_table`](@ref)
@@ -17283,10 +17307,10 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     isnothing(link) == isnothing(link_key) || throw(ArgumentError(
         "render_table: `link` names the group and `link_key(row)` keys each row; give both or neither"))
     cols = Tables.columnnames(Tables.columns(table))
+    texts = get(kwargs, :texts, _EN_TABLE_TEXTS)
 
     body_rows = [
-        h.tr([h.td(isnothing(cell) ? string(Tables.getcolumn(row, c)) : cell(Tables.getcolumn(row, c), c, ri))
-              for c in cols]...;
+        h.tr([_render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts) for c in cols]...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
              (isnothing(link_key) ? (;) : (; data_htmxo_link_key=string(link_key(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
@@ -17295,6 +17319,12 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     sortable_table([string(c) for c in cols], body_rows;
         id, sortable, download, download_filename, caption, class, link, kwargs...)
 end
+
+# A `render_table` cell: a float is a number cell in the table's language,
+# any other value its `string`; a custom `cell` renders the content.
+_render_table_cell(::Nothing, value::AbstractFloat, c, ri, texts) = number_cell(value; texts)
+_render_table_cell(::Nothing, value, c, ri, texts) = h.td(string(value))
+_render_table_cell(cell, value, c, ri, texts) = h.td(cell(value, c, ri))
 
 """
     sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
@@ -17331,7 +17361,9 @@ wrapper instead of widening the page.
 - `rows`: `Vector{<:Node}` of pre-built `h.tr(...)` rows. The caller controls
   every `<td>`, including `data-sort-value` for semantic sort keys (see
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
-  `id="detail-X"` for the paired-row pattern.
+  `id="detail-X"` for the paired-row pattern. Write a number as
+  [`number_cell`](@ref)`(x; texts)` with the table's `texts`: it shows the
+  number in the table's language and sorts and exports by its exact value.
 - `header_groups`: optional `label => first:last` pairs for a two-row header,
   for example `["Primal" => 2:4, "Gradient" => 5:7]`. Each range spans at
   least two adjacent leaf columns and groups cannot overlap. Uncovered leaf
@@ -18045,12 +18077,16 @@ end
 # when its attributes are computed together with its cells — a `semantic_app`
 # layout splatting `parts.action_attrs` onto the row. The helper keeps those
 # attributes on the row it builds. Its copy of the cells is its own, so
-# relabelling the first cell leaves the caller's row untouched.
-_md_master_row(row::Node) = HTMX.tag(row) === :tr ?
-    (collect(Any, HTMX.children(row)), HTMX.attrs(row)) :
+# relabelling the first cell leaves the caller's row untouched. A bare float
+# among the cells becomes a number cell in the table's language.
+_md_master_row(row::Node, texts::TableTexts) = HTMX.tag(row) === :tr ?
+    (_md_master_cells(HTMX.children(row), texts), HTMX.attrs(row)) :
     throw(ArgumentError(string("master/detail: the master cells must be the row's ",
         "cells or one <tr>, got <", HTMX.tag(row), ">")))
-_md_master_row(cells) = (collect(Any, cells), ())
+_md_master_row(cells, texts::TableTexts) = (_md_master_cells(cells, texts), ())
+_md_master_cells(cells, texts) = Any[_md_master_cell(c, texts) for c in cells]
+_md_master_cell(x::AbstractFloat, texts) = number_cell(x; texts)
+_md_master_cell(x, texts) = x
 
 _md_interactive_label(::Any) = false
 _md_interactive_label(::Raw) = true
@@ -18218,7 +18254,7 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     # workaround; that drop is now scoped to true boolean attrs.)
     tr_kwargs[:aria_expanded] = initially_open ? "true" : "false"
     isnothing(master_class) || (tr_kwargs[:class] = master_class)
-    cells, row_attrs = _md_master_row(master_cells)
+    cells, row_attrs = _md_master_row(master_cells, texts)
     given = _md_merge_row_attrs!(Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(master_attrs)),
                                  row_attrs, master_class)
     for (k, v) in given
@@ -18262,7 +18298,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 # Keyword arguments
 - `key(item)`: function returning the row key (sanitised internally).
 - `master(item)`: function returning the master row's `<td>` cells
-  (vector or tuple of nodes), or one `<tr>` holding them. A row's attributes
+  (vector or tuple of nodes), or one `<tr>` holding them. A bare float among
+  them becomes a [`number_cell`](@ref) in the table's language (`texts`). A row's attributes
   stay on the master row the helper builds, so attributes computed together
   with the cells need no second callback: a [`semantic_app`](@ref) layout can
   return `h.tr(cells...; parts.action_attrs...)`, with the shared result host
@@ -18581,7 +18618,7 @@ function master_detail_table(headers, items;
         body = isnothing(detail) ? nothing : detail(item)
         url  = isnothing(_url) ? nothing : _url(item)
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
-        cells, row_attrs = _md_master_row(master(item))
+        cells, row_attrs = _md_master_row(master(item), texts)
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
         if branch && branches_collapsible && !selecting && !haskey(attrs, :onclick)
             attrs[:onclick] = "htmxoTreeRow(this,event)"
@@ -18924,7 +18961,7 @@ struct ColumnSummary
     end
 end
 const _SUMMARY_ARITY = (sum=1, mean=1, min=1, max=1, count=0, ratio=2)
-# Exact powers of ten, the same literals in the browser (`htmxoFormatNumber`).
+# Exact powers of ten, the same literals in the browser (`htmxoFixed`).
 const _SUMMARY_POW10 = (1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10)
 
 # A leaf's number for a summary: `nothing` when it has none.
@@ -18966,23 +19003,175 @@ _md_reduce(::Val{:mean}, xs) = foldl(+, xs) / length(xs)
 _md_reduce(::Val{:min}, xs) = minimum(xs)
 _md_reduce(::Val{:max}, xs) = maximum(xs)
 
-# A summary as the table writes it: `digits` decimals, halves away from zero,
-# the table's own decimal mark and thousands separator. `htmxoFormatNumber`
-# writes the same text in the browser.
-_md_format_number(::Nothing, digits, texts) = ""
-function _md_format_number(x::Float64, digits::Int, texts::TableTexts)
+# A number with `digits` decimals, halves away from zero, written with the
+# given decimal mark and thousands separator: group summaries and
+# `format_number(x; digits)`. `htmxoFixed` writes the same text in the browser.
+function _format_fixed(x::Float64, digits::Int, decimal::AbstractString, thousands::AbstractString)
     scaled = round(abs(x) * _SUMMARY_POW10[digits + 1], RoundNearestTiesAway)
     s = lpad(string(BigInt(scaled)), digits + 1, '0')
-    whole, frac = s[1:end-digits], s[end-digits+1:end]
     io = IOBuffer()
     x < 0 && scaled != 0 && print(io, '-')
-    for (i, c) in enumerate(whole)
-        i > 1 && (length(whole) - i + 1) % 3 == 0 && print(io, texts.thousands)
-        print(io, c)
-    end
-    digits > 0 && print(io, texts.decimal, frac)
+    _print_grouped(io, s[1:end-digits], thousands)
+    digits > 0 && print(io, decimal, s[end-digits+1:end])
     String(take!(io))
 end
+
+# An integer's digits with a thousands separator every three from the right.
+function _print_grouped(io::IO, whole::AbstractString, thousands::AbstractString)
+    for (i, c) in enumerate(whole)
+        i > 1 && (length(whole) - i + 1) % 3 == 0 && print(io, thousands)
+        print(io, c)
+    end
+end
+
+# A group summary cell: the summary as the table writes it, and as the ⬇ CSV
+# writes it (`data-htmxo-number`: the same decimals, a `.` and no grouping).
+# `htmxoRegroup` fills the cells of the rows it builds the same way.
+_md_summary_cell(::Nothing, digits, texts, i) = h.td(""; data_htmxo_group_summary=string(i))
+_md_summary_cell(x::Float64, digits, texts::TableTexts, i) =
+    h.td(_format_fixed(x, digits, texts.decimal, texts.thousands);
+         data_htmxo_group_summary=string(i), data_htmxo_number=_format_fixed(x, digits, ".", ""))
+
+"""
+    format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing) -> String
+
+Write the number `x` in a table's language, with the decimal mark and
+thousands separator of `texts` (a [`TableTexts`](@ref)): `table_texts(:de)`
+writes `0,156`, `1.234.567` and `3,81·10⁻⁵`; the default English texts write
+`0.156`, `1,234,567` and `3.81·10⁻⁵`.
+
+- With neither keyword, every digit Julia prints is kept: `0.15623` writes
+  `0,15623`, and `2.0` writes `2`. A float below 10⁻⁴ or from 10¹⁵ up (in
+  absolute value, zero aside) is written as a power of ten with superscript
+  digits, `3,81·10⁻⁵`, which reads the same in HTML, Markdown, a
+  [`pdf_report`](@ref) and a pasted copy. An integer keeps every digit:
+  `1.234.567`.
+- `sigdigits=k` first rounds to `k` significant digits, as
+  `round(x; sigdigits=k)` does: `0.15623` writes `0,156`, `1234567` writes
+  `1.230.000`.
+- `digits=k` (0 to 10) writes exactly `k` decimals, halves away from zero,
+  the way the group sums of [`ColumnSummary`](@ref) are written: `0.15623`
+  writes `0,16` with `digits=2`. It never switches to a power of ten.
+
+`missing` and `nothing` write `–`; `Inf`, `-Inf` and `NaN` write `∞`, `-∞` and
+`NaN`. A negative number starts with `-`. Other real numbers (a `Rational`, an
+irrational, a decimal type) are written as their `float`.
+
+[`number_cell`](@ref) puts the text in a table cell that sorts by the exact
+value. Unlike [`fmt_number`](@ref), which shortens a number with an English
+unit suffix (`1.5K`), `format_number` writes the number itself.
+"""
+format_number(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Integer}=nothing,
+              sigdigits::Union{Nothing,Integer}=nothing) =
+    _format_number(_number_value(x), texts, _number_rounding(digits, sigdigits))
+
+"""
+    number_cell(x; texts=table_texts(), digits=nothing, sigdigits=nothing, attrs...)
+
+A table cell, `<td>`, that shows `format_number(x; texts, digits, sigdigits)`
+(see [`format_number`](@ref)) and keeps the exact value of `x` twice:
+
+- as `data-sort-value`, so sorting compares the numbers and not the rounded or
+  localised text (German `0,156` would otherwise sort as 0);
+- as `data-htmxo-number`, which the ⬇ CSV download writes in place of the
+  shown text (`3.81e-5`, not `3,81·10⁻⁵`), so a spreadsheet or R/Python reads a
+  number.
+
+`missing` and `nothing` show `–`, with no sort value and an empty CSV field.
+`attrs` are further attributes of the `<td>`. [`render_table`](@ref) and the
+master cells of [`master_detail_table`](@ref) make a float this cell by
+themselves; pass the table's `texts` to cells you build for
+[`sortable_table`](@ref).
+"""
+number_cell(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Integer}=nothing,
+            sigdigits::Union{Nothing,Integer}=nothing, attrs...) =
+    _number_cell(_number_value(x), format_number(x; texts, digits, sigdigits), attrs)
+_number_cell(::Nothing, text, attrs) = h.td(; data_htmxo_number="", attrs...)(text)
+_number_cell(x, text, attrs) = let key = _number_key(x)
+    h.td(; data_sort_value=key, data_htmxo_number=key, attrs...)(text)
+end
+
+# The number a cell writes: integers and floats as they are, other reals as
+# their float; `nothing` for no value.
+_number_value(::Union{Nothing,Missing}) = nothing
+_number_value(x::Bool) = throw(ArgumentError(string(
+    "format_number: ", x, " is a Bool, not a number; write it as text")))
+_number_value(x::Union{Integer,AbstractFloat}) = x
+_number_value(x::Real) = float(x)
+_number_value(x) = throw(ArgumentError(string(
+    "format_number: expected a real number, missing or nothing; got ", repr(x))))
+
+# How a number is rounded: not at all, to fixed decimals or to significant digits.
+struct _FixedDigits; k::Int; end
+struct _SigDigits; k::Int; end
+_number_rounding(::Nothing, ::Nothing) = nothing
+_number_rounding(digits::Integer, ::Nothing) = 0 <= digits <= length(_SUMMARY_POW10) - 1 ?
+    _FixedDigits(digits) : throw(ArgumentError(
+        "format_number: digits must be between 0 and $(length(_SUMMARY_POW10) - 1), got $digits"))
+_number_rounding(::Nothing, sigdigits::Integer) = sigdigits >= 1 ? _SigDigits(sigdigits) :
+    throw(ArgumentError("format_number: sigdigits must be at least 1, got $sigdigits"))
+_number_rounding(::Integer, ::Integer) = throw(ArgumentError(
+    "format_number: give digits (fixed decimals) or sigdigits (significant digits), not both"))
+
+_format_number(::Nothing, texts, rounding) = "–"
+_format_number(x::Integer, texts, rounding) = _format_finite(x, texts, rounding)
+_format_number(x::AbstractFloat, texts, rounding) =
+    isnan(x) ? "NaN" : isinf(x) ? (x > 0 ? "∞" : "-∞") : _format_finite(x, texts, rounding)
+
+function _format_finite(x::Integer, texts, ::Nothing)
+    io = IOBuffer()
+    s = string(x)
+    x < 0 && print(io, '-')
+    _print_grouped(io, lstrip(s, '-'), texts.thousands)
+    String(take!(io))
+end
+_format_finite(x::Integer, texts, r::_FixedDigits) =
+    r.k == 0 ? _format_finite(x, texts, nothing) :
+    string(_format_finite(x, texts, nothing), texts.decimal, repeat('0', r.k))
+_format_finite(x::AbstractFloat, texts, r::_FixedDigits) =
+    _format_fixed(Float64(x), r.k, texts.decimal, texts.thousands)
+_format_finite(x::Real, texts, r::_SigDigits) = _format_finite(round(x; sigdigits=r.k), texts, nothing)
+function _format_finite(x::AbstractFloat, texts, ::Nothing)
+    negative, ds, point = _shortest_digits(x)
+    isempty(ds) && return "0"
+    io = IOBuffer()
+    negative && print(io, '-')
+    if abs(x) < 1e-4 || abs(x) >= 1e15
+        print(io, ds[1])
+        length(ds) > 1 && print(io, texts.decimal, ds[2:end])
+        print(io, "·10", _superscript(point - 1))
+    elseif point <= 0
+        print(io, '0', texts.decimal, repeat('0', -point), ds)
+    elseif point >= length(ds)
+        _print_grouped(io, ds * repeat('0', point - length(ds)), texts.thousands)
+    else
+        _print_grouped(io, ds[1:point], texts.thousands)
+        print(io, texts.decimal, ds[point+1:end])
+    end
+    String(take!(io))
+end
+
+# A float's digits as Julia prints it (its shortest round-trip form):
+# `(negative, digits, point)` for ±0.digits × 10^point, without leading or
+# trailing zeros (zero has no digits).
+function _shortest_digits(x::AbstractFloat)
+    m = match(r"^(-?)(\d+)(?:\.(\d*))?(?:e([+-]?\d+))?$", string(x))
+    isnothing(m) && throw(ArgumentError(string("format_number: cannot read the digits of the ",
+        typeof(x), " ", repr(x), "; pass it as a Float64")))
+    ds = m[2] * something(m[3], "")
+    point = length(m[2]) + (isnothing(m[4]) ? 0 : parse(Int, m[4]))
+    lead = something(findfirst(!=('0'), ds), length(ds) + 1) - 1
+    (m[1] == "-", rstrip(ds[lead+1:end], '0'), point - lead)
+end
+
+const _SUPERSCRIPT_DIGITS = ('⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹')
+_superscript(n::Int) = string(n < 0 ? "⁻" : "", join(_SUPERSCRIPT_DIGITS[d - '0' + 1] for d in string(abs(n))))
+
+# A number's exact value as the sort key and the ⬇ CSV write it: Julia's
+# shortest round-trip form, which the browser's `parseFloat`, spreadsheets
+# and R/Python read back; `Infinity`, since `parseFloat` does not know `Inf`.
+_number_key(x::Integer) = string(x)
+_number_key(x::AbstractFloat) = isinf(x) ? (x > 0 ? "Infinity" : "-Infinity") : string(x)
 
 # `group_summary` as (column index => summary) pairs, by header label.
 _md_group_summaries(headers, ::Nothing) = Pair{Int,ColumnSummary}[]
@@ -19141,8 +19330,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     end
     summary_cell(col, members) = let i = findfirst(p -> first(p) == col, summaries)
         isnothing(i) ? h.td("") :
-            h.td(_md_format_number(_md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in members]),
-                                   last(summaries[i]).digits, texts); data_htmxo_group_summary=string(i - 1))
+            _md_summary_cell(_md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in members]),
+                             last(summaries[i]).digits, texts, i - 1)
     end
     default_master = _md_default_group_master(ncols, k -> last(gpath(k)), summary_cell)
     gmaster = something(group_master, default_master)
@@ -19212,7 +19401,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         append!(rendered, [gid(g.path) * "/" * string(key(m)) for m in direct if shown_leaf(g, m)])
     end
     update && foreach(render!, roots)
-    leaf_text(item) = isnothing(search_text) ? _md_text(master(item)) : string(search_text(item))
+    leaf_text(item) = isnothing(search_text) ? _md_text(first(_md_master_row(master(item), texts))) :
+        string(search_text(item))
     function group_attrs(g)
         attrs = _md_attr_union((; data_htmxo_group=""),
             _md_group_select_attrs(selectable, gid(g.path), g.key, string(selectable, "_group")))

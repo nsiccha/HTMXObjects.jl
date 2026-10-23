@@ -1738,13 +1738,17 @@ end
 
 @testitem "group summaries: ColumnSummary columns of a group row" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
-    import HTMXObjects: h, to_markdown_string, _md_format_number
+    import HTMXObjects: h, to_markdown_string
     html(x) = repr("text/html", x)
     row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
-    cell(r, i) = match(Regex("<td data-htmxo-group-summary=\"$i\">([^<]*)</td>"), r)[1]
+    summary(r, i) = match(Regex("<td(?=[^>]* data-htmxo-group-summary=\"$i\")[^>]*>([^<]*)</td>"), r)
+    cell(r, i) = summary(r, i)[1]
+    # What the ⬇ CSV writes for the cell: its decimals, a `.`, no grouping.
+    number(r, i) = let m = match(r"data-htmxo-number=\"([^\"]*)\"", summary(r, i).match); isnothing(m) ? nothing : m[1] end
     # Acme holds p1, p2, p7 (-10, -20, -70); Bakery p4, p6; Prime Video p5.
     sums = html(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount; digits=1)]))
     @test cell(row(sums, "row-group--Acme"), 0) == "-100.0" && cell(row(sums, "row-group--Prime--Video"), 0) == "-50.0"
+    @test number(row(sums, "row-group--Acme"), 0) == "-100.0"
     # The other columns stay blank; the first holds the key and count.
     @test contains(row(sums, "row-group--Acme"), "<small data-htmxo-group-count=\"\">(3)</small></button></span></td><td></td>")
     each = html(grouped(group_by="party", group_summary=[
@@ -1761,14 +1765,12 @@ end
     ratio = html(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:ratio,
         t -> t.amount, t -> t.party == "Bakery" ? 0 : 2.0; digits=2)]))
     @test cell(row(ratio, "row-group--Acme"), 0) == "-16.67" && cell(row(ratio, "row-group--Bakery"), 0) == ""
+    @test number(row(ratio, "row-group--Acme"), 0) == "-16.67" && isnothing(number(row(ratio, "row-group--Bakery"), 0))
     # German texts write German numbers.
     de = html(grouped(group_by="rule", texts=table_texts(:de),
         group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount * 100; digits=2)]))
-    @test cell(row(de, "row-group--Shops"), 0) == "-23.000,00"
-    en, ger = table_texts(:en), table_texts(:de)
-    @test [_md_format_number(x, d, en) for (x, d) in ((1234567.891, 2), (0.125, 2), (-0.004, 2), (999.5, 0), (1e15, 0))] ==
-        ["1,234,567.89", "0.13", "0.00", "1,000", "1,000,000,000,000,000"]
-    @test _md_format_number(-1234.5, 1, ger) == "-1.234,5" && table_texts(:de; thousands=" ").thousands == " "
+    @test cell(row(de, "row-group--Shops"), 0) == "-23.000,00" && number(row(de, "row-group--Shops"), 0) == "-23000.00"
+    # The cells' `format_number(x; digits)` writes the same text: test/number_format.jl.
     # Every leaf carries what the browser regroups it by, on every copy.
     leaf = match(r"<tr[^>]*id=\"row-group--Shops--p3\"[^>]*>", html(grouped(group_by="rule",
         group_summary=["Amount" => ColumnSummary(:ratio, t -> t.amount, t -> 1)]))).match

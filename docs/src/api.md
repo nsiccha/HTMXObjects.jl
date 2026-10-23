@@ -2554,6 +2554,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `ColumnSpec(label; help)` | A `sortable_table`/`master_detail_table` header with an explanation that stays sortable; see [components](components.md#column-explanations) |
 | `ColumnSummary(reduce, values...; digits)` | A group row's sum, mean, min, max, count or ratio of its leaves in a regroupable `master_detail_table` (`group_summary=`), recomputed in the browser on every regroup; see [components](components.md#table-regrouping) |
 | `table_texts(locale; texts...)`, `TableTexts` | The words of a table's built-in controls (`:en`, `:de`, per-text overrides), passed as `texts=`; see [components](components.md#table-texts) |
+| `number_cell(x; texts, digits, sigdigits, attrs...)`, `format_number(x; texts, digits, sigdigits)` | A number in the table's language (`0,156`, `3,81·10⁻⁵`): a `<td>` that sorts and exports to CSV by the exact value, or the text alone; `render_table` and `master` cells make floats such cells by themselves; see [components](components.md#table-numbers) |
 | `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a `master_detail_table` grouped by an ordered `group_by` list; see [components](components.md#table-regrouping) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 | `caption_texts(locale; …)`, `CaptionTexts` | A caption's own words (the toggle that opens its long text) in English or German, with per-text overrides; pass as `texts=` to `render_caption` / `with_caption`; see [components](components.md#captions) |
@@ -2562,6 +2563,8 @@ See the [Components catalog](components.md) for the full list with examples.
 ## Formatting
 
 `fmt_time`, `fmt_bytes`, `fmt_number` — concise human-readable formatters.
+`format_number` writes a number in a table's language instead; see
+[Numbers in table cells](components.md#table-numbers).
 
 ## Theming & styles
 
