@@ -773,6 +773,35 @@ cache single-flights the drain, backs off, and logs with the cause — so first
 paint never waits; the next render (a poll cycle, a push refresh) picks the
 metadata up. `?plain` carries `[label](href)` either way.
 
+### Link targets in Markdown {#markdown-id-targets}
+
+Markdown has no syntax for an element id, so the target of a `[text](#X)`
+link is written as inline HTML. `render_markdown`, and with it every
+`SemanticProse`, renders two such forms as real, empty elements; all other
+raw HTML stays escaped text:
+
+```markdown
+| Prior | Term |
+|---|---|
+| <span id="prior-1"></span>P1 | normal(0, 1) |
+
+The intercept's prior is [P1](#prior-1).
+```
+
+- **The forms:** `<span id="X"></span>` and `<a id="X"></a>`, the closing tag
+  right after the opening one, no other attribute, and an id of a letter
+  followed by letters, digits, `_` or `-`. They work in prose, headings, list
+  items and table cells. An `<a id>` target inside a link's text stays text,
+  because an `<a>` inside an `<a>` is invalid HTML.
+- **Everything else stays escaped:** another attribute, content between the
+  tags, single quotes, an id such as `1x` or `a.b`, an unpaired tag, any other
+  element.
+- **The Markdown projection writes the tags back as written.** Pandoc reads
+  `<span id="X"></span>` as a span with that id, so in a [`pdf_report`](#pdf-report)
+  the link resolves too. It drops `<a id="X"></a>`, and Typst then refuses the
+  report (`label <X> does not exist`), so write the span form in content that
+  may become a PDF.
+
 ### Accessible PDF reports — `pdf_report` {#pdf-report}
 
 `pdf_report` writes a page's Markdown projection as an accessible PDF:
@@ -847,6 +876,13 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `de-DE` report. A bundled filter does this: Pandoc's Typst writer alone
   turns `“ ” ‘ ’` into straight quotes, so a German `„Titel“` came out
   `„Titel„` and `‚Wort‘` came out `‚Wort’`.
+- **Tables** are set ragged-right, while the body text stays justified. A word
+  in a table cell is hyphenated only when it is wider than its column, such as
+  `Kontaminationswahrscheinlichkeit` in a narrow column; a word that fits on
+  the next line moves there whole. Quarto's template justified table cells
+  too, which stretched narrow cells with wide gaps and split words such as
+  `Me-dian`. Code is never hyphenated, so a code span wider than its column
+  runs into the next one.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense

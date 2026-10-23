@@ -4152,9 +4152,44 @@ markdown_node(::MarkdownRenderer, ::CommonMark.DisplayMath, n, rules, context) =
 # injected into the page. A bare `String` child renders escaped, so inline
 # HTML stays visible literal text and block HTML shows as a source block.
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlInline, n, rules, context) =
-    n.literal
+    _md_html_inline(n)
 markdown_node(::MarkdownRenderer, ::CommonMark.HtmlBlock, n, rules, context) =
     h.pre(n.literal)
+
+# The one exception is an empty link target, `<span id="X"></span>` or
+# `<a id="X"></a>`: Markdown has no syntax for an element id, so inline HTML is
+# how an author names the destination of a `[text](#X)` link (BRM model
+# descriptions mark their prior-table rows this way). The parser hands over
+# the two tags as adjacent `HtmlInline` nodes. Only that exact pair, with no
+# other attribute and an id made of a letter and then letters, digits, `_` or
+# `-`, becomes an empty element; every other tag stays escaped text. The
+# opening node renders the element, for the HTML peer only; the closing node
+# writes both tags back as they were, for the Markdown projection only, where
+# Pandoc reads them as a labelled span. An `<a>` target inside a link stays
+# text, because an `<a>` inside an `<a>` is invalid HTML.
+const _MD_ID_TARGET = r"^<(span|a) id=\"([A-Za-z][A-Za-z0-9_-]*)\">$"
+
+_md_html_inline_at(n::CommonMark.Node) =
+    n !== CommonMark.NULL_NODE && n.t isa CommonMark.HtmlInline
+
+# The target's opening tag, or `nothing` when `open`/`close` are not one.
+function _md_id_target(open::CommonMark.Node, close::CommonMark.Node)
+    (_md_html_inline_at(open) && _md_html_inline_at(close)) || return nothing
+    m = match(_MD_ID_TARGET, open.literal)
+    (isnothing(m) || close.literal != "</$(m[1])>") && return nothing
+    m[1] == "a" && _md_in_link(open) && return nothing
+    m
+end
+
+function _md_html_inline(n::CommonMark.Node)
+    target = _md_id_target(n, n.nxt)
+    isnothing(target) ||
+        return html_only(getproperty(h, Symbol(target[1]))(; id=String(target[2])))
+    if isdefined(n, :prv) && !isnothing(_md_id_target(n.prv, n))
+        return markdown_only(n.prv.literal * n.literal)
+    end
+    n.literal
+end
 
 # Loud fallback (dev §1 / §4.5): an unhandled node kind warns and still
 # renders its children, so prose is surfaced, never silently dropped.
@@ -4228,6 +4263,12 @@ instances (like `CommonMark.TableRule()`) beyond the stock ones.
 The `?plain` projection stays faithful: rules and overrides build ordinary
 nodes, which the tag-dispatched markdown serializer projects back
 (`h.a` → `[text](url)`, emphasis → `*text*`, and so on).
+
+Raw HTML stays escaped text, except an empty link target:
+`<span id="X"></span>` or `<a id="X"></a>`, with no other attribute and an id
+of a letter followed by letters, digits, `_` or `-`, renders as that empty
+element, so a `[text](#X)` link reaches it. The Markdown projection writes the
+tags back as written.
 
 Two deliberate cuts: a rule sees
 escape-RESOLVED text (a `\\\\` marker is zero-width, so `\\\\#12` and `#12` are
@@ -14954,6 +14995,11 @@ const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "
 # `file:` URL or a relative path that leaves `resources`.
 const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-images.lua")
 
+# Quarto's Typst template justifies the whole document, tables included, and
+# Typst then hyphenates them; these rules set table cells ragged-right and
+# hyphenate only a word wider than its column.
+const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
+
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
 # German report `de-US`.
@@ -15057,6 +15103,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
     $(_pdf_report_front_matter(metadata, lang))format:
       typst:
         pdf-standard: [ua-1]
+        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST))]
     filters:
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
@@ -15106,11 +15153,13 @@ Quarto would let it override `title`, `lang` and the equation filter.
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
 filter that gives every equation its TeX source as alt text. Typographic quotes
 read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
-become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Every image needs
-alt text: Typst refuses a PDF/UA document with an image that has none. A
-Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
-supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
-Typst 0.15.1).
+become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Tables are set
+ragged-right, while the body text stays justified: a word in a table cell is
+hyphenated only when it is wider than its column, and code never is. Every
+image needs alt text: Typst refuses a PDF/UA document with an image that has
+none. A Quarto program (`quarto`, found on `PATH` or given as a path) whose
+Typst supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its
+bundled Typst 0.15.1).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
