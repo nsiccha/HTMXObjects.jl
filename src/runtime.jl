@@ -255,7 +255,7 @@ function _runtime_request_kind(req::HTTP.Request)
     HTTP.WebSockets.isupgrade(req) && return :websocket
     occursin("text/event-stream", HTTP.header(req, "Accept", "")) && return :sse
     occursin("__htmxo_poll=1", req.target) && return :poll
-    is_htmx(req) && return :htmx
+    _hx_partial_swap(req) && return :htmx
     :page
 end
 
