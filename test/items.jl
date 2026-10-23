@@ -3773,6 +3773,47 @@ end
     end
 end
 
+# htmx's history restore (`HX-History-Restore-Request`, an XHR sending
+# `Accept: */*` and, by default, `HX-Request: true`) replaces the whole body,
+# so a slow page route answers it as a direct visit: the shell with its
+# load-triggered operation region, never a bare poller that would become the
+# whole page (snag history-restore-e9d56a74).
+@testitem "a history restore of a slow page route loads like a direct visit" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    import HTMXObjects: _clear_operation_polls!, _operation_polling_impl
+
+    reset_slow_page!()
+    _clear_operation_polls!()
+    route!(SlowPagePolicyApp(); operation_policy=OperationPolicy(:auto; keep_progress=false))
+    drive(target, headers) = begin
+        request = HTTP.Request("GET", target, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, request))(request)
+    end
+    old_polling = _operation_polling_impl[]
+    _operation_polling_impl[] =
+        (_render, _started, _ip, _keys, _call_kwargs, transport) -> begin
+            transport.retain()
+            h.aside("polling")
+        end
+    try
+        restored = String(drive("/slow?count=5", ["HX-Request" => "true",
+            "HX-History-Restore-Request" => "true",
+            "HX-Current-URL" => "http://host/slow?count=5"]).body)
+        @test contains(restored, "DIRECT PAGE SHELL")
+        @test contains(restored, "data-htmxo-operation-load")
+        @test contains(restored, "hx-trigger=\"load\"")
+        @test !contains(restored, "<aside>polling</aside>")
+        # The control: an ordinary swap of the same route polls, bare.
+        swapped = String(drive("/slow?count=6", ["HX-Request" => "true",
+            "HX-Current-URL" => "http://host/"]).body)
+        @test contains(swapped, "<aside>polling</aside>")
+        @test !contains(swapped, "DIRECT PAGE SHELL")
+    finally
+        release_slow_page!()
+        _operation_polling_impl[] = old_polling
+        _clear_operation_polls!()
+    end
+end
+
 # A direct visit spends the grace budget before deferring, so an operation
 # that finishes within it renders inline in the shell: one response, no blank
 # placeholder, no hx-load refetch. Pins the byte shape against the `:blocking`
@@ -7353,6 +7394,86 @@ end
 
     # A misspelled override is an error, not a silent fallback.
     @test drive("/section/view/detail?__chrome__=partial").status >= 400
+end
+
+# Back/Forward to an address htmx holds no `sessionStorage` snapshot of: htmx
+# 2.0.8's `loadHistoryFromServer` GETs it with `HX-History-Restore-Request:
+# true` (plus `HX-Request: true` under its default
+# `historyRestoreAsHxRequest`), `HX-Current-URL` already naming that address,
+# and swaps the answer into `<body>`. It is a page load, not a swap from inside
+# the page: answered as a bare fragment, the page lost its whole `__page__`
+# chrome on Back (snag history-restore-e9d56a74, RegionExplorer zoom links).
+@testitem "a history restore is answered as the page at its address" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
+    using Logging
+    import HTMXObjects: h
+    drive(path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request("GET", path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
+    end
+    restore_headers(path; hx) = vcat(hx ? ["HX-Request" => "true"] : Pair{String,String}[],
+        ["HX-History-Restore-Request" => "true", "HX-Current-URL" => "http://host" * path])
+    restore(path; hx=true) = drive(path, restore_headers(path; hx))
+
+    # Every level of a nested chain, byte-identical to a direct visit, with or
+    # without `HX-Request` — and the root's own route (a one-object chain).
+    route!(SwapRoot())
+    for path in ("/section/view/detail", "/")
+        direct = String(drive(path).body)
+        @test contains(direct, "ROOT-CHROME")
+        for hx in (true, false)
+            answer = restore(path; hx)
+            @test answer.status == 200
+            @test String(answer.body) == direct
+        end
+    end
+    # The control: the same address as an ordinary swap from itself is bare.
+    @test !contains(String(drive("/section/view/detail", ["HX-Request" => "true",
+        "HX-Current-URL" => "http://host/section/view/detail"]).body), "CHROME")
+
+    # Page wrappers that take navigation get their own node's, as on a direct visit.
+    route!(NavChainRoot())
+    @test String(restore("/child").body) == String(drive("/child").body)
+    @test contains(String(restore("/child").body), "INNER:/child")
+
+    # `htmx_or` answers the page too.
+    or(headers) = String(htmx_or(() -> h.main("PAGE"), HTTP.Request("GET", "/", headers, UInt8[]),
+                                 h.p("FRAGMENT")).body)
+    @test contains(or(["HX-Request" => "true"]), "FRAGMENT")
+    @test contains(or(restore_headers("/"; hx=true)), "PAGE")
+    @test contains(or(restore_headers("/"; hx=false)), "PAGE")
+
+    # A route error answers the error article inside the page's chrome, and
+    # keeps 200 with its error id: htmx swaps only a 2xx/3xx restore, so an
+    # error status would leave the previous page under the new address.
+    # `:blocking` answers inline; under `:auto` the restore is a page load
+    # like a direct browser visit (the shell, its region loading the route).
+    @htmx struct RestoreErrorApp
+        __page__(content) = h.div(h.nav("RESTORE-CHROME"), content)
+        @get restore_boom() = error("restore fault")
+        @get index() = "restore-home"
+    end
+    quiet(f) = with_logger(f, NullLogger())
+    route!(RestoreErrorApp())
+    deferred = String(quiet(() -> restore("/restore_boom")).body)
+    @test contains(deferred, "RESTORE-CHROME") && contains(deferred, "data-htmxo-operation-load")
+    route!(RestoreErrorApp(); operation_policy=OperationPolicy(:blocking))
+    for hx in (true, false)
+        failed = quiet(() -> restore("/restore_boom"; hx))
+        @test failed.status == 200
+        @test !isempty(HTTP.header(failed, "X-HTMXO-Error-Id", ""))
+        @test contains(String(failed.body), "RESTORE-CHROME")
+        @test contains(String(failed.body), "aria-invalid=\"true\"")
+    end
+    # The controls: a swap's error is bare, a direct visit's keeps its status.
+    swap_failed = quiet(() -> drive("/restore_boom", ["HX-Request" => "true",
+        "HX-Current-URL" => "http://host/"]))
+    @test swap_failed.status == 200 && !contains(String(swap_failed.body), "RESTORE-CHROME")
+    @test quiet(() -> drive("/restore_boom")).status == 500
+
+    # The runtime ledger counts it as a page load.
+    kind(headers) = HTMXObjects._runtime_request_kind(HTTP.Request("GET", "/", headers, UInt8[]))
+    @test kind(restore_headers("/"; hx=true)) === :page
+    @test kind(["HX-Request" => "true"]) === :htmx
 end
 
 @testitem "the semantic graph carries containment, dependency and route edges" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

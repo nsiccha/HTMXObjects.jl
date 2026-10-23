@@ -20,11 +20,13 @@ using TestItemRunner
             at: post-render
           - $(HTMXObjects._yaml_string(filter))
           - $(HTMXObjects._yaml_string(images))
+          - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
         ---
 
         # Ergebnisse
         """
-    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST)
+    @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
+          isfile(HTMXObjects._PDF_REPORT_DATE_FILTER)
 end
 
 @testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
@@ -60,6 +62,43 @@ end
     # An explicit papersize wins, written once.
     fm = frontmatter("de-DE"; metadata=(papersize="a5",))
     @test occursin("papersize: \"a5\"", fm) && count("papersize", fm) == 1
+end
+
+@testitem "pdf_report keeps a date Quarto reads and prints any other date text as written" tags=[:unit] begin
+    using HTMXObjects, Dates
+
+    frontmatter(metadata) =
+        split(HTMXObjects._pdf_report_qmd("# R\n"; title="R", lang="de-DE", metadata), "\n---\n")[1]
+    text = HTMXObjects._PDF_REPORT_DATE_TEXT_KEY
+
+    # A date Quarto reads correctly stays `date`, for `date_format` to format.
+    for date in (Date(2026, 10, 22), DateTime(2026, 10, 22, 10, 30), "2026-10-22", "2026-10-22 10:30",
+                 "2026-10-22T10:30:00.5+02:00", "today", :now, "last-modified")
+        fm = frontmatter((date=date, date_format="long"))
+        @test occursin("\ndate: \"$date\"\n", fm) && occursin("\ndate-format: \"long\"\n", fm)
+        @test !occursin(text, fm)
+    end
+    # Quarto would misread any other text ("22.10.2026" as Invalid Date,
+    # "05.10.2026" as 10 May), so it goes under the key the date filter prints
+    # as written, its Markdown punctuation escaped so Pandoc keeps the text.
+    @test occursin("\n$text: $(HTMXObjects._yaml_string("05\\.10\\.2026"))\n", frontmatter((date="05.10.2026",)))
+    fm = frontmatter(Dict("date" => "1. Oktober *2026*", "subtitle" => "S"))
+    @test occursin("\n$text: $(HTMXObjects._yaml_string("1\\. Oktober \\*2026\\*"))\n", fm)
+    @test !occursin("\ndate:", fm) && occursin("\nsubtitle: \"S\"\n", fm)
+    for date in ("22.10.2026", "Oktober 2026", "2026-10", "2026-1-5", "10/22/2026", :heute)
+        @test occursin("\n$text: ", frontmatter((date=date,)))
+    end
+    # A date given as Quarto's object form is Quarto's to read.
+    @test occursin("\ndate: {\"value\": \"2026-10-22\", \"format\": \"long\"}\n",
+                   frontmatter((date=(value="2026-10-22", format="long"),)))
+
+    # refused: `date_format` cannot format text, which prints as written
+    # (snag pdf-report-metad-89ac6032, user design decision 1dnvswg)
+    err = try frontmatter((date="22.10.2026", date_format="DD.MM.YYYY")) catch e e end
+    @test err isa ArgumentError && occursin("date_format", err.msg) && occursin("\"22.10.2026\"", err.msg)
+    # refused: the date text key is pdf_report's own; text goes in as `date=`
+    err = try frontmatter(Dict(text => "x")) catch e e end
+    @test err isa ArgumentError && occursin("date=", err.msg)
 end
 
 @testitem "pdf_report refuses metadata and Markdown that would override its own front matter" tags=[:unit] begin
@@ -125,7 +164,7 @@ end
     if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
         @test_skip true
     else
-        using HTMXObjects
+        using HTMXObjects, Dates
 
         pdfua(path) = let bytes = read(path, String)
             startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) &&
@@ -155,6 +194,35 @@ end
                              metadata=(subtitle="Entwurf", date="22.10.2026", toc=true,
                                        margin=(x="2cm", y="2cm"), fontsize="10pt")) == opts
             @test pdfua(opts) && mediabox(opts) == a4
+
+            # The date filter hands Typst the date as a string: written as
+            # markup, `[22. Oktober 2026]` is a numbered list in Typst.
+            template = joinpath(dir, "date.template")
+            write(template, "\$date\$\n")
+            typst_date(key, value) = (write(joinpath(dir, "date.md"), "---\n$key: $(HTMXObjects._yaml_string(value))\n---\n");
+                strip(read(`$(Sys.which("quarto")) pandoc -s -f markdown -t typst --template=$template
+                            --lua-filter=$(HTMXObjects._PDF_REPORT_DATE_FILTER) $(joinpath(dir, "date.md"))`, String)))
+            @test typst_date("date", "22. Oktober 2026") == "#\"22. Oktober 2026\""
+            @test typst_date(HTMXObjects._PDF_REPORT_DATE_TEXT_KEY,
+                             HTMXObjects._markdown_literal("1. Oktober \"*2026*\" \\ #a")) ==
+                  "#\"1. Oktober \\\"*2026*\\\" \\\\ #a\""
+            rm(template); rm(joinpath(dir, "date.md"))
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                # Quarto alone printed "Invalid Date" for 22.10.2026 and 2026-05-10
+                # for 05.10.2026 (snag pdf-report-metad-89ac6032).
+                @test occursin("22.10.2026", read(`pdftotext $opts -`, String))
+                for (date, shown) in [(date="05.10.2026",) => "05.10.2026",
+                                      (date="1. Oktober 2026",) => "1. Oktober 2026",
+                                      (date=Date(2026, 10, 5), date_format="long") => "5. Oktober 2026",
+                                      (date="2026-10-05", date_format="DD.MM.YYYY") => "05.10.2026"]
+                    dated = joinpath(dir, "out", "datum.pdf")
+                    @test pdf_report("# R\n", dated; title="R", lang="de-DE", metadata=date) == dated
+                    @test pdfua(dated) && occursin(shown, read(`pdftotext $dated -`, String))
+                    rm(dated)
+                end
+            end
             us = joinpath(dir, "out", "us.pdf")
             @test pdf_report("# R\n", us; title="R", lang="en-US") == us
             @test mediabox(us) == letter
@@ -204,7 +272,9 @@ end
             if isnothing(Sys.which("pdftotext"))
                 @test_skip "pdftotext (poppler-utils) reads the text layer"
             else
-                text = read(`pdftotext $de -`, String)
+                # pdftotext's default encoding is Latin-1 on Windows, which
+                # writes „ as ,, and “ as ".
+                text = read(`pdftotext -enc UTF-8 $de -`, String)
                 @test occursin("Bericht „Q“", text)
                 @test occursin("„Lieferflächen für Berlin“", text)
                 @test occursin("„gerades“", text) && occursin("‚einfache‘", text)

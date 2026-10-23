@@ -5742,15 +5742,17 @@ hx_link(url; preload=nothing, kwargs...) =
 """
     htmx_or(full_page_fn, req, fragment)
 
-Return `fragment` directly for HTMX requests; call `full_page_fn()` and wrap
-its result for direct browser navigation. Typical usage:
+Return `fragment` directly for HTMX swaps; call `full_page_fn()` and wrap
+its result for direct browser navigation, and for htmx's reload of a history
+entry it holds no snapshot of (`HX-History-Restore-Request`), whose answer
+replaces the whole page body. Typical usage:
 
     htmx_or(req, fragment) do
         htmx(h.main(search_input(q), fragment))
     end
 """
 function htmx_or(full_page_fn, req::HTTP.Request, fragment)
-    to_response(is_htmx(req) ? fragment : full_page_fn())
+    to_response(_hx_partial_swap(req) ? fragment : full_page_fn())
 end
 
 # --- HTMX request header inspection ---
@@ -5768,6 +5770,20 @@ hx_trigger(req::HTTP.Request)    = HTTP.header(req, "HX-Trigger",       "")
 hx_current_url(req::HTTP.Request)= HTTP.header(req, "HX-Current-URL",   "")
 """Return the `HX-Prompt` header value (the user's response to `hx-prompt`), or `""`."""
 hx_prompt(req::HTTP.Request)     = HTTP.header(req, "HX-Prompt",        "")
+
+# htmx's reload of a history entry it holds no `sessionStorage` snapshot for
+# (Back/Forward after a miss, `loadHistoryFromServer` in htmx 2): the answer
+# replaces the whole history element (`<body>`), so the request asks for the
+# page at its address. htmx 2 sends `HX-Request: true` on it too, unless the
+# page sets `htmx.config.historyRestoreAsHxRequest = false`.
+_hx_history_restore(req::HTTP.Request) =
+    HTTP.header(req, "HX-History-Restore-Request", "") == "true"
+
+# An htmx request whose answer replaces a region of a page already on screen:
+# every htmx request except a history restore. The fragment-versus-page
+# decisions (page chrome, the error page, the operation transport, `htmx_or`)
+# read this, never `is_htmx` alone.
+_hx_partial_swap(req::HTTP.Request) = is_htmx(req) && !_hx_history_restore(req)
 
 """
     hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location, toast)
@@ -9092,8 +9108,12 @@ _unwrapped_status_code(e::CallerFault) = e.status
 _unwrapped_status_code(::OperationResultUnavailable) = 410
 _unwrapped_status_code(::OperationStalled) = 504
 _unwrapped_status_code(_err) = 500
+# htmx swaps only a 2xx/3xx answer, a history restore's included (it leaves the
+# previous page on screen under the new address otherwise), so an answer htmx
+# will swap keeps 200 and carries its error as content.
 _with_error_status(req, resp::HTTP.Response, err) =
-    is_htmx(req) ? resp : HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
+    (is_htmx(req) || _hx_history_restore(req)) ? resp :
+    HTTP.Response(_error_status_code(err), resp.headers; body=resp.body)
 
 # A hook that returns a finished response answers the request as it is: no
 # `wrap`, no Markdown projection, no `__page__` shell, so a JSON API's error
@@ -9141,7 +9161,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     if wants_markdown(req)
         return _stamp_error_id(_with_error_status(req, markdown_response(to_markdown_string(err_val)), err), uid)
     end
-    if !is_htmx(req)
+    if !_hx_partial_swap(req)
         for obj in reverse(page_chain)
             wrapper = _page_wrapper(obj)
             isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
@@ -9222,7 +9242,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
                     HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
                     ext=".md")
             end
-        elseif is_htmx(req)
+        elseif _hx_partial_swap(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
             save_response(record_dir, save_path, to_response(static_transform(_apply_page(obj, wrapper, _html_value(val)); record_base)))
@@ -9248,8 +9268,9 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
 
     # HTMX fragment or no page wrapper defined → return as-is. A single-object
     # chain is the root's own, so `_page_chain_skip` drops it for every swap
-    # made from inside this mount — the same answer `is_htmx(req)` gave — while
-    # still honouring an explicit `?__chrome__=` override in either direction.
+    # made from inside this mount — the same answer `_hx_partial_swap(req)`
+    # gives — while still honouring an explicit `?__chrome__=` override in
+    # either direction.
     wrapper = _page_wrapper(obj)
     (isnothing(wrapper) || isempty(_page_chain_to_apply(Any[obj], req; root=obj))) &&
         return to_response(_static_response_value(req, val))
@@ -9956,8 +9977,9 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     # gate belongs here — the transport underneath (grace fast path,
     # heal-on-unknown-token for reads, no-replay resume for mutations,
     # chrome-free terminal) is what makes the marker-free default safe, not
-    # narrowing who may poll.
-    is_htmx(req) && return :polling
+    # narrowing who may poll. A history restore replaces the whole page, so it
+    # takes the page path, not a bare poller.
+    _hx_partial_swap(req) && return :polling
     page_shell ? :page_load : :blocking
 end
 
@@ -10257,8 +10279,11 @@ function _operation_has_page_shell(target)
     any(_has_page, objects)
 end
 
+# htmx's history-restore request is an `XMLHttpRequest` (`Accept: */*`) whose
+# answer htmx renders as the page.
 _operation_rich_page_request(req::HTTP.Request) =
-    contains(lowercase(HTTP.header(req, "Accept", "")), "text/html")
+    contains(lowercase(HTTP.header(req, "Accept", "")), "text/html") ||
+    _hx_history_restore(req)
 
 # `:auto` spends a small part of the existing request task waiting on the
 # DO Pending handle. The extension returns a fast value directly; only a
@@ -12689,6 +12714,9 @@ exactly when its mount prefix covers the current location.
 
 * direct browser visit — no current location, so nothing is on screen and the
   whole chain applies.
+* htmx's reload of a history entry it holds no snapshot of (Back/Forward,
+  `HX-History-Restore-Request`, with or without `HX-Request`) — its answer
+  replaces the whole body, so the whole chain applies, as on a direct visit.
 * HTMX swap from inside this root's mount — skip the levels the current location
   is already within, apply the rest.
 * HTMX request with no `HX-Current-URL` (a hand-rolled `fetch`), or one made from
@@ -12703,7 +12731,7 @@ function _page_chain_skip(page_chain, req::HTTP.Request; root=nothing)
     mode = _page_chrome_mode(req)
     mode === :none && return length(page_chain)
     mode === :full && return 0
-    is_htmx(req) || return 0
+    _hx_partial_swap(req) || return 0
     current = _hx_current_path(req)
     isnothing(current) && return length(page_chain)
     root_prefix = isnothing(root) ? nothing : _mount_prefix(root)
@@ -12764,7 +12792,7 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
                     HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
                     ext=".md")
             end
-        elseif is_htmx(req)
+        elseif _hx_partial_swap(req)
             save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         else
             wrapped = _html_value(val)
@@ -14089,7 +14117,7 @@ function _nav_request(obj)
     req = _req_of(obj)
     req === nothing && return (; path=nothing, mode=:none)
     (; path=String(split(req.target, "?")[1]),
-       mode=wants_markdown(req) ? :markdown : is_htmx(req) ? :fragment : :page)
+       mode=wants_markdown(req) ? :markdown : _hx_partial_swap(req) ? :fragment : :page)
 end
 
 """
@@ -15002,6 +15030,19 @@ const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto"
 # than its column, and let a captioned table break across pages.
 const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
 
+# Typst reads the date Pandoc writes as markup, so `22. Oktober 2026` became a
+# numbered list; this filter writes the date as text, the date text of
+# `_PDF_REPORT_DATE_TEXT_KEY` when there is one.
+const _PDF_REPORT_DATE_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-date.lua")
+
+# Quarto reads `date` as a date and prints what it parsed: "22.10.2026" as
+# "Invalid Date", "05.10.2026" as 2026-05-10, "Oktober 2026" as 2026-01-01. It
+# reads an ISO date or date-time and its keywords correctly; `pdf_report` writes
+# any other `date` under `_PDF_REPORT_DATE_TEXT_KEY`, which Quarto leaves alone.
+const _PDF_REPORT_ISO_DATE = r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$"
+const _PDF_REPORT_DATE_KEYWORDS = ("today", "now", "last-modified")
+const _PDF_REPORT_DATE_TEXT_KEY = "htmxobjects-date-text"
+
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
 # German report `de-US`.
@@ -15031,6 +15072,7 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "format" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "filters" => "pdf_report runs the filter that gives equations alt text",
+    _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
 )
 
 const _PDF_REPORT_METADATA_KEY = r"^[A-Za-z][A-Za-z0-9_-]*$"
@@ -15056,6 +15098,15 @@ _yaml_value(v) = throw(ArgumentError(
     "pdf_report: `metadata` values must be strings, numbers, Bools, dates, vectors, " *
     "NamedTuples or dictionaries, got $(typeof(v))"))
 
+# Whether a `date` is text Quarto would misread rather than a date it reads.
+_pdf_report_date_text(v::Union{AbstractString,Symbol}) =
+    !(occursin(_PDF_REPORT_ISO_DATE, string(v)) || string(v) in _PDF_REPORT_DATE_KEYWORDS)
+_pdf_report_date_text(v) = false
+
+# Pandoc reads a metadata string as Markdown; escaping every ASCII punctuation
+# character keeps it the text it was (`1. Oktober` no list, `*` no emphasis).
+_markdown_literal(s) = replace(s, r"([!-/:-@\[-`{-~])" => s"\\\1")
+
 function _pdf_report_front_matter(metadata, lang)
     entries = _metadata_pairs(metadata)
     for (i, (key, _)) in enumerate(entries)
@@ -15066,6 +15117,14 @@ function _pdf_report_front_matter(metadata, lang)
         # a dictionary can name one key twice, as `:toc` and `"toc"`
         any(==(key) ∘ first, entries[1:i-1]) &&
             throw(ArgumentError("pdf_report: `metadata` sets `$key` twice"))
+    end
+    i = findfirst(==("date") ∘ first, entries)
+    if !isnothing(i) && _pdf_report_date_text(last(entries[i]))
+        text = string(last(entries[i]))
+        any(==("date-format") ∘ first, entries) && throw(ArgumentError(
+            "pdf_report: `date_format` formats a date, but `date` $(repr(text)) is text, which the report " *
+            "prints as written; pass a `Date` or an ISO date (\"2026-10-22\") to format it"))
+        entries[i] = _PDF_REPORT_DATE_TEXT_KEY => _markdown_literal(text)
     end
     any(==("papersize") ∘ first, entries) || pushfirst!(entries, "papersize" => _pdf_report_paper(lang))
     join(("$key: $(_yaml_value(value))\n" for (key, value) in entries))
@@ -15111,6 +15170,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
         at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
+      - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
     ---
 
     """ * markdown
@@ -15154,6 +15214,16 @@ Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
 through `metadata`. The Markdown itself must not carry a YAML metadata block:
 Quarto would let it override `title`, `lang` and the equation filter.
 
+`date` is printed in the title block. A `Date` or `DateTime`, an ISO date
+(`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
+`"last-modified"` is a date that `date_format` formats: with `lang="de-DE"`,
+`date=Date(2026, 10, 22), date_format="long"` prints `22. Oktober 2026` and
+`date_format="DD.MM.YYYY"` prints `22.10.2026`; without `date_format` it prints
+`2026-10-22`. Any other text is printed as written (`date="22.10.2026"`,
+`date="Oktober 2026"`), and `date_format` next to it is an `ArgumentError`.
+Quarto alone would read such text as a date: `"22.10.2026"` as "Invalid Date",
+`"05.10.2026"` as 10 May.
+
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
 filter that gives every equation its TeX source as alt text. Typographic quotes
 read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
@@ -15166,8 +15236,9 @@ Typst supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its
 bundled Typst 0.15.1).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
-`metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
-metadata block in the Markdown or a missing `resources` directory, all before
+`metadata` key that `pdf_report` sets itself or a value it cannot write, a
+`date_format` next to a text `date`, a YAML metadata block in the Markdown or a
+missing `resources` directory, all before
 running Quarto, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
