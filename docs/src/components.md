@@ -134,7 +134,7 @@ render_table([
 
 Columns are auto-detected from the table (any `Tables.jl`-compatible source). Other useful kwargs: `id`, `caption`, `cell` (per-cell render override), `class` (default `"striped"`).
 
-Drop `sortable_table_js()` and `download_table_js()` once per page (typically inside `__page__`) to enable the client-side sorting and CSV download.
+The `htmx(...)` / `pico_page` page shell carries the client-side sorting and CSV download (`sortable_table_js()` and `download_table_js()`), together with the table styles and the caption layout, so a table works with nothing added to the page ([Tables on every page](api.md#page-tables)). A page whose `<head>` you build yourself includes those helpers once.
 
 The CSV holds the text each cell shows. A cell shown on several lines (a `<br>`, or block children such as `div` or `p`) exports one quoted field with those lines, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))` becomes a field holding the two lines `6,28` and `6,01–6,55`, rather than `6,286,01–6,55`. A header shown on two lines exports its lines joined by a space.
 
@@ -237,8 +237,9 @@ A row can replace that text with a `data-htmxo-search` attribute (in
 from its cells searchable; it does not change sorting. `detail-<key>` companion
 rows are neither matched nor counted: one hides with its master and reopens
 when the master returns, and sorting a filtered table keeps the filter. The
-field, count and empty state are left out of `?plain`/Markdown. Search needs
-`sortable_table_js()` on the page. Their wording follows `texts=`
+field, count and empty state are left out of `?plain`/Markdown. Search runs on
+the table runtime the page shell carries (`sortable_table_js()` in a `<head>`
+you build yourself). Their wording follows `texts=`
 ([Built-in texts](#table-texts)).
 
 App filters compose with the phrase search as named row predicates:
@@ -401,7 +402,8 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
   the hover started outside that table.
 - **Theme.** Lit rows are tinted and outlined from `--htmxo-accent`; set
   `--htmxo-linked-row` to change the tint. The rules ship in
-  `sortable_table_styles()`, and the runtime in `sortable_table_js()`.
+  `sortable_table_styles()`, and the runtime in `sortable_table_js()`; the
+  page shell carries both.
 
 #### Built-in texts in another language {#table-texts}
 
@@ -462,7 +464,6 @@ master_detail_table(["Name", "Status"], roots;
     initially_open = item -> item.kind == :family,
     searchable = true,
     id = "catalog")
-# Include sortable_table_js() and sortable_table_styles() once in extra_head.
 ```
 
 Column buttons sort siblings and move each whole subtree, keeping open details
@@ -1138,4 +1139,4 @@ cap = CaptionSpec(; title="Posterior fit", short="Median and 95% interval per do
 with_caption(cap, plot_node; actions=(h.a("⬇ CSV"; href=csv_url, class="caption-action"),))
 ```
 
-`title` and `short` form the caption's header line, and `long` is folded behind a **More** toggle. The toggle's word comes from `texts=`: `with_caption(cap, plot_node; texts=caption_texts(:de))` shows **Mehr**, and `caption_texts(:de; more="Erläuterung")` replaces it with the app's own word. `render_caption` takes the same keyword. An unknown locale or text name throws an `ArgumentError`. Include `caption_style()` once per page.
+`title` and `short` form the caption's header line, and `long` is folded behind a **More** toggle. The toggle's word comes from `texts=`: `with_caption(cap, plot_node; texts=caption_texts(:de))` shows **Mehr**, and `caption_texts(:de; more="Erläuterung")` replaces it with the app's own word. `render_caption` takes the same keyword. An unknown locale or text name throws an `ArgumentError`. The page shell carries `caption_style()` unless `tables=false`; otherwise include it once per page.

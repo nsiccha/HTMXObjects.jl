@@ -112,7 +112,7 @@ end
     import HTMXObjects: _runtime_text
     # A many-page bundle: pages one level down address the copies relatively.
     page = htmx(h.p("x"); assets="../assets/vendor", runtime=:linked,
-        pico_version=HTMXObjects._PICO_VERSION, extra_head=(sortable_table_js(),))
+        pico_version=HTMXObjects._PICO_VERSION, extra_head=(htmxo_gallery_styles(),))
     live = repr("text/html", page)
     exported = repr("text/html", static_transform(page, StaticExport(; controls=:remove, runtime=:linked)))
 
@@ -120,7 +120,8 @@ end
     @test exported == live
     @test !contains(exported, "<style")
     @test all(isempty(m.captures[1]) for m in eachmatch(r"<script\b[^>]*>(.*?)</script>"s, exported))
-    @test contains(exported, "src=\"../assets/vendor/htmxo/sortable_table.js?v=")
+    @test contains(exported, "src=\"../assets/vendor/htmxo/table_runtime.js?v=")
+    @test contains(exported, "href=\"../assets/vendor/htmxo/gallery_styles.css?v=")
 
     # Every head link resolves to a file copy_vendorfiles writes, holding the
     # linked text.
@@ -170,12 +171,13 @@ end
 @testitem "a linked shell links the page helpers an app puts into extra_head" setup=[HTMXOTestImports] tags=[:unit] begin
     using Treebars
     import HTMXObjects: _runtime_text, _runtime_version
-    helpers = (sortable_table_js(), sortable_table_styles(), caption_style(), master_detail_js(), download_table_js(),
+    # Without the shell's table runtime, the table helpers are the app's own.
+    # (A copy of what the shell carries is left out: test/table_controls.jl.)
+    helpers = (sortable_table_js(), sortable_table_styles(), caption_style(), download_table_js(),
         htmxo_gallery_styles())
-    names = (:sortable_table, :sortable_table_styles, :caption_style, :master_detail, :download_table,
-        :gallery_styles)
+    names = (:sortable_table, :sortable_table_styles, :caption_style, :download_table, :gallery_styles)
     own = h.style(Raw(".mine{color:red}"))
-    kw = (; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)
+    kw = (; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION, tables=false)
 
     # Inline: every helper stays exactly as given.
     inline = repr("text/html", htmx(h.p("x"); kw..., extra_head=(helpers..., own)))
@@ -235,6 +237,7 @@ end
             typeof htmx === 'object',
             typeof window.htmxoStreamProbe === 'object',
             typeof htmxoMdToggle === 'function',
+            typeof htmxoTreeToggle === 'function',
             typeof window.htmxoThread === 'object',
             window.__htmxoMutationPolls === true,
             getComputedStyle(document.documentElement).getPropertyValue('--htmxo-accent').trim() !== '',
@@ -280,11 +283,11 @@ end
                 try
                     @test timedwait(() -> Base.n_avail(reports) == 2 || process_exited(process), 90; pollint=0.05) === :ok
                     first_load = take!(reports)
-                    @test first_load[1] == "1:111111:"
+                    @test first_load[1] == "1:1111111:"
                     linked_files = count("data-htmxo-runtime", page)
                     @test first_load[2] == linked_files
                     second_load = take!(reports)
-                    @test second_load[1] == "2:111111:"
+                    @test second_load[1] == "2:1111111:"
                     # Nothing linked is fetched again: neither the runtime nor
                     # the pinned libraries.
                     @test second_load[2] == first_load[2]

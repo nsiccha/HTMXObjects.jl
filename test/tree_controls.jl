@@ -120,3 +120,86 @@ end
         end
     end
 end
+
+@testitem "a stock pico_page runs the table controls with nothing in extra_head" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # The reported shape: a hierarchical, searchable table with Expand all /
+        # Collapse all on a page shell the app did not add any table script to.
+        leaf(k, name) = (; key=k, name, kids=())
+        group(k, name, kids) = (; key=k, name, kids)
+        roots = [group("all", "All models", [
+                    group("fam-a", "Alpha family", [leaf("m1", "Model one"), leaf("m2", "Model two")]),
+                    group("fam-b", "Beta family", [leaf("m3", "Model three")])])]
+        tree = master_detail_table(["Name"], roots; key=x -> x.key, master=x -> (h.td(x.name),),
+            children=x -> x.kids, detail=x -> isempty(x.kids) ? h.p("About $(x.name)") : nothing,
+            initially_open=x -> x.key == "all", searchable=true, expand_controls=true, id="tree")
+        scores = render_table((; name=["b", "a", "c"], score=[2, 1, 3]); id="scores")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push(name + ':' + Boolean(ok));
+            const row = k => document.getElementById('row-' + k);
+            const shown = () => Array.from(document.getElementById('tree').rows).filter(r => r.id.startsWith('row-') && !r.hidden).map(r => r.id.slice(4)).join(',');
+            const root = document.getElementById('tree').closest('.htmxo-searchable-table');
+            check('runtime', ['sortTable', 'htmxoTreeToggle', 'htmxoTreeAll', 'htmxoFilterTable', 'downloadTableCsv',
+                'htmxoMdToggle'].every(f => typeof window[f] === 'function'));
+            check('initial', shown() === 'all,fam-a,fam-b');
+            row('fam-b').querySelector('[data-htmxo-tree-toggle]').click();
+            check('toggle', shown() === 'all,fam-a,fam-b,m3');
+            root.querySelector('button[onclick="htmxoTreeAll(this, true)"]').click();
+            check('expand-all', shown() === 'all,fam-a,m1,m2,fam-b,m3');
+            root.querySelector('button[onclick="htmxoTreeAll(this, false)"]').click();
+            check('collapse-all', shown() === 'all');
+            const input = root.querySelector('input[type="search"]');
+            input.value = 'three'; input.dispatchEvent(new Event('input', {bubbles: true}));
+            check('search', shown() === 'all,fam-b,m3' &&
+                root.querySelector('[data-htmxo-table-count]').textContent === '3 of 6 rows shown');
+            // The detail-cell reset (sortable_table_styles) and the caption
+            // layout (caption_style) apply.
+            check('detail-cell-reset', getComputedStyle(document.querySelector('#detail-m1 > td')).paddingTop === '0px');
+            check('caption-layout', getComputedStyle(document.querySelector('.caption-header')).display === 'flex');
+            const body = document.getElementById('scores');
+            const order = () => Array.from(body.rows).map(r => r.cells[0].textContent).join(',');
+            body.closest('table').tHead.rows[0].cells[0].querySelector('.htmxo-sort-control').click();
+            check('sort', order() === 'a,b,c');
+            const createURL = URL.createObjectURL, anchorClick = HTMLAnchorElement.prototype.click;
+            let blob = null;
+            URL.createObjectURL = b => { blob = b; return 'blob:test'; };
+            HTMLAnchorElement.prototype.click = function() {};
+            try { body.closest('figure').querySelector('.caption-action').click(); } finally {
+                URL.createObjectURL = createURL; HTMLAnchorElement.prototype.click = anchorClick;
+            }
+            const csv = blob ? await blob.text() : '';
+            check('csv', csv.split(/\r?\n/)[0] === 'name,score' && csv.split(/\r?\n/)[1] === 'a,1');
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        content = h.div(tree, scores, driver)
+        for runtime in (:inline, :linked)
+            dom = mktempdir() do directory
+                copy_vendorfiles(joinpath(directory, "vendor"))
+                fixture = joinpath(directory, "page.html")
+                # The stock shell, with Pico and htmx from the vendor copies.
+                write(fixture, repr("text/html", HTMXObjects.pico_page(content; assets="vendor",
+                    pico_version=HTMXObjects._PICO_VERSION, runtime)))
+                profile = joinpath(directory, "profile")
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile file://$fixture`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                lines = split(checks[1], '\n')
+                for line in lines
+                    @test endswith(line, ":true")
+                end
+                @test length(lines) == 10
+            end
+        end
+    end
+end

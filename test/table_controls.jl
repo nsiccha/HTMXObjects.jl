@@ -223,6 +223,56 @@ end
     @test contains(repr("text/html", HTMXObjects.pico_page(table)), rule)
 end
 
+@testitem "page shells carry the table runtime and leave out extra_head copies" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: _runtime_text
+    # The reported page: a stock pico_page defined `htmxoMdToggle` but none of
+    # the functions the table controls call, so they were dead.
+    functions = ("function sortTable(", "function htmxoTreeToggle(", "function htmxoTreeAll(",
+        "function htmxoFilterTable(", "function downloadTableCsv(")
+    stock = repr("text/html", HTMXObjects.pico_page(h.p("x")))
+    @test all(f -> count(f, stock) == 1, functions)
+    @test count("function htmxoMdToggle(", stock) == 1
+    @test contains(stock, _runtime_text(:sortable_table_styles)) && contains(stock, _runtime_text(:caption_style))
+    @test all(f -> contains(repr("text/html", htmx(h.p("x"))), f), functions)
+    # The shell's block is sortable_table_js() without the master/detail half
+    # that its comparison block already holds.
+    @test _runtime_text(:sortable_table) == _runtime_text(:table_runtime) * _runtime_text(:master_detail)
+    @test startswith(_runtime_text(:comparison), _runtime_text(:master_detail))
+    # tables=false leaves the table runtime out; the master/detail runtime stays.
+    without = repr("text/html", HTMXObjects.pico_page(h.p("x"); tables=false))
+    @test !any(f -> contains(without, f), functions)
+    @test !contains(without, _runtime_text(:caption_style))
+    @test count("function htmxoMdToggle(", without) == 1
+
+    # An app's own copies of what the shell carries are left out rather than
+    # shipped twice; its other elements keep their place.
+    own = h.style(Raw(".mine{color:red}"))
+    helpers = (sortable_table_js(), sortable_table_styles(), caption_style(), download_table_js(), master_detail_js())
+    @test repr("text/html", HTMXObjects.pico_page(h.p("x"); extra_head=(h.title("T"), helpers..., own))) ==
+        repr("text/html", HTMXObjects.pico_page(h.p("x"); extra_head=(h.title("T"), own)))
+    # Without the table runtime the table helpers are the app's own again;
+    # only the master/detail copy, which the shell still carries, is left out.
+    kept = repr("text/html", HTMXObjects.pico_page(h.p("x"); tables=false, extra_head=helpers))
+    @test all(f -> count(f, kept) == 1, functions)
+    @test kept == repr("text/html", HTMXObjects.pico_page(h.p("x"); tables=false, extra_head=helpers[1:4]))
+    # A changed or attributed copy is not the helper, so it stays.
+    tweaked = h.script(Raw(_runtime_text(:sortable_table) * "\n// app tweak"))
+    attributed = h.style(Raw(_runtime_text(:caption_style)); media="print")
+    changed = repr("text/html", HTMXObjects.pico_page(h.p("x"); extra_head=(tweaked, attributed)))
+    @test contains(changed, "// app tweak") && contains(changed, "media=\"print\"")
+
+    # A linked shell links its table blocks once and still leaves the copies out.
+    kw = (; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION, runtime=:linked)
+    linked = repr("text/html", HTMXObjects.pico_page(h.p("x"); kw..., extra_head=(helpers..., htmxo_gallery_styles())))
+    for file in ("table_runtime.js", "sortable_table_styles.css", "caption_style.css", "download_table.js",
+                 "gallery_styles.css")
+        @test count("/vendor/htmxo/$file?v=", linked) == 1
+    end
+    @test !contains(linked, "htmxo/sortable_table.js") && !contains(linked, "htmxo/master_detail.js")
+    @test !contains(repr("text/html", HTMXObjects.pico_page(h.p("x"); kw..., tables=false)), "table_runtime")
+end
+
 @testitem "sort header controls render as heading text under Pico" setup=[ChromeDump] tags=[:browser] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
