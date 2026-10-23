@@ -14,7 +14,7 @@ export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfile
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
-    static_export, static_url, url_params, url_params_script
+    static_export, static_url, url_params, url_params_script, url_anchor_script
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -2848,6 +2848,7 @@ _runtime_blocks() = (
     operation_stream = (:js, operation_stream_script),
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
+    url_anchor = (:js, url_anchor_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
     # The table runtime. `htmx(...; tables=true)` carries it together with
@@ -3143,6 +3144,9 @@ function htmx(args...;
         # `url_params` elements follow the page address and write
         # their values into it; inert on pages without one.
         :url_params,
+        # The address's `#id` reaches an element an htmx swap inserts
+        # after the page loaded; inert on an address without one.
+        :url_anchor,
         # Markdown math (`render_markdown`) is typeset by KaTeX, which
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
@@ -8759,6 +8763,75 @@ url_params_script() = h.script(Raw(raw"""
   });
 
   window.htmxoUrlParams = { apply: apply };
+})();
+"""))
+
+"""
+    url_anchor_script()
+
+Client runtime that lets the page address's `#id` reach an element that
+arrives after the page has loaded. The browser scrolls to the element the
+`#id` names while it loads the page; an element an htmx swap inserts later —
+inside a fragment the page loads with `hx-trigger="load"`, a [`lazy`](@ref)
+part, or a [`tabset`](@ref) such a fragment carries — misses that scroll, and
+the page stays at its top. With this runtime the page scrolls to the element
+once the swap that brings it has settled, as the browser would have: a link to
+`?tab=trends#odl-tabs` opens the tabset's `trends` tab and brings it into view,
+whether the tabset is part of the page or arrives in a fragment.
+
+It acts only after a fresh navigation (a reload or Back keeps the position the
+browser restores), and only until the reader scrolls, clicks or types. When
+the page is still too short to bring the element to the top, it keeps the
+element in view while content loads into it, as the browser does for an
+element the page carries. An element the page carries when it is parsed is
+left to the browser.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+url_anchor_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoUrlAnchor) return;
+  window.htmxoUrlAnchor = true;
+  var hash = location.hash;
+  if (hash.length < 2) return;
+  var id = hash.slice(1);
+  try { id = decodeURIComponent(id); } catch (e) {}
+  // A reload or Back restores its own scroll position, which wins over the
+  // `#id` here as it does for an element the page carries.
+  var nav = window.performance && performance.getEntriesByType ?
+    performance.getEntriesByType('navigation')[0] : null;
+  if (nav && nav.type !== 'navigate') return;
+  var pending = true, reached = null;
+  var stop = function () { pending = false; };
+  // The reader has taken over, or the address names something else now.
+  ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(function (type) {
+    window.addEventListener(type, stop, { capture: true, passive: true });
+  });
+  window.addEventListener('hashchange', stop);
+  window.addEventListener('popstate', stop);
+  // Parsed with the page: the browser has scrolled to it.
+  document.addEventListener('DOMContentLoaded', function () {
+    if (document.getElementById(id)) stop();
+  });
+  // htmx announces each element a swap inserts once the swap has settled.
+  document.addEventListener('htmx:load', function (e) {
+    if (!pending || location.hash !== hash || !(e.target instanceof Node)) return;
+    if (reached) {
+      // The page may have been too short to bring the element to the top.
+      // Like the browser for an element the page carries, keep it in view
+      // while content loads into it (a tab's lazy panel).
+      if (document.contains(reached) && reached.contains(e.target)) reached.scrollIntoView();
+      return;
+    }
+    var target = document.getElementById(id);
+    if (!target || !e.target.contains(target)) return;
+    // A page scrolled by any other means stays where it is.
+    if (window.scrollX !== 0 || window.scrollY !== 0) { stop(); return; }
+    reached = target;
+    target.scrollIntoView();
+  });
 })();
 """))
 
@@ -26422,6 +26495,12 @@ URL or `active` picks tabs by name.
 share its value, so give each tabset on a page its own when they should keep
 their tabs apart. `url_param=nothing` leaves the URL alone. Inside a docs embed
 (`.htmxo-embed`) the URL is the host page's and is left alone too.
+
+A lazy tab the URL names loads like the initially active one: once it is
+scrolled into view, so a tabset below the fold waits for the reader. A link
+that should land on the tab names the tabset's `id` too, `?tab=trends#odl-tabs`;
+the browser scrolls to it, and so does an `htmx()` page when the tabset
+arrives in a fragment after the page loaded ([`url_anchor_script`](@ref)).
 
 `active` picks the tab shown when the URL names none, by position or by name
 (`active="sonden"`). Keeping the tab in the URL needs [`tabset_script`](@ref),
