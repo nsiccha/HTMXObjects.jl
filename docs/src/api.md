@@ -599,6 +599,9 @@ presence-only `data-htmxo-label` attribute (`h.button(name;
 data_htmxo_label="")`): Markdown drops the control and keeps that label in its
 place. Sortable column headers and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
+A master/detail table's detail rows are never rows of the Markdown table;
+`master_detail_table` writes its eager details after it (see [Details in
+Markdown](components.md#master-detail-markdown)).
 
 A semantic element whose HTML peer is a block — any but `SemanticStatus`,
 `SemanticLink`, `SemanticAction` and `SemanticArtifact`, which are inline and
@@ -838,10 +841,32 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `de-DE` report. A bundled filter does this: Pandoc's Typst writer alone
   turns `“ ” ‘ ’` into straight quotes, so a German `„Titel“` came out
   `„Titel„` and `‚Wort‘` came out `‚Wort’`.
+- **Tables** are set ragged-right, while the body text stays justified. A word
+  in a table cell is hyphenated only when it is wider than its column, such as
+  `Kontaminationswahrscheinlichkeit` in a narrow column; a word that fits on
+  the next line moves there whole. Quarto's template justified table cells
+  too, which stretched narrow cells with wide gaps and split words such as
+  `Me-dian`. Code is never hyphenated, so a code span wider than its column
+  runs into the next one.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense
 is still for a person to check.
+
+**Links within the report.** A link to `#id` needs an element with that
+identifier in the Markdown: Typst refuses a link to a label that does not exist,
+and `pdf_report` throws with its message, `label <id> does not exist in the
+document`. Give the target a semantic `anchor`: `SemanticSection`,
+`SemanticCard` and `SemanticCode` write it as their identifier (see
+[The semantic element vocabulary](@ref)), so the link jumps to the section in
+the browser and in the PDF alike:
+
+```julia
+page = h.article(
+    h.p("Die Datenlage steht in ", SemanticLink("Abschnitt A1", "#abschnitt-a1"), "."),
+    SemanticSection("A1 Datenlage", SemanticProse("…"); anchor="abschnitt-a1"))
+pdf_report(page, "angebot.pdf"; title="Konzept", lang="de-DE")
+```
 
 ```@docs
 pdf_report
@@ -1697,7 +1722,13 @@ it rendered when it was made.
 
 `anchor`, where present, becomes the HTML `id` — a document address, so an
 element can be cited from elsewhere. An unaddressed element emits no attribute
-at all rather than `id=""`.
+at all rather than `id=""`. The Markdown peer keeps the address as a Pandoc
+identifier, so a `[…](#anchor)` link resolves wherever the Markdown is rendered
+(Quarto, [`pdf_report`](#pdf-report)): a section or card writes it on its
+title heading (`## Title {#anchor}`), and a code block, which has no heading,
+inside a fenced div (`::: {#anchor}` … `:::`). An anchor outside Pandoc's
+`#id` shorthand (letters, digits, `_`, `.`, `:`, `-`) is written as
+`{id="…"}`, which Pandoc reads to the same identifier.
 
 Most elements project into the HTML element whose native rendering already
 carries their meaning — `article` for a card, `section` for a division, `dl` for
@@ -2638,7 +2669,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 | `default_gallery_card(item)`   | The default card (title, description, code), built on `gallery_card` |
 | `htmxo_gallery_styles()`       | The gallery stylesheet (`gallery_grid` includes it; for galleries an app composes itself) |
 | `gallery_toolbar`, `gallery_controls_script` | Toolbar widget + JS for filter/group controls in the grid |
-| `record!(app; record_dir, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants |
+| `record!(app; record_dir, record_base, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants. A recorded rooted `hx-get` names the fragment file it writes (`<record_base>/hx/<path>.html`; empty `record_base` = site root), so lazy parts load on any static server |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
 | `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
 | `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline. Returned by an `__error__` hook, it is the error answer as it is, with the error's status (500, 400 for a caller fault, 200 under HTMX) |
