@@ -8769,22 +8769,27 @@ url_params_script() = h.script(Raw(raw"""
 """
     url_anchor_script()
 
-Client runtime that lets the page address's `#id` reach an element that
-arrives after the page has loaded. The browser scrolls to the element the
-`#id` names while it loads the page; an element an htmx swap inserts later —
-inside a fragment the page loads with `hx-trigger="load"`, a [`lazy`](@ref)
-part, or a [`tabset`](@ref) such a fragment carries — misses that scroll, and
-the page stays at its top. With this runtime the page scrolls to the element
-once the swap that brings it has settled, as the browser would have: a link to
-`?tab=trends#odl-tabs` opens the tabset's `trends` tab and brings it into view,
-whether the tabset is part of the page or arrives in a fragment.
+Client runtime that lets the page address's `#id` land on its element while
+htmx is still loading the page's parts. The browser scrolls to the element the
+`#id` names while it loads the page, and keeps it there until the page's `load`
+event; what htmx swaps in after that moves the page on without it. An element
+a swap inserts — inside a fragment the page loads with `hx-trigger="load"`, a
+[`lazy`](@ref) part, or a [`tabset`](@ref) such a fragment carries — misses
+the scroll, so the page stays at its top. An element the page carries is
+pushed down by a lazy part that loads above it, and stays short of the top
+when the page was too short to bring it there and its lazy content (a tab's
+panel) loads afterwards.
+
+With this runtime the page scrolls to the element once the swap that brings it
+has settled, and after every later swap scrolls it back to where the `#id`
+puts it, as the browser does while the page loads: a link to
+`?tab=trends#odl-tabs` opens the tabset's `trends` tab and lands on it,
+whether the tabset is part of the page or arrives in a fragment, and whatever
+loads first.
 
 It acts only after a fresh navigation (a reload or Back keeps the position the
-browser restores), and only until the reader scrolls, clicks or types. When
-the page is still too short to bring the element to the top, it keeps the
-element in view while content loads into it, as the browser does for an
-element the page carries. An element the page carries when it is parsed is
-left to the browser.
+browser restores), and only until the reader scrolls, clicks or types. A page
+scrolled before a swap brings the element stays where it is.
 
 Safe to include more than once. Auto-included by [`htmx`](@ref); include it
 yourself only on pages built without the shell.
@@ -8803,7 +8808,7 @@ url_anchor_script() = h.script(Raw(raw"""
   var nav = window.performance && performance.getEntriesByType ?
     performance.getEntriesByType('navigation')[0] : null;
   if (nav && nav.type !== 'navigate') return;
-  var pending = true, reached = null;
+  var pending = true, reached = false, queued = false;
   var stop = function () { pending = false; };
   // The reader has taken over, or the address names something else now.
   ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(function (type) {
@@ -8811,26 +8816,32 @@ url_anchor_script() = h.script(Raw(raw"""
   });
   window.addEventListener('hashchange', stop);
   window.addEventListener('popstate', stop);
-  // Parsed with the page: the browser has scrolled to it.
+  // Parsed with the page: the browser scrolls to it, but keeps it there only
+  // until the page's `load` event, not through the swaps that follow.
   document.addEventListener('DOMContentLoaded', function () {
-    if (document.getElementById(id)) stop();
+    if (document.getElementById(id)) reached = true;
   });
+  // Once per frame, however many elements a swap settles: each
+  // `scrollIntoView` lays the page out again.
+  var land = function () {
+    queued = false;
+    var target = document.getElementById(id);
+    if (pending && location.hash === hash && target) target.scrollIntoView();
+  };
   // htmx announces each element a swap inserts once the swap has settled.
   document.addEventListener('htmx:load', function (e) {
     if (!pending || location.hash !== hash || !(e.target instanceof Node)) return;
-    if (reached) {
-      // The page may have been too short to bring the element to the top.
-      // Like the browser for an element the page carries, keep it in view
-      // while content loads into it (a tab's lazy panel).
-      if (document.contains(reached) && reached.contains(e.target)) reached.scrollIntoView();
-      return;
+    if (!reached) {
+      var target = document.getElementById(id);
+      if (!target || !e.target.contains(target)) return;
+      // A page scrolled by any other means stays where it is.
+      if (window.scrollX !== 0 || window.scrollY !== 0) { stop(); return; }
+      reached = true;
     }
-    var target = document.getElementById(id);
-    if (!target || !e.target.contains(target)) return;
-    // A page scrolled by any other means stays where it is.
-    if (window.scrollX !== 0 || window.scrollY !== 0) { stop(); return; }
-    reached = target;
-    target.scrollIntoView();
+    // Every swap may move the element: content loading above it pushes it
+    // down, and content loading into or below it lets a page that was too
+    // short bring it to the top.
+    if (!queued) { queued = true; requestAnimationFrame(land); }
   });
 })();
 """))
@@ -26499,8 +26510,9 @@ their tabs apart. `url_param=nothing` leaves the URL alone. Inside a docs embed
 A lazy tab the URL names loads like the initially active one: once it is
 scrolled into view, so a tabset below the fold waits for the reader. A link
 that should land on the tab names the tabset's `id` too, `?tab=trends#odl-tabs`;
-the browser scrolls to it, and so does an `htmx()` page when the tabset
-arrives in a fragment after the page loaded ([`url_anchor_script`](@ref)).
+the browser scrolls to it, and an `htmx()` page keeps it there while lazy parts
+load after the page, and scrolls to a tabset that arrives in a fragment
+([`url_anchor_script`](@ref)).
 
 `active` picks the tab shown when the URL names none, by position or by name
 (`active="sonden"`). Keeping the tab in the URL needs [`tabset_script`](@ref),
