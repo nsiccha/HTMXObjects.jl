@@ -136,6 +136,8 @@ Columns are auto-detected from the table (any `Tables.jl`-compatible source). Ot
 
 Drop `sortable_table_js()` and `download_table_js()` once per page (typically inside `__page__`) to enable the client-side sorting and CSV download.
 
+The CSV holds the text each cell shows. A cell shown on several lines (a `<br>`, or block children such as `div` or `p`) exports one quoted field with those lines, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))` becomes a field holding the two lines `6,28` and `6,01–6,55`, rather than `6,286,01–6,55`. A header shown on two lines exports its lines joined by a space.
+
 #### Reading and restoring the sort state
 
 `sortTable` marks the active `<th>` with both `data-sort-dir="asc"|"desc"` and
