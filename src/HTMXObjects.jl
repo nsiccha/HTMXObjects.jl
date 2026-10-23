@@ -14729,6 +14729,11 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 
 # --- Accessible PDF export ---
 
+# Pandoc's Typst writer turns “ ” ‘ ’ into straight quotes for Typst to quote
+# by `lang`, so a German „…“ came out „…„; this filter, run last, passes them
+# to Typst as written.
+const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
+
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
 # this Quarto filter gives each one its TeX source.
 const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
@@ -14842,6 +14847,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
       typst:
         pdf-standard: [ua-1]
     filters:
+      - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
+        at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
     ---
@@ -14886,7 +14893,9 @@ through `metadata`. The Markdown itself must not carry a YAML metadata block:
 Quarto would let it override `title`, `lang` and the equation filter.
 
 The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
-filter that gives every equation its TeX source as alt text. Every image needs
+filter that gives every equation its TeX source as alt text. Typographic quotes
+read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
+become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Every image needs
 alt text: Typst refuses a PDF/UA document with an image that has none. A
 Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
 supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled

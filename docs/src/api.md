@@ -785,6 +785,12 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `![](figure.png){alt="…"}`: Pandoc reads an image that is alone in its
   paragraph, `![alt](figure.png)`, as a figure whose caption is that text and
   whose image has no alt text.
+- **Quotes:** typographic quotes read as written: `„Titel“`, `‚Wort‘` and
+  `“title”` stay those characters in the PDF, as in the page. Straight quotes
+  (`"Titel"`, `'Wort'`) become the quotes of `lang`, so `„Titel“` in a
+  `de-DE` report. A bundled filter does this: Pandoc's Typst writer alone
+  turns `“ ” ‘ ’` into straight quotes, so a German `„Titel“` came out
+  `„Titel„` and `‚Wort‘` came out `‚Wort’`.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense
