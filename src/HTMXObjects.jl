@@ -23161,21 +23161,24 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
    triggering element (core `requestClass` — no HTMXObjects JS needed), so
    this rule fires on every page carrying this block, including hand-built
    shells that skip `request_feedback()`. `cursor: progress` plus a subtle
-   dim, in plain literals so it holds without `htmxo_theme()`. Pollers
-   (`hx-trigger` containing `every`) are background work, not user-triggered
-   feedback, so they keep their resting style — the same exclusion the
-   `request_feedback` script applies.
+   dim, in plain literals so it holds without `htmxo_theme()`. Requests the
+   page sends by itself — pollers (`hx-trigger` containing `every`) and
+   elements whose trigger is `load` (lazy fragments), `revealed` or
+   `intersect` — keep their resting style: the reader started nothing. The
+   `request_feedback` script applies the same exclusion per request; CSS sees
+   only the attribute, so a trigger list counts as `load` when it begins with
+   it.
    INTENTIONALLY UNLAYERED: Pico styles `<button>` (and other controls)
    unlayered, and an unlayered declaration beats every layered one
    regardless of specificity — inside `@layer htmxo` the cursor would never
    apply on buttons (the opacity would, Pico sets none). The resting `[hx-*]`
    rule above stays layered: at rest it agrees with Pico's `pointer`, so
    there is nothing to beat. */
-[hx-get]:not([hx-trigger*="every"]).htmx-request,
-[hx-post]:not([hx-trigger*="every"]).htmx-request,
-[hx-put]:not([hx-trigger*="every"]).htmx-request,
-[hx-patch]:not([hx-trigger*="every"]).htmx-request,
-[hx-delete]:not([hx-trigger*="every"]).htmx-request {
+[hx-get]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-post]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-put]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-patch]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
+[hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request {
     cursor: progress;
     opacity: 0.7;
 }
@@ -23253,8 +23256,16 @@ an inherited `hx-target`, an extended selector such as `next .result`,
 `closest tr` or `find output`, an `htmx.ajax` target, and an `HX-Retarget`
 response all mark the element the response actually lands in. A target that an
 `outerHTML` swap has already replaced is marked through its same-id
-replacement; otherwise the requesting element's own `hx-target` CSS selector is
-used, then the requesting element itself.
+replacement, else through the elements the swap put in its place; otherwise the
+requesting element's own `hx-target` CSS selector is used, then the requesting
+element itself. The requesting element is the one that sent the request, never
+the ancestor htmx reports the request's end on once that element's own swap
+removed it.
+
+Only requests the reader started are marked. A request the page sends by
+itself — a poll (`hx-trigger` with `every`), a preload, or the requesting
+element's own `load`, `revealed` or `intersect` trigger (a `lazy` fragment, a deferred page's placeholder, a `tabset`'s shown lazy panel) — draws
+no outline; a failure among them still raises the shell's failure toast.
 
 Success and failure are read as [`toast_script`](@ref)'s
 `window.htmxoRequestOutcome` reads them, so the red flash and the shell's
@@ -23265,31 +23276,61 @@ flashes red for every request htmx does not report as successful.
 """
 request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
-    function getTarget(evt) {
-        var elt = evt.detail.elt;
+    // The element that sent the request. Once its own swap has removed it,
+    // htmx reports the request's end a second time on the closest ancestor
+    // still in the page, as `detail.elt`; the request config keeps the sender.
+    function requester(evt) {
+        var config = evt.detail.requestConfig;
+        return (config && config.elt) || evt.detail.elt;
+    }
+    // The elements an outerHTML swap put in place of its target, by request:
+    // htmx announces each with afterSwap before the request ends.
+    var replacements = new WeakMap();
+    document.body.addEventListener('htmx:afterSwap', function(e) {
+        var d = e.detail;
+        if (!d.xhr || !d.target || d.target.isConnected) return;
+        var list = replacements.get(d.xhr) || [];
+        list.push(e.target);
+        replacements.set(d.xhr, list);
+    });
+    function getTargets(evt) {
+        var elt = requester(evt);
         var resolved = evt.detail.target;
-        if (resolved && resolved.isConnected) return resolved;
+        if (resolved && resolved.isConnected) return [resolved];
         // afterRequest follows the swap: an outerHTML swap has replaced the
-        // resolved node, so mark its replacement when it kept the id.
+        // resolved node, so mark its replacement when it kept the id, else
+        // what the swap put in its place.
         if (resolved && resolved.id) {
             var replaced = document.getElementById(resolved.id);
-            if (replaced) return replaced;
+            if (replaced) return [replaced];
         }
+        var swapped = (evt.detail.xhr && replacements.get(evt.detail.xhr) || [])
+            .filter(function(el) { return el.isConnected; });
+        if (swapped.length) return swapped;
         var targetSel = elt.getAttribute('hx-target');
         if (targetSel) {
-            if (targetSel === 'this') return elt;
+            if (targetSel === 'this') return [elt];
             var found = null;
             try { found = document.querySelector(targetSel); } catch (_) {}
-            if (found) return found;
+            if (found) return [found];
         }
-        return elt;
+        return [elt];
     }
     function isPolling(elt) {
         var trigger = elt.getAttribute('hx-trigger') || '';
         return trigger.indexOf('every') !== -1;
     }
-    function isPollingRelated(elt) {
-        return isPolling(elt) || (elt.querySelector && !!elt.querySelector('[hx-trigger*="every"]'));
+    // A request the page sends by itself rather than one the reader started:
+    // a poll, or the element's own `load`, `revealed` or `intersect` trigger
+    // (a lazy fragment, a tab's shown panel, an infinite-scroll sentinel).
+    // There is nothing to confirm, so it draws no outline.
+    function isAutomatic(e, elt) {
+        if (isPolling(elt)) return true;
+        var config = e.detail.requestConfig;
+        var trigger = config && config.triggeringEvent;
+        if (trigger) return trigger.type === 'revealed' || trigger.type === 'intersect';
+        // htmx sends a `load` trigger's request without an event.
+        return /(^|,)\\s*load(?![\\w:-])/.test(elt.getAttribute('hx-trigger') || '');
     }
     // htmx dispatches a preload's beforeRequest before the preload extension
     // cancels it, and no afterRequest follows: marking it would leave the
@@ -23317,15 +23358,14 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(function() { clearFeedback(el); }, state === 'success' ? 1000 : 2000);
     }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
-        var elt = e.detail.elt;
-        if (isPolling(elt) || isPreload(e)) return;
-        var t = getTarget(e);
-        clearFeedback(t);
-        t.classList.add('htmx-request-active');
-        if (t !== elt) {
-            clearFeedback(elt);
-            elt.classList.add('htmx-request-active');
-        }
+        var elt = requester(e);
+        if (isAutomatic(e, elt) || isPreload(e)) return;
+        var targets = getTargets(e);
+        if (targets.indexOf(elt) < 0) targets.push(elt);
+        targets.forEach(function(t) {
+            clearFeedback(t);
+            t.classList.add('htmx-request-active');
+        });
     });
     document.body.addEventListener('htmx:oobAfterSwap', function(e) {
         var t = e.detail.target || e.detail.elt;
@@ -23335,13 +23375,13 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(function() { clearFeedback(t); }, 1000);
     });
     function finished(e) {
-        var elt = e.detail.elt;
-        if (isPollingRelated(elt)) return;
+        var elt = requester(e);
+        if (isAutomatic(e, elt)) return;
         var state = outcome(e);
         if (state === 'pending') return;
-        var t = getTarget(e);
-        mark(t, state);
-        if (t !== elt) mark(elt, state);
+        var targets = getTargets(e);
+        if (targets.indexOf(elt) < 0) targets.push(elt);
+        targets.forEach(function(t) { mark(t, state); });
     }
     ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout', 'htmx:sendAbort'].forEach(function(name) {
         document.body.addEventListener(name, finished);
