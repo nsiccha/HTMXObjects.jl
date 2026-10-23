@@ -277,6 +277,20 @@ is open a poller polls its progress tree at most once a second. A stream that
 drops or is refused leaves its pollers polling at their own pace, and the
 runtime reopens it with backoff.
 
+When the page's Treebars script can apply pushed answers (Treebars ≥ `2b6a0f7`,
+`treebarUpdatePoller`), the stream carries the answers themselves: once a
+second the server renders the running poller's answer by polling the operation
+through `middleware` and the router with the stream request's headers (its
+`Referer` as the page's address), and sends it as `progress`; when the
+computation ends it renders the final answer the same way and sends it as
+`result`. The page's poller then sends no polls at all. `middleware` sees each
+of these renders as a GET of the poll address with `req.context[:htmxo_push]`
+set. A final answer that
+needs htmx's own response handling (a status other than 286, an `HX-*`
+header, a recorded error's id, a toast) is sent as `ready` instead, and the
+poll the page then sends is answered with the answer the stream rendered, so
+nothing is computed twice.
+
 `parallel` chooses where each request is handled:
 - `false` (default) — on HTTP.jl's own connection task. HTTP.jl 2 spawns that
   task on the `:interactive` threadpool (Julia uses `:default` when there are no
@@ -320,6 +334,7 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
     tracker = runtime_tracking ? runtime_tracker() : nothing
     _PRESTART_APP[] = prestart ? _prestart_pipeline(middleware) : nothing
     _OPERATION_STREAM[] = operation_stream
+    _OPERATION_PUSH_APP[] = operation_stream ? _inner_pipeline(middleware, ROUTER) : nothing
     handle = _stream_handler(
         _served_middleware(_request_pipeline(middleware, access_log, Revise,
                                              tracker; operation_stream)),
@@ -358,6 +373,7 @@ function terminate()
     _SERVER[] = nothing
     _PRESTART_APP[] = nothing
     _OPERATION_STREAM[] = false
+    _OPERATION_PUSH_APP[] = nothing
     server !== nothing && isopen(server) && close(server)
     return nothing
 end
@@ -5856,8 +5872,13 @@ const _PRESTART_APP = Ref{Any}(nothing)
 const _PRESTART_LIMIT = 24
 const _PRESTART_LIVE_LIMIT = 96
 
-_prestart_pipeline(middleware) =
-    foldr((m, app) -> m(app), middleware; init=_fallback_middleware(_prestart_router))
+# The app's `middleware` around `handler`, as `serve` composes it, without the
+# access log, the runtime tracker or Revise: the pipeline of the requests the
+# server makes itself (prestarts, pushed answers).
+_inner_pipeline(middleware, handler) =
+    foldr((m, app) -> m(app), middleware; init=_fallback_middleware(handler))
+
+_prestart_pipeline(middleware) = _inner_pipeline(middleware, _prestart_router)
 
 # `ROUTER` for a prestart: an `@htmx` route only. Any other handler (an `@sse`
 # or `@ws` route, one an app registered on `ROUTER` itself) would run inline
@@ -6018,19 +6039,28 @@ const _PRESTART_DROPPED_HEADERS = Set(["accept", "accept-encoding",
     "upgrade", "te", "keep-alive", "last-event-id", "cache-control", "pragma"])
 
 function _prestart_headers(walk::_PrestartWalk, attrs)
+    headers = _inner_htmx_headers(walk.req, walk.current_url)
+    id = get(attrs, :id, nothing)
+    id isa AbstractString && !isempty(id) && push!(headers, "HX-Trigger" => String(id))
+    target = _prestart_target_id(get(attrs, Symbol("hx-target"), nothing), id)
+    target === nothing || push!(headers, "HX-Target" => target)
+    headers
+end
+
+# The headers of an htmx GET the page at `current_url` would send, derived from
+# `req`, a request of that page's browser: its own headers (cookies,
+# authorization, language, a proxy's `X-Forwarded-*`) without those that
+# describe that request's body, caching or kind, plus htmx's.
+function _inner_htmx_headers(req::HTTP.Request, current_url::AbstractString)
     headers = Pair{String,String}[]
-    for (name, value) in walk.req.headers
+    for (name, value) in req.headers
         key = lowercase(name)
         (key in _PRESTART_DROPPED_HEADERS || startswith(key, "hx-") ||
          startswith(key, "sec-fetch-") || startswith(key, "htmxo-")) && continue
         push!(headers, String(name) => String(value))
     end
     push!(headers, "Accept" => "*/*", "HX-Request" => "true")
-    isempty(walk.current_url) || push!(headers, "HX-Current-URL" => walk.current_url)
-    id = get(attrs, :id, nothing)
-    id isa AbstractString && !isempty(id) && push!(headers, "HX-Trigger" => String(id))
-    target = _prestart_target_id(get(attrs, Symbol("hx-target"), nothing), id)
-    target === nothing || push!(headers, "HX-Target" => target)
+    isempty(current_url) || push!(headers, "HX-Current-URL" => String(current_url))
     headers
 end
 
@@ -6085,11 +6115,14 @@ _operation_stream_wanted(req::HTTP.Request) =
 _operation_stream_wanted(_) = false
 
 _operation_stream_router(router) = function (req::HTTP.Request)
+    replay = _pushed_answer(req)
+    replay === nothing || return replay
     tokens = _operation_stream_tokens(req)
     tokens === nothing && return router(req)
     _is_stream_probe(req) && return _stream_probe_response()
     haskey(req.context, :stream) || return router(req)
-    _serve_sse(req, sse -> _operation_stream_body(sse, tokens))
+    push = _operation_stream_push(req)
+    _serve_sse(req, sse -> _operation_stream_body(sse, req, tokens; push))
 end
 
 # The operation tokens a stream request asks for, or `nothing` for any other
@@ -6112,41 +6145,179 @@ function _operation_stream_tokens(req::HTTP.Request)
     tokens
 end
 
-# `ready <token>` once each operation's computation has finished or failed,
-# `gone <token>` for one the server does not hold (answered, expired, never
-# started here); the body then returns, which closes the stream.
-function _operation_stream_body(sse, tokens::Vector{String})
-    ended = Channel{String}(length(tokens))
-    waiting = 0
+# The app's pipeline for the polls the stream makes itself to render the
+# answers it pushes (`_inner_pipeline`); `nothing` outside `serve`.
+const _OPERATION_PUSH_APP = Ref{Any}(nothing)
+# Seconds between the running answers a pushing stream sends. Treebars shows a
+# pushed poller as current while it hears from it at least every five seconds.
+const _OPERATION_PUSH_INTERVAL = 1.0
+
+# Whether the page asked for answers (`__htmxo_push=1`: it can apply them, see
+# `operation_stream_script()`) and `serve` renders them.
+_operation_stream_push(req::HTTP.Request) = _OPERATION_PUSH_APP[] !== nothing &&
+    get(HTTP.queryparams(HTTP.URI(String(req.target))), "__htmxo_push", "") == "1"
+
+# For each operation the stream covers: `gone <token>` at once when the server
+# does not hold it (answered, expired, never started here); otherwise, on a
+# pushing stream, its running answer every `_OPERATION_PUSH_INTERVAL` and its
+# final answer once its computation has ended (`_operation_push!`), and on any
+# other stream `ready <token>` once it has ended. The body returns, closing the
+# stream, when every operation has been sent.
+function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=false)
+    # A token: that operation's computation ended. `""`: the push clock.
+    events = Channel{String}(Inf)
+    waiting = String[]
     for token in tokens
         handle = _operation_stream_handle(token)
         if handle === nothing
             HTTP.WebSockets.send(sse, token; event="gone") || return nothing
         else
-            waiting += 1
-            _operation_stream_watch(handle, token, ended)
+            push!(waiting, token)
+            _operation_stream_watch(handle, token, events)
         end
     end
     # A write to a page that has left fails at the latest with the keep-alive
-    # comment; closing `ended` then ends a stream whose operations never do.
+    # comment; closing `events` then ends a stream whose operations never do.
     left = Timer(1.0; interval=1.0) do timer
-        isopen(sse) || (close(ended); close(timer))
+        isopen(sse) || (close(events); close(timer))
     end
+    ticked = Threads.Atomic{Bool}(false)
+    clock = push ? Timer(_OPERATION_PUSH_INTERVAL;
+                         interval=_OPERATION_PUSH_INTERVAL) do timer
+        # One pending tick at a time: a slow round of renders skips ticks.
+        Threads.atomic_xchg!(ticked, true) && return
+        try
+            put!(events, "")
+        catch err
+            err isa InvalidStateException || rethrow()
+            close(timer)
+        end
+    end : nothing
     try
-        while waiting > 0
+        while !isempty(waiting)
             token = try
-                take!(ended)
+                take!(events)
             catch err
                 err isa InvalidStateException && return nothing
                 rethrow()
             end
-            waiting -= 1
-            HTTP.WebSockets.send(sse, token; event="ready") || return nothing
+            if isempty(token)
+                ticked[] = false
+                for running in copy(waiting)
+                    outcome = _operation_push!(sse, req, running; final=false)
+                    outcome === :closed && return nothing
+                    outcome === :ended && filter!(!=(running), waiting)
+                end
+            elseif token in waiting
+                filter!(!=(token), waiting)
+                outcome = push ? _operation_push!(sse, req, token; final=true) :
+                    (HTTP.WebSockets.send(sse, token; event="ready") ? :ended : :closed)
+                outcome === :closed && return nothing
+            end
         end
     finally
         close(left)
+        clock === nothing || close(clock)
     end
     nothing
+end
+
+# Push the answer the page's poll of `token` would get now, rendered by
+# polling it through the app's pipeline with the stream request's headers:
+# `progress` with the running poller, `result` with a final answer the page
+# can swap as it is (`_operation_pushable`), `ready` for any other final
+# answer, which the page then fetches with its own poll. Every final answer is
+# kept for that poll (`_pushed_answer`), so it is never computed twice. With
+# nothing to render (no poller rendered yet, the operation gone), `final`
+# sends `ready` and a running push sends nothing. Each frame's data is the
+# token, a newline, then the answer. Returns `:running`, `:ended`, or `:closed`
+# once the page has left.
+function _operation_push!(sse, req, token::String; final::Bool)
+    send(event, data="") = HTTP.WebSockets.send(sse,
+        isempty(data) ? token : string(token, '\n', data); event)
+    ended(sent) = sent ? :ended : :closed
+    url = _operation_push_url(token)
+    target = url === nothing ? nothing : _prestart_route_target(req, url)
+    if target === nothing
+        final || return :running
+        return ended(send("ready"))
+    end
+    poll = HTTP.Request("GET", target,
+        _inner_htmx_headers(req, HTTP.header(req, "Referer", "")), UInt8[])
+    poll.context[:htmxo_served] = true
+    poll.context[:htmxo_push] = true
+    response = try
+        _OPERATION_PUSH_APP[](poll)
+    catch err
+        @warn "Rendering an operation's pushed answer failed; the page polls for it" target exception=(err, catch_backtrace())
+        return ended(send("ready"))
+    end
+    if response.status == 200
+        return send("progress", String(_message_body_bytes(response))) ? :running : :closed
+    end
+    _store_pushed_answer!(token, _request_route_path(poll), response)
+    _operation_pushable(response) ?
+        ended(send("result", String(_message_body_bytes(response)))) :
+        ended(send("ready"))
+end
+
+# The page's poll address of a held operation whose poller was rendered.
+function _operation_push_url(token::String)
+    lock(_operation_poll_lock) do
+        entry = get(_operation_polls, token, nothing)
+        entry isa _OperationPollEntry && !isempty(entry.poll_url) ?
+            entry.poll_url : nothing
+    end
+end
+
+# A final answer the page can swap without htmx's own response handling: an
+# HTML poll end with no header htmx or the page runtime acts on (`HX-*`,
+# a recorded error's id, a toast). Anything else goes to the page's own poll.
+function _operation_pushable(response::HTTP.Response)
+    response.status == 286 || return false
+    startswith(HTTP.header(response, "Content-Type", ""), "text/html") || return false
+    !any(response.headers) do (name, _)
+        key = lowercase(name)
+        startswith(key, "hx-") || key in ("x-htmxo-error-id", "x-htmxo-toast")
+    end
+end
+
+# Final answers a pushing stream rendered, by operation token, for the page's
+# own poll of that operation: it gets the same answer instead of a second
+# computation (a read's heal, a `@fresh` re-run). Bounded and expiring like the
+# operation registry.
+const _PUSHED_ANSWER_LIMIT = 256
+const _PUSHED_ANSWER_TTL = 600.0
+const _pushed_answers = Dict{String,@NamedTuple{path::String,response::HTTP.Response,at::Float64}}()
+
+function _store_pushed_answer!(token::String, path::String, response::HTTP.Response)
+    now = _operation_poll_now()
+    stored = _copy_mutation_terminal(response)
+    lock(_operation_poll_lock) do
+        filter!(((_, kept),) -> now - kept.at <= _PUSHED_ANSWER_TTL, _pushed_answers)
+        while length(_pushed_answers) >= _PUSHED_ANSWER_LIMIT
+            delete!(_pushed_answers, argmin(t -> _pushed_answers[t].at, keys(_pushed_answers)))
+        end
+        _pushed_answers[token] = (; path, response=stored, at=now)
+    end
+    nothing
+end
+
+# A copy of the pushed answer of the operation a GET poll names, if the stream
+# rendered one at that poll's path; `nothing` for any other request.
+function _pushed_answer(req::HTTP.Request)
+    req.method == "GET" && occursin("__htmxo_operation=", req.target) || return nothing
+    isempty(_pushed_answers) && return nothing
+    _operation_poll_request(req) || return nothing
+    token = _operation_poll_token(req)
+    token === nothing && return nothing
+    path = _request_route_path(req)
+    kept = lock(_operation_poll_lock) do
+        found = get(_pushed_answers, token, nothing)
+        found !== nothing && found.path == path &&
+            _operation_poll_now() - found.at <= _PUSHED_ANSWER_TTL ? found : nothing
+    end
+    kept === nothing ? nothing : _copy_mutation_terminal(kept.response)
 end
 
 # What an operation's computation is behind its token, or `nothing`. A
@@ -11024,13 +11195,17 @@ mutable struct _OperationPollEntry
     # Started while the server rendered the response that holds its fragment
     # (`_prestart_fragments`), before any browser asked for it.
     prestarted::Bool
+    # The address its running poller polls, as the page has it ("" until a
+    # poller was rendered): where the page's operation stream renders the
+    # answers it pushes (`_operation_push!`).
+    poll_url::String
 end
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job) =
     _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job, false, nothing,
-        0, false, false, Threads.Atomic{Float64}(NaN), false)
+        0, false, false, Threads.Atomic{Float64}(NaN), false, "")
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at) =
@@ -12012,6 +12187,7 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
                                  prefix),
         stream=_operation_stream_wanted(req),
     )
+    entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
         entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
@@ -12110,6 +12286,7 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  ended=outcome -> _record_operation_end!(entry, outcome),
                  failed=(err, uid) -> _note_operation_failure!(req, err, uid),
                  stream=_operation_stream_wanted(req))
+    entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
         started, prop, keys, call_kwargs, transport))
@@ -12297,6 +12474,7 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      ended=outcome -> _record_operation_end!(entry, outcome),
                      failed=(err, uid) -> _note_operation_failure!(req, err, uid),
                      stream=_operation_stream_wanted(req))
+        entry.poll_url = transport.poll_url
         value = _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
             started, prop, keys, call_kwargs, transport))
@@ -23935,12 +24113,18 @@ result arrives when its operation ends instead of at its next poll (see
 [`serve`](@ref)'s `operation_stream`). The script gathers the operations of
 the pollers marked `data-htmxo-operation-stream` (at most 32) and holds one
 `EventSource` on the page's own address with `__htmxo_operations=<token>,…`.
+When the page's Treebars script provides `treebarUpdatePoller` and
+`treebarPollerLost`, the stream is opened with `__htmxo_push=1` and carries
+answers: `progress` and `result` frames are applied with
+`treebarUpdatePoller` (which also stops the poller's own polls), and a poller
+goes back to its own polls with `treebarPollerLost` when the stream drops. A
+poller inside a live-refresh reporter keeps polling and fetches its result.
 When the stream reports an operation `ready`, the script sends that poller's
 poll at once (`htmx.ajax` with the polling element as its source, the request
 its own timer would send), so the answer is swapped, ended and recorded as any
-poll's is. While the stream covers a poller, that poller's timer polls go out at
-most once a second, for its progress tree; an operation the stream reports
-`gone` polls as before. A poller that appears later reopens the stream with the
+poll's is. While the stream covers a poller that shows no pushed answers, that
+poller's timer polls go out at most once a second, for its progress tree; an
+operation the stream reports `gone` polls as before. A poller that appears later reopens the stream with the
 new set. A dropped stream leaves the pollers polling at their own pace while the
 browser reconnects; a refused one is reported to `htmxoStreamProbe` and
 reopened with the backoff of [`live_region`](@ref)'s discover streams. The
@@ -23953,14 +24137,15 @@ operation_stream_script() = h.script(Raw(raw"""
 (function() {
   if (window.__htmxoOperationStream) return;
   window.__htmxoOperationStream = true;
-  // A streamed poller's timer polls go out at most this often, for its
+  // A streamed poller nobody pushes to polls at most this often, for its
   // progress tree; its result is announced on the stream.
   var PROGRESS_MS = 1000;
   // Operations one stream covers (64-character tokens: about 2 KB of address).
   var LIMIT = 32;
-  var state = { source: null, tokens: {}, retries: 0, retry: null, queued: false };
+  var state = { source: null, tokens: {}, push: false, retries: 0, retry: null, queued: false };
   var streamed = {};   // token -> the open stream covers it
-  var ended = {};      // token -> the stream reported it ready or gone
+  var pushed = {};     // token -> its poller shows pushed answers
+  var ended = {};      // token -> the stream sent its result, ready or gone
   var lastPoll = {};   // token -> when its last timer poll went out
   function operationToken(url) {
     var m = /[?&]__htmxo_operation=([^&#]+)/.exec(url || '');
@@ -23969,9 +24154,17 @@ operation_stream_script() = h.script(Raw(raw"""
   function pollToken(url) {
     return /[?&]__htmxo_poll=1(&|#|$)/.test(url || '') ? operationToken(url) : null;
   }
-  function pollers() {
+  function pollers(token) {
     return Array.prototype.slice.call(document.querySelectorAll(
-      '.treebar-poller-inner[data-htmxo-operation-stream][hx-get]'));
+      '.treebar-poller-inner[data-htmxo-operation-stream][hx-get]')).filter(function(el) {
+        return token === undefined || pollToken(el.getAttribute('hx-get')) === token;
+      });
+  }
+  // The page's poller script applies pushed answers when it has the entry
+  // points for it; otherwise the stream only announces each result.
+  function canPush() {
+    return typeof window.treebarUpdatePoller === 'function' &&
+           typeof window.treebarPollerLost === 'function';
   }
   // The operations of the page's marked pollers that have not ended yet.
   function wanted() {
@@ -23983,15 +24176,24 @@ operation_stream_script() = h.script(Raw(raw"""
       if (!ended[t] && list.length < LIMIT) list.push(t);
     });
     // Forget operations whose pollers have left the page.
-    Object.keys(ended).forEach(function(t) { if (!present[t]) delete ended[t]; });
-    Object.keys(lastPoll).forEach(function(t) { if (!present[t]) delete lastPoll[t]; });
+    [ended, lastPoll].forEach(function(seen) {
+      Object.keys(seen).forEach(function(t) { if (!present[t]) delete seen[t]; });
+    });
     return list;
+  }
+  // Pollers that showed pushed answers go back to their own polls.
+  function lose() {
+    Object.keys(pushed).forEach(function(t) {
+      pollers(t).forEach(function(el) { window.treebarPollerLost(el, ''); });
+    });
+    pushed = {};
+    streamed = {};
   }
   function shut() {
     var source = state.source;
     state.source = null;
     state.tokens = {};
-    streamed = {};
+    lose();
     if (source) source.close();
   }
   function sync() {
@@ -24009,23 +24211,68 @@ operation_stream_script() = h.script(Raw(raw"""
     state.queued = true;
     setTimeout(sync, 50);
   }
+  // `<token>\n<answer>`
+  function split(data) {
+    var cut = data.indexOf('\n');
+    return cut < 0 ? { token: data, html: '' } :
+                     { token: data.slice(0, cut), html: data.slice(cut + 1) };
+  }
+  function finish(token) {
+    ended[token] = true;
+    delete streamed[token];
+    delete pushed[token];
+  }
+  // The poller asks for its answer now, with its own request.
+  function poll(el) {
+    if (state.push) window.treebarPollerLost(el, '');
+    if (window.htmx) htmx.ajax('get', el.getAttribute('hx-get'), { source: el });
+  }
+  function apply(data, result) {
+    var answer = split(data), token = answer.token;
+    if (ended[token]) return;
+    if (result) finish(token);
+    pollers(token).forEach(function(el) {
+      // Live refresh reports such a poller's answers through its own requests.
+      if (el.closest('.htmxo-live-reporter')) { if (result) poll(el); return; }
+      if (window.treebarUpdatePoller(el, answer.html)) {
+        if (!result) pushed[token] = true;
+      } else {
+        finish(token);
+      }
+    });
+  }
   function open(tokens) {
+    var push = canPush();
     var source = new EventSource(location.pathname + '?__htmxo_operations=' +
-                                 tokens.join(','));
+                                 tokens.join(',') + (push ? '&__htmxo_push=1' : ''));
     state.source = source;
+    state.push = push;
     tokens.forEach(function(t) { state.tokens[t] = true; });
     source.addEventListener('open', function() {
       if (state.source !== source) return;
       state.retries = 0;
       tokens.forEach(function(t) { if (!ended[t]) streamed[t] = true; });
     });
+    source.addEventListener('progress', function(e) {
+      if (state.source === source) apply(e.data, false);
+    });
+    source.addEventListener('result', function(e) {
+      if (state.source === source) apply(e.data, true);
+    });
+    // A result the page applies through its own request (or the end of an
+    // operation on a stream that pushes nothing).
     source.addEventListener('ready', function(e) {
-      if (state.source === source) ready(e.data);
+      if (state.source !== source) return;
+      var token = split(e.data).token;
+      if (ended[token]) return;
+      finish(token);
+      pollers(token).forEach(poll);
     });
     source.addEventListener('gone', function(e) {
       if (state.source !== source) return;
-      ended[e.data] = true;
-      delete streamed[e.data];
+      var token = split(e.data).token, back = pushed[token];
+      finish(token);
+      if (back) pollers(token).forEach(function(el) { window.treebarPollerLost(el, ''); });
     });
     source.addEventListener('close', function() {
       if (state.source !== source) return;
@@ -24035,7 +24282,7 @@ operation_stream_script() = h.script(Raw(raw"""
     source.addEventListener('error', function() {
       if (state.source !== source) return;
       // While the browser reconnects (CONNECTING), the pollers poll as before.
-      streamed = {};
+      lose();
       if (source.readyState !== EventSource.CLOSED) return;
       if (window.htmxoStreamProbe) window.htmxoStreamProbe.failed(source.url);
       shut();
@@ -24044,22 +24291,12 @@ operation_stream_script() = h.script(Raw(raw"""
                                state.retries * 500);
     });
   }
-  // The operation ended: its poller asks for the answer now.
-  function ready(token) {
-    if (ended[token]) return;
-    ended[token] = true;
-    delete streamed[token];
-    if (!window.htmx) return;
-    pollers().forEach(function(el) {
-      var url = el.getAttribute('hx-get');
-      if (pollToken(url) === token) htmx.ajax('get', url, { source: el });
-    });
-  }
   // `htmx:confirm` comes before anything else of a request, so a held-back
-  // timer poll is never seen as a request by the page's other listeners.
+  // timer poll is never seen as a request by the page's other listeners. A
+  // poller that shows pushed answers sends none; its poller script holds them.
   document.addEventListener('htmx:confirm', function(e) {
     var d = e.detail || {}, token = pollToken(d.path);
-    if (!token || !streamed[token]) return;
+    if (!token || !streamed[token] || pushed[token]) return;
     var now = Date.now();
     if (lastPoll[token] && now - lastPoll[token] < PROGRESS_MS) {
       e.preventDefault();
