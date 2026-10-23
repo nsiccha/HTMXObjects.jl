@@ -660,7 +660,7 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
-| `pdf_report(page_or_markdown, path; title, lang, metadata, base_url)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
+| `pdf_report(page_or_markdown, path; title, lang, metadata, base_url, url_map)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 | `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
 
@@ -917,6 +917,28 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   site links open the live app. A relative address has no page address to
   follow, so it is still written as its text. A `base_url` that is not an
   absolute URL, or that carries a query or fragment, is an `ArgumentError`.
+- **`url_map`** says where links open when the site a report links to does
+  not serve each address under the app's own name: a static snapshot that
+  stores `/api/v1/ap3/anomalien?p_min=0.9` as
+  `api-v1-ap3-anomalien-p_min-0.9.json`, a page shown as a tab of another. It
+  is a function from a link's target, as the Markdown writes it (query
+  included; a site address, a relative address, an `#id` or a URL), to a URL
+  or `nothing`. `pdf_report` calls it before rendering, once for each target
+  of a link in the Markdown or in the document options; an address with a
+  scheme in the text is a link too, and a `[…]()` has none. A `String` answer
+  is the URL the link opens and must be absolute; `nothing` leaves the link to
+  the rules above (`base_url`, or its text). Any other answer, a relative one
+  included, is an `ArgumentError`, and an error `url_map` throws reaches the
+  caller; either way nothing is rendered. It has the shape of
+  [`StaticExport`](#request-scoped-static-export)'s `url_map`, except that a PDF cannot open a
+  relative target:
+
+  ```julia
+  snapshot = "https://example.org/odl"
+  snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
+  pdf_report(md, "konzept.pdf"; title="Konzept", lang="de-DE", base_url=snapshot,
+             url_map = a -> startswith(a, "/api/") ? "$snapshot/$(snapshot_file(a))" : nothing)
+  ```
 - **Images need alt text.** Typst refuses a PDF/UA document with an image that
   has none or has `alt=""`, and `pdf_report` throws with Typst's message, for
   example `PDF/UA-1 error: missing alt text` with the source line. In a page,
@@ -2560,6 +2582,8 @@ page, with no change to the app:
 end
 ```
 
+Building the address with [`route_url`](@ref) (`lazy(route_url(__self__, :summary))`) also checks it when the page renders.
+
 For every such element in a response a browser receives (a page navigation,
 `Accept: text/html`, or an htmx swap), the server runs the fragment's
 request through the app's `middleware`, with the page request's cookies,
@@ -2787,6 +2811,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `post_form(url, children...; …)` / `get_form(url, …)` | Complete inline form with hidden inputs + submit button |
 | `hidden_inputs(; key=val, …)`   | A `Vector{Node}` of `<input type="hidden">` elements    |
 | `query_url(path; …)` / `@query_url`  | URL with encoded query string, type-safe                |
+| `route_url(self, :name, args…; …)` | An own GET route's address, checked when it is built (a missing route or a bad argument throws) |
 | `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group` | Form input widgets (label, select, radio, number, checkbox, textarea, autocomplete, …) |
 | `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
 | `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |

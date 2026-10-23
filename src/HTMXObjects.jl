@@ -32,7 +32,7 @@ export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_er
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
-export fmt_time, fmt_bytes, fmt_number, query_url, hidden_inputs, post_form, get_form, @query_url
+export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
@@ -15097,7 +15097,13 @@ _recording_run_phase(f, phase) = _recording_run_phase_impl[](f, phase)
 _recording_polling(args...; kwargs...) = _recording_polling_impl[](args...; kwargs...)
 
 # Called by @htmx macro expansion — re-registers routes when Revise updates the struct
+# `route_url`'s lookups (`_route_link`), cleared whenever a struct is
+# (re)defined, since its routes may have changed.
+const _route_links = Dict{Any,Any}()
+const _route_links_lock = ReentrantLock()
+
 function _reroute!(T::DataType)
+    lock(() -> empty!(_route_links), _route_links_lock)
     if haskey(_registered_types, T)
         args = _registered_types[T]
         _register_routes(T; args.prefix, args.record_dir,
@@ -15605,6 +15611,12 @@ const _PDF_REPORT_LINKS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto",
 const _PDF_REPORT_BASE_URL_KEY = "htmxobjects-base-url"
 const _PDF_REPORT_READER = "markdown+autolink_bare_uris"
 
+# A Lua filter cannot call a Julia `url_map`, so `pdf_report` first lists the
+# document's link targets with this Pandoc writer, asks `url_map` about each and
+# writes the answers under `_PDF_REPORT_URL_MAP_KEY` for the links filter.
+const _PDF_REPORT_LINK_TARGETS_WRITER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-link-targets.lua")
+const _PDF_REPORT_URL_MAP_KEY = "htmxobjects-url-map"
+
 # Pandoc and Quarto set an image in a box, which Typst puts in a paragraph, so an
 # image alone in its paragraph or figure was tagged as a Figure inside a P, and
 # PAC warns about each one; this filter sets such an image in a Typst block.
@@ -15655,6 +15667,7 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "filters" => "pdf_report runs the filter that gives equations alt text",
     _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
     _PDF_REPORT_BASE_URL_KEY => "pass the address as `base_url=`",
+    _PDF_REPORT_URL_MAP_KEY => "pass the function as `url_map=`",
 )
 
 const _PDF_REPORT_METADATA_KEY = r"^[A-Za-z][A-Za-z0-9_-]*$"
@@ -15746,7 +15759,44 @@ function _pdf_report_base_url(base_url::AbstractString)
     "$_PDF_REPORT_BASE_URL_KEY: $(_yaml_string(_markdown_literal(rstrip(base_url, '/'))))\n"
 end
 
-function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
+# What a link opens under `url_map`: an absolute URL, or "" for the links
+# filter's own rules.
+const _PDF_REPORT_URL = r"^[A-Za-z][A-Za-z0-9+.-]+:\S+$"
+
+_pdf_report_mapped_url(::Nothing, target) = ""
+function _pdf_report_mapped_url(url::AbstractString, target)
+    occursin(_PDF_REPORT_URL, url) || throw(ArgumentError(
+        "pdf_report: `url_map` must return an absolute URL, which a PDF can open, or `nothing`; " *
+        "got $(repr(url)) for the link target $(repr(target))"))
+    String(url)
+end
+_pdf_report_mapped_url(url, target) = throw(ArgumentError(
+    "pdf_report: `url_map` must return a String or nothing; got $(repr(url)) for the link target $(repr(target))"))
+
+# The link targets of the `.qmd` `document`, as Quarto's Pandoc reads them
+# (`--eol=lf`: on Windows a native line end would stay on each target).
+function _pdf_report_link_targets(exe, document)
+    output, errors = IOBuffer(), IOBuffer()
+    proc = run(pipeline(ignorestatus(`$exe pandoc -f $_PDF_REPORT_READER -t $_PDF_REPORT_LINK_TARGETS_WRITER --eol=lf`);
+                        stdin=IOBuffer(document), stdout=output, stderr=errors))
+    success(proc) || error("pdf_report: Pandoc could not list the report's links for `url_map` " *
+        "(exit code $(proc.exitcode)):\n$(String(take!(errors)))")
+    String[t for t in split(String(take!(output)), '\n') if !isempty(t)]
+end
+
+# `url_map`'s answer for each link target of `document`, or `nothing` without one.
+_pdf_report_urls(::Nothing, exe, document) = nothing
+_pdf_report_urls(url_map, exe, document) =
+    [target => _pdf_report_mapped_url(url_map(target), target) for target in _pdf_report_link_targets(exe, document)]
+
+_pdf_report_url_map(::Nothing) = ""
+# The keys are written as given (Pandoc reads a metadata key as text); the URLs
+# are escaped, since it reads a metadata string as Markdown.
+_pdf_report_url_map(urls) = isempty(urls) ? "$_PDF_REPORT_URL_MAP_KEY: {}\n" :
+    "$_PDF_REPORT_URL_MAP_KEY:\n" *
+    join("  $(_yaml_string(target)): $(_yaml_string(_markdown_literal(url)))\n" for (target, url) in urls)
+
+function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, urls=nothing)
     line = _markdown_metadata_block(markdown)
     isnothing(line) || throw(ArgumentError(
         "pdf_report: the Markdown has a YAML metadata block (line $line). Quarto would let it override " *
@@ -15755,7 +15805,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
     ---
     title: $(_yaml_string(title))
     lang: $(_yaml_string(lang))
-    $(_pdf_report_base_url(base_url))$(_pdf_report_front_matter(metadata, lang))format:
+    $(_pdf_report_base_url(base_url))$(_pdf_report_url_map(urls))$(_pdf_report_front_matter(metadata, lang))format:
       typst:
         from: $(_PDF_REPORT_READER)
         pdf-standard: [ua-1]
@@ -15776,7 +15826,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing)
 end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
     pdf_report(value, pdf_path; kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
@@ -15848,7 +15898,8 @@ Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
 `date_format` next to a text `date`, a `base_url` that is not an absolute URL,
 a YAML metadata block in the Markdown or a missing `resources` directory, all
-before running Quarto, and an error carrying Quarto's output when
+before running Quarto, a `url_map` answer that is neither an absolute URL nor
+`nothing` before rendering, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
@@ -15870,6 +15921,28 @@ to it. `base_url` (`"https://example.org/app"`) is the address the Markdown's
 by the path (`https://example.org/app/region/11`). A relative address has no
 page address to follow and is still written as its text.
 
+`url_map` says where links open when the site the report links to does not
+serve each address under the app's own name, as a static snapshot that stores
+`/api/v1/ap3/anomalien?p_min=0.9` as `api-v1-ap3-anomalien-p_min-0.9.json`. It
+is a function from a link's target, as the Markdown writes it (query included;
+a site address, a relative address, an `#id` or a URL), to a URL or `nothing`.
+`pdf_report` calls it before rendering, once for each target of a link in the
+Markdown or in the document options (an address with a scheme in the text is a
+link too, a `[…]()` has no target); Pandoc reads a space in a target as `%20`.
+A `String` answer is the URL the link opens and must be absolute
+(`"https://example.org/odl/api-v1-ap3-anomalien-p_min-0.9.json"`); `nothing`
+leaves the link to the rules above. This is the shape of `StaticExport`'s
+`url_map`, except that a PDF cannot open a relative target. A `www.` address
+or a code span that is an address is linked to itself after that, without
+`url_map`.
+
+```julia
+snapshot = "https://example.org/odl"
+snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
+pdf_report(md, "konzept.pdf"; title="Konzept", lang="de-DE", base_url=snapshot,
+           url_map = a -> startswith(a, "/api/") ? "\$snapshot/\$(snapshot_file(a))" : nothing)
+```
+
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.
 
@@ -15881,7 +15954,7 @@ pdf_report(page, "report.pdf"; title="Annual report 2026", lang="en-GB",
 """
 function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     title::AbstractString, lang::AbstractString, metadata=(;),
-                    base_url::Union{Nothing,AbstractString}=nothing,
+                    base_url::Union{Nothing,AbstractString}=nothing, url_map=nothing,
                     resources::AbstractString=dirname(abspath(pdf_path)),
                     quarto::AbstractString="quarto")
     isempty(strip(title)) &&
@@ -15895,6 +15968,8 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     exe = Sys.which(quarto)
     isnothing(exe) && error("pdf_report: Quarto not found (`quarto=$(repr(quarto))`); " *
         "install a Quarto whose Typst supports PDF/UA-1 (verified: 1.10.18) or pass its path as `quarto=`")
+    urls = _pdf_report_urls(url_map, exe, document)
+    isnothing(urls) || (document = _pdf_report_qmd(markdown; title, lang, metadata, base_url, urls))
     lock(_PDF_REPORT_LOCK) do
         cache_dir = joinpath(resources, ".quarto")
         had_cache = ispath(cache_dir)
@@ -20847,6 +20922,120 @@ query_url(path; kwargs...) = begin
         _push_qparam!(parts, k, v)
     end
     isempty(parts) ? path : path * (occursin('?', path) ? "&" : "?") * join(parts, "&")
+end
+
+"""
+    route_url(self, name::Symbol, args...; kwargs...) -> String
+
+The address of the GET route `name` that `self`'s struct declares, called with
+the path arguments `args` and the query arguments `kwargs`, checked when the
+address is built. A struct with no GET route `name`, the wrong number of path
+arguments, a keyword the route does not read, a required keyword left out, or a
+value that would not parse back as its declared type throws an `ArgumentError`
+naming the struct and the route. A page that links to one of its own fragments
+therefore fails when it renders, instead of when the browser asks for the
+fragment.
+
+```julia
+@htmx struct App
+    @get index() = h.main(h.h1("Overview"),
+        lazy(route_url(__self__, :usage_line; n=3); id="usage"))
+    @get usage_line(; n::Int=1) = slow_usage(n)
+end
+```
+
+The address carries `self`'s mount prefix (an `@include` mount, a proxy's
+`X-Forwarded-Prefix`), as `__self__/"usage_line"` does, and `:index` is the
+mount's own address. It goes wherever an own-route address goes: `lazy`,
+`hx_get`, `href`. A `nothing` keyword is left out, as in [`query_url`](@ref).
+"""
+function route_url(self, name::Symbol, args...; kwargs...)
+    T = typeof(self)
+    route = _route_link(T, name, _route_link_parents(self))
+    route === nothing && throw(ArgumentError(string("route_url: ", nameof(T),
+        " has no GET route `", name, "`")))
+    length(args) == length(route.path) || throw(ArgumentError(string(
+        "route_url: ", nameof(T), ".", name, " takes ", length(route.path),
+        " path argument", length(route.path) == 1 ? "" : "s", " (",
+        join((p.name for p in route.path), ", "), "), got ", length(args))))
+    for (param, value) in zip(route.path, args)
+        _route_link_check(T, name, param, value)
+    end
+    given = Dict{Symbol,Any}(k => v for (k, v) in pairs(kwargs))
+    for (key, value) in given
+        param = get(route.query, key, nothing)
+        param === nothing && throw(ArgumentError(string("route_url: ", nameof(T), ".",
+            name, " has no parameter `", key, "`; it reads ",
+            isempty(route.query) ? "none" : join(sort!(collect(keys(route.query))), ", "))))
+        value === nothing || _route_link_check(T, name, param, value)
+    end
+    for (key, param) in route.query
+        param.required && get(given, key, nothing) === nothing && throw(ArgumentError(
+            string("route_url: ", nameof(T), ".", name, " requires `", key, "`")))
+    end
+    segments = String[]
+    prefix = strip(self.__prefix__, '/')
+    isempty(prefix) || push!(segments, prefix)
+    name === :index || push!(segments, String(name))
+    append!(segments, _url_segment.(args))
+    query_url("/" * join(segments, "/"); kwargs...)
+end
+
+# What `route_url` checks a call against: the route's path parameters, in
+# order, and the query parameters it reads (its keywords and the `@param`s its
+# struct and enclosing structs declare), by name. One walk per struct, route
+# and enclosing chain, held in `_route_links`.
+function _route_link(T, name::Symbol, parents)
+    lock(_route_links_lock) do
+        get!(_route_links, (T, name, parents)) do
+            found = nothing
+            _walk_route_meta(T, (_, _, _) -> nothing, (route, info, method) -> begin
+                route === name && method == "GET" && (found = (info, method))
+            end)
+            found === nothing && return nothing
+            info, method = found
+            path, keywords = _reflect_call_params(T, info, method)
+            query = Dict{Symbol,Any}(p.name => p for p in keywords)
+            for p in _reflect_param_props(T, method, collect(Any, parents))
+                haskey(query, p.name) || (query[p.name] = p)
+            end
+            (; path, query)
+        end
+    end
+end
+
+# The types of the structs `self` is mounted under, outermost first, as the
+# route walk sees them (`__parent__`), for the `@param`s they pass down.
+function _route_link_parents(self)
+    parents = Any[]
+    node = self
+    for _ in 1:32
+        hasproperty(node, :__parent__) || break
+        node = getproperty(node, :__parent__)
+        node === nothing && break
+        pushfirst!(parents, typeof(node))
+    end
+    Tuple(parents)
+end
+
+# A value the route would not parse back as its declared type. A type the
+# request parser has no conversion for is not checked here; the route's own
+# request reports it.
+function _route_link_check(T, name, param, value)
+    type = param.type
+    type isa Type || return nothing
+    type = Base.nonnothingtype(type)
+    value isa type && return nothing
+    wire = value isa AbstractVector ? String[_option_wire_string(v) for v in value] :
+           _option_wire_string(value)
+    try
+        _convert_param(wire, type)
+    catch err
+        err isa MethodError && return nothing
+        throw(ArgumentError(string("route_url: ", nameof(T), ".", name, "'s `",
+            param.name, "` is a ", type, "; got ", repr(value))))
+    end
+    nothing
 end
 
 """
