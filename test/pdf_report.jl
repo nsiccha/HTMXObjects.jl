@@ -20,13 +20,50 @@ using TestItemRunner
             at: post-render
           - $(HTMXObjects._yaml_string(filter))
           - $(HTMXObjects._yaml_string(images))
+          - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_LINKS_FILTER))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
         ---
 
         # Ergebnisse
         """
     @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
-          isfile(HTMXObjects._PDF_REPORT_DATE_FILTER)
+          isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER)
+end
+
+@testitem "pdf_report hands base_url to the link filter" tags=[:unit] begin
+    using HTMXObjects
+
+    key = HTMXObjects._PDF_REPORT_BASE_URL_KEY
+    frontmatter(; kw...) =
+        split(HTMXObjects._pdf_report_qmd("# R\n"; title="R", lang="de-DE", kw...), "\n---\n")[1]
+    @test !occursin(key, frontmatter())
+    # The address the Markdown's `/` stands for, without its trailing `/`,
+    # escaped so that Pandoc keeps it as text.
+    for base in ("https://example.org/p/App", "https://example.org/p/App/")
+        @test occursin("\nlang: \"de-DE\"\n$key: " *
+                       HTMXObjects._yaml_string("https\\:\\/\\/example\\.org\\/p\\/App") * "\n",
+                       frontmatter(; base_url=base))
+    end
+    @test occursin("\n$key: ", frontmatter(; base_url="http://localhost:8080"))
+
+    refusal(; kw...) = try
+        pdf_report("# R\n", joinpath(tempdir(), "never.pdf"); title="R", lang="de-DE",
+                   quarto="htmxo-no-such-quarto", kw...)
+    catch e
+        e
+    end
+    # refused: a `/` path joins onto an absolute address; without a scheme and
+    # host, or with a query or fragment, the joined link would open nothing
+    for base in ("example.org/app", "/p/App", "https://", "https://example.org/a b",
+                 "https://example.org/app?x=1", "https://example.org/app#top")
+        err = refusal(; base_url=base)
+        @test err isa ArgumentError && occursin("base_url", err.msg)
+    end
+    # refused: the key is pdf_report's own; the address goes in as `base_url=`
+    err = refusal(; metadata=Dict(key => "https://example.org"))
+    @test err isa ArgumentError && occursin("base_url=", err.msg)
+    passed = refusal(; base_url="https://example.org/app")
+    @test passed isa ErrorException && occursin("Quarto not found", passed.msg)
 end
 
 @testitem "pdf_report writes metadata into the front matter and picks the region's paper" tags=[:unit] begin
@@ -422,6 +459,88 @@ end
                 table_pages = unique(vcat(row.(1:n)...))
                 @test length(table_pages) >= 2
                 @test onpage(r"Land\s+Wert") == table_pages
+            end
+        end
+    end
+end
+
+@testitem "pdf_report writes a link a PDF cannot open as its text" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        md = """
+            # Links {#oben}
+
+            Länder: [Bayern]() · [Hessen](#) · [Berlin](/region/11) · [Bremen](region/04) · [Sortiert](?sort=name)
+            · [Quelle](https://example.org/daten) · [Post](mailto:info@example.org) · [Nach oben](#oben)
+            """
+        # Typst, as Pandoc writes it after the filter. Without it Typst got
+        # `#link("")[Bayern]` (`URL must not be empty`), `#link()[Hessen]`
+        # (`expected string, … found content`) and `#link("./region/11")[Berlin]`,
+        # a link relative to the PDF file (snag pdf-report-of-a-bc600825).
+        typst(md; base=nothing) = mktempdir() do dir
+            write(joinpath(dir, "links.md"), md)
+            meta = isnothing(base) ? `` : `-M $(HTMXObjects._PDF_REPORT_BASE_URL_KEY)=$base`
+            read(`$quarto pandoc -f markdown -t typst --wrap=none $meta --lua-filter=$(HTMXObjects._PDF_REPORT_LINKS_FILTER)
+                  $(joinpath(dir, "links.md"))`, String)
+        end
+        kept = ["#link(\"https://example.org/daten\")[Quelle]", "#link(\"mailto:info@example.org\")[Post]",
+                "#link(<oben>)[Nach oben]"]
+        plain = typst(md)
+        @test all(k -> occursin(k, plain), kept)
+        @test count("#link(", plain) == length(kept)
+        @test occursin("Länder: Bayern · Hessen · Berlin · Bremen · Sortiert", plain)
+        based = typst(md; base="https://example.org/p/App")
+        @test all(k -> occursin(k, based), kept)
+        @test occursin("#link(\"https://example.org/p/App/region/11\")[Berlin]", based)
+        @test count("#link(", based) == length(kept) + 1
+        @test occursin("Bayern · Hessen · #link(", based) && occursin("· Bremen · Sortiert", based)
+
+        pdfua(path) = let bytes = read(path, String)
+            startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+        end
+        # The URI links of a PDF, by poppler's `pdfinfo -url`; `nothing` without it.
+        function uris(path)
+            isnothing(Sys.which("pdfinfo")) && return nothing
+            out = IOBuffer()
+            success(run(pipeline(ignorestatus(`pdfinfo -url $path`); stdout=out, stderr=devnull))) || return nothing
+            sort!([last(split(l)) for l in split(String(take!(out)), '\n') if occursin("Annotation", l)])
+        end
+        mktempdir() do dir
+            # A page whose links are an htmx-only `<a>` without `href`, the
+            # `href="#"` of a script-driven one and a site path.
+            page = h.article(h.h1("Regionen"), h.p("Länder: ",
+                h.a("Bayern"; hx_get="/region/09", hx_target="#karte"), " · ",
+                h.a("Hessen"; href="#", hx_get="/region/06", onclick="event.preventDefault()"), " · ",
+                h.a("Berlin"; href="/region/11"), " · ", h.a("Quelle"; href="https://example.org/daten")))
+            for (base, links) in [nothing => ["https://example.org/daten"],
+                                  "https://example.org/p/App/" =>
+                                      ["https://example.org/daten", "https://example.org/p/App/region/11"]]
+                out = joinpath(dir, "regionen.pdf")
+                @test pdf_report(page, out; title="Regionen", lang="de-DE", base_url=base) == out
+                @test pdfua(out)
+                found = uris(out)
+                if isnothing(found)
+                    @test_skip "pdfinfo -url (poppler ≥ 22) lists the links"
+                else
+                    @test found == links
+                end
+                if isnothing(Sys.which("pdftotext"))
+                    @test_skip "pdftotext (poppler-utils) reads the text layer"
+                else
+                    text = replace(read(`pdftotext -enc UTF-8 $out -`, String), r"\s+" => " ")
+                    @test occursin("Länder: Bayern · Hessen · Berlin · Quelle", text)
+                end
+            end
+            out = joinpath(dir, "links.pdf")
+            @test pdf_report(md, out; title="Links", lang="de-DE") == out
+            @test pdfua(out)
+            found = uris(out)
+            if !isnothing(found)
+                @test found == ["https://example.org/daten", "mailto:info@example.org"]
             end
         end
     end
