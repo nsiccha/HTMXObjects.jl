@@ -15039,10 +15039,9 @@ become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Tables are se
 ragged-right, while the body text stays justified: a word in a table cell is
 hyphenated only when it is wider than its column, and code never is. Every
 image needs alt text: Typst refuses a PDF/UA document with an image that has
-none. A
-Quarto program (`quarto`, found on `PATH` or given as a path) whose Typst
-supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its bundled
-Typst 0.15.1).
+none. A Quarto program (`quarto`, found on `PATH` or given as a path) whose
+Typst supports PDF/UA-1 is required (verified with Quarto 1.10.18 and its
+bundled Typst 0.15.1).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a YAML
