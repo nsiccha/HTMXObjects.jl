@@ -4,7 +4,8 @@ using TestItemRunner
     using HTMXObjects
 
     filter = HTMXObjects._PDFUA_MATH_ALT_FILTER
-    @test isfile(filter)
+    images = HTMXObjects._PDF_REPORT_IMAGES_FILTER
+    @test isfile(filter) && isfile(images)
     @test HTMXObjects._pdf_report_qmd("# Ergebnisse\n"; title="Bericht \"A\" \\ 2026", lang="de-DE") == """
         ---
         title: "Bericht \\"A\\" \\\\ 2026"
@@ -15,6 +16,7 @@ using TestItemRunner
             pdf-standard: [ua-1]
         filters:
           - $(HTMXObjects._yaml_string(filter))
+          - $(HTMXObjects._yaml_string(images))
         ---
 
         # Ergebnisse
@@ -194,6 +196,31 @@ end
             catch
                 false
             end
+
+            # Images Typst cannot read from `resources` as written: an absolute
+            # path (outside or inside it), a `file:` URL and a relative path that
+            # leaves it. A site-root path names the file under `resources`.
+            report = joinpath(dir, "bericht")
+            mkpath(joinpath(report, "assets"))
+            cp(joinpath(dir, "bars.svg"), joinpath(report, "assets", "bars.svg"))
+            slash(path) = replace(path, '\\' => '/')  # Markdown reads `\` as an escape
+            bars = slash(joinpath(dir, "bars.svg"))
+            @testset "image $src" for src in (bars, "file://" * (startswith(bars, "/") ? "" : "/") * bars,
+                    "../bars.svg", slash(joinpath(report, "assets", "bars.svg")), "/assets/bars.svg")
+                out = joinpath(report, "bericht.pdf")
+                @test pdf_report("# Bericht\n\n![]($src){alt=\"Zwei gleich hohe Balken.\"}\n", out;
+                                 title="Bericht", lang="de-DE") == out
+                @test pdfua(out)
+                rm(out)
+            end
+            err = try
+                pdf_report("# R\n\n![]($(slash(joinpath(dir, "fehlt.svg")))){alt=\"Balken.\"}\n",
+                           joinpath(report, "r.pdf"); title="R", lang="de-DE")
+            catch e
+                e
+            end
+            @test err isa ErrorException && occursin("fehlt.svg", err.msg)
+            @test readdir(report) == ["assets"]
         end
     end
 end

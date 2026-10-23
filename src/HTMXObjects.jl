@@ -14733,6 +14733,11 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 # this Quarto filter gives each one its TeX source.
 const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
 
+# Typst reads only files inside `resources`, and Quarto turns `/abs/x.png` into
+# `./abs/x.png`; this filter brings in an image given as an absolute path, a
+# `file:` URL or a relative path that leaves `resources`.
+const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-images.lua")
+
 # A language tag with its region (`de-DE`, `en-GB`, `sr-Latn-RS`): Quarto's
 # Typst template defaults the region to "US", so `de` alone would label a
 # German report `de-US`.
@@ -14838,6 +14843,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;))
         pdf-standard: [ua-1]
     filters:
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
+      - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
     ---
 
     """ * markdown
@@ -14859,8 +14865,12 @@ the title block above the content. `lang` is a language tag with its region
 (`"de-DE"`, `"en-GB"`): Quarto's template would otherwise label the document
 with the region `US`. Mark a part in another language with a
 `::: {lang="en"}` block, which tags it English (Quarto keeps the document's
-region on it). `resources` is the directory relative paths in the Markdown
-(images) resolve against.
+region on it). `resources` is the directory relative image paths in the
+Markdown resolve against. An image can also be an absolute path, a `file:` URL,
+a relative path outside `resources`, an `http(s)` URL or a `data:` URI; the
+render reads it into a temporary copy, since Typst reads only files inside
+`resources`. A path starting with `/` names the file under `resources` when
+there is one (the site-root URL of an exported page), else the absolute path.
 
 `metadata` sets the report's other document options, as a NamedTuple or an
 `AbstractDict` of Quarto front-matter keys: `subtitle`, `author`, `date`, `toc`,
