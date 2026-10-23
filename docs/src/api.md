@@ -137,6 +137,29 @@ browser libraries refuse to run in quirks mode outright (KaTeX's
 
 Fragments are not documents and never carry a doctype.
 
+### Tables on every page — `tables=true` {#page-tables}
+
+The shell also carries the tables' runtime, so a table from `render_table`,
+`sortable_table` or `master_detail_table` works on any `htmx(...)` or
+`pico_page` page with nothing added: sorting, search with its count, row
+selection, tree rows with **Expand all / Collapse all**, regrouping, hover
+linking, the **⬇ CSV** button and the caption layout. These are the page
+helpers `sortable_table_js()` (whose master/detail half the shell carries in
+any case), `sortable_table_styles()`, `download_table_js()` and
+`caption_style()`. Together they add about 91 KB (25 KB gzipped) to a page;
+under `runtime=:linked` they are four cached files. A shell whose pages have
+no tables can leave them out:
+
+```julia
+__page__(content) = pico_page(content; tables=false)
+```
+
+An app that still lists these helpers, or `master_detail_js()`, in
+`extra_head` ships them once: an `extra_head` element that is exactly what
+the helper returns is left out while the shell carries its code. A changed or
+attributed copy stays as given. A page whose `<head>` is not built by
+`htmx(...)` still includes the helpers itself.
+
 ### Text size, page width and buttons under Pico {#pico-page-size}
 
 Pico ties the text size and the page width to the window: it raises the root
@@ -289,9 +312,9 @@ head = h.head(h.meta(charset="utf-8"),
 
 Besides the libraries, every shell inlines HTMXObjects' own CSS and JS
 runtime (request feedback, live threads, tabs, comparison/master-detail,
-the stream probe, live regions, and the Treebars poll assets while that
-extension is loaded) — about 135 KB on every full-page load with Treebars
-loaded. With a vendor
+the tables, the stream probe, live regions, and the Treebars poll assets
+while that extension is loaded) — about 280 KB (80 KB gzipped) on every
+full-page load, more with Treebars loaded. With a vendor
 mount, `runtime=:linked` moves each of those blocks into its own file on that
 mount, `<mount>/htmxo/<name>.css|js?v=<content version>`, and the library
 URLs gain their pins (`/vendor/htmx.min.js?v=2.0.8`):
@@ -309,7 +332,8 @@ Each block keeps its own element in its old position, so load order and
 script isolation are unchanged. The page helpers an app puts into
 `extra_head` — `sortable_table_js()`, `sortable_table_styles()`,
 `caption_style()`, `master_detail_js()` and `download_table_js()`, exactly as
-they return — are linked the same way, in place; any other `extra_head`
+they return — are linked the same way, in place, unless the shell already
+carries them ([Tables on every page](#page-tables)); any other `extra_head`
 element stays as given. A static export or recording puts the runtime back
 inline, so exported pages stay standalone. A many-page bundle can keep it
 linked instead: copy the files once with `copy_vendorfiles` and export with
@@ -2400,7 +2424,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | Export | Returns |
 |--------|---------|
 | `render_table(rows; …)`   | Sortable HTML table with optional CSV download              |
-| `sortable_table_js`, `download_table_js` | Companion scripts for `render_table`         |
+| `sortable_table_js`, `download_table_js` | The tables' runtime and CSV download; carried by `htmx` unless `tables=false` ([Tables on every page](#page-tables)) |
 | `master_detail_js` | Shared runtime for `master_detail_table`/`master_detail_pair` rows; auto-included by `htmx`, also carried by `sortable_table_js` |
 | `master_detail_table(headers, roots; children, searchable, …)` | Hierarchical sibling sorting, ancestor-preserving search, keyboard branch/detail controls, and lazy details; see [components](components.md#hierarchical-master-detail-tables) |
 | `ColumnSpec(label; help)` | A `sortable_table`/`master_detail_table` header with an explanation that stays sortable; see [components](components.md#column-explanations) |

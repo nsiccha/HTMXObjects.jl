@@ -2730,9 +2730,12 @@ _runtime_blocks() = (
     mutation_poll = (:js, mutation_poll_script),
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
-    # Page helpers the shell does not carry: an app places them itself,
-    # usually in `extra_head`, and a linked shell links them there
-    # (`_linked_extra_head`).
+    # The table runtime. `htmx(...; tables=true)` carries it together with
+    # `sortable_table_styles`, `caption_style` and `download_table` below.
+    table_runtime = (:js, _table_runtime_js),
+    # Page helpers an app may place itself, usually in `extra_head`. The
+    # shell leaves out a copy whose code it already carries and links the
+    # rest (`_shell_extra_head`).
     sortable_table = (:js, sortable_table_js),
     sortable_table_styles = (:css, sortable_table_styles),
     caption_style = (:css, caption_style),
@@ -2789,21 +2792,31 @@ function _runtime_block_name(node::Node, texts)
     get(texts, (HTMX.tag(node), join(String(child) for child in HTMX.children(node))), nothing)
 end
 
-# `extra_head` as the shell carries it. Linked, an element that is exactly a
-# named runtime block — an app's own `sortable_table_js()`, say — becomes its
-# link in the same place, like the shell's blocks; anything else stays as given.
-_linked_extra_head(extra_head, ::Nothing) = extra_head
-function _linked_extra_head(extra_head, mount::AbstractString)
+# The shell blocks whose code a runtime block consists of: the block itself,
+# or for a page helper that bundles shell code, those blocks.
+_runtime_parts(name::Symbol) = _runtime_parts(Val(name))
+_runtime_parts(::Val{name}) where {name} = (name,)
+_runtime_parts(::Val{:sortable_table}) = (:table_runtime, :comparison)
+_runtime_parts(::Val{:master_detail}) = (:comparison,)
+
+# `extra_head` as the shell carries it. An element that is exactly a named
+# runtime block — an app's own `sortable_table_js()`, say — is left out when
+# the shell already carries its code (`carried`, the shell's block names);
+# otherwise, linked, it becomes its link in the same place, like the shell's
+# blocks. Anything else stays as given.
+function _shell_extra_head(extra_head, mount, carried)
     texts = nothing
-    map(extra_head) do node
+    filter(!isnothing, map(extra_head) do node
         node isa Node && HTMX.tag(node) in (:style, :script) || return node
         # Built once, and only for a head that has a candidate element.
         isnothing(texts) && (texts = Dict(
             (_runtime_tag(Val(first(getfield(_runtime_blocks(), name)))), _runtime_text(name)) => name
             for name in _available_runtime_names()))
         name = _runtime_block_name(node, texts)
-        isnothing(name) ? node : _runtime_head(name, mount)
-    end
+        isnothing(name) ? node :
+            all(in(carried), _runtime_parts(name)) ? nothing :
+            isnothing(mount) ? node : _runtime_head(name, mount)
+    end)
 end
 
 # `runtime` → the mount the shell links its runtime from, or `nothing` to
@@ -2818,7 +2831,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, extra_head=(), error_texts=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -2831,6 +2844,20 @@ so a ws or sse stream refused by an auth gateway reloads the page on the
 gateway's `HX-Refresh` instead of reconnecting forever.
 Set `feedback=false` to disable automatic request feedback (pulsating borders, success/error flash).
 Set `thread=false` to leave out the [`live_thread`](@ref) runtime.
+
+The shell carries the table runtime, so a table from [`render_table`](@ref),
+[`sortable_table`](@ref) or [`master_detail_table`](@ref) works with nothing
+added to the page: sorting, search, row selection, tree rows with Expand all /
+Collapse all, regrouping, hover linking, the "⬇ CSV" button and the caption
+layout. These are [`sortable_table_js`](@ref) (whose master/detail half the
+shell carries anyway), [`sortable_table_styles`](@ref),
+[`download_table_js`](@ref) and [`caption_style`](@ref). Set `tables=false` to
+leave them out of pages without tables.
+
+`extra_head` follows the shell's own head. An element in it that is exactly
+one of these page helpers, or [`master_detail_js`](@ref), as the function
+returns it, is left out while the shell carries its code, so a page that
+still lists them does not ship them twice. A changed or attributed copy stays.
 `error_texts`, an [`ErrorTexts`](@ref) such as `error_texts(:de)`, is the
 language of the failed-request toasts ([`toast_script`](@ref)); pass the root's
 `__error_texts__` from `__page__` so the toasts match the error articles.
@@ -2857,8 +2884,8 @@ for a static bundle whose copies [`copy_vendorfiles`](@ref) wrote.
 
 `runtime=:linked` moves HTMXObjects' own page runtime — the CSS and JS the
 shell otherwise inlines into every page (request feedback, live threads,
-tabs, comparison/master-detail, stream probe, live regions, and the Treebars
-poll assets while that extension is loaded) — out of the page into files on
+tabs, comparison/master-detail, tables, stream probe, live regions, and the
+Treebars poll assets while that extension is loaded) — out of the page into files on
 the same vendor mount, e.g. `<mount>/htmxo/live_region.js?v=<hash>`. The
 `?v=` is the content version, and the vendored library URLs gain their pins
 the same way, so a browser keeps the whole head for good and a changed
@@ -2868,8 +2895,9 @@ block keeps its place and its own element, so load order and script
 isolation are unchanged. The page helpers an app adds through `extra_head` —
 [`sortable_table_js`](@ref), [`sortable_table_styles`](@ref),
 [`caption_style`](@ref), [`master_detail_js`](@ref),
-[`download_table_js`](@ref) and [`htmxo_gallery_styles`](@ref), exactly as they return — are linked the same
-way, in place; any other `extra_head` element stays as given. A static export
+[`download_table_js`](@ref) and [`htmxo_gallery_styles`](@ref), exactly as
+they return — are linked the same way, in place, unless the shell already
+carries them; any other `extra_head` element stays as given. A static export
 or recording ([`static_transform`](@ref)) puts the runtime back inline, so
 exported pages stay standalone; `StaticExport(; runtime=:linked)` keeps the
 links instead, for a bundle that carries the files once
@@ -2895,6 +2923,7 @@ function htmx(args...;
     feedback             = true,
     compose              = true,
     thread               = true,
+    tables               = true,
     # Opt-in: the bar bundle is a KB-app-only route (`KB_ORIGIN/overlay/bar.js`),
     # so standalone pages must not fetch it by default.
     overlay              = false,
@@ -2920,63 +2949,73 @@ function htmx(args...;
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html_attrs = (; (preload ? (; hx_ext="preload") : (;))..., _error_texts_attrs(error_texts)...)
     html = isempty(html_attrs) ? h.html : h.html(; html_attrs...)
+    # The runtime blocks the shell carries, before and after the overlay
+    # bootstrap.
+    shell_blocks = (
+        # Theme defaults: declared at zero specificity inside `@layer htmxo`
+        # so any subsequent `:root { --htmxo-...: ... }` (host-supplied or
+        # via `pico_bridge` / `vitepress_bridge`) wins automatically.
+        :theme,
+        (isnothing(pico_version) ? () : (:pico_bridge,))...,
+        (feedback ? (:request_feedback_style, :request_feedback_script) : ())...,
+        (compose ? (:compose_box_styles, :compose_box_script) : ())...,
+        (thread ? (:live_thread_styles, :live_thread_script) : ())...)
+    page_blocks = (:utility_styles, :tabset_styles,
+        # A tabset's open tab follows the page URL; inert without one.
+        :tabset_script,
+        :comparison_styles, :editor_styles,
+        # Route-named success toasts and `window.htmxoToast`; inert
+        # until a response or a script raises one.
+        :toast_styles, :toast_script,
+        # Comparison panes and master/detail rows share the lazy runtime.
+        :comparison,
+        # A refused stream hides its HTTP status: this probe lets an auth
+        # gateway's `HX-Refresh` reload the page instead of the stream
+        # retrying forever. Inert until a stream fails.
+        :stream_probe,
+        # A followed redirect records its destination where an
+        # `hx-push-url` names the requested page; inert otherwise.
+        :redirect_history,
+        # Discover-mode live regions keep one reconnecting stream behind
+        # this runtime; inert on pages without one.
+        :live_region,
+        # Semantic shared context groups follow their live declared
+        # domains; inert on pages without a refreshable group.
+        :semantic_refresh,
+        # `url_params` elements follow the page address and write
+        # their values into it; inert on pages without one.
+        :url_params,
+        # The tables' sort, search, selection, tree, regroup, linking and
+        # CSV controls with their styles and captions; inert on pages
+        # without a table.
+        (tables ? (:table_runtime, :sortable_table_styles, :caption_style, :download_table) : ())...,
+        # Poller quietness by default: the Treebars stylesheet + script
+        # ride every shell while the extension is loaded (no-op without
+        # Treebars), ahead of `extra_head` so apps can still override.
+        # A manual install alongside stays harmless but redundant.
+        _operation_page_blocks(treebars_assets)...)
+    carried = ((preload ? (:preload_runtime,) : ())..., shell_blocks..., page_blocks...)
     HTMLDocument(html(
         head(
             h.meta(charset="utf-8"),
             h.meta(name="viewport", content="width=device-width, initial-scale=1"),
             h.meta(name="color-scheme", content="light dark"),
             cdn...,
-            # Theme defaults: declared at zero specificity inside `@layer htmxo`
-            # so any subsequent `:root { --htmxo-...: ... }` (host-supplied or
-            # via `pico_bridge` / `vitepress_bridge`) wins automatically.
-            _runtime_head(:theme, mount),
-            (isnothing(pico_version) ? () : _runtime_heads(mount, :pico_bridge))...,
-            (feedback ? _runtime_heads(mount, :request_feedback_style, :request_feedback_script) : ())...,
-            (compose ? _runtime_heads(mount, :compose_box_styles, :compose_box_script) : ())...,
-            (thread ? _runtime_heads(mount, :live_thread_styles, :live_thread_script) : ())...,
+            _runtime_heads(mount, shell_blocks...)...,
             # Thin-hook bootstrap: load the relocated overlay bundle from
             # `KB_ORIGIN/overlay/bar.js` instead of inlining `<style>`+`<script>`.
             # The bar is `position:fixed`, so a deferred async load has no
             # layout-shift to guard (no skeleton/placeholder needed).
             (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
-            _runtime_heads(mount, :utility_styles, :tabset_styles,
-                # A tabset's open tab follows the page URL; inert without one.
-                :tabset_script,
-                :comparison_styles, :editor_styles,
-                # Route-named success toasts and `window.htmxoToast`; inert
-                # until a response or a script raises one.
-                :toast_styles, :toast_script,
-                # Comparison panes and master/detail rows share the lazy runtime.
-                :comparison,
-                # A refused stream hides its HTTP status: this probe lets an auth
-                # gateway's `HX-Refresh` reload the page instead of the stream
-                # retrying forever. Inert until a stream fails.
-                :stream_probe,
-                # A followed redirect records its destination where an
-                # `hx-push-url` names the requested page; inert otherwise.
-                :redirect_history,
-                # Discover-mode live regions keep one reconnecting stream behind
-                # this runtime; inert on pages without one.
-                :live_region,
-                # Semantic shared context groups follow their live declared
-                # domains; inert on pages without a refreshable group.
-                :semantic_refresh,
-                # `url_params` elements follow the page address and write
-                # their values into it; inert on pages without one.
-                :url_params)...,
-            # Poller quietness by default: the Treebars stylesheet + script
-            # ride every shell while the extension is loaded (no-op without
-            # Treebars), ahead of `extra_head` so apps can still override.
-            # A manual install alongside stays harmless but redundant.
-            _runtime_heads(mount, _operation_page_blocks(treebars_assets)...)...,
-            _linked_extra_head(extra_head, mount)...,
+            _runtime_heads(mount, page_blocks...)...,
+            _shell_extra_head(extra_head, mount, carried)...,
         ),
         body(args...),
     ))
 end
 
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, error_texts=nothing)
+    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, tables=true, error_texts=nothing)
 
 Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
 wrap `content` in `h.main(class=class)(content)` and assemble a full
@@ -2990,14 +3029,14 @@ with
     # or with extras:
     __page__(content) = pico_page(content; extra_head=(h.title("My App"),))
 
-`assets`, `runtime` and `error_texts` forward to [`htmx`](@ref): `pico_page(content;
+`assets`, `runtime`, `tables` and `error_texts` forward to [`htmx`](@ref): `pico_page(content;
 assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
 page (vendor mode needs pico at its exact pin, not the floating `"2"`
 default), and adding `runtime=:linked` makes its whole head cacheable.
 """
 pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline,
-        error_texts=nothing) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, error_texts)
+        tables=true, error_texts=nothing) =
+    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, tables, error_texts)
 
 # --- Route registration and recording ---
 
@@ -14554,7 +14593,8 @@ const _EN_CAPTION_TEXTS = caption_texts(:en)
 
 Return a `<style>` node with default CSS for `render_caption` / `with_caption`:
 flex layout for the caption header (title left, actions right) and small
-spacing for the `<details>` body. Include once per page.
+spacing for the `<details>` body. [`htmx`](@ref) (so `pico_page` too) carries
+it unless `tables=false`; otherwise include it once per page.
 
 The actions stay one compact row. When the title would keep less than `16rem`
 beside them, they move below it, wrapping only if the row itself is wider than
@@ -14788,9 +14828,12 @@ end
     sortable_table_js()
 
 Return an `h.script(...)` node containing the `sortTable` and `htmxoSortState`
-JavaScript functions for click-to-sort table headers. Include this once per
-page (e.g. in `extra_head`). It also carries the master/detail row runtime
-(see [`master_detail_js`](@ref)).
+JavaScript functions for click-to-sort table headers, and the rest of the
+tables' runtime: search, row selection, tree rows, regrouping, row updates and
+hover linking. It also carries the master/detail row runtime (see
+[`master_detail_js`](@ref)). [`htmx`](@ref) (so `pico_page` too) carries all
+of it unless `tables=false`; include this once per page only in a `<head>` you
+build without it. A copy in `htmx`'s `extra_head` is left out.
 
 The JS finds the `<tbody>` relative to the clicked header (no hardcoded ID),
 so multiple sortable tables can coexist on the same page. Numeric values are
@@ -14823,8 +14866,18 @@ then render with `sortable_table(rows...; default_sort=sort_col => sort_dir)`
 so the server-rendered header agrees with the server-rendered row order.
 See [`sortable_table`](@ref).
 """
-function sortable_table_js()
-    h.script(Raw(string(raw"""
+sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
+    # The master/detail runtime rides along: every master/detail table needs
+    # this script anyway, so a hand-built `<head>` that follows the table docs
+    # keeps working rows (see `master_detail_js`).
+    _md_runtime_js())))
+
+# The table half of `sortable_table_js()`: sorting, search, selection, tree
+# rows, regrouping, row updates and hover linking, without the master/detail
+# runtime the shell already carries in `comparison`. The shell carries it as
+# its `table_runtime` block (`htmx(...; tables=true)`).
+_table_runtime_js() = h.script(Raw(_table_runtime_text()))
+_table_runtime_text() = raw"""
 function sortTable(col, th) {
     // Accept sortTable(th): with a single <th> element, use its leaf-column
     // marker in a grouped header, else its position in the header row. Lets a
@@ -16385,12 +16438,7 @@ function htmxoSortState(target) {
         sort_dir: th.dataset.sortDir,
     };
 }
-""",
-    # The master/detail runtime rides along: every master/detail table needs
-    # this script anyway, so a hand-built `<head>` that follows the table docs
-    # keeps working rows (see `master_detail_js`).
-    _md_runtime_js())))
-end
+"""
 
 """
     sortable_table_styles()
@@ -16407,7 +16455,8 @@ These rules are intentionally **outside any `@layer`** — Pico styles `<tr>`
 and `<td>` unlayered and an unlayered rule beats any `@layer`-ed rule
 regardless of specificity (htmxo-semantic-styling cracked pattern 9), so
 wrapping them in `@layer htmxo` would leave them ineffective against
-Pico's defaults. Pair with [`sortable_table_js`](@ref).
+Pico's defaults. Pair with [`sortable_table_js`](@ref). [`htmx`](@ref) (so
+`pico_page` too) carries both unless `tables=false`.
 
 The header's sort `<button>` does not depend on this block: its plain-heading
 reset ships in [`htmxo_utility_styles`](@ref), which every [`htmx`](@ref) page
@@ -16446,7 +16495,9 @@ end
     download_table_js()
 
 Return an `h.script(...)` node containing the `downloadTableCsv` JavaScript function
-used by `render_table(...; download=true)`. Include this once per page (e.g. in `extra_head`).
+used by `render_table(...; download=true)`. [`htmx`](@ref) (so `pico_page` too)
+carries it unless `tables=false`; include it once per page only in a `<head>`
+you build without it.
 
 The JS reads the closest `<table>` relative to the clicked button, serializes the
 visible header cells and body rows to CSV (escaping `"`, `,`, and newlines), and
@@ -16688,8 +16739,10 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 - `id`: tbody element id (omitted if `nothing`). Supply a document-unique id
   when targeting the body from elsewhere; sorting and download do not need one.
   With a caption, the surrounding figure uses `"tbl-" * id` as its distinct id.
-- `sortable`: add click-to-sort headers (default `true`; requires `sortable_table_js()` on the page)
-- `download`: add a "⬇ CSV" button (default `true`; requires `download_table_js()` on the page).
+- `sortable`: add click-to-sort headers (default `true`; needs `sortable_table_js()`, which
+  the [`htmx`](@ref) shell carries)
+- `download`: add a "⬇ CSV" button (default `true`; needs `download_table_js()`, which the
+  [`htmx`](@ref) shell carries).
   Placed in the caption header when `caption` is given, otherwise above the table.
 - `download_filename`: filename for the CSV download (default: `id * ".csv"`
   when `id` is supplied, otherwise `"table.csv"`)
@@ -16712,13 +16765,7 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 ```julia
 df = DataFrame(name=["Alice", "Bob"], score=[95, 87])
 cap = CaptionSpec(; title="Scores", short="Ranked test scores.", long="Data collected 2026-Q1.")
-page = htmx(
-    h.body(
-        render_table(df; download=true, caption=cap),
-        sortable_table_js(), download_table_js()
-    );
-    pico_version="2"
-)
+page = htmx(h.main(render_table(df; download=true, caption=cap)); pico_version="2")
 ```
 """
 function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
@@ -16818,7 +16865,8 @@ metadata absent from its cells; it does not affect sorting). A `detail-<key>`
 companion row is never matched or counted; it hides with its master and keeps
 its place through a sort, and sorting a filtered table keeps the filter. The
 field, count and empty state are client-side affordances and are left out of
-`?plain`/Markdown. Search needs [`sortable_table_js`](@ref) on the page.
+`?plain`/Markdown. Search needs [`sortable_table_js`](@ref) on the page, which
+the [`htmx`](@ref) shell carries.
 [`master_detail_table`](@ref)`(...; searchable=true)` shares this search.
 
 App filters compose with the phrase search through named row predicates:
@@ -16907,7 +16955,7 @@ fires a bubbling `htmxo:selection-changed` event on the wrapper with `detail`
 the selection (`[]` clears) and `htmxoSelectedKeys(target)` reads it. The
 selected row is tinted and the active row marked with `--htmxo-accent`
 (override the tint with `--htmxo-selected-row`). Selection needs
-[`sortable_table_js`](@ref) on the page.
+[`sortable_table_js`](@ref) on the page, which the [`htmx`](@ref) shell carries.
 
 # Hover linking
 Tables, plots and maps that show the same items name one link group with
@@ -16943,7 +16991,8 @@ A highlight never changes the table:
 The latest key of each group is kept (`window.htmxoLinkState`), so a table
 that is re-rendered, regrouped or filtered shows it again. Override the tint
 with `--htmxo-linked-row`. Hover linking needs [`sortable_table_js`](@ref) and
-[`sortable_table_styles`](@ref) on the page.
+[`sortable_table_styles`](@ref) on the page, which the [`htmx`](@ref) shell
+carries.
 
 # Example
 ```julia
@@ -16972,7 +17021,8 @@ sortable_table(headers, sorted_rows; id="entries",
 ```
 
 Pair with [`sortable_table_js`](@ref) (which ships `htmxoSortState`) and
-[`sortable_table_styles`](@ref).
+[`sortable_table_styles`](@ref); the [`htmx`](@ref) shell carries both unless
+`tables=false`.
 """
 function sortable_table(headers, rows;
                         sortable=true, class="striped", id=nothing,
@@ -17898,11 +17948,13 @@ than rendering every collapsed detail up front), pass `detail_url` — the
 proven single-flight + click-to-retry slot, no hand-rolled `htmx.ajax` glue
 or custom onclick needed. Without it, detail bodies are eager.
 
-Include [`sortable_table_js`](@ref) on the page (which also brings in
-the master/detail hover + detail-cell reset rules via
-[`sortable_table_styles`](@ref)). The rows' click and lazy-load handlers are
-short calls into the page's master/detail runtime ([`master_detail_js`](@ref)),
-which [`htmx`](@ref) auto-includes and `sortable_table_js` also carries.
+The tree rows, Expand all / Collapse all, sorting and search run on
+[`sortable_table_js`](@ref), and the master/detail hover and detail-cell reset
+rules come from [`sortable_table_styles`](@ref). The rows' click and lazy-load
+handlers are short calls into the page's master/detail runtime
+([`master_detail_js`](@ref)). [`htmx`](@ref) (so `pico_page` too) carries all
+three unless `tables=false`; include the first two yourself only in a
+`<head>` you build without it.
 """
 function master_detail_table(headers, items;
                              key, master, detail=nothing,
