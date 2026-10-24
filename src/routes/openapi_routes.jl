@@ -129,9 +129,149 @@ function _openapi_request_body(body_params)
      content=Dict("application/x-www-form-urlencoded" => (schema=schema,)))
 end
 
+# --- Response schemas -----------------------------------------------------------
+#
+# A route declared `::JSONResponse{T}` (src/json_response.jl) answers `T` as
+# `_json_write` encodes it; `_openapi_response_schema` describes `T` by the same
+# rules, so the document and the payload read one declaration. Each struct type
+# is described once under `components.schemas` and referenced by `$ref`:
+# `schemas` holds the descriptions, `names` each type's component name (set
+# before its description is built, so a recursive type refers to itself).
+struct _OpenAPIComponents
+    schemas::Dict{String,Any}
+    names::Dict{Any,String}
+end
+_OpenAPIComponents() = _OpenAPIComponents(Dict{String,Any}(), Dict{Any,String}())
+
+const _OPENAPI_REF = Symbol("\$ref")
+
+# Leaves are described as parameters are (`_openapi_type_schema`). A float may
+# be `null`: JSON has no `NaN` or `±Inf`, so `_json_write` sends those as `null`.
+_openapi_response_schema(c, ::Type{Any}) = (;)
+_openapi_response_schema(c, ::Type{Nothing}) = (type="null",)
+_openapi_response_schema(c,
+        ::Type{T}) where {T<:Union{Bool,Integer,AbstractString,Symbol,Char,Dates.TimeType}} =
+    _openapi_type_schema(T)
+_openapi_response_schema(c, ::Type{T}) where {T<:Enum} = isconcretetype(T) ?
+    (type="string", enum=[string(x) for x in instances(T)]) : (type="string",)
+_openapi_response_schema(c, ::Type{T}) where {T<:AbstractFloat} = (type=["number", "null"],)
+_openapi_response_schema(c, ::Type{T}) where {T<:AbstractVector} =
+    _openapi_array_schema(_openapi_response_schema(c, eltype(T)))
+_openapi_response_schema(c, ::Type{T}) where {T<:AbstractDict} =
+    _openapi_map_schema(_openapi_response_schema(c, valtype(T)))
+
+function _openapi_response_schema(c, ::Type{T}) where {T}
+    S = _json_nonnull(T)
+    S !== T && S !== Union{} && return _openapi_nullable(_openapi_response_schema(c, S))
+    T <: Real && return (type=["number", "null"],)
+    _json_object_type(T) || return (;)   # abstract or unknown: any JSON value
+    T <: NamedTuple ? _openapi_object_schema(c, T) : _openapi_component_ref(c, T)
+end
+
+_openapi_array_schema(items) = isempty(items) ? (type="array",) : (type="array", items=items)
+_openapi_map_schema(values) = isempty(values) ? (type="object",) :
+    (type="object", additionalProperties=values)
+
+# `T`'s schema, admitting `null` as well. An empty schema admits it already.
+function _openapi_nullable(schema)
+    isempty(schema) && return schema
+    t = get(schema, :type, nothing)
+    t isa AbstractString && return merge(schema, (type=[t, "null"],))
+    t isa AbstractVector && return "null" in t ? schema : merge(schema, (type=[t..., "null"],))
+    (anyOf=[schema, (type="null",)],)
+end
+
+# An object of exactly `T`'s fields, listed in their declared order (a
+# NamedTuple keeps it; the encoder sorts a Dict's keys). `_json_write` sends
+# every declared field (`null` when it holds nothing), so every one is
+# required; a field's type says whether it may be `null`.
+function _openapi_object_schema(c, ::Type{T}) where {T}
+    field_docs = _type_field_docs(T)
+    properties = NamedTuple{fieldnames(T)}(map(fieldnames(T), fieldtypes(T)) do name, F
+        schema = _openapi_response_schema(c, F)
+        doc = get(field_docs, name, nothing)
+        doc === nothing ? schema : merge(schema, (description=string(doc),))
+    end)
+    object = (type="object", properties=properties,
+              required=[String(name) for name in fieldnames(T)])
+    doc = _type_doc(T)
+    doc === nothing ? object : merge((description=doc,), object)
+end
+
+function _openapi_component_ref(c, ::Type{T}) where {T}
+    name = get(c.names, T, nothing)
+    if name === nothing
+        name = _openapi_component_name(c, T)
+        c.names[T] = name
+        c.schemas[name] = _openapi_object_schema(c, T)
+    end
+    NamedTuple{(_OPENAPI_REF,)}(("#/components/schemas/" * name,))
+end
+
+# A component is named after its type; a parametric type adds its parameters,
+# and a name another type already holds is qualified by the module.
+function _openapi_component_name(c, ::Type{T}) where {T}
+    key(s) = replace(s, r"[^A-Za-z0-9._-]+" => "_")
+    base = key(join([string(nameof(T)); [string(p) for p in T.parameters]], "_"))
+    taken(name) = name in values(c.names)
+    taken(base) || return base
+    qualified = key(string(parentmodule(T))) * "." * base
+    name, n = qualified, 1
+    while taken(name)
+        n += 1
+        name = qualified * "_" * string(n)
+    end
+    name
+end
+
+# A struct's docstring and its field docstrings (`"…" field::T` lines), as
+# the docs system holds them. A NamedTuple type carries none of its own.
+function _type_docstr(::Type{T}) where {T}
+    mod = parentmodule(T)
+    multidoc = get(Base.Docs.meta(mod), Base.Docs.Binding(mod, nameof(T)), nothing)
+    multidoc === nothing ? nothing : get(multidoc.docs, Union{}, nothing)
+end
+_type_docstr(::Type{<:NamedTuple}) = nothing
+
+function _type_doc(T)
+    docstr = _type_docstr(T)
+    docstr === nothing && return nothing
+    text = strip(join(docstr.text))
+    isempty(text) ? nothing : String(text)
+end
+
+function _type_field_docs(T)
+    docstr = _type_docstr(T)
+    docstr === nothing ? Dict{Symbol,Any}() : get(docstr.data, :fields, Dict{Symbol,Any}())
+end
+
+# The `200` response of a route with declared output `returns`. Only a
+# `JSONResponse` declaration says what the body holds; its description is the
+# first line of the payload struct's docstring.
+_openapi_ok(c, _returns) = (description="OK",)
+function _openapi_ok(c, ::Type{J}) where {J<:JSONResponse}
+    T = _json_payload_type(J)
+    doc = _json_object_type(T) ? _type_doc(T) : nothing
+    summary = doc === nothing ? nothing : _openapi_summary(doc)
+    (description=something(summary, "OK"),
+     content=Dict("application/json" => (schema=_openapi_response_schema(c, T),)))
+end
+
+# `reflect`'s routes, each with the output its declaration names, read from the
+# descriptor the operation policy reads (`_declared_output_type`). `reflect`'s
+# own route shape is unchanged.
+function _openapi_routes(::Type{T}) where {T}
+    acc = Any[]
+    hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return acc
+    _reflect_walk!(acc, T, ""; enrich=(owner, route, _parents) -> (; route,
+        returns=_declared_output_type(_property_descriptor(owner, route.name, route.verb))))
+    acc
+end
+
 # One OpenAPI operation from a `reflect` route descriptor. `operation_id` is
 # assigned by the caller, which sees the whole path group.
-function _openapi_operation(route, method::AbstractString, operation_id::AbstractString)
+function _openapi_operation(route, method::AbstractString, operation_id::AbstractString,
+        components::_OpenAPIComponents, returns)
     operation = (operationId=operation_id,)
     if route.doc !== nothing
         summary = _openapi_summary(route.doc)
@@ -155,7 +295,7 @@ function _openapi_operation(route, method::AbstractString, operation_id::Abstrac
     isempty(parameters) || (operation = merge(operation, (parameters=parameters,)))
     isempty(body_params) ||
         (operation = merge(operation, (requestBody=_openapi_request_body(body_params),)))
-    merge(operation, (responses=Dict("200" => (description="OK",)),))
+    merge(operation, (responses=Dict("200" => _openapi_ok(components, returns)),))
 end
 
 """
@@ -184,22 +324,34 @@ doc = openapi(MyApp; title="My API", version="2.0.0")
   `AbstractFloat` → `number`, `Bool` → `boolean`, strings/`Symbol`/`Char`/
   enums → `string`, arrays → `array`, dates → `string` + `format`);
   unresolvable types degrade to `string`.
+- A route declared `::JSONResponse{T}` (see [`JSONResponse`](@ref)) gets an
+  `application/json` `200` response whose schema describes `T` by the rules it
+  is encoded with: a struct is an object of all its fields (all `required`; a
+  field whose type admits `nothing` may be `null`), described once under
+  `components.schemas` and referenced by `\$ref`, with its docstring and
+  field docstrings as descriptions and its docstring's first line as the
+  response `description`; a `NamedTuple` type is an inline object;
+  `Vector{E}` is an array of `E`; floats may be `null` (non-finite values).
+  Every other route keeps `{"200": {"description": "OK"}}`.
 - `@ws` and `@sse` routes are skipped: OpenAPI has no WebSocket operation or
   event-stream response.
 - Each `servers` entry is a URL string or an `(url=…, description=…)` record;
-  the key is omitted when no servers are given.
+  the key is omitted when no servers are given; `components` likewise appears
+  only when a response refers to one.
 """
 function openapi(T::Type; title::AbstractString="",
         version::AbstractString="1.0.0", description=nothing, servers=[])
     grouped = Dict{String,Vector{Any}}()
     order = String[]
-    for route in reflect(T)
+    for entry in _openapi_routes(T)
+        route = entry.route
         method = get(_OPENAPI_METHODS, route.verb, nothing)
         method === nothing && continue
         group = get!(Vector{Any}, grouped, route.path)
         isempty(group) && push!(order, route.path)
-        push!(group, (route=route, method=method))
+        push!(group, (route=route, method=method, returns=entry.returns))
     end
+    components = _OpenAPIComponents()
     paths = Dict{String,Any}()
     for path in order
         group = grouped[path]
@@ -212,8 +364,8 @@ function openapi(T::Type; title::AbstractString="",
             operation_id = string(entry.route.name)
             counts[entry.route.name] > 1 &&
                 (operation_id = operation_id * "_" * entry.method)
-            operations[entry.method] =
-                _openapi_operation(entry.route, entry.method, operation_id)
+            operations[entry.method] = _openapi_operation(entry.route, entry.method,
+                operation_id, components, entry.returns)
         end
         paths[path] = operations
     end
@@ -223,6 +375,8 @@ function openapi(T::Type; title::AbstractString="",
     document = (openapi="3.1.0", info=info, paths=paths)
     server_records = [s isa AbstractString ? (url=String(s),) : s for s in servers]
     isempty(server_records) || (document = merge(document, (servers=server_records,)))
+    isempty(components.schemas) ||
+        (document = merge(document, (components=(schemas=components.schemas,),)))
     document
 end
 
@@ -239,9 +393,10 @@ Opt-in OpenAPI endpoint for the route tree of an `@htmx` app. Mount via
 The single `GET` route (the `@get index()`) returns
 [`openapi`](@ref)`(root; …)` serialized as JSON — an OpenAPI 3.1 document
 with one operation per route, per-parameter descriptions from route
-docstrings and `# Arguments` sections, and form `requestBody`s for
-POST/PUT/PATCH params. Designed for agent tool-autogen, documentation
-generators, and anything else that speaks OpenAPI.
+docstrings and `# Arguments` sections, form `requestBody`s for
+POST/PUT/PATCH params, and response schemas for routes declared
+`::JSONResponse{T}` (see [`JSONResponse`](@ref)). Designed for agent tool-autogen,
+documentation generators, and anything else that speaks OpenAPI.
 """
 @htmx struct OpenAPIRoutes
     root::Type = Any

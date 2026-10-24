@@ -1995,7 +1995,7 @@ faithful account of the generated signature, and the verb is reachable as
 
 Two property-level keys do matter to the compiler: `role` must be `:operation`
 (`semantic_app` rejects any discovered route whose descriptor says otherwise),
-and a declared `output` of `HTTP.Response` / `MIMEResponse` keeps the operation
+and a declared `output` of `HTTP.Response` / `MIMEResponse` / `JSONResponse` keeps the operation
 on the direct, non-polling transport regardless of policy.
 
 ### Domains and control selection
@@ -2337,7 +2337,7 @@ otherwise it stays direct:
 |-----------|---------------------|
 | The verb is `GET`, or an HTMX `POST`/`PUT`/`PATCH`/`DELETE` that swaps into a target | Reads poll through GETs of their own URL; a mutation polls through GET resumes of its token when its client declares a swap that can host the poller (see *Fresh and mutation invocations*). WebSocket/SSE handshakes, `hx-swap="none"`, undeclared and non-HTMX submissions stay direct |
 | The route is not marked `@direct` | The per-route transport opt-out |
-| The declared output is not `HTTP.Response` / `MIMEResponse` | A declared final response is returned as-is |
+| The declared output is not `HTTP.Response` / `MIMEResponse` / `JSONResponse` | A declared final response is returned as-is |
 | The invocation can run in the background | A memoized route through its `Pending` cache cell (`semantics.pending`); a fresh one (`semantics.fresh`: `@fresh`, or any mutation verb) as a per-invocation operation |
 | The response is not Markdown or `?error`-filtered | `?plain`, `?markdown`, `Accept: text/markdown`/`text/plain` and `?error` answer inline under every policy, `HX-Request` or not: the Markdown projection drops the poller's `hx-get` continuation, and `?error` would filter a running poller to "(no errors)" |
 
@@ -2916,6 +2916,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
 | `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
 | `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline. Returned by an `__error__` hook, it is the error answer as it is, with the error's status (500, 400 for a caller fault, 200 under HTMX) |
+| `JSONResponse{T}(value)` | A JSON answer encoded through the declared type `T`. Declare it as a route's return type (`@get f()::JSONResponse{T} = value`) and return the plain value; [`openapi`](@ref) describes `T` as the route's response schema — see [OpenAPI](#openapi). Final like `MIMEResponse`, including from an `__error__` hook |
 
 See the [`htmxo-gallery`](https://github.com/nsiccha/Claude/blob/main/skills/htmxo-gallery/SKILL.md) skill for the canonical wiring.
 
@@ -2959,6 +2960,36 @@ end
 This serves the document as JSON at `GET /openapi` (the mount prefix is
 yours — mount wherever the document should live).
 
+A route's response is described when its declaration names the payload type:
+declare it `::JSONResponse{T}` and return the plain value. The route answers the
+value encoded through `T`, and the document gives the operation an
+`application/json` `200` response whose schema describes the same `T`:
+
+```julia
+"One pre-alarm of the threshold rule."
+struct Alarm
+    "Start hour (UTC)."
+    start::DateTime
+    probes::Vector{String}
+    rain_share::Union{Float64,Nothing}
+end
+
+@htmx struct MyApp
+    "Pre-alarms for one threshold."
+    @get alarms(; k::Float64=3.0)::JSONResponse{Vector{Alarm}} = alarm_table(k)  # a DataFrame works
+    @include openapi = OpenAPIRoutes(; root=MyApp, title="My API")
+end
+```
+
+Each struct is one `components.schemas` entry referenced by `$ref`, with its
+docstring and field docstrings as descriptions and every field `required` (it
+is always sent); a field whose type admits `nothing`, and every float, may be
+`null`. A `NamedTuple` type is an inline object, `Vector{E}` an array.
+[`JSONResponse`](@ref) gives the encoding rules. Every other route keeps
+`{"200": {"description": "OK"}}`; error responses are not described yet.
+`reflect(T)` is unchanged: the declared type comes from each route's
+descriptor.
+
 The human companion is [`SwaggerRoutes`](@ref): a version-pinned Swagger UI
 viewer initialized against the document. Mount it next to the document
 route:
@@ -2979,6 +3010,7 @@ air-gapped deployments at a local mirror serving
 
 ```@docs
 openapi
+JSONResponse
 OpenAPIRoutes
 SwaggerRoutes
 ```
