@@ -15,7 +15,8 @@ export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse, JSONResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
     static_export, static_url, url_params, url_params_script, url_anchor_script,
-    export_site, static_file_name, StaticSiteIncomplete
+    export_site, static_file_name, StaticSiteIncomplete,
+    private, Private, export_audience, PrivateContentEscaped
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -4974,6 +4975,135 @@ Base.show(io::IO, ::MIME"text/html", ::MarkdownOnly) = nothing
 Base.show(io::IO, ::MIME"text/markdown", ::HtmlOnly) = nothing
 Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text)
 
+# --- Audience: content that public views leave out ---
+
+"""
+    private(content; public=nothing)
+
+Content that a public reader must not see, such as a model's full
+specification. The live app and a private export show `content`. A public
+answer shows `public` in its place: nothing (the default), or a stand-in such
+as a short summary of the model.
+
+Public answers are those of an export, unless it asks for `audience=:private`:
+a [`StaticExport`](@ref) or [`export_site`](@ref) bundle, a
+[`pdf_report`](@ref) of a value, a `dispatch` made outside any request (the
+Markdown a concept PDF inlines), and a `dispatch(...; audience=:public)`. The
+live app always shows everything. [`export_audience`](@ref) tells a route which
+audience it answers for.
+
+`private` works wherever a value is rendered, in HTML and in Markdown: as a
+child of an element, in a semantic element, or as a route's whole answer. A
+route whose whole answer is `private(x)` without a stand-in is a private page.
+A public answer to it is a `404` carrying the header `X-HTMXO-Private: true`
+and nothing else; [`export_site`](@ref) writes no file for it and leaves out
+every link to it. A static export never follows a link inside content it
+leaves out.
+
+A public export renders `public` while it walks the answer, so anything
+rendered before the walk cannot be left out: markup a route renders into a
+`Raw` string or a JSON payload. The live page marks private content with the
+HTML comments `<!--htmxo-private-->` and `<!--/htmxo-private-->`, so such
+markup inside a public answer makes the export fail
+([`PrivateContentEscaped`](@ref)) instead of publishing it.
+
+```julia
+@get model() = h.article(
+    h.h2("Model"),
+    private(SemanticCode(stan_code(spec), "stan");
+            public = h.p("A hierarchical model of the measured doses.")))
+@get specification() = private(SemanticCode(stan_code(spec), "stan"))  # a private page
+```
+"""
+struct Private
+    content::Any
+    public::Any
+end
+private(content; public=nothing) = Private(content, public)
+
+# The audience of the answer being rendered: `:public`, `:private`, or
+# `nothing` outside any request and export, where content shows as in the
+# live app. A route handler sets it to its request's `export_audience` for the
+# whole request, `pdf_report` to its own while it renders a value.
+const _AUDIENCE = :htmxo_audience
+_ambient_audience() = get(task_local_storage(), _AUDIENCE, nothing)
+_with_audience(f, audience::Symbol) = task_local_storage(f, _AUDIENCE, audience)
+
+_check_audience(audience, who) = audience in (:public, :private) ? audience :
+    throw(ArgumentError("$who audience must be :public or :private (got $(repr(audience)))"))
+
+# What an answer for `audience` shows of `p`.
+_shown(p::Private, audience) = audience === :public ? p.public : p.content
+_shown(p::Private) = _shown(p, _ambient_audience())
+
+const _PRIVATE_OPEN = "<!--htmxo-private-->"
+const _PRIVATE_CLOSE = "<!--/htmxo-private-->"
+
+function Base.show(io::IO, m::MIME"text/html", p::Private)
+    _ambient_audience() === :public && return _show_html_content(io, m, p.public)
+    print(io, _PRIVATE_OPEN)
+    _show_html_content(io, m, p.content)
+    print(io, _PRIVATE_CLOSE)
+end
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", p::Private) =
+    _show_html_content(io, m, _shown(p))
+Base.show(io::IO, m::MIME"text/markdown", p::Private) =
+    let shown = _shown(p)
+        isnothing(shown) || show(io, m, shown)
+    end
+HTMX.markdown_block(p::Private) = HTMX.markdown_block(_shown(p))
+# A whole answer, as the route had returned what it shows.
+auto(p::Private; wrap) = let shown = _shown(p)
+    isnothing(shown) ? wrap("") : auto(_html_value(shown); wrap)
+end
+_finalized_response(p::Private) = _finalized_response(_shown(p))
+filter_errors(p::Private) = filter_errors(_shown(p))
+_filter_errors_child(p::Private) = _filter_errors_child(_shown(p))
+_strip_md_chrome(p::Private) = _strip_md_chrome(_shown(p))
+_strip_md_chrome_child(p::Private) = _strip_md_chrome_child(_shown(p))
+_rescue_semantic!(out, p::Private) = _rescue_semantic!(out, _shown(p))
+
+# Content renders as an element's child does: its own markup, else escaped
+# text; several values in order.
+_show_html_content(io, m, ::Nothing) = nothing
+_show_html_content(io, m, xs::Union{AbstractVector,Tuple}) =
+    foreach(x -> _show_html_content(io, m, x), xs)
+_show_html_content(io, m, x) =
+    showable(m, x) ? show(io, m, x) : print(io, HTMX.escape(string(x)))
+
+# A route whose whole answer is private content without a stand-in is a
+# private page; a public answer to it holds nothing of it.
+_private_page(_) = false
+_private_page(p::Private) = isnothing(p.public)
+_private_page(req::HTTP.Request, val) = export_audience(req) === :public && _private_page(val)
+_private_page_response() = HTTP.Response(404, ["X-HTMXO-Private" => "true"]; body="")
+_private_page_response(resp::HTTP.Response) = HTTP.header(resp, "X-HTMXO-Private") == "true"
+
+"""
+    PrivateContentEscaped <: Exception
+
+Thrown when a public answer (a public static export or `dispatch(...;
+audience=:public)`, a recording, a public `pdf_report`) still holds content
+marked [`private`](@ref): markup rendered for the live app before the export
+could leave it out, such as a `Raw` string built from `repr("text/html", …)` or
+an `HTMLSnapshot` held inside a value the export cannot walk. Render that
+markup from the value instead, or build it for the request's
+[`export_audience`](@ref).
+"""
+struct PrivateContentEscaped <: Exception
+    what::String
+end
+
+Base.showerror(io::IO, e::PrivateContentEscaped) = print(io,
+    "PrivateContentEscaped: ", e.what, " is for a public audience but holds content marked ",
+    "`private` (", _PRIVATE_OPEN, "), rendered before the export could leave it out. ",
+    "Render that markup from the value, or for the request's `export_audience`.")
+
+# Refuse a public answer that still holds private markup.
+_check_public(body, what) =
+    _body_contains(body, _PRIVATE_OPEN) ? throw(PrivateContentEscaped(what)) : body
+_check_public(resp::HTTP.Response, what) = (_check_public(_response_bytes(resp), what); resp)
+
 """
     HTMLSnapshot(value)
 
@@ -4994,7 +5124,8 @@ It is a value, not a cache. It holds no key, invalidation or request identity,
 and captures whatever context `value` was built under. Retain it only under the
 application-owned identity documented in "Reusing generated markup" (root and
 provider lifetime, external prefix, selected indices, request inputs, controls
-and domains, presentation settings).
+and domains, presentation settings, and the [`export_audience`](@ref) the
+stored bytes show [`private`](@ref) content for).
 """
 struct HTMLSnapshot
     value::Any
@@ -5185,7 +5316,8 @@ const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45
 const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-patch"), Symbol("hx-delete")])
 
 """
-    StaticExport(; url_map=nothing, controls=:disable, record_base="", runtime=:inline)
+    StaticExport(; url_map=nothing, controls=:disable, record_base="", runtime=:inline,
+                 audience=:public)
 
 Request-scoped static-export spec: pass it as `dispatch(...; static=spec)` to
 receive one route's response in static form from inside a live server. For
@@ -5233,6 +5365,14 @@ alone, so concurrent ordinary requests are unaffected.
   [`copy_vendorfiles`](@ref) writes those files next to the libraries, so a
   page whose `assets` addresses the copied libraries addresses the runtime
   too. A many-page export then holds one copy instead of one per page.
+- `audience` — who reads the export. `:public` (default) shows the stand-in
+  of each [`private`](@ref) part, or nothing, and answers a private page with
+  an empty `404` (header `X-HTMXO-Private: true`); links inside what it leaves
+  out never reach `url_map`. `:private` shows everything, as the live app does.
+  The route sees it as [`export_audience`](@ref)`(__req__)`, and Markdown
+  requests follow it too. A public answer that still holds private markup
+  rendered before the export (a `Raw` string) throws
+  [`PrivateContentEscaped`](@ref).
 
 A route that returns a finished `HTTP.Response`, [`MIMEResponse`](@ref) or
 [`JSONResponse`](@ref) has no value to transform, so a static dispatch of it throws
@@ -5254,19 +5394,20 @@ struct StaticExport{F}
     controls::Symbol
     record_base::String
     runtime::Symbol
+    audience::Symbol
     function StaticExport(url_map::F, controls::Symbol,
-            record_base::AbstractString, runtime::Symbol=:inline) where {F}
+            record_base::AbstractString, runtime::Symbol=:inline, audience=:public) where {F}
         controls in (:disable, :remove) || throw(ArgumentError(
             "StaticExport controls must be :disable or :remove (got $(repr(controls)))"))
         runtime in (:inline, :linked) || throw(ArgumentError(
             "StaticExport runtime must be :inline or :linked (got $(repr(runtime)))"))
-        new{F}(url_map, controls, String(record_base), runtime)
+        new{F}(url_map, controls, String(record_base), runtime, _check_audience(audience, "StaticExport"))
     end
 end
 
 StaticExport(; url_map=nothing, controls::Symbol=:disable,
-        record_base::AbstractString="", runtime::Symbol=:inline) =
-    StaticExport(url_map, controls, record_base, runtime)
+        record_base::AbstractString="", runtime::Symbol=:inline, audience=:public) =
+    StaticExport(url_map, controls, record_base, runtime, audience)
 
 """
     StaticExportRefused <: Exception
@@ -5312,6 +5453,32 @@ end
 ```
 """
 static_export(req::HTTP.Request) = get(req.context, :htmxo_static_export, nothing)
+
+"""
+    export_audience(req::HTTP.Request) -> Symbol
+
+Who the answer to this request is for: `:public` or `:private`. A request of
+the live app is `:private`, since the live app shows everything. A `dispatch`
+answers for the `audience` it was given, else its `StaticExport`'s (`:public`
+unless asked otherwise), else the audience of the request it is made in, and
+`:public` outside any request. [`private`](@ref) content shows its public
+stand-in, or nothing, in a `:public` answer.
+
+A `dispatch` made while the route runs inherits it. Pass it on where that does
+not reach, so what the route embeds is for the same reader: work moved to
+another task, or a function with its own default, such as `pdf_report`
+(public unless asked otherwise):
+
+```julia
+@get concept() = pdf_report(concept_page(), "konzept.pdf"; title="Konzept",
+                            lang="de-DE", audience=export_audience(__req__))
+```
+
+Markup a route builds and keeps beyond the request (an `HTMLSnapshot`, a cached
+`Raw` string) holds what it showed for the audience it was built for, so key it
+by `export_audience(__req__)` as well.
+"""
+export_audience(req::HTTP.Request) = get(req.context, :htmxo_audience, :private)
 
 # Who names the file of each value a `url_params` element declares, and of an
 # unmapped rooted `hx-get`: the spec's `url_map` and default rule for a
@@ -5402,9 +5569,13 @@ Walk a Node tree and make it static-safe under `rules`:
 - Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline,
   unless the spec keeps it linked (`runtime=:linked`)
 
-Documents, arrays, tuples, `content => id` pairs, [`html_only`](@ref) content
-and [`HTMLSnapshot`](@ref) values are walked through; other values pass
-through unchanged.
+- Leave out what [`private`](@ref) content does not show the spec's
+  `audience`, and every element that links a page the export leaves out as
+  private
+
+Documents, arrays, tuples, `content => id` pairs, [`html_only`](@ref) and
+[`private`](@ref) content and [`HTMLSnapshot`](@ref) values are walked
+through; other values pass through unchanged.
 """
 _static_walk(val, rules::_StaticRules) = val
 # A full page arrives as an `HTMLDocument`; unwrap so the `<html>` tree is
@@ -5694,6 +5865,7 @@ function _static_walk(node::Node, rules::_StaticRules)
     # whose address is then rewritten below like any other.
     runtime = get(HTMX.attrs(node), Symbol("data-htmxo-runtime"), nothing)
     isnothing(runtime) || spec.runtime === :linked || return _runtime_block(Symbol(runtime))
+    _static_links_private(spec, HTMX.attrs(node)) && return _STATIC_REMOVED
     new_attrs = copy(HTMX.attrs(node))
     # Set when the element carries a request a static server cannot answer.
     unservable = false
@@ -5756,15 +5928,41 @@ function _static_walk(node::Node, rules::_StaticRules)
         new_attrs[:disabled] = "true"                        # renders as boolean attribute
     end
 
-    # Recurse into children
-    new_children = _static_kept(map(child -> _static_walk_child(child, rules),
-                                    HTMX.children(node)))
+    # Recurse into children; private content shown as several values takes
+    # its place among them.
+    new_children = Any[]
+    for child in HTMX.children(node)
+        _static_append!(new_children, _static_walk_child(child, rules))
+    end
 
     Node(HTMX.tag(node), new_attrs, new_children)
 end
 
+_static_append!(out, child) = (child === _STATIC_REMOVED || push!(out, child); out)
+_static_append!(out, children::AbstractVector) =
+    (foreach(child -> _static_append!(out, child), children); out)
+
+# An element that loads or links an address the export leaves out as a private
+# page (`export_site` knows them) goes, whatever `controls` says: a disabled
+# link would still name the page.
+const _STATIC_ADDRESS_ATTRS = (Symbol("hx-get") => :fragment, :href => :full, :src => :full,
+    Symbol("hx-push-url") => :full, Symbol("hx-replace-url") => :full)
+_static_links_private(spec::StaticExport, attrs) = any(_STATIC_ADDRESS_ATTRS) do (sym, kind)
+    address = get(attrs, sym, nothing)
+    address isa AbstractString && _url_map_private(spec.url_map, address, kind)
+end
+_url_map_private(url_map, address, kind) = false
+
 _static_walk_child(child, rules) = child
 _static_walk_child(child::Node, rules) = _static_walk(child, rules)
+# Private content is walked as what the export's audience reads, so the
+# content a public export leaves out is gone from its answer, whatever later
+# renders it, and the links inside it never reach `url_map`.
+function _static_walk(p::Private, rules::_StaticRules)
+    shown = _shown(p, rules.spec.audience)
+    isnothing(shown) ? _STATIC_REMOVED : _static_walk(shown, rules)
+end
+_static_walk_child(p::Private, rules) = _static_walk(p, rules)
 # A snapshot's stored bytes predate the rewrite, so export walks its value.
 _static_walk(s::HTMLSnapshot, rules::_StaticRules) = _static_walk(_html_value(s.value), rules)
 _static_walk_child(s::HTMLSnapshot, rules) = _static_walk(s, rules)
@@ -5999,6 +6197,7 @@ struct _SiteCrawl
     entries::Vector{_SiteEntry}
     keys::Dict{String,Int}
     failed::Vector{Pair{String,String}}
+    private::Dict{Int,Int}  # entry answered as a private page → how many were found by then
     lock::ReentrantLock
 end
 
@@ -6009,6 +6208,7 @@ struct _SiteMap
     base::String
 end
 _url_map_target(m::_SiteMap, url, kind) = _site_target!(m.crawl, m.base, url, kind)
+_url_map_private(m::_SiteMap, url, kind) = _site_private(m.crawl, m.base, url, kind)
 
 _site_marker(crawl::_SiteCrawl, i::Integer) = string(crawl.marker, i, 'x')
 
@@ -6035,18 +6235,36 @@ function _site_identity(address::AbstractString)
         path * "?" * join(sort!(split(query, '&'; keepempty=false)), '&')
 end
 
+# The address `url` names from the page at `base`, and the key of its entry
+# (its file name before a `?`) with the query a link to it keeps.
+function _site_address(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
+    rest, id = _split_once(url, '#')
+    address = _site_resolve(base, rest)
+    address = get(crawl.aliases, address, address)
+    fragment = kind === :fragment
+    key, linked = _split_once(crawl.file_name(address; fragment, ext=".html"), '?')
+    (; address, fragment, key, linked, id)
+end
+
+# Whether `url` names an entry that answered as a private page.
+function _site_private(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
+    lock(() -> isempty(crawl.private), crawl.lock) && return false
+    _site_internal(url) || return false
+    key = _site_address(crawl, base, url, kind).key
+    lock(crawl.lock) do
+        i = get(crawl.keys, key, nothing)
+        !isnothing(i) && haskey(crawl.private, i)
+    end
+end
+
 # Queue `url` (if new) and return what the page writes for it: the marker of
 # its file, then the query the link keeps (one `file_name` names after a `?`,
 # or a file address's own) and the `#id`.
 function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
     _site_internal(url) || return nothing
-    rest, id = _split_once(url, '#')
-    address = _site_resolve(base, rest)
-    address = get(crawl.aliases, address, address)
-    fragment = kind === :fragment
+    (; address, fragment, key, linked, id) = _site_address(crawl, base, url, kind)
     path, query = _split_once(address, '?')
     own = _static_own_extension(path)
-    key, linked = _split_once(crawl.file_name(address; fragment, ext=".html"), '?')
     i = lock(crawl.lock) do
         i = get(crawl.keys, key, nothing)
         if isnothing(i)
@@ -6087,14 +6305,14 @@ end
 # `.html`) is fetched as its route answers it; anything else is rendered as a
 # static export, and a route that returns a finished response (a download, an
 # API's JSON) is fetched as it answers too.
-function _site_fetch(crawl::_SiteCrawl, e::_SiteEntry, controls::Symbol, parent)
+function _site_fetch(crawl::_SiteCrawl, e::_SiteEntry, controls::Symbol, parent, audience::Symbol)
     headers = e.fragment ? ["HX-Request" => "true"] : Pair{String,String}[]
-    plain() = dispatch(:GET, e.address; headers, parent, operation_policy=:blocking)
+    plain() = dispatch(:GET, e.address; headers, parent, operation_policy=:blocking, audience)
     own = _static_own_extension(first(_split_once(e.address, '?')))
     isnothing(own) || own == ".html" || own == ".htm" || return plain()
     try
         dispatch(:GET, e.address; headers, parent,
-                 static=StaticExport(_SiteMap(crawl, e.address), controls, "", :linked))
+                 static=StaticExport(_SiteMap(crawl, e.address), controls, "", :linked, audience))
     catch err
         err isa StaticExportRefused || rethrow()
         plain()
@@ -6103,7 +6321,8 @@ end
 
 """
     export_site(dir; pages, file_name=static_file_name, controls=:remove,
-                aliases=Dict{String,String}(), parent=nothing) -> (; files, bytes)
+                aliases=Dict{String,String}(), parent=nothing, audience=:public)
+        -> (; files, bytes)
 
 Write the mounted app into the new or empty directory `dir` as a static site
 that any static file server shows as it is, from the bundle's root or from a
@@ -6148,8 +6367,18 @@ can run inside a serving app (it renders in process with
   at another address, whose file is linked instead:
   `Dict("/api/v1/docs" => "/api/v1/openapi.json")`.
 - `parent` is the progress node each route's work hangs under (`dispatch`).
+- **Private content.** `audience` says who reads the site: `:public` (default)
+  or `:private`. A public site shows the stand-in of each [`private`](@ref)
+  part, or nothing, and never follows a link inside what it leaves out. A page
+  or fragment whose whole answer is private gets no file, and every element
+  that links or loads it is left out; a page written before such a page was
+  found is rendered again for that. An address a public answer names where
+  the export cannot leave it out (a script, a JSON payload) is a failure, as
+  is private markup rendered before the export ([`PrivateContentEscaped`](@ref)).
+  `audience=:private` writes everything, as the live app shows it.
 - A route can tell it is being exported with `static_export(__req__) !== nothing`
-  (to show a snapshot notice, say).
+  (to show a snapshot notice, say), and for whom with
+  [`export_audience`](@ref)`(__req__)`.
 
 `.nojekyll` is written too (GitHub Pages otherwise drops `_`-prefixed files
 such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get`,
@@ -6168,8 +6397,9 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])
 ```
 """
 function export_site(dir::AbstractString; pages, file_name=static_file_name, controls::Symbol=:remove,
-                     aliases=Dict{String,String}(), parent=nothing)
-    StaticExport(nothing, controls, "", :linked)  # refuses a `controls` it does not know
+                     aliases=Dict{String,String}(), parent=nothing, audience=:public)
+    # refuses a `controls` or `audience` it does not know
+    audience = StaticExport(nothing, controls, "", :linked, audience).audience
     isdir(dir) && !isempty(readdir(dir)) && throw(ArgumentError(
         "export_site writes into a new or empty directory; $(repr(dir)) is not empty"))
     aliases = Dict{String,String}(String(a) => String(b) for (a, b) in aliases)
@@ -6181,56 +6411,107 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     root = normpath(abspath(dir))
     crawl = _SiteCrawl(file_name, aliases, "htmxo" * Random.randstring('a':'z', 12) * "f",
         file_name === static_file_name, _SiteEntry[], Dict{String,Int}(), Pair{String,String}[],
-        ReentrantLock())
+        Dict{Int,Int}(), ReentrantLock())
     foreach(p -> _site_target!(crawl, "/", p, :full), pages)
-    links = Dict{Int,String}()          # entry → the address pages link its file by
-    written = Dict{String,String}()     # file → the address it holds
-    marked = String[]                   # files whose answer carries markers
+    written = _SiteWritten(root)
     i = 0
-    while i < length(crawl.entries)
-        i += 1
-        e = crawl.entries[i]
-        resp = _site_fetch(crawl, e, controls, parent)
-        reason = _site_failure(resp)
-        path = first(_split_once(e.address, '?'))
-        ext = isnothing(reason) ? something(_static_own_extension(path), _site_extension(resp), Some(nothing)) : nothing
-        if isnothing(reason) && isnothing(ext)
-            reason = "no file extension for its Content-Type $(repr(HTTP.header(resp, "Content-Type"))); " *
-                     "give the address one, or pass export_site a file_name"
+    while true
+        while i < length(crawl.entries)
+            i += 1
+            _site_write!(crawl, written, i, controls, parent, audience)
         end
-        name = isnothing(reason) ? first(_split_once(file_name(e.address; fragment=e.fragment, ext), '?')) : ""
-        file = normpath(joinpath(root, name))
-        if isnothing(reason) && (isabspath(name) || !startswith(file, joinpath(root, "")))
-            reason = "its file name $(repr(name)) leaves the bundle"
-        elseif isnothing(reason) && haskey(written, file)
-            reason = "has the same file ($name) as $(written[file])"
-        end
-        if !isnothing(reason)
-            lock(() -> push!(crawl.failed, e.address => reason), crawl.lock)
-            continue
-        end
-        body = _response_bytes(resp)
-        mkpath(dirname(file))
-        write(file, body)
-        written[file] = e.address
-        _site_contains(body, crawl.marker) && push!(marked, file)
-        ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
-        links[i] = _static_link(name)
+        # A file rendered before a page it refers to answered as private still
+        # refers to it; rendered again, the walk leaves those references out.
+        stale = _site_stale(crawl, written)
+        isempty(stale) && break
+        foreach(k -> _site_write!(crawl, written, k, controls, parent, audience), stale)
+    end
+    for k in sort!(collect(written.marked)), j in unique(_site_markers(crawl, read(written.paths[k], String)))
+        haskey(crawl.private, j) && push!(crawl.failed, crawl.entries[j].address =>
+            "is private, but $(relpath(written.paths[k], root)) refers to it where the export " *
+            "cannot leave the reference out (a script or a JSON payload)")
     end
     # A failed address keeps its own path, which the reference check below
     # does not report again.
     failed = Set(first(_split_once(a, '?')) for (a, _) in crawl.failed)
     unmarked(m) = (k = parse(Int, m[length(crawl.marker)+1:end-1]);
-                   get(() -> first(_split_once(crawl.entries[k].address, '?')), links, k))
-    for file in marked
+                   get(() -> first(_split_once(crawl.entries[k].address, '?')), written.links, k))
+    for k in written.marked
+        file = written.paths[k]
         write(file, replace(read(file, String), Regex(crawl.marker * "[0-9]+x") => unmarked))
     end
     touch(joinpath(root, ".nojekyll"))
     unresolved = _site_unresolved(root, failed)
-    bytes = sum(filesize, keys(written); init=0)
+    bytes = sum(filesize, values(written.paths); init=0)
+    files = length(written.paths)
     isempty(crawl.failed) && isempty(unresolved) ||
-        throw(StaticSiteIncomplete(root, crawl.failed, unresolved, length(written), bytes))
-    (; files=length(written), bytes)
+        throw(StaticSiteIncomplete(root, crawl.failed, unresolved, files, bytes))
+    (; files, bytes)
+end
+
+# What the crawl has written, by entry: its file, the address pages link it
+# by, how many private pages were known when it was rendered, and whether its
+# answer carries markers.
+struct _SiteWritten
+    root::String
+    paths::Dict{Int,String}
+    links::Dict{Int,String}
+    rendered::Dict{Int,Int}
+    marked::Set{Int}
+    owners::Dict{String,Int}  # file → entry
+end
+_SiteWritten(root) = _SiteWritten(root, Dict{Int,String}(), Dict{Int,String}(), Dict{Int,Int}(),
+                                  Set{Int}(), Dict{String,Int}())
+
+# Fetch entry `i` and write its file, or record why not.
+function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls, parent, audience)
+    e = crawl.entries[i]
+    known = lock(() -> length(crawl.private), crawl.lock)
+    resp = try
+        _site_fetch(crawl, e, controls, parent, audience)
+    catch err
+        err isa PrivateContentEscaped || rethrow()
+        return lock(() -> push!(crawl.failed, e.address => sprint(showerror, err)), crawl.lock)
+    end
+    if _private_page_response(resp)
+        return lock(() -> (crawl.private[i] = length(crawl.private) + 1), crawl.lock)
+    end
+    reason = _site_failure(resp)
+    path = first(_split_once(e.address, '?'))
+    ext = isnothing(reason) ? something(_static_own_extension(path), _site_extension(resp), Some(nothing)) : nothing
+    if isnothing(reason) && isnothing(ext)
+        reason = "no file extension for its Content-Type $(repr(HTTP.header(resp, "Content-Type"))); " *
+                 "give the address one, or pass export_site a file_name"
+    end
+    name = isnothing(reason) ? first(_split_once(crawl.file_name(e.address; fragment=e.fragment, ext), '?')) : ""
+    file = normpath(joinpath(written.root, name))
+    if isnothing(reason) && (isabspath(name) || !startswith(file, joinpath(written.root, "")))
+        reason = "its file name $(repr(name)) leaves the bundle"
+    elseif isnothing(reason) && get(written.owners, file, i) != i
+        reason = "has the same file ($name) as $(crawl.entries[written.owners[file]].address)"
+    end
+    isnothing(reason) || return lock(() -> push!(crawl.failed, e.address => reason), crawl.lock)
+    body = _response_bytes(resp)
+    mkpath(dirname(file))
+    write(file, body)
+    written.owners[file] = i
+    written.paths[i] = file
+    written.links[i] = _static_link(name)
+    written.rendered[i] = known
+    _body_contains(body, crawl.marker) ? push!(written.marked, i) : delete!(written.marked, i)
+    ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
+end
+
+# The entries each marker in `text` names.
+_site_markers(crawl::_SiteCrawl, text::AbstractString) =
+    (parse(Int, m[1]) for m in eachmatch(Regex(crawl.marker * "([0-9]+)x"), text))
+
+# Written entries that refer to a page found private after they were rendered.
+function _site_stale(crawl::_SiteCrawl, written::_SiteWritten)
+    isempty(crawl.private) && return Int[]
+    sort!([k for k in written.marked
+           if any(j -> get(crawl.private, j, 0) > written.rendered[k],
+                  _site_markers(crawl, read(written.paths[k], String)))])
 end
 
 # A stylesheet's `url(...)`s resolve against the stylesheet itself, and its
@@ -6251,8 +6532,8 @@ function _site_follow_stylesheet!(crawl::_SiteCrawl, address::AbstractString, bo
     end
 end
 
-_site_contains(body::AbstractString, s::AbstractString) = occursin(s, body)
-_site_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(findfirst(codeunits(s), body))
+_body_contains(body::AbstractString, s::AbstractString) = occursin(s, body)
+_body_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(findfirst(codeunits(s), body))
 
 const _SITE_REFERENCE =
     r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\"|\"url\":\"([^\"]*)\""
@@ -6357,6 +6638,9 @@ _prestart_walk(doc::HTMLDocument, walk, blocked) =
     _prestart_rewrap(_prestart_walk(doc.root, walk, blocked), HTMLDocument)
 _prestart_walk(val::HtmlOnly, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.content, walk, blocked), HtmlOnly)
+_prestart_walk(p::Private, walk, blocked) = _ambient_audience() === :public ?
+    _prestart_rewrap(_prestart_walk(p.public, walk, blocked), x -> Private(p.content, x)) :
+    _prestart_rewrap(_prestart_walk(p.content, walk, blocked), x -> Private(x, p.public))
 _prestart_walk(val::_LabelledControl, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.control, walk, blocked), _LabelledControl)
 _prestart_walk((content, id)::Pair, walk, blocked) =
@@ -7795,7 +8079,8 @@ function _register_handler(method, path, handler; resume_only::Bool=false,
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
-        handler(req)
+        # The whole answer renders for the request's audience (`private`).
+        _with_audience(() -> handler(req), export_audience(req))
     end
     operation && (wrapped = _OperationRoute(wrapped))
     if http_method == "GET" && !resume_only
@@ -10522,7 +10807,17 @@ Convention-based properties on `obj`:
 
 If the route returns an `HTTP.Response` directly, it passes through unchanged.
 """
+# A recording is public: it renders for the public audience, holds no private
+# page, and refuses private markup rendered before it.
+function _record_public(f, record_dir, save_path, val)
+    (isnothing(record_dir) || isnothing(save_path) || _private_page(val)) && return
+    _with_audience(f, :public)
+end
+_save_recording(record_dir, path, resp; kwargs...) =
+    save_response(record_dir, path, _check_public(resp, "the recording of $path"); kwargs...)
+
 function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
+    _private_page(req, val) && return _private_page_response()
     # Pre-finalized values (a route handler returning an `HTTP.Response`
     # or a `MIMEResponse` escape hatch for non-HTML bodies) bypass the
     # `__page__` wrap entirely — adding `<html>…</html>` around raw JS
@@ -10535,8 +10830,10 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
             # than hand back live markup.
             isnothing(static_export(req)) ||
                 throw(StaticExportRefused(req, finalized))
-            if !isnothing(record_dir) && !isnothing(save_path)
-                _save_typed_response(record_dir, save_path, finalized)
+            _record_public(record_dir, save_path, val) do
+                recorded = _finalized_response(val)
+                isnothing(recorded) ||
+                    _save_typed_response(record_dir, save_path, _check_public(recorded, "the recording of $save_path"))
             end
             return finalized
         end
@@ -10545,23 +10842,23 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
     # Recording for the regular HTML pipeline. Mirrors the runtime branches
     # below (markdown / HX-fragment / wrapped page) so the on-disk shape
     # matches what a live request would produce.
-    if !isnothing(record_dir) && !isnothing(save_path)
+    _record_public(record_dir, save_path, val) do
         wrapper = _page_wrapper(obj)
         if wants_markdown(req)
             # Recording skips markdown for values whose type doesn't define
             # `show(::IO, ::MIME"text/markdown", ...)` — `showable` is the
             # explicit check, rather than catching any error from rendering.
             if showable(MIME"text/markdown"(), val)
-                save_response(record_dir, "/md" * save_path,
+                _save_recording(record_dir, "/md" * save_path,
                     HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
                     ext=".md")
             end
         elseif _hx_partial_swap(req)
-            save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
+            _save_recording(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         elseif !isnothing(wrapper)
-            save_response(record_dir, save_path, to_response(static_transform(_apply_page(obj, wrapper, _html_value(val)); record_base)))
+            _save_recording(record_dir, save_path, to_response(static_transform(_apply_page(obj, wrapper, _html_value(val)); record_base)))
         else
-            save_response(record_dir, save_path, to_response(static_transform(val; record_base)))
+            _save_recording(record_dir, save_path, to_response(static_transform(val; record_base)))
         end
     end
 
@@ -13372,9 +13669,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
                     end, running)
             end
         catch err
-            # Both are export-contract failures the caller must see at the
+            # These are export-contract failures the caller must see at the
             # call, not route errors to render.
-            err isa Union{_RecordDestinationCollision,StaticExportRefused} && rethrow()
+            err isa Union{_RecordDestinationCollision,StaticExportRefused,PrivateContentEscaped} && rethrow()
             bt = catch_backtrace()
             page_chain = is_included ?
                 _collect_page_chain(root, chain, req, root_segs) :
@@ -14154,6 +14451,7 @@ _page_chain_to_apply(page_chain, req::HTTP.Request; root=nothing) =
 """Like `_resolve_response`, but applies nested page wrappers (innermost first, then outward)."""
 function _resolve_response_nested(page_chain, req, val; root=nothing,
         record_dir=nothing, save_path=nothing, record_base::String="")
+    _private_page(req, val) && return _private_page_response()
     # Same finalized-value passthrough as `_resolve_response`. Routes
     # inside `@include`d substructs (e.g. `PipelineRoutes.aov_runtime_js`
     # returning `MIMEResponse("application/javascript", …)`) land here,
@@ -14165,8 +14463,10 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
             # than hand back live markup.
             isnothing(static_export(req)) ||
                 throw(StaticExportRefused(req, finalized))
-            if !isnothing(record_dir) && !isnothing(save_path)
-                _save_typed_response(record_dir, save_path, finalized)
+            _record_public(record_dir, save_path, val) do
+                recorded = _finalized_response(val)
+                isnothing(recorded) ||
+                    _save_typed_response(record_dir, save_path, _check_public(recorded, "the recording of $save_path"))
             end
             return finalized
         end
@@ -14177,25 +14477,25 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
     end
     # Same recording policy as `_resolve_response`: markdown / HX-fragment /
     # full-page-wrapped, picked by the request header alone.
-    if !isnothing(record_dir) && !isnothing(save_path)
+    _record_public(record_dir, save_path, val) do
         if wants_markdown(req)
             # Recording skips markdown for values whose type doesn't define
             # `show(::IO, ::MIME"text/markdown", ...)` — `showable` is the
             # explicit check, rather than catching any error from rendering.
             if showable(MIME"text/markdown"(), val)
-                save_response(record_dir, "/md" * save_path,
+                _save_recording(record_dir, "/md" * save_path,
                     HTTP.Response(200, ["Content-Type" => "text/markdown"]; body=to_markdown_string(val));
                     ext=".md")
             end
         elseif _hx_partial_swap(req)
-            save_response(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
+            _save_recording(record_dir, "/hx" * save_path, to_response(static_transform(val; record_base)))
         else
             wrapped = _html_value(val)
             for obj in reverse(page_chain)
                 wrapper = _page_wrapper(obj)
                 isnothing(wrapper) || (wrapped = _apply_page(obj, wrapper, wrapped))
             end
-            save_response(record_dir, save_path, to_response(static_transform(wrapped; record_base)))
+            _save_recording(record_dir, save_path, to_response(static_transform(wrapped; record_base)))
         end
     end
     if wants_markdown(req)
@@ -15817,7 +16117,7 @@ dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, no
 
 """
     dispatch(method, url; headers=[], body=UInt8[], parent=nothing, static=nothing,
-             operation_policy=nothing) -> HTTP.Response
+             operation_policy=nothing, audience=nothing) -> HTTP.Response
 
 Run one request against the registered route tree in-process and return the
 handler's `HTTP.Response` — no listener, no socket, no serialization
@@ -15878,6 +16178,16 @@ for a loopback request.
   `polling_fetchindex` decides its own `sync`. A `:polling` or `:auto`
   override answers with a poller whose follow-up polls are requests of their
   own: dispatch them with the same `operation_policy` to keep it.
+- `audience` — who the answer is for, `:public` or `:private` (the route reads
+  it as [`export_audience`](@ref)`(__req__)`). A `:public` answer shows the
+  stand-in of each [`private`](@ref) part, or nothing, and a private page
+  answers an empty `404` with the header `X-HTMXO-Private: true`. By default
+  it is `static`'s audience, else the audience of the request this `dispatch`
+  is made in (a live request's is `:private`), else `:public`: a script that
+  fetches Markdown for a public PDF gets the public Markdown without asking.
+  An `audience` other than `static`'s is an `ArgumentError`. A public answer
+  that still holds private markup rendered before the answer (a `Raw` string)
+  throws [`PrivateContentEscaped`](@ref).
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
@@ -15896,16 +16206,28 @@ markdown = String(resp.body)
 ```
 """
 function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
-        parent=nothing, static=nothing, operation_policy=nothing)
+        parent=nothing, static=nothing, operation_policy=nothing, audience=nothing)
     spec = _dispatch_static(static)
+    audience = _dispatch_audience(audience, spec)
     policy = _dispatch_operation_policy(operation_policy)
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
     spec !== nothing && (req.context[:htmxo_static_export] = spec)
     policy !== nothing && (req.context[:htmxo_operation_policy] = policy)
-    _with_dispatch_parent(() -> ROUTER(req), parent)
+    req.context[:htmxo_audience] = audience
+    resp = _with_dispatch_parent(() -> ROUTER(req), parent)
+    audience === :public ? _check_public(resp, "the answer to $(req.method) $(req.target)") : resp
 end
+
+# The audience a dispatched request answers for: the one asked for, a static
+# export's, the calling request's, or else public.
+_dispatch_audience(::Nothing, ::Nothing) = something(_ambient_audience(), :public)
+_dispatch_audience(::Nothing, spec::StaticExport) = spec.audience
+_dispatch_audience(audience, ::Nothing) = _check_audience(audience, "dispatch")
+_dispatch_audience(audience, spec::StaticExport) =
+    _check_audience(audience, "dispatch") === spec.audience ? audience : throw(ArgumentError(
+        "dispatch: audience=$(repr(audience)) contradicts the StaticExport's audience $(repr(spec.audience))"))
 
 # Recording shims. Implementation is held in mutable `Ref`s so the
 # Treebars extension can swap them in at `__init__` time without
@@ -16663,8 +16985,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
 end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto") -> pdf_path
-    pdf_report(value, pdf_path; kwargs...) -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto", audience=:public) -> pdf_path
+    pdf_report(value, pdf_path; audience=:public, kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
 input is Markdown, typically a page's own projection: a `value` such as an
@@ -16731,11 +17053,19 @@ and nothing else. An image alone in its paragraph, or in a figure, is tagged as 
 figure of its own rather than one inside a paragraph, which PAC warns about. An
 image within a line of text stays in its paragraph, and PAC still warns about it.
 
+`audience` says who reads the report: `:public` (default) or `:private`. A
+value is rendered for it, so a public report shows the stand-in of each
+[`private`](@ref) part, or nothing. A Markdown string is rendered already:
+fetch it for the report's audience (`dispatch(...; audience)`, public by default
+outside a request; [`export_audience`](@ref) inside one). A public report
+refuses Markdown that holds private markup rendered for the live app, raw HTML
+carrying `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
+
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
 `date_format` next to a text `date`, a `base_url` that is not an absolute URL,
-a YAML metadata block in the Markdown or a missing `resources` directory, all
-before running Quarto, a `url_map` answer that is neither an absolute URL nor
+a YAML metadata block in the Markdown, a missing `resources` directory or an
+`audience` other than `:public` and `:private`, all before running Quarto, a `url_map` answer that is neither an absolute URL nor
 `nothing` before rendering, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
 the offending source line), or writes a PDF that does not declare PDF/UA-1. The
@@ -16793,7 +17123,8 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     title::AbstractString, lang::AbstractString, metadata=(;),
                     base_url::Union{Nothing,AbstractString}=nothing, url_map=nothing,
                     resources::AbstractString=dirname(abspath(pdf_path)),
-                    quarto::AbstractString="quarto")
+                    quarto::AbstractString="quarto", audience=:public)
+    _check_audience(audience, "pdf_report") === :public && _check_public(markdown, "the report's Markdown")
     isempty(strip(title)) &&
         throw(ArgumentError("pdf_report: `title` is blank; PDF/UA-1 requires a document title"))
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
@@ -16835,8 +17166,9 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     end
     return pdf_path
 end
-pdf_report(value, pdf_path::AbstractString; kwargs...) =
-    pdf_report(to_markdown_string(value), pdf_path; kwargs...)
+pdf_report(value, pdf_path::AbstractString; audience=:public, kwargs...) =
+    pdf_report(_with_audience(() -> to_markdown_string(value), _check_audience(audience, "pdf_report")),
+               pdf_path; audience, kwargs...)
 
 # --- Captions ---
 
@@ -23906,6 +24238,36 @@ show_when_script() = h.script(Raw(raw"""
 })();
 """))
 
+# An answer's first element as its opening tag alone builds it, for the page
+# scripts that tell a Treebars poller or terminal answer from any other by that
+# element's class (`live_refresh_script`, `auto_terminal_script`). Parsing the
+# whole answer to read one element was a full HTML parse of every swapped
+# answer on top of htmx's own parse of the same string — 95–166 ms for a 4–8 MB
+# answer at 4× CPU throttle, up to twice per swap (snag
+# `serve-a-large-ag-b3caa84b`). An HTML parser builds an element from its start
+# tag whatever follows it, so parsing that tag alone yields the element the
+# whole answer opens with. The tag is matched strictly: HTML whitespace, then a
+# start tag whose attribute names hold no quote and whose values are quoted, or
+# unquoted without quotes, `=`, `<`, `>` or a backtick — where the tokenizer
+# ends the tag at the same `>`. Anything else (text, a comment or a doctype
+# first, a malformed tag) gives `null`, and so does a `table`, before which a
+# parser moves misnested content: the caller then parses the whole answer. So
+# does a tag longer than `OPENING_TAG_MAX`: the pattern keeps backtracking
+# state per attribute, and an opening tag of millions of attributes overflowed
+# V8's regular-expression stack (measured on Chrome 151).
+_opening_element_js() = raw"""
+  var OPENING_TAG = /^[\t\n\f\r ]*<[A-Za-z][^\t\n\f\r \/>]*(?:[\t\n\f\r ]+[^\t\n\f\r "'>\/=]+(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"[^"]*"|'[^']*'|[^\t\n\f\r "'=<>`]+))?)*[\t\n\f\r ]*\/?>/;
+  var OPENING_TAG_MAX = 65536;
+  function openingElement(s) {
+    var m = typeof s === 'string' ? OPENING_TAG.exec(s.slice(0, OPENING_TAG_MAX)) : null;
+    if (!m) return null;
+    var t = document.createElement('template');
+    t.innerHTML = m[0];
+    var el = t.content.firstElementChild;
+    return el && el.localName !== 'table' ? el : null;
+  }
+"""
+
 """
     live_refresh_script()
 
@@ -23942,8 +24304,11 @@ requesting element the refresh came from. The marker is presence-only (its
 value is ignored) and inert for htmx itself (`data-*` attributes never
 inherit, unlike `hx-swap`, so it is safe on aggregate wrappers). Detection
 uses the same Treebars markers the poller/terminal already carry
-(`treebar-poller` vs `treebar-terminal-content`). Include once per page; the
-`htmx()` shell installs it alongside the Treebars assets.
+(`treebar-poller` vs `treebar-terminal-content`), on the answer's first
+element as its opening tag reads, so telling a large answer apart costs no
+parse of it; a diverted terminal is parsed once, to take out its content.
+Include once per page; the `htmx()` shell installs it alongside the Treebars
+assets.
 
 The newest request wins. Requests aimed at a live element are numbered when
 they are sent, and once the element holds settled content an answer older
@@ -23966,6 +24331,7 @@ live_refresh_script() = h.script(Raw(raw"""
   var SETTLED = 'data-htmxo-live-settled';
   var BUSY = 'data-htmxo-live-busy';
   var MARKER = 'data-htmxo-live';
+""" * _opening_element_js() * raw"""
 
   // The reporter lives "behind the hairline": a subtle, muted strip below a
   // 1px divider, so an ongoing refresh reads as quiet background progress, not
@@ -23990,29 +24356,49 @@ live_refresh_script() = h.script(Raw(raw"""
     if (el.hasAttribute(MARKER)) return true;
     return (el.getAttribute('hx-trigger') || '').indexOf('every') !== -1;
   }
-  // Parse a response fragment's first element. Classifying by the actual
-  // top-level class is required: a running poller's `hx-select` attribute value
-  // literally contains the string `treebar-terminal-content`, so a substring
-  // test misfires.
+  // Parse a whole response fragment for its first element.
   function firstEl(s) {
     if (typeof s !== 'string') return null;
     var t = document.createElement('template');
     t.innerHTML = s;
     return t.content.firstElementChild;
   }
+  // Classify an answer by its first element's own class — a running poller's
+  // `hx-select` attribute value literally contains the string
+  // `treebar-terminal-content`, so a substring test of the answer misfires.
+  // `own(el)` decides from the first element's classes, or returns undefined
+  // to leave it to whether an element of class `cls` sits below that element.
+  // The first element is read from the opening tag (`openingElement`), and
+  // only an answer that writes `cls` out can hold such an element (HTMX.jl
+  // escapes only `& " ' < >`, so a class name is never spelled with character
+  // references), so a large answer is classified without parsing it. Otherwise
+  // the answer is parsed, and the verdict hands that parsed first element on
+  // (`el`), so a caller that needs the content does not parse it a second time.
+  function classify(s, own, cls) {
+    var el = openingElement(s), v;
+    if (el) {
+      v = own(el);
+      if (v !== undefined) return { is: v, el: null };
+      if (s.indexOf(cls) === -1) return { is: false, el: null };
+    }
+    el = firstEl(s);
+    if (!el) return { is: false, el: null };
+    v = own(el);
+    return { is: v !== undefined ? v : !!el.querySelector('.' + cls), el: el };
+  }
   // A running Treebars poller (chrome present, not yet terminal).
   function isPoller(s) {
-    var el = firstEl(s);
-    if (!el || el.classList.contains('treebar-terminal-content')) return false;
-    return el.classList.contains('treebar-poller') ||
-           el.classList.contains('treebar-poller-inner') ||
-           !!el.querySelector('.treebar-poller-inner');
+    return classify(s, function(el) {
+      if (el.classList.contains('treebar-terminal-content')) return false;
+      if (el.classList.contains('treebar-poller') ||
+          el.classList.contains('treebar-poller-inner')) return true;
+    }, 'treebar-poller-inner').is;
   }
   // The resolved terminal result.
-  function isTerminal(s) {
-    var el = firstEl(s);
-    return !!(el && (el.classList.contains('treebar-terminal-content') ||
-                     el.querySelector('.treebar-terminal-content')));
+  function terminalOf(s) {
+    return classify(s, function(el) {
+      if (el.classList.contains('treebar-terminal-content')) return true;
+    }, 'treebar-terminal-content');
   }
   // The unobtrusive progress reporter that sits beside a live element.
   function reporterFor(el) {
@@ -24313,7 +24699,8 @@ live_refresh_script() = h.script(Raw(raw"""
     // (B) The diverted poll loop resolved (terminal reached the reporter):
     //     move the result to the live target, clear + hide the reporter.
     var rep2 = target && target.closest ? target.closest('.htmxo-live-reporter') : null;
-    if (rep2 && rep2.__htmxoLiveTarget && isTerminal(resp)) {
+    var found = rep2 && rep2.__htmxoLiveTarget ? terminalOf(resp) : null;
+    if (found && found.is) {
       d.shouldSwap = false;
       var live = rep2.__htmxoLiveTarget;
       // The refresh this answers lands unless an answer to a newer request
@@ -24321,9 +24708,14 @@ live_refresh_script() = h.script(Raw(raw"""
       var cyc = rep2.__htmxoCycleSeq || 0;
       var stale = cyc > 0 && cyc < (rep2.__htmxoLandedSeq || 0);
       if (!stale && cyc > 0) rep2.__htmxoLandedSeq = cyc;
-      var tmp = document.createElement('template');
-      tmp.innerHTML = resp;
-      var term = stale ? null : tmp.content.querySelector('.treebar-terminal-content');
+      // The terminal node is the answer's first element or the first one
+      // below it. The answer is parsed for its content only when it lands,
+      // and at most once: the classification read the opening tag, or hands
+      // over the parse it needed.
+      var first = stale ? null : (found.el || firstEl(resp));
+      var term = !first ? null :
+        first.classList.contains('treebar-terminal-content') ? first :
+        first.querySelector('.treebar-terminal-content');
       // The result content the route rendered, applied to the live target with
       // the diverted request's swap style — so `outerHTML`/`morph:outerHTML`
       // replaces the element (in place for morph) while
@@ -24421,6 +24813,7 @@ auto_terminal_script() = h.script(Raw(raw"""
 (function() {
   if (window.__htmxoAutoTerminal) return;
   window.__htmxoAutoTerminal = true;
+""" * _opening_element_js() * raw"""
   function marked(el) {
     return !!(el && el.getAttribute && el.classList &&
                 el.classList.contains('treebar-terminal-content') &&
@@ -24615,6 +25008,10 @@ auto_terminal_script() = h.script(Raw(raw"""
   function recordOrigin(d) {
     var req = d.requestConfig && d.requestConfig.elt, target = d.target;
     if (!d.shouldSwap || !d.xhr || !target || pollRequest(req)) return;
+    // Only an answer that opens with a poller wrapper starts a poller, which
+    // its opening tag tells: no other answer is parsed here, however large.
+    var head = openingElement(d.serverResponse);
+    if (head && !head.classList.contains('treebar-poller')) return;
     var first = firstElement(d.serverResponse);
     var inner = first && first.classList.contains('treebar-poller') &&
       first.querySelector(':scope > .treebar-poller-inner[hx-get*="__htmxo_poll"]');
@@ -24676,7 +25073,9 @@ auto_terminal_script() = h.script(Raw(raw"""
     if (d.htmxoLiveTerminal) return;
     var r = d.xhr && d.xhr.__htmxoRetire;
     if (!r) { recordOrigin(d); return; }
-    var term = firstElement(d.serverResponse);
+    // Parsed only when its opening tag is a marked terminal, for its content.
+    var head = openingElement(d.serverResponse);
+    var term = head && !marked(head) ? null : firstElement(d.serverResponse);
     if (marked(term)) d.serverResponse = term.innerHTML;
     // HX-Reselect, which htmx reads after this event, still applies.
     d.selectOverride = 'unset';

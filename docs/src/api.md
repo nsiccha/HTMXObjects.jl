@@ -57,9 +57,12 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `to_response(x)` | Coerce arbitrary content to an `HTTP.Response`                           |
 | `save_response(...)` | Persist a response (used by static recording)                        |
 | `static_transform(...)` | Convert dynamic responses to static-friendly form (`static_transform(val; record_base)` for recording, `static_transform(val, spec::StaticExport)` for a request-scoped export) |
-| `StaticExport(; url_map, controls, record_base, runtime)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
+| `StaticExport(; url_map, controls, record_base, runtime, audience)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
-| `export_site(dir; pages, file_name, controls, aliases, parent)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
+| `export_site(dir; pages, file_name, controls, aliases, parent, audience)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
+| `private(content; public=nothing)`, `Private` | Content a public reader must not see: the live app and a private export show `content`, a public export shows `public` (nothing by default) — see [Public and private content](#private-content) |
+| `export_audience(req)` | Who the answer to this request is for: `:private` for the live app, the audience of an export or `dispatch` otherwise |
+| `PrivateContentEscaped` | Thrown when a public answer still holds private markup rendered before the export could leave it out |
 | `static_file_name(address; fragment, ext)` | The file `export_site` writes for an address (`/voralarme?k=3` → `voralarme-k-3.html`) |
 | `StaticSiteIncomplete` | Thrown by `export_site` with every failed address and every reference that names no file of the bundle |
 | `static_url(req, address)` | The address to embed where the static walk cannot rewrite it (a script, a JSON payload, a Vega spec's `data.url`): what an `src` with that value becomes under a static `dispatch`, `address` unchanged otherwise — see [Request-scoped static export](#request-scoped-static-export) |
@@ -664,7 +667,7 @@ For routes that should serve an agent-readable Markdown view *and* an HTML view 
 | `wants_markdown(req)`  | `true` iff `?plain` / `?markdown` query param OR `Accept: text/markdown` / `text/plain` header is set |
 | `wants_errors(req)`    | `true` iff `?error` query param is set                               |
 | `markdown_response(...)` | Build a `text/markdown` response                                   |
-| `pdf_report(page_or_markdown, path; title, lang, metadata, base_url, url_map)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
+| `pdf_report(page_or_markdown, path; title, lang, metadata, base_url, url_map, audience)` | Write the Markdown as an accessible PDF (PDF/UA-1) through Quarto (see [Accessible PDF reports](#pdf-report)) |
 | `html_only(...)` / `markdown_only(...)` / `HtmlOnly` / `MarkdownOnly` | Tag content for one rendering only |
 | `HTMLSnapshot(value)` | Serialize HTML once, project everything else from `value` (see [Reusing generated markup](#Reusing-generated-markup)) |
 
@@ -1615,7 +1618,9 @@ Keep `Raw` for trusted inline JavaScript or CSS.
 
 A snapshot freezes its context. Reuse it only while the mounted root/provider
 lifetime, selected indices, resolved external prefix, inherited request values,
-current controls/domains, and presentation settings remain the same. Rebuild
+current controls/domains, presentation settings, and the answer's audience
+(`export_audience(__req__)`, which decides what [`private`](#private-content)
+content its bytes show) remain the same. Rebuild
 when any of those change. It does not remount a root, rebind request values, or
 activate a new semantic root provider; compile the appropriate graph before
 reusing its markup. `HTMLSnapshot` is a value, not a cache: HTMXObjects supplies
@@ -3464,6 +3469,7 @@ markdown = String(resp.body)
 | `parent` | An optional Treebars progress node the route's compute hangs under |
 | `static` | An optional `StaticExport` spec: this one request runs blocking and comes back in static form ([below](#request-scoped-static-export)) |
 | `operation_policy` | An optional `OperationPolicy`, or its mode Symbol, this one request runs under instead of its root's ([below](#a-per-request-operation-policy)) |
+| `audience` | `:public` or `:private`: who the answer is for. By default `static`'s audience, else that of the request the `dispatch` is made in, else `:public` ([Public and private content](#private-content)) |
 
 The request resolves through the live router, so `:index` collapse, verb
 dispatch, path/query/body extraction (including repeated-key vectors), the
@@ -3556,6 +3562,7 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
 | `controls` | `:disable` (default) strips `hx-post`/`hx-put`/`hx-patch`/`hx-delete` and unmapped query-string `hx-get`s and greys the element out, as recording does. `:remove` drops those elements with their subtree, so the output carries no non-GET attribute and no greyed element. |
 | `record_base` | Prefix the default rules prepend to rooted addresses an unmapped attribute keeps (`hx-get` under `<record_base>/hx`). Empty by default: unchanged. |
 | `runtime` | `:inline` (default) puts a `runtime=:linked` page's runtime back inline, so each file stands alone. `:linked` keeps the links, rewritten by `url_map`/`record_base` like any `src`/`href`, for a bundle that carries the runtime once: `copy_vendorfiles(dir)` writes it next to the libraries, so the page's `assets` prefix addresses both. |
+| `audience` | `:public` (default) leaves out what `private` marks, or shows its stand-in, and answers a private page with an empty `404`; `:private` shows everything, as the live app does ([Public and private content](#private-content)). Markdown requests follow it too. |
 
 - **Many pages, one runtime.** Without `runtime=:linked`, every exported page
   repeats the whole runtime (well over 100 KB). With a relative `assets`
@@ -3592,7 +3599,8 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
   `StaticExportRefused` instead of returning live markup. Fetch such routes
   with a plain `dispatch`.
 - **Markdown** (`Accept: text/markdown`, `?plain`) is forced blocking as well
-  and returned as-is — it carries no attributes to rewrite.
+  and carries no attributes to rewrite. It is rendered for the spec's
+  `audience`, as the HTML is.
 - **Hand-rolled pollers decide their own `sync`.** HTMXObjects forces only its
   own operation transport. A route body that calls `polling_fetchindex`
   directly must block for an export too, or the export captures a live
@@ -3669,6 +3677,12 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   that needs a server to another one. `parent` is the progress node the routes'
   work hangs under. A route that wants to say it is a snapshot tests
   `static_export(__req__) !== nothing`.
+- **Private content.** The site is public unless `audience=:private`: content
+  marked `private` shows its stand-in or nothing, links inside it are not
+  followed, and a page whose whole answer is private gets no file, while every
+  element that links or loads it is left out (a page written before such a
+  page was found is rendered again for that). See [Public and private
+  content](#private-content).
 - **Failures.** An answer other than 200, or one carrying `X-HTMXO-Error-Id`
   (a failed fragment answers 200 under htmx), is not written; the crawl carries
   on, then every `href`, `src`, `hx-get`, `hx-push-url` and Vega `"url"` in the
@@ -3676,6 +3690,79 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   address in raw markup the walk never saw), and `StaticSiteIncomplete` lists
   every failed address and unresolved reference. `.nojekyll` is written, since
   GitHub Pages otherwise drops `_`-prefixed files such as `_hyperscript.min.js`.
+
+### Public and private content {#private-content}
+
+Some content must not reach a public reader, such as a model's full
+specification that prospective clients should not see. Mark it with
+`private(content; public=nothing)`: the live app and a private export show
+`content`; a public export shows `public` in its place, nothing by default or a
+stand-in such as a short summary.
+
+```julia
+@get model() = h.article(
+    h.h2("Model"),
+    private(SemanticCode(stan_code(spec), "stan");
+            public = h.p("A hierarchical model of the measured doses.")))
+@get specification() = private(SemanticCode(stan_code(spec), "stan"))
+```
+
+**Who reads an answer.** Every answer is for an audience, `:public` or
+`:private`, which a route reads as `export_audience(__req__)`:
+
+| Answer | Audience |
+|---|---|
+| The live app (any request `serve` answers) | `:private`: it shows everything |
+| `dispatch(...; static=StaticExport(...))`, `export_site`, `pdf_report` | `:public`, unless the call says `audience=:private` |
+| `dispatch(...)` in a request | the audience of that request |
+| `dispatch(...)` outside any request (a script assembling a PDF) | `:public`, unless it says `audience=` |
+| A `record!` recording | `:public` |
+
+So an export call that forgets the keyword cannot publish anything marked
+private, and exports stay as they were until an app marks something. A
+`dispatch` with both `static=` and an `audience` other than the spec's is an
+`ArgumentError`, as is any audience other than `:public` and `:private`.
+
+**What a public answer holds.**
+
+- `private` works wherever a value is rendered, in HTML and in Markdown: as an
+  element's child, inside a semantic element, or as a route's whole answer.
+- **A private page.** A route whose whole answer is `private(x)` without a
+  stand-in answers a public reader with an empty `404` carrying
+  `X-HTMXO-Private: true`, as a page, a fragment and in Markdown. `export_site`
+  writes no file for it and leaves out every element that links or loads it,
+  whatever `controls` says (a disabled link would still name the page).
+- A static export walks private content as its audience reads it, so a public
+  bundle never asks `url_map` about, nor follows, a link inside what it leaves
+  out.
+
+**Markup rendered ahead of the answer.** The walk leaves out private content
+it can see. Markup rendered before it — a `Raw(repr("text/html", …))` string,
+markup inside a JSON payload, an `HTMLSnapshot` kept inside a value the walk
+cannot open — already holds what it showed when it was rendered. The live page
+marks private content with the HTML comments `<!--htmxo-private-->` and
+`<!--/htmxo-private-->`, and every public answer is checked for them: a public
+`dispatch` throws `PrivateContentEscaped`, `export_site` lists the address as
+failed, and a recording refuses to save it. Build such markup from the value,
+or for `export_audience(__req__)`, and key markup you keep across requests by
+the audience as well (see [Reusing generated markup](#Reusing-generated-markup)).
+An address of a private page that a public answer names where the walk cannot
+remove it (a script, a JSON payload via `static_url`) fails `export_site` too.
+
+**A PDF for the public.** `pdf_report(value, path; audience=:public)` renders
+the value for its audience. A Markdown string is rendered already, so fetch it
+for the report's reader: a `dispatch` outside a request is public by default.
+
+```julia
+markdown = String(dispatch(:GET, "/model"; headers=["Accept" => "text/markdown"]).body)
+pdf_report(markdown, "konzept.pdf"; title="Konzept", lang="de-DE")   # public
+```
+
+A public `pdf_report` refuses Markdown that holds private markup (raw HTML
+carrying `<!--htmxo-private-->`).
+
+**Not covered:** a live app opened to the public (none exists today) would
+need its audience per request.
 
 ## Page address parameters
 
