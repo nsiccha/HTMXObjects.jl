@@ -298,6 +298,47 @@ function _openapi_operation(route, method::AbstractString, operation_id::Abstrac
     merge(operation, (responses=Dict("200" => _openapi_ok(components, returns)),))
 end
 
+# One `operationId` per operation, unique in the document as OpenAPI requires
+# (code generators name functions after them). A route name only one operation
+# uses is its id. A shared name (`index` on every mount, or `messstellen` at
+# `/messstellen` and `/ap3/messstellen`) takes an id built from its path,
+# suffixed with `_<method>` when one path serves several same-named routes. An
+# id that is still taken gets `_2`, `_3`, … in document order.
+function _openapi_operation_ids(grouped, order)
+    entries = [(path, entry) for path in order for entry in grouped[path]]
+    uses = Dict{Symbol,Int}()
+    for (_, entry) in entries
+        uses[entry.route.name] = get(uses, entry.route.name, 0) + 1
+    end
+    wanted = map(entries) do (path, entry)
+        name = entry.route.name
+        uses[name] == 1 && return string(name)
+        id = _openapi_path_id(path)
+        count(e -> e.route.name === name, grouped[path]) > 1 ? id * "_" * entry.method : id
+    end
+    taken = Set(id for (id, (_, entry)) in zip(wanted, entries) if uses[entry.route.name] == 1)
+    ids = Dict{Tuple{String,String},String}()
+    for (id, (path, entry)) in zip(wanted, entries)
+        if uses[entry.route.name] > 1
+            base, n = id, 1
+            while id in taken
+                n += 1
+                id = base * "_" * string(n)
+            end
+            push!(taken, id)
+        end
+        ids[(path, entry.method)] = id
+    end
+    ids
+end
+
+# `/ap3/stunden/{kenn}` → `ap3_stunden_kenn`; the root path `/` → `index`.
+function _openapi_path_id(path::AbstractString)
+    segments = [replace(strip(s, ['{', '}']), r"[^A-Za-z0-9_]+" => "_")
+                for s in split(path, '/'; keepempty=false)]
+    isempty(segments) ? "index" : join(segments, "_")
+end
+
 """
     openapi(T::Type; title="", version="1.0.0", description=nothing, servers=[]) -> NamedTuple
 
@@ -317,9 +358,12 @@ doc = openapi(MyApp; title="My API", version="2.0.0")
 - `:path` params and GET/DELETE query params become `parameters` entries;
   POST/PUT/PATCH form params become an `application/x-www-form-urlencoded`
   `requestBody` — matching how the framework reads each transport.
-- `operationId` is the route name, suffixed with `_<method>` only when one
-  path serves several same-named routes (e.g. `@get status()` +
-  `@post status()`).
+- `operationId` is the route name when no other operation shares it. A
+  shared name gets an id built from its path instead (`/ap3/messstellen` →
+  `ap3_messstellen`, a mount's `index` at `/docs` → `docs`), suffixed with
+  `_<method>` when one path serves several same-named routes (e.g.
+  `@get status()` + `@post status()` → `status_get`, `status_post`). Ids are
+  unique in the document, as OpenAPI requires.
 - Julia types map to JSON-schema types (`Integer` → `integer`,
   `AbstractFloat` → `number`, `Bool` → `boolean`, strings/`Symbol`/`Char`/
   enums → `string`, arrays → `array`, dates → `string` + `format`);
@@ -352,20 +396,13 @@ function openapi(T::Type; title::AbstractString="",
         push!(group, (route=route, method=method, returns=entry.returns))
     end
     components = _OpenAPIComponents()
+    operation_ids = _openapi_operation_ids(grouped, order)
     paths = Dict{String,Any}()
     for path in order
-        group = grouped[path]
-        counts = Dict{Symbol,Int}()
-        for entry in group
-            counts[entry.route.name] = get(counts, entry.route.name, 0) + 1
-        end
         operations = Dict{String,Any}()
-        for entry in group
-            operation_id = string(entry.route.name)
-            counts[entry.route.name] > 1 &&
-                (operation_id = operation_id * "_" * entry.method)
+        for entry in grouped[path]
             operations[entry.method] = _openapi_operation(entry.route, entry.method,
-                operation_id, components, entry.returns)
+                operation_ids[(path, entry.method)], components, entry.returns)
         end
         paths[path] = operations
     end

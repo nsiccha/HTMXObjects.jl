@@ -2946,7 +2946,10 @@ operation `summary` (the rest, minus any `# Arguments` section, becomes
 `description`); path params keep their `{name}` spelling; GET/DELETE params
 become `parameters` entries while POST/PUT/PATCH params become an
 `application/x-www-form-urlencoded` `requestBody`. `@ws` and `@sse` routes are
-skipped — OpenAPI has no WebSocket operation or event-stream response.
+skipped — OpenAPI has no WebSocket operation or event-stream response. Each
+operation's `operationId` is its route name, unless several operations share
+that name (every mount's `index`, say): then it is built from the path
+(`/ap3/messstellen` → `ap3_messstellen`), so ids are unique in the document.
 
 ```julia
 @htmx struct MyApp
@@ -3016,6 +3019,43 @@ openapi
 JSONResponse
 OpenAPIRoutes
 SwaggerRoutes
+```
+
+### Python service
+
+`python_service(T, dir; package, copyright, …)` writes a standalone Python
+service for the JSON routes of `T` (a FastAPI app with pydantic models),
+generated from `openapi(T)`. The document is its single source: the package
+ships it as `openapi.json` and serves it unchanged.
+
+```julia
+python_service(ApiV1, "odl-service"; package = "odl_service",
+               copyright = "2026 Jane Doe", title = "ODL API", version = "1.4.0")
+```
+
+- `models.py` has one pydantic model per struct the document describes, with
+  its docstrings, and `app.py` one endpoint per operation, with the same path,
+  `operationId`, parameters and response type. A route without
+  `::JSONResponse{T}` answers any JSON.
+- Each endpoint calls the method of the same name on a backend object.
+  `backend.py` defines `class Backend` with one typed method per operation,
+  each answering `501` until a subclass overrides it. The service loads the
+  backend that `<PACKAGE>_BACKEND=module:object` names, or takes one directly:
+  `create_app(MyBackend())`. The model computation (a Stan program, a JAX
+  module, hand-written Python) lives in that backend.
+- The document and Swagger page come from FastAPI, at the paths where `T`
+  mounts `OpenAPIRoutes` and `SwaggerRoutes`.
+- The package also gets `pyproject.toml`, a `Dockerfile`, a `README.md`,
+  `LICENSE`, and `tests/test_contract.py`, which checks that the code still
+  matches the document. Python files start with the license notice
+  (`license = "GPL-3.0-or-later"` by default, or `"GPL-3.0-only"` or `"MIT"`)
+  and are PEP 8.
+
+Pass the root of the JSON interface as `T`: every operation of `openapi(T)` is
+served, so a page route under it would become an endpoint answering JSON.
+
+```@docs
+python_service
 ```
 
 ### Runtime dashboard

@@ -7559,8 +7559,10 @@ end
     @test (token.in, token.required, token.schema) ==
         ("query", false, (type="string", default="anon"))
 
+    # `widget` names two operations on two paths: each takes its path's id,
+    # since OpenAPI requires operationIds to be unique in the document.
     get_op = doc.paths["/widget/{id}"]["get"]
-    @test get_op.operationId == "widget"
+    @test get_op.operationId == "widget_id"
     @test get_op.summary == "Fetch one widget."
     # The body is just the summary once `# Arguments` is stripped — omitted.
     @test !haskey(get_op, :description)
@@ -7596,6 +7598,18 @@ end
     @test openapi(OpenAPIWidgets).info.title == string(OpenAPIWidgets)
     served = openapi(OpenAPIWidgets; servers=["https://api.example.com"])
     @test served.servers == [(url="https://api.example.com",)]
+
+    # Across mounts, every mount's `index` and any other shared name take their
+    # path's id; a unique name keeps its own.
+    mounted = openapi(OpenAPIRoot)
+    ids = [op.operationId for ops in values(mounted.paths) for op in values(ops)]
+    @test allunique(ids)
+    @test mounted.paths["/openapi"]["get"].operationId == "openapi"
+    @test mounted.paths["/docs"]["get"].operationId == "docs"
+    @test mounted.paths["/api/widgets"]["get"].operationId == "widgets"
+    @test mounted.paths["/api/status"]["post"].operationId == "api_status_post"
+    @test HTMXObjects._openapi_path_id("/") == "index"
+    @test HTMXObjects._openapi_path_id("/ap3/stunden/{kenn}") == "ap3_stunden_kenn"
 end
 
 @testitem "OpenAPIRoutes serves the OpenAPI document as JSON" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
@@ -7612,7 +7626,7 @@ end
     body = String(response.body)
     @test contains(body, "\"openapi\":\"3.1.0\"")
     @test contains(body, "\"title\":\"Widgets\"")
-    @test contains(body, "\"operationId\":\"widget\"")
+    @test contains(body, "\"operationId\":\"api_widget\"")
     @test contains(body, "/widget/{id}")
     @test contains(body, "requestBody")
 
