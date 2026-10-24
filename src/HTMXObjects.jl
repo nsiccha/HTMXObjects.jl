@@ -16,7 +16,7 @@ export route!, record!, to_response, generic_html, save_response, static_transfo
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
     static_export, static_url, url_params, url_params_script, url_anchor_script,
     export_site, static_file_name, StaticSiteIncomplete,
-    private, Private, export_audience, PrivateContentEscaped
+    private, Private, export_audience, with_audience, PrivateContentEscaped
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -4915,15 +4915,39 @@ _finalized_response(::Any) = nothing
 _finalized_response(r::HTTP.Response) = r
 _finalized_response(m::MIMEResponse) = to_response(m)
 
-# Convert a value to markdown text via show(io, MIME"text/markdown"(), val).
+"""
+    to_markdown_string(val; audience=nothing) -> String
+
+The Markdown of `val`, as a `?plain` or `Accept: text/markdown` answer holds it:
+`show(io, MIME"text/markdown"(), val)` once interactive chrome (forms, inputs,
+buttons) is dropped, or `""` when nothing else is left.
+
+`audience` (`:public` or `:private`) is who the Markdown is for:
+[`private`](@ref) content shows its stand-in, or nothing, for `:public`, and in
+full for `:private`. Without it, `val` renders for the audience of the answer
+it is rendered in (a route's `export_audience(__req__)`), and for the public
+outside any request. Library code that assembles a document from values it
+renders itself passes the document's audience, also when it runs inside a live
+request, which is `:private`:
+
+```julia
+chunks = [to_markdown_string(section; audience) for section in sections]
+pdf_report(join(chunks, "\\n\\n"), "konzept.pdf"; title="Konzept", lang="de-DE", audience)
+```
+
+An `audience` other than `:public` and `:private` is an `ArgumentError`.
+"""
+to_markdown_string(val; audience=nothing) = _to_markdown_string(val, audience)
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
 # Interactive chrome (form/input/textarea/button) is dropped first by
 # `_strip_md_chrome` so a `?plain`/`?markdown` read never serializes a form's
 # fields into prose (e.g. an edit-form textarea pre-filled with the raw body).
 # An all-chrome val strips to `nothing` → empty markdown.
-to_markdown_string(val) = let stripped = _strip_md_chrome(val)
+_to_markdown_string(val, ::Nothing) = let stripped = _strip_md_chrome(val)
     isnothing(stripped) ? "" : sprint(show, MIME"text/markdown"(), stripped)
 end
+_to_markdown_string(val, audience) =
+    _with_audience(() -> _to_markdown_string(val, nothing), _check_audience(audience, "to_markdown_string"))
 
 # --- Dual-view wrappers: html_only / markdown_only ---
 
@@ -4988,9 +5012,11 @@ as a short summary of the model.
 Public answers are those of an export, unless it asks for `audience=:private`:
 a [`StaticExport`](@ref) or [`export_site`](@ref) bundle, a
 [`pdf_report`](@ref) of a value, a `dispatch` made outside any request (the
-Markdown a concept PDF inlines), and a `dispatch(...; audience=:public)`. The
-live app always shows everything. [`export_audience`](@ref) tells a route which
-audience it answers for.
+Markdown a concept PDF inlines), and a `dispatch(...; audience=:public)`.
+Anything rendered outside any request is public too, unless it is rendered
+with [`to_markdown_string`](@ref)`(x; audience=:private)` or inside
+[`with_audience`](@ref)`(f, :private)`. The live app always shows everything.
+[`export_audience`](@ref) tells a route which audience it answers for.
 
 `private` works wherever a value is rendered, in HTML and in Markdown: as a
 child of an element, in a semantic element, or as a route's whole answer. A
@@ -5021,16 +5047,46 @@ struct Private
 end
 private(content; public=nothing) = Private(content, public)
 
-# The audience of the answer being rendered: `:public`, `:private`, or
-# `nothing` outside any request and export, where content shows as in the
-# live app. A route handler sets it to its request's `export_audience` for the
-# whole request, `pdf_report` to its own while it renders a value.
+# The audience of the answer being rendered: `:public` or `:private`, and
+# `:public` outside any request, export and `with_audience`, so a value
+# rendered without asking cannot show private content. A route handler sets it
+# to its request's `export_audience` for the whole request, and the tasks
+# HTMXObjects starts for it carry it on (`_spawn_operation`); `pdf_report` and
+# `to_markdown_string` set their own while they render a value.
 const _AUDIENCE = :htmxo_audience
-_ambient_audience() = get(task_local_storage(), _AUDIENCE, nothing)
+_ambient_audience() = get(task_local_storage(), _AUDIENCE, :public)
 _with_audience(f, audience::Symbol) = task_local_storage(f, _AUDIENCE, audience)
 
 _check_audience(audience, who) = audience in (:public, :private) ? audience :
     throw(ArgumentError("$who audience must be :public or :private (got $(repr(audience)))"))
+
+"""
+    with_audience(f, audience)
+
+Call `f()` and return its value, rendering everything it renders for
+`audience`: `:public` or `:private`. [`private`](@ref) content shows its
+stand-in, or nothing, for `:public`, and in full for `:private`.
+
+Rendering already follows the answer it is part of: a route renders for
+[`export_audience`](@ref)`(__req__)`, and so does the work HTMXObjects runs for
+it in other tasks. Outside any request it is for the public. Use
+`with_audience` where code renders for someone else: HTML it builds itself
+(`repr("text/html", x)`, an [`HTMLSnapshot`](@ref)) for a given reader, or work
+in a task it starts itself, since a new task does not inherit the request's
+audience. For Markdown, [`to_markdown_string`](@ref)`(x; audience)` does the
+same.
+
+```julia
+html = with_audience(:private) do
+    repr("text/html", page)          # everything, as the live app shows it
+end
+audience = export_audience(__req__)
+task = Threads.@spawn with_audience(() -> render_report(spec), audience)
+```
+
+An `audience` other than `:public` and `:private` is an `ArgumentError`.
+"""
+with_audience(f, audience) = _with_audience(f, _check_audience(audience, "with_audience"))
 
 # What an answer for `audience` shows of `p`.
 _shown(p::Private, audience) = audience === :public ? p.public : p.content
@@ -12049,9 +12105,14 @@ function _pool_fetch(pool::Symbol)
 end
 
 # Every background start goes through here: a memoized compute (through
-# `_PoolExecutor`), a fresh invocation, and a preload.
+# `_PoolExecutor`), a fresh invocation, and a preload. A task does not inherit
+# task-local storage, so the audience of the answer that starts it is carried
+# in: what a route body renders there is for the same reader (`private`).
 # Literal pool symbols: `@spawn` only accepts a computed pool on newer Julia.
-_spawn_operation(f, pool::Symbol) = _spawn_operation(f, Val(pool))
+_spawn_operation(f, pool::Symbol) = _spawn_operation(_carry_audience(f), Val(pool))
+_carry_audience(f) = let audience = _ambient_audience()
+    () -> _with_audience(f, audience)
+end
 _spawn_operation(f, ::Val{:default}) = Threads.@spawn :default f()
 _spawn_operation(f, ::Val{:interactive}) = Threads.@spawn :interactive f()
 
@@ -16222,7 +16283,7 @@ end
 
 # The audience a dispatched request answers for: the one asked for, a static
 # export's, the calling request's, or else public.
-_dispatch_audience(::Nothing, ::Nothing) = something(_ambient_audience(), :public)
+_dispatch_audience(::Nothing, ::Nothing) = _ambient_audience()
 _dispatch_audience(::Nothing, spec::StaticExport) = spec.audience
 _dispatch_audience(audience, ::Nothing) = _check_audience(audience, "dispatch")
 _dispatch_audience(audience, spec::StaticExport) =
@@ -17056,10 +17117,11 @@ image within a line of text stays in its paragraph, and PAC still warns about it
 `audience` says who reads the report: `:public` (default) or `:private`. A
 value is rendered for it, so a public report shows the stand-in of each
 [`private`](@ref) part, or nothing. A Markdown string is rendered already:
-fetch it for the report's audience (`dispatch(...; audience)`, public by default
-outside a request; [`export_audience`](@ref) inside one). A public report
-refuses Markdown that holds private markup rendered for the live app, raw HTML
-carrying `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
+render it for the report's audience, with [`to_markdown_string`](@ref)`(x;
+audience)` or `dispatch(...; audience)` (both public by default outside a
+request; a live request is `:private`, so pass the audience inside one). A
+public report refuses Markdown that holds private markup rendered for the live
+app, raw HTML carrying `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
@@ -17167,7 +17229,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     return pdf_path
 end
 pdf_report(value, pdf_path::AbstractString; audience=:public, kwargs...) =
-    pdf_report(_with_audience(() -> to_markdown_string(value), _check_audience(audience, "pdf_report")),
+    pdf_report(to_markdown_string(value; audience=_check_audience(audience, "pdf_report")),
                pdf_path; audience, kwargs...)
 
 # --- Captions ---
