@@ -24112,6 +24112,36 @@ show_when_script() = h.script(Raw(raw"""
 })();
 """))
 
+# An answer's first element as its opening tag alone builds it, for the page
+# scripts that tell a Treebars poller or terminal answer from any other by that
+# element's class (`live_refresh_script`, `auto_terminal_script`). Parsing the
+# whole answer to read one element was a full HTML parse of every swapped
+# answer on top of htmx's own parse of the same string — 95–166 ms for a 4–8 MB
+# answer at 4× CPU throttle, up to twice per swap (snag
+# `serve-a-large-ag-b3caa84b`). An HTML parser builds an element from its start
+# tag whatever follows it, so parsing that tag alone yields the element the
+# whole answer opens with. The tag is matched strictly: HTML whitespace, then a
+# start tag whose attribute names hold no quote and whose values are quoted, or
+# unquoted without quotes, `=`, `<`, `>` or a backtick — where the tokenizer
+# ends the tag at the same `>`. Anything else (text, a comment or a doctype
+# first, a malformed tag) gives `null`, and so does a `table`, before which a
+# parser moves misnested content: the caller then parses the whole answer. So
+# does a tag longer than `OPENING_TAG_MAX`: the pattern keeps backtracking
+# state per attribute, and an opening tag of millions of attributes overflowed
+# V8's regular-expression stack (measured on Chrome 151).
+_opening_element_js() = raw"""
+  var OPENING_TAG = /^[\t\n\f\r ]*<[A-Za-z][^\t\n\f\r \/>]*(?:[\t\n\f\r ]+[^\t\n\f\r "'>\/=]+(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"[^"]*"|'[^']*'|[^\t\n\f\r "'=<>`]+))?)*[\t\n\f\r ]*\/?>/;
+  var OPENING_TAG_MAX = 65536;
+  function openingElement(s) {
+    var m = typeof s === 'string' ? OPENING_TAG.exec(s.slice(0, OPENING_TAG_MAX)) : null;
+    if (!m) return null;
+    var t = document.createElement('template');
+    t.innerHTML = m[0];
+    var el = t.content.firstElementChild;
+    return el && el.localName !== 'table' ? el : null;
+  }
+"""
+
 """
     live_refresh_script()
 
@@ -24148,8 +24178,11 @@ requesting element the refresh came from. The marker is presence-only (its
 value is ignored) and inert for htmx itself (`data-*` attributes never
 inherit, unlike `hx-swap`, so it is safe on aggregate wrappers). Detection
 uses the same Treebars markers the poller/terminal already carry
-(`treebar-poller` vs `treebar-terminal-content`). Include once per page; the
-`htmx()` shell installs it alongside the Treebars assets.
+(`treebar-poller` vs `treebar-terminal-content`), on the answer's first
+element as its opening tag reads, so telling a large answer apart costs no
+parse of it; a diverted terminal is parsed once, to take out its content.
+Include once per page; the `htmx()` shell installs it alongside the Treebars
+assets.
 
 The newest request wins. Requests aimed at a live element are numbered when
 they are sent, and once the element holds settled content an answer older
@@ -24172,6 +24205,7 @@ live_refresh_script() = h.script(Raw(raw"""
   var SETTLED = 'data-htmxo-live-settled';
   var BUSY = 'data-htmxo-live-busy';
   var MARKER = 'data-htmxo-live';
+""" * _opening_element_js() * raw"""
 
   // The reporter lives "behind the hairline": a subtle, muted strip below a
   // 1px divider, so an ongoing refresh reads as quiet background progress, not
@@ -24196,29 +24230,49 @@ live_refresh_script() = h.script(Raw(raw"""
     if (el.hasAttribute(MARKER)) return true;
     return (el.getAttribute('hx-trigger') || '').indexOf('every') !== -1;
   }
-  // Parse a response fragment's first element. Classifying by the actual
-  // top-level class is required: a running poller's `hx-select` attribute value
-  // literally contains the string `treebar-terminal-content`, so a substring
-  // test misfires.
+  // Parse a whole response fragment for its first element.
   function firstEl(s) {
     if (typeof s !== 'string') return null;
     var t = document.createElement('template');
     t.innerHTML = s;
     return t.content.firstElementChild;
   }
+  // Classify an answer by its first element's own class — a running poller's
+  // `hx-select` attribute value literally contains the string
+  // `treebar-terminal-content`, so a substring test of the answer misfires.
+  // `own(el)` decides from the first element's classes, or returns undefined
+  // to leave it to whether an element of class `cls` sits below that element.
+  // The first element is read from the opening tag (`openingElement`), and
+  // only an answer that writes `cls` out can hold such an element (HTMX.jl
+  // escapes only `& " ' < >`, so a class name is never spelled with character
+  // references), so a large answer is classified without parsing it. Otherwise
+  // the answer is parsed, and the verdict hands that parsed first element on
+  // (`el`), so a caller that needs the content does not parse it a second time.
+  function classify(s, own, cls) {
+    var el = openingElement(s), v;
+    if (el) {
+      v = own(el);
+      if (v !== undefined) return { is: v, el: null };
+      if (s.indexOf(cls) === -1) return { is: false, el: null };
+    }
+    el = firstEl(s);
+    if (!el) return { is: false, el: null };
+    v = own(el);
+    return { is: v !== undefined ? v : !!el.querySelector('.' + cls), el: el };
+  }
   // A running Treebars poller (chrome present, not yet terminal).
   function isPoller(s) {
-    var el = firstEl(s);
-    if (!el || el.classList.contains('treebar-terminal-content')) return false;
-    return el.classList.contains('treebar-poller') ||
-           el.classList.contains('treebar-poller-inner') ||
-           !!el.querySelector('.treebar-poller-inner');
+    return classify(s, function(el) {
+      if (el.classList.contains('treebar-terminal-content')) return false;
+      if (el.classList.contains('treebar-poller') ||
+          el.classList.contains('treebar-poller-inner')) return true;
+    }, 'treebar-poller-inner').is;
   }
   // The resolved terminal result.
-  function isTerminal(s) {
-    var el = firstEl(s);
-    return !!(el && (el.classList.contains('treebar-terminal-content') ||
-                     el.querySelector('.treebar-terminal-content')));
+  function terminalOf(s) {
+    return classify(s, function(el) {
+      if (el.classList.contains('treebar-terminal-content')) return true;
+    }, 'treebar-terminal-content');
   }
   // The unobtrusive progress reporter that sits beside a live element.
   function reporterFor(el) {
@@ -24519,7 +24573,8 @@ live_refresh_script() = h.script(Raw(raw"""
     // (B) The diverted poll loop resolved (terminal reached the reporter):
     //     move the result to the live target, clear + hide the reporter.
     var rep2 = target && target.closest ? target.closest('.htmxo-live-reporter') : null;
-    if (rep2 && rep2.__htmxoLiveTarget && isTerminal(resp)) {
+    var found = rep2 && rep2.__htmxoLiveTarget ? terminalOf(resp) : null;
+    if (found && found.is) {
       d.shouldSwap = false;
       var live = rep2.__htmxoLiveTarget;
       // The refresh this answers lands unless an answer to a newer request
@@ -24527,9 +24582,14 @@ live_refresh_script() = h.script(Raw(raw"""
       var cyc = rep2.__htmxoCycleSeq || 0;
       var stale = cyc > 0 && cyc < (rep2.__htmxoLandedSeq || 0);
       if (!stale && cyc > 0) rep2.__htmxoLandedSeq = cyc;
-      var tmp = document.createElement('template');
-      tmp.innerHTML = resp;
-      var term = stale ? null : tmp.content.querySelector('.treebar-terminal-content');
+      // The terminal node is the answer's first element or the first one
+      // below it. The answer is parsed for its content only when it lands,
+      // and at most once: the classification read the opening tag, or hands
+      // over the parse it needed.
+      var first = stale ? null : (found.el || firstEl(resp));
+      var term = !first ? null :
+        first.classList.contains('treebar-terminal-content') ? first :
+        first.querySelector('.treebar-terminal-content');
       // The result content the route rendered, applied to the live target with
       // the diverted request's swap style — so `outerHTML`/`morph:outerHTML`
       // replaces the element (in place for morph) while
@@ -24627,6 +24687,7 @@ auto_terminal_script() = h.script(Raw(raw"""
 (function() {
   if (window.__htmxoAutoTerminal) return;
   window.__htmxoAutoTerminal = true;
+""" * _opening_element_js() * raw"""
   function marked(el) {
     return !!(el && el.getAttribute && el.classList &&
                 el.classList.contains('treebar-terminal-content') &&
@@ -24821,6 +24882,10 @@ auto_terminal_script() = h.script(Raw(raw"""
   function recordOrigin(d) {
     var req = d.requestConfig && d.requestConfig.elt, target = d.target;
     if (!d.shouldSwap || !d.xhr || !target || pollRequest(req)) return;
+    // Only an answer that opens with a poller wrapper starts a poller, which
+    // its opening tag tells: no other answer is parsed here, however large.
+    var head = openingElement(d.serverResponse);
+    if (head && !head.classList.contains('treebar-poller')) return;
     var first = firstElement(d.serverResponse);
     var inner = first && first.classList.contains('treebar-poller') &&
       first.querySelector(':scope > .treebar-poller-inner[hx-get*="__htmxo_poll"]');
@@ -24882,7 +24947,9 @@ auto_terminal_script() = h.script(Raw(raw"""
     if (d.htmxoLiveTerminal) return;
     var r = d.xhr && d.xhr.__htmxoRetire;
     if (!r) { recordOrigin(d); return; }
-    var term = firstElement(d.serverResponse);
+    // Parsed only when its opening tag is a marked terminal, for its content.
+    var head = openingElement(d.serverResponse);
+    var term = head && !marked(head) ? null : firstElement(d.serverResponse);
     if (marked(term)) d.serverResponse = term.innerHTML;
     // HX-Reselect, which htmx reads after this event, still applies.
     d.selectOverride = 'unset';
