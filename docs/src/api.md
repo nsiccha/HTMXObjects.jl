@@ -62,6 +62,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `export_site(dir; pages, file_name, controls, aliases, parent, audience)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
 | `private(content; public=nothing)`, `Private` | Content a public reader must not see: the live app and a private export show `content`, a public export shows `public` (nothing by default) — see [Public and private content](#private-content) |
 | `export_audience(req)` | Who the answer to this request is for: `:private` for the live app, the audience of an export or `dispatch` otherwise |
+| `with_audience(f, audience)` | Call `f()` rendering everything for `audience` (`:public` / `:private`): HTML a library builds itself, or work in a task it starts — see [Public and private content](#private-content) |
 | `PrivateContentEscaped` | Thrown when a public answer still holds private markup rendered before the export could leave it out |
 | `static_file_name(address; fragment, ext)` | The file `export_site` writes for an address (`/voralarme?k=3` → `voralarme-k-3.html`) |
 | `StaticSiteIncomplete` | Thrown by `export_site` with every failed address and every reference that names no file of the bundle |
@@ -3717,11 +3718,23 @@ stand-in such as a short summary.
 | `dispatch(...)` in a request | the audience of that request |
 | `dispatch(...)` outside any request (a script assembling a PDF) | `:public`, unless it says `audience=` |
 | A `record!` recording | `:public` |
+| A value rendered outside any request (`to_markdown_string(x)`, `repr("text/html", x)` in library code, a script, the REPL) | `:public`, unless `to_markdown_string(x; audience=:private)` or `with_audience(f, :private)` |
+| Work HTMXObjects runs for a route in a task of its own (the `:auto` transport, a memoized compute) | the audience of that request |
 
 So an export call that forgets the keyword cannot publish anything marked
 private, and exports stay as they were until an app marks something. A
 `dispatch` with both `static=` and an `audience` other than the spec's is an
 `ArgumentError`, as is any audience other than `:public` and `:private`.
+
+**Rendering a value yourself.** `to_markdown_string(x; audience)` renders `x`'s
+Markdown for `audience`, and `with_audience(f, audience)` (also
+`with_audience(audience) do … end`) renders everything `f` renders for it:
+HTML you build with `repr("text/html", x)`, an `HTMLSnapshot`, or work in a
+task you start yourself, which does not inherit the request's audience.
+Without them a value renders for the answer it is part of, and for the public
+outside any request. Pass the reader's audience whenever you assemble a
+document for someone other than the answer's reader, as library code building
+a public PDF inside a live request (which is `:private`) does.
 
 **What a public answer holds.**
 
@@ -3750,12 +3763,16 @@ An address of a private page that a public answer names where the walk cannot
 remove it (a script, a JSON payload via `static_url`) fails `export_site` too.
 
 **A PDF for the public.** `pdf_report(value, path; audience=:public)` renders
-the value for its audience. A Markdown string is rendered already, so fetch it
-for the report's reader: a `dispatch` outside a request is public by default.
+the value for its audience. A Markdown string is rendered already, so render or
+fetch it for the report's reader: `to_markdown_string(value; audience)`, or a
+`dispatch` (outside a request both are public by default).
 
 ```julia
 markdown = String(dispatch(:GET, "/model"; headers=["Accept" => "text/markdown"]).body)
 pdf_report(markdown, "konzept.pdf"; title="Konzept", lang="de-DE")   # public
+
+chunks = [to_markdown_string(section; audience) for section in sections]
+pdf_report(join(chunks, "\n\n"), "konzept.pdf"; title="Konzept", lang="de-DE", audience)
 ```
 
 A public `pdf_report` refuses Markdown that holds private markup (raw HTML
