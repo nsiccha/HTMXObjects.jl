@@ -44,6 +44,7 @@ export TestApp, IndexApp, AllDefaultsApp, PostApp, WarmupSelectApp,
     reset_slow_page!, release_slow_page!, slow_page_runs,
     PreloadApp, reset_preload!, release_preload!, preload_count,
     LiveMorphApp, LiveMorphNoExtApp, reset_live_morph!, live_morph_interims,
+    LiveParseApp, reset_live_parse!, live_parse_interims,
     LiveGateApp, reset_live_gate!, live_gate_interims,
     LiveEventMorphApp, reset_event_morph!, event_morph_interims,
     LiveRaceApp, reset_race!, race_interim!, race_release!, race_status,
@@ -789,6 +790,81 @@ end
         live_morph_shell(content; ext=false, flip_swap=true, slow_cycles=1)
     @get index() = live_morph_section(0, "outerHTML")
     @get panel(; n::Int=1) = live_morph_panel(n, "outerHTML")
+end
+
+# Live-refresh answer classification cost (snag serve-a-large-ag-b3caa84b): a
+# self-refreshing section carrying a large payload, refreshed three times — a
+# fast answer that settles it, a fast answer straight into the settled section,
+# then a slow one diverted through the reporter (its render waits for its own
+# interim, counted by the test server as in `LiveMorphApp`). The page counts,
+# per refresh, the `<template>` parses of a string that large: that is how the
+# page scripts parse an answer, while htmx's own swap parses with `DOMParser`.
+const live_parse_interims = Ref(0)
+
+reset_live_parse!() = (live_parse_interims[] = 0; nothing)
+
+const _LIVE_PARSE_PAYLOAD = 200_000
+
+function live_parse_driver()
+    h.script(Raw("""
+    (function() {
+      var big = $(_LIVE_PARSE_PAYLOAD), refresh = 0, parses = [0, 0, 0, 0];
+      var native = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+      Object.defineProperty(HTMLTemplateElement.prototype, 'innerHTML', {
+        configurable: true,
+        get: function() { return native.get.call(this); },
+        set: function(v) {
+          if (typeof v === 'string' && v.length >= big) parses[refresh] += 1;
+          native.set.call(this, v);
+        }
+      });
+      function fire(n) {
+        refresh = n;
+        var sec = document.getElementById('live-parse');
+        htmx.ajax('GET', 'panel?n=' + n, {target: sec, swap: 'outerHTML', source: sec});
+      }
+      function shows(n) {
+        var sec = document.getElementById('live-parse');
+        return !!sec && sec.textContent.indexOf('rows n=' + n) !== -1 &&
+          sec.hasAttribute('data-htmxo-live-settled');
+      }
+      window.addEventListener('load', function() {
+        fire(1);
+        var iv = setInterval(function() {
+          if (refresh < 3 && shows(refresh)) {
+            fire(refresh + 1);
+          } else if (refresh === 3 && shows(3)) {
+            clearInterval(iv);
+            document.body.dataset.liveParses = parses.slice(1).join(',');
+            document.body.dataset.liveParseDone = '1';
+          }
+        }, 50);
+      });
+    })();
+    """))
+end
+
+function live_parse_section(n)
+    h.section(h.p("rows n=$n"), h.p(repeat("payload ", _LIVE_PARSE_PAYLOAD ÷ 8 + 1));
+        id="live-parse", hx_get="panel?n=$n", hx_trigger="every 60s", hx_swap="outerHTML")
+end
+
+function live_parse_panel(n)
+    if n == 3
+        while live_parse_interims[] < 1
+            sleep(0.01)
+        end
+    end
+    live_parse_section(n)
+end
+
+@htmx struct LiveParseApp
+    __page__(content) =
+        htmx(content; hyperscript_version=nothing, feedback=false, compose=false,
+             thread=false, overlay=false, extra_head=(live_parse_driver(),))
+    @get index() = h.section("rows n=0"; id="live-parse", hx_get="panel?n=0",
+        hx_trigger="every 60s", hx_swap="outerHTML")
+    @get panel(; n::Int=1) = live_parse_panel(n)
 end
 
 # Live-refresh consumer swap gate (snag live-refresh-ter-4ec4fe63): the same
@@ -4767,6 +4843,63 @@ end
                 r"<div class=\"htmxo-live-reporter\"", dom))) == 1
             @test contains(dom, "view=e</section>" *
                 "<div class=\"htmxo-live-reporter\" hidden=\"\"></div>")
+        finally
+            close(server)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "live-refresh tells pollers from terminals by the opening tag" setup=[HTMXOTestFixtures, HTMXOTestImports, ChromeDump] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using Sockets
+        import HTMXObjects: _clear_operation_polls!
+
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error(
+            "HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+
+        reset_live_parse!()
+        _clear_operation_polls!()
+        route!(LiveParseApp(); operation_policy=OperationPolicy(:auto))
+        router = HTMXObjects.ROUTER
+
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            target = String(req.target)
+            handler = first(HTTP.Handlers.gethandler(router, req))
+            handler === HTTP.Handlers.default404 && return HTTP.Response(404)
+            resp = handler(req)
+            if startswith(HTTP.URI(target).path, "/panel") &&
+                    !contains(target, "__htmxo_poll") &&
+                    contains(String(resp.body), "__htmxo_poll")
+                live_parse_interims[] += 1
+            end
+            resp
+        end
+
+        try
+            dom = mktempdir() do profile
+                url = "http://127.0.0.1:$port/"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile $url`
+                dump_dom(cmd)
+            end
+            # Driver controls: all three refreshes landed, the third through
+            # the reporter, into one live section.
+            @test contains(dom, "data-live-parse-done=\"1\"")
+            @test live_parse_interims[] == 1
+            @test contains(dom, "rows n=3")
+            @test length(collect(eachmatch(r"id=\"live-parse\"", dom))) == 1
+            # Whole-answer parses by the page scripts, per refresh: none for
+            # the answer that settles the section or for the one that swaps
+            # straight into it, one for the diverted terminal, to take out its
+            # content (before the opening-tag read: 1, 2 and 2).
+            @test contains(dom, "data-live-parses=\"0,0,1\"")
         finally
             close(server)
             _clear_operation_polls!()
