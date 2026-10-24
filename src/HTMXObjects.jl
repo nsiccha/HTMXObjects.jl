@@ -25940,6 +25940,12 @@ element itself. The requesting element is the one that sent the request, never
 the ancestor htmx reports the request's end on once that element's own swap
 removed it.
 
+Each out-of-band swap marks its target once. htmx 2.0.8 announces an answer's
+k-th out-of-band swap again on every element the answer has swapped in so far,
+so an answer with N `hx-swap-oob="true"` elements fires `htmx:oobAfterSwap`
+N(N+1)/2 + N times; the script acts on the first announcement of each swap
+only.
+
 Only requests the reader started are marked. A request the page sends by
 itself — a poll (`hx-trigger` with `every`), a preload, or the requesting
 element's own `load`, `revealed` or `intersect` trigger (a `lazy` fragment, a deferred page's placeholder, a `tabset`'s shown lazy panel) — draws
@@ -26045,7 +26051,15 @@ document.addEventListener('DOMContentLoaded', function() {
             t.classList.add('htmx-request-active');
         });
     });
+    // htmx 2.0.8 announces an answer's k-th out-of-band swap on every element
+    // the answer has swapped in so far (its main target and the elements its
+    // outerHTML swaps inserted), so N `hx-swap-oob="true"` elements fire
+    // N(N+1)/2 + N oobAfterSwap events. Every announcement of one swap
+    // carries that swap's own detail object: mark once per detail.
+    var oobMarked = new WeakSet();
     document.body.addEventListener('htmx:oobAfterSwap', function(e) {
+        if (oobMarked.has(e.detail)) return;
+        oobMarked.add(e.detail);
         var t = e.detail.target || e.detail.elt;
         if (!t) return;
         clearFeedback(t);
