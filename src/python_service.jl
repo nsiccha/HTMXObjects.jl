@@ -344,6 +344,7 @@ struct _PyField
     alias::Union{Nothing,String}
     type::_PyType
     required::Bool
+    default::Union{Nothing,String}   # Python source of an optional field's default
     description::Union{Nothing,String}
 end
 
@@ -422,8 +423,11 @@ function _py_class!(c::_PyContext, name::AbstractString, schema)
         pyname, alias = _py_member_name!(taken, wire; reserved=_PY_MODEL_ATTRIBUTES)
         T = _py_type(c, field, name * _py_capwords(wire))
         isrequired = wire in required
-        isrequired || (T = _pyunion([T, _pyname("None")]))
-        _PyField(pyname, alias, T, isrequired, _pyget(field, "description"))
+        default = _pyget(field, "default")
+        # An optional field without a default (or a `null` one) is nullable.
+        isrequired || default !== nothing || (T = _pyunion([T, _pyname("None")]))
+        source = isrequired ? nothing : _py_value(default)
+        _PyField(pyname, alias, T, isrequired, source, _pyget(field, "description"))
     end
     push!(c.classes, _PyClass(name, _pyget(schema, "description"), fields))
     name
@@ -480,9 +484,17 @@ function _py_operation(c::_PyContext, functions, path, method, op)
     body = _pyget(op, "requestBody")
     if body !== nothing
         for (media, content) in _pyentries(_pyget(body, "content"))
+            schema = _pyget(content, "schema")
+            if media == "application/json"
+                # One JSON object: the endpoint's `request` parameter.
+                pname, alias = _py_member_name!(taken, "request")
+                push!(params, _PyParam(pname, alias, "Body", _py_type(c, schema, hint * "Request"),
+                                       _pyget(body, "required") === true ? nothing : "None",
+                                       _pyget(body, "description")))
+                continue
+            end
             media == "application/x-www-form-urlencoded" ||
                 throw(ArgumentError("python_service: no form for request bodies of type $media"))
-            schema = _pyget(content, "schema")
             required = Set(String.(something(_pyget(schema, "required"), String[])))
             for (wire, s) in _pyentries(_pyget(schema, "properties"))
                 push!(params, _py_param(c, taken, wire, s, "Form", wire in required, hint))
@@ -604,7 +616,7 @@ end
 
 function _py_field_lines(f::_PyField)
     args = Pair{String,Any}[]
-    f.required || push!(args, "default" => "None")
+    f.required || push!(args, "default" => f.default)
     f.alias === nothing || push!(args, "alias" => _PyStr(f.alias))
     f.description === nothing || push!(args, "description" => _PyStr(f.description))
     lines = ["    " * f.name * ": "]
@@ -718,13 +730,14 @@ function _py_app_file(ops, header, title, version, openapi_url, docs_url, env)
     lines
 end
 
-function _py_backend_file(ops, header, title, env)
+function _py_backend_file(ops, header, title, env, model_calls)
     names = _py_type_names(_py_operation_types(ops))
     lines = [header; ""; _py_docstring("The backend of " * title * ": one method per operation.", 0)]
     push!(lines, "", "import importlib", "import os")
     append!(lines, _py_type_imports(names))
     models = _py_model_names(names)
     isempty(models) || append!(lines, [""; _py_import_lines(".models", models)])
+    isempty(model_calls) || append!(lines, _py_import_lines(".runtime", ["Models", "load_models"]))
     push!(lines, "", "ENVIRONMENT_VARIABLE = " * _py_literal(env), "", "")
     push!(lines, "class CallerFault(Exception):")
     append!(lines, _py_docstring("A request the caller got wrong, answered with `status`.", 4))
@@ -753,14 +766,28 @@ function _py_backend_file(ops, header, title, env)
 
         Subclass it and override the methods of the operations you serve;
         the others answer 501. A method returns its declared type: model
-        instances, or dicts and lists that validate against them.""", 4))
+        instances, or dicts and lists that validate against them.""" *
+        (isempty(model_calls) ? "" : """
+
+        The model endpoints run their model (`self.models`).""") , 4))
+    if !isempty(model_calls)
+        push!(lines, "", "    @property", "    def models(self) -> Models:")
+        append!(lines, _py_docstring("The models of the service (`runtime`).", 8))
+        push!(lines, "        return load_models()")
+    end
     for op in ops
         push!(lines, "")
         append!(lines, _py_def_lines(op.name, [(p.name, p.type, p.default) for p in op.params],
                                      op.returns, 4; method=true))
         append!(lines, _py_docstring(something(op.summary, "The answer of `" * op.operation_id * "`."), 8))
-        push!(lines, "        raise ")
-        _py_append!(lines, _PyCall("unimplemented", Pair{String,Any}["" => _PyStr(op.name)]), 8)
+        call = get(model_calls, op.name, nothing)
+        if call === nothing
+            push!(lines, "        raise ")
+            _py_append!(lines, _PyCall("unimplemented", Pair{String,Any}["" => _PyStr(op.name)]), 8)
+        else
+            push!(lines, "        return ")
+            _py_append!(lines, _py_model_call(call...), 8)
+        end
     end
     push!(lines, "", "", "def load_backend() -> Backend:")
     append!(lines, _py_docstring("""
@@ -900,9 +927,14 @@ end
 
 _toml_string(s) = "\"" * _py_escape(s) * "\""
 
-function _py_pyproject(package, distribution, title, version, license, forms)
+function _py_pyproject(package, distribution, title, version, license, forms, models)
     dependencies = ["fastapi>=0.115", "pydantic>=2.7", "uvicorn>=0.30"]
     forms && push!(dependencies, "python-multipart>=0.0.9")
+    kinds = Set(m.kind for (_, m) in models)
+    "stan" in kinds && push!(dependencies, "cmdstanpy>=1.2")
+    "jax" in kinds && append!(dependencies, ["jax>=0.4.30", "numpy>=1.26", "numpyro>=0.15", "scipy>=1.11"])
+    subpackages = isempty(models) ? String[] :
+        [package * ".runtime"; [package * ".runtime." * name for (name, _) in models]]
     lines = [
         "# SPDX-License-Identifier: " * license,
         "# Generated by HTMXObjects.python_service; regenerate it instead of editing.",
@@ -927,25 +959,43 @@ function _py_pyproject(package, distribution, title, version, license, forms)
         "test = [\"httpx>=0.27\", \"pycodestyle>=2.11\", \"pytest>=8\"]",
         "",
         "[tool.setuptools]",
-        "packages = [" * _toml_string(package) * "]",
+        "packages = [" * join(_toml_string.([package; subpackages]), ", ") * "]",
         "",
         "[tool.setuptools.package-data]",
         package * " = [\"openapi.json\"]",
         ]
+    for (name, m) in models
+        data = [first(f) for f in m.files if !endswith(first(f), ".py")]
+        isempty(data) || push!(lines, _toml_string(package * ".runtime." * name) * " = [" *
+                                      join(_toml_string.(data), ", ") * "]")
+    end
     lines
 end
 
-function _py_dockerfile(package, license, python)
+function _py_dockerfile(package, license, python, models)
+    stan = any(m.kind == "stan" for (_, m) in models)
     [
         "# SPDX-License-Identifier: " * license,
         "# Generated by HTMXObjects.python_service; regenerate it instead of editing.",
         "FROM python:" * python * "-slim",
+        (stan ? [
+            "# CmdStan, for the Stan programs; the C++ toolchain compiles them.",
+            "ARG CMDSTAN_VERSION=" * _PY_CMDSTAN_VERSION,
+            "ENV CMDSTAN=/opt/cmdstan/cmdstan-\${CMDSTAN_VERSION}",
+            "RUN apt-get update \\",
+            "    && apt-get install -y --no-install-recommends build-essential \\",
+            "    && rm -rf /var/lib/apt/lists/*"] : String[])...,
         "COPY pyproject.toml README.md LICENSE /tmp/service/",
         "COPY " * package * " /tmp/service/" * package,
         "# The copies keep the build host's file modes; the installed package runs,",
         "# readable by the unprivileged user.",
         "RUN chmod -R a+rX /tmp/service \\",
         "    && pip install --no-cache-dir /tmp/service \\",
+        (stan ? ["    && python -m cmdstanpy.install_cmdstan --dir /opt/cmdstan \\",
+                 "        --version \${CMDSTAN_VERSION} \\"] : String[])...,
+        (isempty(models) ? String[] : [
+            "    && python -m " * package * ".runtime \\",
+            "    && chmod -R a+rX \"\$(python -c 'import " * package * "; print(" * package * ".__path__[0])')\" \\"])...,
         "    && rm -rf /tmp/service \\",
         "    && useradd --create-home --uid 10001 service",
         "USER service",
@@ -955,7 +1005,7 @@ function _py_dockerfile(package, license, python)
     ]
 end
 
-function _py_readme(title, version, package, distribution, env, license, copyright, ops, openapi_url, docs_url)
+function _py_readme(title, version, package, distribution, env, license, copyright, ops, openapi_url, docs_url, models)
     licensed = license == "MIT" ? "the MIT License" :
         license == "GPL-3.0-only" ? "the GNU General Public License, version 3" :
         "the GNU General Public License, version 3 or (at your option) any later version"
@@ -1005,6 +1055,7 @@ function _py_readme(title, version, package, distribution, env, license, copyrig
         "| Operation | Method | Summary |",
         "|---|---|---|",
         rows...,
+        _py_models_readme(package, models)...,
         "",
         "## Test it",
         "",
@@ -1015,6 +1066,7 @@ function _py_readme(title, version, package, distribution, env, license, copyrig
         "```",
         "",
         "`tests/test_contract.py` checks that the code still matches `openapi.json`.",
+        (isempty(models) ? String[] : ["`tests/test_models.py` checks the models (see *Models*)."])...,
         "",
         "## License",
         "",
@@ -1052,7 +1104,7 @@ end
 """
     python_service(T::Type, dir; package, copyright, license="GPL-3.0-or-later",
                    title="", version="1.0.0", description=nothing, servers=[],
-                   python="3.12") -> Vector{String}
+                   python="3.12", models=(;), reference_draws=2) -> Vector{String}
 
 Write a standalone Python service for the JSON routes of the `@htmx` app type
 `T` into the directory `dir`: a FastAPI app with pydantic models, generated from
@@ -1091,6 +1143,22 @@ python_service(ApiV1, "odl-service"; package = "odl_service",
   the generated code matches the shipped document (paths, `operationId`s,
   parameters, request bodies and response schemas).
 
+`models = (; name = model, …)` names statistical models the service runs: a
+`@slic` model (with StanBlocks loaded) runs its Stan program through
+CmdStanPy, a bound `@rkppl` model (with ReactiveKernelsPPL loaded) its JAX
+module through NumPyro. Each `name` (a lowercase Python identifier) gets
+endpoints for the operations its model supports, added to the document:
+`POST /models/<name>/fit` (draws of the parameters), `/predict` (predictive
+draws at given draws) and `/log_likelihood` (log likelihoods at given draws).
+The draws travel in the requests; the service stores nothing.
+`<package>/runtime/` holds the artifacts and the runtime, which a backend's
+own methods reach as `self.models.<name>` (`fit`, `predict`,
+`log_likelihood`). `tests/test_models.py` checks each model's endpoints
+against `reference_draws` draws and the log likelihoods the Julia model gives
+at them (`tests/references/<name>.json`; for a Stan model this compiles the
+program once with BridgeStan, and `reference_draws = 0` skips it). The
+`Dockerfile` then installs CmdStan and compiles the Stan programs.
+
 Every Python file starts with the license notice for `license`
 (`"GPL-3.0-or-later"`, `"GPL-3.0-only"` or `"MIT"`) and `Copyright (C)
 <copyright>`. The code is PEP 8: lines of at most 79 characters, broken inside
@@ -1105,14 +1173,25 @@ an endpoint answering JSON. `@ws` and `@sse` routes are left out, as in
 function python_service(T::Type, dir::AbstractString; package::AbstractString,
         copyright::AbstractString, license::AbstractString="GPL-3.0-or-later",
         title::AbstractString="", version::AbstractString="1.0.0",
-        description=nothing, servers=[], python::AbstractString="3.12")
+        description=nothing, servers=[], python::AbstractString="3.12",
+        models=(;), reference_draws::Integer=2)
     occursin(r"^[a-z_][a-z0-9_]*$", package) && !(package in _PY_KEYWORDS) ||
         throw(ArgumentError("python_service: package must be a lowercase Python identifier, not \"$package\""))
     license in _PY_LICENSES ||
         throw(ArgumentError("python_service: license must be one of $(join(_PY_LICENSES, ", ")), not \"$license\""))
     isempty(strip(copyright)) &&
         throw(ArgumentError("python_service: copyright names the holder, e.g. \"2026 Jane Doe\""))
-    doc = openapi(T; title, version, description, servers)
+    reference_draws >= 0 ||
+        throw(ArgumentError("python_service: reference_draws must be nonnegative, not $reference_draws"))
+    specs = Pair{String,_PyModel}[]
+    for (key, model) in pairs(models)
+        name = String(key)
+        occursin(r"^[a-z_][a-z0-9_]*$", name) && !(name in _PY_KEYWORDS) || throw(ArgumentError(
+            "python_service: a model name must be a lowercase Python identifier, not \"$name\""))
+        push!(specs, name => _py_model(model, name; reference_draws))
+    end
+    sort!(specs; by=first)
+    doc = _py_model_document(openapi(T; title, version, description, servers), specs)
     paths = Set(keys(doc.paths))
     openapi_url, docs_url = _py_document_urls(T, paths)
     c = _PyContext(haskey(doc, :components) ? doc.components.schemas : Dict{String,Any}())
@@ -1135,18 +1214,39 @@ function python_service(T::Type, dir::AbstractString; package::AbstractString,
     header = _py_header(license, copyright)
     name = doc.info.title
     forms = any(p -> p.marker == "Form", (p for op in ops for p in op.params))
+    model_calls = Dict{String,Tuple{String,String}}()
+    for (model, m) in specs, method in _py_model_methods(m)
+        op = only(o for o in ops if o.operation_id == model * "_" * method)
+        model_calls[op.name] = (model, method)
+    end
     files = [
         joinpath(package, "__init__.py") => [header; ""; _py_docstring(name * " " * version * ", a generated FastAPI service.", 0)],
         joinpath(package, "models.py") => _py_models_file(c, header, name),
-        joinpath(package, "backend.py") => _py_backend_file(ops, header, name, env),
+        joinpath(package, "backend.py") => _py_backend_file(ops, header, name, env, model_calls),
         joinpath(package, "app.py") => _py_app_file(ops, header, name, version, openapi_url, docs_url, env),
         joinpath("tests", "test_contract.py") => _py_contract_test(header, package),
-        "pyproject.toml" => _py_pyproject(package, distribution, name, version, license, forms),
-        "Dockerfile" => _py_dockerfile(package, license, python),
+        "pyproject.toml" => _py_pyproject(package, distribution, name, version, license, forms, specs),
+        "Dockerfile" => _py_dockerfile(package, license, python, specs),
         ".dockerignore" => ["tests", "**/__pycache__"],
         "README.md" => _py_readme(name, version, package, distribution, env, license, copyright,
-                                  ops, openapi_url, docs_url),
+                                  ops, openapi_url, docs_url, specs),
     ]
+    if !isempty(specs)
+        kinds = Set(m.kind for (_, m) in specs)
+        runtime = joinpath(package, "runtime")
+        push!(files, joinpath(runtime, "__init__.py") => _py_runtime_init(header, package, specs, kinds),
+                     joinpath(runtime, "__main__.py") => _py_runtime_main(header),
+                     joinpath("tests", "test_models.py") => _py_models_test(header, package, specs))
+        "stan" in kinds && push!(files, joinpath(runtime, "stan_model.py") => _py_runtime_file(header, _PY_STAN_RUNTIME))
+        "jax" in kinds && push!(files, joinpath(runtime, "jax_model.py") => _py_runtime_file(header, _PY_JAX_RUNTIME),
+            # The modules ReactiveKernelsPPL emits keep their own layout.
+            "setup.cfg" => ["# Generated by HTMXObjects.python_service; regenerate it instead of editing.",
+                            "[pycodestyle]", "exclude = model.py"])
+        for (model, m) in specs
+            push!(files, joinpath(runtime, model, "__init__.py") =>
+                [header; ""; _py_docstring("The artifacts of the model $model.", 0)])
+        end
+    end
     written = String[]
     for (relative, lines) in files
         path = joinpath(dir, relative)
@@ -1157,6 +1257,19 @@ function python_service(T::Type, dir::AbstractString; package::AbstractString,
     path = joinpath(dir, package, "openapi.json")
     write(path, _schema_json_encode(doc) * '\n')
     push!(written, path)
+    for (model, m) in specs
+        for (file, text) in m.files
+            path = joinpath(dir, package, "runtime", model, file)
+            write(path, text)
+            push!(written, path)
+        end
+        m.reference === nothing && continue
+        path = joinpath(dir, "tests", "references", model * ".json")
+        mkpath(dirname(path))
+        write(path, _schema_json_encode(Dict{String,Any}("data" => m.reference.data,
+            "draws" => m.reference.draws, "log_likelihood" => m.reference.log_likelihood)) * '\n')
+        push!(written, path)
+    end
     path = joinpath(dir, "LICENSE")
     write(path, _py_license_text(license, copyright))
     push!(written, path)

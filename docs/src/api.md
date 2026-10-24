@@ -3049,8 +3049,8 @@ python_service(ApiV1, "odl-service"; package = "odl_service",
   `backend.py` defines `class Backend` with one typed method per operation,
   each answering `501` until a subclass overrides it. The service loads the
   backend that `<PACKAGE>_BACKEND=module:object` names, or takes one directly:
-  `create_app(MyBackend())`. The model computation (a Stan program, a JAX
-  module, hand-written Python) lives in that backend.
+  `create_app(MyBackend())`. A model the app names (below) runs in the
+  service's own runtime; other model computation lives in that backend.
 - The document and Swagger page come from FastAPI, at the paths where `T`
   mounts `OpenAPIRoutes` and `SwaggerRoutes`.
 - The package also gets `pyproject.toml`, a `Dockerfile`, a `README.md`,
@@ -3061,6 +3061,55 @@ python_service(ApiV1, "odl-service"; package = "odl_service",
 
 Pass the root of the JSON interface as `T`: every operation of `openapi(T)` is
 served, so a page route under it would become an endpoint answering JSON.
+
+#### Models in the service {#python-service-models}
+
+Name the app's statistical models, and the service runs them:
+
+```julia
+using StanBlocks          # a @slic model
+using ReactiveKernelsPPL  # a bound @rkppl model
+python_service(ApiV1, "odl-service"; package = "odl_service", copyright = "2026 Jane Doe",
+               models = (; ap3 = AP3_MODEL, trend = trend_model(; x) | (; y)))
+```
+
+- **Endpoints of the model's own operations**, added to the shipped
+  `openapi.json`: `POST /models/<name>/fit` (draws of the parameters, NUTS),
+  `POST /models/<name>/predict` (predictive draws at given draws) and
+  `POST /models/<name>/log_likelihood` (log likelihoods at given draws). Their
+  request and response schemas are the model's data, parameters and outputs:
+  `<Name>Data`, `<Name>Draws`, `<Name>Prediction`, `<Name>LogLikelihood`. Each
+  model gets the operations it supports.
+- **Stateless draws.** `fit` returns the draws; `predict` and
+  `log_likelihood` take them back in the request. The service stores
+  nothing; fits stay with the app.
+- **A runtime the app's own routes can use.** `<package>/runtime/` holds each
+  model's artifacts and `Backend.models.<name>`, with `fit(data, chains=…,
+  samples=…, warmup=…, seed=…)`, `predict(data, draws, seed=…)` and
+  `log_likelihood(data, draws)`. A hand-written backend method calls them
+  instead of re-implementing the model. The app's routes stay hand-written
+  backend methods.
+- **What runs it:**
+
+  | Model | Artifacts | Runtime | Operations |
+  |---|---|---|---|
+  | `@slic` (StanBlocks) | `model.stan`, `interface.json` (`stan_code`, `stan_interface`) | CmdStanPy | those `stan_descriptor` offers: fit, predict, log likelihood (pointwise) |
+  | bound `@rkppl` (ReactiveKernelsPPL) | `model.py` (`jax_source`) | NumPyro | fit, log likelihood (one sum per draw); the module draws no predictions |
+
+  A Stan draw is the constrained value of each parameter; `predict` and
+  `log_likelihood` run the fixed-parameter sampler at each draw. A JAX draw
+  also carries its unconstrained vector.
+- **Tested against the Julia model.** `tests/references/<name>.json` holds
+  `reference_draws` (default 2) draws and the log likelihoods the Julia model
+  gives at them; `tests/test_models.py` posts them to the service and compares.
+  For a Stan model this compiles the program once with BridgeStan when the
+  service is generated; `reference_draws = 0` skips the references.
+- **Packaging.** `pyproject.toml` adds `cmdstanpy` or `jax`/`numpyro`/`scipy`;
+  the `Dockerfile` installs CmdStan and compiles the Stan programs
+  (`python -m <package>.runtime`) while it builds the image.
+
+The extensions on StanBlocks and ReactiveKernelsPPL load with those packages;
+neither package knows HTMXObjects.
 
 ```@docs
 python_service

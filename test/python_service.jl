@@ -178,8 +178,10 @@ end
     prose = join(words[mod1.(1:200, length(words))], " ")
     float_or_none = H._pyunion([H._pyname("float"), H._pyname("None")])
     too_long = String[]
-    for name_length in 1:30, text_length in 20:140, required in (true, false), alias in (nothing, "a")
-        field = H._PyField("f"^name_length, alias, float_or_none, required, first(prose, text_length))
+    for name_length in 1:30, text_length in 20:140, required in (true, false), alias in (nothing, "a"),
+            default in ("None", "1000")
+        field = H._PyField("f"^name_length, alias, float_or_none, required, required ? nothing : default,
+                           first(prose, text_length))
         append!(too_long, filter(line -> length(line) > 79, H._py_field_lines(field)))
     end
     @test isempty(too_long)
