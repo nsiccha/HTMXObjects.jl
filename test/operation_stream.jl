@@ -333,7 +333,11 @@ end
     base = "http://127.0.0.1:$port"
     operation_log = HTMXObjects.OPERATION_LOG[]
     serve(; port, async=true, access_log=nothing, operation_log=nothing)
-    digits(text) = replace(text, r"[0-9]+" => "#")
+    # Numbers masked whole, decimal part included: the elapsed time shows a
+    # whole second without its ".0" (`4.6s`, then `5s`), so masking only digit
+    # runs told a poll rendered on a whole second apart from the push (todo
+    # `0lv9cla`).
+    numbers(text) = replace(text, r"[0-9]+(?:\.[0-9]+)?" => "#")
     try
         first = String(HTTP.get(base * "/stream_fragment?key=a", hx; retry=false).body)
         url = poll_url(first)
@@ -350,11 +354,11 @@ end
             pushed = progress[2][length(token) + 2:end]
             @test contains(pushed, "treebar-poller-inner")
             @test contains(pushed, "data-htmxo-operation-stream")
-            # The page's own poll of the same operation, digits aside (they are
-            # its elapsed time), answers the same.
+            # The page's own poll of the same operation, numbers aside (they
+            # are its elapsed time), answers the same.
             polled = HTTP.get(base * url, hx; retry=false)
             @test polled.status == 200
-            @test digits(String(polled.body)) == digits(pushed)
+            @test numbers(String(polled.body)) == numbers(pushed)
 
             release!("a")
             text = events_until(stream, "event: result")
