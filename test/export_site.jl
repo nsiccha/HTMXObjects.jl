@@ -74,8 +74,10 @@ using TestItemRunner
         @get placed_page(; k::Int=3) = (PLACED_CALLS[] += 10; h.p("k=$k"))
     end
 
-    # Every file of the bundle, relative to its root.
-    bundle_files(dir) = sort!([relpath(joinpath(d, f), dir) for (d, _, fs) in walkdir(dir) for f in fs])
+    # Every file of the bundle, relative to its root, with `/` between
+    # directories (as a static server addresses it, also on Windows).
+    bundle_files(dir) = sort!([replace(relpath(joinpath(d, f), dir), '\\' => '/')
+                               for (d, _, fs) in walkdir(dir) for f in fs])
 
     # Each reference in the bundle's HTML that a browser, with the bundle
     # served from `/repo/`, would not find: resolved as the browser resolves it
