@@ -3650,8 +3650,13 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
 
   Under the default names two addresses never silently share a file (a
   collision fails the export, naming both). Addresses your own `file_name`
-  gives one name share one file, rendered once — for a parameter that only
-  places a view on the page: `file_name = (a; kw...) -> static_file_name(drop_ort(a); kw...)`.
+  gives one name share one file, rendered once from the first one reached —
+  for a parameter that only places a view on the page:
+  `file_name = (a; kw...) -> static_file_name(drop_ort(a); kw...)`. A name
+  with a query (`"lieferflaechen.html?ortsteil=0101"`) names the file before
+  the `?`, and links to that address keep the query, so a page that applies
+  its parameters in the browser (`url_params`) is one file; list its plain
+  address in `pages` so that one is rendered.
 - **Controls** a static site cannot serve are removed (`controls=:remove`,
   the default) or greyed out (`:disable`). A linked runtime stays linked.
 - **Everything linked is rendered**, blocking, and every distinct address is a
