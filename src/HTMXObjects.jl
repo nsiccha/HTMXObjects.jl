@@ -5494,7 +5494,10 @@ no trigger loads on every click inside it. One that loads itself
 (`hx_trigger="load"`) sends the address's values with that first request.
 `hx-vals` that carry a value from an event leave the parameter out when there
 is none (`"js:{...(event?.detail?.kenn ? {kenn: event.detail.kenn} : {})}"`);
-an `undefined` value would be sent as the text `undefined`.
+an `undefined` value would be sent as the text `undefined`. An element a
+control reloads (`hx_trigger="change from:#ortsteil"`) wants
+`hx_sync="this:replace"` as well: htmx otherwise queues a second change behind
+the request of the first and drops it once that swap replaces the element.
 
 `k = k` says that the address parameter `k` drives this element and that the
 element was rendered for `k` (`nothing`: rendered without one).
@@ -5510,9 +5513,11 @@ alike:
 
 - **Address → element.** When the element enters the page (page load, an htmx
   swap, Back/Forward) and the address names another value than the one it shows,
-  it requests its `hx-get` again with the address's value. Its own requests (a
-  `load` trigger, polling) carry the address's value too, unless the request
-  carries the parameter itself, such as a value an `hx-vals` takes from a click.
+  it requests its `hx-get` again with the address's value. A request the
+  element makes while that one loads (a selector's change, a poll) takes its
+  place. Its own requests (a `load` trigger, polling) carry the address's
+  value too, unless the request carries the parameter itself, such as a value
+  an `hx-vals` takes from a click.
   A value outside the declared domain keeps the element as it is, with a
   console warning.
 - **Element → address.** When a request loads the element with a new value — its
@@ -9082,8 +9087,33 @@ url_params_script() = h.script(Raw(raw"""
         ps.map(function (p, i) { return p.name + '=' + want[i]; }).join('&'));
       return;
     }
-    htmx.ajax('GET', path, { source: el });
+    var req = { xhr: null, yielded: false }, sent;
+    el._htmxoUrlApply = req;
+    try { sent = htmx.ajax('GET', path, { source: el }); }
+    finally { delete el._htmxoUrlApply; }
+    // A request of the element's own that took its place (below) is no failure.
+    if (sent) sent.catch(function (err) { if (!req.yielded) throw err; });
   }
+  document.addEventListener('htmx:beforeRequest', function (e) {
+    var d = e.detail || {}, req = d.elt && d.elt._htmxoUrlApply;
+    if (req) { req.xhr = d.xhr; d.elt._htmxoUrlApplying = req; }
+  });
+  document.addEventListener('htmx:afterRequest', function (e) {
+    var d = e.detail || {}, req = d.elt && d.elt._htmxoUrlApplying;
+    if (req && req.xhr === d.xhr) delete d.elt._htmxoUrlApplying;
+  });
+  // A request the element makes while the address's values load (a
+  // selector's `change`, a poll) takes that request's place, as htmx's
+  // `hx-sync="this:abort"` lets it. Queued behind it, as htmx queues by
+  // default, it would be dropped once the swap replaces the element, and the
+  // selector's change would do nothing (snag static-url-param-d5a8157c).
+  document.addEventListener('htmx:confirm', function (e) {
+    var el = (e.detail || {}).elt, req = el && el._htmxoUrlApplying;
+    if (!req || el._htmxoUrlApply) return;
+    delete el._htmxoUrlApplying;
+    req.yielded = true;
+    req.xhr.abort();
+  });
   // A new version a request swapped in writes its values instead (below).
   function loaded(el) {
     var pending = el._htmxoUrlPending;

@@ -1,7 +1,7 @@
 @testmodule UrlParamsFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
-    export UrlParamsApp, SlowUrlParamsApp, KS, PROBES, alarms_view, bundle, bundle_name
+    export UrlParamsApp, SlowUrlParamsApp, PickedUrlParamsApp, KS, PROBES, alarms_view, bundle, bundle_name
 
     const KS = (3.0, 4.0, 5.0)
     const PROBES = ("a", "b", "c")
@@ -144,14 +144,85 @@
         @get index() = h.div(alarms_view(3.0), h.script(Raw(SLOW_DRIVER)))
     end
 
+    # A part a selector outside it reloads, as an Ortsteil selector reloads its
+    # map: its own request takes the selected value from the `change` event.
+    picked_view(k) = h.section(; id="picked", hx_get="/picked", hx_trigger="change from:#k-select",
+                               hx_swap="outerHTML",
+                               hx_vals="js:{...(event?.target?.id === 'k-select' ? {k: event.target.value} : {})}",
+                               url_params(k = k; values = (k = KS,))...)(h.p("k=$k"; class="k"))
+    k_select() = h.select(; id="k-select", name="k")((h.option(string(x); value=string(x)) for x in KS)...)
+
+    # Checks for the browser item over `PickedUrlParamsApp`, opened with
+    # `?k=4.0`, whose part the server answers slowly for 4.0: the selector
+    # changes while the address's value still loads (snag
+    # static-url-param-d5a8157c).
+    const PICKED_DRIVER = raw"""
+    const checks = [];
+    const check = (name, ok) => checks.push([name, Boolean(ok)]);
+    // The selector changes right after the part's first request, the
+    // address's, is sent: in a microtask, as the browser's virtual time stands
+    // still while that request's held answer is pending.
+    let changed = false;
+    document.addEventListener('htmx:beforeRequest', function first(e) {
+      if (e.detail.elt.id !== 'picked') return;
+      document.removeEventListener('htmx:beforeRequest', first);
+      queueMicrotask(() => {
+        check('address-value-loading', document.getElementById('picked').classList.contains('htmx-request'));
+        const select = document.getElementById('k-select');
+        select.value = '5.0';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        changed = true;
+      });
+    });
+    window.addEventListener('load', async function () {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const wait = async cond => {
+        for (let n = 0; n < 200 && !cond(); n++) await sleep(20);
+        const ok = cond();
+        await sleep(60);
+        return ok;
+      };
+      const text = sel => (document.querySelector(sel) || {}).textContent;
+      const param = n => new URLSearchParams(location.search).get(n);
+      let failures = 0;
+      document.body.addEventListener('htmx:responseError', () => failures++);
+      document.body.addEventListener('htmx:sendError', () => failures++);
+      let rejected = 0;
+      window.addEventListener('unhandledrejection', () => rejected++);
+      try {
+        check('selector-changed', await wait(() => changed));
+        check('selected-shown', await wait(() => text('#picked .k') === 'k=5.0'));
+        check('selected-written', await wait(() => param('k') === '5.0'));
+        // The address's answer, held back past this, does not take it back.
+        await sleep(1500);
+        check('selected-kept', text('#picked .k') === 'k=5.0' && param('k') === '5.0');
+        check('no-failed-request', failures === 0 && rejected === 0);
+      } catch (err) {
+        check('error: ' + String(err), false);
+      }
+      const result = document.createElement('pre'); result.id = 'checks';
+      result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+      document.body.appendChild(result);
+    });
+    """
+
+    @htmx struct PickedUrlParamsApp
+        __page__(content) = htmx(h.main(content); assets="/test-assets", sse_version=nothing,
+            ws_version=nothing, preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false, overlay=false)
+        "Picked"
+        @get picked(; k::Float64=3.0) = picked_view(k)
+        @get index() = h.div(k_select(), picked_view(3.0), h.script(Raw(PICKED_DRIVER)))
+    end
+
     # The bundle file of an app address, flat, query folded into the name.
     bundle_name(address) = address == "/" ? "index.html" :
         replace(lstrip(address, '/'), r"[?=&]" => "-") * ".html"
 
     # A static export of the app: every address the pages reference, written
     # as `bundle_name` names it; `seen` lists what `url_map` was asked for.
-    function bundle()
-        route!(UrlParamsApp())
+    function bundle(app=UrlParamsApp())
+        route!(app)
         files, queue, seen = Dict{String,String}(), ["/"], Set(["/"])
         asked = String[]
         url_map(address) = if startswith(address, "/") && !startswith(address, "/test-assets")
@@ -317,6 +388,61 @@ end
                     @info "url_params browser run" url checks=join(lines, "\n") requests=join(requests, "\n")
             end
             @test isempty(missing_files)
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "a selector changed while the address's value loads loads the selected one" setup=[UrlParamsFixture, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        files, _ = bundle(PickedUrlParamsApp())
+        requests = String[]
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # The page renders the part for 3.0; the address asks for 4.0, whose
+        # answer is held back so that the selector changes while it loads.
+        held = ("/picked?k=4.0", "picked-k-4.0.html")
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            endswith(path, "/test-assets/htmx.min.js") &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            target = startswith(path, "/static/") ? path[length("/static/")+1:end] :
+                replace(String(req.target), r"^/live" => "")
+            push!(requests, target)
+            target in held && sleep(1.0)
+            startswith(path, "/static/") ?
+                HTTP.Response(200, ["Content-Type" => "text/html"], files[target]) :
+                dispatch(req.method, isempty(target) ? "/" : target; headers=collect(req.headers))
+        end
+        runs = (
+            ("live/?k=4.0", ["/?k=4.0", "/picked?k=4.0", "/picked?k=5.0"]),
+            ("static/index.html?k=4.0", ["index.html", "picked-k-4.0.html", "picked-k-5.0.html"]))
+        try
+            for (url, expected) in runs
+                empty!(requests)
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/$url`)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                isnothing(checks) && continue
+                lines = split(checks[1], '\n')
+                for line in lines
+                    @test endswith(line, ":true")
+                end
+                @test length(lines) == 6
+                @test sort(requests) == sort(expected)
+                all(endswith(":true"), lines) && sort(requests) == sort(expected) ||
+                    @info "url_params selector run" url checks=join(lines, "\n") requests=join(requests, "\n")
+            end
         finally
             close(server)
         end
