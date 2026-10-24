@@ -237,13 +237,17 @@ end
             private(h.p("Die vollständige Spezifikation."); public = h.p("Eine Kurzfassung.")),
             h.p("Nachher."))
         mktempdir() do dir
-            text(path) = read(`pdftotext -enc UTF-8 $path -`, String)
             public = joinpath(dir, "public.pdf")
-            pdf_report(page, public; title="Konzept", lang="de-DE")
-            @test occursin("Eine Kurzfassung.", text(public)) && !occursin("Spezifikation", text(public))
+            @test pdf_report(page, public; title="Konzept", lang="de-DE") == public
             full = joinpath(dir, "full.pdf")
-            pdf_report(page, full; title="Konzept", lang="de-DE", audience=:private)
-            @test occursin("Die vollständige Spezifikation.", text(full)) && !occursin("Kurzfassung", text(full))
+            @test pdf_report(page, full; title="Konzept", lang="de-DE", audience=:private) == full
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                text(path) = read(`pdftotext -enc UTF-8 $path -`, String)
+                @test occursin("Eine Kurzfassung.", text(public)) && !occursin("Spezifikation", text(public))
+                @test occursin("Die vollständige Spezifikation.", text(full)) && !occursin("Kurzfassung", text(full))
+            end
         end
     end
 end
