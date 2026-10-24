@@ -3654,6 +3654,12 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   places a view on the page: `file_name = (a; kw...) -> static_file_name(drop_ort(a); kw...)`.
 - **Controls** a static site cannot serve are removed (`controls=:remove`,
   the default) or greyed out (`:disable`). A linked runtime stays linked.
+- **Everything linked is rendered**, blocking, and every distinct address is a
+  file. An `hx-get` whose element adds parameters in the browser
+  (`hx-vals="js:…"`, `hx-include`) is fetched without them, so it answers the
+  route's default, or fails when a parameter is required; declare its values
+  with `url_params` on that element ([Page address parameters](#page-address-parameters)),
+  or leave it out of the static page.
 - `aliases = Dict("/api/v1/docs" => "/api/v1/openapi.json")` links an address
   that needs a server to another one. `parent` is the progress node the routes'
   work hangs under. A route that wants to say it is a snapshot tests
