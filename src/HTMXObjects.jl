@@ -5529,6 +5529,15 @@ alike:
   writes the value it asked for when the poller takes the element's place, so
   the element the polls bring matches the address. Reload, Back and a copied
   link then show the same view; no `hx-push-url` is needed for it.
+- **Element → controls.** A control outside the element that reloads it — a
+  `select`, a group of radio buttons or another input that holds a value,
+  named as the element's requests send the parameter, at or inside a `from:`
+  source of its `hx-trigger` or an `hx-include` target — shows the element's
+  value: the address's value as soon as the element requests it, and the
+  value of each version that enters the page. Setting it fires no `change`.
+  A request that fails puts it back, unless the reader changed it meanwhile;
+  a value it has no option for leaves it as it is, with a console warning.
+  Controls inside the element are rendered with it and left alone.
 - **Static exports.** A static export calls `url_map` with the address of every
   declared value (the element's `hx-get` with that value) and gives the element
   each value's file, so an exporter that follows mapped addresses writes them and
@@ -9038,11 +9047,105 @@ url_params_script() = h.script(Raw(raw"""
     return v === undefined || v === null ? null : Array.isArray(v) ? String(v[0]) : String(v);
   }
 
+  // The controls outside an element that show its values: a `select`, a group
+  // of radio buttons or another `input` that holds a value, named as a
+  // parameter is sent, at or inside a `from:` source of the element's
+  // `hx-trigger` or an `hx-include` target, as htmx resolves them. Controls
+  // inside the element are rendered with it. Without them a static export's
+  // selector kept its rendered value beside the address's view (snag
+  // static-url-param-c083f416).
+  var api = null, NO_VALUE = /^(checkbox|file|button|submit|reset|image)$/;
+  function controls(el, ps) {
+    if (!api && window.htmx) htmx.defineExtension('htmxo-url-params', { init: function (a) { api = a; } });
+    var found = ps.map(function () { return []; });
+    if (!api) return found;
+    var sources = included(el);
+    api.getTriggerSpecs(el).forEach(function (spec) {
+      if (spec.from) sources = sources.concat(targets(el, spec.from));
+    });
+    sources.forEach(function (s) {
+      var root = s === window ? document : s;
+      if (!root || !root.querySelectorAll) return;
+      var all = Array.prototype.slice.call(root.querySelectorAll('select, input'));
+      if (root instanceof Element && root.matches('select, input')) all.push(root);
+      all.forEach(function (c) {
+        if (el.contains(c) || (c.tagName === 'SELECT' ? c.multiple : NO_VALUE.test(c.type))) return;
+        ps.forEach(function (p, i) { if (c.name === p.as && found[i].indexOf(c) < 0) found[i].push(c); });
+      });
+    });
+    return found;
+  }
+  // The nodes an htmx selector names: of each comma-separated part (`<…/>`
+  // keeps its commas), the node htmx's API resolves it to (`closest form`,
+  // `next`, `document`, or a CSS selector's first match) and, for a CSS
+  // selector, every match. A form of htmx's own is no CSS selector, or one
+  // that matches nothing (`closest <form/>`, `next`).
+  function targets(el, selector) {
+    var out = [], parts = [], depth = 0, start = 0, root = el.getRootNode();
+    for (var i = 0; i <= selector.length; i++) {
+      var c = selector[i];
+      if (i === selector.length || (c === ',' && depth === 0)) { parts.push(selector.slice(start, i).trim()); start = i + 1; }
+      else if (c === '<') depth++;
+      else if (c === '/' && selector[i + 1] === '>') depth--;
+    }
+    parts.forEach(function (part) {
+      if (!part) return;
+      var first = api.querySelectorExt(el, part), all = [];
+      if (first) out.push(first);
+      try { all = root.querySelectorAll(part.replace(/^<(.*)\/>$/, '$1')); }
+      catch (err) { if (err.name !== 'SyntaxError') throw err; }
+      Array.prototype.push.apply(out, all);
+    });
+    return out;
+  }
+  // An element's `hx-include` targets: inherited, `this`, and `inherit`
+  // adding those of the ancestor it names, as htmx's own lookup does.
+  function included(el) {
+    var value = api.getClosestAttributeValue(el, 'hx-include');
+    if (!value) return [];
+    if (value === 'this') return [api.findThisElement(el, 'hx-include')];
+    var out = targets(el, value), up = el.parentElement;
+    up = /(^|,)\s*inherit\s*($|,)/.test(value) && up && up.closest('[hx-include], [data-hx-include]');
+    return up ? out.concat(included(up)) : out;
+  }
+  // Shows an element's values in its controls, without a `change` event,
+  // which would request the element again. A parameter whose control a reader
+  // changed after the request that brought the values began (`since`) keeps
+  // the reader's value: their change brings its own version. A value a
+  // control cannot show leaves it as it is, with a console warning.
+  var edits = 0;
+  ['input', 'change'].forEach(function (type) {
+    document.addEventListener(type, function (e) { if (e.target) e.target._htmxoUrlEdit = ++edits; }, true);
+  });
+  function follow(el, ps, vals, since) {
+    var found = controls(el, ps);
+    ps.forEach(function (p, i) {
+      var v = vals[i], cs = found[i];
+      if (v === null || cs.some(function (c) { return since !== undefined && (c._htmxoUrlEdit || 0) > since; })) return;
+      var radios = cs.filter(function (c) { return c.type === 'radio'; });
+      cs.forEach(function (c) {
+        if (c.type === 'radio' || c.value === v) return;
+        var old = c.value;
+        c.value = v;
+        if (c.value !== v) { c.value = old; cannot(c, p, v); }
+      });
+      var hits = radios.filter(function (c) { return c.value === v; });
+      if (hits.length) hits.forEach(function (c) { c.checked = true; });
+      else if (radios.length) cannot(radios[0], p, v);
+    });
+  }
+  function cannot(c, p, v) {
+    warn((c.id ? '#' + c.id : c.tagName.toLowerCase() + '[name="' + c.name + '"]') +
+      ' has no ' + p.name + '=' + v + ' to show; kept as it is');
+  }
+
   // A declared element's own request carries the address's values, unless the
   // request carries the parameter itself (an `hx-vals` value from a click). In
-  // a static export it goes to that value's file.
+  // a static export it goes to that value's file. Asking for other values than
+  // the element shows, it shows them in its controls at once.
   document.addEventListener('htmx:configRequest', function (e) {
     var d = e.detail, el = d.elt, ps = declared(el);
+    d.htmxoUrlEdits = edits;
     if (!ps) return;
     var table = files(el), base = shown(el, ps), address = wanted(ps, table, base);
     var vals = ps.map(function (p, i) {
@@ -9071,6 +9174,13 @@ url_params_script() = h.script(Raw(raw"""
     d.htmxoUrlValues = byName(ps, vals);
     d.htmxoUrlShown = byName(ps, base);
     el._htmxoUrlSent = JSON.stringify(vals);
+    if (differs(vals, base)) { d.htmxoUrlFollowed = true; follow(el, ps, vals); }
+  });
+  // Such a request that failed shows the element's values in them again.
+  document.addEventListener('htmx:afterRequest', function (e) {
+    var d = e.detail || {}, cfg = d.requestConfig, el = d.elt;
+    var ps = cfg && cfg.htmxoUrlFollowed && !d.successful && el.isConnected && declared(el);
+    if (ps) follow(el, ps, shown(el, ps), cfg.htmxoUrlEdits);
   });
 
   // An element entering the page (load, swap, Back/Forward) that shows other
@@ -9087,6 +9197,8 @@ url_params_script() = h.script(Raw(raw"""
         ps.map(function (p, i) { return p.name + '=' + want[i]; }).join('&'));
       return;
     }
+    // Its controls show them first, so that an `hx-include` sends them.
+    follow(el, ps, want);
     var req = { xhr: null, yielded: false }, sent;
     el._htmxoUrlApply = req;
     try { sent = htmx.ajax('GET', path, { source: el }); }
@@ -9127,6 +9239,15 @@ url_params_script() = h.script(Raw(raw"""
     if (!(root instanceof Element)) return;
     if (root.matches(SEL)) loaded(root);
     root.querySelectorAll(SEL).forEach(loaded);
+  });
+  // Each version entering the page (load, swap, Back/Forward) shows its values
+  // in its controls before htmx sets it up, so that a `changed` trigger
+  // compares with them.
+  document.addEventListener('htmx:beforeProcessNode', function (e) {
+    var el = e.target, ps = declared(el), pending = el._htmxoUrlPending;
+    if (!ps || el._htmxoUrlInit) return;
+    el._htmxoUrlInit = true;
+    follow(el, ps, shown(el, ps), pending && pending.edits);
   });
 
   // A request that loads a declared element writes its values into the
@@ -9188,8 +9309,12 @@ url_params_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:afterSwap', function (e) {
     var d = e.detail || {}, cfg = d.requestConfig;
     if (!cfg) return;
-    if (cfg.htmxoUrlValues && declared(cfg.elt)) {
-      if (cfg.elt.isConnected) cfg.elt._htmxoUrlShown = cfg.htmxoUrlValues;
+    var own = cfg.htmxoUrlValues && declared(cfg.elt);
+    if (own) {
+      if (cfg.elt.isConnected) {
+        cfg.elt._htmxoUrlShown = cfg.htmxoUrlValues;
+        follow(cfg.elt, own, shown(cfg.elt, own), cfg.htmxoUrlEdits);
+      }
       write(cfg.htmxoUrlValues, cfg.htmxoUrlShown);
     }
     var el = e.target, ps = el === cfg.elt ? null : declared(el);
@@ -9197,12 +9322,13 @@ url_params_script() = h.script(Raw(raw"""
     // A new version of the element, swapped in for the target: until htmx
     // settles it, it carries the old version's attributes when the two share
     // an id, so its values are written once it loads (`loaded`).
-    if (el !== d.target) { el._htmxoUrlPending = { before: cfg.htmxoUrlBefore }; return; }
+    if (el !== d.target) { el._htmxoUrlPending = { before: cfg.htmxoUrlBefore, edits: cfg.htmxoUrlEdits }; return; }
     // Another element's request into this one.
     var vals = requested(el, ps, d);
     if (!vals) return;
     var before = byName(ps, shown(el, ps));
     el._htmxoUrlShown = byName(ps, vals);
+    follow(el, ps, vals, cfg.htmxoUrlEdits);
     write(el._htmxoUrlShown, before);
   });
 
