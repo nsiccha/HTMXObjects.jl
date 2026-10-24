@@ -3831,6 +3831,20 @@ the rest:
   element the polls bring matches the address. The app needs no
   `hx-push-url` for this, and a share button that copies `location.href`
   copies the view.
+- **Element → controls.** A control outside the element that reloads it shows
+  the element's value: a `select`, a group of radio buttons or another input
+  that holds a value, named as the element's requests send the parameter
+  (`name="ortsteil"`), at or inside a `from:` source of its `hx-trigger` or
+  an `hx-include` target. It shows the address's value as soon as the element
+  requests it, and the value of each version that enters the page, one a
+  link swaps in included. Setting it fires no `change`, so it requests
+  nothing. A request that fails puts the controls back to what the element
+  still shows; a control the reader changed meanwhile keeps the reader's
+  value, which loads its own version. A value a control has no option for
+  leaves it as it is, with a console warning. Controls inside the element are
+  rendered with it and left alone. So the static export of a page whose
+  selector sits above the part it reloads opens `?ortsteil=0101` with the
+  selector reading 0101, although the page was rendered for its default.
 - **Static exports.** `StaticExport`'s `url_map` is called with the address of
   every declared value (`/voralarme?k=4.0`), so an exporter that writes every
   mapped address writes those too; the element carries each value's file and
