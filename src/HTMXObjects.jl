@@ -12,7 +12,7 @@ export create_app
 export HTTP, queryparams, formparams, formdata, bodyparams, multipartparams, Upload, MultilineText
 export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfiles, vendor_head
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
-export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse,
+export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse, JSONResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
     static_export, static_url, url_params, url_params_script, url_anchor_script
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
@@ -5226,8 +5226,8 @@ alone, so concurrent ordinary requests are unaffected.
   page whose `assets` addresses the copied libraries addresses the runtime
   too. A many-page export then holds one copy instead of one per page.
 
-A route that returns a finished `HTTP.Response` or [`MIMEResponse`](@ref) has
-no value to transform, so a static dispatch of it throws
+A route that returns a finished `HTTP.Response`, [`MIMEResponse`](@ref) or
+[`JSONResponse`](@ref) has no value to transform, so a static dispatch of it throws
 [`StaticExportRefused`](@ref) instead of handing back live markup; fetch those
 with a plain `dispatch`. Markdown requests (`Accept: text/markdown`, `?plain`)
 are forced blocking too but carry no attributes to rewrite.
@@ -5264,7 +5264,7 @@ StaticExport(; url_map=nothing, controls::Symbol=:disable,
     StaticExportRefused <: Exception
 
 Thrown by `dispatch(...; static=spec)` when the route returned a finished
-`HTTP.Response` or `MIMEResponse`. Such a response bypasses the static
+`HTTP.Response`, `MIMEResponse` or `JSONResponse`. Such a response bypasses the static
 transform, so returning it would put live markup into a static bundle; the
 handler rethrows instead of rendering an ordinary route error, so the export
 fails at the `dispatch` call.
@@ -6755,8 +6755,9 @@ a non-HTMX submission (a classic form post, curl) are answered by their own
 response.
 
 Direct handling is reserved for what genuinely needs it: declared
-`HTTP.Response` and `MIMEResponse` outputs (a route whose answer is its status
-or headers — `hx_response` included — declares that return type), WebSocket
+`HTTP.Response`, `MIMEResponse` and `JSONResponse` outputs (a route whose answer
+is its status or headers — `hx_response` included — or a JSON body declares
+that return type), WebSocket
 and SSE route lambdas, [`record!`](@ref)'s static export (it forces
 `:blocking`), and routes marked `@direct` — the per-route opt-out for a
 fragment that must answer inline on the request's own task.
@@ -10629,12 +10630,16 @@ end
 
 _verb_symbol(::Verb{V}) where {V} = V
 
-function _declared_final_response(descriptor)
-    descriptor === nothing && return false
+# The output type a route's declaration names (`@get f()::T = …`), or `nothing`.
+function _declared_output_type(descriptor)
+    descriptor === nothing && return nothing
     output = get(descriptor, :output, nothing)
-    output === nothing && return false
-    T = get(output, :type, nothing)
-    T isa Type && T <: Union{HTTP.Response,MIMEResponse}
+    output === nothing ? nothing : get(output, :type, nothing)
+end
+
+function _declared_final_response(descriptor)
+    T = _declared_output_type(descriptor)
+    T isa Type && T <: Union{HTTP.Response,MIMEResponse,JSONResponse}
 end
 
 # How a verb's request can be answered off its own task. A GET read polls
@@ -12656,6 +12661,7 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
                                verb_inst, idx_vals, kw_pairs, req; page_shell,
                                parent_progress=parent_progress, preload,
                                direct, queued)
+    value = _as_declared(_declared_output_type(descriptor), value)
     (; context=target.context, root=target.root, leaf=target.leaf,
        idx_vals, kw_pairs, value)
 end
@@ -15287,7 +15293,7 @@ for a loopback request.
   written to disk and no registration, operation policy, or global
   recording state changes, so ordinary requests served concurrently are
   unaffected; `parent=` nests the blocking execution as usual. A route that
-  returns a finished `HTTP.Response`/`MIMEResponse` makes the call throw
+  returns a finished `HTTP.Response`/`MIMEResponse`/`JSONResponse` makes the call throw
   [`StaticExportRefused`](@ref).
 - `operation_policy` — an optional [`OperationPolicy`](@ref), or its mode
   Symbol, that this one request runs under instead of its root's registered
@@ -20956,6 +20962,8 @@ include("test_items.jl")
 include("routes/test_routes.jl")
 
 include("routes/structure_routes.jl")
+
+include("json_response.jl")
 
 include("routes/openapi_routes.jl")
 
