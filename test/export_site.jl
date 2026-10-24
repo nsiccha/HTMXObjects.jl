@@ -68,8 +68,10 @@ using TestItemRunner
             pico_version=HTMXObjects._PICO_VERSION)
         @get index() = h.div(
             h.div(; hx_get=base * "/placed_probe?kenn=a&ort=karte", hx_trigger="load"),
-            h.div(; hx_get=base * "/placed_probe?kenn=a&ort=liste", hx_trigger="load"))
+            h.div(; hx_get=base * "/placed_probe?kenn=a&ort=liste", hx_trigger="load"),
+            h.a("3"; href=base * "/placed_page"), h.a("4"; href=base * "/placed_page?k=4"))
         @get placed_probe(; kenn::String="", ort::String="") = (PLACED_CALLS[] += 1; h.p("probe $kenn"))
+        @get placed_page(; k::Int=3) = (PLACED_CALLS[] += 10; h.p("k=$k"))
     end
 
     # Every file of the bundle, relative to its root.
@@ -229,10 +231,17 @@ end
     # a probe view rendered once, whatever its placement on the page.
     route!(PlacedSiteApp())
     PLACED_CALLS[] = 0
-    unplaced(a; kw...) = static_file_name(replace(a, r"&ort=[a-z]+" => ""); kw...)
+    # A page that reads its parameter in the browser can be one file whose
+    # links keep the query.
+    unplaced(a; kw...) = startswith(a, "/placed_page?") ? "placed_page.html?" * split(a, '?')[2] :
+        static_file_name(replace(a, r"&ort=[a-z]+" => ""); kw...)
     dir = mktempdir()
     export_site(dir; pages=["/"], file_name=unplaced)
-    @test PLACED_CALLS[] == 1
+    @test PLACED_CALLS[] == 11
     @test isfile(joinpath(dir, "hx", "placed_probe-kenn-a.html"))
-    @test count("hx-get=\"hx/placed_probe-kenn-a.html\"", read(joinpath(dir, "index.html"), String)) == 2
+    index = read(joinpath(dir, "index.html"), String)
+    @test count("hx-get=\"hx/placed_probe-kenn-a.html\"", index) == 2
+    @test occursin("href=\"placed_page.html\"", index) && occursin("href=\"placed_page.html?k=4\"", index)
+    @test occursin("k=3", read(joinpath(dir, "placed_page.html"), String))
+    @test !any(f -> occursin('?', f), bundle_files(dir))
 end

@@ -6022,7 +6022,8 @@ function _site_identity(address::AbstractString)
 end
 
 # Queue `url` (if new) and return what the page writes for it: the marker of
-# its file, then a file address's query and the `#id`.
+# its file, then the query the link keeps (one `file_name` names after a `?`,
+# or a file address's own) and the `#id`.
 function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
     _site_internal(url) || return nothing
     rest, id = _split_once(url, '#')
@@ -6031,7 +6032,7 @@ function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractStr
     fragment = kind === :fragment
     path, query = _split_once(address, '?')
     own = _static_own_extension(path)
-    key = crawl.file_name(address; fragment, ext=".html")
+    key, linked = _split_once(crawl.file_name(address; fragment, ext=".html"), '?')
     i = lock(crawl.lock) do
         i = get(crawl.keys, key, nothing)
         if isnothing(i)
@@ -6044,8 +6045,8 @@ function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractStr
         end
         i
     end
-    suffix = (isnothing(own) || isnothing(query) ? "" : "?" * query) * (isnothing(id) ? "" : "#" * id)
-    _site_marker(crawl, i) * suffix
+    kept = something(linked, isnothing(own) ? nothing : query, Some(nothing))
+    _site_marker(crawl, i) * (isnothing(kept) ? "" : "?" * kept) * (isnothing(id) ? "" : "#" * id)
 end
 
 # The file extension an answer's `Content-Type` calls for, or `nothing`.
@@ -6120,7 +6121,11 @@ can run inside a serving app (it renders in process with
   `insitu-raster.geojson`). Every link is written relative to the bundle's
   root. Under the default names two addresses never silently share a file: a
   collision is a failure naming both. Addresses an app's own `file_name` gives
-  one name share one file, rendered once from the first one reached.
+  one name share one file, rendered once from the first one reached (list the
+  plain address in `pages` to render that one). A name with a query
+  (`"lieferflaechen.html?ortsteil=0101"`) names the file before the `?`, and
+  links to that address keep the query: a page that applies its parameters in
+  the browser ([`url_params`](@ref)) is then one file.
 - **Controls** a static site cannot serve (a non-GET `hx-*`, an unmapped
   `hx-get` with a query) follow `controls`: `:remove` (default) leaves them
   out, `:disable` greys them out ([`StaticExport`](@ref)). A page's linked
@@ -6179,7 +6184,7 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
             reason = "no file extension for its Content-Type $(repr(HTTP.header(resp, "Content-Type"))); " *
                      "give the address one, or pass export_site a file_name"
         end
-        name = isnothing(reason) ? file_name(e.address; fragment=e.fragment, ext) : ""
+        name = isnothing(reason) ? first(_split_once(file_name(e.address; fragment=e.fragment, ext), '?')) : ""
         file = normpath(joinpath(root, name))
         if isnothing(reason) && (isabspath(name) || !startswith(file, joinpath(root, "")))
             reason = "its file name $(repr(name)) leaves the bundle"
