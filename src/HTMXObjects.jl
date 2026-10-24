@@ -16,7 +16,7 @@ export route!, record!, to_response, generic_html, save_response, static_transfo
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
     static_export, static_url, url_params, url_params_script, url_anchor_script,
     export_site, static_file_name, StaticSiteIncomplete,
-    private, Private, export_audience, PrivateContentEscaped
+    private, Private, export_audience, with_audience, PrivateContentEscaped
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -4915,15 +4915,39 @@ _finalized_response(::Any) = nothing
 _finalized_response(r::HTTP.Response) = r
 _finalized_response(m::MIMEResponse) = to_response(m)
 
-# Convert a value to markdown text via show(io, MIME"text/markdown"(), val).
+"""
+    to_markdown_string(val; audience=nothing) -> String
+
+The Markdown of `val`, as a `?plain` or `Accept: text/markdown` answer holds it:
+`show(io, MIME"text/markdown"(), val)` once interactive chrome (forms, inputs,
+buttons) is dropped, or `""` when nothing else is left.
+
+`audience` (`:public` or `:private`) is who the Markdown is for:
+[`private`](@ref) content shows its stand-in, or nothing, for `:public`, and in
+full for `:private`. Without it, `val` renders for the audience of the answer
+it is rendered in (a route's `export_audience(__req__)`), and for the public
+outside any request. Library code that assembles a document from values it
+renders itself passes the document's audience, also when it runs inside a live
+request, which is `:private`:
+
+```julia
+chunks = [to_markdown_string(section; audience) for section in sections]
+pdf_report(join(chunks, "\\n\\n"), "konzept.pdf"; title="Konzept", lang="de-DE", audience)
+```
+
+An `audience` other than `:public` and `:private` is an `ArgumentError`.
+"""
+to_markdown_string(val; audience=nothing) = _to_markdown_string(val, audience)
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
 # Interactive chrome (form/input/textarea/button) is dropped first by
 # `_strip_md_chrome` so a `?plain`/`?markdown` read never serializes a form's
 # fields into prose (e.g. an edit-form textarea pre-filled with the raw body).
 # An all-chrome val strips to `nothing` → empty markdown.
-to_markdown_string(val) = let stripped = _strip_md_chrome(val)
+_to_markdown_string(val, ::Nothing) = let stripped = _strip_md_chrome(val)
     isnothing(stripped) ? "" : sprint(show, MIME"text/markdown"(), stripped)
 end
+_to_markdown_string(val, audience) =
+    _with_audience(() -> _to_markdown_string(val, nothing), _check_audience(audience, "to_markdown_string"))
 
 # --- Dual-view wrappers: html_only / markdown_only ---
 
@@ -4988,9 +5012,11 @@ as a short summary of the model.
 Public answers are those of an export, unless it asks for `audience=:private`:
 a [`StaticExport`](@ref) or [`export_site`](@ref) bundle, a
 [`pdf_report`](@ref) of a value, a `dispatch` made outside any request (the
-Markdown a concept PDF inlines), and a `dispatch(...; audience=:public)`. The
-live app always shows everything. [`export_audience`](@ref) tells a route which
-audience it answers for.
+Markdown a concept PDF inlines), and a `dispatch(...; audience=:public)`.
+Anything rendered outside any request is public too, unless it is rendered
+with [`to_markdown_string`](@ref)`(x; audience=:private)` or inside
+[`with_audience`](@ref)`(f, :private)`. The live app always shows everything.
+[`export_audience`](@ref) tells a route which audience it answers for.
 
 `private` works wherever a value is rendered, in HTML and in Markdown: as a
 child of an element, in a semantic element, or as a route's whole answer. A
@@ -5021,16 +5047,46 @@ struct Private
 end
 private(content; public=nothing) = Private(content, public)
 
-# The audience of the answer being rendered: `:public`, `:private`, or
-# `nothing` outside any request and export, where content shows as in the
-# live app. A route handler sets it to its request's `export_audience` for the
-# whole request, `pdf_report` to its own while it renders a value.
+# The audience of the answer being rendered: `:public` or `:private`, and
+# `:public` outside any request, export and `with_audience`, so a value
+# rendered without asking cannot show private content. A route handler sets it
+# to its request's `export_audience` for the whole request, and the tasks
+# HTMXObjects starts for it carry it on (`_spawn_operation`); `pdf_report` and
+# `to_markdown_string` set their own while they render a value.
 const _AUDIENCE = :htmxo_audience
-_ambient_audience() = get(task_local_storage(), _AUDIENCE, nothing)
+_ambient_audience() = get(task_local_storage(), _AUDIENCE, :public)
 _with_audience(f, audience::Symbol) = task_local_storage(f, _AUDIENCE, audience)
 
 _check_audience(audience, who) = audience in (:public, :private) ? audience :
     throw(ArgumentError("$who audience must be :public or :private (got $(repr(audience)))"))
+
+"""
+    with_audience(f, audience)
+
+Call `f()` and return its value, rendering everything it renders for
+`audience`: `:public` or `:private`. [`private`](@ref) content shows its
+stand-in, or nothing, for `:public`, and in full for `:private`.
+
+Rendering already follows the answer it is part of: a route renders for
+[`export_audience`](@ref)`(__req__)`, and so does the work HTMXObjects runs for
+it in other tasks. Outside any request it is for the public. Use
+`with_audience` where code renders for someone else: HTML it builds itself
+(`repr("text/html", x)`, an [`HTMLSnapshot`](@ref)) for a given reader, or work
+in a task it starts itself, since a new task does not inherit the request's
+audience. For Markdown, [`to_markdown_string`](@ref)`(x; audience)` does the
+same.
+
+```julia
+html = with_audience(:private) do
+    repr("text/html", page)          # everything, as the live app shows it
+end
+audience = export_audience(__req__)
+task = Threads.@spawn with_audience(() -> render_report(spec), audience)
+```
+
+An `audience` other than `:public` and `:private` is an `ArgumentError`.
+"""
+with_audience(f, audience) = _with_audience(f, _check_audience(audience, "with_audience"))
 
 # What an answer for `audience` shows of `p`.
 _shown(p::Private, audience) = audience === :public ? p.public : p.content
@@ -5700,6 +5756,15 @@ alike:
   writes the value it asked for when the poller takes the element's place, so
   the element the polls bring matches the address. Reload, Back and a copied
   link then show the same view; no `hx-push-url` is needed for it.
+- **Element → controls.** A control outside the element that reloads it — a
+  `select`, a group of radio buttons or another input that holds a value,
+  named as the element's requests send the parameter, at or inside a `from:`
+  source of its `hx-trigger` or an `hx-include` target — shows the element's
+  value: the address's value as soon as the element requests it, and the
+  value of each version that enters the page. Setting it fires no `change`.
+  A request that fails puts it back, unless the reader changed it meanwhile;
+  a value it has no option for leaves it as it is, with a console warning.
+  Controls inside the element are rendered with it and left alone.
 - **Static exports.** A static export calls `url_map` with the address of every
   declared value (the element's `hx-get` with that value) and gives the element
   each value's file, so an exporter that follows mapped addresses writes them and
@@ -9323,11 +9388,105 @@ url_params_script() = h.script(Raw(raw"""
     return v === undefined || v === null ? null : Array.isArray(v) ? String(v[0]) : String(v);
   }
 
+  // The controls outside an element that show its values: a `select`, a group
+  // of radio buttons or another `input` that holds a value, named as a
+  // parameter is sent, at or inside a `from:` source of the element's
+  // `hx-trigger` or an `hx-include` target, as htmx resolves them. Controls
+  // inside the element are rendered with it. Without them a static export's
+  // selector kept its rendered value beside the address's view (snag
+  // static-url-param-c083f416).
+  var api = null, NO_VALUE = /^(checkbox|file|button|submit|reset|image)$/;
+  function controls(el, ps) {
+    if (!api && window.htmx) htmx.defineExtension('htmxo-url-params', { init: function (a) { api = a; } });
+    var found = ps.map(function () { return []; });
+    if (!api) return found;
+    var sources = included(el);
+    api.getTriggerSpecs(el).forEach(function (spec) {
+      if (spec.from) sources = sources.concat(targets(el, spec.from));
+    });
+    sources.forEach(function (s) {
+      var root = s === window ? document : s;
+      if (!root || !root.querySelectorAll) return;
+      var all = Array.prototype.slice.call(root.querySelectorAll('select, input'));
+      if (root instanceof Element && root.matches('select, input')) all.push(root);
+      all.forEach(function (c) {
+        if (el.contains(c) || (c.tagName === 'SELECT' ? c.multiple : NO_VALUE.test(c.type))) return;
+        ps.forEach(function (p, i) { if (c.name === p.as && found[i].indexOf(c) < 0) found[i].push(c); });
+      });
+    });
+    return found;
+  }
+  // The nodes an htmx selector names: of each comma-separated part (`<…/>`
+  // keeps its commas), the node htmx's API resolves it to (`closest form`,
+  // `next`, `document`, or a CSS selector's first match) and, for a CSS
+  // selector, every match. A form of htmx's own is no CSS selector, or one
+  // that matches nothing (`closest <form/>`, `next`).
+  function targets(el, selector) {
+    var out = [], parts = [], depth = 0, start = 0, root = el.getRootNode();
+    for (var i = 0; i <= selector.length; i++) {
+      var c = selector[i];
+      if (i === selector.length || (c === ',' && depth === 0)) { parts.push(selector.slice(start, i).trim()); start = i + 1; }
+      else if (c === '<') depth++;
+      else if (c === '/' && selector[i + 1] === '>') depth--;
+    }
+    parts.forEach(function (part) {
+      if (!part) return;
+      var first = api.querySelectorExt(el, part), all = [];
+      if (first) out.push(first);
+      try { all = root.querySelectorAll(part.replace(/^<(.*)\/>$/, '$1')); }
+      catch (err) { if (err.name !== 'SyntaxError') throw err; }
+      Array.prototype.push.apply(out, all);
+    });
+    return out;
+  }
+  // An element's `hx-include` targets: inherited, `this`, and `inherit`
+  // adding those of the ancestor it names, as htmx's own lookup does.
+  function included(el) {
+    var value = api.getClosestAttributeValue(el, 'hx-include');
+    if (!value) return [];
+    if (value === 'this') return [api.findThisElement(el, 'hx-include')];
+    var out = targets(el, value), up = el.parentElement;
+    up = /(^|,)\s*inherit\s*($|,)/.test(value) && up && up.closest('[hx-include], [data-hx-include]');
+    return up ? out.concat(included(up)) : out;
+  }
+  // Shows an element's values in its controls, without a `change` event,
+  // which would request the element again. A parameter whose control a reader
+  // changed after the request that brought the values began (`since`) keeps
+  // the reader's value: their change brings its own version. A value a
+  // control cannot show leaves it as it is, with a console warning.
+  var edits = 0;
+  ['input', 'change'].forEach(function (type) {
+    document.addEventListener(type, function (e) { if (e.target) e.target._htmxoUrlEdit = ++edits; }, true);
+  });
+  function follow(el, ps, vals, since) {
+    var found = controls(el, ps);
+    ps.forEach(function (p, i) {
+      var v = vals[i], cs = found[i];
+      if (v === null || cs.some(function (c) { return since !== undefined && (c._htmxoUrlEdit || 0) > since; })) return;
+      var radios = cs.filter(function (c) { return c.type === 'radio'; });
+      cs.forEach(function (c) {
+        if (c.type === 'radio' || c.value === v) return;
+        var old = c.value;
+        c.value = v;
+        if (c.value !== v) { c.value = old; cannot(c, p, v); }
+      });
+      var hits = radios.filter(function (c) { return c.value === v; });
+      if (hits.length) hits.forEach(function (c) { c.checked = true; });
+      else if (radios.length) cannot(radios[0], p, v);
+    });
+  }
+  function cannot(c, p, v) {
+    warn((c.id ? '#' + c.id : c.tagName.toLowerCase() + '[name="' + c.name + '"]') +
+      ' has no ' + p.name + '=' + v + ' to show; kept as it is');
+  }
+
   // A declared element's own request carries the address's values, unless the
   // request carries the parameter itself (an `hx-vals` value from a click). In
-  // a static export it goes to that value's file.
+  // a static export it goes to that value's file. Asking for other values than
+  // the element shows, it shows them in its controls at once.
   document.addEventListener('htmx:configRequest', function (e) {
     var d = e.detail, el = d.elt, ps = declared(el);
+    d.htmxoUrlEdits = edits;
     if (!ps) return;
     var table = files(el), base = shown(el, ps), address = wanted(ps, table, base);
     var vals = ps.map(function (p, i) {
@@ -9356,6 +9515,13 @@ url_params_script() = h.script(Raw(raw"""
     d.htmxoUrlValues = byName(ps, vals);
     d.htmxoUrlShown = byName(ps, base);
     el._htmxoUrlSent = JSON.stringify(vals);
+    if (differs(vals, base)) { d.htmxoUrlFollowed = true; follow(el, ps, vals); }
+  });
+  // Such a request that failed shows the element's values in them again.
+  document.addEventListener('htmx:afterRequest', function (e) {
+    var d = e.detail || {}, cfg = d.requestConfig, el = d.elt;
+    var ps = cfg && cfg.htmxoUrlFollowed && !d.successful && el.isConnected && declared(el);
+    if (ps) follow(el, ps, shown(el, ps), cfg.htmxoUrlEdits);
   });
 
   // An element entering the page (load, swap, Back/Forward) that shows other
@@ -9372,6 +9538,8 @@ url_params_script() = h.script(Raw(raw"""
         ps.map(function (p, i) { return p.name + '=' + want[i]; }).join('&'));
       return;
     }
+    // Its controls show them first, so that an `hx-include` sends them.
+    follow(el, ps, want);
     var req = { xhr: null, yielded: false }, sent;
     el._htmxoUrlApply = req;
     try { sent = htmx.ajax('GET', path, { source: el }); }
@@ -9412,6 +9580,15 @@ url_params_script() = h.script(Raw(raw"""
     if (!(root instanceof Element)) return;
     if (root.matches(SEL)) loaded(root);
     root.querySelectorAll(SEL).forEach(loaded);
+  });
+  // Each version entering the page (load, swap, Back/Forward) shows its values
+  // in its controls before htmx sets it up, so that a `changed` trigger
+  // compares with them.
+  document.addEventListener('htmx:beforeProcessNode', function (e) {
+    var el = e.target, ps = declared(el), pending = el._htmxoUrlPending;
+    if (!ps || el._htmxoUrlInit) return;
+    el._htmxoUrlInit = true;
+    follow(el, ps, shown(el, ps), pending && pending.edits);
   });
 
   // A request that loads a declared element writes its values into the
@@ -9473,8 +9650,12 @@ url_params_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:afterSwap', function (e) {
     var d = e.detail || {}, cfg = d.requestConfig;
     if (!cfg) return;
-    if (cfg.htmxoUrlValues && declared(cfg.elt)) {
-      if (cfg.elt.isConnected) cfg.elt._htmxoUrlShown = cfg.htmxoUrlValues;
+    var own = cfg.htmxoUrlValues && declared(cfg.elt);
+    if (own) {
+      if (cfg.elt.isConnected) {
+        cfg.elt._htmxoUrlShown = cfg.htmxoUrlValues;
+        follow(cfg.elt, own, shown(cfg.elt, own), cfg.htmxoUrlEdits);
+      }
       write(cfg.htmxoUrlValues, cfg.htmxoUrlShown);
     }
     var el = e.target, ps = el === cfg.elt ? null : declared(el);
@@ -9482,12 +9663,13 @@ url_params_script() = h.script(Raw(raw"""
     // A new version of the element, swapped in for the target: until htmx
     // settles it, it carries the old version's attributes when the two share
     // an id, so its values are written once it loads (`loaded`).
-    if (el !== d.target) { el._htmxoUrlPending = { before: cfg.htmxoUrlBefore }; return; }
+    if (el !== d.target) { el._htmxoUrlPending = { before: cfg.htmxoUrlBefore, edits: cfg.htmxoUrlEdits }; return; }
     // Another element's request into this one.
     var vals = requested(el, ps, d);
     if (!vals) return;
     var before = byName(ps, shown(el, ps));
     el._htmxoUrlShown = byName(ps, vals);
+    follow(el, ps, vals, cfg.htmxoUrlEdits);
     write(el._htmxoUrlShown, before);
   });
 
@@ -11923,9 +12105,14 @@ function _pool_fetch(pool::Symbol)
 end
 
 # Every background start goes through here: a memoized compute (through
-# `_PoolExecutor`), a fresh invocation, and a preload.
+# `_PoolExecutor`), a fresh invocation, and a preload. A task does not inherit
+# task-local storage, so the audience of the answer that starts it is carried
+# in: what a route body renders there is for the same reader (`private`).
 # Literal pool symbols: `@spawn` only accepts a computed pool on newer Julia.
-_spawn_operation(f, pool::Symbol) = _spawn_operation(f, Val(pool))
+_spawn_operation(f, pool::Symbol) = _spawn_operation(_carry_audience(f), Val(pool))
+_carry_audience(f) = let audience = _ambient_audience()
+    () -> _with_audience(f, audience)
+end
 _spawn_operation(f, ::Val{:default}) = Threads.@spawn :default f()
 _spawn_operation(f, ::Val{:interactive}) = Threads.@spawn :interactive f()
 
@@ -16096,7 +16283,7 @@ end
 
 # The audience a dispatched request answers for: the one asked for, a static
 # export's, the calling request's, or else public.
-_dispatch_audience(::Nothing, ::Nothing) = something(_ambient_audience(), :public)
+_dispatch_audience(::Nothing, ::Nothing) = _ambient_audience()
 _dispatch_audience(::Nothing, spec::StaticExport) = spec.audience
 _dispatch_audience(audience, ::Nothing) = _check_audience(audience, "dispatch")
 _dispatch_audience(audience, spec::StaticExport) =
@@ -16930,10 +17117,11 @@ image within a line of text stays in its paragraph, and PAC still warns about it
 `audience` says who reads the report: `:public` (default) or `:private`. A
 value is rendered for it, so a public report shows the stand-in of each
 [`private`](@ref) part, or nothing. A Markdown string is rendered already:
-fetch it for the report's audience (`dispatch(...; audience)`, public by default
-outside a request; [`export_audience`](@ref) inside one). A public report
-refuses Markdown that holds private markup rendered for the live app, raw HTML
-carrying `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
+render it for the report's audience, with [`to_markdown_string`](@ref)`(x;
+audience)` or `dispatch(...; audience)` (both public by default outside a
+request; a live request is `:private`, so pass the audience inside one). A
+public report refuses Markdown that holds private markup rendered for the live
+app, raw HTML carrying `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
@@ -17041,7 +17229,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     return pdf_path
 end
 pdf_report(value, pdf_path::AbstractString; audience=:public, kwargs...) =
-    pdf_report(_with_audience(() -> to_markdown_string(value), _check_audience(audience, "pdf_report")),
+    pdf_report(to_markdown_string(value; audience=_check_audience(audience, "pdf_report")),
                pdf_path; audience, kwargs...)
 
 # --- Captions ---
@@ -25940,6 +26128,12 @@ element itself. The requesting element is the one that sent the request, never
 the ancestor htmx reports the request's end on once that element's own swap
 removed it.
 
+Each out-of-band swap marks its target once. htmx 2.0.8 announces an answer's
+k-th out-of-band swap again on every element the answer has swapped in so far,
+so an answer with N `hx-swap-oob="true"` elements fires `htmx:oobAfterSwap`
+N(N+1)/2 + N times; the script acts on the first announcement of each swap
+only.
+
 Only requests the reader started are marked. A request the page sends by
 itself — a poll (`hx-trigger` with `every`), a preload, or the requesting
 element's own `load`, `revealed` or `intersect` trigger (a `lazy` fragment, a deferred page's placeholder, a `tabset`'s shown lazy panel) — draws
@@ -26045,7 +26239,15 @@ document.addEventListener('DOMContentLoaded', function() {
             t.classList.add('htmx-request-active');
         });
     });
+    // htmx 2.0.8 announces an answer's k-th out-of-band swap on every element
+    // the answer has swapped in so far (its main target and the elements its
+    // outerHTML swaps inserted), so N `hx-swap-oob="true"` elements fire
+    // N(N+1)/2 + N oobAfterSwap events. Every announcement of one swap
+    // carries that swap's own detail object: mark once per detail.
+    var oobMarked = new WeakSet();
     document.body.addEventListener('htmx:oobAfterSwap', function(e) {
+        if (oobMarked.has(e.detail)) return;
+        oobMarked.add(e.detail);
         var t = e.detail.target || e.detail.elt;
         if (!t) return;
         clearFeedback(t);
