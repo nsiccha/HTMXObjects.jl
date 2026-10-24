@@ -57,6 +57,13 @@ using TestItemRunner
         @get tree()::JSONResponse{JRNode} = JRNode("root", [JRNode("leaf", JRNode[])])
         @get untyped()::JSONResponse = (; a=1, b=[missing, 2.5], c=Dict("x" => :y))
         @get broken()::JSONResponse{JRAlarm} = (; start=DateTime(2026, 1, 1))
+        "One alarm, or another answer the route finished itself."
+        @get either(; kind::String="value")::JSONResponse{JRAlarm} =
+            kind == "mime" ? MIMEResponse("application/json", "{\"error\":\"NotInSnapshot\"}") :
+            kind == "json" ? JSONResponse((; error="NotInSnapshot", parts=[:ap3])) :
+            kind == "http" ? HTTP.Response(503, ["Content-Type" => "application/json"];
+                                           body="{\"error\":\"busy\"}") :
+            (; start=DateTime(2026, 1, 1), probes=["p"], rain_share=0.5)
         @get other()::JSONResponse{Vector{JROther.JRAlarm}} = [JROther.JRAlarm(1)]
         @get html() = "plain"
     end
@@ -154,6 +161,25 @@ end
     @test failed.status == 500
     @test HTTP.header(failed, "Content-Type") == "application/json; charset=utf-8"
     @test String(failed.body) == """{"error":"failed"}"""
+
+    # A finished answer the body returns on one branch is sent as it is, not
+    # encoded through the declared type (snag `move-odlplaus-ap-8416729f`).
+    @test String(drive("/jr_api/either").body) ==
+        """{"start":"2026-01-01T00:00:00","probes":["p"],"rain_share":0.5}"""
+    note = drive("/jr_api/either?kind=mime")
+    @test note.status == 200
+    @test HTTP.header(note, "Content-Type") == "application/json"
+    @test String(note.body) == """{"error":"NotInSnapshot"}"""
+    @test isempty(HTTP.header(note, "X-HTMXO-Error-Id"))
+    untyped = drive("/jr_api/either?kind=json")
+    @test untyped.status == 200
+    @test String(untyped.body) == """{"error":"NotInSnapshot","parts":["ap3"]}"""
+    busy = drive("/jr_api/either?kind=http")
+    @test busy.status == 503
+    @test String(busy.body) == """{"error":"busy"}"""
+    @test isempty(HTTP.header(busy, "X-HTMXO-Error-Id"))
+    @test String(drive("/jr_api/either?kind=mime", ["HX-Request" => "true"]).body) ==
+        String(note.body)
 end
 
 @testitem "openapi describes a JSONResponse route's payload type" setup=[JSONResponseFixtures] tags=[:unit] begin
@@ -196,6 +222,8 @@ end
     # An array payload: items by `$ref`; the response has no struct docstring.
     @test ok("/rows").description == "OK"
     @test ok("/rows").content["application/json"].schema == (type="array", items=ref("JRAlarm"))
+    # A route that may answer otherwise on one branch still documents `T`.
+    @test ok("/either").content["application/json"].schema == ref("JRAlarm")
     # A recursive type refers to itself.
     @test schemas["JRNode"].properties.children == (type="array", items=ref("JRNode"))
     # An untyped `JSONResponse` says only that the body is JSON.
