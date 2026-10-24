@@ -119,6 +119,10 @@ end
     @test startswith(read_file("LICENSE"), "                    GNU GENERAL PUBLIC LICENSE")
     @test contains(read_file("pyproject.toml"), "license = \"GPL-3.0-or-later\"")
     @test contains(read_file("pyproject.toml"), "\"python-multipart>=0.0.9\"")   # `note` takes a form
+    # The image runs the installed package as an unprivileged user, so files
+    # copied with the build host's modes (0600 under umask 077) stay readable.
+    @test contains(read_file("Dockerfile"), "RUN chmod -R a+rX /tmp/service \\\n    && pip install --no-cache-dir /tmp/service")
+    @test contains(read_file("Dockerfile"), "USER service\nWORKDIR /home/service\n")
 
     # The shipped document is the one `openapi` renders.
     @test read_file("ps_service", "openapi.json") ==
@@ -162,6 +166,26 @@ end
         @test all(line -> length(line) <= 79, eachline(joinpath(dir, "ps_service", file)))
     end
     @test all(line -> length(line) <= 79, eachline(joinpath(dir, "tests", "test_contract.py")))
+end
+
+@testitem "python_service lays Python out within 79 columns" setup=[PythonServiceFixtures] tags=[:unit] begin
+    using HTMXObjects
+    H = HTMXObjects
+    # Every field shape across name and description lengths around the
+    # breaking points: one line, a broken call, a split string.
+    words = ["µSv/h", "Tagesgang,", "Quantil", "(5-%)", "a", "Messstelle"]
+    prose = join(words[mod1.(1:200, length(words))], " ")
+    float_or_none = H._pyunion([H._pyname("float"), H._pyname("None")])
+    too_long = String[]
+    for name_length in 1:30, text_length in 20:140, required in (true, false), alias in (nothing, "a")
+        field = H._PyField("f"^name_length, alias, float_or_none, required, first(prose, text_length))
+        append!(too_long, filter(line -> length(line) > 79, H._py_field_lines(field)))
+    end
+    @test isempty(too_long)
+    # A long docstring wraps; an unbreakable one becomes concatenated literals.
+    for text in (repeat("word ", 60), "https://example.com/" * repeat("x", 120))
+        @test all(line -> length(line) <= 79, H._py_docstring(text, 4))
+    end
 end
 
 @testitem "python_service writes the license it is given and refuses bad arguments" setup=[PythonServiceFixtures] tags=[:unit] begin
