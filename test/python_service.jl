@@ -76,18 +76,19 @@ using TestItemRunner
         copyright="2026 Test Holder", title="PS service", version="1.2.0", kwargs...)
 
     # A Python that has the generated service's dependencies: `HTMXO_TEST_PYTHON`
-    # (an error when it lacks them, since it was chosen on purpose), else
-    # `python3` when it has them, else `nothing`.
+    # (an error showing its import failure when it lacks them, since it was
+    # chosen on purpose), else `python3` when it has them, else `nothing`.
     function service_python()
-        probe(py) = success(pipeline(`$py -c "import fastapi, pydantic, pytest, pycodestyle, httpx, python_multipart"`;
-                                     stdout=devnull, stderr=devnull))
+        probe(py) = run_python(py, mktempdir(), "-c",
+            "import fastapi, pydantic, pytest, pycodestyle, httpx, python_multipart")
         chosen = get(ENV, "HTMXO_TEST_PYTHON", "")
         if !isempty(chosen)
-            probe(chosen) || error("HTMXO_TEST_PYTHON=$chosen lacks fastapi, pydantic, pytest, pycodestyle, httpx or python-multipart")
+            probed = probe(chosen)
+            probed.ok || error("HTMXO_TEST_PYTHON=$chosen cannot import fastapi, pydantic, pytest, pycodestyle, httpx or python-multipart:\n$(probed.output)")
             return chosen
         end
         py = Sys.which("python3")
-        py !== nothing && probe(py) ? py : nothing
+        py !== nothing && probe(py).ok ? py : nothing
     end
 
     # Run `args` with `python` in `dir`; its output, and whether it succeeded.
