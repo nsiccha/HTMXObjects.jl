@@ -3629,8 +3629,10 @@ the rest:
 
 - **Address → element.** When the element enters the page (load, an htmx swap,
   Back/Forward) and the address names another value than the one it shows,
-  it requests its `hx-get` again with the address's value. A `load`-triggered
-  element sends the address's value with its first request, so it loads once.
+  it requests its `hx-get` again with the address's value. A request the
+  element makes while that one loads, such as a selector's change, takes its
+  place, so the selected value loads. A `load`-triggered element sends the
+  address's value with its first request, so it loads once.
   Its other requests (polling, a refresh) carry the address's value too,
   unless the request carries the parameter itself, as the probe pane's map
   click does. A value outside `values` keeps the element as it is and logs a
@@ -3655,7 +3657,7 @@ the rest:
   `hx-replace-url` address like an `href` and keeps its query (`/?k=4.0` →
   `index.html?k=4.0`), because the page reads the query in the browser.
 
-Two details of the markup:
+Three details of the markup:
 
 - An element that shows its content from the start, like `alarms` above,
   needs a trigger that never fires (`hx_trigger="none"`). With `hx-get` and no
@@ -3664,6 +3666,13 @@ Two details of the markup:
 - `hx-vals` that take a value from an event leave the parameter out when there
   is none, as `probe_pane` does. An `undefined` value is sent as the text
   `undefined`, and a default written there would override the address.
+- An element a control outside it reloads
+  (`hx_trigger="change from:#ortsteil"`) wants `hx_sync="this:replace"`. htmx
+  otherwise queues a second change behind the request of the first and drops
+  it once that swap replaces the element, so the view keeps the first value
+  while the control shows the second. The runtime's own request for the
+  address's value needs nothing: a request the element makes while it loads
+  takes its place.
 
 A tab strip records its open tab itself: see `tabset`'s `url_param`. Inside a
 docs embed (`.htmxo-embed`) the address belongs to the host page and is left
