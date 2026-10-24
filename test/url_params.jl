@@ -1,7 +1,8 @@
 @testmodule UrlParamsFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
-    export UrlParamsApp, SlowUrlParamsApp, PickedUrlParamsApp, KS, PROBES, alarms_view, bundle, bundle_name
+    export UrlParamsApp, SlowUrlParamsApp, PickedUrlParamsApp, FollowUrlParamsApp, KS, PROBES, alarms_view,
+           bundle, bundle_name
 
     const KS = (3.0, 4.0, 5.0)
     const PROBES = ("a", "b", "c")
@@ -213,6 +214,97 @@
         "Picked"
         @get picked(; k::Float64=3.0) = picked_view(k)
         @get index() = h.div(k_select(), picked_view(3.0), h.script(Raw(PICKED_DRIVER)))
+    end
+
+    # A part that controls outside it reload, as an Ortsteil selector reloads
+    # its map: a selector it listens to, which has no option for 5.0, and
+    # radio buttons it listens to and includes (snag static-url-param-c083f416).
+    followed_view(k, m) = h.section(; id="followed", hx_get="/followed",
+                                    hx_trigger="change from:#k-pick, change from:#m-choice",
+                                    hx_include="#m-choice", hx_swap="outerHTML", hx_sync="this:replace",
+                                    hx_vals="js:{...(event?.target?.id === 'k-pick' ? {k: event.target.value} : {})}",
+                                    url_params(k = k, m = m; values = (k = KS, m = PROBES))...)(
+        h.p("k=$k m=$m"; class="k"))
+    followed_controls() = (
+        h.select(; id="k-pick", name="k")((h.option(string(x); value=string(x)) for x in KS[1:2])...),
+        h.fieldset(; id="m-choice")((h.label(h.input(; type="radio", name="m", value=m,
+                                                       (m == "a" ? (; checked=true) : (;))...), m)
+                                     for m in PROBES)...),
+        # Links that swap other versions in.
+        (h.a(id; id, href="#", hx_get="/followed?k=$k&m=$m", hx_target="#followed", hx_swap="outerHTML")
+         for (id, k, m) in (("to-4a", 4.0, "a"), ("to-5c", 5.0, "c")))...)
+
+    # Checks for the browser item over `FollowUrlParamsApp`: the controls show
+    # what the part shows. Opened with `?k=4.0&m=b`, or with `?k=4.0` while
+    # the server fails that request.
+    const FOLLOW_DRIVER = raw"""
+    const checks = [];
+    const check = (name, ok) => checks.push([name, Boolean(ok)]);
+    const warnings = [];
+    const consoleWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(' ')); consoleWarn.apply(console, args); };
+    const k = () => document.getElementById('k-pick').value;
+    const m = () => (document.querySelector('#m-choice input:checked') || {}).value;
+    // The runtime's request for the address's values goes out with the
+    // controls showing them.
+    document.addEventListener('htmx:beforeRequest', function first(e) {
+      if (e.detail.elt.id !== 'followed') return;
+      document.removeEventListener('htmx:beforeRequest', first);
+      check('controls-while-loading', k() === '4.0' && m() === (location.search.includes('m=b') ? 'b' : 'a'));
+    });
+    window.addEventListener('load', async function () {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const wait = async cond => {
+        for (let n = 0; n < 200 && !cond(); n++) await sleep(20);
+        const ok = cond();
+        await sleep(60);
+        return ok;
+      };
+      const text = sel => (document.querySelector(sel) || {}).textContent;
+      const param = n => new URLSearchParams(location.search).get(n);
+      const pick = (el, set) => { set(el); el.dispatchEvent(new Event('change', { bubbles: true })); };
+      let failures = 0;
+      document.body.addEventListener('htmx:responseError', () => failures++);
+      document.body.addEventListener('htmx:sendError', () => failures++);
+      try {
+        if (location.search.includes('m=b')) {
+          check('address-shown', await wait(() => text('#followed .k') === 'k=4.0 m=b'));
+          check('controls-show-address', k() === '4.0' && m() === 'b');
+          pick(document.getElementById('k-pick'), s => { s.value = '3.0'; });
+          check('selector-change', await wait(() => text('#followed .k') === 'k=3.0 m=b' && param('k') === '3.0'));
+          pick(document.querySelector('#m-choice input[value=c]'), r => { r.checked = true; });
+          check('radio-change', await wait(() => text('#followed .k') === 'k=3.0 m=c' && param('m') === 'c'));
+          document.getElementById('to-4a').click();
+          check('link-shown', await wait(() => text('#followed .k') === 'k=4.0 m=a'));
+          check('controls-show-link', k() === '4.0' && m() === 'a');
+          // The selector has no 5.0: it stays as it is, with a warning.
+          document.getElementById('to-5c').click();
+          check('link-without-option', await wait(() => text('#followed .k') === 'k=5.0 m=c'));
+          check('selector-kept', k() === '4.0' && m() === 'c' && param('k') === '5.0');
+          check('warned', warnings.some(w => w.includes('#k-pick has no k=5.0')));
+          check('no-failed-request', failures === 0);
+        } else {
+          // The failed request leaves the part, and with it the controls, as
+          // they were.
+          check('request-failed', await wait(() => failures === 1));
+          check('controls-back', k() === '3.0' && m() === 'a' && text('#followed .k') === 'k=3.0 m=a');
+        }
+      } catch (err) {
+        check('error: ' + String(err), false);
+      }
+      const result = document.createElement('pre'); result.id = 'checks';
+      result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+      document.body.appendChild(result);
+    });
+    """
+
+    @htmx struct FollowUrlParamsApp
+        __page__(content) = htmx(h.main(content); assets="/test-assets", sse_version=nothing,
+            ws_version=nothing, preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false, overlay=false)
+        "Followed"
+        @get followed(; k::Float64=3.0, m::String="a") = followed_view(k, m)
+        @get index() = h.div(followed_controls()..., followed_view(3.0, "a"), h.script(Raw(FOLLOW_DRIVER)))
     end
 
     # The bundle file of an app address, flat, query folded into the name.
@@ -442,6 +534,68 @@ end
                 @test sort(requests) == sort(expected)
                 all(endswith(":true"), lines) && sort(requests) == sort(expected) ||
                     @info "url_params selector run" url checks=join(lines, "\n") requests=join(requests, "\n")
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "controls outside a url_params element show its values" setup=[UrlParamsFixture, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        files, _ = bundle(FollowUrlParamsApp())
+        requests = String[]
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # In the last two runs the address's value fails to load.
+        failing = Ref(false)
+        failed = ("/followed?k=4.0&m=a", "followed-k-4.0-m-a.html")
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            endswith(path, "/test-assets/htmx.min.js") &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            static = startswith(path, "/static/")
+            target = static ? path[length("/static/")+1:end] : replace(String(req.target), r"^/live" => "")
+            push!(requests, target)
+            failing[] && target in failed && return HTTP.Response(static ? 404 : 500)
+            static ? HTTP.Response(200, ["Content-Type" => "text/html"], files[target]) :
+                dispatch(req.method, isempty(target) ? "/" : target; headers=collect(req.headers))
+        end
+        # Exactly one request per change: showing a value in a control
+        # requests nothing.
+        runs = (
+            ("live/?k=4.0&m=b", false, 11, ["/?k=4.0&m=b", "/followed?k=4.0&m=b", "/followed?k=3.0&m=b",
+                                            "/followed?k=3.0&m=c", "/followed?k=4.0&m=a", "/followed?k=5.0&m=c"]),
+            ("static/index.html?k=4.0&m=b", false, 11, ["index.html", "followed-k-4.0-m-b.html",
+                "followed-k-3.0-m-b.html", "followed-k-3.0-m-c.html", "followed-k-4.0-m-a.html",
+                "followed-k-5.0-m-c.html"]),
+            ("live/?k=4.0", true, 3, ["/?k=4.0", "/followed?k=4.0&m=a"]),
+            ("static/index.html?k=4.0", true, 3, ["index.html", "followed-k-4.0-m-a.html"]))
+        try
+            for (url, fail, n, expected) in runs
+                empty!(requests)
+                failing[] = fail
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/$url`)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                isnothing(checks) && continue
+                lines = split(checks[1], '\n')
+                for line in lines
+                    @test endswith(line, ":true")
+                end
+                @test length(lines) == n
+                @test sort(requests) == sort(expected)
+                all(endswith(":true"), lines) && sort(requests) == sort(expected) ||
+                    @info "url_params controls run" url checks=join(lines, "\n") requests=join(requests, "\n")
             end
         finally
             close(server)
