@@ -2985,7 +2985,10 @@ Each struct is one `components.schemas` entry referenced by `$ref`, with its
 docstring and field docstrings as descriptions and every field `required` (it
 is always sent); a field whose type admits `nothing`, and every float, may be
 `null`. A `NamedTuple` type is an inline object, `Vector{E}` an array.
-[`JSONResponse`](@ref) gives the encoding rules. Every other route keeps
+[`JSONResponse`](@ref) gives the encoding rules. A body may still return a
+finished `HTTP.Response`, `MIMEResponse` or `JSONResponse` on some branch (a
+note where data is missing, say): it is answered as it is, with its own status,
+while the document keeps `T` as the `200` schema. Every other route keeps
 `{"200": {"description": "OK"}}`; error responses are not described yet.
 `reflect(T)` is unchanged: the declared type comes from each route's
 descriptor.

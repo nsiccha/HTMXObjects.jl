@@ -47,6 +47,18 @@ A value that does not fit its declaration fails the request with an error
 naming the type and field. Like [`MIMEResponse`](@ref), the answer is final: no
 page shell, no Markdown projection, no `:auto` poller; an `__error__` hook may
 return one to answer errors as JSON.
+
+A body that returns a finished answer of its own on some branch (an
+`HTTP.Response`, a `MIMEResponse` or another `JSONResponse`, such as an untyped
+`JSONResponse((; error = "NotInSnapshot"))`) is answered as it is, with its own
+status and content type; it is not encoded through `T` and is not an error.
+`openapi` still describes only `T` as the route's `200` response, so name such
+an answer in the route's docstring:
+
+```julia
+@get alarms(; k::Float64 = 3.0)::JSONResponse{Vector{Alarm}} =
+    fitted() ? alarm_table(k) : JSONResponse((; error = "NotInSnapshot"))
+```
 """
 struct JSONResponse{T}
     value::Any
