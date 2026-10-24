@@ -14,7 +14,8 @@ export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfile
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse, JSONResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
-    static_export, static_url, url_params, url_params_script, url_anchor_script
+    static_export, static_url, url_params, url_params_script, url_anchor_script,
+    export_site, static_file_name, StaticSiteIncomplete
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
@@ -5105,14 +5106,21 @@ function save_response(record_dir::String, url_path::String, response::HTTP.Resp
     dest = joinpath(record_dir, lstrip(_record_file_path(url_path, ext), '/'))
     _guard_record_destination!(record_dir, dest)
     mkpath(dirname(dest))
+    write(dest, _response_bytes(response))
+    dest
+end
+
+# A response body as what a file holds (bytes, or the `String` a route
+# answered), whichever body type HTTP.jl gave it.
+function _response_bytes(response::HTTP.Response)
     body = response.body
     if isdefined(HTTP, :BytesBody) && isa(body, getproperty(HTTP, :BytesBody))
-        body = Vector{UInt8}(body)
+        Vector{UInt8}(body)
     elseif isdefined(HTTP, :EmptyBody) && isa(body, getproperty(HTTP, :EmptyBody))
-        body = UInt8[]
+        UInt8[]
+    else
+        body
     end
-    write(dest, body)
-    dest
 end
 
 # A record! call is synchronous, but multiple calls may run on independent
@@ -5331,16 +5339,20 @@ _static_kept(xs) = filter(x -> x !== _STATIC_REMOVED, xs)
 
 # The caller's target for one attribute value, or `nothing` for the default
 # rules. Only string values are addresses; without a `url_map` every address
-# takes the default rules.
-_static_url_target(::StaticExport, url) = nothing
-_static_url_target(::StaticExport{Nothing}, ::AbstractString) = nothing
-function _static_url_target(spec::StaticExport, url::AbstractString)
-    target = spec.url_map(url)
+# takes the default rules. `kind` says how a static site loads the address:
+# `:fragment` for an `hx-get` (and a `url_params` value, which the element's
+# `hx-get` loads), `:full` for everything else. An ordinary `url_map` sees only
+# the address; `export_site`'s own map (`_SiteMap`) takes the kind as well.
+_static_url_target(::StaticExport, url, kind::Symbol=:full) = nothing
+_static_url_target(::StaticExport{Nothing}, ::AbstractString, kind::Symbol=:full) = nothing
+function _static_url_target(spec::StaticExport, url::AbstractString, kind::Symbol=:full)
+    target = _url_map_target(spec.url_map, url, kind)
     target === nothing && return nothing
     target isa AbstractString && return String(target)
     throw(ArgumentError("StaticExport url_map must return a String or nothing; " *
                         "got $(repr(target)) for $(repr(url))"))
 end
+_url_map_target(url_map, url, kind) = url_map(url)
 
 """
     escape_html(s) -> String
@@ -5588,7 +5600,7 @@ _split_once(s, c) = (i = findfirst(c, s); isnothing(i) ? (String(s), nothing) : 
 # recording, the recording rule's file, which the running `record!` is told
 # to record (none outside `record!`: nothing would write the file).
 _static_variant_target(rules::_StaticRules{<:StaticExport,_MappedVariants}, address) =
-    _static_url_target(rules.spec, address)
+    _static_url_target(rules.spec, address, :fragment)
 _static_variant_target(rules::_StaticRules{<:StaticExport,_RecordedVariants}, address) =
     _record_variant!(address) ?
         _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address)) :
@@ -5698,7 +5710,7 @@ function _static_walk(node::Node, rules::_StaticRules)
         new_attrs[hx_get_sym] = own
     elseif haskey(new_attrs, hx_get_sym)
         url = new_attrs[hx_get_sym]
-        target = _static_url_target(spec, url)
+        target = _static_url_target(spec, url, :fragment)
         if !isnothing(target)
             new_attrs[hx_get_sym] = target
         elseif occursin('?', url) || url in rules.unservable
@@ -5852,6 +5864,402 @@ _static_response_value(spec::StaticExport, val) =
 # prestart of its load-triggered fragments.
 _prepared_response_value(req::HTTP.Request, val) =
     _prestart_fragments(req, _static_response_value(req, val))
+
+# --- Static sites (export_site) ---
+#
+# The whole app as a static bundle, built on the per-response export: a
+# crawl that dispatches every address the written answers reference, with a
+# `StaticExport` whose `url_map` (`_SiteMap`) queues each address and stands in
+# for the file it will become. A file's extension can depend on the answer
+# (`/api/x` answers JSON), which is known only once that address has been
+# rendered, after the pages linking it, so the map writes a marker naming the
+# address and the crawl replaces the markers once every file is named.
+
+"""
+    static_file_name(address; fragment=false, ext=".html") -> String
+
+The file [`export_site`](@ref) writes for an app address, as a path inside the
+bundle.
+
+- **Pages and fragments** get flat names: the path's segments joined by `-`,
+  then each query parameter as `key-value`, in alphabetical order of the keys
+  (`/rohdaten/personen` → `rohdaten-personen.html`, `/voralarme?k=3` →
+  `voralarme-k-3.html`, `/` → `index.html`). Every page of a bundle therefore
+  sits in its root, so one relative link works in every page, and a fragment's
+  links (which resolve against the page that loads it) are right wherever it
+  is loaded. A fragment (`fragment=true`) goes below `hx/`, so a page and the
+  fragment its navigation loads from the same address are two files.
+- A static server decodes an address before it looks up the file, so `%XX`
+  escapes are decoded and every character other than `A-Z a-z 0-9 . _ , -`
+  becomes `_` (`pfad=%2Fap1%2Fk40` → `pfad-_ap1_k40`).
+- **An address whose last segment has a file extension** keeps its path
+  (`/datei/bericht.pdf` → `datei/bericht.pdf`); its query names no file, since
+  a static server ignores it (`/vendor/htmx.min.js?v=2.0.8` →
+  `vendor/htmx.min.js`).
+- `ext` is the extension of a page, fragment or extensionless data address;
+  `export_site` passes the one the answer's `Content-Type` calls for.
+
+An app that names files itself passes its own function with this signature as
+`export_site(...; file_name)`, usually wrapping this one.
+"""
+function static_file_name(address::AbstractString; fragment::Bool=false, ext::AbstractString=".html")
+    path, query = _split_once(first(_split_once(address, '#')), '?')
+    name = if !isnothing(_static_own_extension(path))
+        _static_unescape(lstrip(path, '/'))
+    else
+        stem = strip(path, '/')
+        params = sort!(split(something(query, ""), '&'; keepempty=false); by=p -> first(split(p, '='; limit=2)))
+        parts = [isempty(stem) ? "index" : replace(stem, '/' => '-'); replace.(params, '=' => '-')]
+        join(_static_name_part.(parts), '-') * ext
+    end
+    fragment ? "hx/" * name : name
+end
+
+# The file extension an address's last path segment names (`.pdf`), or
+# `nothing`. A segment such as `A1.5` or `v1.2` is a name, not a file.
+function _static_own_extension(path::AbstractString)
+    m = match(r"(\.[A-Za-z][A-Za-z0-9]{0,7})$", last(split(path, '/')))
+    isnothing(m) ? nothing : lowercase(m.captures[1])
+end
+
+# `%XX` escapes decoded as the bytes they stand for (a static server does the
+# same before it looks a file up); a malformed `%` stays as it is.
+_static_unescape(s::AbstractString) =
+    replace(s, r"%[0-9A-Fa-f]{2}" => m -> String([parse(UInt8, m[2:3]; base=16)]))
+
+_static_name_char(c::Char) = isvalid(c) && isascii(c) && (isletter(c) || isdigit(c) || c in "._,-")
+_static_name_part(s::AbstractString) = map(c -> _static_name_char(c) ? c : '_', _static_unescape(s))
+
+# A file name as the address a page links it by: each character a URL path
+# cannot carry as it is, percent-escaped (the server decodes it back).
+function _static_link(name::AbstractString)
+    io = IOBuffer()
+    for c in name
+        if isascii(c) && (isletter(c) || isdigit(c) || c in "/._,-~")
+            print(io, c)
+        else
+            foreach(b -> print(io, '%', uppercase(string(b; base=16, pad=2))), codeunits(string(c)))
+        end
+    end
+    String(take!(io))
+end
+
+"""
+    StaticSiteIncomplete <: Exception
+
+Thrown by [`export_site`](@ref) once its crawl has finished, when the bundle
+is not complete: `failed` lists each address whose answer could not go into it
+(`address => reason`: a status other than 200, an `X-HTMXO-Error-Id` header,
+no file extension for its `Content-Type`, a file another address already
+took), `unresolved` each reference in a written HTML file that names no file
+of the bundle (`file => address`). `files` and `bytes` count what was written
+into `dir`.
+"""
+struct StaticSiteIncomplete <: Exception
+    dir::String
+    failed::Vector{Pair{String,String}}
+    unresolved::Vector{Pair{String,String}}
+    files::Int
+    bytes::Int
+end
+
+function Base.showerror(io::IO, e::StaticSiteIncomplete)
+    print(io, "StaticSiteIncomplete: export_site wrote ", e.files, " files into ", e.dir,
+          ", but ", length(e.failed), " addresses failed and ", length(e.unresolved),
+          " references name no file of the bundle")
+    foreach(((a, why),) -> print(io, "\n  failed: ", a, " — ", why), e.failed)
+    foreach(((f, a),) -> print(io, "\n  unresolved: ", a, " in ", f), e.unresolved)
+end
+
+# One address the crawl writes, and how a static site loads it.
+struct _SiteEntry
+    address::String
+    fragment::Bool
+end
+
+struct _SiteCrawl
+    file_name::Any
+    aliases::Dict{String,String}
+    marker::String
+    strict::Bool
+    entries::Vector{_SiteEntry}
+    keys::Dict{String,Int}
+    failed::Vector{Pair{String,String}}
+    lock::ReentrantLock
+end
+
+# The `url_map` of one dispatch in the crawl: `base` is the address being
+# rendered, against which a relative address resolves.
+struct _SiteMap
+    crawl::_SiteCrawl
+    base::String
+end
+_url_map_target(m::_SiteMap, url, kind) = _site_target!(m.crawl, m.base, url, kind)
+
+_site_marker(crawl::_SiteCrawl, i::Integer) = string(crawl.marker, i, 'x')
+
+# Whether `url` is an address of this app the bundle carries (not an anchor, a
+# query of the page itself, another site or a scheme such as `data:`).
+_site_internal(url::AbstractString) =
+    !(isempty(url) || startswith(url, '#') || startswith(url, '?') || startswith(url, "//") ||
+      occursin(r"^[A-Za-z][A-Za-z0-9+.-]*:", url))
+
+# A relative address resolves against the address being rendered, as a
+# browser resolves it against the page.
+function _site_resolve(base::AbstractString, address::AbstractString)
+    startswith(address, '/') && return String(address)
+    uri = HTTP.URIs.resolvereference(HTTP.URI("http://site" * base), address)
+    isempty(uri.query) ? uri.path : uri.path * "?" * uri.query
+end
+
+# What the default names deliberately fold together: the order of query
+# parameters, a trailing slash, and a file address's query.
+function _site_identity(address::AbstractString)
+    path, query = _split_once(address, '?')
+    path = isempty(path) || path == "/" ? "/" : rstrip(path, '/')
+    isnothing(query) || !isnothing(_static_own_extension(path)) ? path :
+        path * "?" * join(sort!(split(query, '&'; keepempty=false)), '&')
+end
+
+# Queue `url` (if new) and return what the page writes for it: the marker of
+# its file, then a file address's query and the `#id`.
+function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
+    _site_internal(url) || return nothing
+    rest, id = _split_once(url, '#')
+    address = _site_resolve(base, rest)
+    address = get(crawl.aliases, address, address)
+    fragment = kind === :fragment
+    path, query = _split_once(address, '?')
+    own = _static_own_extension(path)
+    key = crawl.file_name(address; fragment, ext=".html")
+    i = lock(crawl.lock) do
+        i = get(crawl.keys, key, nothing)
+        if isnothing(i)
+            push!(crawl.entries, _SiteEntry(address, fragment))
+            i = crawl.keys[key] = length(crawl.entries)
+        elseif crawl.strict && _site_identity(crawl.entries[i].address) != _site_identity(address) &&
+               !any(f -> first(f) == address, crawl.failed)
+            push!(crawl.failed, address => "has the same file ($key) as $(crawl.entries[i].address); " *
+                  "pass export_site a file_name that tells them apart")
+        end
+        i
+    end
+    suffix = (isnothing(own) || isnothing(query) ? "" : "?" * query) * (isnothing(id) ? "" : "#" * id)
+    _site_marker(crawl, i) * suffix
+end
+
+# The file extension an answer's `Content-Type` calls for, or `nothing`.
+const _SITE_EXTENSIONS = Dict(
+    "text/html" => ".html", "application/json" => ".json", "application/geo+json" => ".geojson",
+    "text/markdown" => ".md", "text/plain" => ".txt", "text/csv" => ".csv", "text/css" => ".css",
+    "text/javascript" => ".js", "application/javascript" => ".js", "application/xml" => ".xml",
+    "application/pdf" => ".pdf", "application/zip" => ".zip", "image/svg+xml" => ".svg",
+    "image/png" => ".png", "image/jpeg" => ".jpg", "image/webp" => ".webp",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx")
+_site_extension(resp::HTTP.Response) =
+    get(_SITE_EXTENSIONS, lowercase(strip(first(split(HTTP.header(resp, "Content-Type"), ';')))), nothing)
+
+# Why an answer must not go into the bundle, or `nothing`. Under htmx a failed
+# fragment still answers 200 with its error article (so htmx swaps it in);
+# only its `X-HTMXO-Error-Id` header tells it apart.
+function _site_failure(resp::HTTP.Response)
+    resp.status == 200 || return "HTTP $(resp.status)"
+    id = HTTP.header(resp, "X-HTMXO-Error-Id")
+    isempty(id) ? nothing : "error $id (X-HTMXO-Error-Id)"
+end
+
+# One address's answer. A file address (one with an extension other than
+# `.html`) is fetched as its route answers it; anything else is rendered as a
+# static export, and a route that returns a finished response (a download, an
+# API's JSON) is fetched as it answers too.
+function _site_fetch(crawl::_SiteCrawl, e::_SiteEntry, controls::Symbol, parent)
+    headers = e.fragment ? ["HX-Request" => "true"] : Pair{String,String}[]
+    plain() = dispatch(:GET, e.address; headers, parent, operation_policy=:blocking)
+    own = _static_own_extension(first(_split_once(e.address, '?')))
+    isnothing(own) || own == ".html" || own == ".htm" || return plain()
+    try
+        dispatch(:GET, e.address; headers, parent,
+                 static=StaticExport(_SiteMap(crawl, e.address), controls, "", :linked))
+    catch err
+        err isa StaticExportRefused || rethrow()
+        plain()
+    end
+end
+
+"""
+    export_site(dir; pages, file_name=static_file_name, controls=:remove,
+                aliases=Dict{String,String}(), parent=nothing) -> (; files, bytes)
+
+Write the mounted app into the new or empty directory `dir` as a static site
+that any static file server shows as it is, from the bundle's root or from a
+subdirectory (`https://<user>.github.io/<repo>/`), with no server-side code.
+`route!` must have registered the app; no listener is needed, and the export
+can run inside a serving app (it renders in process with
+`dispatch(...; static=StaticExport(...))`, which re-registers nothing).
+
+- **What is written.** Starting from `pages` (app addresses), every address
+  the written answers reference, until nothing new turns up: links (`href`),
+  `hx-get` fragments, each value a [`url_params`](@ref) element declares, each
+  address a route passes to [`static_url`](@ref) (a Vega spec's `data.url`),
+  `hx-push-url` pages, and the head's script and style links, so the browser
+  libraries and the linked HTMXObjects runtime come from the app's own
+  [`vendorfiles`](@ref) or `staticfiles` routes, with every file a stylesheet
+  loads through `url(...)` (KaTeX's fonts). A relative address resolves
+  against the address being rendered. Addresses on other sites, `#id`s and
+  `?query` links of the page itself stay as they are.
+- **Page or fragment.** An address in `pages`, or reached through a link,
+  `hx-push-url`, `src` or `static_url`, is fetched as a full answer (a page in
+  its page chrome); one reached through `hx-get` or as a `url_params` value is
+  fetched as a fragment (`HX-Request: true`), into its own file. A route that
+  returns a finished response (a [`MIMEResponse`](@ref) download, a
+  [`JSONResponse`](@ref)) is written as it answers.
+- **File names** come from `file_name` ([`static_file_name`](@ref) by default):
+  flat names in the bundle's root for pages, below `hx/` for fragments, the
+  path for an address with a file extension, and otherwise the extension the
+  answer's `Content-Type` calls for (`/insitu/raster` answering GeoJSON →
+  `insitu-raster.geojson`). Every link is written relative to the bundle's
+  root. Under the default names two addresses never silently share a file: a
+  collision is a failure naming both. Addresses an app's own `file_name` gives
+  one name share one file, rendered once from the first one reached.
+- **Controls** a static site cannot serve (a non-GET `hx-*`, an unmapped
+  `hx-get` with a query) follow `controls`: `:remove` (default) leaves them
+  out, `:disable` greys them out ([`StaticExport`](@ref)). A page's linked
+  runtime stays linked, so the bundle carries it once.
+- `aliases` points an address that needs a server (an interactive API viewer)
+  at another address, whose file is linked instead:
+  `Dict("/api/v1/docs" => "/api/v1/openapi.json")`.
+- `parent` is the progress node each route's work hangs under (`dispatch`).
+- A route can tell it is being exported with `static_export(__req__) !== nothing`
+  (to show a snapshot notice, say).
+
+`.nojekyll` is written too (GitHub Pages otherwise drops `_`-prefixed files
+such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get`,
+`hx-push-url`/`hx-replace-url` and Vega `"url"` in the written HTML is checked
+to name a file of the bundle, which also catches an address a route wrote into
+raw text the walk never sees. An answer with a status other than 200 or an
+`X-HTMXO-Error-Id` header (a failed fragment answers 200 under htmx) is not
+written; the crawl carries on, so one run finds every failure, and then throws
+[`StaticSiteIncomplete`](@ref) listing each failed address and each unresolved
+reference. Otherwise it returns the number of files and bytes written.
+
+```julia
+route!(App())
+vendorfiles()
+export_site("site"; pages = ["/", "/bericht", "/daten"])
+```
+"""
+function export_site(dir::AbstractString; pages, file_name=static_file_name, controls::Symbol=:remove,
+                     aliases=Dict{String,String}(), parent=nothing)
+    StaticExport(nothing, controls, "", :linked)  # refuses a `controls` it does not know
+    isdir(dir) && !isempty(readdir(dir)) && throw(ArgumentError(
+        "export_site writes into a new or empty directory; $(repr(dir)) is not empty"))
+    aliases = Dict{String,String}(String(a) => String(b) for (a, b) in aliases)
+    for address in Iterators.flatten((pages, keys(aliases), values(aliases)))
+        startswith(address, '/') && !startswith(address, "//") || throw(ArgumentError(
+            "export_site: $(repr(address)) is not an address of this app (it must start with `/`)"))
+    end
+    mkpath(dir)
+    root = normpath(abspath(dir))
+    crawl = _SiteCrawl(file_name, aliases, "htmxo" * Random.randstring('a':'z', 12) * "f",
+        file_name === static_file_name, _SiteEntry[], Dict{String,Int}(), Pair{String,String}[],
+        ReentrantLock())
+    foreach(p -> _site_target!(crawl, "/", p, :full), pages)
+    links = Dict{Int,String}()          # entry → the address pages link its file by
+    written = Dict{String,String}()     # file → the address it holds
+    marked = String[]                   # files whose answer carries markers
+    i = 0
+    while i < length(crawl.entries)
+        i += 1
+        e = crawl.entries[i]
+        resp = _site_fetch(crawl, e, controls, parent)
+        reason = _site_failure(resp)
+        path = first(_split_once(e.address, '?'))
+        ext = isnothing(reason) ? something(_static_own_extension(path), _site_extension(resp), Some(nothing)) : nothing
+        if isnothing(reason) && isnothing(ext)
+            reason = "no file extension for its Content-Type $(repr(HTTP.header(resp, "Content-Type"))); " *
+                     "give the address one, or pass export_site a file_name"
+        end
+        name = isnothing(reason) ? file_name(e.address; fragment=e.fragment, ext) : ""
+        file = normpath(joinpath(root, name))
+        if isnothing(reason) && (isabspath(name) || !startswith(file, joinpath(root, "")))
+            reason = "its file name $(repr(name)) leaves the bundle"
+        elseif isnothing(reason) && haskey(written, file)
+            reason = "has the same file ($name) as $(written[file])"
+        end
+        if !isnothing(reason)
+            lock(() -> push!(crawl.failed, e.address => reason), crawl.lock)
+            continue
+        end
+        body = _response_bytes(resp)
+        mkpath(dirname(file))
+        write(file, body)
+        written[file] = e.address
+        _site_contains(body, crawl.marker) && push!(marked, file)
+        ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
+        links[i] = _static_link(name)
+    end
+    # A failed address keeps its own path, which the reference check below
+    # does not report again.
+    failed = Set(first(_split_once(a, '?')) for (a, _) in crawl.failed)
+    unmarked(m) = (k = parse(Int, m[length(crawl.marker)+1:end-1]);
+                   get(() -> first(_split_once(crawl.entries[k].address, '?')), links, k))
+    for file in marked
+        write(file, replace(read(file, String), Regex(crawl.marker * "[0-9]+x") => unmarked))
+    end
+    touch(joinpath(root, ".nojekyll"))
+    unresolved = _site_unresolved(root, failed)
+    bytes = sum(filesize, keys(written); init=0)
+    isempty(crawl.failed) && isempty(unresolved) ||
+        throw(StaticSiteIncomplete(root, crawl.failed, unresolved, length(written), bytes))
+    (; files=length(written), bytes)
+end
+
+# A stylesheet's `url(...)`s resolve against the stylesheet itself, and its
+# file keeps its path, so each file it loads (KaTeX's fonts) is queued and
+# keeps its own path, and the stylesheet is written as it answers.
+function _site_follow_stylesheet!(crawl::_SiteCrawl, address::AbstractString, body)
+    css = body isa AbstractString ? body : String(copy(body))
+    for m in eachmatch(r"url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)", css)
+        url = m.captures[1]
+        _site_internal(url) || continue
+        loaded = _site_resolve(first(_split_once(address, '?')), first(_split_once(url, '#')))
+        if isnothing(_static_own_extension(first(_split_once(loaded, '?'))))
+            lock(() -> push!(crawl.failed, loaded => "the stylesheet $address loads it, but it has " *
+                "no file extension, so its file would not be at the address the stylesheet names"), crawl.lock)
+        else
+            _site_target!(crawl, address, url, :full)
+        end
+    end
+end
+
+_site_contains(body::AbstractString, s::AbstractString) = occursin(s, body)
+_site_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(findfirst(codeunits(s), body))
+
+const _SITE_REFERENCE =
+    r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\"|\"url\":\"([^\"]*)\""
+
+# Every reference in the bundle's HTML that names no file of it, as
+# `file => address`: a rooted address (it escaped the export, and would point
+# outside a bundle served from a subdirectory) or a relative one whose file is
+# missing. Addresses whose export failed are already reported as failures.
+function _site_unresolved(root::AbstractString, failed::Set{String})
+    unresolved = Pair{String,String}[]
+    for (dirpath, _, files) in walkdir(root), f in sort(files)
+        endswith(f, ".html") || continue
+        file = joinpath(dirpath, f)
+        html = read(file, String)
+        for m in eachmatch(_SITE_REFERENCE, html)
+            address = replace(something(m[1], m[2]), "&quot;" => "\"", "&#39;" => "'",
+                              "&lt;" => "<", "&gt;" => ">", "&amp;" => "&")
+            (_site_internal(address) && address != "true" && address != "false") || continue
+            path = first(split(address, r"[?#]"; limit=2))
+            ok = startswith(path, '/') ? path in failed :
+                 isfile(joinpath(root, _static_unescape(path)))
+            ok || push!(unresolved, relpath(file, root) => address)
+        end
+    end
+    unresolved
+end
 
 # --- Prestarted fragments ---
 #

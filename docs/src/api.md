@@ -59,6 +59,9 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `static_transform(...)` | Convert dynamic responses to static-friendly form (`static_transform(val; record_base)` for recording, `static_transform(val, spec::StaticExport)` for a request-scoped export) |
 | `StaticExport(; url_map, controls, record_base, runtime)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
+| `export_site(dir; pages, file_name, controls, aliases, parent)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
+| `static_file_name(address; fragment, ext)` | The file `export_site` writes for an address (`/voralarme?k=3` → `voralarme-k-3.html`) |
+| `StaticSiteIncomplete` | Thrown by `export_site` with every failed address and every reference that names no file of the bundle |
 | `static_url(req, address)` | The address to embed where the static walk cannot rewrite it (a script, a JSON payload, a Vega spec's `data.url`): what an `src` with that value becomes under a static `dispatch`, `address` unchanged otherwise — see [Request-scoped static export](#request-scoped-static-export) |
 | `url_params(; name = value, …, values)` | Attributes that let parameters in the page address drive an element that loads with `hx-get`, on a live page and in a static export — see [Page address parameters](#page-address-parameters) |
 | `url_params_script()` | The browser runtime of `url_params`; `htmx()` pages carry it |
@@ -3596,6 +3599,72 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
   poller: `sync=wants_markdown(__req__) || static_export(__req__) !== nothing`.
 - `parent=` works as for any dispatch: the blocking execution nests under the
   caller's node.
+
+### Whole-site export
+
+`export_site(dir; pages)` writes the whole mounted app into the new or empty
+directory `dir` as a static site, for any static file server (GitHub Pages,
+`python -m http.server`), served from the site root or from a subdirectory
+(`https://<user>.github.io/<repo>/`). It renders in process with
+`dispatch(...; static=StaticExport(...))`, so it needs `route!` but no
+listener, re-registers nothing, and can run inside a serving app.
+
+```julia
+route!(App())
+vendorfiles()
+export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes)
+```
+
+- **What is written.** Starting from `pages`, every address the written
+  answers reference, until nothing new turns up: links, `hx-get` fragments,
+  each value a `url_params` element declares, each address a route passes to
+  `static_url`, `hx-push-url` pages, and the head's script and style links —
+  so the libraries and the linked runtime are fetched from the app's own
+  `vendorfiles`/`staticfiles` routes, with the files a stylesheet loads
+  (KaTeX's fonts). Other sites, `#id`s and `?query` links of the page itself
+  stay as they are; a relative address resolves against the address being
+  rendered.
+- **Pages, fragments, files.** An address in `pages` or reached through a
+  link, `src` or `static_url` is fetched as a full answer; one reached through
+  `hx-get` or a `url_params` value as a fragment (`HX-Request: true`), into a
+  file of its own — `hx_link` and `nav_sidebar` put one address on both. A
+  route returning a finished response (a `MIMEResponse` download, a
+  `JSONResponse`) is written as it answers.
+- **File names** (`static_file_name`, or the `file_name` you pass): pages flat
+  in the bundle's root, fragments below `hx/`, query parameters folded in
+  alphabetical order, escapes decoded and other characters as `_`; an address
+  with a file extension keeps its path, and an extensionless data address gets
+  the extension its `Content-Type` calls for. Every link is written relative to
+  the root, which is why every page lives there: a fragment's links resolve
+  against the page that loads it, so they are right in all of them.
+
+  | Address | File |
+  |---|---|
+  | `/` | `index.html` |
+  | `/rohdaten/personen` | `rohdaten-personen.html` |
+  | `/voralarme?k=3` | `voralarme-k-3.html` |
+  | `/zelle?vb_nr=12` as a fragment | `hx/zelle-vb_nr-12.html` |
+  | `/datei/bericht_1.pdf` | `datei/bericht_1.pdf` |
+  | `/vendor/htmx.min.js?v=2.0.8` | `vendor/htmx.min.js` (linked with its `?v=`) |
+  | `/insitu/raster` answering GeoJSON | `insitu-raster.geojson` |
+
+  Under the default names two addresses never silently share a file (a
+  collision fails the export, naming both). Addresses your own `file_name`
+  gives one name share one file, rendered once — for a parameter that only
+  places a view on the page: `file_name = (a; kw...) -> static_file_name(drop_ort(a); kw...)`.
+- **Controls** a static site cannot serve are removed (`controls=:remove`,
+  the default) or greyed out (`:disable`). A linked runtime stays linked.
+- `aliases = Dict("/api/v1/docs" => "/api/v1/openapi.json")` links an address
+  that needs a server to another one. `parent` is the progress node the routes'
+  work hangs under. A route that wants to say it is a snapshot tests
+  `static_export(__req__) !== nothing`.
+- **Failures.** An answer other than 200, or one carrying `X-HTMXO-Error-Id`
+  (a failed fragment answers 200 under htmx), is not written; the crawl carries
+  on, then every `href`, `src`, `hx-get`, `hx-push-url` and Vega `"url"` in the
+  written HTML is checked to name a file of the bundle (which also catches an
+  address in raw markup the walk never saw), and `StaticSiteIncomplete` lists
+  every failed address and unresolved reference. `.nojekyll` is written, since
+  GitHub Pages otherwise drops `_`-prefixed files such as `_hyperscript.min.js`.
 
 ## Page address parameters
 
