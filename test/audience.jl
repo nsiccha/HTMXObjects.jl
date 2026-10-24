@@ -8,13 +8,13 @@ using TestItemRunner
 
 @testmodule AudienceFixture begin
     using HTMXObjects, HTTP
-    import HTMXObjects: h, Raw
+    import HTMXObjects: h, Raw, to_markdown_string
     export AudienceApp, AudienceScriptApp, bundle_bytes
 
     const base = ""
     # Rendered for the live app before any export runs, so the export cannot
     # leave the private part out of it.
-    const PRERENDERED = Raw(repr("text/html", private(h.p("SECRET-PRERENDERED"))))
+    const PRERENDERED = Raw(with_audience(() -> repr("text/html", private(h.p("SECRET-PRERENDERED"))), :private))
 
     @htmx struct AudienceApp
         __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
@@ -37,6 +37,13 @@ using TestItemRunner
         # A nested dispatch answers for the audience of the request it is made in.
         @get aud_nested() = h.div(h.p("Verschachtelt"),
             Raw(String(dispatch(:GET, base * "/aud_spec"; headers=["HX-Request" => "true"]).body)))
+        # A body that renders its own Markdown, which HTMXObjects may run in a
+        # task of its own.
+        @get aud_selfmd() = MIMEResponse("text/plain",
+            to_markdown_string(h.div(h.p("Offen"), private(h.p("SECRET-SELF"); public = h.p("Kurz")))))
+        # Library code inside a route assembling Markdown for a public reader.
+        @get aud_libmd() = MIMEResponse("text/plain",
+            to_markdown_string(private(h.p("SECRET-LIB"); public = h.p("Kurz")); audience=:public))
     end
 
     @htmx struct AudienceScriptApp
@@ -56,7 +63,7 @@ end
     page = h.article(h.h2("Modell"),
         private(h.p("SECRET"); public = h.p("Kurzfassung")),
         h.p("Ende"))
-    live = repr("text/html", page)
+    live = with_audience(() -> repr("text/html", page), :private)
     @test occursin("<p>SECRET</p>", live) && !occursin("Kurzfassung", live)
     # The live markup marks the private part, so markup rendered ahead of an
     # export can be recognised in its answer.
@@ -65,25 +72,81 @@ end
     @test occursin("<p>Kurzfassung</p>", public) && !occursin("SECRET", public)
     @test !occursin("htmxo-private", public)
     @test _with_audience(() -> repr("text/html", page), :private) == live
+    # Outside any request a value renders for the public.
+    @test repr("text/html", page) == public
 
     # Markdown alike, with the stand-in in the private part's place.
-    @test occursin("SECRET", to_markdown_string(page)) && !occursin("Kurzfassung", to_markdown_string(page))
+    full = to_markdown_string(page; audience=:private)
+    @test occursin("SECRET", full) && !occursin("Kurzfassung", full)
     md = _with_audience(() -> to_markdown_string(page), :public)
     @test occursin("Kurzfassung\n\nEnde", md) && !occursin("SECRET", md)
+    @test to_markdown_string(page) == md
 
     # Without a stand-in a public reader gets nothing; text is escaped as an
     # element's child is; several values render in order.
     @test _with_audience(() -> repr("text/html", h.div("a", private("<b>x</b>"), "c")), :public) == "<div>ac</div>"
-    @test repr("text/html", h.div(private("<b>x</b>"))) ==
+    @test _with_audience(() -> repr("text/html", h.div(private("<b>x</b>"))), :private) ==
           "<div><!--htmxo-private-->&lt;b&gt;x&lt;/b&gt;<!--/htmxo-private--></div>"
-    @test occursin("<p>a</p><p>b</p>", repr("text/html", h.div(private([h.p("a"), h.p("b")]))))
+    @test occursin("<p>a</p><p>b</p>",
+                   _with_audience(() -> repr("text/html", h.div(private([h.p("a"), h.p("b")]))), :private))
     # A semantic element stays a block of its own in Markdown.
     card = private(SemanticCard("Modell", "y ~ x"))
-    @test HTMXObjects.HTMX.markdown_block(card)
+    @test _with_audience(() -> HTMXObjects.HTMX.markdown_block(card), :private)
     @test !_with_audience(() -> HTMXObjects.HTMX.markdown_block(card), :public)
     # A whole answer renders what it shows; an empty one for a public reader.
-    @test String(to_response(private(h.p("SECRET"))).body) == "<p>SECRET</p>"
+    @test _with_audience(() -> String(to_response(private(h.p("SECRET"))).body), :private) == "<p>SECRET</p>"
     @test _with_audience(() -> String(to_response(private(h.p("SECRET"))).body), :public) == ""
+end
+
+@testitem "code that renders a value itself asks for its audience" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: h, to_markdown_string
+    page = h.article(h.p("Offen"), private(h.p("SECRET"); public = h.p("Kurzfassung")))
+    # Markdown: the keyword says who it is for; without it, outside any request,
+    # it is for the public (snag to-markdown-stri-25778f31).
+    public = to_markdown_string(page; audience=:public)
+    @test occursin("Offen", public) && occursin("Kurzfassung", public) && !occursin("SECRET", public)
+    full = to_markdown_string(page; audience=:private)
+    @test occursin("SECRET", full) && !occursin("Kurzfassung", full)
+    @test to_markdown_string(page) == public
+    # The keyword wins over the audience it is rendered in.
+    @test with_audience(() -> to_markdown_string(page; audience=:public), :private) == public
+    @test with_audience(() -> to_markdown_string(page), :private) == full
+
+    # with_audience covers every other rendering and returns f's value.
+    html = with_audience(:private) do
+        repr("text/html", page)
+    end
+    @test occursin("<!--htmxo-private--><p>SECRET</p><!--/htmxo-private-->", html)
+    @test !occursin("SECRET", with_audience(() -> repr("text/html", page), :public))
+    @test with_audience(() -> 42, :public) == 42
+    snapshot = with_audience(() -> HTMLSnapshot(page), :public)
+    @test !occursin("SECRET", repr("text/html", snapshot))
+    # A task the code starts itself does not inherit the audience; it asks.
+    @test occursin("SECRET", with_audience(:private) do
+        fetch(Threads.@spawn with_audience(() -> to_markdown_string(page), :private))
+    end)
+
+    # refused: an audience is :public or :private (user pick 0id3m3n)
+    @test_throws ArgumentError to_markdown_string(page; audience=:everyone)
+    @test_throws ArgumentError with_audience(() -> 1, "public")
+    err = try to_markdown_string(page; audience=:all); nothing catch e e end
+    @test err isa ArgumentError && occursin("to_markdown_string", err.msg)
+end
+
+@testitem "a route body renders for its request's audience in any task" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    route!(AudienceApp())
+    body(resp) = String(resp.body)
+    # Under `:auto` a fragment's body runs in a task HTMXObjects starts; it
+    # renders for the request's audience there too (snag to-markdown-stri-25778f31).
+    for headers in (["HX-Request" => "true"], String[], ["Accept" => "text/markdown"])
+        public = body(dispatch(:GET, "/aud_selfmd"; headers))
+        @test occursin("Kurz", public) && !occursin("SECRET", public)
+        @test occursin("SECRET-SELF", body(dispatch(:GET, "/aud_selfmd"; headers, audience=:private)))
+    end
+    # Library code inside a live request asks for its own reader.
+    lib = body(dispatch(:GET, "/aud_libmd"; audience=:private))
+    @test occursin("Kurz", lib) && !occursin("SECRET", lib)
 end
 
 @testitem "a static export walks private content as its audience reads it" setup=[HTMXOTestImports] tags=[:unit] begin
@@ -209,15 +272,16 @@ end
         @test_throws ArgumentError pdf_report("# R", out; title="R", lang="de-DE", audience=:all)
         @test_throws ArgumentError pdf_report(h.p("R"), out; title="R", lang="de-DE", audience="public")
         # Markdown holding markup rendered for the live app is no public report.
+        live_html = with_audience(() -> repr("text/html", private(h.p("SECRET"))), :private)
         err = try
-            pdf_report("# R\n\n" * repr("text/html", private(h.p("SECRET"))), out; title="R", lang="de-DE")
+            pdf_report("# R\n\n" * live_html, out; title="R", lang="de-DE")
         catch e
             e
         end
         @test err isa PrivateContentEscaped
         # A private report takes it; here Quarto is missing.
         err = try
-            pdf_report("# R\n\n" * repr("text/html", private(h.p("SECRET"))), out; title="R",
+            pdf_report("# R\n\n" * live_html, out; title="R",
                        lang="de-DE", audience=:private, quarto="htmxo-no-such-quarto")
         catch e
             e
@@ -237,13 +301,17 @@ end
             private(h.p("Die vollständige Spezifikation."); public = h.p("Eine Kurzfassung.")),
             h.p("Nachher."))
         mktempdir() do dir
-            text(path) = read(`pdftotext -enc UTF-8 $path -`, String)
             public = joinpath(dir, "public.pdf")
-            pdf_report(page, public; title="Konzept", lang="de-DE")
-            @test occursin("Eine Kurzfassung.", text(public)) && !occursin("Spezifikation", text(public))
+            @test pdf_report(page, public; title="Konzept", lang="de-DE") == public
             full = joinpath(dir, "full.pdf")
-            pdf_report(page, full; title="Konzept", lang="de-DE", audience=:private)
-            @test occursin("Die vollständige Spezifikation.", text(full)) && !occursin("Kurzfassung", text(full))
+            @test pdf_report(page, full; title="Konzept", lang="de-DE", audience=:private) == full
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                text(path) = read(`pdftotext -enc UTF-8 $path -`, String)
+                @test occursin("Eine Kurzfassung.", text(public)) && !occursin("Spezifikation", text(public))
+                @test occursin("Die vollständige Spezifikation.", text(full)) && !occursin("Kurzfassung", text(full))
+            end
         end
     end
 end
