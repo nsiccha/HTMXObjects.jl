@@ -26146,16 +26146,20 @@ element itself. The requesting element is the one that sent the request, never
 the ancestor htmx reports the request's end on once that element's own swap
 removed it.
 
-Each out-of-band swap marks its target once. htmx 2.0.8 announces an answer's
-k-th out-of-band swap again on every element the answer has swapped in so far,
-so an answer with N `hx-swap-oob="true"` elements fires `htmx:oobAfterSwap`
-N(N+1)/2 + N times; the script acts on the first announcement of each swap
-only.
+Each element a request's answer swaps out of band flashes once: the element
+it swapped into, or, for a swap that replaces its target (`hx-swap-oob="true"`,
+`outerHTML`), the element that took the target's id. htmx 2.0.8 announces an
+answer's k-th out-of-band swap again on every element the answer has swapped
+in so far, so an answer with N `hx-swap-oob="true"` elements fires
+`htmx:oobAfterSwap` N(N+1)/2 + N times; the script acts on the first
+announcement of each swap only.
 
 Only requests the reader started are marked. A request the page sends by
 itself — a poll (`hx-trigger` with `every`), a preload, or the requesting
 element's own `load`, `revealed` or `intersect` trigger (a `lazy` fragment, a deferred page's placeholder, a `tabset`'s shown lazy panel) — draws
-no outline; a failure among them still raises the shell's failure toast.
+no outline, and its out-of-band swaps flash nothing; neither do those of an SSE
+or WebSocket message or of an operation's diverted terminal. A failure among
+them still raises the shell's failure toast.
 
 Success and failure are read as [`toast_script`](@ref)'s
 `window.htmxoRequestOutcome` reads them, so the red flash and the shell's
@@ -26257,20 +26261,44 @@ document.addEventListener('DOMContentLoaded', function() {
             t.classList.add('htmx-request-active');
         });
     });
+    // Whether the answer htmx is swapping belongs to a request the reader
+    // started. An answer's out-of-band swaps run inside its swap, between its
+    // beforeSwap and its afterSwap; the swap of an SSE or WebSocket message,
+    // or of a diverted terminal (its beforeSwap is the terminal poll's),
+    // is no reader's request.
+    var readerSwap = false;
+    document.body.addEventListener('htmx:beforeSwap', function(e) {
+        var elt = requester(e);
+        readerSwap = !!(elt && e.detail.requestConfig) && !isAutomatic(e, elt);
+    });
+    ['htmx:afterSwap', 'htmx:afterRequest'].forEach(function(name) {
+        document.body.addEventListener(name, function() { readerSwap = false; });
+    });
     // htmx 2.0.8 announces an answer's k-th out-of-band swap on every element
     // the answer has swapped in so far (its main target and the elements its
     // outerHTML swaps inserted), so N `hx-swap-oob="true"` elements fire
     // N(N+1)/2 + N oobAfterSwap events. Every announcement of one swap
     // carries that swap's own detail object: mark once per detail.
     var oobMarked = new WeakSet();
+    var oobPending = [];
     document.body.addEventListener('htmx:oobAfterSwap', function(e) {
-        if (oobMarked.has(e.detail)) return;
+        if (!readerSwap || oobMarked.has(e.detail)) return;
         oobMarked.add(e.detail);
-        var t = e.detail.target || e.detail.elt;
-        if (!t) return;
-        clearFeedback(t);
-        t.classList.add('htmx-request-success');
-        setTimeout(function() { clearFeedback(t); }, 1000);
+        // The detail's target is the element before the swap: an outerHTML
+        // swap (`hx-swap-oob="true"`) has replaced it, so mark the element
+        // that took its id.
+        var t = e.detail.target;
+        if (t && !t.isConnected) t = t.id ? document.getElementById(t.id) : null;
+        if (t) oobPending.push(t);
+    });
+    // Until a swap settles, an element that took an old one's id wears the
+    // old one's settled attributes (`htmx.config.attributesToSettle`, class
+    // among them); settling gives it back its own, which would drop a mark
+    // set before. So the marks wait for the settle.
+    document.body.addEventListener('htmx:afterSettle', function() {
+        var settled = oobPending;
+        oobPending = [];
+        settled.forEach(function(t) { if (t.isConnected) mark(t, 'success'); });
     });
     function finished(e) {
         var elt = requester(e);
