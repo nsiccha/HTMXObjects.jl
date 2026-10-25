@@ -28925,7 +28925,10 @@ content, never a partial one. No lock is needed to read.
         nothing
     end
 
-    _signature() = begin
+    # `@fresh`: `LibGit2.Signature(name, email)` stamps the current time, so a
+    # memoized signature dated every later commit with the first one's second
+    # (snag `gitrepo-editor-c-710f9834`).
+    @fresh _signature() = begin
         name, email = _parse_author(author)
         LibGit2.Signature(name, email)
     end
@@ -28957,8 +28960,7 @@ content, never a partial one. No lock is needed to read.
         # executing (snag `hold-one-gitrepo-a9b4d2eb`). `@fresh` (DO
         # `312542d`, carried by the `DynamicObjects = "0.4.4, 0.5"` floor)
         # recomputes on every call. What stays memoized is pure: `read_version`
-        # is addressed by immutable commit sha, `_ensure`/`_signature` are
-        # idempotent.
+        # is addressed by immutable commit sha, `_ensure` is idempotent.
 
         # A missing file is seeded under the lock and re-checked there: an
         # unlocked seed could land after a concurrent `write!`/`update!` created
