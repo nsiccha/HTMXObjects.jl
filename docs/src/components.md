@@ -245,9 +245,10 @@ for `default_sort` rather than the ambiguous name.
 #### Client-side search {#table-search}
 
 `searchable=true` on `sortable_table`, `render_table` or `master_detail_table`
-adds a labelled search field above the table, a live "N of M rows shown" count
-as the field's helper text (`role="status"`, `aria-live="polite"`) and a "No
-matching rows" state below it:
+adds a labelled search field to the table's control line, a live "N of M rows
+shown" count beside it (`role="status"`, `aria-live="polite"`) and a "No
+matching rows" state below the table (the line stays in view while the rows
+scroll: [Controls and headers stay in view](#table-sticky)):
 
 ```julia
 sortable_table(["Party", "Category", "Amount"], rows; id="entries", searchable=true)
@@ -319,6 +320,40 @@ document.addEventListener('htmxo:table-filtered', e => {
 });
 ```
 
+#### Controls and headers stay in view {#table-sticky}
+
+The controls a table draws itself share one line above it: the search field
+with its count, then a `master_detail_table`'s *Group by* (select or pills) and
+*Expand all* / *Collapse all*, then the selection bar. The line wraps only
+when the window is too narrow. While the table is in view, that line stays at
+the top of the window and the column headers stay just below it, so a reader
+scrolling a long table keeps the search, the grouping and the column names in
+sight. This is the default for `sortable_table`, `render_table` and
+`master_detail_table`; a table without controls keeps only its header in view.
+
+- **A table that fits its column** scrolls with the page.
+- **A table wider than its column** becomes a box as tall as the window that
+  scrolls both ways, with its header at the top of the box and its sideways
+  scrollbar on screen.
+- **A table inside another table's cell** (a detail row) does not stick.
+- **Rows moved to by the keyboard** (↑/↓, j/k) or a `#row-…` link scroll into
+  view below the line and the header, never under them.
+
+An app whose page has its own sticky header moves the line below it with one
+CSS variable. Inside a card, give the line the card's background:
+
+```css
+:root { --htmxo-sticky-top: 3.5rem; }
+article { --htmxo-sticky-bg: var(--pico-card-background-color); }
+```
+
+`sticky=false` keeps one table's line and header in the flow. The line is
+`div.htmxo-table-toolbar`; the table runtime that every `htmx()` /
+`pico_page` shell carries measures it (`--htmxo-table-toolbar-h`) and marks
+each `.table-wrap` `data-htmxo-width="fits"` or `"wide"`. Without the runtime
+the table keeps its sideways scroll and its header scrolls away. Markdown and
+PDF output are unchanged: the line is HTML only.
+
 #### Row selection {#table-selection}
 
 `selectable="<input name>"` on `sortable_table`, `render_table` or
@@ -352,7 +387,7 @@ sortable_table(["Party", "Amount"],
   outside the form. `data-htmxo-select-submit="false"` (in `master_detail_table`,
   `select_submit(item) = false`) keeps a row selectable but unsubmitted.
 - **Feedback.** A live "N selected (M hidden by the filter)" count with
-  *Select all shown* and *Clear* sits above the table; in a tree it also notes
+  *Select all shown* and *Clear* sits in the table's control line; in a tree it also notes
   selected rows inside collapsed groups ("3 selected (2 in collapsed groups)"). Controls marked
   `data-htmxo-needs-selection="<input name>"` are disabled while nothing would
   be submitted. Each change fires a bubbling `htmxo:selection-changed` event

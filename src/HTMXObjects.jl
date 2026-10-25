@@ -17744,7 +17744,7 @@ function htmxoTableFilter(target, name, predicate) {
 // Set a table's query as if typed ('' clears it) and filter.
 function htmxoTableSearch(target, query) {
     const root = htmxoSearchRoot(target);
-    const input = root.querySelector(':scope > label > input[type="search"]');
+    const input = root.querySelector(':scope > .htmxo-table-toolbar > label > input[type="search"]');
     root.htmxoSearchSeen = true;
     if (input) input.value = query;
     htmxoFilterTable(root);
@@ -17765,7 +17765,7 @@ function htmxoLazyLeaves(row) {
 
 function htmxoFilterTable(target) {
     const root = htmxoSearchRoot(target);
-    const input = root.querySelector(':scope > label > input[type="search"]');
+    const input = root.querySelector(':scope > .htmxo-table-toolbar > label > input[type="search"]');
     const table = root.querySelector('table');
     const all = Array.from(table.tBodies[0].rows);
     const rows = all.filter(r => !r.id.startsWith('detail-'));
@@ -17880,7 +17880,7 @@ function htmxoFilterTable(target) {
     items.forEach(item => { if (item.shown) shown++; else hiddenBy[item.by] = (hiddenBy[item.by] || 0) + 1; });
     const detail = {shown, total: items.size, query, hiddenBy, notes: []};
     root.dispatchEvent(new CustomEvent('htmxo:table-filtered', {bubbles: true, detail}));
-    const count = root.querySelector(':scope > label > [data-htmxo-table-count]');
+    const count = root.querySelector(':scope > .htmxo-table-toolbar > label > [data-htmxo-table-count]');
     if (count) count.textContent = htmxoText(root, 'count', {shown: detail.shown, total: detail.total}) +
         detail.notes.map(note => ' · ' + note).join('');
     root.querySelector(':scope > [data-htmxo-table-empty]').hidden = visible.size !== 0;
@@ -17890,7 +17890,7 @@ function htmxoFilterTable(target) {
 // search is active, the matching paths (see `htmxoFilterTable`).
 function htmxoTreeAll(button, open) {
     const root = htmxoSearchRoot(button);
-    const input = root.querySelector(':scope > label > input[type="search"]');
+    const input = root.querySelector(':scope > .htmxo-table-toolbar > label > input[type="search"]');
     const searching = Boolean(input && input.value.trim());
     if (searching) {
         if (open) delete root.dataset.htmxoSearchCollapsed;
@@ -18358,6 +18358,76 @@ if (!window.htmxoSearchBound) {
 // htmx load event: restore what is already in the document.
 if (document.body) htmxoSearchRestore(document.body);
 
+// --- Sticky toolbar and header: `sortable_table(...; sticky=true)` ---
+// The header sticks just below its table's toolbar, so the toolbar's height
+// goes into `--htmxo-table-toolbar-h` on its parent and the header's into
+// `--htmxo-table-head-h` on the table (rows scroll into view below both). A
+// `.table-wrap` is `data-htmxo-width="fits"` while its table fits it, which
+// drops the sideways scroll box so the header can stick to the window, else
+// `"wide"`: a window-tall box scrolling both ways with the header at its top.
+// Measurements run in a task of their own, never inside the observer's
+// callback, whose layout changes would re-notify in the same frame; a newly
+// found element is measured that way too, without waiting for the
+// observer's first notice. A table inside another table's cell does not
+// stick and is not measured.
+window.htmxoStickyTracked = window.htmxoStickyTracked || new Set();
+function htmxoStickyMeasure(el) {
+    if (!el.isConnected) return;
+    if (el.classList.contains('htmxo-table-toolbar')) {
+        el.parentElement.style.setProperty('--htmxo-table-toolbar-h', el.offsetHeight + 'px');
+        return;
+    }
+    const table = el.tagName === 'TABLE' ? el : el.querySelector(':scope > table');
+    if (!table) return;
+    table.style.setProperty('--htmxo-table-head-h', (table.tHead ? table.tHead.offsetHeight : 0) + 'px');
+    const wrap = table.parentElement;
+    if (!wrap.classList.contains('table-wrap')) return;
+    const width = wrap.scrollWidth > wrap.clientWidth + 1 ? 'wide' : 'fits';
+    if (wrap.dataset.htmxoWidth !== width) wrap.dataset.htmxoWidth = width;
+}
+function htmxoStickyQueue(el) {
+    (window.htmxoStickyPending || (window.htmxoStickyPending = new Set())).add(el);
+    if (window.htmxoStickyFrame) return;
+    window.htmxoStickyFrame = setTimeout(() => {
+        window.htmxoStickyFrame = 0;
+        const pending = Array.from(window.htmxoStickyPending);
+        window.htmxoStickyPending.clear();
+        pending.forEach(htmxoStickyMeasure);
+    }, 0);
+}
+// Observe the sticky toolbars and tables in `elt` (and the table wrappers,
+// whose width changes alone when a wide table's window widens); forget
+// elements that have left the document.
+function htmxoStickyTrack(elt) {
+    if (!elt || !elt.querySelectorAll || typeof ResizeObserver !== 'function') return;
+    const tracked = window.htmxoStickyTracked;
+    const ro = window.htmxoStickyObserver || (window.htmxoStickyObserver =
+        new ResizeObserver(entries => entries.forEach(e => htmxoStickyQueue(e.target))));
+    tracked.forEach(el => { if (!el.isConnected) { ro.unobserve(el); tracked.delete(el); } });
+    // No top-level `const`: this file may run more than once per page.
+    const sticky = '.htmxo-table-toolbar[data-htmxo-sticky], table[data-htmxo-sticky]';
+    const found = Array.from(elt.querySelectorAll(sticky));
+    if (elt.matches && elt.matches(sticky)) found.push(elt);
+    found.forEach(el => {
+        if (!el.isConnected || el.parentElement.closest('td, th')) return;
+        const wrap = el.tagName === 'TABLE' && el.parentElement.classList.contains('table-wrap') ? el.parentElement : null;
+        [el, wrap].forEach(t => {
+            if (!t) return;
+            if (!tracked.has(t)) { tracked.add(t); ro.observe(t); }
+            htmxoStickyQueue(t);
+        });
+    });
+}
+if (!window.htmxoStickyBound) {
+    window.htmxoStickyBound = true;
+    document.addEventListener('htmx:load', e => htmxoStickyTrack(e.target));
+    // A morph keeps the elements but drops the measured values the server
+    // did not render: measure every tracked element again.
+    document.addEventListener('htmx:afterSettle', () => window.htmxoStickyTracked.forEach(htmxoStickyQueue));
+    document.addEventListener('DOMContentLoaded', () => htmxoStickyTrack(document.body));
+}
+if (document.body) htmxoStickyTrack(document.body);
+
 // --- Row selection: `selectable` on sortable_table / master_detail_table ---
 // State is keyed per selection (input name, form, page path) and per row key,
 // never held by row elements, so it survives sorting, filtering, a row's
@@ -18459,7 +18529,8 @@ function htmxoSelectionUpdate(root) {
     const hidden = filtered + folded;
     const notes = [filtered && htmxoText(root, 'selected_filtered', {count: filtered}),
         folded && htmxoText(root, 'selected_collapsed', {count: folded})].filter(Boolean);
-    const count = root.querySelector(':scope > div > .htmxo-selection-bar > [data-htmxo-selection-count]');
+    const count = root.querySelector(':scope > .htmxo-table-toolbar > .htmxo-selection-bar > [data-htmxo-selection-count], ' +
+        ':scope > .htmxo-searchable-table > .htmxo-table-toolbar > .htmxo-selection-bar > [data-htmxo-selection-count]');
     if (count) count.textContent = htmxoText(root, 'selected', {count: selected.length + unloaded.length}) +
         (notes.length ? ' (' + notes.join(', ') + ')' : '');
     document.querySelectorAll('[data-htmxo-needs-selection]').forEach(control => {
@@ -18567,7 +18638,7 @@ function htmxoSelectionTarget(e) {
 }
 // The search query a regroup carries to the re-rendered table.
 function htmxoGroupedQuery(el) {
-    const input = el.closest('[data-htmxo-grouped]').querySelector('.htmxo-searchable-table > label > input[type="search"]');
+    const input = el.closest('[data-htmxo-grouped]').querySelector('.htmxo-searchable-table > .htmxo-table-toolbar > label > input[type="search"]');
     return input ? input.value : '';
 }
 // The `group_by` values that render a regroupable table's current grouping
@@ -18948,7 +19019,7 @@ function htmxoSelectionRestore(elt) {
     const aroundSearch = !window.htmxoRowsUpdating && elt.closest && elt.closest('.htmxo-searchable-table');
     if (aroundSearch) searches.push(aroundSearch);
     searches.forEach(r => {
-        const input = r.querySelector(':scope > label > input[type="search"]');
+        const input = r.querySelector(':scope > .htmxo-table-toolbar > label > input[type="search"]');
         if (input && input.value.trim()) htmxoFilterTable(r);
     });
     const roots = new Set(elt.querySelectorAll('[data-htmxo-select]'));
@@ -19507,6 +19578,9 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   [`sortable_table`](@ref)
 - `texts`: the words of the built-in controls, a [`TableTexts`](@ref) from
   [`table_texts`](@ref) (default English); see [`sortable_table`](@ref)
+- `sticky`: keep the table's control line and column headers in view while
+  its rows scroll (default `true`); see *Controls and headers stay in view* in
+  [`sortable_table`](@ref)
 - Extra kwargs are forwarded to `h.table()`
 
 # Example
@@ -19544,7 +19618,7 @@ _render_table_cell(cell, value, c, ri, texts) = h.td(cell(value, c, ri))
                    download=false, download_filename=nothing, caption=nothing,
                    default_sort=nothing, header_groups=nothing,
                    searchable=false, selectable=nothing,
-                   select_form=nothing, link=nothing, texts=table_texts(), kwargs...)
+                   select_form=nothing, link=nothing, sticky=true, texts=table_texts(), kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -19554,7 +19628,9 @@ itself delegates to this after materialising rows from a Tables.jl source.
 The `<table>` is emitted inside a `<div class="table-wrap">` scroll container
 (`overflow-x: auto`, defined in the `htmx()`-auto-included
 [`htmxo_utility_styles`](@ref)), so a wide table scrolls inside its own
-wrapper instead of widening the page.
+wrapper instead of widening the page. While the table runtime runs, a table
+that fits its column drops that scroll box so its header can stay in view
+(*Controls and headers stay in view* below).
 
 # Arguments
 - `headers`: `Vector` of header entries. Each entry is either:
@@ -19607,6 +19683,9 @@ wrapper instead of widening the page.
   the same item in every other table or plot of that group, and theirs
   highlight its row. Rows are keyed by `data-htmxo-link-key` (else
   `data-htmxo-select-key`). See *Hover linking* below.
+- `sticky`: keep the table's control line and column headers at the top of
+  the window while its rows scroll (default `true`; `false` leaves them in the
+  flow). See *Controls and headers stay in view* below.
 - `texts`: the words of the table's built-in controls (the search label,
   count and empty state, the selection bar, the CSV button, lazy-detail
   status lines), as a [`TableTexts`](@ref) from [`table_texts`](@ref), e.g.
@@ -19674,6 +19753,28 @@ document.addEventListener('htmxo:table-filtered', e => {
 });
 ```
 
+# Controls and headers stay in view
+The controls a table draws itself share one line above it (`div.htmxo-table-toolbar`):
+the search field with its count, then a [`master_detail_table`](@ref)'s *Group
+by* and *Expand all* / *Collapse all*, then the selection bar. The line wraps
+only when the window is too narrow. With `sticky=true` (the default) the line
+stays at the top of the window while the table is in view, and the column
+headers stay just below it, so a reader scrolling a long table keeps the
+search, the grouping and the column names. A table without controls keeps
+only its header in view. The table runtime measures the line and the header
+(`--htmxo-table-toolbar-h`, `--htmxo-table-head-h`), and rows moved to by the
+keyboard or a `#row-…` link scroll into view below both.
+
+A table that fits its column scrolls with the page. A table wider than its
+column (`data-htmxo-width="wide"` on its `.table-wrap`) becomes a window-tall
+box that scrolls both ways, with its header at the box top and its sideways
+scrollbar on screen. A table inside another table's cell (a detail row) does
+not stick. An app whose page has its own sticky header moves both below it
+with `--htmxo-sticky-top` (e.g. `:root { --htmxo-sticky-top: 3.5rem; }`);
+inside a card, set `--htmxo-sticky-bg` to the card's background.
+`sticky=false` keeps one table's line and header in the flow. None of this
+reaches Markdown or PDF output.
+
 # Row selection
 With `selectable=name`, every keyed row (`data-htmxo-select-key`, else its
 `id`; `detail-<key>` companions excluded) becomes a selectable grid row:
@@ -19689,9 +19790,9 @@ behaviour.
 The selection is submitted as one hidden `<input name=name>` per selected row,
 with the row's `data-htmxo-select-value` (else its key) as the value, inside
 the selectable wrapper and associated with `select_form`. A row with
-`data-htmxo-select-submit="false"` is selectable but not submitted. Above the
-table, a live count ("3 selected (1 hidden by the filter)") sits beside
-*Select all shown* and *Clear* buttons. A control carrying
+`data-htmxo-select-submit="false"` is selectable but not submitted. In the
+table's control line, a live count ("3 selected (1 hidden by the filter)")
+sits beside *Select all shown* and *Clear* buttons. A control carrying
 `data-htmxo-needs-selection=name` is disabled while nothing would be
 submitted, so a bulk form needs no script:
 
@@ -19789,6 +19890,7 @@ function sortable_table(headers, rows;
                         header_groups=nothing,
                         searchable::Bool=false, search_query::AbstractString="",
                         selectable=nothing, select_form=nothing, link=nothing,
+                        sticky::Bool=true,
                         texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true, kwargs...)
     isnothing(link) || link isa Union{AbstractString,Symbol} && !isempty(string(link)) || throw(ArgumentError(
         "sortable_table: link must be the non-empty name of a link group; got $(repr(link))"))
@@ -19816,7 +19918,7 @@ function sortable_table(headers, rows;
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
     # A `detail-<key>` companion is no row of the Markdown table.
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
-    table_node = h.table(; class=table_class, role, link_attrs..., kwargs...)(
+    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)..., kwargs...)(
         thead,
         h.tbody(body_rows...; body_attrs...),
     )
@@ -19860,8 +19962,11 @@ function sortable_table(headers, rows;
     else
         table_wrap
     end
-    searched = searchable ? _searchable_table(framed, rows; query=search_query, texts) : framed
-    selected = isnothing(selectable) ? searched : _selectable_table(searched, rows, selectable; form=select_form, texts)
+    # The selection bar joins the search field's toolbar when there is one.
+    bar = isnothing(selectable) || !searchable ? nothing : _selection_bar(rows; texts)
+    searched = searchable ? _searchable_table(framed, rows; query=search_query, texts, sticky, selection=bar) : framed
+    selected = isnothing(selectable) ? searched :
+        _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!searchable)
     # `master_detail_table` wraps this table and marks its own outermost element.
     _stamp_texts ? _with_table_texts(selected, texts) : selected
 end
@@ -19899,27 +20004,45 @@ _selection_css() = """
 .htmxo-selectable-table tbody > tr[aria-selected]:focus-visible { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: -2px; }
 """
 
+# The selection's live count with its select-all-shown / clear controls. It
+# sits in the search field's toolbar when the table has one, else in a toolbar
+# of its own (`_selectable_table`).
+_selection_bar(rows; texts::TableTexts=_EN_TABLE_TEXTS) = h.p(; class="htmxo-selection-bar")(
+    h.small(_table_text(texts, :selected; count=count(_is_selected_row, rows));
+        data_htmxo_selection_count="", role="status", aria_live="polite"),
+    h.button(texts.select_all; type="button", class="secondary outline", data_htmxo_select_all=""),
+    h.button(texts.clear_selection; type="button", class="secondary outline", data_htmxo_select_clear=""))
+
 # The opt-in row selection shared by `sortable_table` and
-# `master_detail_table`: a live count with select-all-shown / clear controls,
-# the (possibly searchable) table, and a holder for the hidden inputs the
-# runtime keeps in step with the selection. `form` names the form those
-# inputs submit with (the HTML `form` attribute), so the table need not sit
-# inside it. The bar is client-side only, like the search field.
-function _selectable_table(inner, rows, name; form=nothing, texts::TableTexts=_EN_TABLE_TEXTS)
+# `master_detail_table`: the (possibly searchable) table and a holder for the
+# hidden inputs the runtime keeps in step with the selection, plus, with
+# `toolbar`, the selection bar in a toolbar of its own (without it the caller
+# put the bar in the search toolbar). `form` names the form those inputs
+# submit with (the HTML `form` attribute), so the table need not sit inside
+# it. The bar is client-side only, like the search field.
+function _selectable_table(inner, rows, name; form=nothing, texts::TableTexts=_EN_TABLE_TEXTS,
+                           sticky::Bool=true, toolbar::Bool=true)
     name isa AbstractString && !isempty(name) || throw(ArgumentError(
         "selectable must be the non-empty name of the submitted inputs; got $(repr(name))"))
     form_attrs = isnothing(form) ? (;) : (; data_htmxo_select_form=string(form))
     h.div(; class="htmxo-selectable-table", data_htmxo_select=name, form_attrs...)(
-        html_only(h.div(h.style(Raw(_selection_css())),
-            h.p(; class="htmxo-selection-bar")(
-                h.small(_table_text(texts, :selected; count=count(_is_selected_row, rows));
-                    data_htmxo_selection_count="", role="status", aria_live="polite"),
-                h.button(texts.select_all; type="button", class="secondary outline", data_htmxo_select_all=""),
-                h.button(texts.clear_selection; type="button", class="secondary outline", data_htmxo_select_clear="")))),
+        html_only(h.style(Raw(_selection_css()))),
+        (toolbar ? (html_only(_table_toolbar((_selection_bar(rows; texts),); sticky)),) : ())...,
         inner,
         html_only(h.div(; hidden=true, data_htmxo_selection_inputs="")),
     )
 end
+
+# The marker that keeps a table's header (and its toolbar) in view while its
+# rows scroll; `sticky=false` leaves it out (see *Controls and headers stay in
+# view* in `sortable_table`).
+_sticky_attrs(sticky::Bool) = sticky ? (; data_htmxo_sticky="") : (;)
+
+# The one line of a table's own controls: the search field, the hierarchy and
+# grouping controls and the selection bar, as they apply. It is hidden when
+# none of them shows.
+_table_toolbar(items; sticky::Bool=true, shown::Bool=true) =
+    h.div(; class="htmxo-table-toolbar", _sticky_attrs(sticky)..., hidden=!shown)(items...)
 
 # A master row, as the client-side search counts it: every body row except a
 # `detail-<key>` companion, which follows its master's visibility.
@@ -19948,23 +20071,26 @@ function _table_item_counts(rows, pending)
 end
 
 # The client-side search shared by `sortable_table` and `master_detail_table`:
-# a labelled field with a live shown-count as its helper text, the table, and
-# an empty state. The field and its texts are client-side affordances
-# (`html_only`): in Markdown the label would run into the table's header row.
-# `field=false` keeps a hidden scaffold that a hierarchy's branch toggles
-# filter through. The input's `aria-label` keeps the count out of its name.
+# a toolbar holding a labelled field with its live shown-count, the hierarchy
+# and grouping `controls` and the `selection` bar, then the table and an empty
+# state. The toolbar is a client-side affordance (`html_only`): in Markdown the
+# label would run into the table's header row. `field=false` keeps a hidden
+# scaffold that a hierarchy's branch toggles filter through. The input's
+# `aria-label` keeps the count out of its name.
 function _searchable_table(table, rows; field::Bool=true, controls=nothing, query::AbstractString="",
-                           texts::TableTexts=_EN_TABLE_TEXTS, pending=String[])
+                           texts::TableTexts=_EN_TABLE_TEXTS, pending=String[],
+                           sticky::Bool=true, selection=nothing)
     count_text = _table_count_text(texts, _table_item_counts(rows, pending)...)
     # A prefilled query (e.g. carried across a regroup) is applied by the
     # runtime when the table loads; the server's count is the unfiltered one.
     value_attrs = isempty(query) ? (;) : (; value=query)
+    search = h.label(texts.search,
+        h.input(; type="search", aria_label=texts.search, oninput="htmxoFilterTable(this)", value_attrs...),
+        h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
+        hidden=!field)
+    extras = filter(!isnothing, Any[controls, selection])
     h.div(; class="htmxo-searchable-table")(
-        html_only(h.label(texts.search,
-            h.input(; type="search", aria_label=texts.search, oninput="htmxoFilterTable(this)", value_attrs...),
-            h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
-            hidden=!field)),
-        (isnothing(controls) ? () : (html_only(controls),))...,
+        html_only(_table_toolbar((search, extras...); sticky, shown=field || !isempty(extras))),
         table,
         html_only(h.p(texts.empty; hidden=true, data_htmxo_table_empty="")),
     )
@@ -20655,6 +20781,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   its `key`). Give it when several tables on one page show the same items:
   each table's `key` stays unique on the page (`key = p -> "trend-" * p.kenn`)
   while every table names the item by the same `link_key = p -> p.kenn`.
+- `sticky`: keep the control line (search, *Group by*, *Expand all* /
+  *Collapse all*, selection bar) and the column headers at the top of the
+  window while the rows scroll (default `true`). See *Controls and headers
+  stay in view* in [`sortable_table`](@ref).
 - `texts`: the words of every built-in control — search, selection bar,
   *Expand all* / *Collapse all*, *Group by* and its pills, the ▸/ⓘ controls'
   accessible names, lazy-detail status lines, the CSV button — as a
@@ -20809,6 +20939,7 @@ function master_detail_table(headers, items;
                              update_groups=nothing,
                              link=nothing,
                              link_key=nothing,
+                             sticky::Bool=true,
                              _rows_only::Bool=false,
                              _toolbar=(),
                              _level_marks::Bool=false,
@@ -20825,7 +20956,7 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, link_key, texts, kwargs...)
+        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
     all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, update_groups)) || throw(ArgumentError(
         "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
@@ -21018,7 +21149,7 @@ function master_detail_table(headers, items;
     # gets one from its root keys, which are unique on the page.
     body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
-    table = sortable_table(headers, rows; table_attrs..., texts, link, _stamp_texts=false, kwargs...)
+    table = sortable_table(headers, rows; table_attrs..., texts, link, sticky, _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries. A narrow first column
@@ -21080,9 +21211,15 @@ function master_detail_table(headers, items;
         h.button(texts.collapse_all; type="button", class="secondary outline", aria_controls=body_id,
             onclick="htmxoTreeAll(this, false)"))
     controls = isempty(tools) ? nothing : h.p(; class="htmxo-tree-controls")(tools...)
-    searched = (searchable || !isnothing(children) || !isnothing(controls)) ?
-        _searchable_table(table, rows; field=searchable, controls, query=search_query, texts, pending) : table
-    _with_table_texts(selecting ? _selectable_table(searched, rows, selectable; form=select_form, texts) : searched, texts)
+    scaffold = searchable || !isnothing(children) || !isnothing(controls)
+    # The selection bar joins the search toolbar when there is one.
+    bar = selecting && scaffold ? _selection_bar(rows; texts) : nothing
+    searched = scaffold ?
+        _searchable_table(table, rows; field=searchable, controls, query=search_query, texts, pending,
+            sticky, selection=bar) : table
+    _with_table_texts(selecting ?
+        _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!scaffold) :
+        searched, texts)
 end
 
 # --- Regroupable master/detail tables ---
@@ -26077,6 +26214,35 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 .htmxo-sortable-table thead th > .htmxo-sort-control:focus-visible {
     outline: 2px solid var(--htmxo-accent, currentColor); outline-offset: .15em;
 }
+
+/* A table's own controls (the search field with its count, Group by,
+   Expand/Collapse all, the selection bar) share one line, wrapping only when
+   the window is too narrow. With `sticky=true` (the default) the line stays
+   at the top of the window while its table is in view, with the column
+   headers just below it; `--htmxo-sticky-top` moves both below an app's own
+   sticky header. The table runtime measures the line
+   (`--htmxo-table-toolbar-h`) and the header (`--htmxo-table-head-h`), and
+   marks a `.table-wrap` whose table fits it `data-htmxo-width="fits"` (no
+   sideways scroll box, so the header sticks to the window) or `"wide"` (a
+   window-tall box scrolling both ways, its header stuck at the box top);
+   without the runtime the wrapper keeps its sideways scroll. A table inside
+   another table's cell does not stick. UNLAYERED: Pico styles `label`,
+   `input` and `small` unlayered. */
+.htmxo-table-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem 1rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
+.htmxo-table-toolbar[hidden], .htmxo-table-toolbar > label[hidden] { display: none; }
+.htmxo-table-toolbar > * { margin: 0; }
+.htmxo-table-toolbar > label { display: flex; flex: 1 1 22rem; align-items: center; gap: .5rem; font-size: .875em; }
+.htmxo-table-toolbar > label > input[type="search"] { flex: 1 1 8rem; width: auto; min-width: 8rem; height: auto; margin: 0; padding-block: .3em; font-size: inherit; }
+.htmxo-table-toolbar > label > small { display: inline; width: auto; margin: 0; font-size: inherit; white-space: nowrap; }
+.htmxo-table-toolbar > .htmxo-tree-controls, .htmxo-table-toolbar > .htmxo-selection-bar { margin: 0; }
+.htmxo-table-toolbar[data-htmxo-sticky] { position: sticky; top: var(--htmxo-sticky-top, 0px); z-index: 3; padding-block: .35rem; background: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
+table[data-htmxo-sticky] > thead { position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px)); z-index: 2; }
+table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
+.table-wrap[data-htmxo-width="fits"] { overflow: visible; }
+.table-wrap[data-htmxo-width="wide"] { overflow: auto; max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px)); max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px)); }
+.table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { top: 0; }
+.table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: var(--htmxo-table-head-h, 0px); }
+:is(td, th) .htmxo-table-toolbar[data-htmxo-sticky], :is(td, th) table[data-htmxo-sticky] > thead { position: static; }
 """))
 
 # --- Request feedback ---
