@@ -495,8 +495,18 @@ of that kind also carries `Vary: Accept-Encoding`, compressed or not, so a
 shared cache keeps the two forms apart. `serve` leaves a response alone when
 it is a HEAD answer, a `206` or `Content-Range` answer, already carries
 `Content-Encoding`, or is marked `Cache-Control: no-transform`. It also
-leaves streams alone: `@sse`, a streamed `IO` body, and WebSocket upgrades.
-In-process [`dispatch`](@ref) and static recording never compress.
+leaves a streamed `IO` body and WebSocket upgrades alone. In-process
+[`dispatch`](@ref) and static recording never compress.
+
+An event stream is compressed too: an `@sse` route, and the page's
+operation stream, which carries the finished answers of slow fragments. For
+a client that admits gzip it is one gzip stream, and every write is flushed
+through the compressor (a zlib sync flush), so each event reaches the
+browser as soon as it is sent, at a few bytes of overhead per event. A
+4.2 MB HTML answer pushed on the operation stream goes out as about 221 KB.
+The stream carries `Vary: Accept-Encoding` like a buffered answer, and a
+client without gzip (an `EventSource` always asks for it; plain `curl`
+does not) reads it uncompressed.
 
 Pass `serve(; compress=false)` to send every body uncompressed. A page that
 reflects attacker-supplied text next to a secret, served over HTTPS, may want
