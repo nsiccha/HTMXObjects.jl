@@ -11284,6 +11284,47 @@ end
     @test r3.read_blob("HEAD:g.md") == "v2"
 end
 
+@testitem "GitRepo commits carry the time they were made" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: GitRepo
+    import LibGit2
+
+    # Every commit of one `GitRepo` used to carry the author and committer
+    # time of its FIRST commit: the signature was memoized, and
+    # `LibGit2.Signature(name, email)` stamps the time it is built (snag
+    # `gitrepo-editor-c-710f9834`: an app's audit-trail commits were dated
+    # 42 minutes early). Git times have one-second resolution, hence the sleeps.
+    dir = mktempdir()
+    repo = GitRepo(dir)
+    commit_times(sha) = begin
+        r = LibGit2.GitRepo(dir)
+        try
+            c = LibGit2.GitCommit(r, sha)
+            try
+                (LibGit2.author(c).time, LibGit2.committer(c).time)
+            finally
+                close(c)
+            end
+        finally
+            close(r)
+        end
+    end
+    before1 = floor(Int, time())
+    _, sha1 = repo.editor("a.md").update!(_ -> "one"; message="first")
+    sleep(1.1)
+    before2 = floor(Int, time())
+    _, sha2 = repo.editor("a.md").update!(_ -> "two"; message="second")
+    sleep(1.1)
+    before3 = floor(Int, time())
+    _, sha3 = repo.editor("b.md").write!("three"; version="", message="third")
+    for (sha, before) in ((sha1, before1), (sha2, before2), (sha3, before3))
+        author_t, committer_t = commit_times(sha)
+        @test author_t >= before
+        @test committer_t >= before
+    end
+    @test first(commit_times(sha2)) > first(commit_times(sha1))
+    @test first(commit_times(sha3)) > first(commit_times(sha2))
+end
+
 @testitem "GitRepo editor writes never expose a partial file to a plain reader" setup=[HTMXOTestImports] tags=[:unit] begin
     import HTMXObjects: GitRepo
 

@@ -9,7 +9,8 @@ using TestItemRunner
 @testmodule AudienceFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw, to_markdown_string
-    export AudienceApp, AudienceScriptApp, bundle_bytes
+    export AudienceApp, AudienceScriptApp, bundle_bytes,
+        AudienceDocApp, AudienceKeptApp, BUILDS, DOCS_DIR, document_pack
 
     const base = ""
     # Rendered for the live app before any export runs, so the export cannot
@@ -52,6 +53,43 @@ using TestItemRunner
         @get index() = h.div(h.p("Karte"),
             h.script(Raw("window.spec = " * repr(static_url(__req__, base * "/aud_script_spec")) * ";")))
         @get aud_script_spec() = private(h.pre("SECRET-SCRIPT"))
+    end
+
+    # Library code answering a private page it has to build: it looks the
+    # document up and reads its file, which only a private reader's answer
+    # does (TenderViews' `tender_document`; snag private-page-con-b8682fea).
+    const BUILDS = Ref(0)
+    const DOCS = Dict("lb" => "lb.pdf")
+    const DOCS_DIR = Ref("")
+    lazy_document(dir, id) = private() do
+        BUILDS[] += 1
+        file = get(DOCS, id, nothing)
+        isnothing(file) && throw(CallerFault(404, "no document $(repr(id))"))
+        MIMEResponse("application/pdf", read(joinpath(dir, file)))
+    end
+
+    @htmx struct AudienceDocApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div(h.p("Unterlagen"),
+            h.a("Leistungsbeschreibung"; href=base * "/aud_doc/lb"),
+            private(; public = h.p("Kurz")) do
+                BUILDS[] += 1
+                h.p("SECRET-LAZY")
+            end)
+        @get aud_doc(id::String) = lazy_document(DOCS_DIR[], id)
+    end
+
+    # The same page in a root that is kept across requests.
+    @htmx struct AudienceKeptApp
+        @get aud_kept(id::String) = lazy_document(DOCS_DIR[], id)
+    end
+
+    # A directory holding the document.
+    function document_pack()
+        dir = mktempdir()
+        write(joinpath(dir, "lb.pdf"), "%PDF-1.4 lb")
+        dir
     end
 
     # Every byte the bundle holds, as text.
@@ -262,6 +300,102 @@ end
     @test any(((a, why),) -> a == "/aud_script_spec" && occursin("is private", why), err.failed)
     @test isempty(err.unresolved)
     @test !occursin("SECRET", bundle_bytes(dir))
+end
+
+@testitem "a private page a function builds is built for a private reader only" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    route!(AudienceDocApp())
+    body(resp) = String(resp.body)
+    error_id(resp) = HTTP.header(resp, "X-HTMXO-Error-Id")
+    private_page(resp) = resp.status == 404 && HTTP.header(resp, "X-HTMXO-Private") == "true" &&
+        body(resp) == "" && error_id(resp) == ""
+    # A public reader gets the private page: nothing is looked up or read, so
+    # neither a document missing on this host nor an unknown id fails it.
+    DOCS_DIR[] = mktempdir()
+    BUILDS[] = 0
+    for headers in ([], ["HX-Request" => "true"], ["Accept" => "text/markdown"]), id in ("lb", "xx")
+        @test private_page(dispatch(:GET, "/aud_doc/$id"; headers))
+    end
+    @test BUILDS[] == 0
+    # A private reader's answer is built once.
+    DOCS_DIR[] = document_pack()
+    resp = dispatch(:GET, "/aud_doc/lb"; audience=:private)
+    @test resp.status == 200 && body(resp) == "%PDF-1.4 lb"
+    @test HTTP.header(resp, "Content-Type") == "application/pdf"
+    @test BUILDS[] == 1
+    # What fails while it is built is a recorded route error: a CallerFault
+    # keeps its status.
+    unknown = dispatch(:GET, "/aud_doc/xx"; audience=:private)
+    @test unknown.status == 404 && !isempty(error_id(unknown))
+    @test occursin("no document", body(unknown))
+    DOCS_DIR[] = mktempdir()
+    absent = dispatch(:GET, "/aud_doc/lb"; audience=:private)
+    @test absent.status == 500 && !isempty(error_id(absent))
+end
+
+@testitem "a private part a function builds is built when a private reader is shown it" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    import HTMXObjects: h, to_markdown_string
+    route!(AudienceDocApp())
+    body(resp) = String(resp.body)
+    answers = ([], ["HX-Request" => "true"], ["Accept" => "text/markdown"])
+    BUILDS[] = 0
+    for headers in answers
+        public = body(dispatch(:GET, "/"; headers))
+        @test occursin("Kurz", public) && !occursin("SECRET", public)
+    end
+    @test BUILDS[] == 0
+    for headers in answers
+        built = BUILDS[]
+        live = body(dispatch(:GET, "/"; headers, audience=:private))
+        @test occursin("SECRET-LAZY", live) && !occursin("Kurz", live)
+        @test BUILDS[] == built + 1
+    end
+    # Rendering it yourself, and a static export, build it for a private
+    # reader only.
+    part = private(() -> (BUILDS[] += 1; h.p("SECRET-PART")); public = h.p("Kurz"))
+    built = BUILDS[]
+    @test !occursin("SECRET", to_markdown_string(part)) && !occursin("SECRET", repr("text/html", part))
+    @test !occursin("SECRET", repr("text/html", static_transform(h.div(part), StaticExport())))
+    @test BUILDS[] == built
+    @test occursin("SECRET-PART", to_markdown_string(part; audience=:private))
+    @test occursin("SECRET-PART", with_audience(() -> repr("text/html", part), :private))
+    @test occursin("SECRET-PART",
+        repr("text/html", static_transform(h.div(part), StaticExport(; audience=:private))))
+    @test BUILDS[] == built + 3
+end
+
+@testitem "export_site leaves out a private page a function builds without building it" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    route!(AudienceDocApp())
+    vendorfiles()
+    # The documents are not on this host: a public site needs none of them.
+    DOCS_DIR[] = mktempdir()
+    BUILDS[] = 0
+    dir = joinpath(mktempdir(), "site")
+    export_site(dir; pages=["/"])
+    @test BUILDS[] == 0
+    @test !occursin("SECRET", bundle_bytes(dir)) && !occursin("%PDF", bundle_bytes(dir))
+    @test !occursin("aud_doc", read(joinpath(dir, "index.html"), String))
+    # A private site carries the document.
+    DOCS_DIR[] = document_pack()
+    full = joinpath(mktempdir(), "full")
+    export_site(full; pages=["/"], audience=:private)
+    @test occursin("%PDF-1.4 lb", bundle_bytes(full)) && occursin("SECRET-LAZY", bundle_bytes(full))
+end
+
+@testitem "a private page a function builds answers each reader in a kept root" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    # The route's value is kept across requests; each answer is built for its
+    # own reader.
+    route!(AudienceKeptApp(); root_provider=RootProvider(scope=:session, key=req -> "k",
+                                                         retention=RootRetention()))
+    DOCS_DIR[] = document_pack()
+    @test dispatch(:GET, "/aud_kept/lb").status == 404
+    for _ in 1:2
+        @test String(dispatch(:GET, "/aud_kept/lb"; audience=:private).body) == "%PDF-1.4 lb"
+    end
+    @test dispatch(:GET, "/aud_kept/lb").status == 404
 end
 
 @testitem "pdf_report checks its audience before running Quarto" tags=[:unit] begin
