@@ -21948,6 +21948,7 @@ include("json_response.jl")
 include("routes/openapi_routes.jl")
 
 include("python_service.jl")
+include("python_models.jl")
 
 include("routes/reflection_routes.jl")
 
