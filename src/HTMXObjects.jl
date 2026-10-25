@@ -18371,7 +18371,10 @@ if (document.body) htmxoSearchRestore(document.body);
 // callback, whose layout changes would re-notify in the same frame; a newly
 // found element is measured that way too, without waiting for the
 // observer's first notice. A table inside another table's cell does not
-// stick and is not measured.
+// stick to the window, but its wrapper is measured all the same, so a wide
+// one becomes that box too, sized to fit below the outer table's line and
+// header. Its own line and header are not measured: its rows keep scrolling
+// into view below the outer ones, whose heights they inherit.
 window.htmxoStickyTracked = window.htmxoStickyTracked || new Set();
 function htmxoStickyMeasure(el) {
     if (!el.isConnected) return;
@@ -18381,7 +18384,8 @@ function htmxoStickyMeasure(el) {
     }
     const table = el.tagName === 'TABLE' ? el : el.querySelector(':scope > table');
     if (!table) return;
-    table.style.setProperty('--htmxo-table-head-h', (table.tHead ? table.tHead.offsetHeight : 0) + 'px');
+    if (!table.parentElement.closest('td, th'))
+        table.style.setProperty('--htmxo-table-head-h', (table.tHead ? table.tHead.offsetHeight : 0) + 'px');
     const wrap = table.parentElement;
     if (!wrap.classList.contains('table-wrap')) return;
     const width = wrap.scrollWidth > wrap.clientWidth + 1 ? 'wide' : 'fits';
@@ -18411,7 +18415,7 @@ function htmxoStickyTrack(elt) {
     const found = Array.from(elt.querySelectorAll(sticky));
     if (elt.matches && elt.matches(sticky)) found.push(elt);
     found.forEach(el => {
-        if (!el.isConnected || el.parentElement.closest('td, th')) return;
+        if (!el.isConnected || (el.tagName !== 'TABLE' && el.parentElement.closest('td, th'))) return;
         const wrap = el.tagName === 'TABLE' && el.parentElement.classList.contains('table-wrap') ? el.parentElement : null;
         [el, wrap].forEach(t => {
             if (!t) return;
@@ -19771,8 +19775,10 @@ A table that fits its column scrolls with the page. A table wider than its
 column (`data-htmxo-width="wide"` on its `.table-wrap`) becomes a window-tall
 box that scrolls both ways, with its header at the box top and its sideways
 scrollbar on screen. A table inside another table's cell (a detail row) does
-not stick. An app whose page has its own sticky header moves both below it
-with `--htmxo-sticky-top` (e.g. `:root { --htmxo-sticky-top: 3.5rem; }`);
+not stick to the window; wider than that cell, it becomes the same box, as
+tall as the window below the outer table's line and header, so its sideways
+scrollbar is on screen too. An app whose page has its own sticky header moves
+both below it with `--htmxo-sticky-top` (e.g. `:root { --htmxo-sticky-top: 3.5rem; }`);
 inside a card, set `--htmxo-sticky-bg` to the card's background.
 `sticky=false` keeps one table's line and header in the flow. None of this
 reaches Markdown or PDF output.
@@ -26257,8 +26263,11 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
    sideways scroll box, so the header sticks to the window) or `"wide"` (a
    window-tall box scrolling both ways, its header stuck at the box top);
    without the runtime the wrapper keeps its sideways scroll. A table inside
-   another table's cell does not stick. UNLAYERED: Pico styles `label`,
-   `input` and `small` unlayered. */
+   another table's cell does not stick to the window; a wide one is that box
+   too, as tall as the window below the outer table's line and header, with
+   its header at the box top beneath the outer one, on the line's background
+   (Pico's translucent row stripes reach a nested header through the outer
+   row). UNLAYERED: Pico styles `label`, `input` and `small` unlayered. */
 .htmxo-table-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem 1rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
 .htmxo-table-toolbar[hidden], .htmxo-table-toolbar > label[hidden] { display: none; }
 .htmxo-table-toolbar > * { margin: 0; }
@@ -26274,6 +26283,10 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
 .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { top: 0; }
 .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: var(--htmxo-table-head-h, 0px); }
 :is(td, th) .htmxo-table-toolbar[data-htmxo-sticky], :is(td, th) table[data-htmxo-sticky] > thead { position: static; }
+:is(td, th) .table-wrap[data-htmxo-width="wide"] { max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); }
+:is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { position: sticky; z-index: 1; }
+:is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead th { background-color: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
+:is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
 """))
 
 # --- Request feedback ---

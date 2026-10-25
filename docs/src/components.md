@@ -335,7 +335,10 @@ sight. This is the default for `sortable_table`, `render_table` and
 - **A table wider than its column** becomes a box as tall as the window that
   scrolls both ways, with its header at the top of the box and its sideways
   scrollbar on screen.
-- **A table inside another table's cell** (a detail row) does not stick.
+- **A table inside another table's cell** (a detail row) does not stick to
+  the window. Wider than that cell, it becomes the same box, as tall as the
+  window below the outer table's line and header, so its sideways scrollbar
+  is on screen when the box is; its header stays at the box top.
 - **Rows moved to by the keyboard** (↑/↓, j/k) or a `#row-…` link scroll into
   view below the line and the header, never under them.
 
