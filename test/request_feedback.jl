@@ -276,6 +276,9 @@ end
     # out-of-band swap again on every element swapped in so far, and the
     # script re-marked the swap's target on every announcement, so an answer
     # of 40 out-of-band cells applied 860 success marks.
+    # Todo 1lkdcr9 (user decision 1xadoyt, option 1): those marks went to the
+    # replaced, detached cells, so none showed; the element that took the
+    # cell's id flashes now, and an automatic request's swaps flash nothing.
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -314,6 +317,22 @@ end
             // An innerHTML target stays in the page, so its mark shows.
             if (!document.getElementById('box').classList.contains('htmx-request-success')) wrong.push('box unmarked');
             if (document.getElementById('c39').textContent !== 'new') wrong.push('cells not swapped');
+            // Each cell that replaced one flashes.
+            var flashing = document.querySelectorAll('td.htmx-request-success').length;
+            if (flashing !== 40) wrong.push('flashing cells=' + flashing);
+            // A request the page sends by itself (a load trigger) answers out
+            // of band too: its swaps land and nothing flashes.
+            var auto = document.createElement('div');
+            auto.setAttribute('hx-get', '/oob-auto');
+            auto.setAttribute('hx-trigger', 'load');
+            auto.setAttribute('hx-swap', 'none');
+            var autoSettled = new Promise(resolve => auto.addEventListener('htmx:afterSettle', resolve, {once: true}));
+            document.querySelector('main').appendChild(auto);
+            htmx.process(auto);
+            await autoSettled;
+            if (document.getElementById('d4').textContent !== 'auto') wrong.push('automatic cells not swapped');
+            if (document.getElementById('box2').textContent !== 'auto') wrong.push('automatic box not swapped');
+            if (marks !== 42) wrong.push('marks after the automatic request=' + marks);
             await fetch('/complete?status=' + (wrong.length ? encodeURIComponent('wrong ' + wrong.join(',')) : 'passed'));
           } catch (error) {
             await fetch('/complete?status=' + encodeURIComponent(String(error)));
@@ -322,14 +341,17 @@ end
         """))
         body = h.main(
             h.button("go"; id="go", hx_get="/oob", hx_swap="none"),
-            h.div("box"; id="box"),
-            h.table(h.tbody(h.tr((h.td(string(i); id="c$i") for i in 0:cells-1)...))))
+            h.div("box"; id="box"), h.div("box2"; id="box2"),
+            h.table(h.tbody(h.tr((h.td(string(i); id="c$i") for i in 0:cells-1)...),
+                            h.tr((h.td(string(i); id="d$i") for i in 0:4)...))))
         page = repr("text/html", htmx(body, driver;
             assets="/test-assets", sse_version=nothing, ws_version=nothing,
             preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
             compose=false, overlay=false))
         answer = "<div id=\"box\" hx-swap-oob=\"innerHTML\">boxed</div>" *
             join("<template><td id=\"c$i\" hx-swap-oob=\"true\">new</td></template>" for i in 0:cells-1)
+        auto_answer = "<div id=\"box2\" hx-swap-oob=\"innerHTML\">auto</div>" *
+            join("<template><td id=\"d$i\" hx-swap-oob=\"true\">auto</td></template>" for i in 0:4)
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
@@ -340,6 +362,7 @@ end
                 return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
             path == "/favicon.ico" && return HTTP.Response(204)
             path == "/oob" && return HTTP.Response(200, ["Content-Type" => "text/html"], answer)
+            path == "/oob-auto" && return HTTP.Response(200, ["Content-Type" => "text/html"], auto_answer)
             if path == "/complete"
                 isready(receipt) || put!(receipt, String(req.target))
                 return HTTP.Response(204)
