@@ -241,9 +241,13 @@ one. Every such response carries `Vary: Accept-Encoding`, compressed or not,
 so a cache keeps the two forms apart. A client that sends no
 `Accept-Encoding` (plain `curl`, for example) gets the body unchanged. Left
 alone: HEAD answers, `206` and `Content-Range` answers, responses that
-already carry `Content-Encoding` or `Cache-Control: no-transform`, streamed
-bodies (`@sse`, `IO`), and WebSocket upgrades. [`dispatch`](@ref) and static
-recording do not go through `serve` and always see the uncompressed body.
+already carry `Content-Encoding` or `Cache-Control: no-transform`, a streamed
+`IO` body, and WebSocket upgrades. An event stream (an `@sse` route, and the
+page's operation stream with the answers it pushes) is gzipped as one stream
+for a client that admits gzip, each write flushed through the compressor so
+an event arrives as soon as it is sent; it carries `Vary: Accept-Encoding`
+too. [`dispatch`](@ref) and static recording do not go through `serve` and
+always see the uncompressed body.
 
 With `prestart=true`, a response a browser receives — a page navigation
 (`Accept: text/html`) or an htmx request — starts the operations of its
@@ -470,6 +474,8 @@ function _stream_handler(app, check_origin=nothing, compress::Bool=true)
         handle = HTTP.streamhandler(function (req::HTTP.Request)
             req.context[:stream] = stream
             req.context[:ws_check_origin] = check_origin
+            # An event stream writes its own body; `_serve_sse` compresses it.
+            req.context[:htmxo_compress] = compress
             response = app(req)
             compress && (response = _compress_buffered(req, response))
             return _frame_buffered!(req, response)
@@ -8316,6 +8322,65 @@ const _TRANSPORT_HTTP_METHODS = Dict("WEBSOCKET" => "GET", "SSE" => "GET")
 
 # --- Server-sent events ------------------------------------------------------
 
+# `serve(; compress)` on an event stream: one gzip stream (RFC 1952) for the
+# whole response, with a zlib sync flush after every write, so each frame
+# leaves the compressor whole as soon as it is written. CodecZlib's stream API
+# cannot sync-flush (its `flush` keeps the bytes deflate still holds), so this
+# drives zlib through CodecZlib's own binding. A separate gzip member per frame
+# is no way around it: Chrome decodes only the first member of a response.
+mutable struct _GzipFrames
+    zstream::CodecZlib.ZStream
+    out::Vector{UInt8}
+end
+
+function _GzipFrames()
+    zstream = CodecZlib.ZStream()
+    # Level 6, as `transcode` uses for buffered answers; window bits 15 + 16
+    # write the gzip header and trailer.
+    code = CodecZlib.deflate_init!(zstream, 6, 15 + 16)
+    code == CodecZlib.Z_OK || error("zlib could not start a gzip stream (code $code)")
+    _GzipFrames(zstream, Vector{UInt8}(undef, 64 * 1024))
+end
+
+# Compress `n` bytes at `p` into `io`, ending with `flush`: `Z_SYNC_FLUSH`
+# after a write, `Z_FINISH` for the trailer (`_end_sse_gzip!`).
+function _gzip_write(gz::_GzipFrames, io, p::Ptr{UInt8}, n::UInt, flush::Cint)
+    z = gz.zstream
+    while true
+        # zlib counts input in `Cuint`; a larger write goes in pieces.
+        piece = min(n, UInt(typemax(Cuint)))
+        n -= piece
+        mode = n == 0 ? flush : CodecZlib.Z_NO_FLUSH
+        z.next_in = p
+        z.avail_in = piece
+        p += piece
+        while true
+            code = _gzip_deflate!(gz, io, mode)
+            # `Z_BUF_ERROR` only says there was nothing left to do.
+            code in (CodecZlib.Z_OK, CodecZlib.Z_STREAM_END, CodecZlib.Z_BUF_ERROR) ||
+                error("zlib failed to compress an event stream (code $code)")
+            # Done once zlib ends the stream, or leaves output space unused
+            # (it then holds nothing back from this flush).
+            code == CodecZlib.Z_STREAM_END && return nothing
+            mode != CodecZlib.Z_FINISH && z.avail_out > 0 && break
+        end
+        n == 0 && return nothing
+    end
+end
+
+# One `deflate` call into `gz.out`, whose output goes to `io`; zlib's code.
+function _gzip_deflate!(gz::_GzipFrames, io, mode::Cint)
+    z = gz.zstream
+    return GC.@preserve gz begin
+        z.next_out = pointer(gz.out)
+        z.avail_out = length(gz.out)
+        code = CodecZlib.deflate!(z, mode)
+        produced = length(gz.out) - z.avail_out
+        produced > 0 && unsafe_write(io, pointer(gz.out), produced)
+        code
+    end
+end
+
 """
     SSEStream
 
@@ -8336,16 +8401,23 @@ When the body returns, a non-`nothing` value is sent as a final
 instead), followed by `event: close`, which tells the client the stream is
 over. `close(__sse__)` instead ends the stream without those frames, so the
 browser reconnects (sending [`last_event_id`](@ref)).
+
+Under `serve(; compress=true)` the stream is gzipped for a client that accepts
+gzip, and every write is flushed through the compressor, so each frame still
+reaches the browser the moment it is written.
 """
 mutable struct SSEStream <: IO
     stream::Any
     request::HTTP.Request
     lock::ReentrantLock
     open::Bool
+    gzip::Union{Nothing,_GzipFrames}
 end
 
-SSEStream(stream, request::HTTP.Request) =
-    SSEStream(stream, request, ReentrantLock(), true)
+# `gzip=true`: the response announced `Content-Encoding: gzip`
+# (`_sse_gzip_headers!`), and every write goes through one gzip stream.
+SSEStream(stream, request::HTTP.Request; gzip::Bool=false) =
+    SSEStream(stream, request, ReentrantLock(), true, gzip ? _GzipFrames() : nothing)
 
 Base.isopen(sse::SSEStream) = @lock sse.lock sse.open
 
@@ -8361,7 +8433,9 @@ function Base.unsafe_write(sse::SSEStream, p::Ptr{UInt8}, n::UInt)
     try
         sse.open || throw(Base.IOError("SSE client disconnected", 0))
         try
-            return unsafe_write(sse.stream, p, n)
+            sse.gzip === nothing && return unsafe_write(sse.stream, p, n)
+            _gzip_write(sse.gzip, sse.stream, p, n, CodecZlib.Z_SYNC_FLUSH)
+            return n
         catch
             # A failed write means the client went away; nothing more can
             # reach it, so every later write and `isopen` reflects that.
@@ -8533,9 +8607,10 @@ function _serve_sse(req::HTTP.Request, body; error_obj=nothing)
     for header in _SSE_HEADERS
         HTTP.setheader(stream, header)
     end
+    gzip = _sse_gzip_headers!(stream, req)
     _sse_http1() && HTTP.setheader(stream, "Connection" => "close")
     HTTP.startwrite(stream)
-    sse = SSEStream(stream, req)
+    sse = SSEStream(stream, req; gzip)
     heartbeat = _start_sse_heartbeat(sse)
     try
         final = _run_sse_body(body, sse, req, error_obj)
@@ -8543,9 +8618,40 @@ function _serve_sse(req::HTTP.Request, body; error_obj=nothing)
     finally
         heartbeat === nothing || close(heartbeat)
         close(sse)
+        _end_sse_gzip!(sse)
         _end_sse_response(stream)
     end
     HTTP.Response(200)
+end
+
+# `serve(; compress)` (`_stream_handler` records it on the request) for an
+# event stream: `Vary: Accept-Encoding` on every stream, as on a buffered
+# answer, and `Content-Encoding: gzip` when the client admits gzip. Whether
+# the stream is gzipped.
+function _sse_gzip_headers!(stream, req::HTTP.Request)
+    get(req.context, :htmxo_compress, false) === true || return false
+    HTTP.setheader(stream, "Vary" => "Accept-Encoding")
+    _accepts_gzip(HTTP.header(req, "Accept-Encoding", "")) || return false
+    HTTP.setheader(stream, "Content-Encoding" => "gzip")
+    return true
+end
+
+# A gzipped stream's trailer, written before the response ends, and zlib's
+# memory freed whether or not the client is still there to take it.
+function _end_sse_gzip!(sse::SSEStream)
+    @lock sse.lock begin
+        gz = sse.gzip
+        gz === nothing && return nothing
+        sse.gzip = nothing
+        try
+            _gzip_write(gz, sse.stream, Ptr{UInt8}(C_NULL), UInt(0), CodecZlib.Z_FINISH)
+        catch err
+            @debug "SSE client left before the gzip trailer" exception=(err, catch_backtrace())
+        finally
+            CodecZlib.deflate_end!(gz.zstream)
+        end
+    end
+    nothing
 end
 
 # An `@sse` route answers its GET with a live event stream. Argument parsing,
