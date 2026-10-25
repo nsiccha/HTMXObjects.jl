@@ -2654,6 +2654,11 @@ sends no polls at all:
   operation through `middleware` and the router itself, with the stream
   request's headers and its `Referer` as the page's address, and sends it as
   `progress`; the page applies it with Treebars' `treebarUpdatePoller`;
+- from the moment the stream is opened, the poller's timer polls are held in
+  `htmx:confirm`, before htmx starts a request, so the page's other listeners
+  never see one; if no answer has arrived three seconds after the stream
+  opened (a proxy holding the stream back, say), the poller polls once a
+  second until one does;
 - when the computation ends it renders the final answer the same way and sends
   it as `result`, so the result reaches the page without another request;
 - a final answer that needs htmx's own response handling (any status but

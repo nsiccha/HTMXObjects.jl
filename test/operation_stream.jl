@@ -49,8 +49,27 @@ using TestItemRunner
     end
 
     # A page in the full shell, for Chrome. Its driver reports to the server
-    # when the fragment's poller is on the page and when the fragment landed.
+    # when the fragment's poller is on the page and when the fragment landed,
+    # then how many polls the page sent and how many htmx started as requests
+    # (a poll held back in `htmx:confirm` is neither; one cancelled in
+    # `htmx:beforeRequest` is started but never sent, and never ends).
     const BROWSER_DRIVER = h.script(HTMXObjects.Raw(raw"""
+    (function () {
+    const polls = { sent: 0, started: 0 };
+    const isPoll = url => /[?&]__htmxo_poll=1(&|#|$)/.test(url || '');
+    const open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      this.__pollUrl = String(url);
+      return open.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function () {
+      if (isPoll(this.__pollUrl)) polls.sent++;
+      return send.apply(this, arguments);
+    };
+    document.addEventListener('htmx:beforeRequest', function (e) {
+      const d = e.detail || {};
+      if (isPoll(d.requestConfig && d.requestConfig.path)) polls.started++;
+    }, true);
     window.addEventListener('load', async function () {
       const sleep = ms => new Promise(r => setTimeout(r, ms));
       const beacon = text => fetch('/stream_beacon?text=' + encodeURIComponent(text));
@@ -63,8 +82,11 @@ using TestItemRunner
         beacon('badge:' + (poller ? poller.innerText : ''));
       }, 6500);
       for (n = 0; n < 1200 && !document.querySelector('#done-browser'); n++) await sleep(25);
+      const counted = 'polls:' + JSON.stringify(polls);
       await beacon(n < 1200 ? 'landed' : 'never-landed');
+      await beacon(counted);
     });
+    })();
     """))
 
     @htmx struct StreamBrowserApp
@@ -486,6 +508,7 @@ end
                     @test timedwait(() -> beacon("landed") !== nothing ||
                                           beacon("never-landed") !== nothing,
                                     30.0; pollint=0.01) === :ok
+                    @test timedwait(() -> beacon("polls:") !== nothing, 10.0; pollint=0.01) === :ok
                 finally
                     process_exited(proc) || kill(proc)
                     wait(proc)
@@ -498,13 +521,84 @@ end
             @test badge !== nothing
             # Pushed answers kept the poller current: no "Updated … ago".
             badge === nothing || @test !occursin(r"\bago\b", BEACONS[badge][2])
-            # Once the first pushed answer arrived (within a second of the
-            # stream opening), the poller sent no polls; the result needed none.
-            opened = first(r[1] for r in requests if contains(r[2], "__htmxo_push=1"))
-            polls = count(r -> opened + 1.5 <= r[1] && contains(r[2], "__htmxo_poll=1"), requests)
-            @test polls == 0
+            # The poller sent no polls at all: it waited for the stream's first
+            # answer (a second after the stream opened) and then took every
+            # answer from the stream; the result needed none.
+            @test count(r -> contains(r[2], "__htmxo_poll=1"), requests) == 0
+            # Nor did htmx start a poll as a request that never ended (a timer
+            # poll cancelled in `htmx:beforeRequest`), which page listeners
+            # counting requests would see as one still running.
+            polls = beacon("polls:")
+            @test polls !== nothing
+            polls === nothing || @test BEACONS[polls][2] == """polls:{"sent":0,"started":0}"""
             @test runs("browser") == 1
         finally
+            release!("browser")
+            terminate()
+            HTMXObjects.OPERATION_LOG[] = operation_log
+        end
+    end
+end
+
+@testitem "a pushed poller whose stream brings no answer polls by itself" setup=[OperationStreamFixtures, HTMXOTestPorts] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Test
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_stream!()
+        route!(StreamBrowserApp())
+        vendorfiles()
+        requests = Tuple{Float64,String}[]
+        # A proxy that holds the stream back: the stream opens, and none of its
+        # events reaches the page.
+        held = Base.Event()
+        holding(handler) = function (req)
+            push!(requests, (time(), req.target))
+            contains(req.target, "__htmxo_operations=") &&
+                occursin("text/event-stream", HTTP.header(req, "Accept", "")) ||
+                return handler(req)
+            HTMXObjects._serve_sse(req, _ -> wait(held))
+        end
+        beacon(text) = findfirst(b -> startswith(b[2], text), BEACONS)
+        port = free_port()
+        operation_log = HTMXObjects.OPERATION_LOG[]
+        serve(; port, async=true, access_log=nothing, operation_log=nothing,
+              middleware=[holding])
+        released = Ref(NaN)
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/stream_browser`
+                proc = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> beacon("polling") !== nothing, 60.0; pollint=0.02) === :ok
+                    @test timedwait(() -> any(r -> contains(r[2], "__htmxo_push=1"), requests),
+                                    10.0; pollint=0.01) === :ok
+                    sleep(5.0)
+                    released[] = time()
+                    release!("browser")
+                    @test timedwait(() -> beacon("landed") !== nothing ||
+                                          beacon("never-landed") !== nothing,
+                                    30.0; pollint=0.01) === :ok
+                finally
+                    process_exited(proc) || kill(proc)
+                    wait(proc)
+                end
+            end
+            landed = beacon("landed")
+            @test landed !== nothing
+            # Its own poll brought the result, at most a second late.
+            landed === nothing || @test BEACONS[landed][1] - released[] < 1.5
+            opened = first(r[1] for r in requests if contains(r[2], "__htmxo_push=1"))
+            polls = [r[1] for r in requests if contains(r[2], "__htmxo_poll=1")]
+            # It waited three seconds for the stream's first answer, then polled
+            # once a second, as an announcing stream's pollers do.
+            @test !isempty(polls)
+            isempty(polls) || @test first(polls) - opened >= 2.5
+            @test length(polls) <= 5
+            @test runs("browser") == 1
+        finally
+            notify(held)
             release!("browser")
             terminate()
             HTMXObjects.OPERATION_LOG[] = operation_log
