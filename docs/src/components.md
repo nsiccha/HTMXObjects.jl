@@ -558,7 +558,11 @@ An app-provided `master_attrs.onclick` continues to override the row shortcut.
 A flat table (no `children`) gives each detail row a compact
 disclosure triangle (▸ closed, ▾ open, named "Details") in its first cell,
 beside the cell's content, which may be a link; the row click remains a pointer
-shortcut. Every branch and detail control is a native button carrying
+shortcut. A click on a control of the row's own (a link, button, form field,
+label, per-row form, a `<details>` drop-out with its `<summary>`, editable
+text) keeps its own behaviour: it neither toggles nor selects the row. Only
+controls inside the row count, so a table inside a `<form>` or a `<details>`
+still toggles. Every branch and detail control is a native button carrying
 `aria-controls`/`aria-expanded`, so it supports keyboard activation, as do
 auto-wired sort headers. Sorting, search and CSV export read the cell's content,
 not its controls. However narrow the first column, its controls stay on their

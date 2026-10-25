@@ -17962,7 +17962,7 @@ function htmxoTreeToggle(button) {
     htmxoFilterTable(row);
 }
 function htmxoTreeRow(row, event) {
-    if (event.target.closest('a,button,input,textarea,select,form')) return;
+    if (htmxoRowControl(row, event.target)) return;
     const button = row.querySelector('[data-htmxo-tree-toggle]');
     if (button && !button.disabled) htmxoTreeToggle(button);
 }
@@ -18557,14 +18557,13 @@ function htmxoSelectionKeydown(root, row, e) {
 }
 
 // The selectable row an event targets, unless it lands on a control of its
-// own (a link, button, input, label, per-row form, …), which keeps its own
-// behaviour. Returns [root, row] or null.
+// own (`htmxoRowControl`), which keeps its own behaviour. Returns [root, row]
+// or null.
 function htmxoSelectionTarget(e) {
     const row = e.target.closest && e.target.closest('tr[aria-selected]');
     const root = row && row.closest('[data-htmxo-select]');
     if (!root || !htmxoSelectionRows(root).includes(row)) return null;
-    const control = e.target.closest('a,button,input,textarea,select,label,form,summary,[contenteditable]');
-    return control && row.contains(control) ? null : [root, row];
+    return htmxoRowControl(row, e.target) ? null : [root, row];
 }
 // The search query a regroup carries to the re-rendered table.
 function htmxoGroupedQuery(el) {
@@ -20067,6 +20066,12 @@ if (!window.htmxoMoveBeforeGuarded) {
 # The runtime starts with the page's `moveBefore` guard
 # (`_move_before_guard_js`), so every page carrying it moves preserved
 # elements safely.
+# The elements that are controls of their own inside a master row: a click on
+# one keeps its own behaviour (`htmxoRowControl`, which also counts editable
+# text), and a first-cell label holding one is never wrapped in the row's
+# native button (`_md_interactive_label`).
+const _MD_ROW_CONTROLS = (:a, :button, :input, :textarea, :select, :label, :form, :details)
+
 _md_runtime_js() = _move_before_guard_js() * """
 // A table text (`TableTexts`) with its {placeholders} filled in: from the
 // nearest `data-htmxo-texts` the table's `texts=` wrote, else English.
@@ -20082,8 +20087,18 @@ function htmxoText(el, name, values) {
     }
     return texts[name].replace(/[{]([A-Za-z_]+)[}]/g, function(m, k) { return values && k in values ? String(values[k]) : m; });
 }
+// The control of its own that a click inside `row` landed on (a link, button,
+// form field, label, per-row form, <details> drop-out or editable text), which
+// keeps its own behaviour instead of toggling or selecting the row; null for a
+// click on the row itself. Only a control inside the row counts, so a table
+// inside a <form> or a <details> still toggles. The row toggle, the tree row
+// and row selection all ask this.
+function htmxoRowControl(row, target) {
+    var control = target.closest && target.closest('$(join(_MD_ROW_CONTROLS, ',')),[contenteditable]');
+    return control && row.contains(control) ? control : null;
+}
 function htmxoMdToggle(row, event, key, slot) {
-    if (event.target.closest('a,button,input,textarea,select,form')) return;
+    if (htmxoRowControl(row, event.target)) return;
     var d = document.getElementById('detail-' + key); if (!d) return;
     var show = row.dataset.htmxoDetailOpen === undefined ? d.hidden : row.dataset.htmxoDetailOpen !== 'true';
     htmxoMdShow(row, d, show);
@@ -20227,8 +20242,10 @@ master_detail_js() = h.script(Raw(_md_runtime_js()))
     master_detail_toggle_js(safe_key; lazy_slot_id=nothing) -> String
 
 Return the click-handler JS snippet for the master row of a master/detail
-pair. The snippet ignores clicks on interactive descendants (`a`,
-`button`, `input`, `textarea`, `select`, `form`), toggles the
+pair. The snippet ignores clicks on the row's own controls (`a`, `button`,
+`input`, `textarea`, `select`, `label`, `form`, a `<details>` drop-out and
+its `<summary>`, editable text) — only those inside the row, so a table inside
+a `<form>` or `<details>` still toggles — toggles the
 `#detail-<safe_key>` row's `hidden` attribute, and mirrors the open state
 to `aria-expanded` on the master. `safe_key` MUST already be CSS-safe
 (see [`master_detail_safe_key`](@ref)).
@@ -20313,7 +20330,7 @@ _md_interactive_label(::Any) = false
 _md_interactive_label(::Raw) = true
 _md_interactive_label(::_LabelledControl) = true
 _md_interactive_label(node::Node) =
-    HTMX.tag(node) in (:a, :button, :input, :textarea, :select, :form) ||
+    HTMX.tag(node) in _MD_ROW_CONTROLS ||
     any(_md_interactive_label, HTMX.children(node))
 
 _md_attr_name(key) = Symbol(replace(string(key), '_' => '-'))
