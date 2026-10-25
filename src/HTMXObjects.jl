@@ -285,7 +285,9 @@ second the server renders the running poller's answer by polling the operation
 through `middleware` and the router with the stream request's headers (its
 `Referer` as the page's address), and sends it as `progress`; when the
 computation ends it renders the final answer the same way and sends it as
-`result`. The page's poller then sends no polls at all. `middleware` sees each
+`result`. The page's poller then sends no polls at all: it waits for the
+stream's first answer, and polls once a second only if none has arrived three
+seconds after the stream opened. `middleware` sees each
 of these renders as a GET of the poll address with `req.context[:htmxo_push]`
 set. A final answer that
 needs htmx's own response handling (a status other than 286, an `HX-*`
@@ -25394,15 +25396,20 @@ the pollers marked `data-htmxo-operation-stream` (at most 32) and holds one
 `EventSource` on the page's own address with `__htmxo_operations=<token>,…`.
 When the page's Treebars script provides `treebarUpdatePoller` and
 `treebarPollerLost`, the stream is opened with `__htmxo_push=1` and carries
-answers: `progress` and `result` frames are applied with
-`treebarUpdatePoller` (which also stops the poller's own polls), and a poller
-goes back to its own polls with `treebarPollerLost` when the stream drops. A
-poller inside a live-refresh reporter keeps polling and fetches its result.
+answers, and its pollers send no polls: from the moment the stream is opened
+a poller waits for its first answer (the server sends one a second later),
+`progress` and `result` frames are applied with `treebarUpdatePoller`, and
+the poller's timer polls are held in `htmx:confirm`, so the page's other
+listeners never see them as requests. If no answer has arrived three seconds
+after the stream opened (a proxy holding the stream back), the poller polls
+once a second until one does. A poller goes back to its own polls with
+`treebarPollerLost` when the stream drops. A poller inside a live-refresh
+reporter keeps polling and fetches its result.
 When the stream reports an operation `ready`, the script sends that poller's
 poll at once (`htmx.ajax` with the polling element as its source, the request
 its own timer would send), so the answer is swapped, ended and recorded as any
-poll's is. While the stream covers a poller that shows no pushed answers, that
-poller's timer polls go out at most once a second, for its progress tree; an
+poll's is. While a stream that pushes nothing covers a poller, that poller's
+timer polls go out at most once a second, for its progress tree; an
 operation the stream reports `gone` polls as before. A poller that appears later reopens the stream with the
 new set. A dropped stream leaves the pollers polling at their own pace while the
 browser reconnects; a refused one is reported to `htmxoStreamProbe` and
@@ -25419,11 +25426,16 @@ operation_stream_script() = h.script(Raw(raw"""
   // A streamed poller nobody pushes to polls at most this often, for its
   // progress tree; its result is announced on the stream.
   var PROGRESS_MS = 1000;
+  // How long a pushing stream's poller waits for its first answer before it
+  // polls by itself. The server sends one a second after the stream opens; a
+  // proxy that holds the stream back sends none.
+  var FIRST_PUSH_MS = 3000;
   // Operations one stream covers (64-character tokens: about 2 KB of address).
   var LIMIT = 32;
   var state = { source: null, tokens: {}, push: false, retries: 0, retry: null, queued: false };
   var streamed = {};   // token -> the open stream covers it
   var pushed = {};     // token -> its poller shows pushed answers
+  var awaited = {};    // token -> since when a pushing stream owes it a first answer
   var ended = {};      // token -> the stream sent its result, ready or gone
   var lastPoll = {};   // token -> when its last timer poll went out
   function operationToken(url) {
@@ -25455,7 +25467,7 @@ operation_stream_script() = h.script(Raw(raw"""
       if (!ended[t] && list.length < LIMIT) list.push(t);
     });
     // Forget operations whose pollers have left the page.
-    [ended, lastPoll].forEach(function(seen) {
+    [ended, lastPoll, awaited].forEach(function(seen) {
       Object.keys(seen).forEach(function(t) { if (!present[t]) delete seen[t]; });
     });
     return list;
@@ -25466,6 +25478,7 @@ operation_stream_script() = h.script(Raw(raw"""
       pollers(t).forEach(function(el) { window.treebarPollerLost(el, ''); });
     });
     pushed = {};
+    awaited = {};
     streamed = {};
   }
   function shut() {
@@ -25500,6 +25513,7 @@ operation_stream_script() = h.script(Raw(raw"""
     ended[token] = true;
     delete streamed[token];
     delete pushed[token];
+    delete awaited[token];
   }
   // The poller asks for its answer now, with its own request.
   function poll(el) {
@@ -25514,7 +25528,7 @@ operation_stream_script() = h.script(Raw(raw"""
       // Live refresh reports such a poller's answers through its own requests.
       if (el.closest('.htmxo-live-reporter')) { if (result) poll(el); return; }
       if (window.treebarUpdatePoller(el, answer.html)) {
-        if (!result) pushed[token] = true;
+        if (!result) { pushed[token] = true; delete awaited[token]; }
       } else {
         finish(token);
       }
@@ -25527,10 +25541,19 @@ operation_stream_script() = h.script(Raw(raw"""
     state.source = source;
     state.push = push;
     tokens.forEach(function(t) { state.tokens[t] = true; });
+    // A pushing stream brings each poller's answers, so its pollers wait for
+    // them from the moment it is opened (and again when it reconnects).
+    function owe() {
+      if (push) tokens.forEach(function(t) {
+        if (!ended[t] && !pushed[t] && !awaited[t]) awaited[t] = Date.now();
+      });
+    }
+    owe();
     source.addEventListener('open', function() {
       if (state.source !== source) return;
       state.retries = 0;
       tokens.forEach(function(t) { if (!ended[t]) streamed[t] = true; });
+      owe();
     });
     source.addEventListener('progress', function(e) {
       if (state.source === source) apply(e.data, false);
@@ -25571,12 +25594,20 @@ operation_stream_script() = h.script(Raw(raw"""
     });
   }
   // `htmx:confirm` comes before anything else of a request, so a held-back
-  // timer poll is never seen as a request by the page's other listeners. A
-  // poller that shows pushed answers sends none; its poller script holds them.
+  // timer poll is never seen as a request by the page's other listeners
+  // (cancelled in `htmx:beforeRequest`, as its poller script would, it would
+  // be a request that never ends). A poller that shows pushed answers sends
+  // none, nor does one waiting for its first, unless that is late.
   document.addEventListener('htmx:confirm', function(e) {
     var d = e.detail || {}, token = pollToken(d.path);
-    if (!token || !streamed[token] || pushed[token]) return;
+    if (!token) return;
     var now = Date.now();
+    if (pushed[token] || (awaited[token] && now - awaited[token] < FIRST_PUSH_MS &&
+                          !(d.elt && d.elt.closest('.htmxo-live-reporter')))) {
+      e.preventDefault();
+      return;
+    }
+    if (!streamed[token]) return;
     if (lastPoll[token] && now - lastPoll[token] < PROGRESS_MS) {
       e.preventDefault();
       return;
