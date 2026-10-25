@@ -87,3 +87,74 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
         with:
           fail_ci_if_error: false
+  # python_service(…; models=): the StanBlocks and ReactiveKernelsPPL
+  # extensions, and the generated CmdStanPy/NumPyro runtimes checked against
+  # the Julia models (test/python_models.jl). The matrix skips both: they need
+  # a Julia project with the two packages (HTMXO_TEST_MODELS) and a Python
+  # with the model runtimes (HTMXO_TEST_PYTHON_MODELS=1 makes a skip fail).
+  models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CMDSTAN_VERSION: '2.40.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git for private repos
+        run: git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'lts'
+      - uses: julia-actions/cache@v2
+      - name: Install unregistered dependencies
+        run: julia --project=. test/provision.jl
+      - uses: julia-actions/julia-buildpkg@v1
+      # Outside the checkout, so TestItemRunner does not scan their test items.
+      - name: Julia project with StanBlocks and ReactiveKernelsPPL
+        run: |
+          deps="$RUNNER_TEMP/ci-deps"
+          mkdir -p "$deps"
+          git clone -q -b dev https://github.com/nsiccha/HTMX.jl "$deps/HTMX.jl"
+          git clone -q -b pre-inference https://github.com/nsiccha/DynamicObjects.jl "$deps/DynamicObjects.jl"
+          git clone -q https://github.com/nsiccha/OutputSignatures.jl "$deps/OutputSignatures.jl"
+          # The revision HTMXObjects' [sources] pins (Julia 1.10 ignores [sources]).
+          git clone -q https://github.com/nsiccha/Treebars.jl "$deps/Treebars.jl"
+          git -C "$deps/Treebars.jl" checkout -q de253533c2e6d4884815100988630746c6801017
+          git clone -q -b main https://github.com/nsiccha/ReactiveKernels.jl "$deps/ReactiveKernels.jl"
+          git clone -q -b devibe https://github.com/nsiccha/StanBlocks.jl "$deps/StanBlocks.jl"
+          julia --project="$RUNNER_TEMP/models-env" -e '
+            using Pkg
+            deps = joinpath(ENV["RUNNER_TEMP"], "ci-deps")
+            rk = joinpath(deps, "ReactiveKernels.jl")
+            Pkg.develop([PackageSpec(path=pwd()),
+                         PackageSpec(path=joinpath(deps, "HTMX.jl")),
+                         PackageSpec(path=joinpath(deps, "DynamicObjects.jl")),
+                         PackageSpec(path=joinpath(deps, "OutputSignatures.jl")),
+                         PackageSpec(path=joinpath(deps, "Treebars.jl")),
+                         PackageSpec(path=rk),
+                         PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsDistributionKernels")),
+                         PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsPPL")),
+                         PackageSpec(path=joinpath(deps, "StanBlocks.jl"))])
+            Pkg.instantiate()
+            Pkg.precompile()'
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: '3.12'
+      - name: Install the generated service's dependencies and the model runtimes
+        run: ${{ steps.python.outputs.python-path }} -m pip install fastapi pydantic uvicorn python-multipart httpx pytest pycodestyle cmdstanpy jax numpyro scipy
+      - uses: actions/cache@v4
+        id: cmdstan
+        with:
+          path: ~/cmdstan
+          key: cmdstan-${{ env.CMDSTAN_VERSION }}-${{ runner.os }}
+      - name: Install CmdStan
+        if: steps.cmdstan.outputs.cache-hit != 'true'
+        run: ${{ steps.python.outputs.python-path }} -m cmdstanpy.install_cmdstan --dir ~/cmdstan --version "$CMDSTAN_VERSION" --cores 4
+      - name: Run test/python_models.jl
+        env:
+          HTMXO_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+          HTMXO_TEST_PYTHON_MODELS: "1"
+          HTMXO_TEST_MODELS: ${{ runner.temp }}/models-env
+        run: |
+          export CMDSTAN="$HOME/cmdstan/cmdstan-$CMDSTAN_VERSION"
+          julia --project=. --color=no test/select.jl --file=test/python_models.jl
