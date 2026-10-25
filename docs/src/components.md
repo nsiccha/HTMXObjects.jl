@@ -558,7 +558,11 @@ An app-provided `master_attrs.onclick` continues to override the row shortcut.
 A flat table (no `children`) gives each detail row a compact
 disclosure triangle (▸ closed, ▾ open, named "Details") in its first cell,
 beside the cell's content, which may be a link; the row click remains a pointer
-shortcut. Every branch and detail control is a native button carrying
+shortcut. A click on a control of the row's own (a link, button, form field,
+label, per-row form, a `<details>` drop-out with its `<summary>`, editable
+text) keeps its own behaviour: it neither toggles nor selects the row. Only
+controls inside the row count, so a table inside a `<form>` or a `<details>`
+still toggles. Every branch and detail control is a native button carrying
 `aria-controls`/`aria-expanded`, so it supports keyboard activation, as do
 auto-wired sort headers. Sorting, search and CSV export read the cell's content,
 not its controls. However narrow the first column, its controls stay on their
@@ -1156,6 +1160,13 @@ an element's own `load`, `revealed` or `intersect` trigger — `lazy(url)`, a
 deferred page's placeholder, a `tabset`'s shown lazy panel, an infinite-scroll
 sentinel. So a page that loads its main content lazily just shows it. A failure
 among them still raises the failure toast.
+
+Each out-of-band swap of an answer marks its target once. htmx 2.0.8 announces
+an answer's k-th out-of-band swap again on every element the answer has swapped
+in so far, so N `hx-swap-oob="true"` elements fire `htmx:oobAfterSwap`
+N(N+1)/2 + N times (500 elements: 125,750); request feedback acts on the first
+announcement of each swap only. htmx's own announcements still grow with the
+square of N ([bigskysoftware/htmx#1803](https://github.com/bigskysoftware/htmx/issues/1803)).
 
 ## Links and links-as-actions
 
