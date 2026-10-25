@@ -60,7 +60,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `StaticExport(; url_map, controls, record_base, runtime, audience)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
 | `export_site(dir; pages, file_name, controls, aliases, parent, audience)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
-| `private(content; public=nothing)`, `Private` | Content a public reader must not see: the live app and a private export show `content`, a public export shows `public` (nothing by default) — see [Public and private content](#private-content) |
+| `private(content; public=nothing)`, `Private` | Content a public reader must not see: the live app and a private export show `content`, a public export shows `public` (nothing by default); `content` can be a function (`private() do … end`) that builds it for a private reader only — see [Public and private content](#private-content) |
 | `export_audience(req)` | Who the answer to this request is for: `:private` for the live app, the audience of an export or `dispatch` otherwise |
 | `with_audience(f, audience)` | Call `f()` rendering everything for `audience` (`:public` / `:private`): HTML a library builds itself, or work in a task it starts — see [Public and private content](#private-content) |
 | `PrivateContentEscaped` | Thrown when a public answer still holds private markup rendered before the export could leave it out |
@@ -3799,6 +3799,26 @@ a public PDF inside a live request (which is `:private`) does.
   `X-HTMXO-Private: true`, as a page, a fragment and in Markdown. `export_site`
   writes no file for it and leaves out every element that links or loads it,
   whatever `controls` says (a disabled link would still name the page).
+- **Content that has to be built.** `content` can be a function, usually a
+  `do` block: `private() do … end`, or `private(; public=…) do … end`. It is
+  called only when the content is shown to a private reader, so a public
+  answer neither computes nor reads it, and nothing it throws can fail a public
+  answer: a private page whose document is missing on this host, or whose id
+  is unknown, still answers its empty `404`, and a public `export_site` never
+  builds it. A route's whole answer is built once, while the answer is made: a
+  `CallerFault` it throws answers with its status, and any other exception is
+  a recorded route error. A part of a page is built whenever it is rendered for
+  a private reader, so keep the function free of side effects. It runs after
+  the route's operation, so the `:auto` transport does not poll it.
+
+  ```julia
+  document(dir, id) = private() do      # library code needs no `__req__`
+      file = get(DOCUMENTS, id, nothing)
+      isnothing(file) && throw(CallerFault(404, "no document $(repr(id))"))
+      MIMEResponse("application/pdf", read(joinpath(dir, file)))
+  end
+  @get unterlagen(id::String) = document(UNTERLAGEN, id)
+  ```
 - A static export walks private content as its audience reads it, so a public
   bundle never asks `url_map` about, nor follows, a link inside what it leaves
   out.
