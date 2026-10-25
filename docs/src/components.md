@@ -1161,6 +1161,13 @@ deferred page's placeholder, a `tabset`'s shown lazy panel, an infinite-scroll
 sentinel. So a page that loads its main content lazily just shows it. A failure
 among them still raises the failure toast.
 
+Each out-of-band swap of an answer marks its target once. htmx 2.0.8 announces
+an answer's k-th out-of-band swap again on every element the answer has swapped
+in so far, so N `hx-swap-oob="true"` elements fire `htmx:oobAfterSwap`
+N(N+1)/2 + N times (500 elements: 125,750); request feedback acts on the first
+announcement of each swap only. htmx's own announcements still grow with the
+square of N ([bigskysoftware/htmx#1803](https://github.com/bigskysoftware/htmx/issues/1803)).
+
 ## Links and links-as-actions
 
 ### `hx_link(url; …)` — `<a>` that uses `hx-get` (HTMX boost-style)

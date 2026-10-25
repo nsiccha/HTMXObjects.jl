@@ -270,3 +270,102 @@ end
         end
     end
 end
+
+@testitem "request feedback marks each out-of-band swap once in a browser" tags=[:browser, :unit] begin
+    # Snag answer-an-htmx-r-63b2f727: htmx 2.0.8 announces an answer's k-th
+    # out-of-band swap again on every element swapped in so far, and the
+    # script re-marked the swap's target on every announcement, so an answer
+    # of 40 out-of-band cells applied 860 success marks.
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        cells = 40
+        driver = h.script(Raw(raw"""
+        // Every success mark the page applies, and every out-of-band
+        // announcement htmx makes.
+        var marks = 0, announced = 0;
+        var add = DOMTokenList.prototype.add;
+        DOMTokenList.prototype.add = function() {
+          for (var i = 0; i < arguments.length; i++) if (arguments[i] === 'htmx-request-success') marks++;
+          return add.apply(this, arguments);
+        };
+        document.addEventListener('htmx:oobAfterSwap', function() { announced++; });
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent(event.message));
+        });
+        window.addEventListener('load', async function() {
+          try {
+            var go = document.getElementById('go');
+            var settled = new Promise(resolve => go.addEventListener('htmx:afterSettle', resolve, {once: true}));
+            go.click();
+            await settled;
+            var wrong = [];
+            // The answer: one innerHTML swap into #box, then 40 outerHTML
+            // cells. htmx's own count: 1 for the box, then k + 1 for the k-th
+            // cell (the request's target and the k cells swapped in so far).
+            if (announced !== 861) wrong.push('announced=' + announced);
+            // One mark per out-of-band swap, plus the clicked button's own.
+            if (marks !== 42) wrong.push('marks=' + marks);
+            // An innerHTML target stays in the page, so its mark shows.
+            if (!document.getElementById('box').classList.contains('htmx-request-success')) wrong.push('box unmarked');
+            if (document.getElementById('c39').textContent !== 'new') wrong.push('cells not swapped');
+            await fetch('/complete?status=' + (wrong.length ? encodeURIComponent('wrong ' + wrong.join(',')) : 'passed'));
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        body = h.main(
+            h.button("go"; id="go", hx_get="/oob", hx_swap="none"),
+            h.div("box"; id="box"),
+            h.table(h.tbody(h.tr((h.td(string(i); id="c$i") for i in 0:cells-1)...))))
+        page = repr("text/html", htmx(body, driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing, pico_version=nothing,
+            compose=false, overlay=false))
+        answer = "<div id=\"box\" hx-swap-oob=\"innerHTML\">boxed</div>" *
+            join("<template><td id=\"c$i\" hx-swap-oob=\"true\">new</td></template>" for i in 0:cells-1)
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            path == "/oob" && return HTTP.Response(200, ["Content-Type" => "text/html"], answer)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            HTTP.Response(404)
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        @test take!(receipt) == "/complete?status=passed"
+                    else
+                        @info "Browser diagnostics" log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
