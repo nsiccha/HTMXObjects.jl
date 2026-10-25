@@ -589,3 +589,132 @@ end
         @test unescape(csv.captures[1]) == expected
     end
 end
+
+@testitem "a table's controls share one toolbar line that sticks with its header" tags=[:unit] begin
+    using HTMXObjects
+    toolbars(html) = [m.match for m in eachmatch(r"<div class=\"htmxo-table-toolbar\"[^>]*>", html)]
+    items = [(; id="r$i", name="Item $i", kind=isodd(i) ? "odd" : "even") for i in 1:4]
+    grouped(; kw...) = repr("text/html", master_detail_table(["Name", "Kind"], items;
+        key=x -> x.id, master=x -> (h.td(x.name), h.td(x.kind)), detail=x -> h.p(x.id),
+        groupings=["None" => nothing, "Kind" => x -> x.kind], group_by="None",
+        searchable=true, selectable="sel", id="grouped", kw...))
+    html = grouped()
+    # One line holds the search field, Group by and the selection bar, in that order.
+    @test toolbars(html) == ["<div class=\"htmxo-table-toolbar\" data-htmxo-sticky=\"\">"]
+    line = html[findfirst("class=\"htmxo-table-toolbar\"", html).start:findfirst("<table", html).start]
+    search, controls, bar = (findfirst(s, line) for s in ("type=\"search\"", "class=\"htmxo-tree-controls\"",
+        "class=\"htmxo-selection-bar\""))
+    @test !isnothing(search) && !isnothing(controls) && !isnothing(bar)
+    @test search.start < controls.start < bar.start
+    @test count("class=\"htmxo-selection-bar\"", html) == 1
+    @test contains(html, r"<table[^>]*data-htmxo-sticky=\"\"")
+    # `sticky=false`: the same line, nothing marked to stick.
+    off = grouped(sticky=false)
+    @test toolbars(off) == ["<div class=\"htmxo-table-toolbar\">"]
+    @test !contains(off, "data-htmxo-sticky")
+    # A table without a search field: the selection bar is its toolbar.
+    rows = [h.tr(h.td("a"); data_htmxo_select_key="a")]
+    selecting = repr("text/html", sortable_table(["Name"], rows; selectable="rows"))
+    @test toolbars(selecting) == ["<div class=\"htmxo-table-toolbar\" data-htmxo-sticky=\"\">"]
+    @test contains(selecting, "class=\"htmxo-selection-bar\"") && !contains(selecting, "type=\"search\"")
+    # A table without controls has no toolbar; its header still sticks.
+    plain = repr("text/html", render_table((; name=["a", "b"])))
+    @test isempty(toolbars(plain)) && contains(plain, r"<table[^>]*data-htmxo-sticky=\"\"")
+    # A hierarchy without a search field or controls keeps the hidden scaffold.
+    tree = repr("text/html", master_detail_table(["Name"], [(; key="g", children=[(; key="l", children=())])];
+        key=x -> x.key, master=x -> (h.td(x.key),), children=x -> x.children))
+    @test only(toolbars(tree)) == "<div class=\"htmxo-table-toolbar\" data-htmxo-sticky=\"\" hidden=\"true\">"
+    # The toolbar is HTML only: Markdown keeps the table without it.
+    md = repr("text/markdown", master_detail_table(["Name", "Kind"], items;
+        key=x -> x.id, master=x -> (h.td(x.name), h.td(x.kind)), detail=x -> h.p(x.id),
+        searchable=true, selectable="sel"))
+    @test contains(md, "| Item 1") && !contains(md, "Search") && !contains(md, "selected")
+    styles = repr("text/html", htmxo_utility_styles())
+    @test contains(styles, ".htmxo-table-toolbar[data-htmxo-sticky] { position: sticky;")
+    @test contains(styles, "table[data-htmxo-sticky] > thead { position: sticky;")
+    @test contains(styles, ".table-wrap[data-htmxo-width=\"wide\"]")
+end
+
+@testitem "table controls and headers stay in view while the rows scroll" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', () => setTimeout(() => {
+                const out = document.body.dataset;
+                const box = e => e.getBoundingClientRect();
+                const near = (a, b) => Math.abs(a - b) <= 1;
+                const parts = id => { const s = document.getElementById(id), t = s.querySelector('table');
+                    return {t, tb: s.querySelector('.htmxo-table-toolbar'), wrap: t.parentElement}; };
+                const into = t => window.scrollTo(0, box(t).top + scrollY + 600);
+                // The grouped table: one control line; scrolled, it sits at the
+                // window top with the header just below it.
+                const g = parts('s-grouped');
+                const tops = Array.from(g.tb.children).filter(c => !c.hidden).map(c => box(c).top);
+                out.oneLine = String(tops.length === 3 && Math.max(...tops) - Math.min(...tops) < 8);
+                out.fits = String(g.wrap.dataset.htmxoWidth === 'fits');
+                into(g.t);
+                out.toolbarTop = String(near(box(g.tb).top, 0));
+                out.headBelow = String(near(box(g.t.tHead).top, box(g.tb).bottom));
+                // Keyboard moves keep the active row below the header.
+                const rows = Array.from(g.t.tBodies[0].querySelectorAll(':scope > tr[aria-selected]'));
+                rows[30].click();
+                window.scrollTo(0, box(rows[30]).top + scrollY - box(g.t.tHead).bottom - 2);
+                for (let i = 0; i < 3; i++) document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key: 'k', bubbles: true}));
+                out.keyRow = String(document.activeElement === rows[27] && box(rows[27]).top >= box(g.t.tHead).bottom - 1);
+                // No controls: the header alone sticks.
+                const p = parts('s-plain'); into(p.t);
+                out.plainHead = String(near(box(p.t.tHead).top, 0));
+                // Positive control: `sticky=false` scrolls away like before.
+                const o = parts('s-off'); into(o.t);
+                out.offScrolls = String(box(o.t.tHead).bottom < 0 && box(o.tb).bottom < 0);
+                // Wider than its column: a window-tall box with the header at its top.
+                const w = parts('s-wide');
+                out.wide = String(w.wrap.dataset.htmxoWidth === 'wide' && getComputedStyle(w.wrap).overflowY === 'auto' &&
+                    w.wrap.clientHeight <= innerHeight - w.tb.offsetHeight + 1);
+                window.scrollTo(0, box(w.wrap).top + scrollY - w.tb.offsetHeight);
+                w.wrap.scrollTop = 400;
+                out.wideHead = String(near(box(w.t.tHead).top, box(w.wrap).top));
+                // A table in another table's detail row does not stick.
+                const inner = document.querySelector('#detail-o2 table');
+                window.scrollTo(0, box(inner).top + scrollY + 120);
+                out.innerScrolls = String(box(inner.tHead).bottom < 0 &&
+                    near(box(document.querySelector('#s-nested table').tHead).top, box(document.querySelector('#s-nested .htmxo-table-toolbar')).bottom));
+                out.done = '1';
+            }, 100));
+            """))
+        items = [(; id="r$i", name="Item $i " * repeat("x", i % 9), kind=["a", "b", "c"][1 + i % 3]) for i in 1:80]
+        grouped = master_detail_table(["Name", "Kind"], items;
+            key=x -> x.id, master=x -> (h.td(x.name), h.td(x.kind)), detail=x -> h.p(x.id),
+            groupings=["None" => nothing, "Kind" => x -> x.kind], group_by="None",
+            searchable=true, selectable="sel")
+        long(n; kw...) = render_table((; name=["Row $i" for i in 1:n], value=collect(1:n)); download=false, kw...)
+        wide = render_table((; (Symbol("column_$j") => ["value $i/$j" for i in 1:60] for j in 1:30)...);
+            download=false, searchable=true)
+        inner(i) = sortable_table(["Inner"], [h.tr(h.td("inner $i.$k")) for k in 1:12]; searchable=true)
+        nested = master_detail_table(["Outer"], 1:12; key=i -> "o$i", master=i -> (h.td("Outer $i"),),
+            detail=inner, initially_open=i -> i == 2, searchable=true)
+        filler = h.p(repeat("Filler text. ", 200))
+        content = h.main(; class="container")(filler,
+            h.section(; id="s-grouped")(grouped), filler, h.section(; id="s-plain")(long(60)), filler,
+            h.section(; id="s-off")(long(40; searchable=true, sticky=false)), filler,
+            h.section(; id="s-wide")(wide), filler, h.section(; id="s-nested")(nested), filler, filler, driver)
+        dom = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, repr("text/html", htmx(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION, htmx_version=nothing,
+                hyperscript_version=nothing, preload_version=nothing)))
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,900 --virtual-time-budget=3000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        @test contains(dom, "data-done=\"1\"")
+        for marker in ("one-line", "fits", "toolbar-top", "head-below", "key-row", "plain-head",
+                       "off-scrolls", "wide", "wide-head", "inner-scrolls")
+            @test contains(dom, "data-$marker=\"true\"")
+        end
+    end
+end
