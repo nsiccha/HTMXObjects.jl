@@ -5005,6 +5005,7 @@ Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text
 
 """
     private(content; public=nothing)
+    private(; public=nothing) do … end
 
 Content that a public reader must not see, such as a model's full
 specification. The live app and a private export show `content`. A public
@@ -5035,12 +5036,27 @@ HTML comments `<!--htmxo-private-->` and `<!--/htmxo-private-->`, so such
 markup inside a public answer makes the export fail
 ([`PrivateContentEscaped`](@ref)) instead of publishing it.
 
+`content` can be a function (a `do` block) that builds it: it is called only
+when the content is shown to a private reader, so a public answer neither
+computes nor reads what only a private reader sees, and nothing it throws can
+fail a public answer. A route's whole answer is built once, while the answer is
+made: a [`CallerFault`](@ref) it throws answers with its status, and any other
+exception is a recorded route error, as if the route body had thrown it. A
+part of a page is built whenever it is rendered for a private reader, so keep
+the function free of side effects. It runs after the route's operation, so the
+`:auto` transport does not poll it.
+
 ```julia
 @get model() = h.article(
     h.h2("Model"),
     private(SemanticCode(stan_code(spec), "stan");
             public = h.p("A hierarchical model of the measured doses.")))
 @get specification() = private(SemanticCode(stan_code(spec), "stan"))  # a private page
+@get document(id::String) = private() do  # read for a private reader only
+    file = get(DOCUMENTS, id, nothing)
+    isnothing(file) && throw(CallerFault(404, "no document \$(repr(id))"))
+    MIMEResponse("application/pdf", read(file))
+end
 ```
 """
 struct Private
@@ -5048,6 +5064,10 @@ struct Private
     public::Any
 end
 private(content; public=nothing) = Private(content, public)
+
+# Content a function builds is built when it is shown.
+_built(content) = content
+_built(build::Function) = build()
 
 # The audience of the answer being rendered: `:public` or `:private`, and
 # `:public` outside any request, export and `with_audience`, so a value
@@ -5091,7 +5111,7 @@ An `audience` other than `:public` and `:private` is an `ArgumentError`.
 with_audience(f, audience) = _with_audience(f, _check_audience(audience, "with_audience"))
 
 # What an answer for `audience` shows of `p`.
-_shown(p::Private, audience) = audience === :public ? p.public : p.content
+_shown(p::Private, audience) = audience === :public ? p.public : _built(p.content)
 _shown(p::Private) = _shown(p, _ambient_audience())
 
 const _PRIVATE_OPEN = "<!--htmxo-private-->"
@@ -5099,8 +5119,9 @@ const _PRIVATE_CLOSE = "<!--/htmxo-private-->"
 
 function Base.show(io::IO, m::MIME"text/html", p::Private)
     _ambient_audience() === :public && return _show_html_content(io, m, p.public)
+    content = _built(p.content)
     print(io, _PRIVATE_OPEN)
-    _show_html_content(io, m, p.content)
+    _show_html_content(io, m, content)
     print(io, _PRIVATE_CLOSE)
 end
 Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", p::Private) =
@@ -5136,6 +5157,11 @@ _private_page(p::Private) = isnothing(p.public)
 _private_page(req::HTTP.Request, val) = export_audience(req) === :public && _private_page(val)
 _private_page_response() = HTTP.Response(404, ["X-HTMXO-Private" => "true"]; body="")
 _private_page_response(resp::HTTP.Response) = HTTP.header(resp, "X-HTMXO-Private") == "true"
+# A whole answer's private content is built once, for a private reader, before
+# the answer is made from it; a public reader's answer builds none.
+_built_answer(req::HTTP.Request, val) = val
+_built_answer(req::HTTP.Request, p::Private) =
+    export_audience(req) === :public ? p : Private(_built(p.content), p.public)
 
 """
     PrivateContentEscaped <: Exception
@@ -6698,7 +6724,14 @@ _prestart_walk(val::HtmlOnly, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.content, walk, blocked), HtmlOnly)
 _prestart_walk(p::Private, walk, blocked) = _ambient_audience() === :public ?
     _prestart_rewrap(_prestart_walk(p.public, walk, blocked), x -> Private(p.content, x)) :
-    _prestart_rewrap(_prestart_walk(p.content, walk, blocked), x -> Private(x, p.public))
+    _prestart_walk_private(_built(p.content), p, walk, blocked)
+# Content built for the walk replaces its function, so the page that renders
+# the walked value does not build it again.
+function _prestart_walk_private(content, p::Private, walk, blocked)
+    walked = _prestart_walk(content, walk, blocked)
+    isnothing(walked) && content === p.content && return nothing
+    Private(isnothing(walked) ? content : walked, p.public)
+end
 _prestart_walk(val::_LabelledControl, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.control, walk, blocked), _LabelledControl)
 _prestart_walk((content, id)::Pair, walk, blocked) =
@@ -10876,6 +10909,7 @@ _save_recording(record_dir, path, resp; kwargs...) =
 
 function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
     _private_page(req, val) && return _private_page_response()
+    val = _built_answer(req, val)
     # Pre-finalized values (a route handler returning an `HTTP.Response`
     # or a `MIMEResponse` escape hatch for non-HTML bodies) bypass the
     # `__page__` wrap entirely — adding `<html>…</html>` around raw JS
@@ -14515,6 +14549,7 @@ _page_chain_to_apply(page_chain, req::HTTP.Request; root=nothing) =
 function _resolve_response_nested(page_chain, req, val; root=nothing,
         record_dir=nothing, save_path=nothing, record_base::String="")
     _private_page(req, val) && return _private_page_response()
+    val = _built_answer(req, val)
     # Same finalized-value passthrough as `_resolve_response`. Routes
     # inside `@include`d substructs (e.g. `PipelineRoutes.aov_runtime_js`
     # returning `MIMEResponse("application/javascript", …)`) land here,
