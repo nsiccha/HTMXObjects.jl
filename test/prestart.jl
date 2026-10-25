@@ -11,12 +11,13 @@ using TestItemRunner
 
     export PrestartApp, PrestartBrowserApp, reset_prestart!, release!, runs, served_get,
         body_text, with_prestart, prestart_token, fragment_url, poll_url,
-        running, settle, RAW_RUNS
+        running, settle, RAW_RUNS, PRIVATE_BUILDS
 
     const prestart_lock = ReentrantLock()
     const gates = Dict{String,Base.Event}()
     const counts = Dict{String,Int}()
     const RAW_RUNS = Ref(0)
+    const PRIVATE_BUILDS = Ref(0)
 
     function reset_prestart!()
         lock(prestart_lock) do
@@ -55,6 +56,16 @@ using TestItemRunner
             # Root-absolute: past a proxy's prefix, another server's address.
             lazy("/prestart_outside"),
         )
+        "A page whose private parts are built when shown, one holding a fragment"
+        @get prestart_private_page() = h.section(
+            private(; public = h.p("summary")) do
+                PRIVATE_BUILDS[] += 1
+                lazy(query_url(__self__/"prestart_fragment"; key="private"); id="frag-private")
+            end,
+            private() do
+                PRIVATE_BUILDS[] += 1
+                h.p("private-plain")
+            end)
         "A page whose fragment lacks its required argument"
         @get prestart_broken_page() =
             h.section(lazy(string(__self__/"prestart_fragment"); id="broken"))
@@ -182,6 +193,23 @@ end
         @test timedwait(() -> runs("a") == 1, 10.0; pollint=0.01) === :ok
     end
     release!("a")
+end
+
+@testitem "a private part a function builds is built once and its fragments start" setup=[PrestartFixtures] tags=[:unit] begin
+    using HTMXObjects, HTTP, Test
+
+    reset_prestart!()
+    route!(PrestartApp())
+    PRIVATE_BUILDS[] = 0
+    with_prestart() do
+        # The walk builds each part, and the page renders what it built.
+        page = body_text(served_get("/prestart_private_page", "Accept" => "text/html"))
+        @test PRIVATE_BUILDS[] == 2
+        @test occursin("private-plain", page) && !occursin("summary", page)
+        @test prestart_token(page, "private") !== nothing
+        @test timedwait(() -> runs("private") == 1, 10.0; pollint=0.01) === :ok
+    end
+    release!("private")
 end
 
 @testitem "a prestart that finished is answered bare to the browser's first request" setup=[PrestartFixtures] tags=[:unit] begin
