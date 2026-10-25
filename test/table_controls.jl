@@ -633,6 +633,7 @@ end
     @test contains(styles, ".htmxo-table-toolbar[data-htmxo-sticky] { position: sticky;")
     @test contains(styles, "table[data-htmxo-sticky] > thead { position: sticky;")
     @test contains(styles, ".table-wrap[data-htmxo-width=\"wide\"]")
+    @test contains(styles, ":is(td, th) .table-wrap[data-htmxo-width=\"wide\"] { max-height:")
 end
 
 @testitem "table controls and headers stay in view while the rows scroll" setup=[ChromeDump] tags=[:browser] begin
@@ -683,6 +684,20 @@ end
                 window.scrollTo(0, box(inner).top + scrollY + 120);
                 out.innerScrolls = String(box(inner.tHead).bottom < 0 &&
                     near(box(document.querySelector('#s-nested table').tHead).top, box(document.querySelector('#s-nested .htmxo-table-toolbar')).bottom));
+                // Wider than the cell it sits in: the same box, fitting below the
+                // outer line and header, so its sideways scrollbar is on screen.
+                const ow = parts('s-nested-wide'), nw = document.querySelector('#detail-w1 .table-wrap');
+                window.scrollTo(0, box(nw).top + scrollY - ow.tb.offsetHeight - ow.t.tHead.offsetHeight);
+                out.nestedWide = String(nw.dataset.htmxoWidth === 'wide' && getComputedStyle(nw).overflowY === 'auto' &&
+                    near(box(nw).top, box(ow.t.tHead).bottom) && box(nw).bottom <= innerHeight + 1);
+                // Its header stays at the box top, opaque, and slides under the outer one.
+                const nh = nw.querySelector(':scope > table').tHead;
+                nw.scrollTop = 300;
+                out.nestedWideHead = String(near(box(nh).top, box(nw).top) &&
+                    getComputedStyle(nh.querySelector('th')).backgroundColor === getComputedStyle(document.documentElement).backgroundColor);
+                window.scrollBy(0, 200);
+                const oh = box(ow.t.tHead), hit = document.elementFromPoint(oh.left + 20, oh.top + oh.height / 2);
+                out.nestedWideUnder = String(box(nh).top < oh.bottom && !!hit && ow.t.tHead.contains(hit));
                 out.done = '1';
             }, 100));
             """))
@@ -692,16 +707,23 @@ end
             groupings=["None" => nothing, "Kind" => x -> x.kind], group_by="None",
             searchable=true, selectable="sel")
         long(n; kw...) = render_table((; name=["Row $i" for i in 1:n], value=collect(1:n)); download=false, kw...)
-        wide = render_table((; (Symbol("column_$j") => ["value $i/$j" for i in 1:60] for j in 1:30)...);
+        widecols(n) = render_table((; (Symbol("column_$j") => ["value $i/$j" for i in 1:n] for j in 1:30)...);
             download=false, searchable=true)
+        wide = widecols(60)
         inner(i) = sortable_table(["Inner"], [h.tr(h.td("inner $i.$k")) for k in 1:12]; searchable=true)
         nested = master_detail_table(["Outer"], 1:12; key=i -> "o$i", master=i -> (h.td("Outer $i"),),
             detail=inner, initially_open=i -> i == 2, searchable=true)
+        # An outer table that keeps its width (TenderViews' crosswalk does this):
+        # the wide inner table cannot widen it and scrolls sideways itself.
+        nested_wide = master_detail_table(["Outer"], 1:4; key=i -> "w$i", master=i -> (h.td("Outer $i"),),
+            detail=i -> widecols(40), initially_open=i -> i == 1, searchable=true)
+        fixed = h.style(Raw("#s-nested-wide table:not(td table) { table-layout: fixed; width: 100%; }"))
         filler = h.p(repeat("Filler text. ", 200))
         content = h.main(; class="container")(filler,
             h.section(; id="s-grouped")(grouped), filler, h.section(; id="s-plain")(long(60)), filler,
             h.section(; id="s-off")(long(40; searchable=true, sticky=false)), filler,
-            h.section(; id="s-wide")(wide), filler, h.section(; id="s-nested")(nested), filler, filler, driver)
+            h.section(; id="s-wide")(wide), filler, h.section(; id="s-nested")(nested), filler,
+            h.section(; id="s-nested-wide")(fixed, nested_wide), filler, filler, driver)
         dom = mktempdir() do directory
             copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
             fixture = joinpath(directory, "page.html")
@@ -713,7 +735,8 @@ end
         end
         @test contains(dom, "data-done=\"1\"")
         for marker in ("one-line", "fits", "toolbar-top", "head-below", "key-row", "plain-head",
-                       "off-scrolls", "wide", "wide-head", "inner-scrolls")
+                       "off-scrolls", "wide", "wide-head", "inner-scrolls", "nested-wide", "nested-wide-head",
+                       "nested-wide-under")
             @test contains(dom, "data-$marker=\"true\"")
         end
     end
