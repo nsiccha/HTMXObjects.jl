@@ -1884,7 +1884,7 @@ end
     update = html(grouped(group_by="party", group_order=ORDER, update_rows="p1"))
     @test contains(update, "data-htmxo-group-order=\"{&quot;party&quot;:[&quot;Bakery&quot;,")
     @test !contains(html(grouped(group_by="party", update_rows="p1")), "data-htmxo-group-order")
-    lazy = (; group_by="party", group_order=ORDER, group_by_url="/table", group_rows_url=(k, ms) -> "/rows")
+    lazy = (; group_by=["party"], group_order=ORDER, group_by_url="/table", group_rows_url=(k, ms) -> "/rows")
     @test !contains(html(grouped(; lazy..., update_rows="p1")), "data-htmxo-group-order")
     @test groups(html(grouped(; lazy..., initially_open=true))) == ["Bakery", "Prime--Video", "Acme", "Acme--Prime"]
     # Markdown and PDFs list the groups in the same order.
@@ -2043,7 +2043,8 @@ end
             const o = () => document.getElementById('o').closest('[data-htmxo-grouped]');
             const n = () => document.getElementById('on').closest('[data-htmxo-grouped]');
             const groups = w => Array.from(w.querySelector('tbody').rows).filter(r => 'htmxoGroup' in r.dataset).map(r => r.id.slice(4)).join(',');
-            const regroup = v => { const s = o().querySelector('select[name="group_by"]'); s.value = v; s.dispatchEvent(new Event('change', {bubbles: true})); };
+            // Group by one grouping alone (or none), as the pills ask for it.
+            const regroup = v => htmxoGroupRequest(o().querySelector('.htmxo-group-pills'), v === 'none' ? [] : [v], null);
             // Every grouping, regrouped in the browser: the server's rows, in its order.
             for (const v of ['iban', 'rule', 'media', 'none', 'party']) {
                 regroup(v);
@@ -2084,7 +2085,7 @@ end
             # p1 leaves Acme for Zeta: the update names both groups.
             uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
             uri.path == "/flat" ? html(haskey(q, "update") ?
-                flat(only(levels); items, update_rows=q["update"], update_groups=["Acme", "Zeta"]) : flat(only(levels); items)) :
+                flat(levels; items, update_rows=q["update"], update_groups=["[\"Acme\"]", "[\"Zeta\"]"]) : flat(levels; items)) :
             uri.path == "/nested" ? html(nested(levels)) : HTTP.Response(404)
         end
         try
