@@ -1802,7 +1802,19 @@ end
     de = html(grouped(group_by="rule", texts=table_texts(:de),
         group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount * 100; digits=2)]))
     @test cell(row(de, "row-group--Shops"), 0) == "-23.000,00" && number(row(de, "row-group--Shops"), 0) == "-23000.00"
-    # The cells' `format_number(x; digits)` writes the same text: test/number_format.jl.
+    # Significant digits: Acme's and Bakery's amounts × 28.5 sum to -2850, a
+    # half, which rounds away from zero. The CSV gets the rounded number, and
+    # no power of ten where the cell shows one.
+    sig = html(grouped(group_by="party", texts=table_texts(:de), group_summary=[
+        "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
+        "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)]))
+    @test cell(row(sig, "row-group--Acme"), 1) == "-2.900" && number(row(sig, "row-group--Acme"), 1) == "-2900"
+    @test cell(row(sig, "row-group--Bakery"), 1) == "-2.900" && cell(row(sig, "row-group--Prime--Video"), 1) == "-1.400"
+    @test cell(row(sig, "row-group--Acme--Prime"), 1) == "-860"
+    @test cell(row(sig, "row-group--Acme"), 0) == "-3,3·10⁻⁵" && number(row(sig, "row-group--Acme"), 0) == "-0.000033"
+    @test contains(sig, "&quot;summary&quot;:[{&quot;reduce&quot;:&quot;mean&quot;,&quot;sigdigits&quot;:2}," *
+        "{&quot;reduce&quot;:&quot;sum&quot;,&quot;sigdigits&quot;:2}]")
+    # The cells' `format_number(x; digits | sigdigits)` writes the same text: test/number_format.jl.
     # Every leaf carries what the browser regroups it by, on every copy.
     leaf = match(r"<tr[^>]*id=\"row-group--Shops--p3\"[^>]*>", html(grouped(group_by="rule",
         group_summary=["Amount" => ColumnSummary(:ratio, t -> t.amount, t -> 1)]))).match
@@ -1831,13 +1843,18 @@ end
     md = to_markdown_string(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount)]))
     @test contains(md, "-100") && !contains(md, "template") && count("Acme Prime", md) == 3
     @test contains(md, "\n\n**Acme Prime**\n\nmemo 3\n\n")
-    # Refused: an unknown reduce or digits, the wrong number of functions, a
-    # column that is not a header or is the first, a column named twice,
-    # something other than a ColumnSummary, a value that is not a number.
+    # Refused: an unknown reduce, digits or sigdigits (outside 1 to 15, the
+    # digits the browser rounds exactly), digits and sigdigits together, the
+    # wrong number of functions, a column that is not a header or is the
+    # first, a column named twice, something other than a ColumnSummary, a
+    # value that is not a number.
     @test_throws ArgumentError ColumnSummary(:median, identity)
     @test_throws ArgumentError ColumnSummary(:sum)
     @test_throws ArgumentError ColumnSummary(:ratio, identity)
     @test_throws ArgumentError ColumnSummary(:sum, identity; digits=11)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=0)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=16)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; digits=1, sigdigits=2)
     @test_throws ArgumentError grouped(group_summary=["Nope" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Party" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Amount" => ColumnSummary(:count), "Amount" => ColumnSummary(:count)])
@@ -2102,6 +2119,82 @@ end
                     @test endswith(line, ":true")
                 end
                 @test count(==('\n'), checks[1]) + 1 == 11
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "sigdigits group summaries round the same in the browser browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets, Random
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        de = table_texts(:de)
+        # Acme and Bakery sum to -2850, a half; the IBAN means are powers of ten.
+        table(group_by) = regroup_table(; group_by, id="s", texts=de, group_summary=[
+            "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
+            "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)])
+        # The browser's rounding against the server's, number by number:
+        # halves, carries into a new digit, the ends of Float64, and sums of
+        # numbers rounded to two digits each, where halves are common.
+        rng = Xoshiro(7)
+        xs = Float64[2850, -2850, 0.125, 2.5, 9.96, 99.96, 29210, 1.05e16, 1.5e15, 999999999999999, 3.81234e-5,
+                     9.9996e-5, 5e-324, 2.2250738585072014e-308, floatmax(), -0.0, 1, 1000, 0.001]
+        append!(xs, [(rand(rng) - 0.5) * 10.0^rand(rng, -12:18) for _ in 1:150])
+        append!(xs, [-sum(round(rand(rng) * 10.0^rand(rng, 1:5); sigdigits=2) for _ in 1:rand(rng, 2:8)) for _ in 1:150])
+        append!(xs, [rand(rng, -10^6:10^6) / 8 for _ in 1:100])
+        cases = [(x, k) for x in xs for k in (1, 2, 3, 6, 15)]
+        driver = h.script(Raw(regroup_driver_prelude() * "const CASES = [" * join(("[$x,$k]" for (x, k) in cases), ",") * "];\n" * raw"""
+        window.addEventListener('load', async function() {
+            const s = () => document.getElementById('s').closest('[data-htmxo-grouped]');
+            const levels = v => v === 'none' ? [] : [v];
+            const regroup = v => htmxoGroupRequest(s().querySelector('.htmxo-group-pills'), levels(v), null);
+            for (const v of ['iban', 'rule', 'media', 'none', 'party'])
+                (regroup(v), check('parity-' + v, await parity(s(), '/s?group_by=' + v)));
+            const cell = (id, i) => document.getElementById('row-' + id).querySelector('[data-htmxo-group-summary="' + i + '"]');
+            check('half', cell('group--Acme', 1).textContent === '-2.900' && cell('group--Acme', 1).dataset.htmxoNumber === '-2900');
+            check('power-of-ten', cell('group--Acme', 0).textContent === '-3,3·10⁻⁵' && cell('group--Acme', 0).dataset.htmxoNumber === '-0.000033');
+            const numbers = document.createElement('pre'); numbers.id = 'numbers';
+            numbers.textContent = CASES.map(([x, k]) => htmxoSummaryText(x, {sigdigits: k}, ',', '.', false) + '\t' +
+                htmxoSummaryText(x, {sigdigits: k}, '.', '', true)).join('\n');
+            document.body.appendChild(numbers);
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(table(["party"]), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
+            uri.path == "/s" ? HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", table(levels))) :
+            HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 7
+            end
+            numbers = match(r"<pre id=\"numbers\">(.*?)</pre>"s, dom)
+            @test !isnothing(numbers)
+            if !isnothing(numbers)
+                browser = split(numbers[1], '\n')
+                server_side = [HTMXObjects._format_finite(x, de, HTMXObjects._SigDigits(k)) * "\t" *
+                               HTMXObjects._summary_key(x, HTMXObjects._SigDigits(k)) for (x, k) in cases]
+                @test length(browser) == length(cases)
+                @test [(cases[i], browser[i], server_side[i]) for i in eachindex(cases, browser) if browser[i] != server_side[i]] == []
             end
         finally
             close(server)
