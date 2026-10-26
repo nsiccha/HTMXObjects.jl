@@ -19449,6 +19449,31 @@ function htmxoGroupBy(target) {
     if (!wrapper) throw new Error('htmxoGroupBy: no regroupable table at ' + target);
     return JSON.parse(wrapper.dataset.htmxoGroupBy);
 }
+// A request from inside a regroupable table that carries `group_by` (in its
+// URL, a form field or `hx-vals`) sends the table's current grouping, once.
+// The browser regroups without rendering the rows again, so a `group_by` the
+// server wrote into a row's action URL, form or `detail_url` names the
+// grouping of that render; an update rendered for it would be refused. The
+// pills' own request asks for the grouping they are changing to.
+if (!window.htmxoGroupByBound) {
+    window.htmxoGroupByBound = true;
+    document.addEventListener('htmx:configRequest', e => {
+        const d = e.detail, el = d.elt;
+        const wrapper = el && el.closest && el.closest('[data-htmxo-group-by]');
+        if (!wrapper || el.closest('.htmxo-group-pills')) return;
+        const url = new URL(d.path, document.baseURI);
+        const inUrl = url.searchParams.has('group_by'), inParams = d.parameters.group_by !== undefined;
+        if (!inUrl && !inParams) return;
+        const levels = JSON.parse(wrapper.dataset.htmxoGroupBy);
+        if (inParams) d.parameters.group_by = levels;
+        // A GET sends its parameters in the URL as well: keep one copy.
+        const urlLevels = inParams && d.useUrlParams ? [] : levels;
+        if (!inUrl || JSON.stringify(url.searchParams.getAll('group_by')) === JSON.stringify(urlLevels)) return;
+        url.searchParams.delete('group_by');
+        urlLevels.forEach(v => url.searchParams.append('group_by', v));
+        d.path = url.origin === location.origin ? url.pathname + url.search + url.hash : url.href;
+    });
+}
 
 // --- Grouping pills: master_detail_table(...; groupings, group_by) ---
 // The active pills name the grouping levels, outermost first. A change sets
@@ -21779,9 +21804,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   level stays on. Every
   leaf carries its keys under each grouping, and leaves the current grouping
   leaves out wait beside the table. With `select_form` the grouping is also
-  submitted with that form. In the browser, `htmxoGroupBy(target)` returns the
-  `group_by` values of the table's current grouping, e.g. for an action's
-  `hx-vals`, and the table fires `htmxo:regrouped` after each change.
+  submitted with that form. An htmx request from inside the table that carries
+  `group_by` (in its URL, a form field or `hx-vals`) sends the current
+  grouping, once, so a `group_by` written into a row's action URL, form or
+  `detail_url` before a regroup still reaches the route as the grouping the
+  reader sees. In the browser, `htmxoGroupBy(target)` returns the `group_by`
+  values of the table's current grouping, e.g. for the `hx-vals` of an
+  element outside the table, and the table fires `htmxo:regrouped` after each
+  change.
 - `group_by_url`: the route that renders this table for the `group_by` and `q`
   (the current search) it receives, for what the browser cannot build: group
   rows from `group_master`, which replace the browser's after each regroup (a
