@@ -11491,9 +11491,12 @@ end
 # Here, once, is the right place: it is the single seam every request's root
 # passes through, and it runs before any property is read, so a request never
 # observes a half-invalidated object. A `:request`-scoped root is freshly built
-# and has nothing to drop, which costs one integer compare per tracked value;
-# `:session`/`:job` roots outlive requests and are exactly the case that needs
-# it. There is no hot-path cost — property reads are untouched.
+# and has computed nothing, so this walks only its fields and constructor
+# overrides. One of those can be an object the app retains across requests by
+# handing it to `route!` (`route!(App(; rows=Rows(dir)))`, docs "Scoped root
+# lifecycle"): it is synced here on every request, at one probe per tracked file
+# it holds. `:session`/`:job` roots outlive requests and need it for everything
+# they cached. Property reads are untouched.
 #
 # Guarded, not required: an older DynamicObjects has no `sync!`, and a non-DO
 # root (a custom provider may return one) has no method for it. Neither is an
