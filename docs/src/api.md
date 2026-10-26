@@ -278,7 +278,7 @@ the helper returns is left out while the shell carries its code. A changed or
 attributed copy stays as given. A page whose `<head>` is not built by
 `htmx(...)` still includes the helpers itself.
 
-### Text size, page width and buttons under Pico {#pico-page-size}
+### Text size, page width, buttons and disclosures under Pico {#pico-page-size}
 
 Pico ties the text size and the page width to the window: it raises the root
 font size from 16 px to 20 px at 1280 px and 21 px from 1536 px, and caps
@@ -305,6 +305,19 @@ busy. `.secondary` and `.contrast` buttons keep Pico's looks. An app that
 wants a coloured button sets `--pico-background-color`, `--pico-color` and
 `--pico-border-color` on it from a later stylesheet, with a selector at least
 as specific as two classes (`.app .cta`).
+
+Pico draws a disclosure (`<details>`) as one borderless line with a small
+chevron at the far edge, which readers miss. Under the shell every disclosure
+is a bordered box instead: its summary is a bold, tinted bar with the chevron
+right before the label, and its content opens inside the box. That covers a
+hand-written `h.details(h.summary(…), …)`, [`SemanticDisclosure`](@ref), the
+later views of [`SemanticAlternatives`](@ref) and a caption's "More", so no app
+restyles `<details>` itself. Pico's dropdown menus (`details.dropdown`) and
+button summaries (`summary[role=button]`) keep Pico's looks. The box's rules
+are no stronger than Pico's own, so a component that uses `<details>` for
+something else, such as a menu badge, keeps whatever its own class rules set
+(`border: 0`, its own summary padding). `--htmxo-disclosure-padding` (default
+`1rem`) sets the box's inner spacing.
 
 ### Success toasts {#success-toasts}
 
@@ -721,7 +734,9 @@ place. Sortable column headers and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
 A master/detail table's detail rows are never rows of the Markdown table;
 `master_detail_table` writes its eager details after it (see [Details in
-Markdown](components.md#master-detail-markdown)).
+Markdown](components.md#master-detail-markdown)). A `tabset` has no tab bar in
+Markdown: each tab follows in order, its label in bold and then its content
+(see [Tabs in Markdown](components.md#tabset-markdown)).
 
 A semantic element whose HTML peer is a block — any but `SemanticStatus`,
 `SemanticLink`, `SemanticAction` and `SemanticArtifact`, which are inline and
@@ -1862,7 +1877,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticTable(source)` | Any Tables.jl-compatible source |
 | `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
-| `SemanticStatus(state; detail="")` | A state, not a colour |
+| `SemanticStatus(state; detail="", label=string(state))` | A state, not a colour; `label` is the word shown for it |
 | `SemanticUnavailable(reason; texts=semantic_texts())` | A declined computation, and why — not a state |
 | `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
@@ -1901,6 +1916,16 @@ vocabulary writes itself, so it follows `texts=`, a `SemanticTexts` from
 Markdown and `[nicht verfügbar] reason` in plain text;
 `semantic_texts(:de; unavailable="entfällt")` puts the app's own word there.
 The `htmxo-semantic-unavailable` class keeps its name in every language.
+
+A status prints its state's name after the glyph unless it has a `label`. The
+state stays the data, so it still picks the glyph (✓ for `:ok`/`:available`, !
+for `:warn`/`:blocked`, ✗ for `:fail`, … for `:pending`, • otherwise) and the
+`data-status` attribute, while the label is the word in every format. A German
+page keeps the recognised state and names it in its own words:
+`SemanticStatus(:warn; label="im Projekt zu klären")` reads
+`! **im Projekt zu klären**` in Markdown and `[im Projekt zu klären]` in plain
+text. Do not make the German word the state: `SemanticStatus(Symbol("im Projekt
+zu klären"))` loses the glyph and the `data-status="warn"` hook.
 
 Four points where a projection is deliberately not a translation of the HTML:
 
@@ -2995,7 +3020,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `master_detail_js` | Shared runtime for `master_detail_table`/`master_detail_pair` rows; auto-included by `htmx`, also carried by `sortable_table_js` |
 | `master_detail_table(headers, roots; children, searchable, …)` | Hierarchical sibling sorting, ancestor-preserving search, keyboard branch/detail controls, and lazy details; see [components](components.md#hierarchical-master-detail-tables) |
 | `ColumnSpec(label; help)` | A `sortable_table`/`master_detail_table` header with an explanation that stays sortable; see [components](components.md#column-explanations) |
-| `ColumnSummary(reduce, values...; digits)` | A group row's sum, mean, min, max, count or ratio of its leaves in a regroupable `master_detail_table` (`group_summary=`), recomputed in the browser on every regroup; see [components](components.md#table-regrouping) |
+| `ColumnSummary(reduce, values...; digits, sigdigits)` | A group row's sum, mean, min, max, count or ratio of its leaves in a regroupable `master_detail_table` (`group_summary=`), recomputed in the browser on every regroup; see [components](components.md#table-regrouping) |
 | `table_texts(locale; texts...)`, `TableTexts` | The words of a table's built-in controls (`:en`, `:de`, per-text overrides), passed as `texts=`; see [components](components.md#table-texts) |
 | `number_cell(x; texts, digits, sigdigits, attrs...)`, `format_number(x; texts, digits, sigdigits)` | A number in the table's language (`0,156`, `3,81·10⁻⁵`): a `<td>` that sorts and exports to CSV by the exact value, or the text alone; `render_table` and `master` cells make floats such cells by themselves; see [components](components.md#table-numbers) |
 | `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a regroupable `master_detail_table` (its key is a JSON path); see [components](components.md#table-regrouping) |
@@ -3016,9 +3041,9 @@ HTMXObjects ships its own CSS variables and matches the host environment (raw Pi
 | Export | Purpose |
 |--------|---------|
 | `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
-| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }`. Buttons without a colour class get Pico's slate `secondary outline` look instead of its azure fill; see [the page shell](#pico-page-size) |
+| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }`. Buttons without a colour class get Pico's slate `secondary outline` look instead of its azure fill, and every `<details>` disclosure is a bordered box with a bold label bar and the chevron before the label; see [the page shell](#pico-page-size) |
 | `vitepress_bridge()`      | Map `--htmxo-*` (including `--htmxo-bg`) onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
-| `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight) |
+| `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight), and every definition list's look with no class: bold terms in a column beside their values, `div`-wrapped pairs sharing the columns. Tune it from your stylesheet with `--htmxo-dl-label-width` (default `16rem`, never more than 40% of the list), `--htmxo-dl-row-gap` and `--htmxo-dl-column-gap`; `display: block` on a list and its `div` pairs keeps it stacked |
 | `escape_html(s)`          | HTML-escape (`HTMX.escape`, 5 chars) — for hand-built HTML strings only; `h.*` escapes text + attrs itself, use `Raw` for trusted markup |
 | `html_escape(s)`          | Minimal `&` / `<` / `>` escape — for hand-built HTML strings (never pre-escape a value passed through `h.*`) |
 

@@ -3557,19 +3557,40 @@ struct SemanticCode <: SemanticNode
 end
 
 """
-    SemanticStatus(state::Symbol; detail="")
+    SemanticStatus(state::Symbol; detail="", label=string(state))
 
 Store status meaning rather than styling. `:ok` / `:available`, `:warn` /
 `:blocked`, `:fail`, and `:pending` receive distinct text glyphs; any other
-symbol remains valid and uses a neutral glyph. The state also remains available
-as an HTML class and literal Markdown/HXML/text content.
+symbol remains valid and uses a neutral glyph. The state stays data: it picks
+the glyph and fills the HTML/HXML `data-status` attribute.
+
+`label` is the word written after the glyph in every peer format, the state's
+own name unless given. An app in another language, or one whose states are
+domain outcomes, keeps a recognised state and its glyph and names it in its
+own words:
+
+```julia
+SemanticStatus(:warn; label="im Projekt zu klären", detail="3 Ortsteile")
+# HTML: <span … data-status="warn"><strong>! im Projekt zu klären</strong>…
+# Markdown: ! **im Projekt zu klären** — 3 Ortsteile
+# plain text: [im Projekt zu klären] 3 Ortsteile
+```
+
+A blank `label` throws an `ArgumentError`: plain text shows no glyph, so the
+status would say nothing there.
 """
 struct SemanticStatus <: SemanticNode
     state::Symbol
     detail::String
+    label::String  # the word after the glyph
+    function SemanticStatus(state::Symbol; detail="", label=string(state))
+        label = String(label)
+        # Plain text carries the status in this word alone.
+        all(isspace, label) && throw(ArgumentError(
+            "SemanticStatus(:$state): `label` is blank; omit it to show the state's name"))
+        new(state, String(detail), label)
+    end
 end
-
-SemanticStatus(state::Symbol; detail="") = SemanticStatus(state, String(detail))
 
 """
     SemanticTexts
@@ -3903,7 +3924,7 @@ _semantic_code_node(code::SemanticCode) = h.pre(
 function _semantic_status_node(status::SemanticStatus)
     detail = isempty(status.detail) ? Any[] : Any[h.small(" $(status.detail)")]
     h.span(
-        h.strong(string(_semantic_status_glyph(status.state), " ", status.state)),
+        h.strong(string(_semantic_status_glyph(status.state), " ", status.label)),
         detail...;
         class="htmxo-semantic-status", data_status=string(status.state))
 end
@@ -4841,7 +4862,7 @@ function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
 end
 
 Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
-    io, _semantic_status_glyph(status.state), " **", status.state, "**",
+    io, _semantic_status_glyph(status.state), " **", status.label, "**",
     isempty(status.detail) ? "" : " — $(status.detail)")
 
 Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
@@ -4953,7 +4974,7 @@ end
 
 Base.show(io::IO, ::MIME"text/plain", code::SemanticCode) = print(io, code.text)
 Base.show(io::IO, ::MIME"text/plain", status::SemanticStatus) = print(
-    io, '[', status.state, ']', isempty(status.detail) ? "" : " $(status.detail)")
+    io, '[', status.label, ']', isempty(status.detail) ? "" : " $(status.detail)")
 
 function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
     print(io, card.title)
@@ -17969,7 +17990,7 @@ figcaption.caption { margin-bottom: 0.5rem; }
 .caption-header > :first-child:not(:empty) { flex: 1 1 16rem; min-width: 0; }
 .caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .caption-long { margin-top: 0.25rem; }
-.caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
+.caption-long > summary { font-size: 0.9em; }
 }
 /* Caption buttons — INTENTIONALLY UNLAYERED, at (0,2,0) so they beat Pico's
    unlayered button and [type=button] rules (0,0,1)/(0,1,0) in any order. */
@@ -18637,9 +18658,11 @@ function htmxoTreeRow(row, event) {
 // whose place among its siblings changed, goes where the table's own render
 // puts it, unless its group is not loaded, and a sorted table re-applies its
 // sort; a row in the update's scope that it no longer lists leaves, with its
-// detail and child rows. Any htmx response holding such a body is applied
-// this way, whatever the requesting element's hx-target;
-// `htmxoUpdateRows(html)` applies one fetched by other means.
+// detail and child rows. The group rows a browser regroup asks for
+// (`group_masters`) replace the browser's and leave the leaf rows alone. Any
+// htmx response holding such a body is applied this way, whatever the
+// requesting element's hx-target; `htmxoUpdateRows(html)` applies one
+// fetched by other means.
 function htmxoUpdateRows(update, origin) {
     if (typeof update === 'string') {
         const template = document.createElement('template');
@@ -18661,12 +18684,18 @@ function htmxoUpdateRows(update, origin) {
     const named = [...incoming.flatMap(r => [r.id, r.dataset.htmxoParent]), ...ids, ...groups];
     for (let i = 0; !tbody && i < named.length; i++) tbody = bodyOf(named[i]);
     if (!tbody && origin && origin.closest) { const t = origin.closest('table'); tbody = t && t.tBodies[0]; }
+    // The group rows of a browser regroup (`group_masters`) have nothing to
+    // do once their table has left the page, or the reader has regrouped
+    // again: they are dropped, quietly.
+    const groupMasters = 'htmxoGroupMasters' in update.dataset;
+    if (!tbody && groupMasters) return;
     if (!tbody) throw new Error('htmxoUpdateRows: no table on the page holds these rows');
     // Rows rendered for another grouping than the table shows would land
     // under the wrong groups: refuse them.
     if ('htmxoGrouped' in update.dataset) {
         const wrapper = tbody.closest('[data-htmxo-grouped]');
         const shown = wrapper ? wrapper.dataset.htmxoGrouped : null;
+        if (shown !== update.dataset.htmxoGrouped && groupMasters) return;
         if (shown !== update.dataset.htmxoGrouped) throw new Error('htmxoUpdateRows: the rows are grouped by ' +
             JSON.stringify(update.dataset.htmxoGrouped) + ' but the table by ' + JSON.stringify(shown));
     }
@@ -18838,10 +18867,15 @@ function htmxoUpdateRows(update, origin) {
     // changed, before focus returns (moving a row drops its focus).
     if (fresh.length) htmxoResort(table);
     // A branch toggle names the child rows the branch now has.
+    const kidsOf = new Map();
+    if (touched.size) masters().forEach(r => {
+        const p = r.dataset.htmxoParent;
+        if (p) { if (!kidsOf.has(p)) kidsOf.set(p, []); kidsOf.get(p).push(r.id); }
+    });
     touched.forEach(b => {
         const toggle = b.isConnected && b.querySelector(':scope > td [data-htmxo-tree-toggle]');
         if (!toggle) return;
-        const kids = masters().filter(r => r.dataset.htmxoParent === b.id).map(r => r.id);
+        const kids = kidsOf.get(b.id) || [];
         if (kids.length) toggle.setAttribute('aria-controls', kids.join(' '));
         else toggle.removeAttribute('aria-controls');
     });
@@ -19591,8 +19625,8 @@ function htmxoGroupDragEnd(e) {
 // several groups gets a copy per group; leaves the grouping leaves out wait in
 // `template[data-htmxo-unplaced]`. The wrapper's `data-htmxo-regroup` says how
 // (grouping names, flat name, nested or not, the `group_summary` columns).
-// Keep `htmxoRegroup`, `htmxoFixed` and `htmxoGroupPillsSync` in step
-// with that function, `_format_fixed` and `_md_group_pills`.
+// Keep `htmxoRegroup`, `htmxoSummaryText` and `htmxoGroupPillsSync` in step
+// with that function, `_md_summary_cell` and `_md_group_pills`.
 function htmxoRegroupConfig(wrapper) {
     if (wrapper.htmxoRegroupSource !== wrapper.dataset.htmxoRegroup) {
         wrapper.htmxoRegroupSource = wrapper.dataset.htmxoRegroup;
@@ -19610,7 +19644,7 @@ function htmxoJsonString(s) {
 }
 function htmxoJsonList(xs) { return '[' + xs.map(htmxoJsonString).join(',') + ']'; }
 // A group summary over its leaves' inputs (`_md_summary_value`), folded left
-// to right, and written as the table writes numbers (`_format_fixed`).
+// to right, and written as the table writes numbers (`_md_summary_cell`).
 function htmxoSummaryValue(reduce, inputs) {
     if (reduce === 'count') return inputs.length;
     if (reduce === 'ratio') {
@@ -19625,16 +19659,50 @@ function htmxoSummaryValue(reduce, inputs) {
     const sum = xs.reduce((a, b) => a + b);
     return reduce === 'mean' ? sum / xs.length : sum;
 }
-function htmxoFixed(x, digits, decimal, thousands) {
-    const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
-    const s = BigInt(scaled).toString().padStart(digits + 1, '0');
-    const whole = s.slice(0, s.length - digits);
-    let out = x < 0 && scaled !== 0 ? '-' : '';
+// `_print_grouped`: an integer's digits with `thousands` every three from the right.
+function htmxoGrouped(whole, thousands) {
+    let out = '';
     for (let i = 0; i < whole.length; i++) {
         if (i > 0 && (whole.length - i) % 3 === 0) out += thousands;
         out += whole[i];
     }
+    return out;
+}
+function htmxoFixed(x, digits, decimal, thousands) {
+    const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
+    const s = BigInt(scaled).toString().padStart(digits + 1, '0');
+    const out = (x < 0 && scaled !== 0 ? '-' : '') + htmxoGrouped(s.slice(0, s.length - digits), thousands);
     return digits > 0 ? out + decimal + s.slice(s.length - digits) : out;
+}
+// `_round_sig`: x to k significant digits, halves away from zero, as
+// [negative, digits, point] for ±0.digits × 10^point, by the same steps.
+function htmxoSigDigits(x, k) {
+    const a = Math.abs(x), pow10 = n => Number('1e' + n);
+    if (!isFinite(a)) throw new RangeError('cannot round ' + x + ' to significant digits: it is not a finite number');
+    if (a === 0) return [false, '', 0];
+    let e = Math.floor(Math.log10(a));
+    while (a < pow10(e)) e--;
+    while (a >= pow10(e + 1)) e++;
+    const d = k - 1 - e;
+    const s = String(Math.round(d > 300 ? a * 1e300 * pow10(d - 300) : d >= 0 ? a * pow10(d) : a / pow10(-d)));
+    return [x < 0, s.replace(/0+$/, ''), s.length + e + 1 - k];
+}
+// `_format_digits`: ±0.ds × 10^point, as a power of ten (`sci`) or positionally.
+function htmxoDigitsText(negative, ds, point, decimal, thousands, sci) {
+    if (!ds) return '0';
+    const sup = n => (n < 0 ? '⁻' : '') + String(Math.abs(n)).replace(/[0-9]/g, c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]);
+    const out = negative ? '-' : '';
+    if (sci) return out + ds[0] + (ds.length > 1 ? decimal + ds.slice(1) : '') + '·10' + sup(point - 1);
+    if (point <= 0) return out + '0' + decimal + '0'.repeat(-point) + ds;
+    if (point >= ds.length) return out + htmxoGrouped(ds + '0'.repeat(point - ds.length), thousands);
+    return out + htmxoGrouped(ds.slice(0, point), thousands) + decimal + ds.slice(point);
+}
+// `_md_summary_cell`: a summary `s` as the table writes it, or as the ⬇ CSV
+// does (`csv`: no power of ten).
+function htmxoSummaryText(x, s, decimal, thousands, csv) {
+    if (!s.sigdigits) return htmxoFixed(x, s.digits, decimal, thousands);
+    const [negative, ds, point] = htmxoSigDigits(x, s.sigdigits);
+    return htmxoDigitsText(negative, ds, point, decimal, thousands, !csv && (point <= -4 || point >= 16));
 }
 // Give a leaf's rows the row key `safe`: the ids, the row's own toggle call
 // (`master_detail_toggle_js`) and the controls naming its detail.
@@ -19769,8 +19837,8 @@ function htmxoRegroup(wrapper, levels) {
                 cell.textContent = '';
                 cell.removeAttribute('data-htmxo-number');
             } else {
-                cell.textContent = htmxoFixed(x, s.digits, htmxoText(table, 'decimal'), htmxoText(table, 'thousands'));
-                cell.dataset.htmxoNumber = htmxoFixed(x, s.digits, '.', '');
+                cell.textContent = htmxoSummaryText(x, s, htmxoText(table, 'decimal'), htmxoText(table, 'thousands'), false);
+                cell.dataset.htmxoNumber = htmxoSummaryText(x, s, '.', '', true);
             }
         });
         fresh.add(row);
@@ -21817,8 +21885,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   and the other groupings list its first row in the tree, with that row's
   cells, detail and grouping keys. `group_order` cannot name it (the tree
   keeps its own order); `group_master`, `group_by_url`, `group_rows_url`,
-  `group_rows`, `update_rows`, `update_groups` and nesting a level in the
-  tree are not built with it yet and throw an `ArgumentError`.
+  `group_rows`, `group_masters`, `update_rows`, `update_groups` and nesting a
+  level in the tree are not built with it yet and throw an `ArgumentError`.
 - `leaf_key(item)`: with a tree grouping, a row's leaf key, or `nothing` for
   a row that is no leaf (default: its `key` for a row without children,
   `nothing` for the others). A row with children cannot be a leaf.
@@ -21849,12 +21917,26 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `group_by_url`: the route that renders this table for the `group_by` and `q`
   (the current search) it receives, for what the browser cannot build: group
   rows from `group_master`, which replace the browser's after each regroup (a
-  hidden element asks for them, so a recording, which strips that request,
-  keeps the control live with the browser's group rows), and lazy groups
-  (`group_rows_url`), whose control asks this URL instead of regrouping in the
-  browser and appears only with it. It receives the levels as repeated
-  `group_by` values, or for none the flat grouping's name, so declare the
-  route's `group_by::Vector{String}`.
+  hidden element asks for them, with `group_masters=true`, so a recording,
+  which strips that request, keeps the control live with the browser's group
+  rows), and lazy groups (`group_rows_url`), whose control asks this URL
+  instead of regrouping in the browser and appears only with it. It receives
+  the levels as repeated `group_by` values, or for none the flat grouping's
+  name, so declare the route's `group_by::Vector{String}`.
+- `group_masters`: instead of the table, return its group rows only, from
+  `group_master`, as a row update (see `update_rows`): every group row of the
+  grouping at every level and no leaf row, so `master` is not called. The
+  request that `group_by_url` receives after a browser regroup sends
+  `group_masters=true`. A route that declares `group_masters::Bool=false` and
+  passes it to this call answers with these rows, which take the place of the
+  browser's group rows and leave every leaf row as the browser placed it; a
+  route that does not declare it answers with the whole table, which replaces
+  the browser's. As in any browser regroup the leaf rows are not rendered
+  again, and a request from them still sends the table's current grouping. In
+  the flat view the answer has no rows, and an answer for a grouping the
+  reader has left since is dropped. Needs `group_master`; refused
+  together with `group_rows_url`, `group_rows`, `update_rows` or
+  `update_groups`.
 - `group_rows_url(key, members)`: return a URL to load that group's rows on
   first expand (or `nothing` to render them). The route renders the same call
   with `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` of just
@@ -21940,6 +22022,7 @@ function master_detail_table(headers, items;
                              group_rows=nothing,
                              group_summary=nothing,
                              group_order=nothing,
+                             group_masters::Bool=false,
                              leaf_key=nothing,
                              leaf_order=nothing,
                              update_rows=nothing,
@@ -21967,11 +22050,11 @@ function master_detail_table(headers, items;
             initially_open, outline=tree, branches_collapsible, detail_toggle, searchable,
             search_text, selectable, select_form, select_value, select_submit,
             expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-            group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+            group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
     end
-    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups,
+    !group_masters && all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups,
                     leaf_key, leaf_order)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/update_groups/leaf_key/leaf_order require `groupings`"))
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/group_masters/update_groups/leaf_key/leaf_order require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -22473,8 +22556,28 @@ end
 _md_json_hex4(s, i, bad) = i + 4 <= ncodeunits(s) && all(j -> isxdigit(Char(codeunit(s, j))), i+1:i+4) ?
     parse(UInt32, s[i+1:i+4]; base=16) : bad()
 
+# How a number is rounded (`format_number`, `number_cell`, `ColumnSummary`):
+# to fixed decimals or to significant digits, halves away from zero; `nothing`
+# for not at all.
+struct _FixedDigits; k::Int; end
+struct _SigDigits; k::Int; end
+# Exact powers of ten, the same literals in the browser (`htmxoFixed`).
+const _SUMMARY_POW10 = (1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10)
+# Up to 15 significant digits a rounded number's digits stay an exact Float64
+# integer, in Julia and in the browser (`_round_sig`).
+const _MAX_SIGDIGITS = 15
+_number_rounding(::Nothing, ::Nothing, who="format_number") = nothing
+_number_rounding(digits::Integer, ::Nothing, who="format_number") = 0 <= digits <= length(_SUMMARY_POW10) - 1 ?
+    _FixedDigits(digits) : throw(ArgumentError(
+        "$who: digits must be between 0 and $(length(_SUMMARY_POW10) - 1), got $digits"))
+_number_rounding(::Nothing, sigdigits::Integer, who="format_number") = 1 <= sigdigits <= _MAX_SIGDIGITS ?
+    _SigDigits(sigdigits) : throw(ArgumentError(
+        "$who: sigdigits must be between 1 and $_MAX_SIGDIGITS, got $sigdigits"))
+_number_rounding(::Integer, ::Integer, who="format_number") = throw(ArgumentError(
+    "$who: give digits (fixed decimals) or sigdigits (significant digits), not both"))
+
 """
-    ColumnSummary(reduce, values...; digits=0)
+    ColumnSummary(reduce, values...; digits=0, sigdigits=nothing)
 
 One column of a group row in a regroupable [`master_detail_table`](@ref),
 computed from the leaves under the group: pass it in `group_summary` under the
@@ -22490,28 +22593,33 @@ in a recorded page with no server.
 A function may return `nothing` or `missing` for a leaf without a value: that
 leaf is left out (both parts of a `:ratio`). A group without any value, or a
 `:ratio` whose denominators sum to zero, shows an empty cell. Numbers are
-rounded to `digits` decimals, halves away from zero, and written with the
-table's `decimal` and `thousands` texts (`texts=table_texts(:de)` writes
-`1.234,5`).
+written with the table's `decimal` and `thousands` texts
+(`texts=table_texts(:de)` writes `1.234,5`), rounded halves away from zero:
+
+- `digits=k` (0 to 10, default 0) writes exactly `k` decimals.
+- `sigdigits=k` (1 to 15) rounds to `k` significant digits and writes the
+  result as [`format_number`](@ref)`(x; sigdigits=k)` does, so a sum of
+  estimates that are each good to two digits shows no more than it supports:
+  with `sigdigits=2`, 29 210 writes `29,000` (`29.000` in German) and 0.15623
+  writes `0.16`. The ⬇ CSV gets the rounded number (`29000`).
+
+Give `digits` or `sigdigits`, not both.
 """
 struct ColumnSummary
     reduce::Symbol
     values::Tuple
-    digits::Int
-    function ColumnSummary(reduce::Symbol, values...; digits::Integer=0)
+    rounding::Union{_FixedDigits,_SigDigits}
+    function ColumnSummary(reduce::Symbol, values...; digits::Union{Nothing,Integer}=nothing,
+                           sigdigits::Union{Nothing,Integer}=nothing)
         arity = get(_SUMMARY_ARITY, reduce, nothing)
         isnothing(arity) && throw(ArgumentError(string("ColumnSummary: unknown reduce ", repr(reduce),
             "; use one of ", join(repr.(keys(_SUMMARY_ARITY)), ", "))))
         length(values) == arity || throw(ArgumentError(string("ColumnSummary: ", repr(reduce), " takes ",
             arity, arity == 1 ? " function" : " functions", ", got ", length(values))))
-        0 <= digits <= length(_SUMMARY_POW10) - 1 || throw(ArgumentError(
-            "ColumnSummary: digits must be between 0 and $(length(_SUMMARY_POW10) - 1), got $digits"))
-        new(reduce, values, Int(digits))
+        new(reduce, values, something(_number_rounding(digits, sigdigits, "ColumnSummary"), _FixedDigits(0)))
     end
 end
 const _SUMMARY_ARITY = (sum=1, mean=1, min=1, max=1, count=0, ratio=2)
-# Exact powers of ten, the same literals in the browser (`htmxoFixed`).
-const _SUMMARY_POW10 = (1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10)
 
 # A leaf's number for a summary: `nothing` when it has none.
 _md_summary_number(::Union{Nothing,Missing}) = nothing
@@ -22573,13 +22681,22 @@ function _print_grouped(io::IO, whole::AbstractString, thousands::AbstractString
     end
 end
 
-# A group summary cell: the summary as the table writes it, and as the ⬇ CSV
-# writes it (`data-htmxo-number`: the same decimals, a `.` and no grouping).
-# `htmxoRegroup` fills the cells of the rows it builds the same way.
-_md_summary_cell(::Nothing, digits, texts, i) = h.td(""; data_htmxo_group_summary=string(i))
-_md_summary_cell(x::Float64, digits, texts::TableTexts, i) =
-    h.td(_format_fixed(x, digits, texts.decimal, texts.thousands);
-         data_htmxo_group_summary=string(i), data_htmxo_number=_format_fixed(x, digits, ".", ""))
+# A group summary cell: the summary as the table writes it
+# (`format_number(x; digits | sigdigits)`), and as the ⬇ CSV writes it
+# (`data-htmxo-number`: the same rounded number with a `.`, no grouping and no
+# power of ten). `htmxoSummaryText` fills the cells of the rows `htmxoRegroup`
+# builds the same way.
+_md_summary_cell(::Nothing, rounding, texts, i) = h.td(""; data_htmxo_group_summary=string(i))
+_md_summary_cell(x::Float64, rounding, texts::TableTexts, i) =
+    h.td(_format_finite(x, texts, rounding);
+         data_htmxo_group_summary=string(i), data_htmxo_number=_summary_key(x, rounding))
+_summary_key(x::Float64, r::_FixedDigits) = _format_fixed(x, r.k, ".", "")
+_summary_key(x::Float64, r::_SigDigits) = let (negative, ds, point) = _round_sig(x, r.k)
+    _format_digits(negative, ds, point, ".", "", false)
+end
+# How the browser rounds a summary: `"digits":k` or `"sigdigits":k`.
+_summary_rounding_json(r::_FixedDigits) = "\"digits\":$(r.k)"
+_summary_rounding_json(r::_SigDigits) = "\"sigdigits\":$(r.k)"
 
 """
     format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing) -> String
@@ -22595,12 +22712,17 @@ writes `0,156`, `1.234.567` and `3,81·10⁻⁵`; the default English texts writ
   digits, `3,81·10⁻⁵`, which reads the same in HTML, Markdown, a
   [`pdf_report`](@ref) and a pasted copy. An integer keeps every digit:
   `1.234.567`.
-- `sigdigits=k` first rounds to `k` significant digits, as
-  `round(x; sigdigits=k)` does: `0.15623` writes `0,156`, `1234567` writes
-  `1.230.000`.
-- `digits=k` (0 to 10) writes exactly `k` decimals, halves away from zero,
-  the way the group sums of [`ColumnSummary`](@ref) are written: `0.15623`
-  writes `0,16` with `digits=2`. It never switches to a power of ten.
+- `sigdigits=k` (1 to 15) first rounds to `k` significant digits, halves
+  away from zero: `0.15623` writes `0,156`, `1234567` writes `1.230.000`, and
+  `2850` writes `2.900` with `sigdigits=2` (where `round(x; sigdigits=2)`
+  rounds the half to even, `2800`). The rounded number is then written as
+  above.
+- `digits=k` (0 to 10) writes exactly `k` decimals, halves away from zero:
+  `0.15623` writes `0,16` with `digits=2`. It never switches to a power of
+  ten.
+
+The group sums of [`ColumnSummary`](@ref) take the same `digits` or
+`sigdigits` and write the same text, in the browser too.
 
 `missing` and `nothing` write `–`; `Inf`, `-Inf` and `NaN` write `∞`, `-∞` and
 `NaN`. A negative number starts with `-`. Other real numbers (a `Rational`, an
@@ -22650,18 +22772,6 @@ _number_value(x::Real) = float(x)
 _number_value(x) = throw(ArgumentError(string(
     "format_number: expected a real number, missing or nothing; got ", repr(x))))
 
-# How a number is rounded: not at all, to fixed decimals or to significant digits.
-struct _FixedDigits; k::Int; end
-struct _SigDigits; k::Int; end
-_number_rounding(::Nothing, ::Nothing) = nothing
-_number_rounding(digits::Integer, ::Nothing) = 0 <= digits <= length(_SUMMARY_POW10) - 1 ?
-    _FixedDigits(digits) : throw(ArgumentError(
-        "format_number: digits must be between 0 and $(length(_SUMMARY_POW10) - 1), got $digits"))
-_number_rounding(::Nothing, sigdigits::Integer) = sigdigits >= 1 ? _SigDigits(sigdigits) :
-    throw(ArgumentError("format_number: sigdigits must be at least 1, got $sigdigits"))
-_number_rounding(::Integer, ::Integer) = throw(ArgumentError(
-    "format_number: give digits (fixed decimals) or sigdigits (significant digits), not both"))
-
 _format_number(::Nothing, texts, rounding) = "–"
 _format_number(x::Integer, texts, rounding) = _format_finite(x, texts, rounding)
 _format_number(x::AbstractFloat, texts, rounding) =
@@ -22679,26 +22789,68 @@ _format_finite(x::Integer, texts, r::_FixedDigits) =
     string(_format_finite(x, texts, nothing), texts.decimal, repeat('0', r.k))
 _format_finite(x::AbstractFloat, texts, r::_FixedDigits) =
     _format_fixed(Float64(x), r.k, texts.decimal, texts.thousands)
-_format_finite(x::Real, texts, r::_SigDigits) = _format_finite(round(x; sigdigits=r.k), texts, nothing)
-function _format_finite(x::AbstractFloat, texts, ::Nothing)
-    negative, ds, point = _shortest_digits(x)
+# Rounding an integer to significant digits leaves an integer, which keeps
+# every digit; a float switches to a power of ten as it does unrounded.
+_format_finite(x::Integer, texts, r::_SigDigits) = let (negative, ds, point) = _round_sig(Float64(x), r.k)
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, false)
+end
+_format_finite(x::AbstractFloat, texts, r::_SigDigits) = let (negative, ds, point) = _round_sig(Float64(x), r.k)
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point))
+end
+_format_finite(x::AbstractFloat, texts, ::Nothing) = let (negative, ds, point) = _shortest_digits(x)
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point))
+end
+
+# A float is written as a power of ten below 10⁻⁴ and from 10¹⁵ up: for
+# ±0.digits × 10^point, a point of -4 or less or 16 or more.
+_float_sci(point) = point <= -4 || point >= 16
+
+# The number ±0.`ds` × 10^`point` (`ds` without leading or trailing zeros;
+# zero has none) written with `decimal` and `thousands`: as a power of ten with
+# superscript digits (`sci`), else positionally. `htmxoDigitsText` writes the
+# same text in the browser.
+function _format_digits(negative::Bool, ds::AbstractString, point::Int, decimal, thousands, sci::Bool)
     isempty(ds) && return "0"
     io = IOBuffer()
     negative && print(io, '-')
-    if abs(x) < 1e-4 || abs(x) >= 1e15
+    if sci
         print(io, ds[1])
-        length(ds) > 1 && print(io, texts.decimal, ds[2:end])
+        length(ds) > 1 && print(io, decimal, ds[2:end])
         print(io, "·10", _superscript(point - 1))
     elseif point <= 0
-        print(io, '0', texts.decimal, repeat('0', -point), ds)
+        print(io, '0', decimal, repeat('0', -point), ds)
     elseif point >= length(ds)
-        _print_grouped(io, ds * repeat('0', point - length(ds)), texts.thousands)
+        _print_grouped(io, ds * repeat('0', point - length(ds)), thousands)
     else
-        _print_grouped(io, ds[1:point], texts.thousands)
-        print(io, texts.decimal, ds[point+1:end])
+        _print_grouped(io, ds[1:point], thousands)
+        print(io, decimal, ds[point+1:end])
     end
     String(take!(io))
 end
+
+# `x` rounded to `k` significant digits, halves away from zero, as
+# `(negative, digits, point)` like `_shortest_digits`. `htmxoSigDigits` takes
+# the same floating-point steps in the browser, so a group summary reads the
+# same before and after a regroup: the exponent comes from exact powers of
+# ten (`log10` only guesses it), and the scaled number is one product or
+# quotient rounded to an integer of at most `_MAX_SIGDIGITS` + 1 digits.
+# (Base's `round(x; sigdigits)` rounds halves to even: 2850 to 2800.)
+function _round_sig(x::Float64, k::Int)
+    a = abs(x)
+    isfinite(a) || throw(ArgumentError("cannot round $x to significant digits: it is not a finite number"))
+    a == 0 && return (false, "", 0)
+    e = floor(Int, log10(a))
+    while a < _exact_pow10(e); e -= 1; end
+    while a >= _exact_pow10(e + 1); e += 1; end
+    d = k - 1 - e
+    n = round(d > 300 ? a * 1e300 * _exact_pow10(d - 300) : d >= 0 ? a * _exact_pow10(d) : a / _exact_pow10(-d),
+              RoundNearestTiesAway)
+    s = string(Int(n))
+    (x < 0, rstrip(s, '0'), length(s) + e + 1 - k)
+end
+# 10ⁿ as the nearest Float64, as the literal `1e<n>` reads; 0 and Inf beyond,
+# as the browser's `Number('1e' + n)` reads them (`parse` refuses those).
+_exact_pow10(n::Int) = n < -323 ? 0.0 : n > 308 ? Inf : parse(Float64, string("1e", n))
 
 # A float's digits as Julia prints it (its shortest round-trip form):
 # `(negative, digits, point)` for ±0.digits × 10^point, without leading or
@@ -22781,15 +22933,15 @@ end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, outline, groupings, group_by, group_master,
-        group_by_url, group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, selectable,
+        group_by_url, group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     # A tree grouping regroups in the browser alone, and its rows come from
     # the app's tree; what would ask the server for a group's rows, or update
     # rows in place, is not built for it yet.
     if !isnothing(outline)
         hooks = [string(n) for (n, v) in (:group_master => group_master, :group_by_url => group_by_url,
-            :group_rows_url => group_rows_url, :group_rows => group_rows, :update_rows => update_rows,
-            :update_groups => update_groups) if !isnothing(v)]
+            :group_rows_url => group_rows_url, :group_rows => group_rows, :group_masters => (group_masters ? true : nothing),
+            :update_rows => update_rows, :update_groups => update_groups) if !isnothing(v)]
         isempty(hooks) || throw(ArgumentError(string("master_detail_table: ", join(hooks, ", "),
             " together with the tree grouping ", repr(outline.name), " (=> :children) is not built yet")))
     end
@@ -22850,7 +23002,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     group_by_values = isempty(levels) ? [something(flat_name, "")] : levels
     nlevels == 0 && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows needs a grouping, but $(repr(requested)) is ungrouped"))
-    update = !isnothing(update_rows) || !isnothing(update_groups)
+    # `group_masters`: the group rows alone, as an update, for a table the
+    # browser has regrouped (every leaf is on the page already).
+    if group_masters
+        isnothing(group_master) && throw(ArgumentError(
+            "master_detail_table: group_masters returns the group rows from `group_master`; without it the browser builds them itself"))
+        isnothing(group_rows_url) || throw(ArgumentError(
+            "master_detail_table: group_masters returns the group rows of a table the browser regroups, but with `group_rows_url` (lazy groups) the server regroups it, as a whole table"))
+        others = [string(n) for (n, v) in (:group_rows => group_rows, :update_rows => update_rows,
+            :update_groups => update_groups) if !isnothing(v)]
+        isempty(others) || throw(ArgumentError(string("master_detail_table: group_masters is a response of its own; ",
+            "drop ", join(others, " and "))))
+    end
+    update = !isnothing(update_rows) || !isnothing(update_groups) || group_masters
     update && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows loads a lazy group; update_rows/update_groups are a separate response"))
     _attrs(item) = isnothing(master_attrs) ? (;) : master_attrs(item)
@@ -22862,10 +23026,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # (`htmxoRegroup`). Lazy groups hold rows it has not got, so their
     # control regroups through the server. Group rows from `group_master`
     # need the server too: after the browser has regrouped, a hidden element
-    # asks `group_by_url` for them. A recording strips that element's request
-    # (it names a kwargs route) and leaves the control live, so a recorded
-    # page, like a table without `group_by_url`, shows the browser's group
-    # rows: the group's key, its count and the `group_summary` cells.
+    # asks `group_by_url` for them, with `group_masters=true` (a route that
+    # passes it on answers with the group rows alone, one that does not with
+    # the whole table; `hx-sync` drops a request the next regroup overtakes).
+    # A recording strips that element's request (it names a kwargs route)
+    # and leaves the control live, so a recorded page, like a table without
+    # `group_by_url`, shows the browser's group rows: the group's key, its
+    # count and the `group_summary` cells.
     browser = isnothing(group_rows_url)
     serve = !isnothing(group_by_url) && !browser
     refresh = !isnothing(group_by_url) && browser && !isnothing(group_master)
@@ -22878,8 +23045,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         serve ? group_by_url : nothing, select_form, table_id, texts, isnothing(outline) ? nothing : outline.name),)
     toolbar = !(control && refresh) ? toolbar : (toolbar...,
         h.span(; hidden=true, data_htmxo_group_refresh="", hx_get=string(group_by_url), hx_trigger="htmxo-regroup",
-            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
-            hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this)}"))
+            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML", hx_sync="this:replace",
+            hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this), group_masters: true}"))
     leaf_keys = _md_update_keys(update_rows)
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     # A group's key names it in callbacks, selections and requests; its
@@ -22909,7 +23076,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     summary_cell(col, members) = let i = findfirst(p -> first(p) == col, summaries)
         isnothing(i) ? h.td("") :
             _md_summary_cell(_md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in members]),
-                             last(summaries[i]).digits, texts, i - 1)
+                             last(summaries[i]).rounding, texts, i - 1)
     end
     default_master = _md_default_group_master(ncols, k -> last(gpath(k)), summary_cell)
     gmaster = something(group_master, default_master)
@@ -22928,12 +23095,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # The groups and leaves a render shows: all of them; for a lazy load,
     # the target group whole (and the path to it); for an update, the
     # named groups whole, the groups on their paths and those holding an
-    # updated leaf. Summaries always see a group's full membership.
+    # updated leaf; for `group_masters`, every group and no leaf. Summaries
+    # always see a group's full membership.
     whole(path) = !isnothing(target) ? isprefix(target, path) :
         !update || any(n -> isprefix(n, path), named)
     keep(::_MDGroupLeaf) = true
     keep(g::_MDGroup) = !isnothing(target) ? isprefix(g.path, target) || isprefix(target, g.path) :
-        !update || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
+        !update || group_masters || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
             any(m -> string(key(m)) in leaf_set, g.members)
     # A predicate sees leaves only: a group holding a leaf it opens (its
     # members are every leaf below it) renders open, and eagerly rather
@@ -23068,7 +23236,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
-            order=browser ? order_json : nothing))
+            order=browser ? order_json : nothing, group_masters))
     built = tree_active ? outline_rows(false) : tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
@@ -23098,7 +23266,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
         isnothing(outline) ? "" : ",\"tree\":" * _md_json_string(outline.name),
         ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
-        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]",
+        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",$(_summary_rounding_json(s.rounding))}" for (_, s) in summaries), ","), "]",
         isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
     h.div(; grouping..., data_htmxo_regroup=config)(template..., store, stash..., built)
 end
@@ -23187,11 +23355,15 @@ end
 # so it can remove those it no longer lists: rows by id, every copy of a
 # leaf (`data-htmxo-leaf`), and a group row with all its rows. `places` (see
 # `_md_record_places!`) says where its rows go; `order`, the `group_order`
-# lists the table's browser regrouping goes by from now on.
-function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(), order=nothing)
+# lists the table's browser regrouping goes by from now on. `group_masters`
+# marks the group rows of a browser regroup, which the runtime drops once the
+# reader has regrouped again.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(),
+                        order=nothing, group_masters::Bool=false)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
     isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
+    group_masters && push!(attrs, :data_htmxo_group_masters => "")
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
     isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
@@ -26944,6 +27116,17 @@ hover, focus and busy states. `.secondary` and `.contrast` buttons keep
 Pico's looks. To colour a button otherwise, set `--pico-background-color`,
 `--pico-color` and `--pico-border-color` on it from a later stylesheet, with a
 selector at least as specific as two classes (`.app .cta`).
+
+A disclosure (`<details>`, so also [`SemanticDisclosure`](@ref), the later
+views of [`SemanticAlternatives`](@ref) and a caption's "More") is a bordered
+box: its summary is a bold, tinted bar with the chevron right before the
+label, and its content opens inside the box. Pico draws it as one borderless
+line with the chevron at the far edge. Pico's dropdown menus
+(`details.dropdown`) and button summaries (`summary[role]`) keep Pico's looks.
+The box's rules are as weak as Pico's own, so a component that draws its own
+`<details>` (a menu badge) keeps every property it sets in its own class
+rules. `--htmxo-disclosure-padding` (default `1rem`) is the box's inner
+spacing.
 """
 pico_bridge() = h.style(Raw("""
 :root {
@@ -26994,6 +27177,67 @@ pico_bridge() = h.style(Raw("""
 details summary[role=button]:not(.secondary, .contrast)::after,
 [aria-busy=true]:not(input, select, textarea):is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast)::before {
     filter: none;
+}
+/* Pico draws a disclosure (`<details>`) as one borderless line with its
+   chevron at the far edge, and colours the label like a link while it has
+   focus, so readers miss it. It is a bordered box instead: the summary is a
+   bold, tinted bar with the chevron right before the label, and the content
+   opens inside the box. Pico's dropdown menus and button summaries
+   (`summary[role]`) keep their looks. What Pico leaves unset (the box, the
+   bar, the new chevron) has zero specificity and what Pico sets (the label's
+   line height and colours, its chevron, the gap under an open label) has
+   exactly Pico's, so a component that styles its own `<details>` still wins
+   wherever it sets something. */
+:where(details:not(.dropdown, :has(> summary[role]))) {
+    --pico-accordion-active-summary-color: var(--pico-accordion-close-summary-color);
+    --pico-accordion-open-summary-color: var(--pico-accordion-close-summary-color);
+    padding: 0 var(--htmxo-disclosure-padding, 1rem);
+    border: var(--pico-border-width) solid var(--pico-form-element-border-color);
+    border-radius: var(--pico-border-radius);
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) {
+    padding-bottom: var(--htmxo-disclosure-padding, 1rem);
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary) {
+    margin-inline: calc(-1 * var(--htmxo-disclosure-padding, 1rem));
+    padding: 0.6rem var(--htmxo-disclosure-padding, 1rem);
+    border-radius: calc(var(--pico-border-radius) - var(--pico-border-width));
+    background: var(--pico-card-sectioning-background-color);
+    font-weight: 600;
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary):hover {
+    background: color-mix(in srgb, currentColor 7%, var(--pico-card-sectioning-background-color));
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) > :where(summary) {
+    border-bottom: var(--pico-border-width) solid var(--pico-muted-border-color);
+    border-end-start-radius: 0;
+    border-end-end-radius: 0;
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary)::before {
+    content: "";
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    margin-inline-end: 0.5rem;
+    vertical-align: -0.125rem;
+    background-image: var(--pico-icon-chevron);
+    background-position: center;
+    background-size: 1rem auto;
+    background-repeat: no-repeat;
+    transform: rotate(-90deg);
+    transition: transform var(--pico-transition);
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) > :where(summary)::before {
+    transform: rotate(0);
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :last-child { margin-bottom: 0; }
+details:where(:not(.dropdown, :has(> summary[role]))) > summary { line-height: var(--pico-line-height); }
+details:where(:not(.dropdown, :has(> summary[role]))) > summary::after { content: none; }
+details:where(:not(.dropdown, :has(> summary[role])))[open] > summary {
+    margin-bottom: var(--htmxo-disclosure-padding, 1rem);
+}
+details:where(:not(.dropdown, :has(> summary[role]))) > summary:focus-visible:not([role]) {
+    outline-offset: calc(-1 * var(--pico-outline-width));
 }
 """))
 
@@ -29266,6 +29510,54 @@ const _TABSET_URL_RESTORE = "(window.htmxoTabset || (ts => ts.closest('.htmxo-em
 _tabset_url_restore(::Nothing) = ()
 _tabset_url_restore(url_param) = (h.script(Raw(_TABSET_URL_RESTORE)),)
 
+# The tab bar or one panel of a `tabset`, in every format. HTML and HXML write
+# the node as the browser shows it. Markdown, which a `?plain` reader or a PDF
+# reads top to bottom with no tab to click, writes `markdown` instead: nothing
+# for the tab bar, and each tab as its label in bold followed by its content —
+# what `SemanticDisclosure` writes for a label and the body it opens, so a tab
+# whose content its reader does not see goes with its label. A lazy tab's
+# content is not on the page, so its label links the address that has it. The
+# walkers that read the HTML (`?error`, static export, prestart, layout checks)
+# see through to the node.
+struct _TabsetPart
+    node::Node
+    markdown::Any
+end
+Base.show(io::IO, m::MIME"text/html", p::_TabsetPart) = show(io, m, p.node)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", p::_TabsetPart) = show(io, m, p.node)
+function Base.show(io::IO, m::MIME"text/markdown", p::_TabsetPart)
+    _shows_nothing(p.markdown, _ambient_audience()) || show(io, m, p.markdown)
+    nothing
+end
+HTMX.markdown_block(p::_TabsetPart) = !_shows_nothing(p.markdown, _ambient_audience())
+filter_errors(p::_TabsetPart) = filter_errors(p.node)
+_filter_errors_child(p::_TabsetPart) = _filter_errors_child(p.node)
+_strip_md_chrome(p::_TabsetPart) = let markdown = _strip_md_chrome(p.markdown)
+    isnothing(markdown) ? nothing : _TabsetPart(p.node, markdown)
+end
+_strip_md_chrome_child(p::_TabsetPart) = _strip_md_chrome(p)
+_rescue_semantic!(out, p::_TabsetPart) = _rescue_semantic!(out, p.node)
+function _static_walk(p::_TabsetPart, rules::_StaticRules)
+    walked = _static_walk(p.node, rules)
+    walked === _STATIC_REMOVED ? walked : _TabsetPart(walked, p.markdown)
+end
+_static_walk_child(p::_TabsetPart, rules) = _static_walk(p, rules)
+_prestart_walk(p::_TabsetPart, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(p.node, walk, blocked), node -> _TabsetPart(node, p.markdown))
+_semantic_layout_children(p::_TabsetPart) = (p.node,)
+
+# A label that is not text reads as its words, as a master/detail row label does.
+_tabset_label_text(label::AbstractString) = label
+_tabset_label_text(label) = _md_label_text(Any[label])
+function _tabset_markdown(label, content)
+    name = _tabset_label_text(label)
+    isempty(name) ? content : SemanticDisclosure(name, Any[content])
+end
+function _tabset_markdown(label, url::AbstractString)
+    name = _tabset_label_text(label)
+    string("**[", isempty(name) ? url : name, "](", url, ")**")
+end
+
 include("comparison.jl")
 
 """
@@ -29314,6 +29606,13 @@ load after the page, and scrolls to a tabset that arrives in a fragment
 `active` picks the tab shown when the URL names none, by position or by name
 (`active="sonden"`). Keeping the tab in the URL needs [`tabset_script`](@ref),
 which [`htmx`](@ref) pages carry.
+
+Markdown (`?plain`, [`to_markdown_string`](@ref), [`pdf_report`](@ref)) has no
+tab to click, so it writes no tab bar: every tab follows in order, its label in
+bold and then its content, as a [`SemanticDisclosure`](@ref) writes its label
+and body. A tab whose content its reader does not see ([`private`](@ref)
+content read publicly, with no stand-in) is left out with its label, and a lazy
+tab is its label as a link to its address (`**[Details](/api/details)**`).
 """
 function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing,
                 url_param="tab", names=nothing)
@@ -29321,7 +29620,7 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
         _tabset_checked_names(_tabset_names(tabs, names))
     active = _tabset_active_index(active, tab_names)
     h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload)...)(
-        h.nav(
+        _TabsetPart(h.nav(
             h.ul([
                 h.li(h.a(label;
                     href="#",
@@ -29342,8 +29641,9 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
                 ))
                 for (i, (label, content)) in enumerate(tabs)
             ]...)
-        ),
-        [_tabset_panel(content, i, active, id) for (i, (_, content)) in enumerate(tabs)]...,
+        ), nothing),
+        [_TabsetPart(_tabset_panel(content, i, active, id), _tabset_markdown(label, content))
+         for (i, (label, content)) in enumerate(tabs)]...,
         _tabset_url_restore(url_param)...
     )
 end

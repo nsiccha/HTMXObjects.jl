@@ -124,10 +124,11 @@ end
     @test !contains(party, "hx-get=\"/table\"") && contains(party, "&quot;refresh&quot;:false")
     # Group rows from `group_master` come from the server after a browser
     # regroup, through a hidden element: the control itself stays request-free,
-    # so a recording (which strips that request) keeps it live.
+    # so a recording (which strips that request) keeps it live. It asks for the
+    # group rows alone (`group_masters`), and a later regroup replaces its request.
     master_rows = html(grouped(group_by=["party"], group_by_url="/table", group_master=(k, ms) -> (h.td(k), h.td(""), h.td(""))))
     @test !contains(pills_tag(master_rows), "hx-get")
-    @test occursin(r"<span hidden=\"true\" data-htmxo-group-refresh=\"\" hx-get=\"/table\" hx-trigger=\"htmxo-regroup\"[^>]* hx-vals=\"js:\{group_by: htmxoGroupBy\(this\), q: htmxoGroupedQuery\(this\)\}\"", master_rows)
+    @test occursin(r"<span hidden=\"true\" data-htmxo-group-refresh=\"\" hx-get=\"/table\" hx-trigger=\"htmxo-regroup\"[^>]* hx-sync=\"this:replace\" hx-vals=\"js:\{group_by: htmxoGroupBy\(this\), q: htmxoGroupedQuery\(this\), group_masters: true\}\"", master_rows)
     @test contains(master_rows, "&quot;refresh&quot;:true") && !contains(party, "data-htmxo-group-refresh")
     lazy = html(grouped(group_by=["party"], group_by_url="/table", group_rows_url=(k, ms) -> "/rows"))
     @test contains(pills_tag(lazy), "hx-get=\"/table\"") && !contains(lazy, "data-htmxo-regroup")
@@ -360,6 +361,80 @@ end
     @test_throws ArgumentError master_detail_table(["A"], TX; key=t -> t.id, master=t -> (h.td(t.id),),
         detail=t -> "", update_groups="Acme")
     @test_throws ArgumentError grouped(group_by=["party"], group_rows="[\"Acme\"]", update_rows="p1")
+end
+
+@testitem "group_masters: the group rows of a browser regroup, and no leaf" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    # Snag group-master-ref-7ac31517 (reporter Invoices:taxes), user no
+    # preference on design 06kfork: after a browser regroup, a table with its
+    # own group rows asks for those alone, not for the whole table again.
+    html(x) = repr("text/html", x)
+    row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
+    group_ids(page) = [m[1] for m in eachmatch(r"<tr[^>]*? id=\"(row-group--[^\"]*)\"[^>]*data-htmxo-group=", page)]
+    # What a full render's group row and the answer's share: everything but the
+    # child rows its toggle names, which the runtime takes from the page.
+    bare(r) = replace(r, r" aria-controls=\"[^\"]*\"" => "")
+    masters = Ref(0)
+    group_rows = Ref(0)
+    table(group_by; kw...) = grouped(; group_by, id="g", selectable="tx", group_by_url="/table",
+        master=t -> (masters[] += 1; (h.td(t.party), h.td(t.iban), h.td(string(t.amount)))),
+        group_master=(k, ms) -> (group_rows[] += 1;
+            (h.td(h.strong("G " * last(HTMXObjects.group_path(k)))), h.td(h.button("Rule")), h.td(string(length(ms))))),
+        kw...)
+    for group_by in (["party"], ["rule", "iban"], ["iban", "party"])
+        full = table_rows(html(table(group_by)))
+        masters[] = 0; group_rows[] = 0
+        answer = html(table(group_by; group_masters=true))
+        # Every group row of every level, in the full table's order, as the
+        # full table renders it; no leaf row, and `master` never runs.
+        @test group_ids(answer) == group_ids(full)
+        @test !isempty(group_ids(answer)) && count("<tr", answer) == length(group_ids(answer))
+        @test all(bare(row(answer, id)) == bare(row(full, id)) for id in group_ids(answer))
+        @test !contains(answer, "data-htmxo-leaf=") && !contains(answer, "detail-")
+        @test masters[] == 0 && group_rows[] == length(group_ids(answer))
+        # A row update marked as the group rows of this grouping: nothing in
+        # its scope to remove, only where the first row of each level goes.
+        @test startswith(answer, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"" *
+            replace(HTMXObjects._md_json_list(group_by), "\"" => "&quot;") * "\" data-htmxo-group-masters=\"\" data-htmxo-update-places=")
+        @test !contains(answer, "data-htmxo-update-ids") && !contains(answer, "data-htmxo-update-leaves") &&
+            !contains(answer, "data-htmxo-update-groups")
+    end
+    places(page) = replace(match(r"data-htmxo-update-places=\"([^\"]*)\"", page)[1], "&quot;" => "'")
+    @test places(html(table(["party"]; group_masters=true))) == "{'row-group--Acme':['','row-group--Acme--Prime']}"
+    # A group with subgroups names its first subgroup's neighbours; the leaves
+    # listed directly in it (no key at the inner level) are not rendered.
+    @test places(html(table(["rule", "iban"]; group_masters=true))) ==
+        "{'row-group--Shops':['','row-group--Media'],'row-group--Shops--DE01':['','row-group--Shops--DE02']," *
+        "'row-group--Media--DE01':['','row-group--Media--DE04']}"
+    # The flat view has no group rows: an answer with no rows.
+    @test html(table(["none"]; group_masters=true)) ==
+        "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[]\" data-htmxo-group-masters=\"\"></tbody>"
+    # Refused: no rows of the app's own (the browser builds the default ones),
+    # lazy groups (the server regroups that table whole), the other answers,
+    # and a table that is not regroupable.
+    @test_throws ArgumentError grouped(group_by=["party"], group_masters=true)
+    @test_throws ArgumentError table(["party"]; group_masters=true, group_rows_url=(k, ms) -> "/rows")
+    @test_throws ArgumentError table(["party"]; group_masters=true, group_rows="[\"Acme\"]")
+    @test_throws ArgumentError table(["party"]; group_masters=true, update_rows="p1")
+    @test_throws ArgumentError table(["party"]; group_masters=true, update_groups="[\"Acme\"]")
+    @test_throws ArgumentError master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),),
+        detail=t -> h.p(t.memo), group_masters=true)
+    # The app's route opts in by declaring the parameter and passing it on;
+    # a route that does not declare it ignores it and answers with the table.
+    @htmx struct GroupMastersApp
+        @get gm_masters(; group_by::Vector{String}=["party"], q::String="", group_masters::Bool=false) =
+            table(group_by; search_query=q, group_masters)
+        @get gm_whole(; group_by::Vector{String}=["party"], q::String="") = table(group_by; search_query=q)
+    end
+    route!(GroupMastersApp())
+    answer = String(dispatch(:GET, "/gm_masters?group_by=iban&q=&group_masters=true").body)
+    @test startswith(answer, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;iban&quot;]\" data-htmxo-group-masters")
+    @test group_ids(answer) == ["row-group--DE01", "row-group--DE02", "row-group--DE03", "row-group--DE04"]
+    whole = String(dispatch(:GET, "/gm_whole?group_by=iban&q=&group_masters=true").body)
+    @test contains(whole, "data-htmxo-regroup=") && contains(whole, "data-htmxo-leaf=\"p1\"") &&
+        !contains(whole, "data-htmxo-row-update")
+    @test contains(String(dispatch(:GET, "/gm_masters?group_by=iban&q=").body), "data-htmxo-regroup=")
 end
 
 @testitem "ordered grouping: nested levels, path keys and grouping pills" setup=[GroupingFixtures] tags=[:unit] begin
@@ -1832,7 +1907,19 @@ end
     de = html(grouped(group_by="rule", texts=table_texts(:de),
         group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount * 100; digits=2)]))
     @test cell(row(de, "row-group--Shops"), 0) == "-23.000,00" && number(row(de, "row-group--Shops"), 0) == "-23000.00"
-    # The cells' `format_number(x; digits)` writes the same text: test/number_format.jl.
+    # Significant digits: Acme's and Bakery's amounts × 28.5 sum to -2850, a
+    # half, which rounds away from zero. The CSV gets the rounded number, and
+    # no power of ten where the cell shows one.
+    sig = html(grouped(group_by="party", texts=table_texts(:de), group_summary=[
+        "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
+        "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)]))
+    @test cell(row(sig, "row-group--Acme"), 1) == "-2.900" && number(row(sig, "row-group--Acme"), 1) == "-2900"
+    @test cell(row(sig, "row-group--Bakery"), 1) == "-2.900" && cell(row(sig, "row-group--Prime--Video"), 1) == "-1.400"
+    @test cell(row(sig, "row-group--Acme--Prime"), 1) == "-860"
+    @test cell(row(sig, "row-group--Acme"), 0) == "-3,3·10⁻⁵" && number(row(sig, "row-group--Acme"), 0) == "-0.000033"
+    @test contains(sig, "&quot;summary&quot;:[{&quot;reduce&quot;:&quot;mean&quot;,&quot;sigdigits&quot;:2}," *
+        "{&quot;reduce&quot;:&quot;sum&quot;,&quot;sigdigits&quot;:2}]")
+    # The cells' `format_number(x; digits | sigdigits)` writes the same text: test/number_format.jl.
     # Every leaf carries what the browser regroups it by, on every copy.
     leaf = match(r"<tr[^>]*id=\"row-group--Shops--p3\"[^>]*>", html(grouped(group_by="rule",
         group_summary=["Amount" => ColumnSummary(:ratio, t -> t.amount, t -> 1)]))).match
@@ -1861,13 +1948,18 @@ end
     md = to_markdown_string(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount)]))
     @test contains(md, "-100") && !contains(md, "template") && count("Acme Prime", md) == 3
     @test contains(md, "\n\n**Acme Prime**\n\nmemo 3\n\n")
-    # Refused: an unknown reduce or digits, the wrong number of functions, a
-    # column that is not a header or is the first, a column named twice,
-    # something other than a ColumnSummary, a value that is not a number.
+    # Refused: an unknown reduce, digits or sigdigits (outside 1 to 15, the
+    # digits the browser rounds exactly), digits and sigdigits together, the
+    # wrong number of functions, a column that is not a header or is the
+    # first, a column named twice, something other than a ColumnSummary, a
+    # value that is not a number.
     @test_throws ArgumentError ColumnSummary(:median, identity)
     @test_throws ArgumentError ColumnSummary(:sum)
     @test_throws ArgumentError ColumnSummary(:ratio, identity)
     @test_throws ArgumentError ColumnSummary(:sum, identity; digits=11)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=0)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=16)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; digits=1, sigdigits=2)
     @test_throws ArgumentError grouped(group_summary=["Nope" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Party" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Amount" => ColumnSummary(:count), "Amount" => ColumnSummary(:count)])
@@ -2139,6 +2231,82 @@ end
     end
 end
 
+@testitem "sigdigits group summaries round the same in the browser browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets, Random
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        de = table_texts(:de)
+        # Acme and Bakery sum to -2850, a half; the IBAN means are powers of ten.
+        table(group_by) = regroup_table(; group_by, id="s", texts=de, group_summary=[
+            "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
+            "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)])
+        # The browser's rounding against the server's, number by number:
+        # halves, carries into a new digit, the ends of Float64, and sums of
+        # numbers rounded to two digits each, where halves are common.
+        rng = Xoshiro(7)
+        xs = Float64[2850, -2850, 0.125, 2.5, 9.96, 99.96, 29210, 1.05e16, 1.5e15, 999999999999999, 3.81234e-5,
+                     9.9996e-5, 5e-324, 2.2250738585072014e-308, floatmax(), -0.0, 1, 1000, 0.001]
+        append!(xs, [(rand(rng) - 0.5) * 10.0^rand(rng, -12:18) for _ in 1:150])
+        append!(xs, [-sum(round(rand(rng) * 10.0^rand(rng, 1:5); sigdigits=2) for _ in 1:rand(rng, 2:8)) for _ in 1:150])
+        append!(xs, [rand(rng, -10^6:10^6) / 8 for _ in 1:100])
+        cases = [(x, k) for x in xs for k in (1, 2, 3, 6, 15)]
+        driver = h.script(Raw(regroup_driver_prelude() * "const CASES = [" * join(("[$x,$k]" for (x, k) in cases), ",") * "];\n" * raw"""
+        window.addEventListener('load', async function() {
+            const s = () => document.getElementById('s').closest('[data-htmxo-grouped]');
+            const levels = v => v === 'none' ? [] : [v];
+            const regroup = v => htmxoGroupRequest(s().querySelector('.htmxo-group-pills'), levels(v), null);
+            for (const v of ['iban', 'rule', 'media', 'none', 'party'])
+                (regroup(v), check('parity-' + v, await parity(s(), '/s?group_by=' + v)));
+            const cell = (id, i) => document.getElementById('row-' + id).querySelector('[data-htmxo-group-summary="' + i + '"]');
+            check('half', cell('group--Acme', 1).textContent === '-2.900' && cell('group--Acme', 1).dataset.htmxoNumber === '-2900');
+            check('power-of-ten', cell('group--Acme', 0).textContent === '-3,3·10⁻⁵' && cell('group--Acme', 0).dataset.htmxoNumber === '-0.000033');
+            const numbers = document.createElement('pre'); numbers.id = 'numbers';
+            numbers.textContent = CASES.map(([x, k]) => htmxoSummaryText(x, {sigdigits: k}, ',', '.', false) + '\t' +
+                htmxoSummaryText(x, {sigdigits: k}, '.', '', true)).join('\n');
+            document.body.appendChild(numbers);
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(table(["party"]), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
+            uri.path == "/s" ? HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", table(levels))) :
+            HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 7
+            end
+            numbers = match(r"<pre id=\"numbers\">(.*?)</pre>"s, dom)
+            @test !isnothing(numbers)
+            if !isnothing(numbers)
+                browser = split(numbers[1], '\n')
+                server_side = [HTMXObjects._format_finite(x, de, HTMXObjects._SigDigits(k)) * "\t" *
+                               HTMXObjects._summary_key(x, HTMXObjects._SigDigits(k)) for (x, k) in cases]
+                @test length(browser) == length(cases)
+                @test [(cases[i], browser[i], server_side[i]) for i in eachindex(cases, browser) if browser[i] != server_side[i]] == []
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "group_master rows come from the server after a browser regroup browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
@@ -2188,6 +2356,145 @@ end
             end
             # One request for the group rows of the new grouping, one from the parity check.
             @test served[] == 2
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "group_masters: a browser regroup takes only the group rows from the server browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # `/masters` declares `group_masters` and passes it on; `/whole`, like a
+        # route written before it, ignores it and answers with the table.
+        custom(id, url, group_by; kw...) = regroup_table(; group_by, id, group_by_url=url,
+            selectable="tx", searchable=true,
+            group_master=(k, ms) -> (h.td(h.strong("G " * last(HTMXObjects.group_path(k)))),
+                h.td(h.button("Rule"; type="button")), h.td(string(length(ms)))), kw...)
+        masters_driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+          // A driver that throws says so as a failed check.
+          try {
+            const toasts = [];
+            window.htmxoToast = (text, status) => toasts.push(status + ': ' + text);
+            let aborted = 0;
+            document.addEventListener('htmx:sendAbort', () => aborted++);
+            // The table's `id` names its body.
+            const table = () => document.getElementById('c');
+            const c = () => table().closest('[data-htmxo-grouped]');
+            const pills = () => c().querySelector('.htmxo-group-pills');
+            const leafRows = () => Array.from(table().rows).filter(r => 'htmxoLeaf' in r.dataset);
+            const groupRows = () => Array.from(table().rows).filter(r => 'htmxoGroup' in r.dataset);
+            const row = id => document.getElementById('row-group--' + id);
+            const served = (id, name) => wait(() => row(id) && row(id).textContent.includes('G ' + name));
+            const same = rows => rows.every(r => r.isConnected && document.getElementById(r.id) === r);
+            // A regroup: the browser's rows at once, then the server's group
+            // rows in place of the browser's; the leaf rows stay the same
+            // nodes, and the table is the server's full render of the grouping.
+            const wrapper = c();
+            htmxoGroupRequest(pills(), ['iban'], null);
+            const placed = leafRows();
+            check('browser-first', row('DE01').querySelector('[data-htmxo-group-label]') !== null && placed.length === 7);
+            check('server-rows', await served('DE01', 'DE01'));
+            check('group-rows-only', c() === wrapper && same(placed) && leafRows().length === 7 &&
+                groupRows().every(r => r.textContent.includes('G ')));
+            check('full-render', await parity(c(), '/masters?group_by=iban'));
+            // A regroup the next one overtakes: its request is dropped and the
+            // later grouping's group rows arrive, without an error.
+            htmxoGroupRequest(pills(), ['party'], null);
+            htmxoGroupRequest(pills(), ['iban', 'party'], null);
+            check('overtaken', await served('DE01--Acme', 'Acme') && aborted === 1 || 'aborted ' + aborted);
+            await new Promise(r => setTimeout(r, 300));
+            check('overtaken-rows', c().dataset.htmxoGrouped === '["iban","party"]' && groupRows().every(r => r.textContent.includes('G ')));
+            check('overtaken-render', await parity(c(), '/masters?group_by=iban&group_by=party'));
+            // An answer for a grouping the reader has left is dropped quietly.
+            const before = JSON.stringify(rowsOf(c()));
+            const stale = await (await fetch('/masters?group_by=party&group_masters=true')).text();
+            let threw = null;
+            try { htmxoUpdateRows(stale); } catch (err) { threw = err.message; }
+            check('stale-dropped', threw === null && JSON.stringify(rowsOf(c())) === before || threw);
+            // What the reader does before the group rows arrive stays: an open
+            // group, an open detail, the search, the selection and the focus.
+            htmxoGroupRequest(pills(), ['iban'], null);
+            const kept = leafRows();
+            htmxoTableSearch(table(), 'prime');
+            htmxoTreeToggle(row('DE01').querySelector('[data-htmxo-tree-toggle]'));
+            row('DE01--p3').querySelector('[data-htmxo-detail-toggle]').click();
+            htmxoSelectRows(table(), ['p4', 'group:DE04']);
+            // The group row itself (a search disables the tree toggles).
+            row('DE01').focus();
+            check('state-set', row('DE01').dataset.htmxoTreeOpen === 'true' && !document.getElementById('detail-group--DE01--p3').hidden &&
+                row('DE02').hidden && document.activeElement === row('DE01'));
+            check('state-answered', await served('DE01', 'DE01'));
+            check('state-leaves', same(kept));
+            check('state-open', row('DE01').dataset.htmxoTreeOpen === 'true' && row('DE01').getAttribute('aria-expanded') === 'true' &&
+                !row('DE01--p3').hidden && !document.getElementById('detail-group--DE01--p3').hidden);
+            check('state-search', c().querySelector('input[type="search"]').value === 'prime' && row('DE02').hidden &&
+                row('DE03').hidden && !row('DE04').hidden && row('DE01--p1').hidden);
+            check('state-selection', JSON.stringify(htmxoSelectedKeys(table()).sort()) === '["group:DE04","p4"]' &&
+                row('DE04').getAttribute('aria-selected') === 'true' && row('DE03--p4').getAttribute('aria-selected') === 'true');
+            check('state-focus', document.activeElement === row('DE01') ||
+                (document.activeElement && document.activeElement.outerHTML.slice(0, 200)));
+            check('no-error', toasts.length === 0 || toasts.join('; '));
+          } catch (err) { check('exception', (err && err.stack) || err); }
+          finish();
+        });
+        """))
+        whole_driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+          try {
+            const w = () => document.getElementById('w').closest('[data-htmxo-grouped]');
+            const wrapper = w();
+            htmxoGroupRequest(w().querySelector('.htmxo-group-pills'), ['iban'], null);
+            const placed = Array.from(document.getElementById('w').rows);
+            // A route that does not pass `group_masters` on: the whole table
+            // replaces the browser's, leaf rows included.
+            check('whole-swapped', await wait(() => w() !== wrapper &&
+                document.getElementById('row-group--DE01').textContent.includes('G DE01')));
+            check('whole-leaves', placed.every(r => !r.isConnected));
+            check('whole-render', await parity(w(), '/whole?group_by=iban'));
+          } catch (err) { check('exception', (err && err.stack) || err); }
+          finish();
+        });
+        """))
+        page(table, driver) = repr("text/html", htmx(table, driver; extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        pages = Dict("/" => page(custom("c", "/masters", ["party"]), masters_driver),
+                     "/whole-page" => page(custom("w", "/whole", ["party"]), whole_driver))
+        requests = String[]
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            haskey(pages, uri.path) && return HTTP.Response(200, ["Content-Type" => "text/html"], pages[uri.path])
+            uri.path in ("/masters", "/whole") || return HTTP.Response(404)
+            params = HTTP.queryparampairs(uri)
+            group_by = [String(last(p)) for p in params if first(p) == "group_by"]
+            group_masters = uri.path == "/masters" && any(p -> p == ("group_masters" => "true"), params)
+            push!(requests, string(uri.path, group_masters ? " group_masters" : ""))
+            HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html",
+                uri.path == "/masters" ? custom("c", "/masters", group_by; group_masters) : custom("w", "/whole", group_by)))
+        end
+        try
+            for (path, n) in ("/" => 16, "/whole-page" => 3)
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port$path`)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                if !isnothing(checks)
+                    for line in split(checks[1], '\n')
+                        @test endswith(line, ":true")
+                    end
+                    @test count(==('\n'), checks[1]) + 1 == n
+                end
+            end
+            # The regroups asked for the group rows; the parity checks and the
+            # route without the parameter rendered whole tables.
+            @test "/masters group_masters" in requests && count(==("/whole"), requests) == 2
         finally
             close(server)
         end
@@ -2450,7 +2757,7 @@ end
     # the server for group rows or update rows.
     @test_broken (outline_table(group_by=["Outline", "Status"]); true)
     for hook in ((; group_master=(k, ms) -> (h.td(k), h.td(""), h.td(""))), (; group_by_url="/t"),
-                 (; group_rows_url=(k, ms) -> nothing), (; group_rows="[\"shown\"]"), (; update_rows="c1"),
+                 (; group_rows_url=(k, ms) -> nothing), (; group_rows="[\"shown\"]"), (; group_masters=true), (; update_rows="c1"),
                  (; update_groups="[\"shown\"]"))
         @test_broken (outline_table(; group_by=["Status"], hook...); true)
     end
