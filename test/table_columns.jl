@@ -95,6 +95,28 @@ using TestItemRunner
             .forEach(b => b && b.click());
           await pause(300);
           out.fit = moved(atLoad, columns('c-grouped'));
+          // A morph to the server's markup drops the colgroup and the marks
+          // (the search table, whose hidden rows sized it); the next swap
+          // puts the held widths back.
+          const searched = document.getElementById('search').closest('table'), held = columns('search');
+          searched.querySelector(':scope > colgroup[data-htmxo-columns]').remove();
+          searched.removeAttribute('style');
+          searched.dataset.htmxoColumns = '';
+          out.stripped = moved(held, columns('search'));
+          const ping = document.getElementById('ping');
+          htmx.trigger(ping, 'ping');
+          await until(() => ping.textContent === 'pong', 'the swap');
+          out.morph = moved(held, columns('search'));
+          // A scrollbar's worth of room keeps the widths; a resize sizes them again.
+          const widths = id => Array.from(document.getElementById(id).closest('table')
+            .querySelectorAll(':scope > colgroup > col')).map(c => c.style.width).join(' ');
+          const main = document.querySelector('main'), first = widths('flat');
+          main.style.paddingRight = '30px';
+          await pause(500);
+          out.narrowed = widths('flat') === first ? 0 : 1;
+          main.style.paddingRight = '500px';
+          await pause(500);
+          out.resized = widths('flat') === first ? 0 : 1;
           report(Object.entries(out).map(([k, v]) => k + ' ' + v).join('\n'));
         });
         """))
@@ -103,7 +125,9 @@ using TestItemRunner
         # before the fix.
         control = h.div(; class="control")(h.style(Raw(".control tr[id^=\"detail-\"] > td > * { contain: none; }")),
             Raw(join(unheld.(tables("c-")))))
-        content = h.main(; class="container-fluid")(tables("")..., control, driver)
+        # Any swap on the page puts a dropped hold back.
+        ping = h.div(; id="ping", hx_get="/ping", hx_trigger="ping", hx_swap="innerHTML")
+        content = h.main(; class="container-fluid")(tables("")..., control, ping, driver)
         page = repr("text/html", htmx(content; assets="/vendor", pico_version=HTMXObjects._PICO_VERSION,
             sse_version=nothing, ws_version=nothing, hyperscript_version=nothing, preload_version=nothing,
             katex_version=nothing))
@@ -129,6 +153,7 @@ using TestItemRunner
                 rows = lazygroups(p; group_rows=HTTP.queryparams(uri)["key"])
                 return html(isempty(p) ? repr("text/html", rows) : unheld(rows))
             end
+            path == "/ping" && return html("pong")
             path == "/complete" && (isready(result) || put!(result, String(req.body)); return HTTP.Response(204))
             HTTP.Response(404)
         end
@@ -160,5 +185,10 @@ using TestItemRunner
         end
         # The leaves of collapsed groups took part in sizing the columns.
         @test moved["fit"] <= 1
+        # A morph's dropped hold moves the columns until the swap restores it.
+        @test moved["stripped"] > 2
+        @test moved["morph"] <= 0.5
+        @test moved["narrowed"] == 0
+        @test moved["resized"] == 1
     end
 end
