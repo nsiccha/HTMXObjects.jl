@@ -5247,6 +5247,12 @@ function Base.show(io::IO, m::MIME"text/markdown", x::_PrivateMark)
         end
     end
 end
+# Plain text names the mark in brackets, as `SemanticUnavailable`'s plain peer
+# names its own.
+function Base.show(io::IO, m::MIME"text/plain", x::_PrivateMark)
+    print(io, "[", _private_label(page_lang()), "] ")
+    _in_private_mark(() -> foreach(c -> _semantic_show_leaf(io, m, c), vcat(x.content)))
+end
 HTMX.markdown_block(x::_PrivateMark) = _private_block(x.content)
 _finalized_response(x::_PrivateMark) = _finalized_response(x.content)
 filter_errors(x::_PrivateMark) = _in_private_mark(() -> filter_errors(x.content))

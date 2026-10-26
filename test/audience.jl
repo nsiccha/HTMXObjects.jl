@@ -177,6 +177,8 @@ end
     @test !occursin("not public", to_markdown_string(private(h.p("S"); public=h.p("P")); audience=:public))
     # The label follows the page's language.
     @test occursin("*nicht öffentlich*", _with_page_meta(() -> md(private(h.p("S"))), (; lang="de-DE", title=nothing)))
+    # Plain text names the mark in brackets.
+    @test repr("text/plain", HTMXObjects._PrivateMark("Normal(0, 1)")) == "[not public] Normal(0, 1)"
 
     # A whole answer is marked too, except a finished response.
     @test _with_audience(() -> String(to_response(private(h.li("x"))).body), :private) == "<li class=\"htmxo-private\">x</li>"
