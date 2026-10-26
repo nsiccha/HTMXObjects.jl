@@ -392,3 +392,219 @@ end
         end
     end
 end
+
+@testitem "the loading status line speaks the page's error_texts" tags=[:unit] begin
+    # Snag change-a-view-th-bb4362e2 (user design 03xqwfw, no preference =
+    # centred status line naming what the reader chose).
+    using HTMXObjects
+    de = error_texts(:de)
+    @test (de.loading, de.loading_named) == ("Wird geladen…", "{label} wird geladen…")
+    @test (error_texts().loading, error_texts().loading_named) == ("Loading…", "Loading {label}…")
+    @test error_texts(:de; loading_named="Lade {label}…").loading_named == "Lade {label}…"
+    # refused: the chosen value fills {label} only (decision 03xqwfw names it so)
+    @test_throws ArgumentError error_texts(:de; loading_named="{name} wird geladen…")
+    # The words ride the page's error texts; English is the script's own.
+    @test contains(repr("text/html", htmx(h.p("x"); error_texts=de)), "{label} wird geladen…")
+    script = repr("text/html", request_feedback_script())
+    @test contains(script, "\"Loading {label}…\"") && contains(script, "\"Loading…\"")
+end
+
+@testitem "request feedback says which part is loading in a browser" tags=[:browser, :unit] begin
+    # Snag change-a-view-th-bb4362e2: choosing an Ortsteil reloaded the view
+    # below the selector for ~7 s while the old view showed only a thin
+    # outline, and readers took it for the new one. Now the part a running
+    # request will replace is dimmed, aria-busy, and a status line over it
+    # names what is coming (user design 03xqwfw, no preference = centred line
+    # naming the reader's choice). Pico is loaded: it styles [aria-busy=true]
+    # (a spinner before it, nowrap, no pointer events), which must not reach
+    # the part.
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        receipt = Channel{String}(1)
+        driver = h.script(Raw(raw"""
+        // Every element that is ever marked as loading.
+        var marked = {};
+        new MutationObserver(function(records) {
+          records.forEach(function(r) {
+            var p = r.target.getAttribute && r.target.getAttribute('data-probe');
+            if (p && r.target.classList.contains('htmxo-loading')) marked[p] = true;
+          });
+        }).observe(document.documentElement, {subtree: true, attributes: true, attributeFilter: ['class']});
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent(event.message));
+        });
+        window.addEventListener('load', async function() {
+          var sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          var $ = id => document.getElementById(id);
+          var lines = () => Array.from(document.querySelectorAll('.htmxo-loading-status'));
+          var said = () => lines().map(s => s.textContent).join('|');
+          var wrong = [];
+          function check(ok, label) { if (!ok) wrong.push(label); }
+          async function until(f, label) {
+            for (var i = 0; i < 400 && !f(); i++) await sleep(25);
+            if (!f()) throw new Error('timeout: ' + label);
+          }
+          function pick(id, value) { $(id).value = value; $(id).dispatchEvent(new Event('change', {bubbles: true})); }
+          async function done(id) {
+            var ended = new Promise(resolve => $(id).addEventListener('htmx:afterRequest', resolve, {once: true}));
+            $(id).click();
+            await ended;
+            await sleep(50);
+          }
+          try {
+            await until(() => $('lazy').textContent === 'new-lazy', 'lazy');
+            // The select reloads the view below it (outerHTML, hx-sync replace).
+            pick('ort', 'kreuzberg');
+            await sleep(150);
+            check(!$('view').classList.contains('htmxo-loading') && lines().length === 0, 'marked before the delay');
+            await sleep(350);
+            var view = $('view'), style = getComputedStyle(view);
+            check(view.classList.contains('htmxo-loading') && style.opacity === '0.45', 'view dim ' + style.opacity);
+            check(view.getAttribute('aria-busy') === 'true', 'view not busy');
+            check(getComputedStyle(view, '::before').content === 'none', 'Pico spinner ' + getComputedStyle(view, '::before').content);
+            check(style.whiteSpace === 'normal' && style.pointerEvents === 'auto',
+                  'Pico busy style ' + style.whiteSpace + ' ' + style.pointerEvents);
+            check(said() === 'Kreuzberg wird geladen…', 'view said ' + said());
+            var line = lines()[0];
+            if (line) {
+              check(line.getAttribute('role') === 'status' && !line.hasAttribute('data-htmxo-off'), 'line hidden');
+              var r = view.getBoundingClientRect(), q = line.getBoundingClientRect();
+              check(Math.abs((q.left + q.right) / 2 - (r.left + r.right) / 2) < 2 &&
+                    Math.abs((q.top + q.bottom) / 2 - (Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2) < 2,
+                    'line not over the view');
+            }
+            // A second pick replaces the request; the part stays marked, same line.
+            pick('ort', 'mitte');
+            check($('view').classList.contains('htmxo-loading') && lines().length === 1 && lines()[0] === line &&
+                  said() === 'Mitte wird geladen…', 'second pick ' + said());
+            await sleep(50);
+            check($('view').classList.contains('htmxo-loading') && lines().length === 1, 'second pick lost its mark');
+            await until(() => $('view').textContent === 'new-mitte', 'view swap');
+            await sleep(50);
+            check(lines().length === 0 && !$('view').classList.contains('htmxo-loading') &&
+                  !$('view').hasAttribute('aria-busy'), 'view marked after its swap');
+            // A button loading into a box keeps the box, then clears it.
+            $('go').click();
+            await sleep(500);
+            check(said() === 'Wird geladen…' && $('box').getAttribute('aria-busy') === 'true', 'box said ' + said());
+            await until(() => $('box').textContent === 'new-box', 'box swap');
+            await sleep(50);
+            // Its own style is back as it was: the white-space and
+            // pointer-events held against Pico's busy rules are gone.
+            var boxStyle = $('box').style;
+            check(lines().length === 0 && !$('box').classList.contains('htmxo-loading') && !$('box').hasAttribute('aria-busy') &&
+                  !$('box').hasAttribute('data-htmxo-busy') && boxStyle.minHeight === '120px' &&
+                  boxStyle.whiteSpace === '' && boxStyle.pointerEvents === '',
+                  'box after its swap: ' + $('box').getAttribute('style'));
+            // A link names what it opens; an app's own words win.
+            $('zoom').click();
+            await sleep(500);
+            check(said() === 'Mitte wird geladen…', 'zoom said ' + said());
+            await until(() => $('box').textContent === 'new-zoom', 'zoom swap');
+            $('own').click();
+            await sleep(500);
+            check(said() === 'Karte wird berechnet…', 'own said ' + said());
+            await until(() => $('box').textContent === 'new-own', 'own swap');
+            // A part with a ::before of its own keeps it, unmarked busy.
+            $('star-go').click();
+            await sleep(500);
+            var star = $('star');
+            check(star.classList.contains('htmxo-loading') && !star.hasAttribute('aria-busy') &&
+                  getComputedStyle(star, '::before').content === '"★"', 'star ' + star.getAttribute('aria-busy'));
+            await until(() => $('star').textContent === 'new-star', 'star swap');
+            // A POST from a select says the plain words.
+            pick('mut', 'b');
+            await sleep(500);
+            check(said() === 'Wird geladen…', 'post said ' + said());
+            await until(() => $('box').textContent === 'new-mut', 'post swap');
+            await sleep(50);
+            // Unmarked: a fast answer, hx-swap none, an insertion, an opt-out.
+            for (var id of ['fast', 'none', 'append', 'off']) await done(id);
+            check(!marked.box3 && !marked.lazy, 'unmarked parts marked ' + Object.keys(marked).join(','));
+            check(marked.view && marked.box && marked.star, 'marked parts ' + Object.keys(marked).join(','));
+            check(lines().length === 0, 'lines left ' + said());
+            await fetch('/complete?status=' + (wrong.length ? encodeURIComponent('wrong ' + wrong.join('; ')) : 'passed'));
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error) + (wrong.length ? '; ' + wrong.join('; ') : '')));
+          }
+        }, {once: true});
+        """))
+        view(ort) = h.section(ort == "" ? h.p("Lieferflächen in Prenzlauer Berg") : "new-$ort";
+            id="view", data_probe="view", style="min-height: 240px",
+            hx_get="/slow?n=view", hx_trigger="change from:#ort", hx_swap="outerHTML",
+            hx_sync="this:replace", hx_vals="js:{ort: document.getElementById('ort').value}")
+        body = h.main(; class="container")(
+            h.select(h.option("Prenzlauer Berg"; value="pb"), h.option("Kreuzberg"; value="kreuzberg"),
+                     h.option("Mitte"; value="mitte"); id="ort", aria_label="Ortsteil"),
+            view(""),
+            h.button("go"; id="go", hx_get="/slow?n=box", hx_target="#box"),
+            h.a("Mitte"; id="zoom", href="/slow?n=zoom", hx_get="/slow?n=zoom", hx_target="#box"),
+            h.button("own"; id="own", hx_get="/slow?n=own", hx_target="#box", data_htmxo_loading="Karte wird berechnet…"),
+            h.select(h.option("a"; value="a"), h.option("b"; value="b");
+                     id="mut", name="v", hx_post="/slow?n=mut", hx_target="#box", aria_label="Status"),
+            h.div(h.p("Ergebnis"); id="box", data_probe="box", style="min-height: 120px"),
+            h.button("star"; id="star-go", hx_get="/slow?n=star", hx_target="#star"),
+            h.div("Stern"; id="star", data_probe="star", style="min-height: 120px"),
+            h.button("fast"; id="fast", hx_get="/fast", hx_target="#box3"),
+            h.button("none"; id="none", hx_get="/slow?n=none", hx_target="#box3", hx_swap="none"),
+            h.button("append"; id="append", hx_get="/slow?n=append", hx_target="#box3", hx_swap="beforeend"),
+            h.div(h.button("off"; id="off", hx_get="/slow?n=off", hx_target="#box3"); data_htmxo_loading="false"),
+            h.div("box3"; id="box3", data_probe="box3", style="min-height: 120px"),
+            h.div("lazy"; id="lazy", data_probe="lazy", hx_get="/slow?n=lazy", hx_trigger="load"))
+        page = repr("text/html", htmx(body, driver;
+            assets=:vendor, pico_version=HTMXObjects._PICO_VERSION, sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, hyperscript_version=nothing, compose=false, overlay=false,
+            lang="de", error_texts=error_texts(:de), extra_head=(h.style(Raw("#star::before { content: \"★\"; }")),)))
+        files = Dict("/vendor/htmx.min.js" => ("application/javascript", read(HTMXObjects._vendor_file(:htmx), String)),
+                     "/vendor/pico.min.css" => ("text/css", read(HTMXObjects._vendor_file(:pico), String)))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            path = uri.path
+            html(s) = HTTP.Response(200, ["Content-Type" => "text/html"], s)
+            path == "/" && return html(page)
+            haskey(files, path) && return HTTP.Response(200, ["Content-Type" => files[path][1]], files[path][2])
+            path == "/favicon.ico" && return HTTP.Response(204)
+            path == "/fast" && return html("fast")
+            if path == "/slow"
+                q = HTTP.queryparams(uri)
+                sleep(0.9)
+                n = get(q, "n", "")
+                n == "view" && return html(repr("text/html", view(get(q, "ort", ""))))
+                return html("new-$n")
+            end
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            HTTP.Response(404)
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1200,900 --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint=0.05) === :ok
+                    @test isready(receipt)
+                    if isready(receipt)
+                        @test take!(receipt) == "/complete?status=passed"
+                    else
+                        @info "Browser diagnostics" log=read(browser_log, String)
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
