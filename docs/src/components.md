@@ -712,7 +712,8 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
 ```
 
 - **Groups.** A grouping renders one collapsible branch per group key, in
-  first-appearance order, with its leaves below. A group row shows the key and
+  first-appearance order unless `group_order` orders it (below), with its
+  leaves below. A group row shows the key and
   the member count, and in each column `group_summary` names, a
   `ColumnSummary` of the group's leaves: `:sum`, `:mean`, `:min`, `:max` of
   `item -> number`, `:count`, or `:ratio` of two sums (Σ demand / Σ capacity).
@@ -722,6 +723,28 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`); the CSV
   download writes the same decimals as a number (`1234.5`). Group rows
   sort among themselves by the same columns; leaves sort within their group.
+- **Group order.** `group_order` gives a grouping's groups an order of their
+  own, so one table serves groupings that each need a different one. Each
+  entry is a grouping name and either a list of keys (those groups first, in
+  that order, any other after them in first-appearance order) or a function
+  `key -> sort key` (ties keep first-appearance order):
+
+  ```julia
+  group_order = ["Status" => ["To do", "Counted", "Not counted"],
+                 "Supplier" => k -> (k == "Not extracted", lowercase(k)),  # A–Z, unread last
+                 "Year" => k -> k == "No date" ? 0 : -parse(Int, k)]       # newest first
+  ```
+
+  The server ranks each grouping's keys once and sorts its groups by them at
+  every level the grouping is nested at, and the browser regroups by the same
+  ranked lists, live and in a recorded page alike, so the order needs neither
+  `group_master` nor `group_by_url`. A row update carries the lists again,
+  ranked with its change, so a key it brings (a newly read supplier) takes its
+  place at the next regroup. Leaves keep the order of `items`
+  within their group, and a column sort the reader picks sorts the group rows
+  by that column instead. A name that is not a grouping, the flat grouping, a
+  name given twice, a key listed twice or an order that is neither a list nor a
+  function throws an `ArgumentError`.
 - **The same leaves.** Leaf rows render through `master`, `detail` /
   `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
   (a shared IBAN, a rule matching several counterparties) gets one row per

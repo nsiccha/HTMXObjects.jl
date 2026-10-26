@@ -18448,6 +18448,16 @@ function htmxoUpdateRows(update, origin) {
         if (shown !== update.dataset.htmxoGrouped) throw new Error('htmxoUpdateRows: the rows are grouped by ' +
             JSON.stringify(update.dataset.htmxoGrouped) + ' but the table by ' + JSON.stringify(shown));
     }
+    // The table's `group_order` as the update ranks it: a group key the
+    // change brought keeps its place in the next regroup in the browser.
+    if ('htmxoGroupOrder' in update.dataset) {
+        const wrapper = tbody.closest('[data-htmxo-regroup]');
+        if (wrapper) {
+            const cfg = JSON.parse(wrapper.dataset.htmxoRegroup);
+            cfg.order = JSON.parse(update.dataset.htmxoGroupOrder);
+            wrapper.dataset.htmxoRegroup = JSON.stringify(cfg);
+        }
+    }
     const table = tbody.closest('table');
     const masters = () => Array.from(tbody.rows).filter(r => !isDetail(r));
     const byId = new Map(masters().map(r => [r.id, r]));
@@ -19289,13 +19299,20 @@ function htmxoRegroup(wrapper, levels) {
     const template = wrapper.querySelector('template[data-htmxo-group-template]');
     const out = [];
     const keysAt = (m, depth) => depth < levels.length ? m.keys[levels[depth]] || [] : [];
-    // The groups of `list` at a level, in first-appearance order.
+    // The groups of `list` at a level, in first-appearance order, or in the
+    // grouping's `group_order` (`_md_group_ranks`: a key it has no place for
+    // goes after, in first-appearance order).
     const groupsAt = (list, depth) => {
         const order = [], byKey = new Map();
         list.forEach(m => keysAt(m, depth).forEach(k => {
             if (!byKey.has(k)) { byKey.set(k, []); order.push(k); }
             byKey.get(k).push(m);
         }));
+        const ranked = cfg.order && cfg.order[levels[depth]];
+        if (ranked) {
+            const rank = new Map(ranked.map((k, i) => [k, i])), at = k => rank.has(k) ? rank.get(k) : ranked.length;
+            order.sort((a, b) => at(a) - at(b));
+        }
         return order.map(k => [k, byKey.get(k)]);
     };
     const leaf = (m, path, parent, level) => {
@@ -21239,7 +21256,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   vector of `name => grouping` pairs where `grouping(item)` returns a group key
   or several (the leaf is then listed under each) and `nothing` means the flat
   view. Replaces `children`. Each group is a collapsible branch, in
-  first-appearance order. Leaves keep their own selection key in every group,
+  first-appearance order unless `group_order` orders the grouping's groups.
+  Leaves keep their own selection key in every group,
   so selecting one selects all its copies, and the selection survives
   regrouping; selectable group rows submit their key under `<selectable>_group`.
   An `initially_open` predicate is called with leaves only; each group holding
@@ -21266,6 +21284,20 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   of the group's leaves, a sum, mean, minimum, maximum, count or ratio of two
   sums, written with the table's `decimal` and `thousands` texts. The first
   column holds the group's key and count.
+- `group_order`: `grouping name => order` pairs that put a grouping's groups
+  in an order of their own instead of first-appearance order, at every level
+  it is nested at, in the server's render and in every regroup in the browser
+  (a recorded page included). `order` is a list of keys (the groups of those
+  keys first, in that order; any others after them, in first-appearance order)
+  or a function `key -> sort key` (the groups sorted by it, ties in
+  first-appearance order), called with the group's key at its own level:
+  `group_order = ["Status" => ["To do", "Counted", "Not counted"],
+  "Year" => k -> -parse(Int, k)]`. Leaves keep the order of `items` within
+  their group. A grouping it does not name keeps first-appearance order; a
+  name that is not a grouping, the flat grouping, a name given twice, a key
+  listed twice or an order that is neither a list nor a function throws an
+  `ArgumentError`. A column sort the reader picks still sorts the group rows
+  by that column.
 - `group_master(key, members)`: the group row's cells instead of the default
   (the group's own key in bold, the member count and the `group_summary`
   cells); `members` are all the leaves under the group. Controls in it keep
@@ -21375,6 +21407,7 @@ function master_detail_table(headers, items;
                              group_rows_url=nothing,
                              group_rows=nothing,
                              group_summary=nothing,
+                             group_order=nothing,
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
@@ -21396,9 +21429,9 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
-    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, update_groups)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/update_groups require `groupings`"))
+        group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -21689,15 +21722,52 @@ _md_group_keys(::Nothing) = String[]
 _md_group_keys(k) = [string(k)]
 
 # The groups `grouping` sorts `items` into, as `key => members` in
-# first-appearance order.
-function _md_groups(items, grouping)
+# first-appearance order, or by `rank` (key => place, from `group_order`).
+function _md_groups(items, grouping, rank=nothing)
     order = String[]
     members = Dict{String,Vector{Any}}()
     for item in items, k in _md_group_keys(grouping(item))
         haskey(members, k) || (push!(order, k); members[k] = Any[])
         push!(members[k], item)
     end
+    isnothing(rank) || sort!(order; by=k -> rank[k])
     [k => members[k] for k in order]
+end
+
+# `group_order` as (grouping name => its keys, ranked) pairs: a list's keys
+# first, all of them (a key a row update brings later still has its place),
+# then the other keys of `items` in first-appearance order; or the keys of
+# `items` sorted by a function's sort key, ties in first-appearance order.
+_md_group_ranks(items, names, by_name, ::Nothing) = Pair{String,Vector{String}}[]
+function _md_group_ranks(items, names, by_name, group_order)
+    out = Pair{String,Vector{String}}[]
+    for entry in group_order
+        entry isa Pair || throw(ArgumentError(string("master_detail_table: group_order takes ",
+            "`grouping name => order` pairs, got ", repr(entry))))
+        name, order = string(first(entry)), last(entry)
+        haskey(by_name, name) || throw(ArgumentError(string("master_detail_table: group_order names no grouping ",
+            repr(name), "; groupings are ", join(repr.(names), ", "))))
+        # Refused: the flat view has no groups to order.
+        isnothing(by_name[name]) && throw(ArgumentError(string(
+            "master_detail_table: group_order names the flat grouping ", repr(name))))
+        any(p -> first(p) == name, out) && throw(ArgumentError(
+            "master_detail_table: group_order names $(repr(name)) twice"))
+        present = unique(k for item in items for k in _md_group_keys(by_name[name](item)))
+        ranked = if order isa AbstractVector
+            listed = String[string(k) for k in order]
+            # Refused: a key listed twice has no one place.
+            allunique(listed) || throw(ArgumentError(
+                "master_detail_table: group_order lists a key of $(repr(name)) twice: $(repr(listed))"))
+            [listed; [k for k in present if !(k in listed)]]
+        elseif order isa Base.Callable
+            sort(present; by=order, alg=MergeSort)
+        else
+            throw(ArgumentError(string("master_detail_table: group_order ", repr(name),
+                " must be a list of keys or a function `key -> sort key`, got ", typeof(order))))
+        end
+        push!(out, name => ranked)
+    end
+    out
 end
 
 """
@@ -22107,7 +22177,7 @@ end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
-        group_by_url, group_rows_url, group_rows, group_summary, update_rows, update_groups, selectable,
+        group_by_url, group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
@@ -22147,6 +22217,15 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     allunique(levels) || throw(ArgumentError("master_detail_table: group_by lists a grouping twice: $(repr(levels))"))
     nlevels = length(levels)
     fns = [by_name[n] for n in levels]
+    # `group_order`: each ordered grouping's keys, ranked over all `items`.
+    # The server's groups follow the ranks at every level; the browser
+    # regroups by the same lists (`htmxoRegroup`), and a row update brings
+    # them again, ranked with its change.
+    ranked = _md_group_ranks(items, names, by_name, group_order)
+    ranks = Dict(n => Dict(k => i for (i, k) in enumerate(ks)) for (n, ks) in ranked)
+    level_ranks = [get(ranks, n, nothing) for n in levels]
+    order_json = isempty(ranked) ? nothing :
+        "{" * join((_md_json_string(n) * ":" * _md_json_list(ks) for (n, ks) in ranked), ",") * "}"
     # What the rows are grouped by (a row update must match it), and the
     # `group_by` values a request sends to render this grouping again.
     grouped_by = _md_json_list(levels)
@@ -22194,7 +22273,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     gid(path) = "group:" * join(path, "/")
     leaf_row_key(x) = isempty(x.group) ? string(key(x.item)) : x.group * "/" * string(key(x.item))
     # What the browser regroups a leaf by: its keys under every grouping, its
-    # place among `items` (groups keep first-appearance order) and its
+    # place among `items` (unranked groups keep first-appearance order) and its
     # `group_summary` inputs, on every row of the leaf, so a leaf's rows are
     # the same whether its group loads lazily or not.
     grouping_names = String[n for n in names if !isnothing(by_name[n])]
@@ -22218,7 +22297,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     gmaster = something(group_master, default_master)
     subgroups(members, depth, prefix) =
         [let path = String[prefix..., k]; _MDGroup(gkey(path), path, ms) end
-         for (k, ms) in _md_groups(members, fns[depth])]
+         for (k, ms) in _md_groups(members, fns[depth], level_ranks[depth])]
     isprefix(a, b) = length(a) <= length(b) && view(b, 1:length(a)) == a
     target = isnothing(group_rows) ? nothing : gpath(group_rows)
     # The flat view has no groups: `update_groups` names none of its rows.
@@ -22350,7 +22429,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
-            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
+            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
+            order=browser ? order_json : nothing))
     built = tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
@@ -22375,7 +22455,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     config = string("{\"names\":", _md_json_list(grouping_names),
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
         ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
-        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]}")
+        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]",
+        isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
     h.div(; grouping..., data_htmxo_regroup=config)(template..., store, built)
 end
 
@@ -22458,10 +22539,12 @@ end
 # hx-target. Its scope says which of the table's rows the update speaks for,
 # so it can remove those it no longer lists: rows by id, every copy of a
 # leaf (`data-htmxo-leaf`), and a group row with all its rows. `places` (see
-# `_md_record_places!`) says where its rows go.
-function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=())
+# `_md_record_places!`) says where its rows go; `order`, the `group_order`
+# lists the table's browser regrouping goes by from now on.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(), order=nothing)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
+    isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
     isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
