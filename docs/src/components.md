@@ -357,6 +357,35 @@ each `.table-wrap` `data-htmxo-width="fits"` or `"wide"`. Without the runtime
 the table keeps its sideways scroll and its header scrolls away. Markdown and
 PDF output are unchanged: the line is HTML only.
 
+#### Columns keep their widths {#table-columns}
+
+A reader opening a row's detail, a lazy detail or lazy group rows arriving,
+a group or branch expanding, a search or filter hiding rows, or a row update
+never moves the columns of a `sortable_table`, `render_table` or
+`master_detail_table`, flat or hierarchical. Apps write nothing for it: no
+fixed column widths, no script.
+
+- **The widths fit every row the table holds.** The table runtime sizes the
+  columns once with the browser's own table layout over all its rows, shown
+  or hidden: the leaves of collapsed groups and branches and the rows a
+  search hides count as if they were shown. Detail rows do not: a detail's
+  content (a form, a PDF preview, a sub-table) fills the width the columns
+  give it and never widens them.
+- **Then the widths hold.** A row that arrives later (lazy group rows, a row
+  update) wraps its text inside its column, breaking a word too long for it.
+- **The columns are sized again** when the table's room changes by more than
+  two scrollbars (the window or a sidebar resizes), when the reader regroups
+  the table, when a table first shows (inside a closed tab or detail row) and
+  once web fonts have loaded. A table filling its room keeps its columns' shares
+  of it, so a scrollbar appearing narrows them all a little instead of
+  re-sizing them.
+
+The table carries `data-htmxo-columns` (`"held"` once sized, with a
+`<colgroup>` of the widths and `table-layout: fixed`); a morph swap that
+drops them gets them back before the browser paints. Without the runtime the
+browser's auto layout runs, with detail content still left out of the widths.
+Markdown and PDF output are unchanged.
+
 #### Row selection {#table-selection}
 
 `selectable="<input name>"` on `sortable_table`, `render_table` or
@@ -712,7 +741,8 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
 ```
 
 - **Groups.** A grouping renders one collapsible branch per group key, in
-  first-appearance order, with its leaves below. A group row shows the key and
+  first-appearance order unless `group_order` orders it (below), with its
+  leaves below. A group row shows the key and
   the member count, and in each column `group_summary` names, a
   `ColumnSummary` of the group's leaves: `:sum`, `:mean`, `:min`, `:max` of
   `item -> number`, `:count`, or `:ratio` of two sums (Σ demand / Σ capacity).
@@ -722,6 +752,28 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`); the CSV
   download writes the same decimals as a number (`1234.5`). Group rows
   sort among themselves by the same columns; leaves sort within their group.
+- **Group order.** `group_order` gives a grouping's groups an order of their
+  own, so one table serves groupings that each need a different one. Each
+  entry is a grouping name and either a list of keys (those groups first, in
+  that order, any other after them in first-appearance order) or a function
+  `key -> sort key` (ties keep first-appearance order):
+
+  ```julia
+  group_order = ["Status" => ["To do", "Counted", "Not counted"],
+                 "Supplier" => k -> (k == "Not extracted", lowercase(k)),  # A–Z, unread last
+                 "Year" => k -> k == "No date" ? 0 : -parse(Int, k)]       # newest first
+  ```
+
+  The server ranks each grouping's keys once and sorts its groups by them at
+  every level the grouping is nested at, and the browser regroups by the same
+  ranked lists, live and in a recorded page alike, so the order needs neither
+  `group_master` nor `group_by_url`. A row update carries the lists again,
+  ranked with its change, so a key it brings (a newly read supplier) takes its
+  place at the next regroup. Leaves keep the order of `items`
+  within their group, and a column sort the reader picks sorts the group rows
+  by that column instead. A name that is not a grouping, the flat grouping, a
+  name given twice, a key listed twice or an order that is neither a list nor a
+  function throws an `ArgumentError`.
 - **The same leaves.** Leaf rows render through `master`, `detail` /
   `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
   (a shared IBAN, a rule matching several counterparties) gets one row per

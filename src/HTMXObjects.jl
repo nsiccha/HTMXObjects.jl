@@ -11663,9 +11663,12 @@ end
 # Here, once, is the right place: it is the single seam every request's root
 # passes through, and it runs before any property is read, so a request never
 # observes a half-invalidated object. A `:request`-scoped root is freshly built
-# and has nothing to drop, which costs one integer compare per tracked value;
-# `:session`/`:job` roots outlive requests and are exactly the case that needs
-# it. There is no hot-path cost — property reads are untouched.
+# and has computed nothing, so this walks only its fields and constructor
+# overrides. One of those can be an object the app retains across requests by
+# handing it to `route!` (`route!(App(; rows=Rows(dir)))`, docs "Scoped root
+# lifecycle"): it is synced here on every request, at one probe per tracked file
+# it holds. `:session`/`:job` roots outlive requests and need it for everything
+# they cached. Property reads are untouched.
 #
 # Guarded, not required: an older DynamicObjects has no `sync!`, and a non-DO
 # root (a custom provider may return one) has no method for it. Neither is an
@@ -18620,6 +18623,16 @@ function htmxoUpdateRows(update, origin) {
         if (shown !== update.dataset.htmxoGrouped) throw new Error('htmxoUpdateRows: the rows are grouped by ' +
             JSON.stringify(update.dataset.htmxoGrouped) + ' but the table by ' + JSON.stringify(shown));
     }
+    // The table's `group_order` as the update ranks it: a group key the
+    // change brought keeps its place in the next regroup in the browser.
+    if ('htmxoGroupOrder' in update.dataset) {
+        const wrapper = tbody.closest('[data-htmxo-regroup]');
+        if (wrapper) {
+            const cfg = JSON.parse(wrapper.dataset.htmxoRegroup);
+            cfg.order = JSON.parse(update.dataset.htmxoGroupOrder);
+            wrapper.dataset.htmxoRegroup = JSON.stringify(cfg);
+        }
+    }
     const table = tbody.closest('table');
     const masters = () => Array.from(tbody.rows).filter(r => !isDetail(r));
     const byId = new Map(masters().map(r => [r.id, r]));
@@ -19041,6 +19054,132 @@ if (!window.htmxoStickyBound) {
 }
 if (document.body) htmxoStickyTrack(document.body);
 
+// --- Columns keep their widths: every sortable_table (`data-htmxo-columns`) ---
+// Auto table layout sizes the columns over the rows that are shown, so a
+// detail opening, a lazy detail or lazy group rows arriving, a group or
+// branch expanding or a search hiding rows moved every column. The runtime
+// sizes the columns once with that same layout over every row the table
+// holds, shown or hidden ("sizing": the CSS shows hidden rows collapsed;
+// detail rows stay out), then holds them ("held": `table-layout: fixed`, one
+// `<col>` per column). A table filling its room holds shares of it, so a
+// scrollbar coming or going narrows the columns together; a wider or
+// narrower one holds pixels. It sizes them again when the room changes by
+// more than two scrollbars, when the browser regroups the table and once web
+// fonts have loaded. A table that is not laid out yet (a closed tab or detail
+// row) is sized when it first shows. A morph keeps the element but drops the
+// colgroup and marks the server did not render: they are put back on the
+// swap, before the browser paints.
+window.htmxoColumnsHeld = window.htmxoColumnsHeld || new WeakMap();
+window.htmxoColumnsWatched = window.htmxoColumnsWatched || new Map();
+// The header cell of each column: the one spanning that column alone (a
+// grouped header's leaf, or a cell spanning both header rows).
+function htmxoColumnCells(table) {
+    const cells = [], taken = [];
+    if (!table.tHead) return cells;
+    Array.from(table.tHead.rows).forEach((row, r) => {
+        let c = 0;
+        Array.from(row.cells).forEach(cell => {
+            while (taken[r] && taken[r][c]) c++;
+            for (let i = 0; i < Math.max(cell.rowSpan, 1); i++)
+                for (let j = 0; j < cell.colSpan; j++) (taken[r + i] = taken[r + i] || [])[c + j] = true;
+            if (cell.colSpan === 1) cells[c] = cell;
+            c += cell.colSpan;
+        });
+    });
+    return cells;
+}
+function htmxoColumnsApply(table, held) {
+    let group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
+    if (!group) {
+        group = document.createElement('colgroup');
+        group.setAttribute('data-htmxo-columns', '');
+        table.insertBefore(group, table.caption ? table.caption.nextSibling : table.firstChild);
+    }
+    group.replaceChildren(...held.widths.map(w => {
+        const col = document.createElement('col');
+        col.style.width = held.fill ? (100 * w / held.width) + '%' : w + 'px';
+        return col;
+    }));
+    table.style.width = held.fill ? '100%' : held.width + 'px';
+    table.dataset.htmxoColumns = 'held';
+}
+function htmxoColumnsMeasure(table, force) {
+    if (!table.isConnected || !('htmxoColumns' in table.dataset)) return;
+    const room = table.parentElement.clientWidth, cells = htmxoColumnCells(table);
+    if (!room || !cells.length || cells.length !== cells.filter(Boolean).length) return;
+    const held = window.htmxoColumnsHeld.get(table);
+    if (held && !force && held.widths.length === cells.length && Math.abs(held.room - room) <= 40) {
+        if (table.dataset.htmxoColumns !== 'held' ||
+            !table.querySelector(':scope > colgroup[data-htmxo-columns]')) htmxoColumnsApply(table, held);
+        return;
+    }
+    const group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
+    if (group) group.remove();
+    // Size with the table's own width, if the app gave it one.
+    const own = held ? held.own : table.style.width;
+    table.style.width = own;
+    table.dataset.htmxoColumns = 'sizing';
+    const width = table.getBoundingClientRect().width;
+    const next = {room, own, width, fill: Math.abs(width - room) < 1,
+                  widths: cells.map(c => c.getBoundingClientRect().width)};
+    window.htmxoColumnsHeld.set(table, next);
+    htmxoColumnsApply(table, next);
+}
+// The observer's notices are measured in a task of their own: the layout a
+// measurement changes would re-notify inside the callback.
+function htmxoColumnsQueue(table, force) {
+    const pending = window.htmxoColumnsPending || (window.htmxoColumnsPending = new Map());
+    pending.set(table, pending.get(table) || !!force);
+    if (window.htmxoColumnsFrame) return;
+    window.htmxoColumnsFrame = setTimeout(() => {
+        window.htmxoColumnsFrame = 0;
+        const due = Array.from(pending);
+        pending.clear();
+        due.forEach(([t, f]) => htmxoColumnsMeasure(t, f));
+    }, 0);
+}
+// Size the tables in `elt` not seen before, put back what a swap dropped,
+// observe each table's room and forget tables that left the document.
+function htmxoColumnsTrack(elt) {
+    if (!elt || !elt.querySelectorAll) return;
+    const watched = window.htmxoColumnsWatched;
+    const ro = typeof ResizeObserver === 'function' && (window.htmxoColumnsObserver ||
+        (window.htmxoColumnsObserver = new ResizeObserver(entries => entries.forEach(e => {
+            const t = e.target.querySelector(':scope > table[data-htmxo-columns]');
+            if (t) htmxoColumnsQueue(t);
+        }))));
+    watched.forEach((room, t) => {
+        if (t.isConnected && t.parentElement === room) return;
+        if (ro) ro.unobserve(room);
+        watched.delete(t);
+    });
+    const found = Array.from(elt.querySelectorAll('table[data-htmxo-columns]'));
+    if (elt.matches && elt.matches('table[data-htmxo-columns]')) found.unshift(elt);
+    found.forEach(t => {
+        if (!t.isConnected) return;
+        if (!watched.has(t) && t.parentElement) {
+            watched.set(t, t.parentElement);
+            if (ro) ro.observe(t.parentElement);
+        }
+        htmxoColumnsMeasure(t);
+    });
+}
+if (!window.htmxoColumnsBound) {
+    window.htmxoColumnsBound = true;
+    // `htmx:afterSwap` runs before the browser paints the swap: a new table
+    // is sized and a morphed one held again without a frame in between.
+    document.addEventListener('htmx:afterSwap', () => htmxoColumnsTrack(document.body));
+    document.addEventListener('htmx:load', e => htmxoColumnsTrack(e.target));
+    document.addEventListener('htmxo:regrouped', e => {
+        const t = e.target.querySelector('table[data-htmxo-columns]');
+        if (t) htmxoColumnsMeasure(t, true);
+    });
+    document.addEventListener('DOMContentLoaded', () => htmxoColumnsTrack(document.body));
+    if (document.fonts && document.fonts.status !== 'loaded')
+        document.fonts.ready.then(() => window.htmxoColumnsWatched.forEach((room, t) => htmxoColumnsQueue(t, true)));
+}
+if (document.body) htmxoColumnsTrack(document.body);
+
 // --- Row selection: `selectable` on sortable_table / master_detail_table ---
 // State is keyed per selection (input name, form, page path) and per row key,
 // never held by row elements, so it survives sorting, filtering, a row's
@@ -19461,13 +19600,20 @@ function htmxoRegroup(wrapper, levels) {
     const template = wrapper.querySelector('template[data-htmxo-group-template]');
     const out = [];
     const keysAt = (m, depth) => depth < levels.length ? m.keys[levels[depth]] || [] : [];
-    // The groups of `list` at a level, in first-appearance order.
+    // The groups of `list` at a level, in first-appearance order, or in the
+    // grouping's `group_order` (`_md_group_ranks`: a key it has no place for
+    // goes after, in first-appearance order).
     const groupsAt = (list, depth) => {
         const order = [], byKey = new Map();
         list.forEach(m => keysAt(m, depth).forEach(k => {
             if (!byKey.has(k)) { byKey.set(k, []); order.push(k); }
             byKey.get(k).push(m);
         }));
+        const ranked = cfg.order && cfg.order[levels[depth]];
+        if (ranked) {
+            const rank = new Map(ranked.map((k, i) => [k, i])), at = k => rank.has(k) ? rank.get(k) : ranked.length;
+            order.sort((a, b) => at(a) - at(b));
+        }
         return order.map(k => [k, byKey.get(k)]);
     };
     const leaf = (m, path, parent, level) => {
@@ -20382,6 +20528,21 @@ inside a card, set `--htmxo-sticky-bg` to the card's background.
 `sticky=false` keeps one table's line and header in the flow. None of this
 reaches Markdown or PDF output.
 
+# Columns keep their widths
+Opening a detail row, a lazy detail or lazy group rows arriving, expanding a
+group or branch, a search or filter hiding rows and a row update never move
+the columns (`data-htmxo-columns` on the `<table>`). The table runtime sizes
+the columns once, with the browser's own table layout over every row the
+table holds, shown or hidden: the leaves of collapsed groups and branches and
+the rows a search hides count, detail rows do not. It then holds those widths
+(`table-layout: fixed` and a `<colgroup>`), so a row shown later wraps its
+text inside its column, breaking a word too long for it. It sizes them again
+when the room the table has changes by more than a scrollbar (the window or a
+sidebar resizes), when the browser regroups the table, when a table first
+shows (a closed tab or detail row) and once web fonts have loaded. A detail
+row's content never takes part in sizing the columns: it gets the width the
+columns give it. Nothing here reaches Markdown or PDF output.
+
 # Row selection
 With `selectable=name`, every keyed row (`data-htmxo-select-key`, else its
 `id`; `detail-<key>` companions excluded) becomes a selectable grid row:
@@ -20525,7 +20686,10 @@ function sortable_table(headers, rows;
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
     # A `detail-<key>` companion is no row of the Markdown table.
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
-    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)..., kwargs...)(
+    # `data-htmxo-columns`: the table runtime holds the columns' widths
+    # (see "Columns keep their widths" above).
+    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)...,
+                         data_htmxo_columns="", kwargs...)(
         thead,
         h.tbody(body_rows...; body_attrs...),
     )
@@ -21237,10 +21401,12 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
     # Lazy mode: the detail cell hosts a slot that fetches `detail_url` on the
     # first expand (see `_md_lazy_slot`); `detail_body` becomes its pre-load
-    # placeholder. Eager mode: `detail_body` is the final content, unchanged.
+    # placeholder. Eager mode: `detail_body` is the final content, in a
+    # `div.htmxo-md-detail`. Either element keeps its content out of the
+    # columns' widths (`contain: inline-size`, `htmxo_utility_styles`).
     cell_body = lazy ?
         _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open, texts) :
-        detail_body
+        h.div(; class="htmxo-md-detail")(detail_body)
     detail = h.tr(; detail_kwargs...)(
         h.td(colspan=string(ncols))(cell_body),
     )
@@ -21411,7 +21577,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   vector of `name => grouping` pairs where `grouping(item)` returns a group key
   or several (the leaf is then listed under each) and `nothing` means the flat
   view. Replaces `children`. Each group is a collapsible branch, in
-  first-appearance order. Leaves keep their own selection key in every group,
+  first-appearance order unless `group_order` orders the grouping's groups.
+  Leaves keep their own selection key in every group,
   so selecting one selects all its copies, and the selection survives
   regrouping; selectable group rows submit their key under `<selectable>_group`.
   An `initially_open` predicate is called with leaves only; each group holding
@@ -21438,6 +21605,20 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   of the group's leaves, a sum, mean, minimum, maximum, count or ratio of two
   sums, written with the table's `decimal` and `thousands` texts. The first
   column holds the group's key and count.
+- `group_order`: `grouping name => order` pairs that put a grouping's groups
+  in an order of their own instead of first-appearance order, at every level
+  it is nested at, in the server's render and in every regroup in the browser
+  (a recorded page included). `order` is a list of keys (the groups of those
+  keys first, in that order; any others after them, in first-appearance order)
+  or a function `key -> sort key` (the groups sorted by it, ties in
+  first-appearance order), called with the group's key at its own level:
+  `group_order = ["Status" => ["To do", "Counted", "Not counted"],
+  "Year" => k -> -parse(Int, k)]`. Leaves keep the order of `items` within
+  their group. A grouping it does not name keeps first-appearance order; a
+  name that is not a grouping, the flat grouping, a name given twice, a key
+  listed twice or an order that is neither a list nor a function throws an
+  `ArgumentError`. A column sort the reader picks still sorts the group rows
+  by that column.
 - `group_master(key, members)`: the group row's cells instead of the default
   (the group's own key in bold, the member count and the `group_summary`
   cells); `members` are all the leaves under the group. Controls in it keep
@@ -21547,6 +21728,7 @@ function master_detail_table(headers, items;
                              group_rows_url=nothing,
                              group_rows=nothing,
                              group_summary=nothing,
+                             group_order=nothing,
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
@@ -21568,9 +21750,9 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
-    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, update_groups)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/update_groups require `groupings`"))
+        group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -21861,15 +22043,52 @@ _md_group_keys(::Nothing) = String[]
 _md_group_keys(k) = [string(k)]
 
 # The groups `grouping` sorts `items` into, as `key => members` in
-# first-appearance order.
-function _md_groups(items, grouping)
+# first-appearance order, or by `rank` (key => place, from `group_order`).
+function _md_groups(items, grouping, rank=nothing)
     order = String[]
     members = Dict{String,Vector{Any}}()
     for item in items, k in _md_group_keys(grouping(item))
         haskey(members, k) || (push!(order, k); members[k] = Any[])
         push!(members[k], item)
     end
+    isnothing(rank) || sort!(order; by=k -> rank[k])
     [k => members[k] for k in order]
+end
+
+# `group_order` as (grouping name => its keys, ranked) pairs: a list's keys
+# first, all of them (a key a row update brings later still has its place),
+# then the other keys of `items` in first-appearance order; or the keys of
+# `items` sorted by a function's sort key, ties in first-appearance order.
+_md_group_ranks(items, names, by_name, ::Nothing) = Pair{String,Vector{String}}[]
+function _md_group_ranks(items, names, by_name, group_order)
+    out = Pair{String,Vector{String}}[]
+    for entry in group_order
+        entry isa Pair || throw(ArgumentError(string("master_detail_table: group_order takes ",
+            "`grouping name => order` pairs, got ", repr(entry))))
+        name, order = string(first(entry)), last(entry)
+        haskey(by_name, name) || throw(ArgumentError(string("master_detail_table: group_order names no grouping ",
+            repr(name), "; groupings are ", join(repr.(names), ", "))))
+        # Refused: the flat view has no groups to order.
+        isnothing(by_name[name]) && throw(ArgumentError(string(
+            "master_detail_table: group_order names the flat grouping ", repr(name))))
+        any(p -> first(p) == name, out) && throw(ArgumentError(
+            "master_detail_table: group_order names $(repr(name)) twice"))
+        present = unique(k for item in items for k in _md_group_keys(by_name[name](item)))
+        ranked = if order isa AbstractVector
+            listed = String[string(k) for k in order]
+            # Refused: a key listed twice has no one place.
+            allunique(listed) || throw(ArgumentError(
+                "master_detail_table: group_order lists a key of $(repr(name)) twice: $(repr(listed))"))
+            [listed; [k for k in present if !(k in listed)]]
+        elseif order isa Base.Callable
+            sort(present; by=order, alg=MergeSort)
+        else
+            throw(ArgumentError(string("master_detail_table: group_order ", repr(name),
+                " must be a list of keys or a function `key -> sort key`, got ", typeof(order))))
+        end
+        push!(out, name => ranked)
+    end
+    out
 end
 
 """
@@ -22279,7 +22498,7 @@ end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
-        group_by_url, group_rows_url, group_rows, group_summary, update_rows, update_groups, selectable,
+        group_by_url, group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
@@ -22319,6 +22538,15 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     allunique(levels) || throw(ArgumentError("master_detail_table: group_by lists a grouping twice: $(repr(levels))"))
     nlevels = length(levels)
     fns = [by_name[n] for n in levels]
+    # `group_order`: each ordered grouping's keys, ranked over all `items`.
+    # The server's groups follow the ranks at every level; the browser
+    # regroups by the same lists (`htmxoRegroup`), and a row update brings
+    # them again, ranked with its change.
+    ranked = _md_group_ranks(items, names, by_name, group_order)
+    ranks = Dict(n => Dict(k => i for (i, k) in enumerate(ks)) for (n, ks) in ranked)
+    level_ranks = [get(ranks, n, nothing) for n in levels]
+    order_json = isempty(ranked) ? nothing :
+        "{" * join((_md_json_string(n) * ":" * _md_json_list(ks) for (n, ks) in ranked), ",") * "}"
     # What the rows are grouped by (a row update must match it), and the
     # `group_by` values a request sends to render this grouping again.
     grouped_by = _md_json_list(levels)
@@ -22366,7 +22594,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     gid(path) = "group:" * join(path, "/")
     leaf_row_key(x) = isempty(x.group) ? string(key(x.item)) : x.group * "/" * string(key(x.item))
     # What the browser regroups a leaf by: its keys under every grouping, its
-    # place among `items` (groups keep first-appearance order) and its
+    # place among `items` (unranked groups keep first-appearance order) and its
     # `group_summary` inputs, on every row of the leaf, so a leaf's rows are
     # the same whether its group loads lazily or not.
     grouping_names = String[n for n in names if !isnothing(by_name[n])]
@@ -22390,7 +22618,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     gmaster = something(group_master, default_master)
     subgroups(members, depth, prefix) =
         [let path = String[prefix..., k]; _MDGroup(gkey(path), path, ms) end
-         for (k, ms) in _md_groups(members, fns[depth])]
+         for (k, ms) in _md_groups(members, fns[depth], level_ranks[depth])]
     isprefix(a, b) = length(a) <= length(b) && view(b, 1:length(a)) == a
     target = isnothing(group_rows) ? nothing : gpath(group_rows)
     # The flat view has no groups: `update_groups` names none of its rows.
@@ -22522,7 +22750,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
-            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
+            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
+            order=browser ? order_json : nothing))
     built = tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
@@ -22547,7 +22776,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     config = string("{\"names\":", _md_json_list(grouping_names),
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
         ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
-        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]}")
+        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]",
+        isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
     h.div(; grouping..., data_htmxo_regroup=config)(template..., store, built)
 end
 
@@ -22630,10 +22860,12 @@ end
 # hx-target. Its scope says which of the table's rows the update speaks for,
 # so it can remove those it no longer lists: rows by id, every copy of a
 # leaf (`data-htmxo-leaf`), and a group row with all its rows. `places` (see
-# `_md_record_places!`) says where its rows go.
-function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=())
+# `_md_record_places!`) says where its rows go; `order`, the `group_order`
+# lists the table's browser regrouping goes by from now on.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(), order=nothing)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
+    isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
     isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
@@ -26932,6 +27164,19 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { position: sticky; z-index: 1; }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead th { background-color: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
+
+/* A table's columns keep their widths while its rows open, load and filter
+   (`data-htmxo-columns`, held by the table runtime). While the runtime sizes
+   them ("sizing"), the hidden rows take part, collapsed, so the widths fit
+   every row the table holds; detail rows stay out. Held, the layout is
+   fixed, and a word too long for its column breaks inside its cell instead
+   of running into the next one. A detail row's content never sizes the
+   columns, held or not: it fills the width they give it. `!important`
+   beats Pico's `[hidden] { display: none !important }`. */
+table[data-htmxo-columns="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { display: table-row !important; visibility: collapse; }
+table[data-htmxo-columns="held"] { table-layout: fixed; }
+table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; }
+tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
 """))
 
 # --- Request feedback ---
