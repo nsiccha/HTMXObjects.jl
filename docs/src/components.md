@@ -168,11 +168,13 @@ The CSV holds the text each cell shows, except in a number cell, which exports i
 `sortable_table_js()` also ships the accessor
 
 ```js
-htmxoSortState(target) // -> {sort_col, sort_dir} | {}   (sort_col is 1-based)
+htmxoSortState(target) // -> {sort_col, sort_dir[, sort_key]} | {}   (sort_col is 1-based)
 ```
 
 where `target` is a CSS selector or element. An unsorted table yields `{}`, so
-it spreads cleanly into an htmx `hx-vals`.
+it spreads cleanly into an htmx `hx-vals`. A column with several sort keys
+(see [Several sort orders for one column](#table-sort-keys)) adds `sort_key`,
+the name of its active key.
 
 !!! warning "A `morph:` swap wipes a client-side sort"
     An idiomorph `hx-swap="morph:*"` re-imposes the server's child order on the
@@ -201,7 +203,9 @@ it spreads cleanly into an htmx `hx-vals`.
 
     `default_sort` **declares** the order (stamping `data-sort-dir` /
     `aria-sort` / the caret on that header); it does not sort `rows` for you.
-    It forwards through `render_table` and `master_detail_table` too.
+    It forwards through `render_table` and `master_detail_table` too. A table
+    with a multi-key column also takes `@param sort_key::String = ""` and
+    `default_sort = (col = sort_col, key = sort_key, dir = Symbol(sort_dir))`.
 
 #### Column explanations {#column-explanations}
 
@@ -222,7 +226,67 @@ technology reads it as the button's description; a `ⓘ` marker after the label
 shows that the column has one. The marker is HTML-only: `?plain` and the CSV
 export keep the label alone. With `sortable=false` the explanation stays, as
 the `<th>`'s `title`. `ColumnSpec` works in every `headers` vector of
-`sortable_table` and `master_detail_table`.
+`sortable_table` and `master_detail_table`, and as a `render_table` column
+through `columns = ["name" => ColumnSpec(...)]`.
+
+#### Several sort orders for one column {#table-sort-keys}
+
+A cell that combines several quantities can be sorted by each of them. The
+usual case is an estimate with its interval in one cell, `22 Tsd. (13–34 Tsd.)`:
+the reader sorts by the estimate, by either bound, or by the interval's
+absolute or relative width. Name the orders in the column's `ColumnSpec`; the
+first is the column's default:
+
+```julia
+DE = table_texts(:de)
+master_detail_table([ColumnSpec("Zelle"),
+                     ColumnSpec("Beschäftigte"; help = "Schätzwert mit 95-%-Intervall",
+                         sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975; texts = DE))],
+    zones; key = r -> r.id, master = r -> (h.td(r.name), h.td(r.estimate_text)),
+    detail_url = r -> "/zelle?id=$(r.id)", texts = DE)
+```
+
+`interval_sort_keys` gives the five orders of an estimate with its interval,
+named from the table's texts (`Schätzwert`, `Untergrenze`, `Obergrenze`,
+`Intervallbreite`, `Relative Breite`; in English `Estimate`, `Lower bound`,
+`Upper bound`, `Interval width`, `Relative width`); the relative width is
+`(upper - lower) / abs(estimate)`. Any other orders are `name => f` pairs:
+`sort_keys = ["Last activity" => a -> a.last_seen, "Liveness" => a -> a.liveness_rank]`.
+
+- **The header.** A click on the label sorts by the column's active key (its
+  first, until the reader picks another) and flips the direction, as for any
+  column. A `▾` button beside the label opens a menu listing every key with
+  `▲` and `▼`; one click there sorts by that key in that direction, so any
+  order takes two clicks. While a key other than the first is active, the
+  header names it after the caret (`▲ Untergrenze`). The menu is reachable by
+  keyboard: `▾` and each `▲`/`▼` are buttons, Escape closes the menu and
+  returns the focus to `▾`, and the pressed button (`aria-pressed`) is the
+  order in force.
+- **The values.** `master_detail_table` calls each `f(item)` and writes the
+  values on the column's cell (`data-htmxo-sort-keys`), so `master` returns
+  its cells unchanged; `render_table` calls `f(row)` with the Tables.jl row
+  (`columns = ["mean" => ColumnSpec(...)]`). A `sortable_table` gets rows
+  that are built already, so its column names the keys alone and each cell
+  carries its values:
+
+  ```julia
+  sortable_table([ColumnSpec("Beschäftigte"; sort_keys = interval_sort_keys(; texts = DE)), "Abschnitt"],
+      [h.tr(h.td(text; interval_sort_values(e.mean, e.q025, e.q975)...), h.td(e.section)) for e in rows];
+      texts = DE)
+  h.td("…"; sort_values(estimate, lower, upper)...)   # any keys, in their order
+  ```
+
+  Numbers sort as numbers and other values as text; `missing`, `nothing`,
+  `NaN` and infinite values sort last in both directions. A group row has no
+  values and sorts by its own cell (its `group_summary` or its text).
+- **What stays the same.** `?plain`, Markdown and PDF show the column label
+  and the cell text; the CSV holds what the cell shows; search reads the
+  cell's text. Sorting runs in the browser, so every key works in a
+  `record!` bundle or a static snapshot. Regrouping, lazy group rows and row
+  updates keep the reader's key and direction.
+- **State.** `htmxoSortState` returns `sort_key`, and `default_sort =
+  (col = "Beschäftigte", key = "Untergrenze", dir = :desc)` renders that
+  order's marker server-side (see the `morph:` note above).
 
 #### Multilevel headers {#table-header-groups}
 
@@ -587,11 +651,14 @@ How much is written:
   `2.0` writes `2`. A float below 10⁻⁴ or from 10¹⁵ up (in absolute value)
   is a power of ten with superscript digits, `3,81·10⁻⁵`, which reads the same
   in HTML, Markdown, a `pdf_report` and a pasted copy.
-- `sigdigits = 3` rounds to three significant digits first, as
-  `round(x; sigdigits = 3)` does: `0,156`, `1.230.000`.
-- `digits = 2` writes exactly two decimals (0 to 10), halves away from zero,
-  the same way as a [group summary](#table-regrouping): `0,16`. It never
-  switches to a power of ten.
+- `sigdigits = 3` rounds to three significant digits first (1 to 15), halves
+  away from zero: `0,156`, `1.230.000`; `2850` with `sigdigits = 2` writes
+  `2.900` (Julia's `round(x; sigdigits = 2)` rounds that half to even, `2800`).
+- `digits = 2` writes exactly two decimals (0 to 10), halves away from zero:
+  `0,16`. It never switches to a power of ten.
+
+A [group summary](#table-regrouping) takes the same `digits` or `sigdigits`
+and writes the same text.
 
 `missing` and `nothing` write `–` (no sort key, an empty CSV field); `Inf`,
 `-Inf` and `NaN` write `∞`, `-∞` and `NaN`. The cell carries its value twice:
@@ -762,10 +829,14 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   `item -> number`, `:count`, or `:ratio` of two sums (Σ demand / Σ capacity).
   A leaf whose function returns `nothing` or `missing` is left out. The
   browser computes the summaries again for every grouping the reader picks,
-  rounded to `digits` decimals and written with the table's `decimal` and
-  `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`); the CSV
-  download writes the same decimals as a number (`1234.5`). Group rows
-  sort among themselves by the same columns; leaves sort within their group.
+  rounded to `digits` decimals (default 0) or to `sigdigits` significant
+  digits, halves away from zero, and written as `format_number` writes them,
+  with the table's `decimal` and `thousands` texts (`texts = table_texts(:de)`
+  writes `1.234,5`); the CSV download writes the rounded number (`1234.5`).
+  A sum of estimates that are each good to two digits shows no more than
+  that with `ColumnSummary(:sum, r -> r.estimate; sigdigits = 2)`: `29.000`,
+  not `29.210`. Group rows sort among themselves by the same columns; leaves
+  sort within their group.
 - **Group order.** `group_order` gives a grouping's groups an order of their
   own, so one table serves groupings that each need a different one. Each
   entry is a grouping name and either a list of keys (those groups first, in
@@ -817,8 +888,8 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   whose leaves are not on the page. For those, pass `group_by_url`: a route
   that renders the same call for the `group_by` and `q` (the current search) it
   receives. With `group_master` the browser regroups at once and then swaps in
-  the server's render of the new grouping; with lazy groups a change asks the
-  server straight away. In a recorded page, or without `group_by_url`, a
+  the server's render of the new grouping (or only its group rows, below);
+  with lazy groups a change asks the server straight away. In a recorded page, or without `group_by_url`, a
   `group_master` table still regroups in the browser, with default group rows
   (key, count and `group_summary`): the request for the server's render rides
   a hidden element, which recording strips, never the control. Lazy groups
@@ -845,6 +916,39 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   @get rows(; group_by::Vector{String}=["Counterparty"], key::String="") =
       transactions_table(__self__, group_by; group_rows=key)
   ```
+- **Only the group rows.** After a browser regroup, the request for the
+  server's render also sends `group_masters=true`. A route that declares it and
+  passes it to the same call gets back only the group rows of the new grouping,
+  at every level, as a [row update](#table-row-updates): they take the place of
+  the browser's group rows, and every leaf row stays as the browser placed it,
+  with what the reader did to it (open groups and details, the selection, the
+  search and the focus). `master` is not called, and the answer holds the group
+  rows alone, not every leaf again. A route that does not declare the
+  parameter answers with the whole table, as before:
+
+  ```julia
+  review_table(self, group_by, q=""; kw...) = master_detail_table(headers, transactions;
+      key = t -> t.id, master = t -> cells(self, t), detail = t -> h.p(t.memo),
+      groupings, group_by, group_by_url = self / "table",
+      group_master = (key, members) -> (h.td(h.strong(last(HTMXObjects.group_path(key)))),
+          h.td(rule_mode_select(self, key, group_by)), h.td(total(members))),
+      searchable = true, search_query = q, id = "review", kw...)
+
+  @get table(; group_by::Vector{String}=["Counterparty"], q::String="",
+             group_masters::Bool=false) =
+      review_table(__self__, group_by, q; group_masters)
+  ```
+
+  As with any browser regroup, the leaf rows are not rendered again: a
+  `group_by` in their action URLs, forms or `detail_url` still reaches the
+  server as the table's current grouping (*The grouping* under
+  [Row updates](#table-row-updates)).
+
+  `group_masters` needs `group_master`, and does not go with lazy groups
+  (`group_rows_url`), whose table the server regroups whole; either is an
+  `ArgumentError`. In the flat view the answer has no rows. Each regroup
+  replaces the request of the one before, and an answer for a grouping the
+  reader has left since is dropped.
 - **Selection.** Keys are per leaf. Selecting a leaf selects every copy, it is
   submitted once, and the selection survives regrouping and the flat view.
   Group rows are selectable too and submit their key under
@@ -1112,6 +1216,42 @@ tabset that arrives in a fragment (`url_anchor_script()`). Two tabs with one nam
 host page and is left alone. `htmx()` pages carry the script that does
 this, `tabset_script()`; a page with its own `<head>` adds it next to
 `tabset_styles()`.
+
+#### Tabs in Markdown {#tabset-markdown}
+
+A `?plain` reader and a PDF ([`pdf_report`](api.md#pdf-report)) have no tab
+to click, so a tabset's Markdown has no tab bar. Every tab follows in order,
+its label in bold and then its content, the way a `SemanticDisclosure` writes
+its label and body:
+
+```julia
+tabset("Überblick" => SemanticProse("Bayes-Regression der Nettokaltmiete …"),
+       "Modelldefinition" => private(SemanticCode(:julia, model_source)),
+       "Ergebnisse" => "/ergebnisse")
+```
+
+reads, for a private reader:
+
+```markdown
+**Überblick**
+
+Bayes-Regression der Nettokaltmiete …
+
+**Modelldefinition**
+
+::: {.htmxo-private}
+…
+:::
+
+**[Ergebnisse](/ergebnisse)**
+```
+
+A tab whose content its reader does not see is left out with its label:
+read publicly, the `private` tab above has no stand-in, so its label goes too.
+A lazy tab has no content on the page, so its label links the address that
+has it. A label that is not text reads as its words. This holds for `?plain`,
+`to_markdown_string` and a direct `repr("text/markdown", …)` alike. The HTML
+does not change.
 
 ### `comparison_view` — tabs and selectable comparison columns {#comparison-view}
 

@@ -30,7 +30,7 @@ export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
@@ -3557,19 +3557,40 @@ struct SemanticCode <: SemanticNode
 end
 
 """
-    SemanticStatus(state::Symbol; detail="")
+    SemanticStatus(state::Symbol; detail="", label=string(state))
 
 Store status meaning rather than styling. `:ok` / `:available`, `:warn` /
 `:blocked`, `:fail`, and `:pending` receive distinct text glyphs; any other
-symbol remains valid and uses a neutral glyph. The state also remains available
-as an HTML class and literal Markdown/HXML/text content.
+symbol remains valid and uses a neutral glyph. The state stays data: it picks
+the glyph and fills the HTML/HXML `data-status` attribute.
+
+`label` is the word written after the glyph in every peer format, the state's
+own name unless given. An app in another language, or one whose states are
+domain outcomes, keeps a recognised state and its glyph and names it in its
+own words:
+
+```julia
+SemanticStatus(:warn; label="im Projekt zu klären", detail="3 Ortsteile")
+# HTML: <span … data-status="warn"><strong>! im Projekt zu klären</strong>…
+# Markdown: ! **im Projekt zu klären** — 3 Ortsteile
+# plain text: [im Projekt zu klären] 3 Ortsteile
+```
+
+A blank `label` throws an `ArgumentError`: plain text shows no glyph, so the
+status would say nothing there.
 """
 struct SemanticStatus <: SemanticNode
     state::Symbol
     detail::String
+    label::String  # the word after the glyph
+    function SemanticStatus(state::Symbol; detail="", label=string(state))
+        label = String(label)
+        # Plain text carries the status in this word alone.
+        all(isspace, label) && throw(ArgumentError(
+            "SemanticStatus(:$state): `label` is blank; omit it to show the state's name"))
+        new(state, String(detail), label)
+    end
 end
-
-SemanticStatus(state::Symbol; detail="") = SemanticStatus(state, String(detail))
 
 """
     SemanticTexts
@@ -3939,7 +3960,7 @@ _semantic_code_node(code::SemanticCode) = h.pre(
 function _semantic_status_node(status::SemanticStatus)
     detail = isempty(status.detail) ? Any[] : Any[h.small(" $(status.detail)")]
     h.span(
-        h.strong(string(_semantic_status_glyph(status.state), " ", status.state)),
+        h.strong(string(_semantic_status_glyph(status.state), " ", status.label)),
         detail...;
         class="htmxo-semantic-status", data_status=string(status.state))
 end
@@ -4918,7 +4939,7 @@ function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
 end
 
 Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
-    io, _semantic_status_glyph(status.state), " **", status.state, "**",
+    io, _semantic_status_glyph(status.state), " **", status.label, "**",
     isempty(status.detail) ? "" : " — $(status.detail)")
 
 Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
@@ -5032,7 +5053,7 @@ end
 
 Base.show(io::IO, ::MIME"text/plain", code::SemanticCode) = print(io, code.text)
 Base.show(io::IO, ::MIME"text/plain", status::SemanticStatus) = print(
-    io, '[', status.state, ']', isempty(status.detail) ? "" : " $(status.detail)")
+    io, '[', status.label, ']', isempty(status.detail) ? "" : " $(status.detail)")
 
 function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
     print(io, card.title)
@@ -18048,7 +18069,7 @@ figcaption.caption { margin-bottom: 0.5rem; }
 .caption-header > :first-child:not(:empty) { flex: 1 1 16rem; min-width: 0; }
 .caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .caption-long { margin-top: 0.25rem; }
-.caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
+.caption-long > summary { font-size: 0.9em; }
 }
 /* Caption buttons — INTENTIONALLY UNLAYERED, at (0,2,0) so they beat Pico's
    unlayered button and [type=button] rules (0,0,1)/(0,1,0) in any order. */
@@ -18118,36 +18139,168 @@ function _sort_dir_token(dir)
 end
 
 """
-    ColumnSpec(label; help=nothing)
+    ColumnSpec(label; help=nothing, sort_keys=())
 
-A table column header that carries an explanation. Use it among the `headers`
-of [`sortable_table`](@ref) (and so of [`master_detail_table`](@ref)) wherever a
-`String` header would go: the column stays auto-wired exactly like a `String` —
-the sort button with keyboard sorting, `default_sort` by `label`, the column
-name in Markdown — and `help` adds the explanation. It becomes the header
-button's `title`, so it shows on hover and assistive technology reads it as
-the button's description, and a `ⓘ` marker follows the label to show that the
-column has one. The marker is HTML-only: Markdown and CSV export keep `label`
-alone. A blank or absent `help` renders the same header as the `String` label.
+A table column header that carries an explanation, several sort orders, or
+both. Use it among the `headers` of [`sortable_table`](@ref) (and so of
+[`master_detail_table`](@ref)), or as a column of [`render_table`](@ref)
+(`columns=`), wherever a `String` header would go: the column stays auto-wired
+exactly like a `String` — the sort button with keyboard sorting,
+`default_sort` by `label`, the column name in Markdown.
+
+`help` adds the explanation. It becomes the header button's `title`, so it
+shows on hover and assistive technology reads it as the button's description,
+and a `ⓘ` marker follows the label to show that the column has one. The marker
+is HTML-only: Markdown and CSV export keep `label` alone. A blank or absent
+`help` renders the same header as the `String` label.
 
 ```julia
 master_detail_table([ColumnSpec("Model"; help="Select a model to compare its sources."),
                      ColumnSpec("Primal"; help="RK / Stan log-density time; below 1× RK is faster.")],
     roots; key, master, children, searchable=true)
 ```
+
+# Several sort orders: `sort_keys`
+
+A cell that combines several quantities, such as an estimate with its interval
+(`22 Tsd. (13–34 Tsd.)`), can be sorted by each of them. `sort_keys` names the
+orders, at least two, the first being the column's default:
+
+```julia
+ColumnSpec("Employees"; sort_keys = ["Estimate" => r -> r.mean, "Lower bound" => r -> r.q025,
+    "Upper bound" => r -> r.q975, "Interval width" => r -> r.q975 - r.q025])
+ColumnSpec("Employees"; sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975; texts))
+```
+
+A click on the column's label sorts by its active key (the first, until the
+reader picks another) and flips the direction, as for any column. A `▾` button
+beside the label opens a menu listing every key with `▲`/`▼`; one click there
+sorts by that key in that direction. While a key other than the first is
+active, the header names it after the caret. [`interval_sort_keys`](@ref)
+gives the five orders of an estimate with its interval.
+
+Each row's cell carries the values (see [`sort_values`](@ref)):
+- `name => f` pairs, for [`master_detail_table`](@ref) and
+  [`render_table`](@ref): the table calls `f(item)` (`f(row)` for a Tables.jl
+  row) and writes the values on the column's cell itself;
+- bare names, for [`sortable_table`](@ref), whose rows are built already: each
+  cell carries its values, `h.td(text; sort_values(m, lo, hi)...)`.
+
+Numbers sort as numbers and other values as text; `missing`, `nothing`, `NaN`
+and infinite values sort last in both directions. A cell without values (a
+group row) sorts by its `data-sort-value` or its text. Sorting runs in the
+browser, so every key works in a static export too; Markdown, CSV and search
+read the cell as it shows. The reader's choice is part of the sort state:
+`htmxoSortState` returns its `sort_key` and `default_sort` takes it back
+(see [`sortable_table`](@ref)).
 """
 struct ColumnSpec
     label::String
     help::Union{Nothing,String}
+    # `name => f` (computed per item by the table) or `name => nothing` (each
+    # cell carries the values); empty for a column with one order.
+    sort_keys::Vector{Pair{String,Any}}
 end
-ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing) =
-    ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help))
+ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=()) =
+    ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
+        _column_sort_keys(label, sort_keys))
+
+_column_sort_key(label, name::Union{AbstractString,Symbol}) = String(name) => nothing
+_column_sort_key(label, key::Pair) = last(key) isa Base.Callable ? string(first(key)) => last(key) :
+    throw(ArgumentError(string("ColumnSpec(", repr(label), "): a sort key is a name or `name => f`, ",
+        "f a function of the row; got ", repr(key))))
+_column_sort_key(label, key) = throw(ArgumentError(string("ColumnSpec(", repr(label),
+    "): a sort key is a name or `name => f`, f a function of the row; got ", repr(key))))
+
+function _column_sort_keys(label, sort_keys)
+    keys = Pair{String,Any}[_column_sort_key(label, k) for k in sort_keys]
+    isempty(keys) && return keys
+    # Refused: one order is the cell's `data-sort-value`; a menu of one is noise.
+    length(keys) >= 2 || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): sort_keys names at least two orders; a column with one sorts by its cells' data-sort-value")))
+    names = first.(keys)
+    all(n -> !isempty(strip(n)), names) || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): a sort key needs a name")))
+    allunique(names) || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): sort key names must be unique, got ", repr(names))))
+    computed = count(k -> !isnothing(last(k)), keys)
+    computed in (0, length(keys)) || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): give every sort key a function (the table computes the values) or none (each cell carries them)")))
+    keys
+end
 
 # Header entries: a `String` or a `ColumnSpec` is auto-wired; any other value
 # (a pre-built `<th>` node) is the caller's own header, used as-is.
 _header_label(hdr::AbstractString) = String(hdr)
 _header_label(col::ColumnSpec) = col.label
 _header_label(_) = nothing
+
+# The names of a column's sort keys (empty: one order), and whether the table
+# computes their values from its items.
+_sort_key_names(col::ColumnSpec) = String[first(k) for k in col.sort_keys]
+_sort_key_names(_) = String[]
+_computed_sort_keys(col::ColumnSpec) = !isempty(col.sort_keys) && !isnothing(last(first(col.sort_keys)))
+_computed_sort_keys(_) = false
+# The header as `sortable_table` sees it once the table has written the values.
+_sort_key_names_only(col::ColumnSpec) = _computed_sort_keys(col) ?
+    ColumnSpec(col.label, col.help, Pair{String,Any}[first(k) => nothing for k in col.sort_keys]) : col
+_sort_key_names_only(hdr) = hdr
+
+"""
+    sort_values(values...)
+
+The attributes that give a table cell its values for the sort keys of its
+column ([`ColumnSpec`](@ref)`(label; sort_keys)`), in the order of the keys:
+
+```julia
+h.td("22 Tsd. (13–34 Tsd.)"; sort_values(22_000, 13_000, 34_000)...)
+```
+
+A number sorts as a number and any other value as its text; `missing`,
+`nothing`, `NaN` and infinite values sort last in both directions.
+[`master_detail_table`](@ref) and [`render_table`](@ref) write them themselves
+when the column's keys are `name => f` pairs; use this for the hand-built rows
+of [`sortable_table`](@ref). [`interval_sort_values`](@ref) gives the five
+values of an estimate with its interval.
+"""
+sort_values(values...) = (; data_htmxo_sort_keys = _sort_values_json(values))
+
+# One JSON array: a finite number as a number, a missing value as `null`,
+# anything else as its text.
+_sort_values_json(values) = "[" * join((_sort_value_json(v) for v in values), ",") * "]"
+_sort_value_json(::Union{Nothing,Missing}) = "null"
+_sort_value_json(x::Bool) = string(Int(x))
+_sort_value_json(x::Integer) = string(x)
+_sort_value_json(x::Real) = isfinite(x) ? string(Float64(x)) : "null"   # `2.0e4` is valid JSON
+_sort_value_json(x) = _md_json_string(string(x))
+
+# The number of values in a flat JSON array of numbers, strings and `null`
+# (what `sort_values` writes), to check a cell against its column's keys.
+function _sort_values_count(json::AbstractString)
+    s = strip(json)
+    startswith(s, '[') && endswith(s, ']') || return -1
+    inner = strip(SubString(s, 2, prevind(s, lastindex(s))))
+    isempty(inner) && return 0
+    n, quoted, escaped = 1, false, false
+    for c in inner
+        if quoted
+            escaped ? (escaped = false) : c == '\\' ? (escaped = true) : c == '"' && (quoted = false)
+        elseif c == '"'
+            quoted = true
+        elseif c == ','
+            n += 1
+        end
+    end
+    n
+end
+
+_interval_missing(x) = x === nothing || x === missing
+function _interval_values(estimate, lower, upper)
+    width = _interval_missing(lower) || _interval_missing(upper) ? missing : upper - lower
+    relative = _interval_missing(width) || _interval_missing(estimate) || iszero(estimate) ?
+        missing : width / abs(estimate)
+    (estimate, lower, upper, width, relative)
+end
 
 # The label plus, for an explained column, its HTML-only marker; and the
 # attributes that carry the explanation itself.
@@ -18157,17 +18310,26 @@ _header_content(col::ColumnSpec) = isnothing(col.help) ? (col.label,) :
 _header_help_attrs(::AbstractString) = (;)
 _header_help_attrs(col::ColumnSpec) = isnothing(col.help) ? (;) : (; title=col.help)
 
-_table_th(hdr, i, ds, sortable) = hdr
-_table_th(hdr::Union{AbstractString,ColumnSpec}, i, ds, sortable) = sortable ?
-    _sortable_th(hdr, i, ds) : h.th(_header_content(hdr)...; _header_help_attrs(hdr)...)
+_table_th(hdr, i, ds, sortable, texts) = hdr
+_table_th(hdr::Union{AbstractString,ColumnSpec}, i, ds, sortable, texts) = sortable ?
+    _sortable_th(hdr, i, ds, texts) : h.th(_header_content(hdr)...; _header_help_attrs(hdr)...)
 
-# Resolve `default_sort` to a `(1-based column index, "asc"|"desc")` pair.
-# Accepts `col`, `col => dir`, where `col` is a 1-based `Integer` or the label
-# of one of the auto-wired (`String` or `ColumnSpec`) headers.
+# Resolve `default_sort` to `(1-based column index, "asc"|"desc", key)`, `key`
+# the 0-based index of the column's sort key (0 for a column with one order).
+# Accepts `col`, `col => dir` and `(; col, key, dir)`, where `col` is a
+# 1-based `Integer` or the label of one of the auto-wired (`String` or
+# `ColumnSpec`) headers and `key` the name of one of its `sort_keys`.
 function _resolve_default_sort(default_sort, headers)
     isnothing(default_sort) && return nothing
-    col, dir = default_sort isa Pair ?
-        (first(default_sort), last(default_sort)) : (default_sort, :asc)
+    col, dir, key = if default_sort isa NamedTuple
+        issubset(keys(default_sort), (:col, :key, :dir)) && haskey(default_sort, :col) || error(
+            "sortable_table: default_sort as a NamedTuple takes `col` and optionally `key` and `dir`, got $(repr(default_sort))")
+        (default_sort.col, get(default_sort, :dir, :asc), get(default_sort, :key, nothing))
+    elseif default_sort isa Pair
+        (first(default_sort), last(default_sort), nothing)
+    else
+        (default_sort, :asc, nothing)
+    end
     idx = if col isa Integer
         Int(col)
     else
@@ -18185,27 +18347,69 @@ function _resolve_default_sort(default_sort, headers)
         "sortable_table: default_sort column $idx is a pre-built header node. Only " *
         "auto-wired String or ColumnSpec headers can be stamped; wire the marker yourself with " *
         "`data_sort_dir=` + `aria_sort=` if the header is a custom node.")
-    (idx, _sort_dir_token(dir))
+    names = _sort_key_names(headers[idx])
+    # A request that rides `htmxoSortState` out sends `sort_key=""` for a
+    # column with one order; that is no key.
+    k = isnothing(key) || key == "" ? 0 : something(findfirst(==(string(key)), names), -1) - 1
+    k >= 0 || error(isempty(names) ?
+        "sortable_table: default_sort key $(repr(key)) given for column $(repr(_header_label(headers[idx]))), which has one order (no sort_keys)" :
+        "sortable_table: default_sort key $(repr(key)) is not one of the sort keys $(repr(names)) of column $(repr(_header_label(headers[idx])))")
+    (idx, _sort_dir_token(dir), k)
 end
 
+# The `▾` beside a multi-key column's label and the menu it opens: one row per
+# key with a `▲` and a `▼` button. HTML-only: Markdown and CSV keep the label.
+# The menu is a popover, so a scroll box or the sticky header never clips it;
+# a manual one, because `htmxoSortMenu` closes it itself (an auto popover
+# closes on the ▾'s own pointerdown, and the click then opens it again).
+function _sort_menu(names, state, texts)
+    rows = map(enumerate(names)) do (j, name)
+        picks = map((("asc", "▲", :sort_ascending), ("desc", "▼", :sort_descending))) do (dir, glyph, text)
+            h.button(glyph; type="button", class="htmxo-sort-pick",
+                aria_label=_table_text(texts, text; name), title=_table_text(texts, text; name),
+                aria_pressed=string(state == (j - 1, dir)), data_htmxo_sort_pick="$(j - 1):$dir",
+                onclick="htmxoSortPick(this,$(j - 1),'$dir',event)")
+        end
+        h.div(; class="htmxo-sort-menu-row")(h.span(name), picks...)
+    end
+    html_only(h.span(; class="htmxo-sort-menu-holder")(
+        h.button("▾"; type="button", class="htmxo-sort-menu-toggle", aria_label=texts.sort_by,
+            title=texts.sort_by, aria_expanded="false", onclick="htmxoSortMenu(this,event)"),
+        h.div(; class="htmxo-sort-menu", popover="manual", onclick="event.stopPropagation()")(
+            h.div(; class="htmxo-sort-menu-title")(texts.sort_by), rows...)))
+end
+
+# The caret after a sorted column's label, naming its key when it is not the
+# column's first; `sortTable` writes the same span.
+_sort_caret(dir, key, names) = h.span(dir == "asc" ? " ▲" : " ▼",
+    (key > 0 ? (h.small(" " * names[key + 1]; class="htmxo-sort-key"),) : ())...; class="htmxo-sort-caret")
+
 # Build one auto-wired sortable `<th>` (1-based column `i`). When `ds = (idx,
-# dir)` names this column, stamp exactly what `sortTable` sets client-side:
-# `data-sort-dir`, `aria-sort`, and the trailing caret `<span>`. That makes a
-# `morph:` swap re-impose the sorted state rather than wipe it, keeps the caret
-# consistent with the rows the server actually emitted, and lets the next click
-# toggle from the right direction (`sortTable` reads `data-sort-dir`).
-function _sortable_th(hdr, i, ds)
+# dir, key)` names this column, stamp exactly what `sortTable` sets
+# client-side: `data-sort-dir`, `aria-sort`, the active key and the trailing
+# caret `<span>`. That makes a `morph:` swap re-impose the sorted state rather
+# than wipe it, keeps the caret consistent with the rows the server actually
+# emitted, and lets the next click toggle from the right direction
+# (`sortTable` reads `data-sort-dir`). A column with several sort keys also
+# carries their names and the `▾` menu.
+function _sortable_th(hdr, i, ds, texts)
     onclick = "sortTable($(i-1), this)"
     control = _LabelledControl(h.button(_header_content(hdr)...; type="button",
         class="htmxo-sort-control", data_htmxo_label="", _header_help_attrs(hdr)...,
         onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))"))
-    if !isnothing(ds) && first(ds) == i
-        dir = last(ds)
-        h.th(control, h.span(dir == "asc" ? " ▲" : " ▼"; class="htmxo-sort-caret");
+    names = _sort_key_names(hdr)
+    sorted = !isnothing(ds) && first(ds) == i
+    key = sorted ? ds[3] : 0
+    menu = isempty(names) ? () : (_sort_menu(names, sorted ? (key, ds[2]) : nothing, texts),)
+    key_attrs = isempty(names) ? (;) : (; data_htmxo_sort_keys=_sort_values_json(names),
+        (key > 0 ? (; data_htmxo_sort_key=string(key)) : (;))...)
+    if sorted
+        dir = ds[2]
+        h.th(control, menu..., _sort_caret(dir, key, names);
             onclick, class="u-pointer", data_sort_dir=dir,
-            aria_sort=(dir == "asc" ? "ascending" : "descending"))
+            aria_sort=(dir == "asc" ? "ascending" : "descending"), key_attrs...)
     else
-        h.th(control; onclick, class="u-pointer")
+        h.th(control, menu...; onclick, class="u-pointer", key_attrs...)
     end
 end
 
@@ -18279,10 +18483,12 @@ sorted numerically; everything else uses `localeCompare`.
 and `aria-sort="ascending"|"descending"`, and clears both from every sibling
 `<th>`. Read that state with:
 
-    htmxoSortState(target) -> {sort_col, sort_dir} | {}
+    htmxoSortState(target) -> {sort_col, sort_dir[, sort_key]} | {}
 
 `target` is a CSS selector or element; `sort_col` is **1-based** (matching
-`default_sort`), `sort_dir` is `"asc"`/`"desc"`. An unsorted table yields `{}`.
+`default_sort`), `sort_dir` is `"asc"`/`"desc"`. A column with several sort
+keys ([`ColumnSpec`](@ref)`(label; sort_keys)`) adds `sort_key`, the name of
+its active key. An unsorted table yields `{}`.
 
 # Sort state vs. `morph:` swaps
 An idiomorph `hx-swap="morph:*"` syncs attributes against the server's HTML and
@@ -18298,8 +18504,9 @@ h.button("↻"; hx_get=string(__self__),
 ```
 
 then render with `sortable_table(rows...; default_sort=sort_col => sort_dir)`
-so the server-rendered header agrees with the server-rendered row order.
-See [`sortable_table`](@ref).
+(`default_sort=(col=sort_col, key=sort_key, dir=sort_dir)` when the table has a
+column with several sort keys) so the server-rendered header agrees with the
+server-rendered row order. See [`sortable_table`](@ref).
 """
 sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
     # The master/detail runtime rides along: every master/detail table needs
@@ -18351,7 +18558,22 @@ function sortTable(col, th) {
     // visible text. This lets callers force a semantic order (e.g. status:
     // proposed → approved → rejected) without re-encoding the displayed text.
     const sortKey = cell => (cell.dataset.sortValue ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
-    const compare = (a, b) => {
+    // A column with several sort keys (`ColumnSpec(...; sort_keys)`) sorts by
+    // its active key: the value at that place in each cell's
+    // `data-htmxo-sort-keys`. A missing value sorts last in both directions.
+    const keys = th.dataset.htmxoSortKeys ? JSON.parse(th.dataset.htmxoSortKeys) : null;
+    const key = keys ? Number(th.dataset.htmxoSortKey || 0) : 0;
+    const keyed = new Map();
+    const keyOf = row => {
+        if (!keyed.has(row)) keyed.set(row, htmxoSortValue(row.cells[col], key, keys.length, sortKey));
+        return keyed.get(row);
+    };
+    const compare = keys ? (a, b) => {
+        const av = keyOf(a), bv = keyOf(b);
+        if (av === null || bv === null) return av === bv ? 0 : av === null ? 1 : -1;
+        const c = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
+        return asc ? c : -c;
+    } : (a, b) => {
         const av = sortKey(a.cells[col]);
         const bv = sortKey(b.cells[col]);
         const an = parseFloat(av), bn = parseFloat(bv);
@@ -18394,7 +18616,86 @@ function sortTable(col, th) {
     const caret = document.createElement('span');
     caret.className = 'htmxo-sort-caret';
     caret.textContent = asc ? ' ▲' : ' ▼';
+    // A key other than the column's first is named after the caret.
+    if (keys && key > 0) {
+        const name = document.createElement('small');
+        name.className = 'htmxo-sort-key';
+        name.textContent = ' ' + keys[key];
+        caret.appendChild(name);
+    }
     th.appendChild(caret);
+    // The ▾ menus mark the order now in force.
+    const order = key + ':' + (asc ? 'asc' : 'desc');
+    th.closest('thead').querySelectorAll('.htmxo-sort-pick').forEach(b =>
+        b.setAttribute('aria-pressed', String(b.closest('th') === th && b.dataset.htmxoSortPick === order)));
+}
+
+// A cell's value for sort key `key` of its column's `n`: from its
+// `data-htmxo-sort-keys`, else (a group row) its `data-sort-value` or text.
+function htmxoSortValue(cell, key, n, sortKey) {
+    if (cell && cell.dataset.htmxoSortKeys) {
+        const values = JSON.parse(cell.dataset.htmxoSortKeys);
+        if (values.length !== n) throw new Error('sortTable: a cell carries ' + values.length +
+            ' sort values for the ' + n + ' sort keys of its column');
+        return values[key] ?? null;
+    }
+    const text = cell ? sortKey(cell) : '';
+    const number = parseFloat(text);
+    return text === '' ? null : isNaN(number) ? text : number;
+}
+
+// The ▾ beside a multi-key column's label: open or close its menu, a
+// popover placed under the button so no scroll box or sticky header clips
+// it. A click elsewhere, Escape or moving the focus out closes it.
+function htmxoSortMenu(button, event) {
+    if (event) event.stopPropagation();
+    const menu = button.nextElementSibling;
+    if (menu.matches(':popover-open')) { htmxoSortMenuClose(menu, true); return; }
+    document.querySelectorAll('.htmxo-sort-menu:popover-open').forEach(m => htmxoSortMenuClose(m, false));
+    menu.showPopover();
+    button.setAttribute('aria-expanded', 'true');
+    const place = () => {
+        const r = button.getBoundingClientRect();
+        menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+        menu.style.top = (r.bottom + 2) + 'px';
+    };
+    place();
+    const close = e => {
+        if (e.type === 'keydown' ? e.key === 'Escape'
+            : e.type === 'focusout' ? e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== button
+            : !menu.contains(e.target) && !button.contains(e.target))
+            htmxoSortMenuClose(menu, e.type === 'keydown');
+    };
+    document.addEventListener('pointerdown', close, true);
+    document.addEventListener('keydown', close, true);
+    menu.addEventListener('focusout', close);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    menu.htmxoSortMenuDone = () => {
+        document.removeEventListener('pointerdown', close, true);
+        document.removeEventListener('keydown', close, true);
+        menu.removeEventListener('focusout', close);
+        window.removeEventListener('scroll', place, true);
+        window.removeEventListener('resize', place);
+    };
+    (menu.querySelector('.htmxo-sort-pick[aria-pressed="true"]') || menu.querySelector('.htmxo-sort-pick')).focus();
+}
+function htmxoSortMenuClose(menu, refocus) {
+    if (menu.htmxoSortMenuDone) { menu.htmxoSortMenuDone(); menu.htmxoSortMenuDone = null; }
+    if (menu.matches(':popover-open')) menu.hidePopover();
+    const button = menu.previousElementSibling;
+    button.setAttribute('aria-expanded', 'false');
+    if (refocus) button.focus();
+}
+// A ▲/▼ in the menu: sort the column by that key in that direction.
+function htmxoSortPick(button, key, dir, event) {
+    if (event) event.stopPropagation();
+    const th = button.closest('th'), menu = button.closest('.htmxo-sort-menu');
+    th.dataset.htmxoSortKey = String(key);
+    // `sortTable` flips the direction it finds.
+    th.dataset.sortDir = dir === 'asc' ? 'desc' : 'asc';
+    sortTable(th);
+    if (menu) htmxoSortMenuClose(menu, true);
 }
 
 // Pair lookup uses literal ids, so punctuation in a hand-built key cannot
@@ -18714,9 +19015,11 @@ function htmxoTreeRow(row, event) {
 // whose place among its siblings changed, goes where the table's own render
 // puts it, unless its group is not loaded, and a sorted table re-applies its
 // sort; a row in the update's scope that it no longer lists leaves, with its
-// detail and child rows. Any htmx response holding such a body is applied
-// this way, whatever the requesting element's hx-target;
-// `htmxoUpdateRows(html)` applies one fetched by other means.
+// detail and child rows. The group rows a browser regroup asks for
+// (`group_masters`) replace the browser's and leave the leaf rows alone. Any
+// htmx response holding such a body is applied this way, whatever the
+// requesting element's hx-target; `htmxoUpdateRows(html)` applies one
+// fetched by other means.
 function htmxoUpdateRows(update, origin) {
     if (typeof update === 'string') {
         const template = document.createElement('template');
@@ -18738,12 +19041,18 @@ function htmxoUpdateRows(update, origin) {
     const named = [...incoming.flatMap(r => [r.id, r.dataset.htmxoParent]), ...ids, ...groups];
     for (let i = 0; !tbody && i < named.length; i++) tbody = bodyOf(named[i]);
     if (!tbody && origin && origin.closest) { const t = origin.closest('table'); tbody = t && t.tBodies[0]; }
+    // The group rows of a browser regroup (`group_masters`) have nothing to
+    // do once their table has left the page, or the reader has regrouped
+    // again: they are dropped, quietly.
+    const groupMasters = 'htmxoGroupMasters' in update.dataset;
+    if (!tbody && groupMasters) return;
     if (!tbody) throw new Error('htmxoUpdateRows: no table on the page holds these rows');
     // Rows rendered for another grouping than the table shows would land
     // under the wrong groups: refuse them.
     if ('htmxoGrouped' in update.dataset) {
         const wrapper = tbody.closest('[data-htmxo-grouped]');
         const shown = wrapper ? wrapper.dataset.htmxoGrouped : null;
+        if (shown !== update.dataset.htmxoGrouped && groupMasters) return;
         if (shown !== update.dataset.htmxoGrouped) throw new Error('htmxoUpdateRows: the rows are grouped by ' +
             JSON.stringify(update.dataset.htmxoGrouped) + ' but the table by ' + JSON.stringify(shown));
     }
@@ -18915,10 +19224,15 @@ function htmxoUpdateRows(update, origin) {
     // changed, before focus returns (moving a row drops its focus).
     if (fresh.length) htmxoResort(table);
     // A branch toggle names the child rows the branch now has.
+    const kidsOf = new Map();
+    if (touched.size) masters().forEach(r => {
+        const p = r.dataset.htmxoParent;
+        if (p) { if (!kidsOf.has(p)) kidsOf.set(p, []); kidsOf.get(p).push(r.id); }
+    });
     touched.forEach(b => {
         const toggle = b.isConnected && b.querySelector(':scope > td [data-htmxo-tree-toggle]');
         if (!toggle) return;
-        const kids = masters().filter(r => r.dataset.htmxoParent === b.id).map(r => r.id);
+        const kids = kidsOf.get(b.id) || [];
         if (kids.length) toggle.setAttribute('aria-controls', kids.join(' '));
         else toggle.removeAttribute('aria-controls');
     });
@@ -19663,8 +19977,8 @@ function htmxoGroupDragEnd(e) {
 // several groups gets a copy per group; leaves the grouping leaves out wait in
 // `template[data-htmxo-unplaced]`. The wrapper's `data-htmxo-regroup` says how
 // (grouping names, flat name, nested or not, the `group_summary` columns).
-// Keep `htmxoRegroup`, `htmxoFixed` and `htmxoGroupPillsSync` in step
-// with that function, `_format_fixed` and `_md_group_pills`.
+// Keep `htmxoRegroup`, `htmxoSummaryText` and `htmxoGroupPillsSync` in step
+// with that function, `_md_summary_cell` and `_md_group_pills`.
 function htmxoRegroupConfig(wrapper) {
     if (wrapper.htmxoRegroupSource !== wrapper.dataset.htmxoRegroup) {
         wrapper.htmxoRegroupSource = wrapper.dataset.htmxoRegroup;
@@ -19682,7 +19996,7 @@ function htmxoJsonString(s) {
 }
 function htmxoJsonList(xs) { return '[' + xs.map(htmxoJsonString).join(',') + ']'; }
 // A group summary over its leaves' inputs (`_md_summary_value`), folded left
-// to right, and written as the table writes numbers (`_format_fixed`).
+// to right, and written as the table writes numbers (`_md_summary_cell`).
 function htmxoSummaryValue(reduce, inputs) {
     if (reduce === 'count') return inputs.length;
     if (reduce === 'ratio') {
@@ -19697,16 +20011,50 @@ function htmxoSummaryValue(reduce, inputs) {
     const sum = xs.reduce((a, b) => a + b);
     return reduce === 'mean' ? sum / xs.length : sum;
 }
-function htmxoFixed(x, digits, decimal, thousands) {
-    const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
-    const s = BigInt(scaled).toString().padStart(digits + 1, '0');
-    const whole = s.slice(0, s.length - digits);
-    let out = x < 0 && scaled !== 0 ? '-' : '';
+// `_print_grouped`: an integer's digits with `thousands` every three from the right.
+function htmxoGrouped(whole, thousands) {
+    let out = '';
     for (let i = 0; i < whole.length; i++) {
         if (i > 0 && (whole.length - i) % 3 === 0) out += thousands;
         out += whole[i];
     }
+    return out;
+}
+function htmxoFixed(x, digits, decimal, thousands) {
+    const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
+    const s = BigInt(scaled).toString().padStart(digits + 1, '0');
+    const out = (x < 0 && scaled !== 0 ? '-' : '') + htmxoGrouped(s.slice(0, s.length - digits), thousands);
     return digits > 0 ? out + decimal + s.slice(s.length - digits) : out;
+}
+// `_round_sig`: x to k significant digits, halves away from zero, as
+// [negative, digits, point] for ±0.digits × 10^point, by the same steps.
+function htmxoSigDigits(x, k) {
+    const a = Math.abs(x), pow10 = n => Number('1e' + n);
+    if (!isFinite(a)) throw new RangeError('cannot round ' + x + ' to significant digits: it is not a finite number');
+    if (a === 0) return [false, '', 0];
+    let e = Math.floor(Math.log10(a));
+    while (a < pow10(e)) e--;
+    while (a >= pow10(e + 1)) e++;
+    const d = k - 1 - e;
+    const s = String(Math.round(d > 300 ? a * 1e300 * pow10(d - 300) : d >= 0 ? a * pow10(d) : a / pow10(-d)));
+    return [x < 0, s.replace(/0+$/, ''), s.length + e + 1 - k];
+}
+// `_format_digits`: ±0.ds × 10^point, as a power of ten (`sci`) or positionally.
+function htmxoDigitsText(negative, ds, point, decimal, thousands, sci) {
+    if (!ds) return '0';
+    const sup = n => (n < 0 ? '⁻' : '') + String(Math.abs(n)).replace(/[0-9]/g, c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]);
+    const out = negative ? '-' : '';
+    if (sci) return out + ds[0] + (ds.length > 1 ? decimal + ds.slice(1) : '') + '·10' + sup(point - 1);
+    if (point <= 0) return out + '0' + decimal + '0'.repeat(-point) + ds;
+    if (point >= ds.length) return out + htmxoGrouped(ds + '0'.repeat(point - ds.length), thousands);
+    return out + htmxoGrouped(ds.slice(0, point), thousands) + decimal + ds.slice(point);
+}
+// `_md_summary_cell`: a summary `s` as the table writes it, or as the ⬇ CSV
+// does (`csv`: no power of ten).
+function htmxoSummaryText(x, s, decimal, thousands, csv) {
+    if (!s.sigdigits) return htmxoFixed(x, s.digits, decimal, thousands);
+    const [negative, ds, point] = htmxoSigDigits(x, s.sigdigits);
+    return htmxoDigitsText(negative, ds, point, decimal, thousands, !csv && (point <= -4 || point >= 16));
 }
 // Give a leaf's rows the row key `safe`: the ids, the row's own toggle call
 // (`master_detail_toggle_js`) and the controls naming its detail.
@@ -19813,8 +20161,8 @@ function htmxoRegroup(wrapper, levels) {
                 cell.textContent = '';
                 cell.removeAttribute('data-htmxo-number');
             } else {
-                cell.textContent = htmxoFixed(x, s.digits, htmxoText(table, 'decimal'), htmxoText(table, 'thousands'));
-                cell.dataset.htmxoNumber = htmxoFixed(x, s.digits, '.', '');
+                cell.textContent = htmxoSummaryText(x, s, htmxoText(table, 'decimal'), htmxoText(table, 'thousands'), false);
+                cell.dataset.htmxoNumber = htmxoSummaryText(x, s, '.', '', true);
             }
         });
         fresh.add(row);
@@ -20141,8 +20489,9 @@ if (!window.htmxoLinkBound) {
 
 // Read a table's CURRENT client-side sort state. `target` is a CSS selector
 // or an element (the <table>, or any node inside or around it). Returns
-// {sort_col, sort_dir} — 1-based column index, 'asc'|'desc' — or {} when the
-// table is unsorted, so it spreads cleanly into an htmx hx-vals:
+// {sort_col, sort_dir} — 1-based column index, 'asc'|'desc' — plus
+// `sort_key`, the active key's name, for a column with several sort keys; or
+// {} when the table is unsorted, so it spreads cleanly into an htmx hx-vals:
 //
 //     hx-vals="js:{...htmxoSortState('#my-table')}"
 //
@@ -20152,7 +20501,7 @@ if (!window.htmxoLinkBound) {
 // span are all gone once the morph lands, and the server's child order is
 // re-imposed on the rows. Ride the state out with the request, render the
 // rows in that order, and stamp it back with
-// `sortable_table(...; default_sort=col => dir)`.
+// `sortable_table(...; default_sort=col => dir)` (or `(col=, key=, dir=)`).
 function htmxoSortState(target) {
     const root = typeof target === 'string' ? document.querySelector(target) : target;
     if (!root) return {};
@@ -20161,11 +20510,15 @@ function htmxoSortState(target) {
     if (!table) return {};
     const th = table.querySelector('thead th[data-sort-dir]');
     if (!th) return {};
-    return {
+    const state = {
         sort_col: th.dataset.htmxoSortCol ? Number(th.dataset.htmxoSortCol)
             : Array.prototype.indexOf.call(th.parentNode.children, th) + 1,
         sort_dir: th.dataset.sortDir,
     };
+    // A column with several sort keys: the name of the active one.
+    if (th.dataset.htmxoSortKeys)
+        state.sort_key = JSON.parse(th.dataset.htmxoSortKeys)[Number(th.dataset.htmxoSortKey || 0)];
+    return state;
 }
 """
 
@@ -20276,7 +20629,7 @@ function downloadTableCsv(btn, filename) {
     // still one name.
     const name = th => {
         const copy = th.cloneNode(true);
-        copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help').forEach(e => e.remove());
+        copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help, .htmxo-sort-menu-holder').forEach(e => e.remove());
         return lines(copy).join(' ');
     };
     const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
@@ -20329,8 +20682,10 @@ separators of the numbers the table writes (`decimal`, `thousands`: its float
 cells and [`number_cell`](@ref)s, see [`format_number`](@ref), and the group
 sums of `group_summary` in [`master_detail_table`](@ref)) and the note on a row that holds a hovered item
 in a collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`; see
-*Hover linking* in
-[`sortable_table`](@ref)). Build one with
+*Hover linking* in [`sortable_table`](@ref)), the `▾` menu of a column with
+several sort keys (`sort_by`, `sort_ascending`, `sort_descending`) and the
+names [`interval_sort_keys`](@ref) gives its five orders (`sort_estimate`,
+`sort_lower`, `sort_upper`, `sort_width`, `sort_relative_width`). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -20341,7 +20696,8 @@ browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
 `selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
 texts take `{name}` (the grouping), `group_level` also `{level}`;
 `rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
-`linked_inside_many` takes `{count}`.
+`linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
+take `{name}` (the sort key).
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -20376,6 +20732,14 @@ struct TableTexts
     linked_inside::String       # note: the hovered item is in this collapsed row
     linked_deep::String         # note: ... several levels down
     linked_inside_many::String  # note: several hovered items are in this collapsed row
+    sort_by::String             # a multi-key column's ▾ menu: its button and heading
+    sort_ascending::String      # its ▲ button for one key
+    sort_descending::String     # its ▼ button for one key
+    sort_estimate::String       # `interval_sort_keys`: the five orders of an estimate
+    sort_lower::String          #   with its interval
+    sort_upper::String
+    sort_width::String
+    sort_relative_width::String
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -20384,6 +20748,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     group_add = (:name,), group_add_inner = (:name,), group_level = (:level, :name),
     group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
     rows_failed = (:status,), linked_deep = (:levels,), linked_inside_many = (:count,),
+    sort_ascending = (:name,), sort_descending = (:name,),
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -20420,6 +20785,14 @@ const _TABLE_TEXT_LOCALES = (
         linked_inside = "↳ inside",
         linked_deep = "↳ {levels} levels down",
         linked_inside_many = "↳ {count} inside",
+        sort_by = "Sort by",
+        sort_ascending = "{name}, ascending",
+        sort_descending = "{name}, descending",
+        sort_estimate = "Estimate",
+        sort_lower = "Lower bound",
+        sort_upper = "Upper bound",
+        sort_width = "Interval width",
+        sort_relative_width = "Relative width",
     ),
     de = (
         search = "Suche",
@@ -20454,6 +20827,14 @@ const _TABLE_TEXT_LOCALES = (
         linked_inside = "↳ darin",
         linked_deep = "↳ {levels} Ebenen tiefer",
         linked_inside_many = "↳ {count} darin",
+        sort_by = "Sortieren nach",
+        sort_ascending = "{name}, aufsteigend",
+        sort_descending = "{name}, absteigend",
+        sort_estimate = "Schätzwert",
+        sort_lower = "Untergrenze",
+        sort_upper = "Obergrenze",
+        sort_width = "Intervallbreite",
+        sort_relative_width = "Relative Breite",
     ),
 )
 
@@ -20477,6 +20858,46 @@ table_texts(locale::Symbol=:en; texts...) =
 
 const _EN_TABLE_TEXTS = table_texts(:en)
 
+"""
+    interval_sort_keys(estimate, lower, upper; texts=table_texts())
+    interval_sort_keys(; texts=table_texts())
+
+The five sort keys of a column that shows an estimate with its interval
+(`22 Tsd. (13–34 Tsd.)`), for [`ColumnSpec`](@ref)`(label; sort_keys)`: the
+estimate, the lower bound, the upper bound, the interval's width
+(`upper - lower`) and its relative width (`(upper - lower) / abs(estimate)`).
+`estimate`, `lower` and `upper` are functions of the row; the names come from
+`texts` (`table_texts(:de)`: Schätzwert, Untergrenze, Obergrenze,
+Intervallbreite, relative Breite).
+
+```julia
+ColumnSpec("Beschäftigte"; sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975; texts = DE))
+```
+
+Without functions it returns the names alone, for [`sortable_table`](@ref)
+rows whose cells carry [`interval_sort_values`](@ref).
+"""
+interval_sort_keys(estimate, lower, upper; texts::TableTexts=_EN_TABLE_TEXTS) =
+    Pair{String,Any}[name => (r -> _interval_values(estimate(r), lower(r), upper(r))[i])
+                     for (i, name) in enumerate(_interval_key_names(texts))]
+interval_sort_keys(; texts::TableTexts=_EN_TABLE_TEXTS) = _interval_key_names(texts)
+
+_interval_key_names(texts::TableTexts) = String[texts.sort_estimate, texts.sort_lower,
+    texts.sort_upper, texts.sort_width, texts.sort_relative_width]
+
+"""
+    interval_sort_values(estimate, lower, upper)
+
+[`sort_values`](@ref) for a cell of a column whose keys are
+[`interval_sort_keys`](@ref): the estimate, both bounds, the interval's width
+and its relative width.
+
+```julia
+h.td("22 Tsd. (13–34 Tsd.)"; interval_sort_values(22_000, 13_000, 34_000)...)
+```
+"""
+interval_sort_values(estimate, lower, upper) = sort_values(_interval_values(estimate, lower, upper)...)
+
 # A table text with its placeholders filled in. The browser runtime's
 # `htmxoText` fills the same templates from the same values.
 _table_text(texts::TableTexts, name::Symbol; values...) = _fill_text(getfield(texts, name); values...)
@@ -20497,7 +20918,7 @@ _with_table_texts(node, texts::TableTexts) = texts == _EN_TABLE_TEXTS ? node :
 _table_count_text(texts::TableTexts, shown, total) = _table_text(texts, :count; shown, total)
 
 """
-    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
+    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, columns=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
@@ -20515,6 +20936,12 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 - `download_filename`: filename for the CSV download (default: `id * ".csv"`
   when `id` is supplied, otherwise `"table.csv"`)
 - `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
+- `columns`: give columns a header other than their name, as `name => label`
+  or `name => ColumnSpec(...)` pairs (a `Dict` or `NamedTuple` works too), e.g.
+  an explanation or several sort orders computed from each Tables.jl row:
+  `columns = ["mean" => ColumnSpec("Employees"; help = "…",
+  sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975))]`
+  (see [`ColumnSpec`](@ref)). A name that is not a column throws.
 - `cell(value, column_name, row_index)`: custom renderer of a cell's content.
   By default a float is a [`number_cell`](@ref) in the table's language
   (`texts`): `0.15623` shows `0,15623` with `texts=table_texts(:de)`,
@@ -20544,21 +20971,53 @@ cap = CaptionSpec(; title="Scores", short="Ranked test scores.", long="Data coll
 page = htmx(h.main(render_table(df; download=true, caption=cap)); pico_version="2")
 ```
 """
-function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
+function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, columns=nothing, kwargs...)
     isnothing(link) == isnothing(link_key) || throw(ArgumentError(
         "render_table: `link` names the group and `link_key(row)` keys each row; give both or neither"))
     cols = Tables.columnnames(Tables.columns(table))
     texts = get(kwargs, :texts, _EN_TABLE_TEXTS)
+    headers = _render_table_headers(columns, cols)
 
     body_rows = [
-        h.tr([_render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts) for c in cols]...;
+        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts), row)
+              for (j, c) in enumerate(cols)]...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
              (isnothing(link_key) ? (;) : (; data_htmxo_link_key=string(link_key(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
-    sortable_table([string(c) for c in cols], body_rows;
+    sortable_table(map(_sort_key_names_only, headers), body_rows;
         id, sortable, download, download_filename, caption, class, link, kwargs...)
+end
+
+# Each column's header: its name, or what `columns` gives for it (a label or
+# a `ColumnSpec`).
+_render_table_headers(::Nothing, cols) = Any[string(c) for c in cols]
+function _render_table_headers(columns, cols)
+    names = [string(c) for c in cols]
+    headers = Any[names...]
+    for (c, spec) in pairs(columns isa AbstractDict || columns isa NamedTuple ? columns : Dict(columns))
+        j = findfirst(==(string(c)), names)
+        isnothing(j) && throw(ArgumentError(string("render_table: `columns` names ", repr(string(c)),
+            ", which is not a column of the table; its columns are ", repr(names))))
+        spec isa Union{AbstractString,ColumnSpec} || throw(ArgumentError(string("render_table: ",
+            "`columns` gives column ", repr(string(c)), " a String label or a ColumnSpec, got ", repr(spec))))
+        # Refused: render_table builds the cells, so it computes their values.
+        isempty(_sort_key_names(spec)) || _computed_sort_keys(spec) || throw(ArgumentError(string(
+            "render_table: column ", repr(string(c)), " names its sort keys without functions; ",
+            "give each a function of the row (`\"Estimate\" => r -> r.mean`)")))
+        headers[j] = spec isa AbstractString ? String(spec) : spec
+    end
+    headers
+end
+
+# A cell of a column whose sort keys `render_table` computes from the row.
+_render_sort_values(hdr, td, row) = td
+function _render_sort_values(hdr::ColumnSpec, td, row)
+    _computed_sort_keys(hdr) || return td
+    Node(HTMX.tag(td), merge(copy(HTMX.attrs(td)), Dict{Symbol,Any}(
+        Symbol("data-htmxo-sort-keys") => _sort_values_json(last(k)(row) for k in hdr.sort_keys))),
+        HTMX.children(td))
 end
 
 # A `render_table` cell: a float is a number cell in the table's language,
@@ -20590,10 +21049,14 @@ that fits its column drops that scroll box so its header can stay in view
 - `headers`: `Vector` of header entries. Each entry is either:
     - a `String` — auto-wired into `h.th(label; onclick="sortTable(i, this)", class="u-pointer")`
       when `sortable=true`, or a plain `h.th(label)` otherwise.
-    - a [`ColumnSpec`](@ref)`(label; help)` — auto-wired exactly like its `label`,
+    - a [`ColumnSpec`](@ref)`(label; help, sort_keys)` — auto-wired exactly like its `label`,
       plus an explanation: `help` becomes the header button's `title` (hover
       text and accessible description) with an HTML-only `ⓘ` marker after the
       label. Use it rather than a hand-built node to explain a column.
+      `sort_keys` names several orders for the column (an estimate, its
+      interval's bounds and widths), picked from a `▾` menu beside the label;
+      here, with rows built already, it names them only, and each cell carries
+      its values with [`sort_values`](@ref).
     - any HTML node (e.g. `h.th("")`, `h.th("Actions")`) — used as-is.
       That's the per-column opt-out: pass a node and the auto-wiring is skipped.
       To make a RICH header sortable anyway (e.g. one holding a button), wire
@@ -20625,7 +21088,10 @@ that fits its column drops that scroll box so its header can stay in view
   caret on that header, exactly as a client-side `sortTable` click would.
   It **declares** the order, it does not perform it: `sortable_table` receives
   pre-built row nodes, so the caller must emit `rows` in that order. Requires
-  `sortable=true` and a `String` or `ColumnSpec` header at `col`.
+  `sortable=true` and a `String` or `ColumnSpec` header at `col`. For a column
+  with several sort keys, `(col=..., key="Lower bound", dir=:desc)` names the
+  key too (default: its first; `key=""`, as a request carries for a column
+  with one order, is the same).
 - `searchable`: add a labelled client-side search field above the table
   (default `false`), with a live "N of M rows shown" count as its helper text
   and a "No matching rows" state below. See *Client-side search* below.
@@ -20887,8 +21353,18 @@ function sortable_table(headers, rows;
         kwargs = (; aria_multiselectable="true", kwargs...)
     end
     ds = _resolve_default_sort(default_sort, headers)
+    # Its rows are built already: a column's sort keys name the orders, and
+    # each cell carries the values (`sort_values`).
+    for (i, hdr) in enumerate(headers)
+        _computed_sort_keys(hdr) && throw(ArgumentError(string("sortable_table: column ",
+            repr(_header_label(hdr)), " gives its sort keys functions, but sortable_table's rows are ",
+            "built already. Name the keys (`sort_keys = [\"Estimate\", …]`) and give each cell its ",
+            "values with `sort_values(…)`, or use master_detail_table or render_table, which compute them")))
+        names = _sort_key_names(hdr)
+        isempty(names) || _check_sort_values(rows, i, names, _header_label(hdr))
+    end
 
-    th_nodes = [_table_th(hdr, i, ds, sortable) for (i, hdr) in enumerate(headers)]
+    th_nodes = [_table_th(hdr, i, ds, sortable, texts) for (i, hdr) in enumerate(headers)]
 
     # Always include `htmxo-sortable-table` when sorting is on — that's
     # the hook `sortable_table_styles()` reads, and it makes call sites
@@ -20955,6 +21431,23 @@ function sortable_table(headers, rows;
         _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!searchable)
     # `master_detail_table` wraps this table and marks its own outermost element.
     _stamp_texts ? _with_table_texts(selected, texts) : selected
+end
+
+# A hand-built cell that carries sort values carries one per key of its
+# column; a cell without them sorts by its `data-sort-value` or text.
+function _check_sort_values(rows, col, names, label)
+    attr = Symbol("data-htmxo-sort-keys")
+    for row in rows
+        row isa Node && HTMX.tag(row) === :tr && _is_master_row(row) || continue
+        cells = [c for c in HTMX.children(row) if c isa Node && HTMX.tag(c) in (:td, :th)]
+        length(cells) >= col || continue
+        json = get(HTMX.attrs(cells[col]), attr, nothing)
+        isnothing(json) && continue
+        n = _sort_values_count(string(json))
+        n == length(names) || throw(ArgumentError(string("sortable_table: a cell of column ", repr(label),
+            " carries ", n < 0 ? "malformed sort values $(repr(json))" : "$n sort value$(n == 1 ? "" : "s")",
+            " for its ", length(names), " sort keys ", repr(names))))
+    end
 end
 
 # A selectable row's key: `data-htmxo-select-key`, else its id. Keyed state
@@ -21679,7 +22172,11 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 `row-…` / `detail-…` ids, and a `colspan`-spanning detail cell.
 
 # Arguments
-- `headers`: as in [`sortable_table`](@ref).
+- `headers`: as in [`sortable_table`](@ref). A [`ColumnSpec`](@ref) whose
+  `sort_keys` are `name => f` pairs gets its values from the table: it calls
+  `f(item)` for every row and writes them on the column's cell, so `master`
+  returns its cells as usual (and may not write them itself). Group rows have
+  no values and sort by their own cell.
 - `items`: any iterable.
 
 # Keyword arguments
@@ -21860,12 +22357,26 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `group_by_url`: the route that renders this table for the `group_by` and `q`
   (the current search) it receives, for what the browser cannot build: group
   rows from `group_master`, which replace the browser's after each regroup (a
-  hidden element asks for them, so a recording, which strips that request,
-  keeps the control live with the browser's group rows), and lazy groups
-  (`group_rows_url`), whose control asks this URL instead of regrouping in the
-  browser and appears only with it. It receives the levels as repeated
-  `group_by` values, or for none the flat grouping's name, so declare the
-  route's `group_by::Vector{String}`.
+  hidden element asks for them, with `group_masters=true`, so a recording,
+  which strips that request, keeps the control live with the browser's group
+  rows), and lazy groups (`group_rows_url`), whose control asks this URL
+  instead of regrouping in the browser and appears only with it. It receives
+  the levels as repeated `group_by` values, or for none the flat grouping's
+  name, so declare the route's `group_by::Vector{String}`.
+- `group_masters`: instead of the table, return its group rows only, from
+  `group_master`, as a row update (see `update_rows`): every group row of the
+  grouping at every level and no leaf row, so `master` is not called. The
+  request that `group_by_url` receives after a browser regroup sends
+  `group_masters=true`. A route that declares `group_masters::Bool=false` and
+  passes it to this call answers with these rows, which take the place of the
+  browser's group rows and leave every leaf row as the browser placed it; a
+  route that does not declare it answers with the whole table, which replaces
+  the browser's. As in any browser regroup the leaf rows are not rendered
+  again, and a request from them still sends the table's current grouping. In
+  the flat view the answer has no rows, and an answer for a grouping the
+  reader has left since is dropped. Needs `group_master`; refused
+  together with `group_rows_url`, `group_rows`, `update_rows` or
+  `update_groups`.
 - `group_rows_url(key, members)`: return a URL to load that group's rows on
   first expand (or `nothing` to render them). The route renders the same call
   with `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` of just
@@ -21951,12 +22462,14 @@ function master_detail_table(headers, items;
                              group_rows=nothing,
                              group_summary=nothing,
                              group_order=nothing,
+                             group_masters::Bool=false,
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
                              link_key=nothing,
                              sticky::Bool=true,
                              _rows_only::Bool=false,
+                             _sort_item=identity,
                              _toolbar=(),
                              _level_marks::Bool=false,
                              _max_level::Int=0,
@@ -21972,9 +22485,9 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
-    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/update_groups require `groupings`"))
+        group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+    !group_masters && all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/group_masters/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -21990,6 +22503,9 @@ function master_detail_table(headers, items;
     # (same URL for every row — unusual, but supported).
     _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
     rows = Any[]
+    # Columns whose sort keys the table computes: (column, functions).
+    sort_columns = [(i, Any[last(k) for k in hdr.sort_keys])
+                    for (i, hdr) in enumerate(headers) if _computed_sort_keys(hdr)]
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     seen = Set{String}()
     max_level = Ref(1)
@@ -22052,6 +22568,9 @@ function master_detail_table(headers, items;
         url  = isnothing(_url) ? nothing : _url(item)
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
         cells, row_attrs = _md_master_row(master(item), texts)
+        # A group row (`_sort_item` gives `nothing`) sorts by its own value.
+        sort_item = isempty(sort_columns) ? nothing : _sort_item(item)
+        isnothing(sort_item) || _md_sort_values!(cells, sort_columns, sort_item, headers)
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
         if branch && branches_collapsible && !selecting && !haskey(attrs, :onclick)
             attrs[:onclick] = "htmxoTreeRow(this,event)"
@@ -22165,7 +22684,8 @@ function master_detail_table(headers, items;
     # gets one from its root keys, which are unique on the page.
     body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
-    table = sortable_table(headers, rows; table_attrs..., texts, link, sticky, _stamp_texts=false, kwargs...)
+    table = sortable_table(map(_sort_key_names_only, headers), rows; table_attrs..., texts, link, sticky,
+        _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries. A narrow first column
@@ -22412,8 +22932,28 @@ end
 _md_json_hex4(s, i, bad) = i + 4 <= ncodeunits(s) && all(j -> isxdigit(Char(codeunit(s, j))), i+1:i+4) ?
     parse(UInt32, s[i+1:i+4]; base=16) : bad()
 
+# How a number is rounded (`format_number`, `number_cell`, `ColumnSummary`):
+# to fixed decimals or to significant digits, halves away from zero; `nothing`
+# for not at all.
+struct _FixedDigits; k::Int; end
+struct _SigDigits; k::Int; end
+# Exact powers of ten, the same literals in the browser (`htmxoFixed`).
+const _SUMMARY_POW10 = (1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10)
+# Up to 15 significant digits a rounded number's digits stay an exact Float64
+# integer, in Julia and in the browser (`_round_sig`).
+const _MAX_SIGDIGITS = 15
+_number_rounding(::Nothing, ::Nothing, who="format_number") = nothing
+_number_rounding(digits::Integer, ::Nothing, who="format_number") = 0 <= digits <= length(_SUMMARY_POW10) - 1 ?
+    _FixedDigits(digits) : throw(ArgumentError(
+        "$who: digits must be between 0 and $(length(_SUMMARY_POW10) - 1), got $digits"))
+_number_rounding(::Nothing, sigdigits::Integer, who="format_number") = 1 <= sigdigits <= _MAX_SIGDIGITS ?
+    _SigDigits(sigdigits) : throw(ArgumentError(
+        "$who: sigdigits must be between 1 and $_MAX_SIGDIGITS, got $sigdigits"))
+_number_rounding(::Integer, ::Integer, who="format_number") = throw(ArgumentError(
+    "$who: give digits (fixed decimals) or sigdigits (significant digits), not both"))
+
 """
-    ColumnSummary(reduce, values...; digits=0)
+    ColumnSummary(reduce, values...; digits=0, sigdigits=nothing)
 
 One column of a group row in a regroupable [`master_detail_table`](@ref),
 computed from the leaves under the group: pass it in `group_summary` under the
@@ -22429,28 +22969,33 @@ in a recorded page with no server.
 A function may return `nothing` or `missing` for a leaf without a value: that
 leaf is left out (both parts of a `:ratio`). A group without any value, or a
 `:ratio` whose denominators sum to zero, shows an empty cell. Numbers are
-rounded to `digits` decimals, halves away from zero, and written with the
-table's `decimal` and `thousands` texts (`texts=table_texts(:de)` writes
-`1.234,5`).
+written with the table's `decimal` and `thousands` texts
+(`texts=table_texts(:de)` writes `1.234,5`), rounded halves away from zero:
+
+- `digits=k` (0 to 10, default 0) writes exactly `k` decimals.
+- `sigdigits=k` (1 to 15) rounds to `k` significant digits and writes the
+  result as [`format_number`](@ref)`(x; sigdigits=k)` does, so a sum of
+  estimates that are each good to two digits shows no more than it supports:
+  with `sigdigits=2`, 29 210 writes `29,000` (`29.000` in German) and 0.15623
+  writes `0.16`. The ⬇ CSV gets the rounded number (`29000`).
+
+Give `digits` or `sigdigits`, not both.
 """
 struct ColumnSummary
     reduce::Symbol
     values::Tuple
-    digits::Int
-    function ColumnSummary(reduce::Symbol, values...; digits::Integer=0)
+    rounding::Union{_FixedDigits,_SigDigits}
+    function ColumnSummary(reduce::Symbol, values...; digits::Union{Nothing,Integer}=nothing,
+                           sigdigits::Union{Nothing,Integer}=nothing)
         arity = get(_SUMMARY_ARITY, reduce, nothing)
         isnothing(arity) && throw(ArgumentError(string("ColumnSummary: unknown reduce ", repr(reduce),
             "; use one of ", join(repr.(keys(_SUMMARY_ARITY)), ", "))))
         length(values) == arity || throw(ArgumentError(string("ColumnSummary: ", repr(reduce), " takes ",
             arity, arity == 1 ? " function" : " functions", ", got ", length(values))))
-        0 <= digits <= length(_SUMMARY_POW10) - 1 || throw(ArgumentError(
-            "ColumnSummary: digits must be between 0 and $(length(_SUMMARY_POW10) - 1), got $digits"))
-        new(reduce, values, Int(digits))
+        new(reduce, values, something(_number_rounding(digits, sigdigits, "ColumnSummary"), _FixedDigits(0)))
     end
 end
 const _SUMMARY_ARITY = (sum=1, mean=1, min=1, max=1, count=0, ratio=2)
-# Exact powers of ten, the same literals in the browser (`htmxoFixed`).
-const _SUMMARY_POW10 = (1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10)
 
 # A leaf's number for a summary: `nothing` when it has none.
 _md_summary_number(::Union{Nothing,Missing}) = nothing
@@ -22512,13 +23057,22 @@ function _print_grouped(io::IO, whole::AbstractString, thousands::AbstractString
     end
 end
 
-# A group summary cell: the summary as the table writes it, and as the ⬇ CSV
-# writes it (`data-htmxo-number`: the same decimals, a `.` and no grouping).
-# `htmxoRegroup` fills the cells of the rows it builds the same way.
-_md_summary_cell(::Nothing, digits, texts, i) = h.td(""; data_htmxo_group_summary=string(i))
-_md_summary_cell(x::Float64, digits, texts::TableTexts, i) =
-    h.td(_format_fixed(x, digits, texts.decimal, texts.thousands);
-         data_htmxo_group_summary=string(i), data_htmxo_number=_format_fixed(x, digits, ".", ""))
+# A group summary cell: the summary as the table writes it
+# (`format_number(x; digits | sigdigits)`), and as the ⬇ CSV writes it
+# (`data-htmxo-number`: the same rounded number with a `.`, no grouping and no
+# power of ten). `htmxoSummaryText` fills the cells of the rows `htmxoRegroup`
+# builds the same way.
+_md_summary_cell(::Nothing, rounding, texts, i) = h.td(""; data_htmxo_group_summary=string(i))
+_md_summary_cell(x::Float64, rounding, texts::TableTexts, i) =
+    h.td(_format_finite(x, texts, rounding);
+         data_htmxo_group_summary=string(i), data_htmxo_number=_summary_key(x, rounding))
+_summary_key(x::Float64, r::_FixedDigits) = _format_fixed(x, r.k, ".", "")
+_summary_key(x::Float64, r::_SigDigits) = let (negative, ds, point) = _round_sig(x, r.k)
+    _format_digits(negative, ds, point, ".", "", false)
+end
+# How the browser rounds a summary: `"digits":k` or `"sigdigits":k`.
+_summary_rounding_json(r::_FixedDigits) = "\"digits\":$(r.k)"
+_summary_rounding_json(r::_SigDigits) = "\"sigdigits\":$(r.k)"
 
 """
     format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing) -> String
@@ -22534,12 +23088,17 @@ writes `0,156`, `1.234.567` and `3,81·10⁻⁵`; the default English texts writ
   digits, `3,81·10⁻⁵`, which reads the same in HTML, Markdown, a
   [`pdf_report`](@ref) and a pasted copy. An integer keeps every digit:
   `1.234.567`.
-- `sigdigits=k` first rounds to `k` significant digits, as
-  `round(x; sigdigits=k)` does: `0.15623` writes `0,156`, `1234567` writes
-  `1.230.000`.
-- `digits=k` (0 to 10) writes exactly `k` decimals, halves away from zero,
-  the way the group sums of [`ColumnSummary`](@ref) are written: `0.15623`
-  writes `0,16` with `digits=2`. It never switches to a power of ten.
+- `sigdigits=k` (1 to 15) first rounds to `k` significant digits, halves
+  away from zero: `0.15623` writes `0,156`, `1234567` writes `1.230.000`, and
+  `2850` writes `2.900` with `sigdigits=2` (where `round(x; sigdigits=2)`
+  rounds the half to even, `2800`). The rounded number is then written as
+  above.
+- `digits=k` (0 to 10) writes exactly `k` decimals, halves away from zero:
+  `0.15623` writes `0,16` with `digits=2`. It never switches to a power of
+  ten.
+
+The group sums of [`ColumnSummary`](@ref) take the same `digits` or
+`sigdigits` and write the same text, in the browser too.
 
 `missing` and `nothing` write `–`; `Inf`, `-Inf` and `NaN` write `∞`, `-∞` and
 `NaN`. A negative number starts with `-`. Other real numbers (a `Rational`, an
@@ -22589,18 +23148,6 @@ _number_value(x::Real) = float(x)
 _number_value(x) = throw(ArgumentError(string(
     "format_number: expected a real number, missing or nothing; got ", repr(x))))
 
-# How a number is rounded: not at all, to fixed decimals or to significant digits.
-struct _FixedDigits; k::Int; end
-struct _SigDigits; k::Int; end
-_number_rounding(::Nothing, ::Nothing) = nothing
-_number_rounding(digits::Integer, ::Nothing) = 0 <= digits <= length(_SUMMARY_POW10) - 1 ?
-    _FixedDigits(digits) : throw(ArgumentError(
-        "format_number: digits must be between 0 and $(length(_SUMMARY_POW10) - 1), got $digits"))
-_number_rounding(::Nothing, sigdigits::Integer) = sigdigits >= 1 ? _SigDigits(sigdigits) :
-    throw(ArgumentError("format_number: sigdigits must be at least 1, got $sigdigits"))
-_number_rounding(::Integer, ::Integer) = throw(ArgumentError(
-    "format_number: give digits (fixed decimals) or sigdigits (significant digits), not both"))
-
 _format_number(::Nothing, texts, rounding) = "–"
 _format_number(x::Integer, texts, rounding) = _format_finite(x, texts, rounding)
 _format_number(x::AbstractFloat, texts, rounding) =
@@ -22618,26 +23165,68 @@ _format_finite(x::Integer, texts, r::_FixedDigits) =
     string(_format_finite(x, texts, nothing), texts.decimal, repeat('0', r.k))
 _format_finite(x::AbstractFloat, texts, r::_FixedDigits) =
     _format_fixed(Float64(x), r.k, texts.decimal, texts.thousands)
-_format_finite(x::Real, texts, r::_SigDigits) = _format_finite(round(x; sigdigits=r.k), texts, nothing)
-function _format_finite(x::AbstractFloat, texts, ::Nothing)
-    negative, ds, point = _shortest_digits(x)
+# Rounding an integer to significant digits leaves an integer, which keeps
+# every digit; a float switches to a power of ten as it does unrounded.
+_format_finite(x::Integer, texts, r::_SigDigits) = let (negative, ds, point) = _round_sig(Float64(x), r.k)
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, false)
+end
+_format_finite(x::AbstractFloat, texts, r::_SigDigits) = let (negative, ds, point) = _round_sig(Float64(x), r.k)
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point))
+end
+_format_finite(x::AbstractFloat, texts, ::Nothing) = let (negative, ds, point) = _shortest_digits(x)
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point))
+end
+
+# A float is written as a power of ten below 10⁻⁴ and from 10¹⁵ up: for
+# ±0.digits × 10^point, a point of -4 or less or 16 or more.
+_float_sci(point) = point <= -4 || point >= 16
+
+# The number ±0.`ds` × 10^`point` (`ds` without leading or trailing zeros;
+# zero has none) written with `decimal` and `thousands`: as a power of ten with
+# superscript digits (`sci`), else positionally. `htmxoDigitsText` writes the
+# same text in the browser.
+function _format_digits(negative::Bool, ds::AbstractString, point::Int, decimal, thousands, sci::Bool)
     isempty(ds) && return "0"
     io = IOBuffer()
     negative && print(io, '-')
-    if abs(x) < 1e-4 || abs(x) >= 1e15
+    if sci
         print(io, ds[1])
-        length(ds) > 1 && print(io, texts.decimal, ds[2:end])
+        length(ds) > 1 && print(io, decimal, ds[2:end])
         print(io, "·10", _superscript(point - 1))
     elseif point <= 0
-        print(io, '0', texts.decimal, repeat('0', -point), ds)
+        print(io, '0', decimal, repeat('0', -point), ds)
     elseif point >= length(ds)
-        _print_grouped(io, ds * repeat('0', point - length(ds)), texts.thousands)
+        _print_grouped(io, ds * repeat('0', point - length(ds)), thousands)
     else
-        _print_grouped(io, ds[1:point], texts.thousands)
-        print(io, texts.decimal, ds[point+1:end])
+        _print_grouped(io, ds[1:point], thousands)
+        print(io, decimal, ds[point+1:end])
     end
     String(take!(io))
 end
+
+# `x` rounded to `k` significant digits, halves away from zero, as
+# `(negative, digits, point)` like `_shortest_digits`. `htmxoSigDigits` takes
+# the same floating-point steps in the browser, so a group summary reads the
+# same before and after a regroup: the exponent comes from exact powers of
+# ten (`log10` only guesses it), and the scaled number is one product or
+# quotient rounded to an integer of at most `_MAX_SIGDIGITS` + 1 digits.
+# (Base's `round(x; sigdigits)` rounds halves to even: 2850 to 2800.)
+function _round_sig(x::Float64, k::Int)
+    a = abs(x)
+    isfinite(a) || throw(ArgumentError("cannot round $x to significant digits: it is not a finite number"))
+    a == 0 && return (false, "", 0)
+    e = floor(Int, log10(a))
+    while a < _exact_pow10(e); e -= 1; end
+    while a >= _exact_pow10(e + 1); e += 1; end
+    d = k - 1 - e
+    n = round(d > 300 ? a * 1e300 * _exact_pow10(d - 300) : d >= 0 ? a * _exact_pow10(d) : a / _exact_pow10(-d),
+              RoundNearestTiesAway)
+    s = string(Int(n))
+    (x < 0, rstrip(s, '0'), length(s) + e + 1 - k)
+end
+# 10ⁿ as the nearest Float64, as the literal `1e<n>` reads; 0 and Inf beyond,
+# as the browser's `Number('1e' + n)` reads them (`parse` refuses those).
+_exact_pow10(n::Int) = n < -323 ? 0.0 : n > 308 ? Inf : parse(Float64, string("1e", n))
 
 # A float's digits as Julia prints it (its shortest round-trip form):
 # `(negative, digits, point)` for ±0.digits × 10^point, without leading or
@@ -22718,9 +23307,29 @@ function _md_json_string(s::AbstractString)
     String(take!(io))
 end
 
+# Write each computed sort key's value of `item` on its column's cell
+# (`sort_values`); `cells` is the table's own copy of the master cells.
+function _md_sort_values!(cells, sort_columns, item, headers)
+    attr = Symbol("data-htmxo-sort-keys")
+    for (col, fs) in sort_columns
+        label = repr(_header_label(headers[col]))
+        length(cells) >= col || throw(ArgumentError(string("master_detail_table: column ", label,
+            " has sort keys, but `master` returned ", length(cells), " cells")))
+        cell = cells[col]
+        cell isa Node || throw(ArgumentError(string("master_detail_table: the cell of column ", label,
+            " must be a <td> node to carry its sort values, got ", typeof(cell))))
+        haskey(HTMX.attrs(cell), attr) && throw(ArgumentError(string("master_detail_table: column ",
+            label, " computes its sort values from `sort_keys`; its cell may not set them too")))
+        cells[col] = Node(HTMX.tag(cell),
+            merge(copy(HTMX.attrs(cell)), Dict{Symbol,Any}(attr => _sort_values_json(f(item) for f in fs))),
+            HTMX.children(cell))
+    end
+    cells
+end
+
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
-        group_by_url, group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, selectable,
+        group_by_url, group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
@@ -22775,7 +23384,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     group_by_values = isempty(levels) ? [something(flat_name, "")] : levels
     nlevels == 0 && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows needs a grouping, but $(repr(requested)) is ungrouped"))
-    update = !isnothing(update_rows) || !isnothing(update_groups)
+    # `group_masters`: the group rows alone, as an update, for a table the
+    # browser has regrouped (every leaf is on the page already).
+    if group_masters
+        isnothing(group_master) && throw(ArgumentError(
+            "master_detail_table: group_masters returns the group rows from `group_master`; without it the browser builds them itself"))
+        isnothing(group_rows_url) || throw(ArgumentError(
+            "master_detail_table: group_masters returns the group rows of a table the browser regroups, but with `group_rows_url` (lazy groups) the server regroups it, as a whole table"))
+        others = [string(n) for (n, v) in (:group_rows => group_rows, :update_rows => update_rows,
+            :update_groups => update_groups) if !isnothing(v)]
+        isempty(others) || throw(ArgumentError(string("master_detail_table: group_masters is a response of its own; ",
+            "drop ", join(others, " and "))))
+    end
+    update = !isnothing(update_rows) || !isnothing(update_groups) || group_masters
     update && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows loads a lazy group; update_rows/update_groups are a separate response"))
     _attrs(item) = isnothing(master_attrs) ? (;) : master_attrs(item)
@@ -22787,10 +23408,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # (`htmxoRegroup`). Lazy groups hold rows it has not got, so their
     # control regroups through the server. Group rows from `group_master`
     # need the server too: after the browser has regrouped, a hidden element
-    # asks `group_by_url` for them. A recording strips that element's request
-    # (it names a kwargs route) and leaves the control live, so a recorded
-    # page, like a table without `group_by_url`, shows the browser's group
-    # rows: the group's key, its count and the `group_summary` cells.
+    # asks `group_by_url` for them, with `group_masters=true` (a route that
+    # passes it on answers with the group rows alone, one that does not with
+    # the whole table; `hx-sync` drops a request the next regroup overtakes).
+    # A recording strips that element's request (it names a kwargs route)
+    # and leaves the control live, so a recorded page, like a table without
+    # `group_by_url`, shows the browser's group rows: the group's key, its
+    # count and the `group_summary` cells.
     browser = isnothing(group_rows_url)
     serve = !isnothing(group_by_url) && !browser
     refresh = !isnothing(group_by_url) && browser && !isnothing(group_master)
@@ -22803,8 +23427,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         serve ? group_by_url : nothing, select_form, table_id, texts),)
     toolbar = !(control && refresh) ? toolbar : (toolbar...,
         h.span(; hidden=true, data_htmxo_group_refresh="", hx_get=string(group_by_url), hx_trigger="htmxo-regroup",
-            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
-            hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this)}"))
+            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML", hx_sync="this:replace",
+            hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this), group_masters: true}"))
     leaf_keys = _md_update_keys(update_rows)
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     # A group's key names it in callbacks, selections and requests; its
@@ -22834,7 +23458,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     summary_cell(col, members) = let i = findfirst(p -> first(p) == col, summaries)
         isnothing(i) ? h.td("") :
             _md_summary_cell(_md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in members]),
-                             last(summaries[i]).digits, texts, i - 1)
+                             last(summaries[i]).rounding, texts, i - 1)
     end
     default_master = _md_default_group_master(ncols, k -> last(gpath(k)), summary_cell)
     gmaster = something(group_master, default_master)
@@ -22853,12 +23477,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # The groups and leaves a render shows: all of them; for a lazy load,
     # the target group whole (and the path to it); for an update, the
     # named groups whole, the groups on their paths and those holding an
-    # updated leaf. Summaries always see a group's full membership.
+    # updated leaf; for `group_masters`, every group and no leaf. Summaries
+    # always see a group's full membership.
     whole(path) = !isnothing(target) ? isprefix(target, path) :
         !update || any(n -> isprefix(n, path), named)
     keep(::_MDGroupLeaf) = true
     keep(g::_MDGroup) = !isnothing(target) ? isprefix(g.path, target) || isprefix(target, g.path) :
-        !update || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
+        !update || group_masters || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
             any(m -> string(key(m)) in leaf_set, g.members)
     # A predicate sees leaves only: a group holding a leaf it opens (its
     # members are every leaf below it) renders open, and eagerly rather
@@ -22964,6 +23589,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
+        _sort_item = x -> x isa _MDGroup ? nothing : x.item,
         _detail_key = x -> x isa _MDGroup ? gid(x.path) : string(key(x.item)),
         update_rows = update ? rendered : nothing,
         # A leaf is linked by its `link_key` (default: its own key), under
@@ -22973,7 +23599,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
-            order=browser ? order_json : nothing))
+            order=browser ? order_json : nothing, group_masters))
     built = tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
@@ -22998,7 +23624,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     config = string("{\"names\":", _md_json_list(grouping_names),
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
         ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
-        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]",
+        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",$(_summary_rounding_json(s.rounding))}" for (_, s) in summaries), ","), "]",
         isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
     h.div(; grouping..., data_htmxo_regroup=config)(template..., store, built)
 end
@@ -23083,11 +23709,15 @@ end
 # so it can remove those it no longer lists: rows by id, every copy of a
 # leaf (`data-htmxo-leaf`), and a group row with all its rows. `places` (see
 # `_md_record_places!`) says where its rows go; `order`, the `group_order`
-# lists the table's browser regrouping goes by from now on.
-function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(), order=nothing)
+# lists the table's browser regrouping goes by from now on. `group_masters`
+# marks the group rows of a browser regroup, which the runtime drops once the
+# reader has regrouped again.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(),
+                        order=nothing, group_masters::Bool=false)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
     isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
+    group_masters && push!(attrs, :data_htmxo_group_masters => "")
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
     isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
@@ -26841,6 +27471,17 @@ Pico's looks. To colour a button otherwise, set `--pico-background-color`,
 `--pico-color` and `--pico-border-color` on it from a later stylesheet, with a
 selector at least as specific as two classes (`.app .cta`).
 
+A disclosure (`<details>`, so also [`SemanticDisclosure`](@ref), the later
+views of [`SemanticAlternatives`](@ref) and a caption's "More") is a bordered
+box: its summary is a bold, tinted bar with the chevron right before the
+label, and its content opens inside the box. Pico draws it as one borderless
+line with the chevron at the far edge. Pico's dropdown menus
+(`details.dropdown`) and button summaries (`summary[role]`) keep Pico's looks.
+The box's rules are as weak as Pico's own, so a component that draws its own
+`<details>` (a menu badge) keeps every property it sets in its own class
+rules. `--htmxo-disclosure-padding` (default `1rem`) is the box's inner
+spacing.
+
 A [`SemanticArtifact`](@ref) download takes the same slate outline, in place
 of Pico's underlined azure link; a later stylesheet restyles it with a
 selector at least as specific as `.app a.htmxo-semantic-artifact`.
@@ -26894,6 +27535,67 @@ pico_bridge() = h.style(Raw("""
 details summary[role=button]:not(.secondary, .contrast)::after,
 [aria-busy=true]:not(input, select, textarea):is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast)::before {
     filter: none;
+}
+/* Pico draws a disclosure (`<details>`) as one borderless line with its
+   chevron at the far edge, and colours the label like a link while it has
+   focus, so readers miss it. It is a bordered box instead: the summary is a
+   bold, tinted bar with the chevron right before the label, and the content
+   opens inside the box. Pico's dropdown menus and button summaries
+   (`summary[role]`) keep their looks. What Pico leaves unset (the box, the
+   bar, the new chevron) has zero specificity and what Pico sets (the label's
+   line height and colours, its chevron, the gap under an open label) has
+   exactly Pico's, so a component that styles its own `<details>` still wins
+   wherever it sets something. */
+:where(details:not(.dropdown, :has(> summary[role]))) {
+    --pico-accordion-active-summary-color: var(--pico-accordion-close-summary-color);
+    --pico-accordion-open-summary-color: var(--pico-accordion-close-summary-color);
+    padding: 0 var(--htmxo-disclosure-padding, 1rem);
+    border: var(--pico-border-width) solid var(--pico-form-element-border-color);
+    border-radius: var(--pico-border-radius);
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) {
+    padding-bottom: var(--htmxo-disclosure-padding, 1rem);
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary) {
+    margin-inline: calc(-1 * var(--htmxo-disclosure-padding, 1rem));
+    padding: 0.6rem var(--htmxo-disclosure-padding, 1rem);
+    border-radius: calc(var(--pico-border-radius) - var(--pico-border-width));
+    background: var(--pico-card-sectioning-background-color);
+    font-weight: 600;
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary):hover {
+    background: color-mix(in srgb, currentColor 7%, var(--pico-card-sectioning-background-color));
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) > :where(summary) {
+    border-bottom: var(--pico-border-width) solid var(--pico-muted-border-color);
+    border-end-start-radius: 0;
+    border-end-end-radius: 0;
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary)::before {
+    content: "";
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    margin-inline-end: 0.5rem;
+    vertical-align: -0.125rem;
+    background-image: var(--pico-icon-chevron);
+    background-position: center;
+    background-size: 1rem auto;
+    background-repeat: no-repeat;
+    transform: rotate(-90deg);
+    transition: transform var(--pico-transition);
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) > :where(summary)::before {
+    transform: rotate(0);
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :last-child { margin-bottom: 0; }
+details:where(:not(.dropdown, :has(> summary[role]))) > summary { line-height: var(--pico-line-height); }
+details:where(:not(.dropdown, :has(> summary[role]))) > summary::after { content: none; }
+details:where(:not(.dropdown, :has(> summary[role])))[open] > summary {
+    margin-bottom: var(--htmxo-disclosure-padding, 1rem);
+}
+details:where(:not(.dropdown, :has(> summary[role]))) > summary:focus-visible:not([role]) {
+    outline-offset: calc(-1 * var(--pico-outline-width));
 }
 /* A `SemanticArtifact` is a download control, drawn in the buttons' slate
    outline: icon, label, then format and size in muted `small` text, which
@@ -27436,6 +28138,37 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 .htmxo-sortable-table thead th > .htmxo-sort-control:focus-visible {
     outline: 2px solid var(--htmxo-accent, currentColor); outline-offset: .15em;
 }
+/* A column with several sort keys: the ▾ beside its label and the menu it
+   opens (a popover in the top layer, placed by `htmxoSortMenu`), one row per
+   key with ▲/▼; the pressed one is the order in force. Buttons reset as above. */
+.htmxo-sort-menu-holder { white-space: nowrap; }
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle,
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick {
+    width: auto; margin: 0; border: none; background: transparent; color: inherit;
+    font: inherit; box-shadow: none; cursor: pointer; line-height: inherit;
+}
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle { padding: 0 .2em; margin-left: .15em; opacity: .65; }
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle:is(:hover, [aria-expanded="true"]) { opacity: 1; }
+.htmxo-sort-menu {
+    position: fixed; inset: auto; margin: 0; padding: .4rem .5rem; min-width: 12em;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: .375rem;
+    background: var(--pico-background-color, Canvas); color: var(--pico-color, CanvasText);
+    box-shadow: 0 .25rem 1rem rgb(0 0 0 / .2); font-size: .875rem; font-weight: normal;
+    text-align: left; white-space: nowrap;
+}
+.htmxo-sort-menu-title { font-weight: 600; opacity: .75; margin-bottom: .2rem; }
+.htmxo-sort-menu-row { display: flex; align-items: center; gap: .25rem; }
+.htmxo-sort-menu-row > span { flex: 1; padding-right: .75rem; }
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick { padding: .1rem .45rem; border-radius: .25rem; }
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick[aria-pressed="true"] {
+    background: color-mix(in srgb, currentColor 18%, transparent); font-weight: 700;
+}
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle:focus-visible,
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick:focus-visible {
+    outline: 2px solid var(--htmxo-accent, currentColor); outline-offset: .1em;
+}
+.htmxo-sort-caret .htmxo-sort-key { font-weight: normal; opacity: .8; }
 
 /* A table's own controls (the search field with its count, Group by,
    Expand/Collapse all, the selection bar) share one line, wrapping only when
@@ -29203,6 +29936,54 @@ const _TABSET_URL_RESTORE = "(window.htmxoTabset || (ts => ts.closest('.htmxo-em
 _tabset_url_restore(::Nothing) = ()
 _tabset_url_restore(url_param) = (h.script(Raw(_TABSET_URL_RESTORE)),)
 
+# The tab bar or one panel of a `tabset`, in every format. HTML and HXML write
+# the node as the browser shows it. Markdown, which a `?plain` reader or a PDF
+# reads top to bottom with no tab to click, writes `markdown` instead: nothing
+# for the tab bar, and each tab as its label in bold followed by its content —
+# what `SemanticDisclosure` writes for a label and the body it opens, so a tab
+# whose content its reader does not see goes with its label. A lazy tab's
+# content is not on the page, so its label links the address that has it. The
+# walkers that read the HTML (`?error`, static export, prestart, layout checks)
+# see through to the node.
+struct _TabsetPart
+    node::Node
+    markdown::Any
+end
+Base.show(io::IO, m::MIME"text/html", p::_TabsetPart) = show(io, m, p.node)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", p::_TabsetPart) = show(io, m, p.node)
+function Base.show(io::IO, m::MIME"text/markdown", p::_TabsetPart)
+    _shows_nothing(p.markdown, _ambient_audience()) || show(io, m, p.markdown)
+    nothing
+end
+HTMX.markdown_block(p::_TabsetPart) = !_shows_nothing(p.markdown, _ambient_audience())
+filter_errors(p::_TabsetPart) = filter_errors(p.node)
+_filter_errors_child(p::_TabsetPart) = _filter_errors_child(p.node)
+_strip_md_chrome(p::_TabsetPart) = let markdown = _strip_md_chrome(p.markdown)
+    isnothing(markdown) ? nothing : _TabsetPart(p.node, markdown)
+end
+_strip_md_chrome_child(p::_TabsetPart) = _strip_md_chrome(p)
+_rescue_semantic!(out, p::_TabsetPart) = _rescue_semantic!(out, p.node)
+function _static_walk(p::_TabsetPart, rules::_StaticRules)
+    walked = _static_walk(p.node, rules)
+    walked === _STATIC_REMOVED ? walked : _TabsetPart(walked, p.markdown)
+end
+_static_walk_child(p::_TabsetPart, rules) = _static_walk(p, rules)
+_prestart_walk(p::_TabsetPart, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(p.node, walk, blocked), node -> _TabsetPart(node, p.markdown))
+_semantic_layout_children(p::_TabsetPart) = (p.node,)
+
+# A label that is not text reads as its words, as a master/detail row label does.
+_tabset_label_text(label::AbstractString) = label
+_tabset_label_text(label) = _md_label_text(Any[label])
+function _tabset_markdown(label, content)
+    name = _tabset_label_text(label)
+    isempty(name) ? content : SemanticDisclosure(name, Any[content])
+end
+function _tabset_markdown(label, url::AbstractString)
+    name = _tabset_label_text(label)
+    string("**[", isempty(name) ? url : name, "](", url, ")**")
+end
+
 include("comparison.jl")
 
 """
@@ -29251,6 +30032,13 @@ load after the page, and scrolls to a tabset that arrives in a fragment
 `active` picks the tab shown when the URL names none, by position or by name
 (`active="sonden"`). Keeping the tab in the URL needs [`tabset_script`](@ref),
 which [`htmx`](@ref) pages carry.
+
+Markdown (`?plain`, [`to_markdown_string`](@ref), [`pdf_report`](@ref)) has no
+tab to click, so it writes no tab bar: every tab follows in order, its label in
+bold and then its content, as a [`SemanticDisclosure`](@ref) writes its label
+and body. A tab whose content its reader does not see ([`private`](@ref)
+content read publicly, with no stand-in) is left out with its label, and a lazy
+tab is its label as a link to its address (`**[Details](/api/details)**`).
 """
 function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing,
                 url_param="tab", names=nothing)
@@ -29258,7 +30046,7 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
         _tabset_checked_names(_tabset_names(tabs, names))
     active = _tabset_active_index(active, tab_names)
     h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload)...)(
-        h.nav(
+        _TabsetPart(h.nav(
             h.ul([
                 h.li(h.a(label;
                     href="#",
@@ -29279,8 +30067,9 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
                 ))
                 for (i, (label, content)) in enumerate(tabs)
             ]...)
-        ),
-        [_tabset_panel(content, i, active, id) for (i, (_, content)) in enumerate(tabs)]...,
+        ), nothing),
+        [_TabsetPart(_tabset_panel(content, i, active, id), _tabset_markdown(label, content))
+         for (i, (label, content)) in enumerate(tabs)]...,
         _tabset_url_restore(url_param)...
     )
 end
