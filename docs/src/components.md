@@ -357,6 +357,35 @@ each `.table-wrap` `data-htmxo-width="fits"` or `"wide"`. Without the runtime
 the table keeps its sideways scroll and its header scrolls away. Markdown and
 PDF output are unchanged: the line is HTML only.
 
+#### Columns keep their widths {#table-columns}
+
+A reader opening a row's detail, a lazy detail or lazy group rows arriving,
+a group or branch expanding, a search or filter hiding rows, or a row update
+never moves the columns of a `sortable_table`, `render_table` or
+`master_detail_table`, flat or hierarchical. Apps write nothing for it: no
+fixed column widths, no script.
+
+- **The widths fit every row the table holds.** The table runtime sizes the
+  columns once with the browser's own table layout over all its rows, shown
+  or hidden: the leaves of collapsed groups and branches and the rows a
+  search hides count as if they were shown. Detail rows do not: a detail's
+  content (a form, a PDF preview, a sub-table) fills the width the columns
+  give it and never widens them.
+- **Then the widths hold.** A row that arrives later (lazy group rows, a row
+  update) wraps its text inside its column, breaking a word too long for it.
+- **The columns are sized again** when the table's room changes by more than
+  two scrollbars (the window or a sidebar resizes), when the reader regroups
+  the table, when a table first shows (inside a closed tab or detail row) and
+  once web fonts have loaded. A table filling its room keeps its columns' shares
+  of it, so a scrollbar appearing narrows them all a little instead of
+  re-sizing them.
+
+The table carries `data-htmxo-columns` (`"held"` once sized, with a
+`<colgroup>` of the widths and `table-layout: fixed`); a morph swap that
+drops them gets them back before the browser paints. Without the runtime the
+browser's auto layout runs, with detail content still left out of the widths.
+Markdown and PDF output are unchanged.
+
 #### Row selection {#table-selection}
 
 `selectable="<input name>"` on `sortable_table`, `render_table` or
@@ -427,10 +456,17 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
 - **Keys.** `master_detail_table` keys each item row by `link_key(item)`,
   which defaults to its `key` (as a string, not the sanitised row id),
   including every copy of a leaf that a regrouped table lists under several
-  groups; group rows have no key. `render_table` keys rows by `link_key(row)`.
-  Hand-built `sortable_table` rows carry `data-htmxo-link-key`, or are keyed
-  by their `data-htmxo-select-key`. A detail row counts as its master. Keys
-  compare as strings.
+  groups; group rows have no key of their own. `render_table` keys rows by
+  `link_key(row)`. Hand-built `sortable_table` rows carry
+  `data-htmxo-link-key`, or are keyed by their `data-htmxo-select-key`. A
+  detail row counts as its master. Keys compare as strings.
+- **Group rows.** Hovering or focusing a group row (of `groupings`, at any
+  level) or a branch of a `children` tree announces every item in it: the
+  street over its street sides, the district over its zones. That includes
+  collapsed rows and the leaves of a lazy group that have not loaded, and
+  leaves out the items the search or a filter hides, so the hover names what
+  the table shows. A branch announces its own key too. The other tables light
+  every one of those items, and a linked plot highlights all of them.
 - **Several tables of the same items.** A `master_detail_table`'s `key` names
   its row and detail ids, so it must be unique on the page. When two tables on
   one page show the same items, keep each table's `key` unique and give both
@@ -444,21 +480,27 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
   ```
 
   `link_key` without `link` throws, since it would highlight nothing.
-- **The event.** Hovering or keyboard-focusing a keyed row dispatches
-  `htmxo:link` on `document` with `detail` `{group, key, source}`; when the
-  hover ends, `key` is `null`. Every linked table listens for it and marks the
-  rows of its group that hold the key (`data-htmxo-linked`). A plot or any
-  other element joins the group by listening for the same event and
-  dispatching it on its own hover; page script can call
-  `htmxoLink(group, key)` (`null` clears). The latest key per group is kept in
-  `window.htmxoLinkState`, so a table that is swapped in, regrouped or filtered
-  later shows it too.
+- **The event.** Hovering or keyboard-focusing a row dispatches `htmxo:link`
+  on `document` with `detail` `{group, key, keys, source}`. `keys` lists the
+  items the row stands for (one for an item row, all of them for a group row)
+  and is empty when the hover ends; `key` is the row's own key, else the one
+  item a group holds, else `null`. Every linked table listens for it and marks
+  the rows of its group that hold one of the keys (`data-htmxo-linked`). A
+  plot or any other element joins the group by listening for the same event,
+  reading `keys` (an announcement without `keys` names `key` alone), and
+  dispatching it on its own hover; page script can call `htmxoLink(group, key)`
+  or `htmxoLink(group, [key1, key2])` (`null` clears). The latest
+  announcement per group is kept in `window.htmxoLinkState`, so a table that
+  is swapped in, regrouped or filtered later shows it too. All of it runs in
+  the browser, so it works the same in a page recorded with `record!` and
+  served as plain files.
 - **Hidden rows.** A highlight never changes the table. An item inside a
   collapsed group or branch lights up the innermost shown row above it, with a
-  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`
-  (the `linked_inside` and `linked_deep` texts, below). That includes a group
-  whose rows load lazily. A row that the search or a filter hides lights up
-  nothing. A lit row that is out of view scrolls into view inside the table's
+  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`,
+  or `↳ 3 inside` when it holds several hovered items (the `linked_inside`,
+  `linked_deep` and `linked_inside_many` texts, below). That includes a group
+  whose rows load lazily. The row the hover is on lights up as itself. A row
+  that the search or a filter hides lights up nothing. A lit row that is out of view scrolls into view inside the table's
   own scroll box (an `overflow: auto` wrapper), never the page, and only when
   the hover started outside that table.
 - **Theme.** Lit rows are tinted and outlined from `--htmxo-accent`; set
@@ -491,13 +533,14 @@ The texts cover everything these tables write themselves: the search field
 to load (`rows_failed`, `rows_missing`), the CSV button (`csv`), the toggle
 of the table's caption (`more`, the same word as `caption_texts`, see
 [Captions](#captions)) and the note on a row that holds a hovered item in a
-collapsed group (`linked_inside`, `linked_deep`, see
+collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`, see
 [Hover linking](#table-linking)). The `TableTexts` docstring names them all.
 
 A text in braces is a placeholder: `count` takes `{shown}` and `{total}` (items,
 not rows: see [Client-side search](#table-search)), the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
-`{level}`), `rows_failed` takes `{status}` and `linked_deep` `{levels}`. The browser writes the live count
+`{level}`), `rows_failed` takes `{status}`, `linked_deep` `{levels}` and `linked_inside_many`
+`{count}`. The browser writes the live count
 and status lines from the same templates, so they are strings, not Julia
 functions: the count changes on every keystroke without asking the server. An
 unknown locale, text name or placeholder throws an `ArgumentError`.
@@ -1213,7 +1256,7 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
-### `loading_indicator_script()` and `request_feedback_*`
+### `loading_indicator_script()` and `request_feedback_*` {#request-feedback}
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.
 `htmx()` includes `request_feedback()` by default (`feedback=true`);
@@ -1224,6 +1267,30 @@ and the element htmx resolved as the request's target. That covers an inherited
 a timeout) flashes red, and the shell's
 [failure toast](api.md#failure-toasts) says why. A request the page aborted, or
 an answer that navigates, only clears the outline.
+
+A part of the page that the request will replace says so while the request
+runs, once it has taken 0.3 s (a faster answer just swaps in). The part is
+dimmed (class `htmxo-loading`) and carries `aria-busy="true"`, and a status
+line (`div.htmxo-loading-status`, `role="status"`) sits over the middle of its
+visible box. When the reader chose what is coming, for a GET request, the line
+names it: a select's option, a radio button's label, a link's text
+("Loading Kreuzberg…"). Otherwise it says "Loading…". The words are `loading`
+and `loading_named` of the page's [`error_texts`](api.md#failure-toasts), so
+`htmx(...; error_texts=error_texts(:de))` gives "Kreuzberg wird geladen…".
+This applies to swaps that replace the part's content (`innerHTML`,
+`outerHTML`, `textContent`, the morph swaps), not to `hx-swap="none"`, an
+insertion beside or inside the part, or `delete`, and not when the part is a
+control (button, input, select, textarea, link, label, summary) or the whole
+`body`. Set `data-htmxo-loading="…"` on the requesting element, or an element
+around it, for other words, and `data-htmxo-loading="false"` to leave its parts
+unmarked, for an app that draws its own placeholder. The mark ends when the
+answer is swapped in, or when the request fails, times out or is aborted. A
+request that replaces a running one on the same part
+(`hx-sync="this:replace"`, a second pick) keeps the part marked without a gap.
+Pico styles every `[aria-busy=true]` element (a spinner before it,
+`white-space: nowrap`, no pointer events), and none of that reaches the part:
+the spinner is removed, the other two are held as they were, and a part with a
+`::before` of its own that Pico would change is not marked busy.
 
 Only requests the reader started are marked. A request the page sends by
 itself draws no outline, and its element does not dim: a poll, a preload, and
