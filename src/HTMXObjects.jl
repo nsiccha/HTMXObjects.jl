@@ -3704,6 +3704,13 @@ collapse into, so their correct projection is the label followed by the whole
 body. Wrapping semantic children in markup instead would force the entire
 subtree down the HTML→Markdown translation path and lose every peer projection
 underneath it.
+
+A disclosure with nothing to open renders nothing in any format, its label
+included. That covers a disclosure with no children, one holding only `nothing`,
+and one whose [`private`](@ref) content has no stand-in for a public reader.
+In Markdown it also covers a body that held only form controls. Groups and
+vectors of such children count as empty too. A static export also leaves out
+a disclosure whose controls it removed (`controls=:remove`).
 """
 struct SemanticDisclosure <: SemanticNode
     summary::String
@@ -3721,7 +3728,9 @@ Several views of the same content — a verbatim source and its rendered
 preview, a summary and its full body. The first view is the DEFAULT: it
 renders directly, and it is the ONLY view in the Markdown, plain and HXML
 peers. Every later view renders collapsed inside a native `<details>` with its
-label as the `<summary>` — view-switching with no client JavaScript.
+label as the `<summary>` — view-switching with no client JavaScript. A later
+view with nothing to show its reader, such as [`private`](@ref) content without
+a stand-in for a public reader, is left out together with its label.
 
 Later views MUST be `label => view` pairs (the label heads the collapsed
 section); anything else is an `ArgumentError`, as is an empty call. To show a
@@ -4566,19 +4575,25 @@ _semantic_html_node(section::SemanticSection, level=_semantic_heading_level()) =
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
 _semantic_html_node(group::SemanticGroup) = h.div(
     group.children...; class="htmxo-semantic-group")
-_semantic_html_node(disclosure::SemanticDisclosure) = h.details(
-    h.summary(disclosure.summary), disclosure.children...;
-    class="htmxo-semantic-disclosure")
+# A disclosure with nothing to open for its reader has no peer at all, rather
+# than a label over an empty body (`_shows_nothing`).
+_semantic_html_node(disclosure::SemanticDisclosure) =
+    _shows_nothing(disclosure, _ambient_audience()) ? nothing : h.details(
+        h.summary(disclosure.summary), disclosure.children...;
+        class="htmxo-semantic-disclosure")
 
 # The default view renders directly; every later view sits collapsed in a
 # native `<details>` under its label — switching with no client JavaScript.
+# A later view with nothing to show its reader is left out with its label.
 # Native elements already render the meaning (Pico styles them), so like the
 # other containers this owes no framework CSS: stacked blocks need no layout.
 function _semantic_html_node(alt::SemanticAlternatives)
+    audience = _ambient_audience()
     h.div(
         first(alt.views),
         (h.details(h.summary(String(first(v))), last(v);
-            class="htmxo-semantic-alternative") for v in alt.views[2:end])...;
+            class="htmxo-semantic-alternative")
+         for v in alt.views[2:end] if !_shows_nothing(last(v), audience))...;
         class="htmxo-semantic-alternatives")
 end
 
@@ -4607,10 +4622,11 @@ _semantic_hxml_node(section::SemanticSection, level=_semantic_heading_level()) =
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
 _semantic_hxml_node(group::SemanticGroup) = h.div(
     map(_semantic_hxml_child, group.children)...; class="htmxo-semantic-group")
-_semantic_hxml_node(disclosure::SemanticDisclosure) = h.details(
-    h.summary(disclosure.summary),
-    map(_semantic_hxml_child, disclosure.children)...;
-    class="htmxo-semantic-disclosure")
+_semantic_hxml_node(disclosure::SemanticDisclosure) =
+    _shows_nothing(disclosure, _ambient_audience()) ? nothing : h.details(
+        h.summary(disclosure.summary),
+        map(_semantic_hxml_child, disclosure.children)...;
+        class="htmxo-semantic-disclosure")
 # HXML readers cannot expand a `<details>` either, so like the text peers the
 # HXML peer is the default view alone, classified before serializing.
 _semantic_hxml_node(alt::SemanticAlternatives) =
@@ -4623,10 +4639,13 @@ for T in (SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
           SemanticLink, SemanticAction, SemanticArtifact,
           SemanticGroup, SemanticDisclosure, SemanticAlternatives)
     @eval Base.show(io::IO, mime::MIME"text/html", value::$T) =
-        show(io, mime, _semantic_html_node(value))
+        _show_semantic_peer(io, mime, _semantic_html_node(value))
     @eval Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", value::$T) =
-        show(io, mime, _semantic_hxml_node(value))
+        _show_semantic_peer(io, mime, _semantic_hxml_node(value))
 end
+# An element without a peer (a disclosure with nothing to open) writes nothing.
+_show_semantic_peer(io::IO, mime::MIME, ::Nothing) = nothing
+_show_semantic_peer(io::IO, mime::MIME, peer) = show(io, mime, peer)
 # A section's peer is built at the level it opens here and shown with its
 # children one level below: they render inside its `show`, not before it.
 for (mime, peer) in ((MIME"text/html", :_semantic_html_node),
@@ -4651,9 +4670,14 @@ for mime in (MIME"text/html", MIME"application/vnd.hyperview+xml",
         _semantic_show_leaf(io, mime, plot.layer)
 end
 
+# A child that shows its reader nothing (`_shows_nothing`) takes no separator.
 function _semantic_show_children(io::IO, mime::MIME, children, separator)
-    for (index, child) in enumerate(children)
-        index == 1 || print(io, separator)
+    audience = _ambient_audience()
+    wrote = false
+    for child in children
+        _shows_nothing(child, audience) && continue
+        wrote && print(io, separator)
+        wrote = true
         _semantic_show_leaf(io, mime, child)
     end
 end
@@ -4701,7 +4725,7 @@ Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
     _semantic_heading(_semantic_card_level()) do level
         print(io, _semantic_heading_sigil(level), " ", card.title,
             _markdown_heading_anchor(card.anchor))
-        isempty(card.children) || print(io, "\n\n")
+        _shows_nothing(card.children, _ambient_audience()) || print(io, "\n\n")
         _semantic_show_children(io, mime, card.children, "\n\n")
     end
 
@@ -4760,7 +4784,7 @@ Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_heading_level()) do level
         print(io, _semantic_heading_sigil(level), " ", section.title,
             _markdown_heading_anchor(section.anchor))
-        isempty(section.children) || print(io, "\n\n")
+        _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
         _semantic_show_children(io, mime, section.children, "\n\n")
     end
 
@@ -4769,11 +4793,11 @@ Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
 
 # Not a header: a disclosure's label names a body, it does not open a document
 # level. Collapsing is a viewport affordance HTML has and these formats do not,
-# so the body is simply present.
+# so the body is simply present. With nothing to open, there is no label either.
 function Base.show(io::IO, mime::MIME"text/markdown",
                    disclosure::SemanticDisclosure)
-    print(io, "**", disclosure.summary, "**")
-    isempty(disclosure.children) || print(io, "\n\n")
+    _shows_nothing(disclosure, _ambient_audience()) && return
+    print(io, "**", disclosure.summary, "**\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
@@ -4792,6 +4816,9 @@ Base.show(io::IO, mime::MIME"text/markdown", alt::SemanticAlternatives) =
 # and stays in its line here too.
 HTMX.markdown_block(::SemanticNode) = true
 HTMX.markdown_block(::Union{SemanticStatus,SemanticLink,SemanticAction,SemanticArtifact}) = false
+# A disclosure that writes nothing delimits nothing.
+HTMX.markdown_block(disclosure::SemanticDisclosure) =
+    !_shows_nothing(disclosure, _ambient_audience())
 
 function Base.show(io::IO, mime::MIME"text/plain", fields::SemanticFields)
     for (key, value) in fields.pairs
@@ -4807,7 +4834,7 @@ Base.show(io::IO, ::MIME"text/plain", status::SemanticStatus) = print(
 
 function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
     print(io, card.title)
-    isempty(card.children) || print(io, "\n\n")
+    _shows_nothing(card.children, _ambient_audience()) || print(io, "\n\n")
     _semantic_show_children(io, mime, card.children, "\n\n")
 end
 
@@ -4843,7 +4870,7 @@ end
 
 function Base.show(io::IO, mime::MIME"text/plain", section::SemanticSection)
     print(io, section.title)
-    isempty(section.children) || print(io, "\n\n")
+    _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
     _semantic_show_children(io, mime, section.children, "\n\n")
 end
 
@@ -4852,8 +4879,8 @@ Base.show(io::IO, mime::MIME"text/plain", group::SemanticGroup) =
 
 function Base.show(io::IO, mime::MIME"text/plain",
                    disclosure::SemanticDisclosure)
-    print(io, disclosure.summary)
-    isempty(disclosure.children) || print(io, "\n\n")
+    _shows_nothing(disclosure, _ambient_audience()) && return
+    print(io, disclosure.summary, "\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
@@ -5040,9 +5067,12 @@ with [`to_markdown_string`](@ref)`(x; audience=:private)` or inside
 [`with_audience`](@ref)`(f, :private)`. The live app always shows everything.
 [`export_audience`](@ref) tells a route which audience it answers for.
 
-`private` works wherever a value is rendered, in HTML and in Markdown: as a
-child of an element, in a semantic element, or as a route's whole answer. A
-route whose whole answer is `private(x)` without a stand-in is a private page.
+`private` works wherever a value is rendered, in HTML, HXML, Markdown and plain
+text: as a child of an element, in a semantic element, or as a route's whole
+answer. A [`SemanticDisclosure`](@ref) left with nothing to open renders
+nothing, label included, and so does a [`SemanticAlternatives`](@ref) view left
+with nothing to show. A route whose whole answer is `private(x)` without a
+stand-in is a private page.
 A public answer to it is a `404` carrying the header `X-HTMXO-Private: true`
 and nothing else; [`export_site`](@ref) writes no file for it and leaves out
 every link to it. A static export never follows a link inside content it
@@ -5274,6 +5304,25 @@ function _rescue_semantic!(out, x::_PrivateMark)
     nothing
 end
 
+# Whether `x` shows a reader of `audience` nothing at all, judged by its
+# structure: `nothing`, private content without a stand-in for a public reader,
+# or a vector, tuple, group or disclosure holding only such values. Anything
+# else is content, an empty string or element included, and so is a
+# `private() do … end` block for a private reader: it is not run to find out.
+# A disclosure with nothing to open renders nothing, label included, and so
+# does a collapsed alternative.
+_shows_nothing(x, audience) = false
+_shows_nothing(::Nothing, audience) = true
+_shows_nothing(xs::Union{AbstractVector,Tuple}, audience) =
+    all(x -> _shows_nothing(x, audience), xs)
+_shows_nothing(p::Private, audience) = audience === :public ?
+    _shows_nothing(p.public, audience) :
+    !(p.content isa Function) && _shows_nothing(p.content, audience)
+_shows_nothing(group::SemanticGroup, audience) = _shows_nothing(group.children, audience)
+_shows_nothing(disclosure::SemanticDisclosure, audience) =
+    _shows_nothing(disclosure.children, audience)
+_shows_nothing(x::_PrivateMark, audience) = _shows_nothing(x.content, audience)
+
 const _PRIVATE_OPEN = "<!--htmxo-private-->"
 const _PRIVATE_CLOSE = "<!--/htmxo-private-->"
 
@@ -5285,6 +5334,8 @@ function Base.show(io::IO, m::MIME"text/html", p::Private)
 end
 Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", p::Private) =
     _show_html_content(io, m, _shown(p))
+# Without this, plain text would print the struct, private content included.
+Base.show(io::IO, m::MIME"text/plain", p::Private) = _show_html_content(io, m, _shown(p))
 Base.show(io::IO, m::MIME"text/markdown", p::Private) =
     let shown = _shown(p)
         isnothing(shown) || show(io, m, shown)
@@ -5302,12 +5353,14 @@ _strip_md_chrome_child(p::Private) = _strip_md_chrome_child(_shown(p))
 _rescue_semantic!(out, p::Private) = _rescue_semantic!(out, _shown(p))
 
 # Content renders as an element's child does: its own markup, else escaped
-# text; several values in order.
+# text; several values in order. Plain text is a semantic element's leaf.
 _show_html_content(io, m, ::Nothing) = nothing
 _show_html_content(io, m, xs::Union{AbstractVector,Tuple}) =
     foreach(x -> _show_html_content(io, m, x), xs)
-_show_html_content(io, m, x) =
+_show_html_content(io, m, x) = _show_content_leaf(io, m, x)
+_show_content_leaf(io, m, x) =
     showable(m, x) ? show(io, m, x) : print(io, HTMX.escape(string(x)))
+_show_content_leaf(io, m::MIME"text/plain", x) = _semantic_show_leaf(io, m, x)
 
 # A route whose whole answer is private content without a stand-in is a
 # private page; a public answer to it holds nothing of it.
@@ -6240,9 +6293,21 @@ _static_walk_child(c::_MDCompanionRow, rules) = _static_walk(c, rules)
 # a `SemanticAction`'s `hx-get`, prose links, and every element a semantic
 # container holds follow the same rules as a hand-built element. An export is
 # HTML alone, so nothing is lost (the same reason a snapshot walks its value).
+# The peer is built for the export's audience, which decides what a disclosure
+# or a collapsed alternative leaves out.
+_static_peer(value::SemanticNode, rules::_StaticRules) =
+    _with_audience(() -> _semantic_html_node(value), rules.spec.audience)
 _static_walk(value::SemanticNode, rules::_StaticRules) =
-    _static_walk(_semantic_html_node(value), rules)
+    _static_walk(_static_peer(value, rules), rules)
 _static_walk_child(value::SemanticNode, rules) = _static_walk(value, rules)
+# A disclosure with nothing to open has no peer. The walk can also leave its
+# summary alone, by removing every control in it (`controls=:remove`).
+function _static_walk(disclosure::SemanticDisclosure, rules::_StaticRules)
+    peer = _static_peer(disclosure, rules)
+    isnothing(peer) && return _STATIC_REMOVED
+    walked = _static_walk(peer, rules)
+    walked isa Node && length(HTMX.children(walked)) == 1 ? _STATIC_REMOVED : walked
+end
 # The sections a section holds are built while its children are walked, so the
 # walk runs one heading level below it, as its `show` does.
 _static_walk(section::SemanticSection, rules::_StaticRules) =
@@ -16915,8 +16980,13 @@ _strip_md_chrome(section::SemanticSection) = SemanticSection(
     anchor=section.anchor)
 _strip_md_chrome(group::SemanticGroup) =
     SemanticGroup(_strip_md_chrome_children(group.children))
-_strip_md_chrome(disclosure::SemanticDisclosure) = SemanticDisclosure(
-    disclosure.summary, _strip_md_chrome_children(disclosure.children))
+# A disclosure whose body strips to nothing (form controls, or private content
+# its reader does not see) has nothing to open, so it goes with its label.
+function _strip_md_chrome(disclosure::SemanticDisclosure)
+    children = _strip_md_chrome_children(disclosure.children)
+    _shows_nothing(children, _ambient_audience()) ? nothing :
+        SemanticDisclosure(disclosure.summary, children)
+end
 # Labels are metadata and survive; views strip like any children. An
 # alternative that strips to nothing is dropped; a default that strips to
 # nothing takes the whole element with it (an alternative without a default
@@ -16952,8 +17022,9 @@ Rescuing the node (rather than salvaging its emitted HTML) is what keeps a
 path projects the semantic TREE through its own `show` methods.
 """
 _rescue_semantic!(out, val) = nothing
-_rescue_semantic!(out, val::SemanticNode) =
-    (push!(out, _strip_md_chrome(val)); nothing)
+_rescue_semantic!(out, val::SemanticNode) = let stripped = _strip_md_chrome(val)
+    isnothing(stripped) || push!(out, stripped); nothing
+end
 _rescue_semantic!(out, val::Union{AbstractArray,Tuple}) =
     (foreach(child -> _rescue_semantic!(out, child), val); nothing)
 _rescue_semantic!(out, node::Node) =

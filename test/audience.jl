@@ -273,6 +273,94 @@ end
     @test_throws ArgumentError StaticExport(; audience="public")
 end
 
+@testitem "a disclosure with nothing to open renders nothing" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: h, _with_audience, to_markdown_string
+    html(x, a) = _with_audience(() -> repr("text/html", x), a)
+    hxml(x, a) = _with_audience(() -> repr("application/vnd.hyperview+xml", x), a)
+    plain(x, a) = _with_audience(() -> repr("text/plain", x), a)
+    md(x, a) = to_markdown_string(x; audience=a)
+    static(x, a; kwargs...) = let walked = static_transform(x, StaticExport(; audience=a, kwargs...))
+        walked == Any[] ? "" : repr("text/html", walked)
+    end
+    every(x, a) = (html(x, a), hxml(x, a), plain(x, a), md(x, a), static(x, a))
+
+    # A public reader gets no label over an empty body, in any format (snag
+    # a-semanticdisclo-de7d9d76, user design 0hbwvea); a private reader opens it.
+    secret = SemanticProse("SECRET-SPEC")
+    d = SemanticDisclosure("Modellbeschreibung", private(secret))
+    @test all(isempty, every(d, :public))
+    for out in every(d, :private)
+        @test occursin("Modellbeschreibung", out) && occursin("SECRET-SPEC", out)
+    end
+    # With a stand-in there is something to open for everyone.
+    stand_in = SemanticDisclosure("Modellbeschreibung",
+        private(secret; public = SemanticProse("Kurzfassung")))
+    for out in every(stand_in, :public)
+        @test occursin("Modellbeschreibung", out) && occursin("Kurzfassung", out) && !occursin("SECRET", out)
+    end
+    # The export decides for its own audience, whoever renders it.
+    @test _with_audience(() -> static(d, :public), :private) == ""
+    @test occursin("SECRET-SPEC", static(d, :private))
+
+    # Among its siblings it leaves no trace, in any format.
+    section = SemanticSection("Modell", d, SemanticProse("Weiter."))
+    for out in every(section, :public)
+        @test occursin("Weiter.", out) && !occursin("Modellbeschreibung", out) && !occursin("<details", out)
+    end
+    @test md(section, :public) == "## Modell\n\nWeiter."
+    @test _with_audience(() -> repr("text/markdown", section), :public) == "## Modell\n\nWeiter."
+    @test plain(section, :public) == "Modell\n\nWeiter."
+    @test md(h.div(h.p("Vorher"), d, h.p("Nachher")), :public) ==
+          md(h.div(h.p("Vorher"), h.p("Nachher")), :public)
+
+    # Nothing to open: no children, only `nothing` or empty groups, a nested
+    # disclosure with nothing to open.
+    for empty in (SemanticDisclosure("Leer"), SemanticDisclosure("Leer", nothing),
+                  SemanticDisclosure("Leer", SemanticGroup(), Any[private(secret)]),
+                  SemanticDisclosure("Außen", SemanticDisclosure("Innen", private(secret))))
+        @test all(isempty, every(empty, :public))
+    end
+    @test all(isempty, every(SemanticDisclosure("Leer"), :private))
+    # An empty string is content.
+    @test occursin("Leer", html(SemanticDisclosure("Leer", ""), :public))
+
+    # A `private() do … end` block is content for a private reader; it is not
+    # run to find out, and never for a public one.
+    built = Ref(0)
+    lazy = SemanticDisclosure("Spezifikation", private(() -> (built[] += 1; secret)))
+    @test all(isempty, every(lazy, :public)) && built[] == 0
+    @test !HTMXObjects._shows_nothing(lazy, :private) && built[] == 0
+    @test occursin("SECRET-SPEC", html(lazy, :private)) && built[] == 1
+
+    # Markdown drops controls, so a disclosure holding only them goes too. A
+    # static export that removes them leaves nothing to open; one that disables
+    # them keeps the disclosure.
+    controls = SemanticDisclosure("Bearbeiten", h.button("Speichern"; hx_post="/save"))
+    @test md(controls, :private) == ""
+    @test occursin("Bearbeiten", html(controls, :private))
+    @test static(controls, :private; controls=:remove) == ""
+    @test occursin("Speichern", static(controls, :private))
+
+    # A collapsed alternative with nothing to show goes with its label.
+    alt = SemanticAlternatives(SemanticProse("Standard"), "Quelle" => private(secret),
+        "Zusammenfassung" => SemanticProse("Kurzfassung"))
+    for out in (html(alt, :public), static(alt, :public), _with_audience(() -> static(alt, :public), :private))
+        @test !occursin("Quelle", out) && !occursin("SECRET", out) &&
+              occursin("Zusammenfassung", out) && occursin("Standard", out)
+    end
+    for out in (html(alt, :private), static(alt, :private))
+        @test occursin("<summary>Quelle</summary>", out) && occursin("SECRET-SPEC", out)
+    end
+
+    # Plain text shows what its reader may see, never the private source.
+    @test plain(private(secret), :public) == ""
+    @test plain(private(secret; public = SemanticProse("Kurzfassung")), :public) == "Kurzfassung"
+    # A private reader sees it marked (snag mark-a-tender-pr-fd4b7782).
+    @test plain(private(secret), :private) == "[not public] SECRET-SPEC"
+    @test plain(private(secret; mark=false), :private) == "SECRET-SPEC"
+    @test plain(SemanticCard("Modell", private(secret), "y ~ x"), :public) == "Modell\n\ny ~ x"
+end
+
 @testitem "a public dispatch answers private content with its stand-in" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
     using Treebars
     route!(AudienceApp())
