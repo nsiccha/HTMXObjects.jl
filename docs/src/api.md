@@ -228,8 +228,31 @@ writes words of its own reads the language with
 and its answer is rendered. A `dispatch(…; lang)` answers in the language it
 names instead of the declared one ([In-process dispatch](#In-process-dispatch)).
 
+A struct on the mount chain can also declare `__progress_pause__`. A
+visitor-facing app sets `__progress_pause__ = false` once on its root, and
+Treebars' `:auto` pollers and live boards then show no ❚❚ / Pause control:
+pausing only freezes what the page shows while the work runs on, which a
+visitor reads as a stuck page. The status, bar, elapsed time and any Stop
+button stay. `true` shows the control and `nothing` keeps the enclosing
+struct's, with the innermost declaration winning as for `__lang__`; a struct
+mounted under such a root can switch it back on for an internal subtree. Any
+other value fails the route with an `ArgumentError` naming the struct. Treebars
+reads the value through [`HTMXObjects.page_progress_pause`](@ref), which holds
+where `page_lang` does, and follows it on a Treebars whose renderers take
+`pause=`; an explicit `pause=true`/`false` on a Treebars renderer wins.
+
+```julia
+@htmx struct App
+    __lang__ = "de"
+    __progress_pause__ = false
+    __page__(content) = HTMXObjects.pico_page(content)
+    # ...
+end
+```
+
 ```@docs
 HTMXObjects.page_lang
+HTMXObjects.page_progress_pause
 ```
 
 ### Tables on every page — `tables=true` {#page-tables}

@@ -3219,8 +3219,10 @@ _is_title_node(node) = node isa Node && HTMX.tag(node) === :title
 # defaults. A dynamic scope rather than keywords, because the shell is a plain
 # function that the root's `__page__` calls, and neither sees the leaf; the
 # response handler sets it around the whole answer, error page included.
+# `__progress_pause__` rides along for Treebars, which reads it while it
+# renders a poller or a live board (`page_progress_pause`).
 const _PAGE_META = :htmxo_page_meta
-const _NO_PAGE_META = (; lang=nothing, title=nothing)
+const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing)
 
 _page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
 _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
@@ -3245,17 +3247,40 @@ the value before handing work off.
 """
 page_lang() = _page_meta().lang
 
+"""
+    HTMXObjects.page_progress_pause() -> Union{Bool,Nothing}
+
+Whether the progress displays of the answer being produced offer a pause
+control: the `__progress_pause__` that the route's mount chain declares (the
+innermost declaration wins), or `nothing` when it declares none, as outside a
+route. `false` asks for no pause control; `true` asks for one.
+
+A visitor-facing app declares `__progress_pause__ = false` once on its root
+struct. Pausing a poller only freezes what the page shows while the work runs
+on, which a visitor reads as a stuck page. Treebars' `:auto` pollers and live
+boards read the value and leave out their ❚❚ / Pause control; `nothing` shows
+it, as before.
+
+It holds where [`HTMXObjects.page_lang`](@ref) holds: on the request's own
+task, while the route's property runs and while its answer is rendered (an
+`:auto` poller and its poll answers, the page shell, an error page). A
+computation that runs in the background sees `nothing`.
+"""
+page_progress_pause() = _page_meta().progress_pause
+
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
-    lang = title = nothing
+    lang = title = progress_pause = nothing
     for obj in objects
         declared = _page_declaration(obj, :__lang__)
         isnothing(declared) || (lang = _page_lang_value(obj, declared))
         declared = _page_declaration(obj, :__title__)
         isnothing(declared) || (title = _page_title_value(obj, declared))
+        declared = _page_declaration(obj, :__progress_pause__)
+        isnothing(declared) || (progress_pause = _page_progress_pause_value(obj, declared))
     end
-    (; lang, title)
+    (; lang, title, progress_pause)
 end
 
 _page_declaration(obj, name) = hasproperty(obj, name) ? getproperty(obj, name) : nothing
@@ -3267,6 +3292,8 @@ _page_lang_value(obj, lang) =
 _page_title_value(obj, title::AbstractString) = isempty(title) ?
     _page_declaration_error(obj, :__title__, "a non-empty string", title) : String(title)
 _page_title_value(obj, title) = _page_declaration_error(obj, :__title__, "a non-empty string", title)
+_page_progress_pause_value(obj, pause::Bool) = pause
+_page_progress_pause_value(obj, pause) = _page_declaration_error(obj, :__progress_pause__, "true or false", pause)
 
 _page_declaration_error(obj, name, wanted, got) = throw(ArgumentError(string(
     "`", name, "` on ", nameof(typeof(obj)), " must be ", wanted,
