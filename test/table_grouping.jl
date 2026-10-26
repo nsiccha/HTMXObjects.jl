@@ -29,7 +29,7 @@
     const MEDIA = [GROUPINGS..., "media" => t -> occursin("Prime", t.party) ? "Prime" : nothing]
     const SUMMARY = ["Amount" => ColumnSummary(:sum, t -> t.amount; digits=1), "IBAN" => ColumnSummary(:count)]
     # Row ids are page-wide: a second table on the page takes other keys.
-    regroup_table(; key=t -> t.id, kw...) = master_detail_table(["Party", "IBAN", "Amount"], TX; key,
+    regroup_table(; items=TX, key=t -> t.id, kw...) = master_detail_table(["Party", "IBAN", "Amount"], items; key,
         master=t -> (h.td(t.party), h.td(t.iban), h.td(string(t.amount); data_sort_value=string(t.amount))),
         detail=t -> h.p(t.memo), groupings=MEDIA, group_summary=SUMMARY, kw...)
     # The page side of a browser check: `check(name, ok)` (ok === true, or a
@@ -1844,6 +1844,68 @@ end
         detail=t -> "", group_summary=["B" => ColumnSummary(:count)])
 end
 
+@testitem "group_order: a grouping's groups in an order of its own" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string
+    html(x) = repr("text/html", x)
+    # The group rows' ids, in the order the table renders them.
+    groups(page) = [match(r"id=\"row-group--([^\"]*)\"", m.match)[1]
+                    for m in eachmatch(r"<tr[^>]*data-htmxo-group=\"\"[^>]*>", table_rows(page))]
+    regroup_config(page) = match(r"data-htmxo-regroup=\"([^\"]*)\"", page)[1]
+    # Bakery and Prime Video before the Acmes, ties in first-appearance order;
+    # DE04 and DE03 first, then the others as they appear; Media first.
+    ORDER = ["party" => k -> startswith(k, "Acme") ? 1 : 0, "iban" => ["DE04", "DE03"], "rule" => ["Media", "Shops"]]
+    @test groups(html(grouped(group_by="party"))) == ["Acme", "Acme--Prime", "Bakery", "Prime--Video"]
+    @test groups(html(grouped(group_by="party", group_order=ORDER))) == ["Bakery", "Prime--Video", "Acme", "Acme--Prime"]
+    @test groups(html(grouped(group_by="iban", group_order=ORDER))) == ["DE04", "DE03", "DE01", "DE02"]
+    # A listed key no item has makes no group, and keeps its place in the list.
+    absent = html(grouped(group_by="iban", group_order=["iban" => ["DE09", "DE04"]]))
+    @test groups(absent) == ["DE04", "DE01", "DE02", "DE03"]
+    @test contains(regroup_config(absent), "&quot;order&quot;:{&quot;iban&quot;:[&quot;DE09&quot;,&quot;DE04&quot;,&quot;DE01&quot;,&quot;DE02&quot;,&quot;DE03&quot;]}")
+    # Every level nested by a list follows its own grouping's order.
+    nested = html(grouped(group_by=["rule", "party"], group_order=ORDER))
+    @test groups(nested) == ["Media", "Media--Prime--Video", "Media--Acme--Prime",
+                             "Shops", "Shops--Bakery", "Shops--Acme", "Shops--Acme--Prime"]
+    # A grouping without an order keeps first appearance; leaves keep the
+    # order of `items` in their group.
+    @test groups(html(grouped(group_by=["rule", "iban"], group_order=["rule" => ["Media", "Shops"]]))) ==
+        ["Media", "Media--DE01", "Media--DE04", "Shops", "Shops--DE01", "Shops--DE02", "Shops--DE03"]
+    leaves = [m[1] for m in eachmatch(r"data-htmxo-leaf=\"([^\"]*)\"", table_rows(html(grouped(group_by="party", group_order=ORDER))))]
+    @test leaves == ["p4", "p6", "p5", "p1", "p2", "p7", "p3"]
+    # The browser regroups by the same ranked lists, every grouping's, whichever
+    # is active; a table without `group_order` writes none.
+    @test endswith(regroup_config(html(grouped(group_by="none", group_order=ORDER))),
+        "&quot;order&quot;:{&quot;party&quot;:[&quot;Bakery&quot;,&quot;Prime Video&quot;,&quot;Acme&quot;,&quot;Acme Prime&quot;]," *
+        "&quot;iban&quot;:[&quot;DE04&quot;,&quot;DE03&quot;,&quot;DE01&quot;,&quot;DE02&quot;]," *
+        "&quot;rule&quot;:[&quot;Media&quot;,&quot;Shops&quot;]}}")
+    @test !contains(regroup_config(html(grouped(group_by="party"))), "&quot;order&quot;")
+    # A row update brings the lists again, ranked with its change; a table that
+    # regroups through the server (lazy groups) has none to keep.
+    update = html(grouped(group_by="party", group_order=ORDER, update_rows="p1"))
+    @test contains(update, "data-htmxo-group-order=\"{&quot;party&quot;:[&quot;Bakery&quot;,")
+    @test !contains(html(grouped(group_by="party", update_rows="p1")), "data-htmxo-group-order")
+    lazy = (; group_by=["party"], group_order=ORDER, group_by_url="/table", group_rows_url=(k, ms) -> "/rows")
+    @test !contains(html(grouped(; lazy..., update_rows="p1")), "data-htmxo-group-order")
+    @test groups(html(grouped(; lazy..., initially_open=true))) == ["Bakery", "Prime--Video", "Acme", "Acme--Prime"]
+    # Markdown and PDFs list the groups in the same order.
+    md = to_markdown_string(grouped(group_by="party", group_order=ORDER))
+    at(s) = first(findfirst(s, md))
+    @test at("Bakery") < at("Prime Video") < at("Acme")
+    # refused: an order for a name that is no grouping would order nothing (a typo; dev §1, no silent no-op)
+    @test_throws ArgumentError html(grouped(group_order=["nope" => ["a"]]))
+    # refused: the flat view has no groups to order
+    @test_throws ArgumentError html(grouped(group_order=["none" => ["a"]]))
+    # refused: two orders for one grouping, or one key at two places, leave the order undefined
+    @test_throws ArgumentError html(grouped(group_order=["party" => ["Acme"], "party" => ["Bakery"]]))
+    @test_throws ArgumentError html(grouped(group_order=["party" => ["Acme", "Acme"]]))
+    # refused: an order is a list of keys or a function `key -> sort key`
+    @test_throws ArgumentError html(grouped(group_order=["party" => :alphabetical]))
+    @test_throws ArgumentError html(grouped(group_order=[("party", ["Acme"])]))
+    # refused: without `groupings` there are no groups to order
+    @test_throws ArgumentError master_detail_table(["A"], TX; key=t -> t.id, master=t -> (h.td(t.id),),
+        detail=t -> "", group_order=["party" => ["Acme"]])
+end
+
 @testitem "regrouping in the browser builds the server's rows browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
@@ -1955,6 +2017,88 @@ end
                     @test endswith(line, ":true")
                 end
                 @test count(==('\n'), checks[1]) + 1 == 21
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "group_order: the browser regroups in the server's order browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # Bakery and Prime Video before the Acmes, DE04 and DE03 first, Media first.
+        ORDER = ["party" => k -> startswith(k, "Acme") ? 1 : 0, "iban" => ["DE04", "DE03"], "rule" => ["Media", "Shops"]]
+        # After an action p1 has a party new to the page, which sorts first.
+        moved = [t.id == "p1" ? merge(t, (; party="Zeta")) : t for t in TX]
+        flat(group_by; items=TX, kw...) = regroup_table(; items, group_by, group_order=ORDER, id="o", kw...)
+        nested(group_by) = regroup_table(; group_by, group_order=ORDER, id="on", key=t -> "n" * t.id)
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            let requests = 0;
+            document.body.addEventListener('htmx:beforeRequest', () => requests++);
+            const o = () => document.getElementById('o').closest('[data-htmxo-grouped]');
+            const n = () => document.getElementById('on').closest('[data-htmxo-grouped]');
+            const groups = w => Array.from(w.querySelector('tbody').rows).filter(r => 'htmxoGroup' in r.dataset).map(r => r.id.slice(4)).join(',');
+            // Group by one grouping alone (or none), as the pills ask for it.
+            const regroup = v => htmxoGroupRequest(o().querySelector('.htmxo-group-pills'), v === 'none' ? [] : [v], null);
+            // Every grouping, regrouped in the browser: the server's rows, in its order.
+            for (const v of ['iban', 'rule', 'media', 'none', 'party']) {
+                regroup(v);
+                check('parity-' + v, await parity(o(), '/flat?group_by=' + v));
+            }
+            regroup('iban');
+            check('listed-first', groups(o()) === 'group--DE04,group--DE03,group--DE01,group--DE02');
+            regroup('party');
+            check('sorted', groups(o()) === 'group--Bakery,group--Prime--Video,group--Acme,group--Acme--Prime');
+            // Nested pills: each level in its own grouping's order.
+            const pill = name => n().querySelector('[data-htmxo-group-name="' + name + '"] > button');
+            pill('rule').click();
+            check('nested', await parity(n(), '/nested?group_by=party&group_by=rule', true));
+            document.getElementById('on-group-rule-earlier').click();
+            check('nested-moved', await parity(n(), '/nested?group_by=rule&group_by=party', true) && groups(n()) ===
+                'group--Media,group--Media--Prime--Video,group--Media--Acme--Prime,group--Shops,group--Shops--Bakery,group--Shops--Acme,group--Shops--Acme--Prime');
+            check('no-requests', requests === 0);
+            // A row update brings a group key new to the page: the next regroup
+            // in the browser puts it where the server does.
+            htmxoUpdateRows(await (await fetch('/flat?group_by=party&moved=1&update=p1')).text());
+            regroup('iban');
+            regroup('party');
+            check('update-order', groups(o()).startsWith('group--Zeta,group--Bakery') && await parity(o(), '/flat?group_by=party&moved=1'));
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(flat("party"), nested(["party"]), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            q = HTTP.queryparams(uri)
+            items = haskey(q, "moved") ? moved : TX
+            # p1 leaves Acme for Zeta: the update names both groups.
+            uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
+            uri.path == "/flat" ? html(haskey(q, "update") ?
+                flat(levels; items, update_rows=q["update"], update_groups=["[\"Acme\"]", "[\"Zeta\"]"]) : flat(levels; items)) :
+            uri.path == "/nested" ? html(nested(levels)) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 11
             end
         finally
             close(server)
