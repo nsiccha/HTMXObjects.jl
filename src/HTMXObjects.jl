@@ -3047,8 +3047,10 @@ one of these page helpers, or [`master_detail_js`](@ref), as the function
 returns it, is left out while the shell carries its code, so a page that
 still lists them does not ship them twice. A changed or attributed copy stays.
 `error_texts`, an [`ErrorTexts`](@ref) such as `error_texts(:de)`, is the
-language of the failed-request toasts ([`toast_script`](@ref)); pass the root's
-`__error_texts__` from `__page__` so the toasts match the error articles.
+language of the failed-request toasts ([`toast_script`](@ref)) and of the
+status line over a part that a running request will replace
+([`request_feedback_script`](@ref)); pass the root's `__error_texts__` from
+`__page__` so they match the error articles.
 `nothing` (the default) keeps them English.
 `katex_version` is the KaTeX release that typesets Markdown math
 ([`render_markdown`](@ref) marks it, [`math_script`](@ref) renders it). The
@@ -3279,8 +3281,10 @@ _is_title_node(node) = node isa Node && HTMX.tag(node) === :title
 # defaults. A dynamic scope rather than keywords, because the shell is a plain
 # function that the root's `__page__` calls, and neither sees the leaf; the
 # response handler sets it around the whole answer, error page included.
+# `__progress_pause__` rides along for Treebars, which reads it while it
+# renders a poller or a live board (`page_progress_pause`).
 const _PAGE_META = :htmxo_page_meta
-const _NO_PAGE_META = (; lang=nothing, title=nothing)
+const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing)
 
 _page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
 _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
@@ -3305,17 +3309,40 @@ the value before handing work off.
 """
 page_lang() = _page_meta().lang
 
+"""
+    HTMXObjects.page_progress_pause() -> Union{Bool,Nothing}
+
+Whether the progress displays of the answer being produced offer a pause
+control: the `__progress_pause__` that the route's mount chain declares (the
+innermost declaration wins), or `nothing` when it declares none, as outside a
+route. `false` asks for no pause control; `true` asks for one.
+
+A visitor-facing app declares `__progress_pause__ = false` once on its root
+struct. Pausing a poller only freezes what the page shows while the work runs
+on, which a visitor reads as a stuck page. Treebars' `:auto` pollers and live
+boards read the value and leave out their ❚❚ / Pause control; `nothing` shows
+it, as before.
+
+It holds where [`HTMXObjects.page_lang`](@ref) holds: on the request's own
+task, while the route's property runs and while its answer is rendered (an
+`:auto` poller and its poll answers, the page shell, an error page). A
+computation that runs in the background sees `nothing`.
+"""
+page_progress_pause() = _page_meta().progress_pause
+
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
-    lang = title = nothing
+    lang = title = progress_pause = nothing
     for obj in objects
         declared = _page_declaration(obj, :__lang__)
         isnothing(declared) || (lang = _page_lang_value(obj, declared))
         declared = _page_declaration(obj, :__title__)
         isnothing(declared) || (title = _page_title_value(obj, declared))
+        declared = _page_declaration(obj, :__progress_pause__)
+        isnothing(declared) || (progress_pause = _page_progress_pause_value(obj, declared))
     end
-    (; lang, title)
+    (; lang, title, progress_pause)
 end
 
 _page_declaration(obj, name) = hasproperty(obj, name) ? getproperty(obj, name) : nothing
@@ -3327,6 +3354,8 @@ _page_lang_value(obj, lang) =
 _page_title_value(obj, title::AbstractString) = isempty(title) ?
     _page_declaration_error(obj, :__title__, "a non-empty string", title) : String(title)
 _page_title_value(obj, title) = _page_declaration_error(obj, :__title__, "a non-empty string", title)
+_page_progress_pause_value(obj, pause::Bool) = pause
+_page_progress_pause_value(obj, pause) = _page_declaration_error(obj, :__progress_pause__, "true or false", pause)
 
 _page_declaration_error(obj, name, wanted, got) = throw(ArgumentError(string(
     "`", name, "` on ", nameof(typeof(obj)), " must be ", wanted,
@@ -10851,13 +10880,16 @@ status without one, and ending in `error_id`), the framework's own caller-fault
 messages, a stalled operation's terminal (`run_again`, `progress`) and the page
 shell's
 failed-request toasts (`request_failed`, `no_response`, `timed_out`,
-`dismiss`, and `reasons` again). Build one with [`error_texts`](@ref).
+`dismiss`, and `reasons` again), and the status line over a part of the page
+that a running request will replace (`loading`, `loading_named`; see
+[`request_feedback_script`](@ref)). Build one with [`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
 `@htmx` threads `__error_texts__` down the `__parent__` chain like
 `__on_error__`, so every `@include`d struct, `safely` panel and polled
 operation of the app answers in it. Pass the same value to the page shell,
-`htmx(...; error_texts)` or `pico_page(...; error_texts)`, for the toasts.
+`htmx(...; error_texts)` or `pico_page(...; error_texts)`, for the toasts and
+the loading status line.
 
 A text in braces is a placeholder the framework fills in: `server_fault` and
 `error_id` take `{id}`, the recorded error id, and must keep it;
@@ -10867,7 +10899,8 @@ or when its declared type rejected the value by `"; "` and `expected_type` with
 `{type}` (then the parser's own reason, as Julia writes it, in parentheses);
 `result_unavailable_detail` takes `{verb}` and `{route}`; `stalled_detail` takes
 `{label}`, `{elapsed}` and `{bound}`, followed by `stalled_rerun` for a read or
-`stalled_not_repeated` (`{verb}`) for a mutation. An app's own
+`stalled_not_repeated` (`{verb}`) for a mutation; `loading_named` takes
+`{label}`, the option, radio button or link the reader chose. An app's own
 [`CallerFault`](@ref) message is shown as written. Error logs, `@error` lines
 and `showerror` stay English.
 """
@@ -10892,6 +10925,8 @@ struct ErrorTexts
     no_response::String                # toast: no answer at all
     timed_out::String                  # toast: the request timed out
     dismiss::String                    # accessible name of a toast's × button
+    loading::String                    # status line: a part is being replaced
+    loading_named::String              # ... by the option or link the reader chose
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -10900,6 +10935,7 @@ const _ERROR_TEXT_PLACEHOLDERS = (
     allowed_values = (:allowed,), expected_type = (:type,),
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
+    loading_named = (:label,),
 )
 
 const _ERROR_TEXT_LOCALES = (
@@ -10924,6 +10960,8 @@ const _ERROR_TEXT_LOCALES = (
         no_response = "Request failed: no response (network error or server unreachable)",
         timed_out = "Request timed out",
         dismiss = "Dismiss",
+        loading = "Loading…",
+        loading_named = "Loading {label}…",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -10947,6 +10985,8 @@ const _ERROR_TEXT_LOCALES = (
         no_response = "Anfrage fehlgeschlagen: keine Antwort (Netzwerkfehler oder Server nicht erreichbar)",
         timed_out = "Zeitüberschreitung der Anfrage",
         dismiss = "Schließen",
+        loading = "Wird geladen…",
+        loading_named = "{label} wird geladen…",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -11009,10 +11049,11 @@ _error_texts_value(::Nothing) = _EN_ERROR_TEXTS
 _error_texts_value(texts) = throw(ArgumentError(string(
     "__error_texts__ must be an ErrorTexts, e.g. error_texts(:de); got ", repr(texts))))
 
-# The texts the page shell's toast runtime writes, as the JSON object it reads.
+# The texts the page shell's toast and request-feedback runtimes write, as the
+# JSON object they read.
 _toast_texts_json(texts::ErrorTexts) = string("{",
     join((string(_md_json_string(string(n)), ":", _md_json_string(getfield(texts, n)))
-          for n in (:request_failed, :no_response, :timed_out, :dismiss)), ","),
+          for n in (:request_failed, :no_response, :timed_out, :dismiss, :loading, :loading_named)), ","),
     ",\"reasons\":{",
     join((string(_md_json_string(string(code)), ":", _md_json_string(phrase))
           for (code, phrase) in texts.reasons), ","), "}}")
@@ -18480,9 +18521,13 @@ function htmxoFilterTable(target) {
         if (!leaves.length) return;
         const kept = visible.has(row), path = [ownText(row).toLocaleLowerCase()];
         for (let r = byId.get(row.dataset.htmxoParent); r; r = byId.get(r.dataset.htmxoParent)) path.unshift(text(r));
+        // The unloaded leaves this pass hides, for hover linking.
+        row.htmxoLazyFiltered = new Set();
         leaves.forEach(([key, t]) => {
             const ctx = {query, input: raw, text: (path.join(' ') + ' ' + t.toLocaleLowerCase()).replace(/\s+/g, ' ')};
-            tally('leaf:' + key, kept && search(row, ctx), kept ? 'search' : rejectedBy.get(row));
+            const shown = kept && search(row, ctx);
+            if (!shown) row.htmxoLazyFiltered.add(key);
+            tally('leaf:' + key, shown, kept ? 'search' : rejectedBy.get(row));
         });
     });
     // hiddenBy counts the hidden items per predicate that first rejected
@@ -19848,41 +19893,76 @@ if (document.body) htmxoSelectionRestore(document.body);
 
 // --- Hover linking: `link` on sortable_table / render_table / master_detail_table ---
 // Tables, plots and maps showing the same items name one link group. A hover
-// (or keyboard focus) on an item announces its key to the page as an
-// `htmxo:link` event on `document`, detail {group, key, source} (key null
-// when the hover ends), and every participant of the group highlights its
-// items with that key. Anything joins by listening for the event and
-// dispatching it; `htmxoLink(group, key)` dispatches it from page script. The
-// latest key per group is kept, so a table rendered, regrouped or filtered
-// later shows it too.
+// (or keyboard focus) announces the items it is on to the page as an
+// `htmxo:link` event on `document`, detail {group, key, keys, source}: `keys`
+// lists the items (one row: its own; a group or branch row: every item below
+// it too, a branch's own first) and is empty when the hover ends; `key` is the
+// row's own item, else the one item a group holds, else null. Every
+// participant of the group highlights the items in `keys` (an announcement
+// without `keys` names `key` alone). Anything joins by listening for the event
+// and dispatching it; `htmxoLink(group, key | [keys] | null)` dispatches it
+// from page script. The latest announcement per group is kept, so a table
+// rendered, regrouped or filtered later shows it too.
 window.htmxoLinkState = window.htmxoLinkState || new Map();
-function htmxoLink(group, key, source) {
-    document.dispatchEvent(new CustomEvent('htmxo:link', {detail:
-        {group: String(group), key: key == null ? null : String(key), source: source || null}}));
+function htmxoLinkAnnounce(group, key, keys, source) {
+    document.dispatchEvent(new CustomEvent('htmxo:link', {detail: {group: String(group),
+        key: key == null ? null : String(key), keys: keys.map(String), source: source || null}}));
 }
-// A row's item key: `data-htmxo-link-key`, else its selection key.
-function htmxoLinkKey(row) { return row.dataset.htmxoLinkKey ?? row.dataset.htmxoSelectKey; }
-// The keyed body row of a linked table that holds `el`, as {group, key, row},
-// else null. A detail row stands for its master, and the rows of a table
-// nested in a detail for the row around them.
+function htmxoLink(group, keys, source) {
+    const list = keys == null ? [] : Array.isArray(keys) ? keys.map(String) : [String(keys)];
+    htmxoLinkAnnounce(group, list.length === 1 ? list[0] : null, list, source);
+}
+// A row's item key: `data-htmxo-link-key`, else its selection key. A group
+// row (`data-htmxo-group`) is no item: its selection key names the group.
+function htmxoLinkKey(row) { return 'htmxoGroup' in row.dataset ? null : row.dataset.htmxoLinkKey ?? row.dataset.htmxoSelectKey; }
+// The body row of a linked table that holds `el`, as {group, row}, else null.
+// A detail row stands for its master, and the rows of a table nested in a
+// detail for the row around them.
 function htmxoLinkRow(el) {
     for (let tr = el && el.closest ? el.closest('tr') : null; tr; tr = tr.parentElement.closest('tr')) {
         const table = tr.parentElement.parentElement;
         if (!table || !table.matches('table[data-htmxo-link]') || tr.parentElement !== table.tBodies[0]) continue;
         const row = tr.id.startsWith('detail-') ? document.getElementById('row-' + tr.id.slice(7)) : tr;
-        const key = row ? htmxoLinkKey(row) : null;
-        return key == null ? null : {group: table.dataset.htmxoLink, key, row};
+        return row ? {group: table.dataset.htmxoLink, row} : null;
     }
     return null;
 }
+// The items `row` stands for, as {key, keys}, else null: its own key, and on
+// a group or branch row every item below it, open or collapsed, loaded or not
+// (a lazy group's unloaded leaves by their link key), except those the search
+// or a filter hides, so a hover names what the table shows.
+function htmxoLinkItems(row) {
+    const own = htmxoLinkKey(row), keys = new Set(own == null ? [] : [own]);
+    const lazy = r => htmxoLazyLeaves(r).forEach(([k, , link]) => {
+        if (!(r.htmxoLazyFiltered && r.htmxoLazyFiltered.has(k))) keys.add(link ?? k);
+    });
+    lazy(row);
+    // A row's rows follow it in the body, so one pass finds everything below.
+    const below = new Set([row.id]);
+    if (row.id) for (const r of row.parentElement.rows) {
+        if (!r.id || r.id.startsWith('detail-') || !below.has(r.dataset.htmxoParent)) continue;
+        below.add(r.id);
+        if ('htmxoFiltered' in r.dataset) continue;
+        const k = htmxoLinkKey(r);
+        if (k != null) keys.add(k);
+        lazy(r);
+    }
+    const list = Array.from(keys);
+    return list.length ? {key: own ?? (list.length === 1 ? list[0] : null), keys: list} : null;
+}
 // The pointer or the focus moved from `from` to `to`: the row it left ends
-// its hover, unless another row of its group takes over, and the row it
-// entered announces its key.
+// its hover, unless another row of its group takes over or the group shows
+// something else (a plot's hover), and the row it entered announces its
+// items. A hovered row that a swap or a regroup replaced ends its hover too.
 function htmxoLinkMove(to, from) {
     const left = htmxoLinkRow(from), entered = htmxoLinkRow(to);
     if (left && entered && left.row === entered.row) return;
-    if (left && !(entered && entered.group === left.group)) htmxoLink(left.group, null, left.row);
-    if (entered) htmxoLink(entered.group, entered.key, entered.row);
+    const items = entered && htmxoLinkItems(entered.row);
+    const shown = left && window.htmxoLinkState.get(left.group);
+    const own = shown && (shown.source === left.row || !(shown.source && shown.source.isConnected));
+    if (own && shown.keys.size && !(items && entered.group === left.group))
+        htmxoLinkAnnounce(left.group, null, [], left.row);
+    if (items) htmxoLinkAnnounce(entered.group, items.key, items.keys, entered.row);
 }
 // How many levels a group row whose rows have not loaded sits above its
 // leaves: the grouping levels below its own (`data-htmxo-grouped` holds a
@@ -19902,12 +19982,13 @@ function htmxoLinkReveal(row) {
         return;
     }
 }
-// Mark the rows of `table` that hold its group's current key. A highlight
+// Mark the rows of `table` that hold its group's current items. A highlight
 // never changes the table: a row inside a collapsed group or branch lights up
 // the innermost shown row above it instead (`data-htmxo-linked="inside"`, its
-// first cell noting how many levels down the item is), and a row the search
-// or a filter hides lights up nothing. With `reveal`, the first lit row
-// scrolls into view inside the table's own scroll box.
+// first cell noting how many levels down the item is, or how many items it
+// holds), and a row the search or a filter hides lights up nothing. The row a
+// hover is on lights up as itself. With `reveal`, the first lit row scrolls
+// into view inside the table's own scroll box.
 function htmxoLinkApply(table, reveal) {
     const body = table.tBodies[0];
     if (!body) return;
@@ -19916,25 +19997,36 @@ function htmxoLinkApply(table, reveal) {
         if (r.cells[0]) delete r.cells[0].dataset.htmxoLinkedNote;
     });
     const state = window.htmxoLinkState.get(table.dataset.htmxoLink);
-    if (!state || state.key == null) return;
+    if (!state || !state.keys.size) return;
     const rows = Array.from(body.rows);
     const byId = new Map(rows.filter(r => r.id).map(r => [r.id, r]));
-    const depths = new Map();
-    const light = (row, depth) => {
+    // Each lit row: the fewest levels down an item sits, and its items.
+    const lit = new Map();
+    const light = (row, depth, key) => {
         for (; row && row.hidden; depth++) row = byId.get(row.dataset.htmxoParent);
-        if (row && !(depths.get(row) <= depth)) depths.set(row, depth);
+        if (!row) return;
+        const at = lit.get(row) || lit.set(row, {depth, keys: new Set()}).get(row);
+        at.depth = Math.min(at.depth, depth);
+        at.keys.add(key);
     };
     rows.forEach(r => {
         if (r.id.startsWith('detail-') || 'htmxoFiltered' in r.dataset) return;
-        if (htmxoLinkKey(r) === state.key) light(r, 0);
-        else if (htmxoLazyLeaves(r).some(([k, , link]) => (link ?? k) === state.key)) light(r, htmxoLinkLazyDepth(r));
+        const k = htmxoLinkKey(r);
+        if (k != null && state.keys.has(k)) light(r, 0, k);
+        htmxoLazyLeaves(r).forEach(([lk, , link]) => {
+            if (state.keys.has(link ?? lk) && !(r.htmxoLazyFiltered && r.htmxoLazyFiltered.has(lk)))
+                light(r, htmxoLinkLazyDepth(r), link ?? lk);
+        });
     });
-    depths.forEach((depth, row) => {
+    if (state.source && state.source.parentElement === body && !state.source.hidden)
+        lit.set(state.source, {depth: 0, keys: new Set()});
+    lit.forEach(({depth, keys}, row) => {
         row.dataset.htmxoLinked = depth ? 'inside' : '';
-        if (depth && row.cells[0]) row.cells[0].dataset.htmxoLinkedNote =
+        if (depth && row.cells[0]) row.cells[0].dataset.htmxoLinkedNote = keys.size > 1 ?
+            htmxoText(table, 'linked_inside_many', {count: keys.size}) :
             htmxoText(table, depth > 1 ? 'linked_deep' : 'linked_inside', {levels: depth});
     });
-    const first = reveal && rows.find(r => depths.has(r));
+    const first = reveal && rows.find(r => lit.has(r));
     if (first) htmxoLinkReveal(first);
 }
 // Show the current keys again in the linked tables in or around `elt`.
@@ -19955,7 +20047,9 @@ if (!window.htmxoLinkBound) {
         const d = e.detail || {};
         if (d.group == null) return;
         const group = String(d.group);
-        window.htmxoLinkState.set(group, {key: d.key == null ? null : String(d.key), source: d.source || null});
+        const keys = Array.isArray(d.keys) ? d.keys : d.key == null ? [] : [d.key];
+        window.htmxoLinkState.set(group, {key: d.key == null ? null : String(d.key),
+            keys: new Set(keys.map(String)), source: d.source || null});
         // The tables the hover did not start in bring their match into view.
         document.querySelectorAll('table[data-htmxo-link]').forEach(t => {
             if (t.dataset.htmxoLink === group) htmxoLinkApply(t, !(d.source && t.contains(d.source)));
@@ -20155,7 +20249,8 @@ caption's long text (`more`, as in [`caption_texts`](@ref)), the number
 separators of the numbers the table writes (`decimal`, `thousands`: its float
 cells and [`number_cell`](@ref)s, see [`format_number`](@ref), and the group
 sums of `group_summary` in [`master_detail_table`](@ref)) and the note on a row that holds a hovered item
-in a collapsed group (`linked_inside`, `linked_deep`; see *Hover linking* in
+in a collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`; see
+*Hover linking* in
 [`sortable_table`](@ref)). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
@@ -20166,7 +20261,8 @@ browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
 *Client-side search* in [`sortable_table`](@ref)); `selected`,
 `selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
 texts take `{name}` (the grouping), `group_level` also `{level}`;
-`rows_failed` takes `{status}`; `linked_deep` takes `{levels}`.
+`rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
+`linked_inside_many` takes `{count}`.
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -20200,6 +20296,7 @@ struct TableTexts
     thousands::String           # their thousands separator
     linked_inside::String       # note: the hovered item is in this collapsed row
     linked_deep::String         # note: ... several levels down
+    linked_inside_many::String  # note: several hovered items are in this collapsed row
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -20207,7 +20304,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     selected = (:count,), selected_filtered = (:count,), selected_collapsed = (:count,),
     group_add = (:name,), group_add_inner = (:name,), group_level = (:level, :name),
     group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
-    rows_failed = (:status,), linked_deep = (:levels,),
+    rows_failed = (:status,), linked_deep = (:levels,), linked_inside_many = (:count,),
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -20243,6 +20340,7 @@ const _TABLE_TEXT_LOCALES = (
         thousands = ",",
         linked_inside = "↳ inside",
         linked_deep = "↳ {levels} levels down",
+        linked_inside_many = "↳ {count} inside",
     ),
     de = (
         search = "Suche",
@@ -20276,6 +20374,7 @@ const _TABLE_TEXT_LOCALES = (
         thousands = ".",
         linked_inside = "↳ darin",
         linked_deep = "↳ {levels} Ebenen tiefer",
+        linked_inside_many = "↳ {count} darin",
     ),
 )
 
@@ -20616,14 +20715,24 @@ no app script. Each body row is keyed by its `data-htmxo-link-key`, else its
 `data-htmxo-select-key`; [`master_detail_table`](@ref) keys its rows by
 `link_key(item)` (default: its `key`) and [`render_table`](@ref) by
 `link_key(row)`. Hovering or keyboard-focusing
-a keyed row announces it to the page as an `htmxo:link` event on `document`
-with `detail` `{group, key, source}` (`key` is `null` when the hover ends), and
-every table of the group marks its rows with that key (`data-htmxo-linked`),
-including each copy of a leaf that a regrouped table lists under several
-groups. A detail row counts as its master. Anything else joins the group by
-listening for that event and dispatching it on its own hover; page script
-announces a key with `htmxoLink(group, key)` (`null` clears). Keys compare as
-strings.
+a row announces its items to the page as an `htmxo:link` event on `document`
+with `detail` `{group, key, keys, source}`, and every table of the group marks
+its rows with those keys (`data-htmxo-linked`), including each copy of a leaf
+that a regrouped table lists under several groups:
+
+- `keys` lists the items: a keyed row's own key, and for a group row or a
+  branch of a `children` tree every item below it too, open or collapsed,
+  loaded or not, except those the search or a filter hides (a branch's own key
+  first). It is empty when the hover ends.
+- `key` is the row's own key, else the one item a group holds, else `null`
+  (a group of several items, and the end of a hover).
+
+A detail row counts as its master. Anything else joins the group by listening
+for that event (reading `keys`; an announcement without `keys` names `key`
+alone) and dispatching it on its own hover; page script announces items with
+`htmxoLink(group, key)` or `htmxoLink(group, [keys...])` (`null` clears). Keys
+compare as strings. All of this runs in the browser, so it works the same in a
+page recorded with `record!` and served as plain files.
 
 ```julia
 master_detail_table(headers, probes; key=p -> p.kenn, master=cells, detail=info,
@@ -20634,13 +20743,15 @@ A highlight never changes the table:
 
 - a row inside a collapsed group or branch lights up the innermost shown row
   above it instead, with a dashed outline and a note on how far down the item
-  is (`linked_inside`, `linked_deep` in [`TableTexts`](@ref): "↳ inside",
-  "↳ 2 levels down");
+  is, or how many hovered items it holds (`linked_inside`, `linked_deep`,
+  `linked_inside_many` in [`TableTexts`](@ref): "↳ inside", "↳ 2 levels down",
+  "↳ 3 inside");
+- the row the hover is on lights up as itself;
 - a row that the search or a filter hides lights up nothing;
 - a lit row out of view scrolls into view only inside the table's own scroll
   box, never the page, and only when the hover started outside the table.
 
-The latest key of each group is kept (`window.htmxoLinkState`), so a table
+The latest announcement of each group is kept (`window.htmxoLinkState`), so a table
 that is re-rendered, regrouped or filtered shows it again. Override the tint
 with `--htmxo-linked-row`. Hover linking needs [`sortable_table_js`](@ref) and
 [`sortable_table_styles`](@ref) on the page, which the [`htmx`](@ref) shell
@@ -21571,9 +21682,11 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `link`: a link group name, e.g. `link="probes"`: hovering an item's row
   highlights the same item in every other table or plot of that group, and
   hovering it there highlights its rows here (every copy of a leaf listed
-  under several groups). Rows are keyed by `string(link_key(item))`. A hovered
-  item inside a collapsed group lights up that group's row, with a note on how
-  many levels down it is; nothing opens. See *Hover linking* in
+  under several groups). Rows are keyed by `string(link_key(item))`. Hovering
+  a group row (of `groupings` or a `children` branch) highlights every item in
+  it, the branch's own included. A hovered item inside a collapsed group lights
+  up that group's row, with a note on how many levels down it is or how many
+  hovered items it holds; nothing opens. See *Hover linking* in
   [`sortable_table`](@ref).
 - `link_key(item)`: with `link`, the item's key in the link group (default:
   its `key`). Give it when several tables on one page show the same items:
@@ -26843,6 +26956,13 @@ generic in-flight `.htmx-request` rule (`cursor: progress`), and the reset
 that renders a [`sortable_table`](@ref) header's sort `<button>` as plain
 heading text with a focus ring.
 
+It also gives every definition list (`dl`) its look, with no class: bold
+terms in a column beside their values, `div`-wrapped pairs sharing the
+columns. `--htmxo-dl-label-width` (default `16rem`, and never more than 40% of
+the list), `--htmxo-dl-row-gap` (`0.5rem`) and `--htmxo-dl-column-gap`
+(`1.25rem`) tune it from an app's stylesheet; `display: block` on a list and
+its `div` pairs keeps it stacked.
+
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
 - `u-text-*`      semantic text colors mapped to `--htmxo-*` tokens
@@ -26895,7 +27015,8 @@ htmxo_utility_styles() = h.style(Raw("""
    the vocabulary whose meaning no HTML element carries — every other one picks
    the element whose native rendering already says it (`article` for a card,
    `section` for a division, `dl` for fields, `details` for a disclosure,
-   `pre>code` for code), which is why those classes need no rule here. A group
+   `pre>code` for code), which is why those classes need no rule here (`dl`
+   gets the generic definition-list rule below, on every `dl`). A group
    falls to a bare `div`, so without this rule it renders as nothing at all and
    its children merely stack. Laid out as a row that WRAPS: siblings share the
    width and each keeps a minimum before the row breaks, so a pair of figures
@@ -26933,6 +27054,42 @@ htmxo_utility_styles() = h.style(Raw("""
     align-items: baseline;
     gap: var(--htmxo-semantic-metric-gap, 0.4rem);
 }
+
+/* A definition list reads as its terms beside their values. Pico styles no
+   `dt` or `dd`, so a bare `dl` fell to the browser's look: each term on its
+   own line in body weight, its value indented 40 px beneath it, nothing
+   setting one pair off from the next — and apps re-rolled their own lists.
+   Every `dl` is a two-column grid instead: bold terms in a column as wide as
+   the longest term, capped at `--htmxo-dl-label-width` and at 40% of the list
+   in a narrow column (a longer term wraps), and the values beside them. A
+   term with several values puts each on its own row of the value column, and
+   a `div` around a pair (valid HTML) is a `subgrid` row, so grouped pairs
+   share the columns. A paragraph or list inside a value drops its outer
+   margins, so its first line sits on its term's line and the row gap alone
+   spaces the rows (without Pico a `p` keeps a 1em top margin, which pushed
+   both the value and its baseline-aligned term down). `:not([hidden])` keeps
+   a hidden list hidden on a page without Pico, whose own `[hidden]` rule is
+   `!important`. Apps tune the
+   variables, or keep a stacked list, in their own scoped stylesheet — never
+   inline:
+       .my-app-sources, .my-app-sources > div { display: block; } */
+dl:not([hidden]) {
+    display: grid;
+    grid-template-columns: fit-content(min(var(--htmxo-dl-label-width, 16rem), 40%)) minmax(0, 1fr);
+    gap: var(--htmxo-dl-row-gap, 0.5rem) var(--htmxo-dl-column-gap, 1.25rem);
+    align-items: baseline;
+}
+dl > div:not([hidden]) {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    row-gap: var(--htmxo-dl-row-gap, 0.5rem);
+    align-items: baseline;
+}
+:is(dl, dl > div) > dt { grid-column: 1; font-weight: 600; }
+:is(dl, dl > div) > dd { grid-column: 2; margin: 0; }
+:is(dl, dl > div) > dd > :first-child { margin-top: 0; }
+:is(dl, dl > div) > dd > :last-child { margin-bottom: 0; }
 
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the
@@ -27132,18 +27289,19 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
    `intersect` — keep their resting style: the reader started nothing. The
    `request_feedback` script applies the same exclusion per request; CSS sees
    only the attribute, so a trigger list counts as `load` when it begins with
-   it.
+   it. A part that sent its own request and now shows it is being replaced
+   (`.htmxo-loading`, from `request_feedback`) takes that rule's dim instead.
    INTENTIONALLY UNLAYERED: Pico styles `<button>` (and other controls)
    unlayered, and an unlayered declaration beats every layered one
    regardless of specificity — inside `@layer htmxo` the cursor would never
    apply on buttons (the opacity would, Pico sets none). The resting `[hx-*]`
    rule above stays layered: at rest it agrees with Pico's `pointer`, so
    there is nothing to beat. */
-[hx-get]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-post]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-put]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-patch]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request {
+[hx-get]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-post]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-put]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-patch]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request {
     cursor: progress;
     opacity: 0.7;
 }
@@ -27215,13 +27373,55 @@ tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain:
     request_feedback_style()
 
 CSS for automatic HTMX request feedback: pulsating border while in-flight,
-brief color flash on success/failure. Themed via `--htmxo-accent`,
-`--htmxo-success`, `--htmxo-error` (see [`htmxo_theme`](@ref)).
-Under `prefers-reduced-motion` the pulse/fade animations are disabled while
-the static outline remains.
+brief color flash on success/failure, and the dim and status line of a part
+that a running request will replace (`.htmxo-loading`,
+`.htmxo-loading-status`; see [`request_feedback_script`](@ref)). Themed via
+`--htmxo-accent`, `--htmxo-success`, `--htmxo-error` and `--htmxo-bg` (see
+[`htmxo_theme`](@ref)). Under `prefers-reduced-motion` the pulse/fade and
+spinner animations are disabled while the static outline remains.
 """
 request_feedback_style() = h.style(Raw("""
+/* A part being replaced: dimmed, with the progress cursor that the in-flight
+   rule of `htmxo_utility_styles` gives it no longer. UNLAYERED, like that rule,
+   so it holds against an unlayered page rule of lower specificity. Pico draws
+   a spinner before every `[aria-busy=true]` element, which would push the
+   part's content down a line while it loads; the script sets
+   `data-htmxo-busy` only on a part without a `::before` of its own, so
+   removing it here removes nothing else. */
+.htmxo-loading { opacity: 0.45; cursor: progress; }
+[data-htmxo-busy][aria-busy="true"]::before { content: none; }
 @layer htmxo {
+.htmxo-loading-status {
+    position: fixed;
+    z-index: 9998;
+    transform: translate(-50%, -50%);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    padding: .5em 1.1em;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 999px;
+    background: var(--htmxo-bg, Canvas);
+    box-shadow: 0 2px 10px rgb(0 0 0 / .12);
+    font-size: 1rem;
+    line-height: 1.4;
+    text-align: center;
+    pointer-events: none;
+}
+.htmxo-loading-status::before {
+    content: "";
+    flex: none;
+    width: .9em;
+    height: .9em;
+    box-sizing: border-box;
+    border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: htmxo-loading-spin .8s linear infinite;
+}
+.htmxo-loading-status[data-htmxo-off] { opacity: 0; }
+@keyframes htmxo-loading-spin { to { transform: rotate(360deg); } }
 @keyframes htmx-pulse {
     0%, 100% { outline-color: color-mix(in srgb, var(--htmxo-accent) 30%, transparent); }
     50% { outline-color: var(--htmxo-accent); }
@@ -27252,7 +27452,8 @@ request_feedback_style() = h.style(Raw("""
 @media (prefers-reduced-motion: reduce) {
     .htmx-request-active,
     .htmx-request-success,
-    .htmx-request-error {
+    .htmx-request-error,
+    .htmxo-loading-status::before {
         animation: none;
     }
 }
@@ -27297,6 +27498,27 @@ failure toast agree: a network error or timeout flashes red, while a request
 the page aborted or an answer that navigates (`HX-Redirect`, `HX-Refresh`,
 `HX-Location`) just clears the outline. A head without the toast runtime
 flashes red for every request htmx does not report as successful.
+
+A part of the page that a request the reader started will replace says so
+while the request runs, once it has taken 0.3 s (a faster answer just swaps
+in): it is dimmed (class `htmxo-loading`), it carries `aria-busy="true"`, and
+a status line (`div.htmxo-loading-status`, `role="status"`) sits over the
+middle of its visible box. The line names what is coming when the reader
+chose it for a GET request — a select's option, a radio button's label, a
+link's text: "Loading Kreuzberg…" — and says "Loading…" otherwise. Its words
+are `loading` and `loading_named` of the page's [`ErrorTexts`](@ref)
+(`htmx(...; error_texts=error_texts(:de))`: "Kreuzberg wird geladen…"). This
+applies to swaps that replace the part's content (`innerHTML`, `outerHTML`,
+`textContent`, the morph swaps), not to `none`, an insertion beside or inside
+it, or `delete`, and not when the part is a control (button, input, select,
+textarea, link, label, summary) or the whole `body`. `data-htmxo-loading` on
+the requesting element or an element around it sets the line's words, and
+`data-htmxo-loading="false"` leaves its parts unmarked (for an app that draws
+its own placeholder). The mark ends when the answer is swapped in, or when the
+request fails, times out or is aborted; a request that replaces a running one
+on the same part (`hx-sync="this:replace"`) keeps it marked without a gap.
+`aria-busy` is set only on a part without a `::before` of its own, since Pico
+draws a spinner there, which the style removes.
 """
 request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
@@ -27381,6 +27603,155 @@ document.addEventListener('DOMContentLoaded', function() {
         el.classList.add(state === 'success' ? 'htmx-request-success' : 'htmx-request-error');
         setTimeout(function() { clearFeedback(el); }, state === 'success' ? 1000 : 2000);
     }
+    // The part a running request will replace says so once the request has
+    // taken LOADING_DELAY ms: dimmed (`htmxo-loading`), `aria-busy`, and a
+    // status line over its visible box naming what is coming. The words are
+    // the page's error texts (`htmx(...; error_texts)` puts them on <html>).
+    var LOADING_DELAY = 300;
+    var ENGLISH = {loading: $(_md_json_string(_EN_ERROR_TEXTS.loading)), loading_named: $(_md_json_string(_EN_ERROR_TEXTS.loading_named))};
+    function loadingTexts() {
+        var raw = document.documentElement.getAttribute('data-htmxo-error-texts');
+        var t = raw ? JSON.parse(raw) : {};
+        return {loading: t.loading || ENGLISH.loading, loading_named: t.loading_named || ENGLISH.loading_named};
+    }
+    // Swaps that put new content in place of the part; `none`, the
+    // insertions beside or inside it and `delete` leave nothing stale.
+    var REPLACING = /^(innerHTML|outerHTML|textContent|morph)/;
+    function swapStyle(elt) {
+        var holder = elt.closest('[hx-swap]');
+        var spec = holder ? holder.getAttribute('hx-swap') : (htmx.config.defaultSwapStyle || 'innerHTML');
+        return spec.trim().split(/\\s+/)[0] || 'innerHTML';
+    }
+    // What the reader chose, when a GET came from choosing it: a select's
+    // option, a radio button's label, a link's text.
+    function chosenLabel(e) {
+        var config = e.detail.requestConfig;
+        if (!config || String(config.verb).toLowerCase() !== 'get') return '';
+        var src = config.triggeringEvent && config.triggeringEvent.target;
+        if (!src || !src.closest) return '';
+        var text = '';
+        if (src.tagName === 'SELECT' && !src.multiple) text = src.selectedOptions[0] ? src.selectedOptions[0].textContent : '';
+        else if (src.type === 'radio') text = src.labels && src.labels[0] ? src.labels[0].textContent : '';
+        else if (src.closest('a')) text = src.closest('a').textContent;
+        return text.replace(/\\s+/g, ' ').trim();
+    }
+    var loading = new Map(), loadingByXhr = new WeakMap(), placing = 0;
+    function startLoading(e, elt) {
+        var t = e.detail.target;
+        if (!t || !t.isConnected || t === document.body || t === document.documentElement) return;
+        if (t.matches('button, input, select, textarea, a, label, summary, option, optgroup')) return;
+        if (!REPLACING.test(swapStyle(elt))) return;
+        var own = elt.closest('[data-htmxo-loading]');
+        var setting = own ? own.getAttribute('data-htmxo-loading') : null;
+        if (setting === 'false') return;
+        var texts = loadingTexts(), label = chosenLabel(e);
+        var text = setting || (label ? texts.loading_named.split('{label}').join(label) : texts.loading);
+        // A request that replaces one still loading here (`hx-sync`'s
+        // `replace`, a second pick) keeps the part marked without a gap.
+        var prev = loading.get(t), status = prev && prev.status;
+        if (prev) { prev.status = null; stopLoading(prev); }
+        var entry = {target: t, text: text, timer: null, status: null, busy: false};
+        loading.set(t, entry);
+        if (e.detail.xhr) loadingByXhr.set(e.detail.xhr, entry);
+        if (status) showLoading(entry, status);
+        else entry.timer = setTimeout(function() { showLoading(entry); }, LOADING_DELAY);
+    }
+    // `aria-busy` with nothing else about the part changed. Pico styles every
+    // [aria-busy=true] element: a spinner before it (pushing its content a
+    // line down), `white-space: nowrap` (re-flowing its text) and
+    // `pointer-events: none`. The style removes the spinner where the part
+    // has no ::before of its own (`data-htmxo-busy`); where it has one that
+    // changed, the part is not marked busy. A changed white-space or
+    // pointer-events is set back on the element while it is busy.
+    var PINNED = ['white-space', 'pointer-events'];
+    function beforeLook(t) {
+        var b = getComputedStyle(t, '::before');
+        return [b.content, b.display, b.width, b.height, b.backgroundImage, b.marginInlineEnd].join('|');
+    }
+    function setBusy(entry) {
+        var t = entry.target, style = getComputedStyle(t);
+        var was = PINNED.map(function(p) { return style.getPropertyValue(p); });
+        var content = getComputedStyle(t, '::before').content;
+        var ownBefore = content !== 'none' && content !== 'normal' && beforeLook(t);
+        t.setAttribute('aria-busy', 'true');
+        if (ownBefore && beforeLook(t) !== ownBefore) {
+            t.removeAttribute('aria-busy');
+            return;
+        }
+        if (!ownBefore) t.setAttribute('data-htmxo-busy', '');
+        entry.busy = true;
+        entry.pinned = [];
+        PINNED.forEach(function(p, i) {
+            if (style.getPropertyValue(p) === was[i]) return;
+            entry.pinned.push([p, t.style.getPropertyValue(p), t.style.getPropertyPriority(p)]);
+            t.style.setProperty(p, was[i], 'important');
+        });
+    }
+    function clearBusy(entry) {
+        var t = entry.target;
+        t.removeAttribute('aria-busy');
+        t.removeAttribute('data-htmxo-busy');
+        entry.pinned.forEach(function(saved) {
+            if (saved[1]) t.style.setProperty(saved[0], saved[1], saved[2]);
+            else t.style.removeProperty(saved[0]);
+        });
+        if (entry.pinned.length && !t.getAttribute('style')) t.removeAttribute('style');
+    }
+    // `status` is the line of the request this one replaced, kept in place.
+    function showLoading(entry, status) {
+        var t = entry.target;
+        if (loading.get(t) !== entry || !t.isConnected) {
+            if (status) status.remove();
+            return;
+        }
+        t.classList.add('htmxo-loading');
+        if (!t.hasAttribute('aria-busy')) setBusy(entry);
+        var s = status;
+        if (s) s.textContent = entry.text;
+        else {
+            s = document.createElement('div');
+            s.className = 'htmxo-loading-status';
+            s.setAttribute('role', 'status');
+            s.setAttribute('data-htmxo-off', '');
+            document.body.appendChild(s);
+            // Filled once the live region is in the page, so it is announced.
+            requestAnimationFrame(function() { if (!s.textContent) s.textContent = entry.text; });
+        }
+        entry.status = s;
+        if (!placing) placing = requestAnimationFrame(placeAll);
+    }
+    // Over the middle of the part's visible box; hidden (yet still read)
+    // while the part is off screen or too low to hold it.
+    function place(entry) {
+        var s = entry.status;
+        if (!s) return;
+        var r = entry.target.getBoundingClientRect();
+        var left = Math.max(r.left, 0), right = Math.min(r.right, window.innerWidth);
+        var top = Math.max(r.top, 0), bottom = Math.min(r.bottom, window.innerHeight);
+        s.style.maxWidth = Math.max(right - left - 16, 0) + 'px';
+        s.style.left = (left + right) / 2 + 'px';
+        s.style.top = (top + bottom) / 2 + 'px';
+        var fits = s.textContent && right - left > 16 && bottom - top >= s.offsetHeight + 8;
+        if (fits) s.removeAttribute('data-htmxo-off'); else s.setAttribute('data-htmxo-off', '');
+    }
+    function placeAll() {
+        placing = 0;
+        loading.forEach(place);
+        if (loading.size) placing = requestAnimationFrame(placeAll);
+    }
+    function stopLoading(entry) {
+        clearTimeout(entry.timer);
+        if (entry.status) entry.status.remove();
+        entry.status = null;
+        if (loading.get(entry.target) !== entry) return;
+        loading.delete(entry.target);
+        entry.target.classList.remove('htmxo-loading');
+        if (entry.busy) clearBusy(entry);
+    }
+    function stopRequest(e) {
+        var entry = e.detail.xhr && loadingByXhr.get(e.detail.xhr);
+        if (entry) stopLoading(entry);
+    }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
         var elt = requester(e);
         if (isAutomatic(e, elt) || isPreload(e)) return;
@@ -27390,6 +27761,13 @@ document.addEventListener('DOMContentLoaded', function() {
             clearFeedback(t);
             t.classList.add('htmx-request-active');
         });
+        startLoading(e, elt);
+    });
+    // The answer is about to land: the new content shows undimmed.
+    document.body.addEventListener('htmx:beforeSwap', stopRequest);
+    // A history snapshot keeps no loading state.
+    document.body.addEventListener('htmx:beforeHistorySave', function() {
+        Array.from(loading.values()).forEach(stopLoading);
     });
     // Whether the answer htmx is swapping belongs to a request the reader
     // started. An answer's out-of-band swaps run inside its swap, between its
@@ -27431,6 +27809,12 @@ document.addEventListener('DOMContentLoaded', function() {
         settled.forEach(function(t) { if (t.isConnected) mark(t, 'success'); });
     });
     function finished(e) {
+        // A request that ended without a swap (failed, timed out, aborted)
+        // leaves its part marked until the task ends: `hx-sync`'s `replace`
+        // aborts a request inside the task that starts its successor, which
+        // takes the mark over without a gap.
+        var entry = e.detail.xhr && loadingByXhr.get(e.detail.xhr);
+        if (entry) setTimeout(function() { stopLoading(entry); }, 0);
         var elt = requester(e);
         if (isAutomatic(e, elt)) return;
         var state = outcome(e);

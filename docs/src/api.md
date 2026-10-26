@@ -76,7 +76,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 | `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, recorded like every error answer |
-| `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles and failure toasts (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
+| `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles, failure toasts and loading status line (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
 response — and it passes through the response pipeline unchanged.
@@ -228,8 +228,31 @@ writes words of its own reads the language with
 and its answer is rendered. A `dispatch(…; lang)` answers in the language it
 names instead of the declared one ([In-process dispatch](#In-process-dispatch)).
 
+A struct on the mount chain can also declare `__progress_pause__`. A
+visitor-facing app sets `__progress_pause__ = false` once on its root, and
+Treebars' `:auto` pollers and live boards then show no ❚❚ / Pause control:
+pausing only freezes what the page shows while the work runs on, which a
+visitor reads as a stuck page. The status, bar, elapsed time and any Stop
+button stay. `true` shows the control and `nothing` keeps the enclosing
+struct's, with the innermost declaration winning as for `__lang__`; a struct
+mounted under such a root can switch it back on for an internal subtree. Any
+other value fails the route with an `ArgumentError` naming the struct. Treebars
+reads the value through [`HTMXObjects.page_progress_pause`](@ref), which holds
+where `page_lang` does, and follows it on a Treebars whose renderers take
+`pause=`; an explicit `pause=true`/`false` on a Treebars renderer wins.
+
+```julia
+@htmx struct App
+    __lang__ = "de"
+    __progress_pause__ = false
+    __page__(content) = HTMXObjects.pico_page(content)
+    # ...
+end
+```
+
 ```@docs
 HTMXObjects.page_lang
+HTMXObjects.page_progress_pause
 ```
 
 ### Tables on every page — `tables=true` {#page-tables}
@@ -1105,7 +1128,11 @@ that names its log file; `/probe/x` reads `Nicht gefunden` / `Sonde x
 unbekannt`; a missing parameter reads `Ungültige Anfrage` / `Pflichtangabe
 fehlt: n`. A stalled operation's terminal and its **Run again** button follow
 too. Passing the same value to the page shell translates the
-[failure toasts](#failure-toasts). Any text can be replaced by keyword, and
+[failure toasts](#failure-toasts) and the status line over a part that a
+running request will replace (`Wird geladen…`, or `Kreuzberg wird geladen…`
+when the reader chose Kreuzberg; `loading` and `loading_named`, which takes
+`{label}`; see [request feedback](components.md#request-feedback)).
+Any text can be replaced by keyword, and
 `reasons` replaces the phrases of the statuses it names:
 `error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
 reasons=Dict(404 => "Unbekannt"))`. `server_fault` and `error_id` (the

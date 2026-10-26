@@ -33,7 +33,7 @@ using TestItemRunner
         branches = [(; id="b1", date="", party="Ordner A", desc="", amount="", status="", children=items[1:4]),
                     (; id="b2", date="", party="Ordner B", desc="", amount="", status="", children=items[5:8])]
         lazygroups(p; kw...) = master_detail_table(headers, items; key=t -> p * "lg-" * t.id, master=cells,
-            detail, groupings, group_by="Gegenpartei", id=p * "lazygroups", group_by_url="/regroup",
+            detail, groupings, group_by=["Gegenpartei"], id=p * "lazygroups", group_by_url="/regroup",
             group_rows_url=(k, ms) -> "/rows/" * p * "?key=" * HTTP.escapeuri(k), kw...)
         tables(p) = (
             master_detail_table(headers, items; key=t -> p * "flat-" * t.id, master=cells, detail, id=p * "flat"),
