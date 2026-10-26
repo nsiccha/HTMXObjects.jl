@@ -11922,12 +11922,12 @@ end
             header_groups=["Row" => 2:3]))
     @htmx struct HtmlOnlyRecording
         @get hopage() = page()
-        @get hotable(; group_by::String="party") = regroupable(group_by)
+        @get hotable(; group_by::Vector{String}=["party"]) = regroupable(group_by)
         @get hobrowser() = regroupable("party"; server=false)
         @get homaster() = master_detail_table(["Party"], rows; key=r -> r.id,
             master=r -> (h.td(r.party),), detail=r -> h.p(r.id),
-            groupings=["none" => nothing, "party" => r -> r.party], group_by="party",
-            group_by_url="/hotable", group_master=(k, ms) -> (h.td(h.strong(k)),))
+            groupings=["none" => nothing, "party" => r -> r.party], group_by=["party"],
+            group_by_url="/hotable", group_master=(k, ms) -> (h.td(h.strong(last(HTMXObjects.group_path(k)))),))
     end
     mktempdir() do dir
         record!(HtmlOnlyRecording(); record_dir=dir, record_base="/b",
@@ -11938,16 +11938,18 @@ end
         @test count("data-static-disabled", recorded) == 2
         @test contains(recorded, "href=\"/b/hodoc\"")
         table = read(joinpath(dir, "hotable.html"), String)
-        @test contains(repr("text/html", regroupable("party")), "<select name=\"group_by\" hx-get=\"/hotable\"")
-        @test contains(table, r"<select name=\"group_by\" hx-target=[^>]* data-static-disabled=\"true\" disabled=\"true\">")
+        @test occursin(r"<span class=\"htmxo-group-pills\"[^>]* hx-get=\"/hotable\"", repr("text/html", regroupable(["party"])))
+        @test occursin(r"<span class=\"htmxo-group-pills\"[^>]* data-static-disabled=\"true\" disabled=\"true\"", table)
         @test !contains(table, "hx-get=\"/hotable\"")
         # A table the browser regroups keeps its control: no request to strip.
+        live_pills(page) = occursin(r"<span class=\"htmxo-group-pills\"(?![^>]*data-static-disabled)[^>]*>", page) &&
+            contains(page, "onclick=\"htmxoGroupToggle(this)\"")
         browser = read(joinpath(dir, "hobrowser.html"), String)
-        @test contains(browser, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\">")
+        @test live_pills(browser)
         # So does one whose `group_master` rows come from the server: only the
         # hidden element that asks for them loses its request.
         master = read(joinpath(dir, "homaster.html"), String)
-        @test contains(master, "<select name=\"group_by\" onchange=\"htmxoGroupSelect(this)\">") &&
+        @test live_pills(master) &&
             occursin(r"<span hidden=\"true\" data-htmxo-group-refresh=\"\"[^>]* data-static-disabled=\"true\"", master) &&
             !contains(master, "hx-get=\"/hotable\"")
     end
