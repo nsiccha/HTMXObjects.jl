@@ -4,16 +4,20 @@
  * `prefers-color-scheme: dark` as a last-resort fallback). The tokens
  * sit on top of `htmxo-gallery-card-code`'s subtle background, so
  * highlighting blends with the rest of the docs theme instead of
- * forcing a heavy `prism-tomorrow`-style dark frame everywhere. */
+ * forcing a heavy `prism-tomorrow`-style dark frame everywhere.
+ * Every color meets WCAG AA (4.5:1) on Pico's code background in its
+ * theme (light rgb(243, 244.5, 246.75), dark rgb(26, 30.5, 40.25)), as
+ * Pico's plain code color does.
+ * The `htmx()` shell carries this file as `syntax_styles()`. */
 
 :root {
-    --htmxo-syntax-comment:     #8a8d92;
+    --htmxo-syntax-comment:     #6b6e73;
     --htmxo-syntax-punctuation: currentColor;
-    --htmxo-syntax-string:      #4f8a3b;
+    --htmxo-syntax-string:      #467a34;
     --htmxo-syntax-keyword:     #a335a5;
     --htmxo-syntax-function:    #2f6dc7;
-    --htmxo-syntax-number:      #b06900;
-    --htmxo-syntax-class:       #b06900;
+    --htmxo-syntax-number:      #9e5e00;
+    --htmxo-syntax-class:       #9e5e00;
     --htmxo-syntax-operator:    currentColor;
     --htmxo-syntax-tag:         #c43d3d;
 }

@@ -357,6 +357,35 @@ each `.table-wrap` `data-htmxo-width="fits"` or `"wide"`. Without the runtime
 the table keeps its sideways scroll and its header scrolls away. Markdown and
 PDF output are unchanged: the line is HTML only.
 
+#### Columns keep their widths {#table-columns}
+
+A reader opening a row's detail, a lazy detail or lazy group rows arriving,
+a group or branch expanding, a search or filter hiding rows, or a row update
+never moves the columns of a `sortable_table`, `render_table` or
+`master_detail_table`, flat or hierarchical. Apps write nothing for it: no
+fixed column widths, no script.
+
+- **The widths fit every row the table holds.** The table runtime sizes the
+  columns once with the browser's own table layout over all its rows, shown
+  or hidden: the leaves of collapsed groups and branches and the rows a
+  search hides count as if they were shown. Detail rows do not: a detail's
+  content (a form, a PDF preview, a sub-table) fills the width the columns
+  give it and never widens them.
+- **Then the widths hold.** A row that arrives later (lazy group rows, a row
+  update) wraps its text inside its column, breaking a word too long for it.
+- **The columns are sized again** when the table's room changes by more than
+  two scrollbars (the window or a sidebar resizes), when the reader regroups
+  the table, when a table first shows (inside a closed tab or detail row) and
+  once web fonts have loaded. A table filling its room keeps its columns' shares
+  of it, so a scrollbar appearing narrows them all a little instead of
+  re-sizing them.
+
+The table carries `data-htmxo-columns` (`"held"` once sized, with a
+`<colgroup>` of the widths and `table-layout: fixed`); a morph swap that
+drops them gets them back before the browser paints. Without the runtime the
+browser's auto layout runs, with detail content still left out of the widths.
+Markdown and PDF output are unchanged.
+
 #### Row selection {#table-selection}
 
 `selectable="<input name>"` on `sortable_table`, `render_table` or
@@ -1227,7 +1256,7 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
-### `loading_indicator_script()` and `request_feedback_*`
+### `loading_indicator_script()` and `request_feedback_*` {#request-feedback}
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.
 `htmx()` includes `request_feedback()` by default (`feedback=true`);
@@ -1238,6 +1267,30 @@ and the element htmx resolved as the request's target. That covers an inherited
 a timeout) flashes red, and the shell's
 [failure toast](api.md#failure-toasts) says why. A request the page aborted, or
 an answer that navigates, only clears the outline.
+
+A part of the page that the request will replace says so while the request
+runs, once it has taken 0.3 s (a faster answer just swaps in). The part is
+dimmed (class `htmxo-loading`) and carries `aria-busy="true"`, and a status
+line (`div.htmxo-loading-status`, `role="status"`) sits over the middle of its
+visible box. When the reader chose what is coming, for a GET request, the line
+names it: a select's option, a radio button's label, a link's text
+("Loading Kreuzberg…"). Otherwise it says "Loading…". The words are `loading`
+and `loading_named` of the page's [`error_texts`](api.md#failure-toasts), so
+`htmx(...; error_texts=error_texts(:de))` gives "Kreuzberg wird geladen…".
+This applies to swaps that replace the part's content (`innerHTML`,
+`outerHTML`, `textContent`, the morph swaps), not to `hx-swap="none"`, an
+insertion beside or inside the part, or `delete`, and not when the part is a
+control (button, input, select, textarea, link, label, summary) or the whole
+`body`. Set `data-htmxo-loading="…"` on the requesting element, or an element
+around it, for other words, and `data-htmxo-loading="false"` to leave its parts
+unmarked, for an app that draws its own placeholder. The mark ends when the
+answer is swapped in, or when the request fails, times out or is aborted. A
+request that replaces a running one on the same part
+(`hx-sync="this:replace"`, a second pick) keeps the part marked without a gap.
+Pico styles every `[aria-busy=true]` element (a spinner before it,
+`white-space: nowrap`, no pointer events), and none of that reaches the part:
+the spinner is removed, the other two are held as they were, and a part with a
+`::before` of its own that Pico would change is not marked busy.
 
 Only requests the reader started are marked. A request the page sends by
 itself draws no outline, and its element does not dim: a poll, a preload, and
