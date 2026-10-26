@@ -824,8 +824,8 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   whose leaves are not on the page. For those, pass `group_by_url`: a route
   that renders the same call for the `group_by` and `q` (the current search) it
   receives. With `group_master` the browser regroups at once and then swaps in
-  the server's render of the new grouping; with lazy groups a change asks the
-  server straight away. In a recorded page, or without `group_by_url`, a
+  the server's render of the new grouping (or only its group rows, below);
+  with lazy groups a change asks the server straight away. In a recorded page, or without `group_by_url`, a
   `group_master` table still regroups in the browser, with default group rows
   (key, count and `group_summary`): the request for the server's render rides
   a hidden element, which recording strips, never the control. Lazy groups
@@ -852,6 +852,39 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   @get rows(; group_by::Vector{String}=["Counterparty"], key::String="") =
       transactions_table(__self__, group_by; group_rows=key)
   ```
+- **Only the group rows.** After a browser regroup, the request for the
+  server's render also sends `group_masters=true`. A route that declares it and
+  passes it to the same call gets back only the group rows of the new grouping,
+  at every level, as a [row update](#table-row-updates): they take the place of
+  the browser's group rows, and every leaf row stays as the browser placed it,
+  with what the reader did to it (open groups and details, the selection, the
+  search and the focus). `master` is not called, and the answer holds the group
+  rows alone, not every leaf again. A route that does not declare the
+  parameter answers with the whole table, as before:
+
+  ```julia
+  review_table(self, group_by, q=""; kw...) = master_detail_table(headers, transactions;
+      key = t -> t.id, master = t -> cells(self, t), detail = t -> h.p(t.memo),
+      groupings, group_by, group_by_url = self / "table",
+      group_master = (key, members) -> (h.td(h.strong(last(HTMXObjects.group_path(key)))),
+          h.td(rule_mode_select(self, key, group_by)), h.td(total(members))),
+      searchable = true, search_query = q, id = "review", kw...)
+
+  @get table(; group_by::Vector{String}=["Counterparty"], q::String="",
+             group_masters::Bool=false) =
+      review_table(__self__, group_by, q; group_masters)
+  ```
+
+  As with any browser regroup, the leaf rows are not rendered again: a
+  `group_by` in their action URLs, forms or `detail_url` still reaches the
+  server as the table's current grouping (*The grouping* under
+  [Row updates](#table-row-updates)).
+
+  `group_masters` needs `group_master`, and does not go with lazy groups
+  (`group_rows_url`), whose table the server regroups whole; either is an
+  `ArgumentError`. In the flat view the answer has no rows. Each regroup
+  replaces the request of the one before, and an answer for a grouping the
+  reader has left since is dropped.
 - **Selection.** Keys are per leaf. Selecting a leaf selects every copy, it is
   submitted once, and the selection survives regrouping and the flat view.
   Group rows are selectable too and submit their key under
