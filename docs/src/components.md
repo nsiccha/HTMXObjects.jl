@@ -456,10 +456,17 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
 - **Keys.** `master_detail_table` keys each item row by `link_key(item)`,
   which defaults to its `key` (as a string, not the sanitised row id),
   including every copy of a leaf that a regrouped table lists under several
-  groups; group rows have no key. `render_table` keys rows by `link_key(row)`.
-  Hand-built `sortable_table` rows carry `data-htmxo-link-key`, or are keyed
-  by their `data-htmxo-select-key`. A detail row counts as its master. Keys
-  compare as strings.
+  groups; group rows have no key of their own. `render_table` keys rows by
+  `link_key(row)`. Hand-built `sortable_table` rows carry
+  `data-htmxo-link-key`, or are keyed by their `data-htmxo-select-key`. A
+  detail row counts as its master. Keys compare as strings.
+- **Group rows.** Hovering or focusing a group row (of `groupings`, at any
+  level) or a branch of a `children` tree announces every item in it: the
+  street over its street sides, the district over its zones. That includes
+  collapsed rows and the leaves of a lazy group that have not loaded, and
+  leaves out the items the search or a filter hides, so the hover names what
+  the table shows. A branch announces its own key too. The other tables light
+  every one of those items, and a linked plot highlights all of them.
 - **Several tables of the same items.** A `master_detail_table`'s `key` names
   its row and detail ids, so it must be unique on the page. When two tables on
   one page show the same items, keep each table's `key` unique and give both
@@ -473,21 +480,27 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
   ```
 
   `link_key` without `link` throws, since it would highlight nothing.
-- **The event.** Hovering or keyboard-focusing a keyed row dispatches
-  `htmxo:link` on `document` with `detail` `{group, key, source}`; when the
-  hover ends, `key` is `null`. Every linked table listens for it and marks the
-  rows of its group that hold the key (`data-htmxo-linked`). A plot or any
-  other element joins the group by listening for the same event and
-  dispatching it on its own hover; page script can call
-  `htmxoLink(group, key)` (`null` clears). The latest key per group is kept in
-  `window.htmxoLinkState`, so a table that is swapped in, regrouped or filtered
-  later shows it too.
+- **The event.** Hovering or keyboard-focusing a row dispatches `htmxo:link`
+  on `document` with `detail` `{group, key, keys, source}`. `keys` lists the
+  items the row stands for (one for an item row, all of them for a group row)
+  and is empty when the hover ends; `key` is the row's own key, else the one
+  item a group holds, else `null`. Every linked table listens for it and marks
+  the rows of its group that hold one of the keys (`data-htmxo-linked`). A
+  plot or any other element joins the group by listening for the same event,
+  reading `keys` (an announcement without `keys` names `key` alone), and
+  dispatching it on its own hover; page script can call `htmxoLink(group, key)`
+  or `htmxoLink(group, [key1, key2])` (`null` clears). The latest
+  announcement per group is kept in `window.htmxoLinkState`, so a table that
+  is swapped in, regrouped or filtered later shows it too. All of it runs in
+  the browser, so it works the same in a page recorded with `record!` and
+  served as plain files.
 - **Hidden rows.** A highlight never changes the table. An item inside a
   collapsed group or branch lights up the innermost shown row above it, with a
-  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`
-  (the `linked_inside` and `linked_deep` texts, below). That includes a group
-  whose rows load lazily. A row that the search or a filter hides lights up
-  nothing. A lit row that is out of view scrolls into view inside the table's
+  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`,
+  or `↳ 3 inside` when it holds several hovered items (the `linked_inside`,
+  `linked_deep` and `linked_inside_many` texts, below). That includes a group
+  whose rows load lazily. The row the hover is on lights up as itself. A row
+  that the search or a filter hides lights up nothing. A lit row that is out of view scrolls into view inside the table's
   own scroll box (an `overflow: auto` wrapper), never the page, and only when
   the hover started outside that table.
 - **Theme.** Lit rows are tinted and outlined from `--htmxo-accent`; set
@@ -520,13 +533,14 @@ The texts cover everything these tables write themselves: the search field
 to load (`rows_failed`, `rows_missing`), the CSV button (`csv`), the toggle
 of the table's caption (`more`, the same word as `caption_texts`, see
 [Captions](#captions)) and the note on a row that holds a hovered item in a
-collapsed group (`linked_inside`, `linked_deep`, see
+collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`, see
 [Hover linking](#table-linking)). The `TableTexts` docstring names them all.
 
 A text in braces is a placeholder: `count` takes `{shown}` and `{total}` (items,
 not rows: see [Client-side search](#table-search)), the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
-`{level}`), `rows_failed` takes `{status}` and `linked_deep` `{levels}`. The browser writes the live count
+`{level}`), `rows_failed` takes `{status}`, `linked_deep` `{levels}` and `linked_inside_many`
+`{count}`. The browser writes the live count
 and status lines from the same templates, so they are strings, not Julia
 functions: the count changes on every keystroke without asking the server. An
 unknown locale, text name or placeholder throws an `ArgumentError`.
