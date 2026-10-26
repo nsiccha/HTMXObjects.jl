@@ -51,7 +51,7 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
-rev = "de253533c2e6d4884815100988630746c6801017"
+rev = "98344e0c5dc6c8bdf868d31b0fbe4bc2a14c8679"
 
 [targets]
 test = ["Artifacts", "Logging", "PrecompileTools", "TOML", "Test", "TestItemRunner", "Treebars"]
