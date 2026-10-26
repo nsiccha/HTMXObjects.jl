@@ -85,7 +85,7 @@ end
     @test "k3" in keyed(tupdate)
     # A lazy group lists each unloaded leaf's link key after its key and search
     # text, so a hover lights the group; without `link_key` the entries stay pairs.
-    lazy(; kw...) = html(probe_table(; groupings=LINK_GROUPINGS, group_by="Land",
+    lazy(; kw...) = html(probe_table(; groupings=LINK_GROUPINGS, group_by=["Land"],
         group_rows_url=(k, ms) -> "/rows?land=$k", link="probes", kw...))
     @test contains(lazy(; key=p -> "trend-" * p.id, link_key=p -> p.id),
         "data-htmxo-lazy-leaves=\"[[&quot;trend-k5&quot;,&quot;k5 Sachsen 5&quot;,&quot;k5&quot;],[&quot;trend-k8&quot;,&quot;k8 Sachsen 8&quot;,&quot;k8&quot;]]\"")
@@ -168,8 +168,7 @@ end
             search('');
             check('search-cleared-relit', lit('grouped') === 'row-group--Sachsen--k8=row');
             // Regrouping keeps the highlight.
-            const select = document.querySelector('#grouped').closest('[data-htmxo-grouped]').querySelector('select[name="group_by"]');
-            select.value = 'Region'; select.dispatchEvent(new Event('change', {bubbles: true}));
+            htmxoGroupRequest(document.querySelector('#grouped').closest('[data-htmxo-grouped]').querySelector('.htmxo-group-pills'), ['Region'], null);
             await wait(() => lit('grouped') === 'row-group--Mitte=inside[↳ darin]');
             check('regroup-relit', lit('grouped') === 'row-group--Mitte=inside[↳ darin]');
             // A group row has no key: moving onto it from a leaf ends the leaf's hover.
@@ -240,7 +239,7 @@ end
         # and detail ids, and all three name a probe by its id in the group.
         main = probe_table(; link="probes", id="main")
         trend = probe_table(; key=p -> "trend-" * p.id, link="probes", link_key=p -> p.id, id="trend")
-        lazy = probe_table(; key=p -> "lz-" * p.id, groupings=LINK_GROUPINGS, group_by="Land",
+        lazy = probe_table(; key=p -> "lz-" * p.id, groupings=LINK_GROUPINGS, group_by=["Land"],
             group_rows_url=(k, ms) -> "/rows?land=$k", link="probes", link_key=p -> p.id, id="lazy")
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function() {
