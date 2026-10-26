@@ -403,6 +403,13 @@ KaTeX, which typesets [Markdown math](#markdown-math), is a directory:
 in an inert template; nothing is fetched until a page shows math.
 `vendor_head(base; packages=(:katex,))` returns that template, for a
 hand-built head that also adds `math_script()` and `math_styles()`.
+PrismJS, which [highlights code](#syntax-highlighting), is a directory in its
+npm layout: `/vendor/prism/components/prism-core.min.js`,
+`…/prism/plugins/autoloader/prism-autoloader.min.js` and every language's
+grammar, `…/prism/components/prism-<language>.min.js`; `copy_vendorfiles`
+writes them to `dir/prism/`, and `vendor_head(base; packages=(:prism,))`
+returns its template, for a hand-built head that also adds `syntax_script()`
+and `syntax_styles()`.
 
 ```julia
 copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico))
@@ -749,6 +756,7 @@ For authoring Markdown that renders to HTML — the reverse direction:
 | `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
 | `markdown_parser(; extra_rules, math)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
 | `math_script()` / `math_styles()` | The browser runtime that typesets Markdown math with KaTeX; `htmx()` pages carry both |
+| `syntax_script()` / `syntax_styles()` | The browser runtime that highlights code with PrismJS; `htmx()` pages carry both |
 | `decorated_link(label, href, entry; class, attrs, base)` | `base` attrs always; `attrs(entry)` merged over them once known |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
@@ -817,6 +825,36 @@ SemanticProse(BRM.brm_description_markdown(BRM.brm_description(d)))
 An app that renders math nodes its own way adds `markdown_node` methods for
 `CommonMark.Math` / `CommonMark.DisplayMath` on its renderer; a
 `parser_rules=[CommonMark.DollarMathRule()]` workaround is no longer needed.
+
+### Syntax highlighting {#syntax-highlighting}
+
+Code that names its language is highlighted on every `htmx()` page, with
+nothing added to the page: a `SemanticCode(:julia, source)`, a Markdown fence
+such as ` ```stan `, or any other `<code class="language-…">`.
+
+- **Everywhere code arrives.** The shell's `syntax_script` highlights the
+  page's code on load and the code in every fragment htmx swaps in, so code
+  in a lazily loaded tab, a disclosure or an in-place demo is highlighted
+  too. A code element that holds other elements (links, or a highlight
+  already applied) is left as it is. Code without a language stays plain.
+- **PrismJS loads only for pages that show code.** The shell carries an inert
+  `<template id="htmxo-prism">` naming PrismJS's core and its autoloader; the
+  runtime adds them the first time such code appears, and the autoloader
+  fetches each language's grammar (Julia, Stan, Python, JSON, TOML, R, Bash
+  and about 290 more). `prism_version` selects the release (default the
+  vendored pin, `1.30.0`): from jsdelivr under `assets=:cdn`, from the vendor
+  mount under `assets=:vendor` (see [Offline pages](#offline-pages)).
+  `prism_version=nothing` leaves the template out; the runtime then uses a
+  PrismJS the page loaded itself (`window.Prism`), or the code stays plain.
+- **Light and dark.** `syntax_styles` colors the tokens through
+  `--htmxo-syntax-*` variables that follow a dark theme (Pico
+  `data-theme="dark"`, VitePress `html.dark`, or the system's dark mode); each
+  color meets WCAG AA contrast on Pico's code background. The rules sit in
+  `@layer htmxo`, so a host stylesheet that sets the variables wins.
+- **Static sites too.** `export_site` writes the template's files and every
+  grammar the autoloader can fetch, so an exported page highlights its code
+  from the bundle, offline. `?plain`, `pdf_report` and the Markdown of a page
+  carry the code unchanged.
 
 Deferred decoration pairs a [`MarkdownRule`](@ref) with a DynamicObjects
 `BackgroundCache` in batch mode: the build function reads `cache[key]` on the
@@ -1674,6 +1712,8 @@ MARKDOWN_URL_RULE
 render_markdown
 math_script
 math_styles
+syntax_script
+syntax_styles
 MarkdownRenderer
 DefaultMarkdownRenderer
 markdown_node
