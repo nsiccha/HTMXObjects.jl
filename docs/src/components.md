@@ -587,11 +587,14 @@ How much is written:
   `2.0` writes `2`. A float below 10⁻⁴ or from 10¹⁵ up (in absolute value)
   is a power of ten with superscript digits, `3,81·10⁻⁵`, which reads the same
   in HTML, Markdown, a `pdf_report` and a pasted copy.
-- `sigdigits = 3` rounds to three significant digits first, as
-  `round(x; sigdigits = 3)` does: `0,156`, `1.230.000`.
-- `digits = 2` writes exactly two decimals (0 to 10), halves away from zero,
-  the same way as a [group summary](#table-regrouping): `0,16`. It never
-  switches to a power of ten.
+- `sigdigits = 3` rounds to three significant digits first (1 to 15), halves
+  away from zero: `0,156`, `1.230.000`; `2850` with `sigdigits = 2` writes
+  `2.900` (Julia's `round(x; sigdigits = 2)` rounds that half to even, `2800`).
+- `digits = 2` writes exactly two decimals (0 to 10), halves away from zero:
+  `0,16`. It never switches to a power of ten.
+
+A [group summary](#table-regrouping) takes the same `digits` or `sigdigits`
+and writes the same text.
 
 `missing` and `nothing` write `–` (no sort key, an empty CSV field); `Inf`,
 `-Inf` and `NaN` write `∞`, `-∞` and `NaN`. The cell carries its value twice:
@@ -762,10 +765,14 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   `item -> number`, `:count`, or `:ratio` of two sums (Σ demand / Σ capacity).
   A leaf whose function returns `nothing` or `missing` is left out. The
   browser computes the summaries again for every grouping the reader picks,
-  rounded to `digits` decimals and written with the table's `decimal` and
-  `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`); the CSV
-  download writes the same decimals as a number (`1234.5`). Group rows
-  sort among themselves by the same columns; leaves sort within their group.
+  rounded to `digits` decimals (default 0) or to `sigdigits` significant
+  digits, halves away from zero, and written as `format_number` writes them,
+  with the table's `decimal` and `thousands` texts (`texts = table_texts(:de)`
+  writes `1.234,5`); the CSV download writes the rounded number (`1234.5`).
+  A sum of estimates that are each good to two digits shows no more than
+  that with `ColumnSummary(:sum, r -> r.estimate; sigdigits = 2)`: `29.000`,
+  not `29.210`. Group rows sort among themselves by the same columns; leaves
+  sort within their group.
 - **Group order.** `group_order` gives a grouping's groups an order of their
   own, so one table serves groupings that each need a different one. Each
   entry is a grouping name and either a list of keys (those groups first, in
@@ -924,9 +931,12 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
   `group_by` would reach a `Vector{String}` route as no values, and
   `query_url` would drop it from the action URLs.
 - **The grouping elsewhere.** A bulk form named by `select_form` receives the
-  levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
-  returns the `group_by` values of the table's current grouping, e.g. for an
-  action's `hx-vals`
+  levels as `group_by` values. An htmx request from inside the table that
+  carries `group_by` (in its URL, a form field or `hx-vals`) sends the
+  table's current grouping, once, whatever grouping the row was rendered for
+  (see *Row updates*). In the browser, `htmxoGroupBy('#documents')` returns
+  the `group_by` values of the table's current grouping, e.g. for a script, or
+  for the `hx-vals` of an element outside the table
   (`js:{group_by: htmxoGroupBy('#documents')}`).
 - **Lazy groups** load at any level. The subgroups of a loaded group can be
   lazy in turn, and *Expand all* loads and opens them all.
@@ -1030,9 +1040,13 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
   `update_rows=id, update_groups=[old, new]`.
 - **The grouping.** Render the update for the grouping the reader sees: pass
   `group_by` into the action URLs that `master` and `group_master` build, as
-  above. An update rendered for another grouping is refused with an error
-  toast, and the table is left as it was. In the flat view `update_groups`
-  names no rows.
+  above, or into a form in a detail, or a `detail_url`. The browser regroups
+  without rendering the rows again, so those values still name the grouping
+  of their render; an htmx request from inside the table that carries
+  `group_by` therefore sends the table's current grouping instead, once (a
+  `group_by` in both the URL and `hx-vals` is not doubled). An update rendered
+  for another grouping is refused with an error toast, and the table is left
+  as it was. In the flat view `update_groups` names no rows.
 - **Transport and toasts.** Like any route whose response is table rows,
   declare the action `@direct` (see `OperationPolicy`): an interim poller
   cannot stand in a table row. The response body is rows, so name a success
