@@ -3557,19 +3557,40 @@ struct SemanticCode <: SemanticNode
 end
 
 """
-    SemanticStatus(state::Symbol; detail="")
+    SemanticStatus(state::Symbol; detail="", label=string(state))
 
 Store status meaning rather than styling. `:ok` / `:available`, `:warn` /
 `:blocked`, `:fail`, and `:pending` receive distinct text glyphs; any other
-symbol remains valid and uses a neutral glyph. The state also remains available
-as an HTML class and literal Markdown/HXML/text content.
+symbol remains valid and uses a neutral glyph. The state stays data: it picks
+the glyph and fills the HTML/HXML `data-status` attribute.
+
+`label` is the word written after the glyph in every peer format, the state's
+own name unless given. An app in another language, or one whose states are
+domain outcomes, keeps a recognised state and its glyph and names it in its
+own words:
+
+```julia
+SemanticStatus(:warn; label="im Projekt zu klären", detail="3 Ortsteile")
+# HTML: <span … data-status="warn"><strong>! im Projekt zu klären</strong>…
+# Markdown: ! **im Projekt zu klären** — 3 Ortsteile
+# plain text: [im Projekt zu klären] 3 Ortsteile
+```
+
+A blank `label` throws an `ArgumentError`: plain text shows no glyph, so the
+status would say nothing there.
 """
 struct SemanticStatus <: SemanticNode
     state::Symbol
     detail::String
+    label::String  # the word after the glyph
+    function SemanticStatus(state::Symbol; detail="", label=string(state))
+        label = String(label)
+        # Plain text carries the status in this word alone.
+        all(isspace, label) && throw(ArgumentError(
+            "SemanticStatus(:$state): `label` is blank; omit it to show the state's name"))
+        new(state, String(detail), label)
+    end
 end
-
-SemanticStatus(state::Symbol; detail="") = SemanticStatus(state, String(detail))
 
 """
     SemanticTexts
@@ -3903,7 +3924,7 @@ _semantic_code_node(code::SemanticCode) = h.pre(
 function _semantic_status_node(status::SemanticStatus)
     detail = isempty(status.detail) ? Any[] : Any[h.small(" $(status.detail)")]
     h.span(
-        h.strong(string(_semantic_status_glyph(status.state), " ", status.state)),
+        h.strong(string(_semantic_status_glyph(status.state), " ", status.label)),
         detail...;
         class="htmxo-semantic-status", data_status=string(status.state))
 end
@@ -4841,7 +4862,7 @@ function Base.show(io::IO, ::MIME"text/markdown", code::SemanticCode)
 end
 
 Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
-    io, _semantic_status_glyph(status.state), " **", status.state, "**",
+    io, _semantic_status_glyph(status.state), " **", status.label, "**",
     isempty(status.detail) ? "" : " — $(status.detail)")
 
 Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
@@ -4953,7 +4974,7 @@ end
 
 Base.show(io::IO, ::MIME"text/plain", code::SemanticCode) = print(io, code.text)
 Base.show(io::IO, ::MIME"text/plain", status::SemanticStatus) = print(
-    io, '[', status.state, ']', isempty(status.detail) ? "" : " $(status.detail)")
+    io, '[', status.label, ']', isempty(status.detail) ? "" : " $(status.detail)")
 
 function Base.show(io::IO, mime::MIME"text/plain", card::SemanticCard)
     print(io, card.title)
