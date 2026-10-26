@@ -8620,6 +8620,17 @@ end
     @test SemanticCode("julia", "x = 1").language === :julia
 end
 
+@testitem "a SemanticCode language is one word, given first" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    md(x) = HTMXObjects.to_markdown_string(x)
+    # refused: source text given first rendered silently as the Markdown
+    # fence's info string, the language as the code (dev §1, never silently
+    # produce false output; snag followed-htmxo-u-f1d20b08)
+    @test_throws ArgumentError SemanticCode("model { y ~ normal(mu, sigma); }", "stan")
+    @test_throws ArgumentError SemanticCode("mu ~ 1 + z\nlog(sigma) ~ 1", :julia)
+    @test md(SemanticCode(:stan, "y ~ normal(mu, sigma);")) == "```stan\ny ~ normal(mu, sigma);\n```"
+    @test md(SemanticCode("julia-repl", "julia> 1")) == "```julia-repl\njulia> 1\n```"
+end
+
 @testitem "chrome stripping keeps every semantic container and its anchor" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     strip_chrome = HTMXObjects._strip_md_chrome
 
