@@ -22127,8 +22127,18 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `master_class`, `detail_class`: optional extra CSS classes on the rows.
 - `initially_open`: `true`, `false`, or a predicate `item -> Bool`.
   When the predicate is `true` for an item, that row renders open from
-  the first paint (see [`master_detail_pair`](@ref) for the mechanics).
-  Defaults to `false` (all rows collapsed initially).
+  the first paint, opening what a click on the row opens: a flat row or a
+  leaf shows its detail, and a collapsible branch shows its child rows while
+  its own detail stays closed (`initially_open_detail` opens that). See
+  [`master_detail_pair`](@ref) for the mechanics. Defaults to `false` (all
+  rows collapsed initially).
+- `initially_open_detail`: `true`, `false`, or a predicate `item -> Bool`,
+  asked only about rows that have a detail. When given, it alone decides
+  which details render open from the first paint, and `initially_open` then
+  decides only which branches show their child rows. Use it to open a
+  branch's own detail (a section's summary above its rows), or to reveal a
+  row with `initially_open` while keeping its detail closed. Default
+  `nothing`: the details `initially_open` opens.
 - `children(item)`: optional callback returning child items. `items` then
   contains roots; the helper emits a single tree table in preorder. Keys must
   be unique after sanitisation, including across levels. Clicking a branch row
@@ -22136,12 +22146,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   is a native keyboard button when the first cell is non-interactive. A separate
   triangle remains when that cell contains a link/control or `detail_toggle=:label`
   reserves the label for a detail. A selectable row click still selects, while
-  its branch control opens children. `initially_open` controls branches and leaf
-  details. A group with neither a detail body nor URL has no companion or detail
-  request.
+  its branch control opens children. `initially_open` opens a branch's child
+  rows and a leaf's detail; a branch's own detail opens on first paint only
+  with `initially_open_detail`. A group with neither a detail body nor URL has
+  no companion or detail request.
 - `branches_collapsible`: with `children`, default `true`. Set `false` to
   keep every branch expanded without disclosure controls. This overrides
-  `initially_open` for branch visibility only; detail expansion stays independent.
+  `initially_open` for branch visibility only: `initially_open` then opens a
+  branch's own detail, which a click on its row opens.
 - `expand_controls`: with collapsible `children`, add *Expand all* and
   *Collapse all* buttons above the table (default `false`). They open or close
   every branch at once; detail rows keep their own state and collapsed
@@ -22220,6 +22232,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   a leaf it opens, at every level, renders open (and its rows eagerly, even
   with `group_rows_url`), so that leaf and its detail show on first paint. With
   `initially_open=true` every rendered group is open and lazy groups stay lazy.
+  An `initially_open_detail` predicate is called with leaves only too and
+  decides their details; the groups still open by `initially_open`.
   See *Regroupable tables* in `docs/src/components.md`.
 - `group_by`: the active levels, an ordered list of grouping names that nests
   the groups level by level, the first outermost (`["Review stage",
@@ -22364,6 +22378,7 @@ function master_detail_table(headers, items;
                              master_class=nothing,
                              detail_class=nothing,
                              initially_open::Union{Bool,Function}=false,
+                             initially_open_detail::Union{Nothing,Bool,Function}=nothing,
                              children=nothing,
                              branches_collapsible::Bool=true,
                              detail_toggle::Symbol=:button,
@@ -22403,7 +22418,7 @@ function master_detail_table(headers, items;
         "master_detail_table: `link_key(item)` keys the rows of the link group `link`; give `link` too"))
     isnothing(groupings) || return _grouped_master_detail_table(headers, items;
         key, master, detail, detail_url, master_attrs, master_class, detail_class,
-        initially_open, children, branches_collapsible, detail_toggle, searchable,
+        initially_open, initially_open_detail, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
         group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
@@ -22428,6 +22443,7 @@ function master_detail_table(headers, items;
     sort_columns = [(i, Any[last(k) for k in hdr.sort_keys])
                     for (i, hdr) in enumerate(headers) if _computed_sort_keys(hdr)]
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
+    _open_detail = initially_open_detail isa Bool ? (_ -> initially_open_detail) : initially_open_detail
     seen = Set{String}()
     max_level = Ref(1)
     # `update_rows`: render only these items' rows (see `_md_row_update`); the
@@ -22488,6 +22504,11 @@ function master_detail_table(headers, items;
         body = isnothing(detail) ? nothing : detail(item)
         url  = isnothing(_url) ? nothing : _url(item)
         has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
+        # `initially_open` opens what a click on the row opens, so a
+        # collapsible branch shows its child rows and keeps its own detail
+        # closed; `initially_open_detail`, when given, decides every detail.
+        detail_open = has_detail && (isnothing(_open_detail) ?
+            open && !(branch && branches_collapsible) : _open_detail(item))
         cells, row_attrs = _md_master_row(master(item), texts)
         # A group row (`_sort_item` gives `nothing`) sorts by its own value.
         sort_item = isempty(sort_columns) ? nothing : _sort_item(item)
@@ -22546,7 +22567,7 @@ function master_detail_table(headers, items;
             end
         end
         if has_detail
-            isnothing(children) || (attrs[:data_htmxo_detail_open] = string(open))
+            isnothing(children) || (attrs[:data_htmxo_detail_open] = string(detail_open))
             # Plain hierarchy leaves use their label as the keyboard detail
             # control. Linked leaves and branches with their own details keep
             # a separate icon, so links and child-row expansion remain distinct.
@@ -22555,12 +22576,12 @@ function master_detail_table(headers, items;
                 (!isnothing(children) && !branch && !any(_md_interactive_label, label))
             toggle_label, label_attrs =
                 label_detail ? (label, (; data_htmxo_label="")) :
-                isnothing(children) ? (Any[_md_disclosure_glyph(open)],
+                isnothing(children) ? (Any[_md_disclosure_glyph(detail_open)],
                                        (; data_htmxo_disclosure="", aria_label=texts.details)) :
                 (Any["ⓘ"], (; aria_label=texts.details, title=texts.details))
             toggle = h.button(toggle_label...; type="button",
                 data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
-                aria_expanded=string(open), onclick="htmxoMdControl(this,event)")
+                aria_expanded=string(detail_open), onclick="htmxoMdControl(this,event)")
             if label_detail
                 label = Any[_LabelledControl(toggle)]
             else
@@ -22580,7 +22601,7 @@ function master_detail_table(headers, items;
         else
             (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
-                                    initially_open=open && ancestors_open, detail_url=url,
+                                    initially_open=detail_open && ancestors_open, detail_url=url,
                                     row_toggle=!selecting, texts)
             push!(rows, m, d)
         end
@@ -23249,7 +23270,7 @@ function _md_sort_values!(cells, sort_columns, item, headers)
 end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
-        master_attrs, initially_open, children, groupings, group_by, group_master,
+        master_attrs, initially_open, initially_open_detail, children, groupings, group_by, group_master,
         group_by_url, group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
@@ -23352,6 +23373,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this), group_masters: true}"))
     leaf_keys = _md_update_keys(update_rows)
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
+    _open_detail = initially_open_detail isa Bool ? (_ -> initially_open_detail) : initially_open_detail
     # A group's key names it in callbacks, selections and requests; its
     # row key (and so its row id) joins its level keys. A leaf's row key
     # names the group it is listed under; the flat view lists each leaf once,
@@ -23505,6 +23527,9 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         initially_open = x -> x isa _MDGroup ?
             (!isnothing(target) && isprefix(x.path, target) || initially_open === true || reveals(x)) :
             _open(x.item),
+        # The predicate sees leaves only; a group has no detail of its own.
+        initially_open_detail = isnothing(_open_detail) ? nothing :
+            (x -> !(x isa _MDGroup) && _open_detail(x.item)),
         search_text = isnothing(search_text) ? nothing :
             (x -> x isa _MDGroup ? last(x.path) : search_text(x.item)),
         selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
