@@ -1845,6 +1845,12 @@ Four points where a projection is deliberately not a translation of the HTML:
   viewport to collapse into, so their correct projection is the label followed
   by the whole body. Wrapping the children in markup instead would force the
   subtree down the HTML→Markdown path and lose every peer projection under it.
+  A disclosure with nothing to open renders nothing in any format, label
+  included. That covers a disclosure with no children, one holding only
+  `nothing`, and one whose [`private`](#private-content) content has no
+  stand-in for a public reader. In Markdown it also covers a body that held
+  only form controls, and a static export leaves out one whose controls it
+  removed.
 - **`SemanticProse`'s HTML peer renders its Markdown**, through
   [`render_markdown`](@ref) (CommonMark plus bare-URL linking and
   [TeX math](#markdown-math)), which escapes inline markup — so prose cannot
@@ -1853,7 +1859,9 @@ Four points where a projection is deliberately not a translation of the HTML:
 - **`SemanticAlternatives` projects its default view alone** outside HTML.
   Collapsed views have no text analogue, so Markdown, plain and HXML carry the
   default — the consent surface — and the alternatives' labels stay in HTML
-  with the collapsed sections they head.
+  with the collapsed sections they head. A collapsed view with nothing to show
+  its reader (private content without a stand-in, for a public reader) is left
+  out with its label.
 
 `SemanticTable` is gated by `Tables.istable`, not by a duck-typed
 `propertynames` check: a `NamedTuple` of vectors, a `DataFrame` and a
@@ -3837,8 +3845,14 @@ outlined and labelled "not public", with no code in the app.
 
 **What a public answer holds.**
 
-- `private` works wherever a value is rendered, in HTML and in Markdown: as an
-  element's child, inside a semantic element, or as a route's whole answer.
+- `private` works wherever a value is rendered, in HTML, HXML, Markdown and
+  plain text: as an element's child, inside a semantic element, or as a
+  route's whole answer.
+- **Nothing to open.** A `SemanticDisclosure` whose body shows its reader
+  nothing renders nothing, label included, and so does a `SemanticAlternatives`
+  view left with nothing to show. A public reader therefore never sees a
+  "Model specification" disclosure that opens onto nothing. Give `private` a
+  `public` stand-in to keep the label in public views.
 - **A private page.** A route whose whole answer is `private(x)` without a
   stand-in answers a public reader with an empty `404` carrying
   `X-HTMXO-Private: true`, as a page, a fragment and in Markdown. `export_site`
