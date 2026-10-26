@@ -18882,6 +18882,132 @@ if (!window.htmxoStickyBound) {
 }
 if (document.body) htmxoStickyTrack(document.body);
 
+// --- Columns keep their widths: every sortable_table (`data-htmxo-columns`) ---
+// Auto table layout sizes the columns over the rows that are shown, so a
+// detail opening, a lazy detail or lazy group rows arriving, a group or
+// branch expanding or a search hiding rows moved every column. The runtime
+// sizes the columns once with that same layout over every row the table
+// holds, shown or hidden ("sizing": the CSS shows hidden rows collapsed;
+// detail rows stay out), then holds them ("held": `table-layout: fixed`, one
+// `<col>` per column). A table filling its room holds shares of it, so a
+// scrollbar coming or going narrows the columns together; a wider or
+// narrower one holds pixels. It sizes them again when the room changes by
+// more than two scrollbars, when the browser regroups the table and once web
+// fonts have loaded. A table that is not laid out yet (a closed tab or detail
+// row) is sized when it first shows. A morph keeps the element but drops the
+// colgroup and marks the server did not render: they are put back on the
+// swap, before the browser paints.
+window.htmxoColumnsHeld = window.htmxoColumnsHeld || new WeakMap();
+window.htmxoColumnsWatched = window.htmxoColumnsWatched || new Map();
+// The header cell of each column: the one spanning that column alone (a
+// grouped header's leaf, or a cell spanning both header rows).
+function htmxoColumnCells(table) {
+    const cells = [], taken = [];
+    if (!table.tHead) return cells;
+    Array.from(table.tHead.rows).forEach((row, r) => {
+        let c = 0;
+        Array.from(row.cells).forEach(cell => {
+            while (taken[r] && taken[r][c]) c++;
+            for (let i = 0; i < Math.max(cell.rowSpan, 1); i++)
+                for (let j = 0; j < cell.colSpan; j++) (taken[r + i] = taken[r + i] || [])[c + j] = true;
+            if (cell.colSpan === 1) cells[c] = cell;
+            c += cell.colSpan;
+        });
+    });
+    return cells;
+}
+function htmxoColumnsApply(table, held) {
+    let group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
+    if (!group) {
+        group = document.createElement('colgroup');
+        group.setAttribute('data-htmxo-columns', '');
+        table.insertBefore(group, table.caption ? table.caption.nextSibling : table.firstChild);
+    }
+    group.replaceChildren(...held.widths.map(w => {
+        const col = document.createElement('col');
+        col.style.width = held.fill ? (100 * w / held.width) + '%' : w + 'px';
+        return col;
+    }));
+    table.style.width = held.fill ? '100%' : held.width + 'px';
+    table.dataset.htmxoColumns = 'held';
+}
+function htmxoColumnsMeasure(table, force) {
+    if (!table.isConnected || !('htmxoColumns' in table.dataset)) return;
+    const room = table.parentElement.clientWidth, cells = htmxoColumnCells(table);
+    if (!room || !cells.length || cells.length !== cells.filter(Boolean).length) return;
+    const held = window.htmxoColumnsHeld.get(table);
+    if (held && !force && held.widths.length === cells.length && Math.abs(held.room - room) <= 40) {
+        if (table.dataset.htmxoColumns !== 'held' ||
+            !table.querySelector(':scope > colgroup[data-htmxo-columns]')) htmxoColumnsApply(table, held);
+        return;
+    }
+    const group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
+    if (group) group.remove();
+    // Size with the table's own width, if the app gave it one.
+    const own = held ? held.own : table.style.width;
+    table.style.width = own;
+    table.dataset.htmxoColumns = 'sizing';
+    const width = table.getBoundingClientRect().width;
+    const next = {room, own, width, fill: Math.abs(width - room) < 1,
+                  widths: cells.map(c => c.getBoundingClientRect().width)};
+    window.htmxoColumnsHeld.set(table, next);
+    htmxoColumnsApply(table, next);
+}
+// The observer's notices are measured in a task of their own: the layout a
+// measurement changes would re-notify inside the callback.
+function htmxoColumnsQueue(table, force) {
+    const pending = window.htmxoColumnsPending || (window.htmxoColumnsPending = new Map());
+    pending.set(table, pending.get(table) || !!force);
+    if (window.htmxoColumnsFrame) return;
+    window.htmxoColumnsFrame = setTimeout(() => {
+        window.htmxoColumnsFrame = 0;
+        const due = Array.from(pending);
+        pending.clear();
+        due.forEach(([t, f]) => htmxoColumnsMeasure(t, f));
+    }, 0);
+}
+// Size the tables in `elt` not seen before, put back what a swap dropped,
+// observe each table's room and forget tables that left the document.
+function htmxoColumnsTrack(elt) {
+    if (!elt || !elt.querySelectorAll) return;
+    const watched = window.htmxoColumnsWatched;
+    const ro = typeof ResizeObserver === 'function' && (window.htmxoColumnsObserver ||
+        (window.htmxoColumnsObserver = new ResizeObserver(entries => entries.forEach(e => {
+            const t = e.target.querySelector(':scope > table[data-htmxo-columns]');
+            if (t) htmxoColumnsQueue(t);
+        }))));
+    watched.forEach((room, t) => {
+        if (t.isConnected && t.parentElement === room) return;
+        if (ro) ro.unobserve(room);
+        watched.delete(t);
+    });
+    const found = Array.from(elt.querySelectorAll('table[data-htmxo-columns]'));
+    if (elt.matches && elt.matches('table[data-htmxo-columns]')) found.unshift(elt);
+    found.forEach(t => {
+        if (!t.isConnected) return;
+        if (!watched.has(t) && t.parentElement) {
+            watched.set(t, t.parentElement);
+            if (ro) ro.observe(t.parentElement);
+        }
+        htmxoColumnsMeasure(t);
+    });
+}
+if (!window.htmxoColumnsBound) {
+    window.htmxoColumnsBound = true;
+    // `htmx:afterSwap` runs before the browser paints the swap: a new table
+    // is sized and a morphed one held again without a frame in between.
+    document.addEventListener('htmx:afterSwap', () => htmxoColumnsTrack(document.body));
+    document.addEventListener('htmx:load', e => htmxoColumnsTrack(e.target));
+    document.addEventListener('htmxo:regrouped', e => {
+        const t = e.target.querySelector('table[data-htmxo-columns]');
+        if (t) htmxoColumnsMeasure(t, true);
+    });
+    document.addEventListener('DOMContentLoaded', () => htmxoColumnsTrack(document.body));
+    if (document.fonts && document.fonts.status !== 'loaded')
+        document.fonts.ready.then(() => window.htmxoColumnsWatched.forEach((room, t) => htmxoColumnsQueue(t, true)));
+}
+if (document.body) htmxoColumnsTrack(document.body);
+
 // --- Row selection: `selectable` on sortable_table / master_detail_table ---
 // State is keyed per selection (input name, form, page path) and per row key,
 // never held by row elements, so it survives sorting, filtering, a row's
@@ -20230,6 +20356,21 @@ inside a card, set `--htmxo-sticky-bg` to the card's background.
 `sticky=false` keeps one table's line and header in the flow. None of this
 reaches Markdown or PDF output.
 
+# Columns keep their widths
+Opening a detail row, a lazy detail or lazy group rows arriving, expanding a
+group or branch, a search or filter hiding rows and a row update never move
+the columns (`data-htmxo-columns` on the `<table>`). The table runtime sizes
+the columns once, with the browser's own table layout over every row the
+table holds, shown or hidden: the leaves of collapsed groups and branches and
+the rows a search hides count, detail rows do not. It then holds those widths
+(`table-layout: fixed` and a `<colgroup>`), so a row shown later wraps its
+text inside its column, breaking a word too long for it. It sizes them again
+when the room the table has changes by more than a scrollbar (the window or a
+sidebar resizes), when the browser regroups the table, when a table first
+shows (a closed tab or detail row) and once web fonts have loaded. A detail
+row's content never takes part in sizing the columns: it gets the width the
+columns give it. Nothing here reaches Markdown or PDF output.
+
 # Row selection
 With `selectable=name`, every keyed row (`data-htmxo-select-key`, else its
 `id`; `detail-<key>` companions excluded) becomes a selectable grid row:
@@ -20373,7 +20514,10 @@ function sortable_table(headers, rows;
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
     # A `detail-<key>` companion is no row of the Markdown table.
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
-    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)..., kwargs...)(
+    # `data-htmxo-columns`: the table runtime holds the columns' widths
+    # (see "Columns keep their widths" above).
+    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)...,
+                         data_htmxo_columns="", kwargs...)(
         thead,
         h.tbody(body_rows...; body_attrs...),
     )
@@ -21085,10 +21229,12 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
     # Lazy mode: the detail cell hosts a slot that fetches `detail_url` on the
     # first expand (see `_md_lazy_slot`); `detail_body` becomes its pre-load
-    # placeholder. Eager mode: `detail_body` is the final content, unchanged.
+    # placeholder. Eager mode: `detail_body` is the final content, in a
+    # `div.htmxo-md-detail`. Either element keeps its content out of the
+    # columns' widths (`contain: inline-size`, `htmxo_utility_styles`).
     cell_body = lazy ?
         _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open, texts) :
-        detail_body
+        h.div(; class="htmxo-md-detail")(detail_body)
     detail = h.tr(; detail_kwargs...)(
         h.td(colspan=string(ncols))(cell_body),
     )
@@ -26846,6 +26992,19 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { position: sticky; z-index: 1; }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead th { background-color: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
+
+/* A table's columns keep their widths while its rows open, load and filter
+   (`data-htmxo-columns`, held by the table runtime). While the runtime sizes
+   them ("sizing"), the hidden rows take part, collapsed, so the widths fit
+   every row the table holds; detail rows stay out. Held, the layout is
+   fixed, and a word too long for its column breaks inside its cell instead
+   of running into the next one. A detail row's content never sizes the
+   columns, held or not: it fills the width they give it. `!important`
+   beats Pico's `[hidden] { display: none !important }`. */
+table[data-htmxo-columns="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { display: table-row !important; visibility: collapse; }
+table[data-htmxo-columns="held"] { table-layout: fixed; }
+table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; }
+tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
 """))
 
 # --- Request feedback ---

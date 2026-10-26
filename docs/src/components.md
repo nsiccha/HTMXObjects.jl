@@ -357,6 +357,35 @@ each `.table-wrap` `data-htmxo-width="fits"` or `"wide"`. Without the runtime
 the table keeps its sideways scroll and its header scrolls away. Markdown and
 PDF output are unchanged: the line is HTML only.
 
+#### Columns keep their widths {#table-columns}
+
+A reader opening a row's detail, a lazy detail or lazy group rows arriving,
+a group or branch expanding, a search or filter hiding rows, or a row update
+never moves the columns of a `sortable_table`, `render_table` or
+`master_detail_table`, flat or hierarchical. Apps write nothing for it: no
+fixed column widths, no script.
+
+- **The widths fit every row the table holds.** The table runtime sizes the
+  columns once with the browser's own table layout over all its rows, shown
+  or hidden: the leaves of collapsed groups and branches and the rows a
+  search hides count as if they were shown. Detail rows do not: a detail's
+  content (a form, a PDF preview, a sub-table) fills the width the columns
+  give it and never widens them.
+- **Then the widths hold.** A row that arrives later (lazy group rows, a row
+  update) wraps its text inside its column, breaking a word too long for it.
+- **The columns are sized again** when the table's room changes by more than
+  two scrollbars (the window or a sidebar resizes), when the reader regroups
+  the table, when a table first shows (inside a closed tab or detail row) and
+  once web fonts have loaded. A table filling its room keeps its columns' shares
+  of it, so a scrollbar appearing narrows them all a little instead of
+  re-sizing them.
+
+The table carries `data-htmxo-columns` (`"held"` once sized, with a
+`<colgroup>` of the widths and `table-layout: fixed`); a morph swap that
+drops them gets them back before the browser paints. Without the runtime the
+browser's auto layout runs, with detail content still left out of the widths.
+Markdown and PDF output are unchanged.
+
 #### Row selection {#table-selection}
 
 `selectable="<input name>"` on `sortable_table`, `render_table` or
