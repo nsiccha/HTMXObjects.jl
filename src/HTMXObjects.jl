@@ -18656,9 +18656,11 @@ function htmxoTreeRow(row, event) {
 // whose place among its siblings changed, goes where the table's own render
 // puts it, unless its group is not loaded, and a sorted table re-applies its
 // sort; a row in the update's scope that it no longer lists leaves, with its
-// detail and child rows. Any htmx response holding such a body is applied
-// this way, whatever the requesting element's hx-target;
-// `htmxoUpdateRows(html)` applies one fetched by other means.
+// detail and child rows. The group rows a browser regroup asks for
+// (`group_masters`) replace the browser's and leave the leaf rows alone. Any
+// htmx response holding such a body is applied this way, whatever the
+// requesting element's hx-target; `htmxoUpdateRows(html)` applies one
+// fetched by other means.
 function htmxoUpdateRows(update, origin) {
     if (typeof update === 'string') {
         const template = document.createElement('template');
@@ -18680,12 +18682,18 @@ function htmxoUpdateRows(update, origin) {
     const named = [...incoming.flatMap(r => [r.id, r.dataset.htmxoParent]), ...ids, ...groups];
     for (let i = 0; !tbody && i < named.length; i++) tbody = bodyOf(named[i]);
     if (!tbody && origin && origin.closest) { const t = origin.closest('table'); tbody = t && t.tBodies[0]; }
+    // The group rows of a browser regroup (`group_masters`) have nothing to
+    // do once their table has left the page, or the reader has regrouped
+    // again: they are dropped, quietly.
+    const groupMasters = 'htmxoGroupMasters' in update.dataset;
+    if (!tbody && groupMasters) return;
     if (!tbody) throw new Error('htmxoUpdateRows: no table on the page holds these rows');
     // Rows rendered for another grouping than the table shows would land
     // under the wrong groups: refuse them.
     if ('htmxoGrouped' in update.dataset) {
         const wrapper = tbody.closest('[data-htmxo-grouped]');
         const shown = wrapper ? wrapper.dataset.htmxoGrouped : null;
+        if (shown !== update.dataset.htmxoGrouped && groupMasters) return;
         if (shown !== update.dataset.htmxoGrouped) throw new Error('htmxoUpdateRows: the rows are grouped by ' +
             JSON.stringify(update.dataset.htmxoGrouped) + ' but the table by ' + JSON.stringify(shown));
     }
@@ -18857,10 +18865,15 @@ function htmxoUpdateRows(update, origin) {
     // changed, before focus returns (moving a row drops its focus).
     if (fresh.length) htmxoResort(table);
     // A branch toggle names the child rows the branch now has.
+    const kidsOf = new Map();
+    if (touched.size) masters().forEach(r => {
+        const p = r.dataset.htmxoParent;
+        if (p) { if (!kidsOf.has(p)) kidsOf.set(p, []); kidsOf.get(p).push(r.id); }
+    });
     touched.forEach(b => {
         const toggle = b.isConnected && b.querySelector(':scope > td [data-htmxo-tree-toggle]');
         if (!toggle) return;
-        const kids = masters().filter(r => r.dataset.htmxoParent === b.id).map(r => r.id);
+        const kids = kidsOf.get(b.id) || [];
         if (kids.length) toggle.setAttribute('aria-controls', kids.join(' '));
         else toggle.removeAttribute('aria-controls');
     });
@@ -21836,12 +21849,26 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `group_by_url`: the route that renders this table for the `group_by` and `q`
   (the current search) it receives, for what the browser cannot build: group
   rows from `group_master`, which replace the browser's after each regroup (a
-  hidden element asks for them, so a recording, which strips that request,
-  keeps the control live with the browser's group rows), and lazy groups
-  (`group_rows_url`), whose control asks this URL instead of regrouping in the
-  browser and appears only with it. It receives the levels as repeated
-  `group_by` values, or for none the flat grouping's name, so declare the
-  route's `group_by::Vector{String}`.
+  hidden element asks for them, with `group_masters=true`, so a recording,
+  which strips that request, keeps the control live with the browser's group
+  rows), and lazy groups (`group_rows_url`), whose control asks this URL
+  instead of regrouping in the browser and appears only with it. It receives
+  the levels as repeated `group_by` values, or for none the flat grouping's
+  name, so declare the route's `group_by::Vector{String}`.
+- `group_masters`: instead of the table, return its group rows only, from
+  `group_master`, as a row update (see `update_rows`): every group row of the
+  grouping at every level and no leaf row, so `master` is not called. The
+  request that `group_by_url` receives after a browser regroup sends
+  `group_masters=true`. A route that declares `group_masters::Bool=false` and
+  passes it to this call answers with these rows, which take the place of the
+  browser's group rows and leave every leaf row as the browser placed it; a
+  route that does not declare it answers with the whole table, which replaces
+  the browser's. As in any browser regroup the leaf rows are not rendered
+  again, and a request from them still sends the table's current grouping. In
+  the flat view the answer has no rows, and an answer for a grouping the
+  reader has left since is dropped. Needs `group_master`; refused
+  together with `group_rows_url`, `group_rows`, `update_rows` or
+  `update_groups`.
 - `group_rows_url(key, members)`: return a URL to load that group's rows on
   first expand (or `nothing` to render them). The route renders the same call
   with `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` of just
@@ -21927,6 +21954,7 @@ function master_detail_table(headers, items;
                              group_rows=nothing,
                              group_summary=nothing,
                              group_order=nothing,
+                             group_masters::Bool=false,
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
@@ -21948,9 +21976,9 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
-    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/update_groups require `groupings`"))
+        group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+    !group_masters && all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/group_masters/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -22765,7 +22793,7 @@ end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
-        group_by_url, group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, selectable,
+        group_by_url, group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
@@ -22820,7 +22848,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     group_by_values = isempty(levels) ? [something(flat_name, "")] : levels
     nlevels == 0 && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows needs a grouping, but $(repr(requested)) is ungrouped"))
-    update = !isnothing(update_rows) || !isnothing(update_groups)
+    # `group_masters`: the group rows alone, as an update, for a table the
+    # browser has regrouped (every leaf is on the page already).
+    if group_masters
+        isnothing(group_master) && throw(ArgumentError(
+            "master_detail_table: group_masters returns the group rows from `group_master`; without it the browser builds them itself"))
+        isnothing(group_rows_url) || throw(ArgumentError(
+            "master_detail_table: group_masters returns the group rows of a table the browser regroups, but with `group_rows_url` (lazy groups) the server regroups it, as a whole table"))
+        others = [string(n) for (n, v) in (:group_rows => group_rows, :update_rows => update_rows,
+            :update_groups => update_groups) if !isnothing(v)]
+        isempty(others) || throw(ArgumentError(string("master_detail_table: group_masters is a response of its own; ",
+            "drop ", join(others, " and "))))
+    end
+    update = !isnothing(update_rows) || !isnothing(update_groups) || group_masters
     update && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows loads a lazy group; update_rows/update_groups are a separate response"))
     _attrs(item) = isnothing(master_attrs) ? (;) : master_attrs(item)
@@ -22832,10 +22872,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # (`htmxoRegroup`). Lazy groups hold rows it has not got, so their
     # control regroups through the server. Group rows from `group_master`
     # need the server too: after the browser has regrouped, a hidden element
-    # asks `group_by_url` for them. A recording strips that element's request
-    # (it names a kwargs route) and leaves the control live, so a recorded
-    # page, like a table without `group_by_url`, shows the browser's group
-    # rows: the group's key, its count and the `group_summary` cells.
+    # asks `group_by_url` for them, with `group_masters=true` (a route that
+    # passes it on answers with the group rows alone, one that does not with
+    # the whole table; `hx-sync` drops a request the next regroup overtakes).
+    # A recording strips that element's request (it names a kwargs route)
+    # and leaves the control live, so a recorded page, like a table without
+    # `group_by_url`, shows the browser's group rows: the group's key, its
+    # count and the `group_summary` cells.
     browser = isnothing(group_rows_url)
     serve = !isnothing(group_by_url) && !browser
     refresh = !isnothing(group_by_url) && browser && !isnothing(group_master)
@@ -22848,8 +22891,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         serve ? group_by_url : nothing, select_form, table_id, texts),)
     toolbar = !(control && refresh) ? toolbar : (toolbar...,
         h.span(; hidden=true, data_htmxo_group_refresh="", hx_get=string(group_by_url), hx_trigger="htmxo-regroup",
-            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
-            hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this)}"))
+            hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML", hx_sync="this:replace",
+            hx_vals="js:{group_by: htmxoGroupBy(this), q: htmxoGroupedQuery(this), group_masters: true}"))
     leaf_keys = _md_update_keys(update_rows)
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     # A group's key names it in callbacks, selections and requests; its
@@ -22898,12 +22941,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # The groups and leaves a render shows: all of them; for a lazy load,
     # the target group whole (and the path to it); for an update, the
     # named groups whole, the groups on their paths and those holding an
-    # updated leaf. Summaries always see a group's full membership.
+    # updated leaf; for `group_masters`, every group and no leaf. Summaries
+    # always see a group's full membership.
     whole(path) = !isnothing(target) ? isprefix(target, path) :
         !update || any(n -> isprefix(n, path), named)
     keep(::_MDGroupLeaf) = true
     keep(g::_MDGroup) = !isnothing(target) ? isprefix(g.path, target) || isprefix(target, g.path) :
-        !update || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
+        !update || group_masters || any(n -> isprefix(n, g.path) || isprefix(g.path, n), named) ||
             any(m -> string(key(m)) in leaf_set, g.members)
     # A predicate sees leaves only: a group holding a leaf it opens (its
     # members are every leaf below it) renders open, and eagerly rather
@@ -23018,7 +23062,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
-            order=browser ? order_json : nothing))
+            order=browser ? order_json : nothing, group_masters))
     built = tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
@@ -23128,11 +23172,15 @@ end
 # so it can remove those it no longer lists: rows by id, every copy of a
 # leaf (`data-htmxo-leaf`), and a group row with all its rows. `places` (see
 # `_md_record_places!`) says where its rows go; `order`, the `group_order`
-# lists the table's browser regrouping goes by from now on.
-function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(), order=nothing)
+# lists the table's browser regrouping goes by from now on. `group_masters`
+# marks the group rows of a browser regroup, which the runtime drops once the
+# reader has regrouped again.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(),
+                        order=nothing, group_masters::Bool=false)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
     isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
+    group_masters && push!(attrs, :data_htmxo_group_masters => "")
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
     isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
