@@ -26899,6 +26899,13 @@ generic in-flight `.htmx-request` rule (`cursor: progress`), and the reset
 that renders a [`sortable_table`](@ref) header's sort `<button>` as plain
 heading text with a focus ring.
 
+It also gives every definition list (`dl`) its look, with no class: bold
+terms in a column beside their values, `div`-wrapped pairs sharing the
+columns. `--htmxo-dl-label-width` (default `16rem`, and never more than 40% of
+the list), `--htmxo-dl-row-gap` (`0.5rem`) and `--htmxo-dl-column-gap`
+(`1.25rem`) tune it from an app's stylesheet; `display: block` on a list and
+its `div` pairs keeps it stacked.
+
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
 - `u-text-*`      semantic text colors mapped to `--htmxo-*` tokens
@@ -26951,7 +26958,8 @@ htmxo_utility_styles() = h.style(Raw("""
    the vocabulary whose meaning no HTML element carries — every other one picks
    the element whose native rendering already says it (`article` for a card,
    `section` for a division, `dl` for fields, `details` for a disclosure,
-   `pre>code` for code), which is why those classes need no rule here. A group
+   `pre>code` for code), which is why those classes need no rule here (`dl`
+   gets the generic definition-list rule below, on every `dl`). A group
    falls to a bare `div`, so without this rule it renders as nothing at all and
    its children merely stack. Laid out as a row that WRAPS: siblings share the
    width and each keeps a minimum before the row breaks, so a pair of figures
@@ -26989,6 +26997,42 @@ htmxo_utility_styles() = h.style(Raw("""
     align-items: baseline;
     gap: var(--htmxo-semantic-metric-gap, 0.4rem);
 }
+
+/* A definition list reads as its terms beside their values. Pico styles no
+   `dt` or `dd`, so a bare `dl` fell to the browser's look: each term on its
+   own line in body weight, its value indented 40 px beneath it, nothing
+   setting one pair off from the next — and apps re-rolled their own lists.
+   Every `dl` is a two-column grid instead: bold terms in a column as wide as
+   the longest term, capped at `--htmxo-dl-label-width` and at 40% of the list
+   in a narrow column (a longer term wraps), and the values beside them. A
+   term with several values puts each on its own row of the value column, and
+   a `div` around a pair (valid HTML) is a `subgrid` row, so grouped pairs
+   share the columns. A paragraph or list inside a value drops its outer
+   margins, so its first line sits on its term's line and the row gap alone
+   spaces the rows (without Pico a `p` keeps a 1em top margin, which pushed
+   both the value and its baseline-aligned term down). `:not([hidden])` keeps
+   a hidden list hidden on a page without Pico, whose own `[hidden]` rule is
+   `!important`. Apps tune the
+   variables, or keep a stacked list, in their own scoped stylesheet — never
+   inline:
+       .my-app-sources, .my-app-sources > div { display: block; } */
+dl:not([hidden]) {
+    display: grid;
+    grid-template-columns: fit-content(min(var(--htmxo-dl-label-width, 16rem), 40%)) minmax(0, 1fr);
+    gap: var(--htmxo-dl-row-gap, 0.5rem) var(--htmxo-dl-column-gap, 1.25rem);
+    align-items: baseline;
+}
+dl > div:not([hidden]) {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    row-gap: var(--htmxo-dl-row-gap, 0.5rem);
+    align-items: baseline;
+}
+:is(dl, dl > div) > dt { grid-column: 1; font-weight: 600; }
+:is(dl, dl > div) > dd { grid-column: 2; margin: 0; }
+:is(dl, dl > div) > dd > :first-child { margin-top: 0; }
+:is(dl, dl > div) > dd > :last-child { margin-bottom: 0; }
 
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the
