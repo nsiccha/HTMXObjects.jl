@@ -5231,18 +5231,18 @@ end
     @test !contains(page, "https://")
 end
 
-@testitem "vendor artifacts stay lazy: install selects none, vendor load selects seven" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+@testitem "vendor artifacts stay lazy: install selects none, vendor load selects all eight" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     using Artifacts, TOML
     toml = joinpath(pkgdir(HTMXObjects), "Artifacts.toml")
     meta = TOML.parsefile(toml)
-    names = ("htmx", "htmx-ext-sse", "htmx-ext-ws", "htmx-ext-preload", "hyperscript", "pico", "katex")
+    names = ("htmx", "htmx-ext-sse", "htmx-ext-ws", "htmx-ext-preload", "hyperscript", "pico", "katex", "prismjs")
     # Every table carries the flag: one unflagged entry downloads at install.
     @test Set(keys(meta)) == Set(names)
     for n in names
         @test get(meta[n], "lazy", false) === true
     end
     # Ordinary installation (what Pkg resolves) fetches nothing; explicit
-    # vendor loading resolves the same seven with identical metadata.
+    # vendor loading resolves the same eight with identical metadata.
     @test isempty(Artifacts.select_downloadable_artifacts(toml))
     explicit = Artifacts.select_downloadable_artifacts(toml; include_lazy=true)
     @test Set(keys(explicit)) == Set(names)
