@@ -26514,8 +26514,12 @@ htmxo_utility_styles() = h.style(Raw("""
    in a narrow column (a longer term wraps), and the values beside them. A
    term with several values puts each on its own row of the value column, and
    a `div` around a pair (valid HTML) is a `subgrid` row, so grouped pairs
-   share the columns. `:not([hidden])` keeps a hidden list hidden on a page
-   without Pico, whose own `[hidden]` rule is `!important`. Apps tune the
+   share the columns. A paragraph or list inside a value drops its outer
+   margins, so its first line sits on its term's line and the row gap alone
+   spaces the rows (without Pico a `p` keeps a 1em top margin, which pushed
+   both the value and its baseline-aligned term down). `:not([hidden])` keeps
+   a hidden list hidden on a page without Pico, whose own `[hidden]` rule is
+   `!important`. Apps tune the
    variables, or keep a stacked list, in their own scoped stylesheet — never
    inline:
        .my-app-sources, .my-app-sources > div { display: block; } */
@@ -26534,6 +26538,7 @@ dl > div:not([hidden]) {
 }
 :is(dl, dl > div) > dt { grid-column: 1; font-weight: 600; }
 :is(dl, dl > div) > dd { grid-column: 2; margin: 0; }
+:is(dl, dl > div) > dd > :first-child { margin-top: 0; }
 :is(dl, dl > div) > dd > :last-child { margin-bottom: 0; }
 
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
