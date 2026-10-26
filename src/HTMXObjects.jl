@@ -3002,8 +3002,10 @@ one of these page helpers, or [`master_detail_js`](@ref), as the function
 returns it, is left out while the shell carries its code, so a page that
 still lists them does not ship them twice. A changed or attributed copy stays.
 `error_texts`, an [`ErrorTexts`](@ref) such as `error_texts(:de)`, is the
-language of the failed-request toasts ([`toast_script`](@ref)); pass the root's
-`__error_texts__` from `__page__` so the toasts match the error articles.
+language of the failed-request toasts ([`toast_script`](@ref)) and of the
+status line over a part that a running request will replace
+([`request_feedback_script`](@ref)); pass the root's `__error_texts__` from
+`__page__` so they match the error articles.
 `nothing` (the default) keeps them English.
 `katex_version` is the KaTeX release that typesets Markdown math
 ([`render_markdown`](@ref) marks it, [`math_script`](@ref) renders it). The
@@ -10679,13 +10681,16 @@ status without one, and ending in `error_id`), the framework's own caller-fault
 messages, a stalled operation's terminal (`run_again`, `progress`) and the page
 shell's
 failed-request toasts (`request_failed`, `no_response`, `timed_out`,
-`dismiss`, and `reasons` again). Build one with [`error_texts`](@ref).
+`dismiss`, and `reasons` again), and the status line over a part of the page
+that a running request will replace (`loading`, `loading_named`; see
+[`request_feedback_script`](@ref)). Build one with [`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
 `@htmx` threads `__error_texts__` down the `__parent__` chain like
 `__on_error__`, so every `@include`d struct, `safely` panel and polled
 operation of the app answers in it. Pass the same value to the page shell,
-`htmx(...; error_texts)` or `pico_page(...; error_texts)`, for the toasts.
+`htmx(...; error_texts)` or `pico_page(...; error_texts)`, for the toasts and
+the loading status line.
 
 A text in braces is a placeholder the framework fills in: `server_fault` and
 `error_id` take `{id}`, the recorded error id, and must keep it;
@@ -10695,7 +10700,8 @@ or when its declared type rejected the value by `"; "` and `expected_type` with
 `{type}` (then the parser's own reason, as Julia writes it, in parentheses);
 `result_unavailable_detail` takes `{verb}` and `{route}`; `stalled_detail` takes
 `{label}`, `{elapsed}` and `{bound}`, followed by `stalled_rerun` for a read or
-`stalled_not_repeated` (`{verb}`) for a mutation. An app's own
+`stalled_not_repeated` (`{verb}`) for a mutation; `loading_named` takes
+`{label}`, the option, radio button or link the reader chose. An app's own
 [`CallerFault`](@ref) message is shown as written. Error logs, `@error` lines
 and `showerror` stay English.
 """
@@ -10720,6 +10726,8 @@ struct ErrorTexts
     no_response::String                # toast: no answer at all
     timed_out::String                  # toast: the request timed out
     dismiss::String                    # accessible name of a toast's × button
+    loading::String                    # status line: a part is being replaced
+    loading_named::String              # ... by the option or link the reader chose
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -10728,6 +10736,7 @@ const _ERROR_TEXT_PLACEHOLDERS = (
     allowed_values = (:allowed,), expected_type = (:type,),
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
+    loading_named = (:label,),
 )
 
 const _ERROR_TEXT_LOCALES = (
@@ -10752,6 +10761,8 @@ const _ERROR_TEXT_LOCALES = (
         no_response = "Request failed: no response (network error or server unreachable)",
         timed_out = "Request timed out",
         dismiss = "Dismiss",
+        loading = "Loading…",
+        loading_named = "Loading {label}…",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -10775,6 +10786,8 @@ const _ERROR_TEXT_LOCALES = (
         no_response = "Anfrage fehlgeschlagen: keine Antwort (Netzwerkfehler oder Server nicht erreichbar)",
         timed_out = "Zeitüberschreitung der Anfrage",
         dismiss = "Schließen",
+        loading = "Wird geladen…",
+        loading_named = "{label} wird geladen…",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -10837,10 +10850,11 @@ _error_texts_value(::Nothing) = _EN_ERROR_TEXTS
 _error_texts_value(texts) = throw(ArgumentError(string(
     "__error_texts__ must be an ErrorTexts, e.g. error_texts(:de); got ", repr(texts))))
 
-# The texts the page shell's toast runtime writes, as the JSON object it reads.
+# The texts the page shell's toast and request-feedback runtimes write, as the
+# JSON object they read.
 _toast_texts_json(texts::ErrorTexts) = string("{",
     join((string(_md_json_string(string(n)), ":", _md_json_string(getfield(texts, n)))
-          for n in (:request_failed, :no_response, :timed_out, :dismiss)), ","),
+          for n in (:request_failed, :no_response, :timed_out, :dismiss, :loading, :loading_named)), ","),
     ",\"reasons\":{",
     join((string(_md_json_string(string(code)), ":", _md_json_string(phrase))
           for (code, phrase) in texts.reasons), ","), "}}")
@@ -26698,18 +26712,19 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
    `intersect` — keep their resting style: the reader started nothing. The
    `request_feedback` script applies the same exclusion per request; CSS sees
    only the attribute, so a trigger list counts as `load` when it begins with
-   it.
+   it. A part that sent its own request and now shows it is being replaced
+   (`.htmxo-loading`, from `request_feedback`) takes that rule's dim instead.
    INTENTIONALLY UNLAYERED: Pico styles `<button>` (and other controls)
    unlayered, and an unlayered declaration beats every layered one
    regardless of specificity — inside `@layer htmxo` the cursor would never
    apply on buttons (the opacity would, Pico sets none). The resting `[hx-*]`
    rule above stays layered: at rest it agrees with Pico's `pointer`, so
    there is nothing to beat. */
-[hx-get]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-post]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-put]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-patch]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request,
-[hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"]).htmx-request {
+[hx-get]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-post]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-put]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-patch]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request,
+[hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request {
     cursor: progress;
     opacity: 0.7;
 }
@@ -26768,13 +26783,55 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
     request_feedback_style()
 
 CSS for automatic HTMX request feedback: pulsating border while in-flight,
-brief color flash on success/failure. Themed via `--htmxo-accent`,
-`--htmxo-success`, `--htmxo-error` (see [`htmxo_theme`](@ref)).
-Under `prefers-reduced-motion` the pulse/fade animations are disabled while
-the static outline remains.
+brief color flash on success/failure, and the dim and status line of a part
+that a running request will replace (`.htmxo-loading`,
+`.htmxo-loading-status`; see [`request_feedback_script`](@ref)). Themed via
+`--htmxo-accent`, `--htmxo-success`, `--htmxo-error` and `--htmxo-bg` (see
+[`htmxo_theme`](@ref)). Under `prefers-reduced-motion` the pulse/fade and
+spinner animations are disabled while the static outline remains.
 """
 request_feedback_style() = h.style(Raw("""
+/* A part being replaced: dimmed, with the progress cursor that the in-flight
+   rule of `htmxo_utility_styles` gives it no longer. UNLAYERED, like that rule,
+   so it holds against an unlayered page rule of lower specificity. Pico draws
+   a spinner before every `[aria-busy=true]` element, which would push the
+   part's content down a line while it loads; the script sets
+   `data-htmxo-busy` only on a part without a `::before` of its own, so
+   removing it here removes nothing else. */
+.htmxo-loading { opacity: 0.45; cursor: progress; }
+[data-htmxo-busy][aria-busy="true"]::before { content: none; }
 @layer htmxo {
+.htmxo-loading-status {
+    position: fixed;
+    z-index: 9998;
+    transform: translate(-50%, -50%);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    padding: .5em 1.1em;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 999px;
+    background: var(--htmxo-bg, Canvas);
+    box-shadow: 0 2px 10px rgb(0 0 0 / .12);
+    font-size: 1rem;
+    line-height: 1.4;
+    text-align: center;
+    pointer-events: none;
+}
+.htmxo-loading-status::before {
+    content: "";
+    flex: none;
+    width: .9em;
+    height: .9em;
+    box-sizing: border-box;
+    border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: htmxo-loading-spin .8s linear infinite;
+}
+.htmxo-loading-status[data-htmxo-off] { opacity: 0; }
+@keyframes htmxo-loading-spin { to { transform: rotate(360deg); } }
 @keyframes htmx-pulse {
     0%, 100% { outline-color: color-mix(in srgb, var(--htmxo-accent) 30%, transparent); }
     50% { outline-color: var(--htmxo-accent); }
@@ -26805,7 +26862,8 @@ request_feedback_style() = h.style(Raw("""
 @media (prefers-reduced-motion: reduce) {
     .htmx-request-active,
     .htmx-request-success,
-    .htmx-request-error {
+    .htmx-request-error,
+    .htmxo-loading-status::before {
         animation: none;
     }
 }
@@ -26850,6 +26908,27 @@ failure toast agree: a network error or timeout flashes red, while a request
 the page aborted or an answer that navigates (`HX-Redirect`, `HX-Refresh`,
 `HX-Location`) just clears the outline. A head without the toast runtime
 flashes red for every request htmx does not report as successful.
+
+A part of the page that a request the reader started will replace says so
+while the request runs, once it has taken 0.3 s (a faster answer just swaps
+in): it is dimmed (class `htmxo-loading`), it carries `aria-busy="true"`, and
+a status line (`div.htmxo-loading-status`, `role="status"`) sits over the
+middle of its visible box. The line names what is coming when the reader
+chose it for a GET request — a select's option, a radio button's label, a
+link's text: "Loading Kreuzberg…" — and says "Loading…" otherwise. Its words
+are `loading` and `loading_named` of the page's [`ErrorTexts`](@ref)
+(`htmx(...; error_texts=error_texts(:de))`: "Kreuzberg wird geladen…"). This
+applies to swaps that replace the part's content (`innerHTML`, `outerHTML`,
+`textContent`, the morph swaps), not to `none`, an insertion beside or inside
+it, or `delete`, and not when the part is a control (button, input, select,
+textarea, link, label, summary) or the whole `body`. `data-htmxo-loading` on
+the requesting element or an element around it sets the line's words, and
+`data-htmxo-loading="false"` leaves its parts unmarked (for an app that draws
+its own placeholder). The mark ends when the answer is swapped in, or when the
+request fails, times out or is aborted; a request that replaces a running one
+on the same part (`hx-sync="this:replace"`) keeps it marked without a gap.
+`aria-busy` is set only on a part without a `::before` of its own, since Pico
+draws a spinner there, which the style removes.
 """
 request_feedback_script() = h.script(Raw("""
 document.addEventListener('DOMContentLoaded', function() {
@@ -26934,6 +27013,155 @@ document.addEventListener('DOMContentLoaded', function() {
         el.classList.add(state === 'success' ? 'htmx-request-success' : 'htmx-request-error');
         setTimeout(function() { clearFeedback(el); }, state === 'success' ? 1000 : 2000);
     }
+    // The part a running request will replace says so once the request has
+    // taken LOADING_DELAY ms: dimmed (`htmxo-loading`), `aria-busy`, and a
+    // status line over its visible box naming what is coming. The words are
+    // the page's error texts (`htmx(...; error_texts)` puts them on <html>).
+    var LOADING_DELAY = 300;
+    var ENGLISH = {loading: $(_md_json_string(_EN_ERROR_TEXTS.loading)), loading_named: $(_md_json_string(_EN_ERROR_TEXTS.loading_named))};
+    function loadingTexts() {
+        var raw = document.documentElement.getAttribute('data-htmxo-error-texts');
+        var t = raw ? JSON.parse(raw) : {};
+        return {loading: t.loading || ENGLISH.loading, loading_named: t.loading_named || ENGLISH.loading_named};
+    }
+    // Swaps that put new content in place of the part; `none`, the
+    // insertions beside or inside it and `delete` leave nothing stale.
+    var REPLACING = /^(innerHTML|outerHTML|textContent|morph)/;
+    function swapStyle(elt) {
+        var holder = elt.closest('[hx-swap]');
+        var spec = holder ? holder.getAttribute('hx-swap') : (htmx.config.defaultSwapStyle || 'innerHTML');
+        return spec.trim().split(/\\s+/)[0] || 'innerHTML';
+    }
+    // What the reader chose, when a GET came from choosing it: a select's
+    // option, a radio button's label, a link's text.
+    function chosenLabel(e) {
+        var config = e.detail.requestConfig;
+        if (!config || String(config.verb).toLowerCase() !== 'get') return '';
+        var src = config.triggeringEvent && config.triggeringEvent.target;
+        if (!src || !src.closest) return '';
+        var text = '';
+        if (src.tagName === 'SELECT' && !src.multiple) text = src.selectedOptions[0] ? src.selectedOptions[0].textContent : '';
+        else if (src.type === 'radio') text = src.labels && src.labels[0] ? src.labels[0].textContent : '';
+        else if (src.closest('a')) text = src.closest('a').textContent;
+        return text.replace(/\\s+/g, ' ').trim();
+    }
+    var loading = new Map(), loadingByXhr = new WeakMap(), placing = 0;
+    function startLoading(e, elt) {
+        var t = e.detail.target;
+        if (!t || !t.isConnected || t === document.body || t === document.documentElement) return;
+        if (t.matches('button, input, select, textarea, a, label, summary, option, optgroup')) return;
+        if (!REPLACING.test(swapStyle(elt))) return;
+        var own = elt.closest('[data-htmxo-loading]');
+        var setting = own ? own.getAttribute('data-htmxo-loading') : null;
+        if (setting === 'false') return;
+        var texts = loadingTexts(), label = chosenLabel(e);
+        var text = setting || (label ? texts.loading_named.split('{label}').join(label) : texts.loading);
+        // A request that replaces one still loading here (`hx-sync`'s
+        // `replace`, a second pick) keeps the part marked without a gap.
+        var prev = loading.get(t), status = prev && prev.status;
+        if (prev) { prev.status = null; stopLoading(prev); }
+        var entry = {target: t, text: text, timer: null, status: null, busy: false};
+        loading.set(t, entry);
+        if (e.detail.xhr) loadingByXhr.set(e.detail.xhr, entry);
+        if (status) showLoading(entry, status);
+        else entry.timer = setTimeout(function() { showLoading(entry); }, LOADING_DELAY);
+    }
+    // `aria-busy` with nothing else about the part changed. Pico styles every
+    // [aria-busy=true] element: a spinner before it (pushing its content a
+    // line down), `white-space: nowrap` (re-flowing its text) and
+    // `pointer-events: none`. The style removes the spinner where the part
+    // has no ::before of its own (`data-htmxo-busy`); where it has one that
+    // changed, the part is not marked busy. A changed white-space or
+    // pointer-events is set back on the element while it is busy.
+    var PINNED = ['white-space', 'pointer-events'];
+    function beforeLook(t) {
+        var b = getComputedStyle(t, '::before');
+        return [b.content, b.display, b.width, b.height, b.backgroundImage, b.marginInlineEnd].join('|');
+    }
+    function setBusy(entry) {
+        var t = entry.target, style = getComputedStyle(t);
+        var was = PINNED.map(function(p) { return style.getPropertyValue(p); });
+        var content = getComputedStyle(t, '::before').content;
+        var ownBefore = content !== 'none' && content !== 'normal' && beforeLook(t);
+        t.setAttribute('aria-busy', 'true');
+        if (ownBefore && beforeLook(t) !== ownBefore) {
+            t.removeAttribute('aria-busy');
+            return;
+        }
+        if (!ownBefore) t.setAttribute('data-htmxo-busy', '');
+        entry.busy = true;
+        entry.pinned = [];
+        PINNED.forEach(function(p, i) {
+            if (style.getPropertyValue(p) === was[i]) return;
+            entry.pinned.push([p, t.style.getPropertyValue(p), t.style.getPropertyPriority(p)]);
+            t.style.setProperty(p, was[i], 'important');
+        });
+    }
+    function clearBusy(entry) {
+        var t = entry.target;
+        t.removeAttribute('aria-busy');
+        t.removeAttribute('data-htmxo-busy');
+        entry.pinned.forEach(function(saved) {
+            if (saved[1]) t.style.setProperty(saved[0], saved[1], saved[2]);
+            else t.style.removeProperty(saved[0]);
+        });
+        if (entry.pinned.length && !t.getAttribute('style')) t.removeAttribute('style');
+    }
+    // `status` is the line of the request this one replaced, kept in place.
+    function showLoading(entry, status) {
+        var t = entry.target;
+        if (loading.get(t) !== entry || !t.isConnected) {
+            if (status) status.remove();
+            return;
+        }
+        t.classList.add('htmxo-loading');
+        if (!t.hasAttribute('aria-busy')) setBusy(entry);
+        var s = status;
+        if (s) s.textContent = entry.text;
+        else {
+            s = document.createElement('div');
+            s.className = 'htmxo-loading-status';
+            s.setAttribute('role', 'status');
+            s.setAttribute('data-htmxo-off', '');
+            document.body.appendChild(s);
+            // Filled once the live region is in the page, so it is announced.
+            requestAnimationFrame(function() { if (!s.textContent) s.textContent = entry.text; });
+        }
+        entry.status = s;
+        if (!placing) placing = requestAnimationFrame(placeAll);
+    }
+    // Over the middle of the part's visible box; hidden (yet still read)
+    // while the part is off screen or too low to hold it.
+    function place(entry) {
+        var s = entry.status;
+        if (!s) return;
+        var r = entry.target.getBoundingClientRect();
+        var left = Math.max(r.left, 0), right = Math.min(r.right, window.innerWidth);
+        var top = Math.max(r.top, 0), bottom = Math.min(r.bottom, window.innerHeight);
+        s.style.maxWidth = Math.max(right - left - 16, 0) + 'px';
+        s.style.left = (left + right) / 2 + 'px';
+        s.style.top = (top + bottom) / 2 + 'px';
+        var fits = s.textContent && right - left > 16 && bottom - top >= s.offsetHeight + 8;
+        if (fits) s.removeAttribute('data-htmxo-off'); else s.setAttribute('data-htmxo-off', '');
+    }
+    function placeAll() {
+        placing = 0;
+        loading.forEach(place);
+        if (loading.size) placing = requestAnimationFrame(placeAll);
+    }
+    function stopLoading(entry) {
+        clearTimeout(entry.timer);
+        if (entry.status) entry.status.remove();
+        entry.status = null;
+        if (loading.get(entry.target) !== entry) return;
+        loading.delete(entry.target);
+        entry.target.classList.remove('htmxo-loading');
+        if (entry.busy) clearBusy(entry);
+    }
+    function stopRequest(e) {
+        var entry = e.detail.xhr && loadingByXhr.get(e.detail.xhr);
+        if (entry) stopLoading(entry);
+    }
     document.body.addEventListener('htmx:beforeRequest', function(e) {
         var elt = requester(e);
         if (isAutomatic(e, elt) || isPreload(e)) return;
@@ -26943,6 +27171,13 @@ document.addEventListener('DOMContentLoaded', function() {
             clearFeedback(t);
             t.classList.add('htmx-request-active');
         });
+        startLoading(e, elt);
+    });
+    // The answer is about to land: the new content shows undimmed.
+    document.body.addEventListener('htmx:beforeSwap', stopRequest);
+    // A history snapshot keeps no loading state.
+    document.body.addEventListener('htmx:beforeHistorySave', function() {
+        Array.from(loading.values()).forEach(stopLoading);
     });
     // Whether the answer htmx is swapping belongs to a request the reader
     // started. An answer's out-of-band swaps run inside its swap, between its
@@ -26984,6 +27219,12 @@ document.addEventListener('DOMContentLoaded', function() {
         settled.forEach(function(t) { if (t.isConnected) mark(t, 'success'); });
     });
     function finished(e) {
+        // A request that ended without a swap (failed, timed out, aborted)
+        // leaves its part marked until the task ends: `hx-sync`'s `replace`
+        // aborts a request inside the task that starts its successor, which
+        // takes the mark over without a gap.
+        var entry = e.detail.xhr && loadingByXhr.get(e.detail.xhr);
+        if (entry) setTimeout(function() { stopLoading(entry); }, 0);
         var elt = requester(e);
         if (isAutomatic(e, elt)) return;
         var state = outcome(e);

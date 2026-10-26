@@ -76,7 +76,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 | `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, recorded like every error answer |
-| `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles and failure toasts (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
+| `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles, failure toasts and loading status line (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
 response — and it passes through the response pipeline unchanged.
@@ -1067,7 +1067,11 @@ that names its log file; `/probe/x` reads `Nicht gefunden` / `Sonde x
 unbekannt`; a missing parameter reads `Ungültige Anfrage` / `Pflichtangabe
 fehlt: n`. A stalled operation's terminal and its **Run again** button follow
 too. Passing the same value to the page shell translates the
-[failure toasts](#failure-toasts). Any text can be replaced by keyword, and
+[failure toasts](#failure-toasts) and the status line over a part that a
+running request will replace (`Wird geladen…`, or `Kreuzberg wird geladen…`
+when the reader chose Kreuzberg; `loading` and `loading_named`, which takes
+`{label}`; see [request feedback](components.md#request-feedback)).
+Any text can be replaced by keyword, and
 `reasons` replaces the phrases of the statuses it names:
 `error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
 reasons=Dict(404 => "Unbekannt"))`. `server_fault` and `error_id` (the

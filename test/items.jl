@@ -8556,10 +8556,12 @@ end
     # page sends by itself — pollers (`every`), lazy `load` fragments,
     # `revealed` and `intersect` — the same exclusion the `request_feedback`
     # script applies, so neither a polling region nor a lazy placeholder dims
-    # (snag lazy-load-succes-a0c68d63).
+    # (snag lazy-load-succes-a0c68d63). A part showing that it is being
+    # replaced (`.htmxo-loading`) takes request feedback's dim instead (snag
+    # change-a-view-th-bb4362e2).
     for verb in ("get", "post", "put", "patch", "delete")
         @test contains(css, "[hx-$(verb)]:not([hx-trigger*=\"every\"], [hx-trigger^=\"load\"], " *
-            "[hx-trigger*=\"revealed\"], [hx-trigger*=\"intersect\"]).htmx-request")
+            "[hx-trigger*=\"revealed\"], [hx-trigger*=\"intersect\"], .htmxo-loading).htmx-request")
     end
     @test contains(css, "cursor: progress")
     # Plain literals, no theme variables: the rule must hold on hand-built
