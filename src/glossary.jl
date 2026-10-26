@@ -439,3 +439,81 @@ function _glossary_report(markdown::AbstractString, g::Glossary)
     isempty(entries) && return linked
     string(rstrip(linked), "\n\n## ", _md_escape_text(g.title), "\n\n", _glossary_markdown(entries), "\n")
 end
+
+"""
+    glossary_script()
+
+Client runtime of the term links [`link_terms`](@ref) writes. Hovering a term
+or focusing its link opens the term's definition beside it; the runtime places
+the box below the term (above it when there is no room below), inside the
+window, and outside any scrolling container such as a wide table's, which
+would otherwise clip it, and keeps it there while the page scrolls. Escape
+closes it until the pointer or the focus leaves the term. Without the runtime,
+the stylesheet ([`htmxo_utility_styles`](@ref)) still opens the box below the
+term.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+glossary_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoGlossary) return;
+  window.htmxoGlossary = true;
+  document.documentElement.classList.add('htmxo-terms');
+  var MARGIN = 8, open = new Set();
+  var termOf = function (node) { return node instanceof Element ? node.closest('.htmxo-term') : null; };
+  var parts = function (term) {
+    return {link: term.querySelector(':scope > a'), box: term.querySelector(':scope > .htmxo-term-def')};
+  };
+  function place(term) {
+    var p = parts(term);
+    if (!p.link || !p.box) return;
+    term.setAttribute('data-htmxo-term-open', '');
+    open.add(term);
+    // Measured at its own width first, then moved where it fits.
+    p.box.style.left = '0px';
+    p.box.style.top = '0px';
+    var r = p.link.getBoundingClientRect(), b = p.box.getBoundingClientRect();
+    var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+    var left = Math.max(MARGIN, Math.min(r.left, vw - b.width - MARGIN));
+    var top = r.bottom + b.height > vh - MARGIN && r.top - b.height >= MARGIN ? r.top - b.height : r.bottom;
+    p.box.style.left = left + 'px';
+    p.box.style.top = top + 'px';
+  }
+  function close(term) {
+    term.removeAttribute('data-htmxo-term-open');
+    var box = parts(term).box;
+    if (box) { box.style.left = ''; box.style.top = ''; }
+    open.delete(term);
+  }
+  function enter(e) {
+    var term = termOf(e.target);
+    if (term && !open.has(term) && !term.hasAttribute('data-htmxo-term-dismissed')) place(term);
+  }
+  function leave(e, stays) {
+    var term = termOf(e.target);
+    if (!term || term.contains(e.relatedTarget)) return;
+    term.removeAttribute('data-htmxo-term-dismissed');
+    if (!stays(term)) close(term);
+  }
+  document.addEventListener('mouseover', enter);
+  document.addEventListener('focusin', enter);
+  document.addEventListener('mouseout', function (e) {
+    leave(e, function (term) { return term.contains(document.activeElement); });
+  });
+  document.addEventListener('focusout', function (e) {
+    leave(e, function (term) { return term.matches(':hover'); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape' || !open.size) return;
+    open.forEach(function (term) { term.setAttribute('data-htmxo-term-dismissed', ''); close(term); });
+  });
+  // An open box follows its term when the page or a container scrolls.
+  var follow = function () {
+    open.forEach(function (term) { term.isConnected ? place(term) : open.delete(term); });
+  };
+  document.addEventListener('scroll', follow, true);
+  window.addEventListener('resize', follow);
+})();
+"""))

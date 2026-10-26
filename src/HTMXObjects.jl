@@ -26,7 +26,7 @@ export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_style
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
-export Glossary, GlossaryTerm, glossary_section, term, link_terms
+export Glossary, GlossaryTerm, glossary_section, term, link_terms, glossary_script
 export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
@@ -2903,6 +2903,7 @@ _runtime_blocks() = (
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
+    glossary = (:js, glossary_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
     syntax_styles = (:css, syntax_styles),
@@ -3216,6 +3217,9 @@ function htmx(args...;
         # The address's `#id` reaches an element an htmx swap inserts
         # after the page loaded; inert on an address without one.
         :url_anchor,
+        # A glossary term's definition opens beside it, kept on screen
+        # and outside scrolling tables; inert on pages without terms.
+        :glossary,
         # Markdown math (`render_markdown`) is typeset by KaTeX, which
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
@@ -28804,6 +28808,10 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 }
 .htmxo-term:hover > .htmxo-term-def,
 .htmxo-term:focus-within > .htmxo-term-def { display: block; }
+/* With `glossary_script` the runtime opens it, in the window's coordinates,
+   so a scrolling table cannot clip it and it stays inside the window. */
+.htmxo-terms .htmxo-term:is(:hover, :focus-within) > .htmxo-term-def { display: none; }
+.htmxo-terms .htmxo-term[data-htmxo-term-open] > .htmxo-term-def { display: block; position: fixed; }
 .htmxo-glossary > dt { font-weight: bold; }
 .htmxo-glossary > dt > dfn { font-style: normal; }
 }

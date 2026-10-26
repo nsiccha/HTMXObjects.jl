@@ -92,6 +92,13 @@ end
     end
     unchanged = h.div(h.p("nichts"))
     @test link_terms(unchanged, G) === unchanged
+
+    # A header that is a term explains its column instead: `title` and ⓘ.
+    header = html(link_terms(render_table([(Registerzelle="a", Wert=1)]; sortable=false), G))
+    @test contains(header, "<th title=\"Ein Bezirk × Abschnitt mit einem Wert im Unternehmensregister.\">Registerzelle<span class=\"htmxo-column-help\"")
+    @test links(header) == 0
+    own = html(link_terms(h.table(h.thead(h.tr(h.th("Registerzelle"; title="eigene")))), G))
+    @test !contains(own, "Ein Bezirk") && !contains(own, "htmxo-column-help")
 end
 
 @testitem "term links in Markdown, semantic containers and prose" setup=[GlossaryFixture] tags=[:unit] begin
@@ -201,9 +208,16 @@ end
     plain = body("/glossary_plain_page")
     @test links(plain) == 0
     @test contains(plain, "Die Registerzelle im Text.")
-    bad = dispatch(:GET, "/glossary_bad_page"; headers=["HX-Request" => "true"])
+    # A declaration that is no `Glossary` is the route's error, named after its struct.
+    bad = dispatch(:GET, "/glossary_bad_page"; headers=["Accept" => "text/html"])
     @test bad.status == 500
-    @test contains(String(HTMXObjects._message_body_bytes(bad)), "__glossary__")
+    err = try
+        HTMXObjects._page_meta_of(Any[GlossaryBadApp()])
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError && contains(err.msg, "`__glossary__` on GlossaryBadApp")
 end
 
 @testitem "a static export keeps term links on the exported glossary" setup=[GlossaryFixture] tags=[:unit] begin
@@ -272,7 +286,7 @@ end
     end
 end
 
-@testitem "a term's definition shows on keyboard focus, beside the text" setup=[GlossaryFixture, ChromeDump] tags=[:browser] begin
+@testitem "a term's definition opens on hover or focus, inside the window and outside scrolling tables" setup=[GlossaryFixture, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -283,32 +297,75 @@ end
         window.addEventListener('load', function () {
           const checks = [];
           const check = (name, ok) => checks.push(name + ':' + Boolean(ok));
-          const p = document.getElementById('p'), link = p.querySelector('.htmxo-term > a');
-          const box = document.getElementById(link.getAttribute('aria-describedby'));
+          const runtime = document.documentElement.classList.contains('htmxo-terms');
+          const parts = id => {
+            const link = document.querySelector('#' + id + ' .htmxo-term > a');
+            return {link, box: document.getElementById(link.getAttribute('aria-describedby'))};
+          };
+          const shown = box => getComputedStyle(box).display === 'block';
+          // Whether the box's centre is the box, i.e. nothing clips or covers it.
+          const visible = box => {
+            const b = box.getBoundingClientRect();
+            const at = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return at !== null && box.contains(at);
+          };
+          const prose = parts('prose'), p = document.getElementById('prose');
           const height = p.getBoundingClientRect().height;
-          check('hidden at rest', getComputedStyle(box).display === 'none');
-          check('reads as text', getComputedStyle(link).color === getComputedStyle(p).color);
-          check('dotted underline', getComputedStyle(link).textDecorationStyle === 'dotted');
-          link.focus();
-          check('shown on focus', getComputedStyle(box).display === 'block');
+          check('hidden at rest', !shown(prose.box));
+          check('reads as text', getComputedStyle(prose.link).color === getComputedStyle(p).color);
+          check('dotted underline', getComputedStyle(prose.link).textDecorationStyle === 'dotted');
+          prose.link.focus();
+          check('open on focus', shown(prose.box));
           check('beside, not in, the line', p.getBoundingClientRect().height === height);
-          check('below the term', box.getBoundingClientRect().top >= link.getBoundingClientRect().bottom - 1);
-          link.blur();
-          check('hidden again', getComputedStyle(box).display === 'none');
+          check('below the term', prose.box.getBoundingClientRect().top >= prose.link.getBoundingClientRect().bottom - 1);
+          prose.link.blur();
+          check('closed after focus', !shown(prose.box));
+          const cell = parts('scroller');
+          cell.link.focus();
+          check('table cell open', shown(cell.box));
+          check('table cell unclipped', visible(cell.box));
+          cell.link.blur();
+          const edge = parts('edge');
+          edge.link.focus();
+          check('edge inside the window', edge.box.getBoundingClientRect().right <= document.documentElement.clientWidth);
+          if (runtime) {
+            document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+            check('escape closes', !shown(edge.box));
+            edge.link.blur();
+            prose.link.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            check('open on hover', shown(prose.box));
+            prose.link.dispatchEvent(new MouseEvent('mouseout', {bubbles: true, relatedTarget: document.body}));
+            check('closed after hover', !shown(prose.box));
+          }
           const out = document.createElement('pre'); out.id = 'checks';
           out.textContent = checks.join('\n'); document.body.appendChild(out);
         });
         """))
-        page = link_terms(h.main(h.p("Die Registerzelle steht im Text."; id="p"), driver), GlossaryFixture.G)
-        file = joinpath(mktempdir(), "glossary.html")
-        write(file, repr("text/html", htmx(page; htmx_version=nothing, sse_version=nothing, ws_version=nothing,
+        content = link_terms(h.main(
+            h.p("Die Registerzelle steht im Text."; id="prose"),
+            h.div(h.table(h.tbody((h.tr(h.td(i == 6 ? "Registerzelle" : "Zeile $i")) for i in 1:6)...));
+                  id="scroller", style="overflow: auto; height: 3em; margin-top: 2em"),
+            h.p("Am Rand steht das Modell"; id="edge", style="text-align: right"),
+            driver; style="max-width: 30rem"), GlossaryFixture.G)
+        dir = mktempdir()
+        shell = joinpath(dir, "shell.html")
+        write(shell, repr("text/html", htmx(content; htmx_version=nothing, sse_version=nothing, ws_version=nothing,
             preload_version=nothing, hyperscript_version=nothing, katex_version=nothing, feedback=false)))
-        profile = mktempdir()
-        dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$file`)
-        checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
-        @test !isnothing(checks)
-        for line in split(checks.captures[1], '\n')
-            @test endswith(line, ":true")
+        # The control: the stylesheet alone, without the runtime.
+        bare = joinpath(dir, "bare.html")
+        write(bare, "<!DOCTYPE html>" * repr("text/html", h.html(h.head(h.meta(; charset="utf-8"), htmxo_utility_styles()),
+                                                               h.body(content))))
+        results = Dict{String,Dict{String,Bool}}()
+        for (name, file) in (("shell", shell), ("bare", bare))
+            profile = mktempdir()
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=300,700 --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$file`)
+            m = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(m)
+            results[name] = Dict(String(first(split(l, ':'))) => endswith(l, ":true") for l in split(m.captures[1], '\n'))
         end
+        @test all(values(results["shell"]))
+        @test length(results["shell"]) == 13
+        @test results["shell"]["table cell unclipped"] && !results["bare"]["table cell unclipped"]
+        @test results["bare"]["open on focus"] && results["bare"]["closed after focus"]
     end
 end

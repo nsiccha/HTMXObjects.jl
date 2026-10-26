@@ -3049,10 +3049,12 @@ See the [Components catalog](components.md) for the full list with examples.
 An app declares its technical terms once and every answer links the uses of
 them to their entries: the first use of a term in each section of a page, and
 again in each table, figure, caption and disclosure, becomes a link to the
-glossary. The link reads as the surrounding text with a dotted underline;
-hovering it or focusing it with the keyboard shows the definition in a small
-box beside it, and screen readers read the definition as the link's
-description. Clicking it opens the glossary entry.
+glossary. The link reads as the surrounding text with a dotted underline.
+Hovering it or focusing it with the keyboard opens the definition in a small
+box beside it, kept inside the window and outside a scrolling table, and
+Escape closes it ([`glossary_script`](@ref), in every `htmx()` shell). Screen
+readers read the definition as the link's description. Clicking it, or
+tapping it on a touch screen, opens the glossary entry.
 
 ```julia
 const GLOSSAR = Glossary([
@@ -3099,6 +3101,7 @@ GlossaryTerm
 glossary_section
 term
 link_terms
+glossary_script
 ```
 
 ## Tables and captions
