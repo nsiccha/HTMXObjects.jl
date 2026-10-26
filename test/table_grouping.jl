@@ -779,12 +779,15 @@ end
             check('no-leaks', leaked() === 0 && document.querySelectorAll('tbody[data-htmxo-row-update]').length === 0);
             // Rows rendered for another grouping are refused, loudly, and change
             // nothing (htmx leaves an empty class on the row it sent the request from).
+            // A request from inside the table sends the grouping it shows, so
+            // this one comes from outside it.
             const markup = () => body().innerHTML.replace(/ class=""/g, '');
             const snapshot = markup();
-            await post('/flag?id=p1&group_by=iban', row('group--Acme--p1'));
+            const stale = () => htmx.ajax('POST', '/flag?id=p1&group_by=iban', {source: document.body, target: row('group--Acme--p1'), swap: 'outerHTML'}).then(settle);
+            await stale();
             check('wrong-grouping', markup() === snapshot &&
                 /grouped by .*iban.* but the table by .*party/.test((document.querySelector('.htmxo-toast-error') || {}).textContent || ''));
-            await post('/flag?id=p1&group_by=iban', row('group--Acme--p1'));   // back to flagged on the server
+            await stale();   // back to flagged on the server
             // Every copy of a leaf: p3 is listed under Shops and Media.
             toggle('group--Bakery');
             await regroup('rule');
@@ -1799,7 +1802,19 @@ end
     de = html(grouped(group_by="rule", texts=table_texts(:de),
         group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount * 100; digits=2)]))
     @test cell(row(de, "row-group--Shops"), 0) == "-23.000,00" && number(row(de, "row-group--Shops"), 0) == "-23000.00"
-    # The cells' `format_number(x; digits)` writes the same text: test/number_format.jl.
+    # Significant digits: Acme's and Bakery's amounts × 28.5 sum to -2850, a
+    # half, which rounds away from zero. The CSV gets the rounded number, and
+    # no power of ten where the cell shows one.
+    sig = html(grouped(group_by="party", texts=table_texts(:de), group_summary=[
+        "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
+        "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)]))
+    @test cell(row(sig, "row-group--Acme"), 1) == "-2.900" && number(row(sig, "row-group--Acme"), 1) == "-2900"
+    @test cell(row(sig, "row-group--Bakery"), 1) == "-2.900" && cell(row(sig, "row-group--Prime--Video"), 1) == "-1.400"
+    @test cell(row(sig, "row-group--Acme--Prime"), 1) == "-860"
+    @test cell(row(sig, "row-group--Acme"), 0) == "-3,3·10⁻⁵" && number(row(sig, "row-group--Acme"), 0) == "-0.000033"
+    @test contains(sig, "&quot;summary&quot;:[{&quot;reduce&quot;:&quot;mean&quot;,&quot;sigdigits&quot;:2}," *
+        "{&quot;reduce&quot;:&quot;sum&quot;,&quot;sigdigits&quot;:2}]")
+    # The cells' `format_number(x; digits | sigdigits)` writes the same text: test/number_format.jl.
     # Every leaf carries what the browser regroups it by, on every copy.
     leaf = match(r"<tr[^>]*id=\"row-group--Shops--p3\"[^>]*>", html(grouped(group_by="rule",
         group_summary=["Amount" => ColumnSummary(:ratio, t -> t.amount, t -> 1)]))).match
@@ -1828,13 +1843,18 @@ end
     md = to_markdown_string(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount)]))
     @test contains(md, "-100") && !contains(md, "template") && count("Acme Prime", md) == 3
     @test contains(md, "\n\n**Acme Prime**\n\nmemo 3\n\n")
-    # Refused: an unknown reduce or digits, the wrong number of functions, a
-    # column that is not a header or is the first, a column named twice,
-    # something other than a ColumnSummary, a value that is not a number.
+    # Refused: an unknown reduce, digits or sigdigits (outside 1 to 15, the
+    # digits the browser rounds exactly), digits and sigdigits together, the
+    # wrong number of functions, a column that is not a header or is the
+    # first, a column named twice, something other than a ColumnSummary, a
+    # value that is not a number.
     @test_throws ArgumentError ColumnSummary(:median, identity)
     @test_throws ArgumentError ColumnSummary(:sum)
     @test_throws ArgumentError ColumnSummary(:ratio, identity)
     @test_throws ArgumentError ColumnSummary(:sum, identity; digits=11)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=0)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=16)
+    @test_throws ArgumentError ColumnSummary(:sum, identity; digits=1, sigdigits=2)
     @test_throws ArgumentError grouped(group_summary=["Nope" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Party" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Amount" => ColumnSummary(:count), "Amount" => ColumnSummary(:count)])
@@ -2106,6 +2126,82 @@ end
     end
 end
 
+@testitem "sigdigits group summaries round the same in the browser browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets, Random
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        de = table_texts(:de)
+        # Acme and Bakery sum to -2850, a half; the IBAN means are powers of ten.
+        table(group_by) = regroup_table(; group_by, id="s", texts=de, group_summary=[
+            "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
+            "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)])
+        # The browser's rounding against the server's, number by number:
+        # halves, carries into a new digit, the ends of Float64, and sums of
+        # numbers rounded to two digits each, where halves are common.
+        rng = Xoshiro(7)
+        xs = Float64[2850, -2850, 0.125, 2.5, 9.96, 99.96, 29210, 1.05e16, 1.5e15, 999999999999999, 3.81234e-5,
+                     9.9996e-5, 5e-324, 2.2250738585072014e-308, floatmax(), -0.0, 1, 1000, 0.001]
+        append!(xs, [(rand(rng) - 0.5) * 10.0^rand(rng, -12:18) for _ in 1:150])
+        append!(xs, [-sum(round(rand(rng) * 10.0^rand(rng, 1:5); sigdigits=2) for _ in 1:rand(rng, 2:8)) for _ in 1:150])
+        append!(xs, [rand(rng, -10^6:10^6) / 8 for _ in 1:100])
+        cases = [(x, k) for x in xs for k in (1, 2, 3, 6, 15)]
+        driver = h.script(Raw(regroup_driver_prelude() * "const CASES = [" * join(("[$x,$k]" for (x, k) in cases), ",") * "];\n" * raw"""
+        window.addEventListener('load', async function() {
+            const s = () => document.getElementById('s').closest('[data-htmxo-grouped]');
+            const levels = v => v === 'none' ? [] : [v];
+            const regroup = v => htmxoGroupRequest(s().querySelector('.htmxo-group-pills'), levels(v), null);
+            for (const v of ['iban', 'rule', 'media', 'none', 'party'])
+                (regroup(v), check('parity-' + v, await parity(s(), '/s?group_by=' + v)));
+            const cell = (id, i) => document.getElementById('row-' + id).querySelector('[data-htmxo-group-summary="' + i + '"]');
+            check('half', cell('group--Acme', 1).textContent === '-2.900' && cell('group--Acme', 1).dataset.htmxoNumber === '-2900');
+            check('power-of-ten', cell('group--Acme', 0).textContent === '-3,3·10⁻⁵' && cell('group--Acme', 0).dataset.htmxoNumber === '-0.000033');
+            const numbers = document.createElement('pre'); numbers.id = 'numbers';
+            numbers.textContent = CASES.map(([x, k]) => htmxoSummaryText(x, {sigdigits: k}, ',', '.', false) + '\t' +
+                htmxoSummaryText(x, {sigdigits: k}, '.', '', true)).join('\n');
+            document.body.appendChild(numbers);
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(table(["party"]), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
+            uri.path == "/s" ? HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", table(levels))) :
+            HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 7
+            end
+            numbers = match(r"<pre id=\"numbers\">(.*?)</pre>"s, dom)
+            @test !isnothing(numbers)
+            if !isnothing(numbers)
+                browser = split(numbers[1], '\n')
+                server_side = [HTMXObjects._format_finite(x, de, HTMXObjects._SigDigits(k)) * "\t" *
+                               HTMXObjects._summary_key(x, HTMXObjects._SigDigits(k)) for (x, k) in cases]
+                @test length(browser) == length(cases)
+                @test [(cases[i], browser[i], server_side[i]) for i in eachindex(cases, browser) if browser[i] != server_side[i]] == []
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "group_master rows come from the server after a browser regroup browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
@@ -2221,6 +2317,124 @@ end
             finally
                 close(server)
             end
+        end
+    end
+end
+
+@testitem "requests from a browser-regrouped table carry its current grouping browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        esc = HTTP.escapeuri
+        gbq(group_by) = join(("group_by=$(esc(g))" for g in group_by), '&')
+        flagged, noted = Set{String}(), Set{String}()
+        # (path, id, group_by in the URL, group_by in the body) of each request.
+        seen = Tuple{String,String,Vector{String},Vector{String}}[]
+        # Table a writes the grouping of its render into its action URL, its
+        # `detail_url` and the form of each detail; neither table has a
+        # `group_by_url`, so the browser alone regroups it.
+        table_a(group_by; kw...) = master_detail_table(["Party", "IBAN", "Amount", "State"], TX; key=t -> t.id,
+            master=t -> (h.td(t.party), h.td(t.iban), h.td(string(t.amount)),
+                h.td(h.span(t.id in flagged ? "flagged" : "-"; class="flag"), " ",
+                     h.span(t.id in noted ? "noted" : "-"; class="note"), " ",
+                     h.button("flag"; type="button", data_flag=t.id,
+                         hx_post="/flag?id=$(t.id)&$(gbq(group_by))", hx_target="closest tr", hx_swap="outerHTML"))),
+            detail_url=t -> "/detail?id=$(t.id)&$(gbq(group_by))", groupings=GROUPINGS, group_by, id="a", kw...)
+        # Table b also sends the grouping through an ancestor's hx-vals, as
+        # htmxo-master-detail describes: its detail requests name it twice.
+        b_groupings = ["none" => nothing, "party" => t -> "b-" * t.party, "iban" => t -> "b-" * t.iban]
+        table_b(group_by) = master_detail_table(["Party", "IBAN", "Amount"], TX; key=t -> "b" * t.id,
+            master=t -> (h.td(t.party), h.td(t.iban), h.td(string(t.amount))),
+            detail_url=t -> "/detail?id=b$(t.id)&$(gbq(group_by))", groupings=b_groupings, group_by, id="b")
+        detail(id, group_by) = h.div(h.span(join(group_by, ","); data_seen=""),
+            h.form(; hx_post="/note", data_note=id)(h.input(; type="hidden", name="id", value=id),
+                (h.input(; type="hidden", name="group_by", value=g) for g in group_by)...,
+                h.button("note"; type="submit")))
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            const errors = [];
+            window.addEventListener('error', e => errors.push(e.message));
+            const wrap = id => document.getElementById(id).closest('[data-htmxo-grouped]');
+            const pills = id => wrap(id).querySelector('.htmxo-group-pills');
+            const row = id => document.getElementById('row-' + id);
+            const detail = id => document.getElementById('detail-' + id);
+            const text = (id, sel) => { const r = row(id), el = r && r.querySelector(sel); return el ? el.textContent : null; };
+            htmxoGroupRequest(pills('a'), ['iban'], null);
+            check('regrouped', wrap('a').dataset.htmxoGrouped === '["iban"]' && row('group--DE01--p1') !== null);
+            // An action URL written for "party" sends "iban".
+            row('group--DE01--p1').querySelector('[data-flag]').click();
+            check('flag-update', await wait(() => text('group--DE01--p1', '.flag') === 'flagged') || errors.join('; '));
+            // So does a lazy detail URL; its form is rendered for "iban".
+            row('group--DE02--p2').querySelector('[data-htmxo-detail-toggle]').click();
+            await wait(() => detail('group--DE02--p2').querySelector('[data-note]'));
+            const seenAs = id => { const s = detail(id) && detail(id).querySelector('[data-seen]'); return s ? s.textContent : null; };
+            check('detail-url', seenAs('group--DE02--p2') === 'iban' || seenAs('group--DE02--p2'));
+            // Regrouped again, the loaded form's hidden inputs send "rule".
+            htmxoGroupRequest(pills('a'), ['rule'], null);
+            const form = detail('group--Shops--p2').querySelector('form[data-note]');
+            form.requestSubmit();
+            check('form-update', await wait(() => text('group--Shops--p2', '.note') === 'noted') || errors.join('; '));
+            // URL and hx-vals together send the grouping once.
+            htmxoGroupRequest(pills('b'), ['iban'], null);
+            row('group--b-DE01--bp3').querySelector('[data-htmxo-detail-toggle]').click();
+            await wait(() => detail('group--b-DE01--bp3').querySelector('[data-note]'));
+            check('one-copy', seenAs('group--b-DE01--bp3') === 'iban' || seenAs('group--b-DE01--bp3'));
+            check('no-errors', errors.length === 0 || errors.join('; '));
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(table_a(["party"]), h.div(; hx_vals="js:{group_by: htmxoGroupBy(this)}")(table_b(["party"])), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            uri.path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            body = HTTP.queryparampairs(String(req.body))
+            levels_in(pairs) = [String(last(p)) for p in pairs if first(p) == "group_by"]
+            url_levels, body_levels = levels_in(HTTP.queryparampairs(uri)), levels_in(body)
+            # As an HTMXObjects route reads them: the body first, then the URL.
+            group_by = isempty(body_levels) ? url_levels : body_levels
+            id = get(HTTP.queryparams(uri), "id", get(Dict(body), "id", ""))
+            push!(seen, (uri.path, id, url_levels, body_levels))
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            if uri.path == "/flag"
+                push!(flagged, id)
+                html(table_a(group_by; update_rows=id))
+            elseif uri.path == "/note"
+                push!(noted, id)
+                html(table_a(group_by; update_rows=id))
+            elseif uri.path == "/detail"
+                html(detail(id, group_by))
+            else
+                HTTP.Response(404)
+            end
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 6
+            end
+            # Each request carried the grouping the table showed, once, where
+            # its element put it.
+            sent(path, id) = (i = findfirst(s -> s[1] == path && s[2] == id, seen); isnothing(i) ? nothing : seen[i][3:4])
+            @test sent("/flag", "p1") == (["iban"], String[])
+            @test sent("/detail", "p2") == (["iban"], String[])
+            @test sent("/note", "p2") == (String[], ["rule"])
+            @test sent("/detail", "bp3") == (["iban"], String[])
+        finally
+            close(server)
         end
     end
 end

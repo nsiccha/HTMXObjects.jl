@@ -8423,6 +8423,54 @@ end
     @test_throws TypeError SemanticUnavailable(reason; texts=table_texts(:de))
 end
 
+@testitem "a status keeps its state and glyph and shows the app's own label=" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    formats = ("text/html", "application/vnd.hyperview+xml", "text/markdown", "text/plain")
+
+    # Without `label=` the word is the state's name, byte-identical to before.
+    @test repr("text/html", SemanticStatus(:warn; detail="3 Ortsteile")) ==
+        "<span class=\"htmxo-semantic-status\" data-status=\"warn\">" *
+        "<strong>! warn</strong><small> 3 Ortsteile</small></span>"
+    @test repr("text/markdown", SemanticStatus(:fail; detail="boom")) == "✗ **fail** — boom"
+    @test repr("text/plain", SemanticStatus(:ok)) == "[ok]"
+    @test all(repr(m, SemanticStatus(:recorded)) ==
+              repr(m, SemanticStatus(:recorded; label="recorded")) for m in formats)
+
+    # A German page names a recognised state in its own words: the state keeps
+    # the glyph and `data-status`, the label is the word in every peer format.
+    status = SemanticStatus(:warn; label="im Projekt zu klären", detail="3 Ortsteile")
+    @test status.state === :warn
+    @test repr("text/html", status) ==
+        "<span class=\"htmxo-semantic-status\" data-status=\"warn\">" *
+        "<strong>! im Projekt zu klären</strong><small> 3 Ortsteile</small></span>"
+    hxml = repr("application/vnd.hyperview+xml", status)
+    @test contains(hxml, "! im Projekt zu klären") && !contains(hxml, "! warn")
+    @test repr("text/markdown", status) == "! **im Projekt zu klären** — 3 Ortsteile"
+    @test repr("text/plain", status) == "[im Projekt zu klären] 3 Ortsteile"
+    # Two outcomes on one glyph still read differently.
+    @test repr("text/markdown", SemanticStatus(:ok; label="unauffällig")) == "✓ **unauffällig**"
+    @test repr("text/markdown", SemanticStatus(:available; label="im Modell behandelt")) ==
+        "✓ **im Modell behandelt**"
+
+    # The label survives generated form chrome and a table cell.
+    page = h.div(h.form(h.input(; type="text", name="q"), status, h.button("Go")))
+    markdown = HTMXObjects.to_markdown_string(page)
+    @test contains(markdown, "! **im Projekt zu klären** — 3 Ortsteile")
+    @test !contains(markdown, "**warn**") && !contains(markdown, "<form")
+    checks = [(; id="a", name="Pendler", status=SemanticStatus(:ok; label="unauffällig")),
+              (; id="b", name="Betriebe", status=SemanticStatus(:warn; label="im Projekt zu klären"))]
+    table = repr("text/markdown", master_detail_table(["Prüfung", "Stand"], checks;
+        key=x -> x.id, master=x -> (h.td(x.name), h.td(x.status)), detail=x -> h.p(x.id)))
+    @test contains(table, "✓ **unauffällig**")
+    @test contains(table, "! **im Projekt zu klären**")
+    @test !contains(table, "**ok**") && !contains(table, "**warn**")
+
+    # refused: plain text shows no glyph, so a blank label would leave the
+    # status saying nothing there; the vocabulary's meaning survives into every
+    # peer format (docs/src/api.md, "The semantic element vocabulary").
+    @test_throws ArgumentError SemanticStatus(:ok; label="")
+    @test_throws ArgumentError SemanticStatus(:ok; label="  ")
+end
+
 @testitem "SemanticTable is gated by Tables.istable, never duck-typed" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     table = SemanticTable((x=[1, 2], y=["a", "b"]))
     @test contains(repr("text/markdown", table), "| x | y |")
