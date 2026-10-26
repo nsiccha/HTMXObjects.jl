@@ -78,7 +78,7 @@ using TestItemRunner
         @get progress_pause_bad() = h.p("never rendered")
     end
     route!(ProgressPauseBadApp())
-    bad = dispatch(:GET, "/progress_pause_bad"; headers=hx)
+    bad = dispatch(:GET, "/progress_pause_bad"; headers=["Accept" => "text/html"])
     @test bad.status == 500 && !contains(String(HTMXObjects._message_body_bytes(bad)), "never rendered")
     err = try
         HTMXObjects._page_meta_of(Any[ProgressPauseBadApp()])
