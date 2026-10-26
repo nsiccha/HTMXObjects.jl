@@ -278,7 +278,7 @@ the helper returns is left out while the shell carries its code. A changed or
 attributed copy stays as given. A page whose `<head>` is not built by
 `htmx(...)` still includes the helpers itself.
 
-### Text size, page width and buttons under Pico {#pico-page-size}
+### Text size, page width, buttons and disclosures under Pico {#pico-page-size}
 
 Pico ties the text size and the page width to the window: it raises the root
 font size from 16 px to 20 px at 1280 px and 21 px from 1536 px, and caps
@@ -305,6 +305,19 @@ busy. `.secondary` and `.contrast` buttons keep Pico's looks. An app that
 wants a coloured button sets `--pico-background-color`, `--pico-color` and
 `--pico-border-color` on it from a later stylesheet, with a selector at least
 as specific as two classes (`.app .cta`).
+
+Pico draws a disclosure (`<details>`) as one borderless line with a small
+chevron at the far edge, which readers miss. Under the shell every disclosure
+is a bordered box instead: its summary is a bold, tinted bar with the chevron
+right before the label, and its content opens inside the box. That covers a
+hand-written `h.details(h.summary(…), …)`, [`SemanticDisclosure`](@ref), the
+later views of [`SemanticAlternatives`](@ref) and a caption's "More", so no app
+restyles `<details>` itself. Pico's dropdown menus (`details.dropdown`) and
+button summaries (`summary[role=button]`) keep Pico's looks. The box's rules
+are no stronger than Pico's own, so a component that uses `<details>` for
+something else, such as a menu badge, keeps whatever its own class rules set
+(`border: 0`, its own summary padding). `--htmxo-disclosure-padding` (default
+`1rem`) sets the box's inner spacing.
 
 ### Success toasts {#success-toasts}
 
@@ -3016,7 +3029,7 @@ HTMXObjects ships its own CSS variables and matches the host environment (raw Pi
 | Export | Purpose |
 |--------|---------|
 | `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
-| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }`. Buttons without a colour class get Pico's slate `secondary outline` look instead of its azure fill; see [the page shell](#pico-page-size) |
+| `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }`. Buttons without a colour class get Pico's slate `secondary outline` look instead of its azure fill, and every `<details>` disclosure is a bordered box with a bold label bar and the chevron before the label; see [the page shell](#pico-page-size) |
 | `vitepress_bridge()`      | Map `--htmxo-*` (including `--htmxo-bg`) onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
 | `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight) |
 | `escape_html(s)`          | HTML-escape (`HTMX.escape`, 5 chars) — for hand-built HTML strings only; `h.*` escapes text + attrs itself, use `Raw` for trusted markup |
