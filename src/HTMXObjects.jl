@@ -17990,7 +17990,7 @@ figcaption.caption { margin-bottom: 0.5rem; }
 .caption-header > :first-child:not(:empty) { flex: 1 1 16rem; min-width: 0; }
 .caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .caption-long { margin-top: 0.25rem; }
-.caption-long > summary { cursor: pointer; font-size: 0.9em; opacity: 0.75; }
+.caption-long > summary { font-size: 0.9em; }
 }
 /* Caption buttons — INTENTIONALLY UNLAYERED, at (0,2,0) so they beat Pico's
    unlayered button and [type=button] rules (0,0,1)/(0,1,0) in any order. */
@@ -26933,6 +26933,17 @@ hover, focus and busy states. `.secondary` and `.contrast` buttons keep
 Pico's looks. To colour a button otherwise, set `--pico-background-color`,
 `--pico-color` and `--pico-border-color` on it from a later stylesheet, with a
 selector at least as specific as two classes (`.app .cta`).
+
+A disclosure (`<details>`, so also [`SemanticDisclosure`](@ref), the later
+views of [`SemanticAlternatives`](@ref) and a caption's "More") is a bordered
+box: its summary is a bold, tinted bar with the chevron right before the
+label, and its content opens inside the box. Pico draws it as one borderless
+line with the chevron at the far edge. Pico's dropdown menus
+(`details.dropdown`) and button summaries (`summary[role]`) keep Pico's looks.
+The box's rules are as weak as Pico's own, so a component that draws its own
+`<details>` (a menu badge) keeps every property it sets in its own class
+rules. `--htmxo-disclosure-padding` (default `1rem`) is the box's inner
+spacing.
 """
 pico_bridge() = h.style(Raw("""
 :root {
@@ -26983,6 +26994,67 @@ pico_bridge() = h.style(Raw("""
 details summary[role=button]:not(.secondary, .contrast)::after,
 [aria-busy=true]:not(input, select, textarea):is(button, [type=submit], [type=button], [role=button]):not(.secondary, .contrast)::before {
     filter: none;
+}
+/* Pico draws a disclosure (`<details>`) as one borderless line with its
+   chevron at the far edge, and colours the label like a link while it has
+   focus, so readers miss it. It is a bordered box instead: the summary is a
+   bold, tinted bar with the chevron right before the label, and the content
+   opens inside the box. Pico's dropdown menus and button summaries
+   (`summary[role]`) keep their looks. What Pico leaves unset (the box, the
+   bar, the new chevron) has zero specificity and what Pico sets (the label's
+   line height and colours, its chevron, the gap under an open label) has
+   exactly Pico's, so a component that styles its own `<details>` still wins
+   wherever it sets something. */
+:where(details:not(.dropdown, :has(> summary[role]))) {
+    --pico-accordion-active-summary-color: var(--pico-accordion-close-summary-color);
+    --pico-accordion-open-summary-color: var(--pico-accordion-close-summary-color);
+    padding: 0 var(--htmxo-disclosure-padding, 1rem);
+    border: var(--pico-border-width) solid var(--pico-form-element-border-color);
+    border-radius: var(--pico-border-radius);
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) {
+    padding-bottom: var(--htmxo-disclosure-padding, 1rem);
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary) {
+    margin-inline: calc(-1 * var(--htmxo-disclosure-padding, 1rem));
+    padding: 0.6rem var(--htmxo-disclosure-padding, 1rem);
+    border-radius: calc(var(--pico-border-radius) - var(--pico-border-width));
+    background: var(--pico-card-sectioning-background-color);
+    font-weight: 600;
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary):hover {
+    background: color-mix(in srgb, currentColor 7%, var(--pico-card-sectioning-background-color));
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) > :where(summary) {
+    border-bottom: var(--pico-border-width) solid var(--pico-muted-border-color);
+    border-end-start-radius: 0;
+    border-end-end-radius: 0;
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :where(summary)::before {
+    content: "";
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    margin-inline-end: 0.5rem;
+    vertical-align: -0.125rem;
+    background-image: var(--pico-icon-chevron);
+    background-position: center;
+    background-size: 1rem auto;
+    background-repeat: no-repeat;
+    transform: rotate(-90deg);
+    transition: transform var(--pico-transition);
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open]) > :where(summary)::before {
+    transform: rotate(0);
+}
+:where(details:not(.dropdown, :has(> summary[role]))) > :last-child { margin-bottom: 0; }
+details:where(:not(.dropdown, :has(> summary[role]))) > summary { line-height: var(--pico-line-height); }
+details:where(:not(.dropdown, :has(> summary[role]))) > summary::after { content: none; }
+details:where(:not(.dropdown, :has(> summary[role])))[open] > summary {
+    margin-bottom: var(--htmxo-disclosure-padding, 1rem);
+}
+details:where(:not(.dropdown, :has(> summary[role]))) > summary:focus-visible:not([role]) {
+    outline-offset: calc(-1 * var(--pico-outline-width));
 }
 """))
 
