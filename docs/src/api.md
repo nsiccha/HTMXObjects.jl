@@ -1866,7 +1866,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticUnavailable(reason; texts=semantic_texts())` | A declined computation, and why — not a state |
 | `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
-| `SemanticArtifact(name, mime, bytes=nothing; target=nothing)` | A downloadable payload |
+| `SemanticArtifact(name, mime, bytes=nothing; target=nothing, label=nothing, size=nothing, texts=semantic_texts())` | A downloadable file: one download control naming its format and size |
 | `SemanticCode(language, text; anchor="")` | Source code, language kept as data |
 | `SemanticSection(title, children...; anchor="")` | A document division — opens a heading level |
 | `SemanticCard(title, children...; anchor="")` | A self-contained titled summary |
@@ -1901,6 +1901,31 @@ vocabulary writes itself, so it follows `texts=`, a `SemanticTexts` from
 Markdown and `[nicht verfügbar] reason` in plain text;
 `semantic_texts(:de; unavailable="entfällt")` puts the app's own word there.
 The `htmxo-semantic-unavailable` class keeps its name in every language.
+
+A `SemanticArtifact` is a file to download. `name` is the file name it is saved
+under, and its extension in capitals is the format every projection names.
+`label=` puts other text in place of the name, which then becomes the link's
+tooltip. `size=` is the size in bytes; it defaults to the size of `bytes` when
+the artifact holds them as a string or a byte vector. It is written short, with
+1024 bytes to a KB and one decimal below 10, and with the decimal mark of
+`texts=`:
+
+```julia
+SemanticArtifact("vs_beschaeftigte_2025.xlsx", XLSX_MIME;
+    target="/datei/vs_beschaeftigte_2025.xlsx", size=1_468_006, texts=semantic_texts(:de))
+```
+
+- **HTML:** one `<a class="htmxo-semantic-artifact" download type=…>` holding a
+  download icon, the label and `<small>XLSX · 1,4 MB</small>`. On a Pico page
+  (`htmx(...; pico_version)`, `pico_page`) `pico_bridge()` draws it in the slate
+  outline of the buttons, not as Pico's underlined azure link, and the format
+  and size wrap below the label in a narrow box.
+- **Markdown:** `[vs_beschaeftigte_2025.xlsx](/datei/…) (XLSX, 1,4 MB)`; the
+  PDFs `pdf_report` builds read the same.
+- **Plain text:** `vs_beschaeftigte_2025.xlsx [XLSX, 1,4 MB] (/datei/…)`.
+
+A name without an extension has no format: Markdown and plain text name the
+MIME type in its place, and HTML keeps it in the `type` attribute.
 
 Four points where a projection is deliberately not a translation of the HTML:
 
@@ -3001,7 +3026,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a regroupable `master_detail_table` (its key is a JSON path); see [components](components.md#table-regrouping) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 | `caption_texts(locale; …)`, `CaptionTexts` | A caption's own words (the toggle that opens its long text) in English or German, with per-text overrides; pass as `texts=` to `render_caption` / `with_caption`; see [components](components.md#captions) |
-| `semantic_texts(locale; …)`, `SemanticTexts` | The semantic vocabulary's own words (the marker of a `SemanticUnavailable`) in English or German, with per-text overrides; pass as `texts=` to `SemanticUnavailable`; see [The semantic element vocabulary](@ref) |
+| `semantic_texts(locale; …)`, `SemanticTexts` | The semantic vocabulary's own words (the marker of a `SemanticUnavailable`, the decimal mark of a `SemanticArtifact`'s size) in English or German, with per-text overrides; pass as `texts=` to `SemanticUnavailable` and `SemanticArtifact`; see [The semantic element vocabulary](@ref) |
 
 ## Formatting
 
