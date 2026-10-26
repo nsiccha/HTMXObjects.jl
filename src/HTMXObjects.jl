@@ -22,7 +22,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
     semantic_card, SemanticTexts, semantic_texts
-export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles
+export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles, syntax_script, syntax_styles
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
@@ -2567,10 +2567,18 @@ const _PICO_VERSION = "2.1.1"
 # KaTeX typesets the math `render_markdown` marks (`math_script`). The shell
 # only names where it lives; the runtime fetches it when a page shows math.
 const _KATEX_VERSION = "0.19.0"
+# PrismJS highlights code (`syntax_script`). As with KaTeX, the shell only
+# names where it lives; the runtime fetches it when a page shows code.
+const _PRISM_VERSION = "1.30.0"
+const _PRISM_CORE = "components/prism-core.min.js"
+const _PRISM_AUTOLOADER = "plugins/autoloader/prism-autoloader.min.js"
 
 # pkg => (path inside its artifact, served filename, pinned version).
 # KaTeX is a directory: its stylesheet finds its fonts relative to itself, so
 # it is served as `katex/…` with the `fonts/` beside it (`_vendor_files`).
+# PrismJS is one too: its autoloader fetches each language's grammar from the
+# `components/` directory beside its own `plugins/`, so it is served as
+# `prism/…` in the npm package's layout.
 # The artifact itself resolves through `_vendor_artifact` below — the
 # `artifact"..."` macro needs a literal, so one method per asset.
 const _VENDOR_ASSETS = (
@@ -2588,6 +2596,7 @@ const _VENDOR_ASSETS = (
         file="pico.min.css", version=_PICO_VERSION),
     katex=(relpath=joinpath("package", "dist"),
         file="katex", version=_KATEX_VERSION),
+    prism=(relpath="package", file="prism", version=_PRISM_VERSION),
 )
 
 _vendor_artifact(::Val{:htmx}) = artifact"htmx"
@@ -2597,6 +2606,7 @@ _vendor_artifact(::Val{:preload}) = artifact"htmx-ext-preload"
 _vendor_artifact(::Val{:hyperscript}) = artifact"hyperscript"
 _vendor_artifact(::Val{:pico}) = artifact"pico"
 _vendor_artifact(::Val{:katex}) = artifact"katex"
+_vendor_artifact(::Val{:prism}) = artifact"prismjs"
 
 # Single validation point for the `assets` mode, so an unknown mode fails
 # even when every version kwarg is `nothing` and no URL is built.
@@ -2629,16 +2639,28 @@ end
 # library a script. Shared by the `htmx()` shell and `vendor_head`.
 _head_asset_node(::Val{:pico}, src) = h.link(rel="stylesheet", href=src)
 _head_asset_node(::Val, src) = h.script(src=src)
+# A head asset's address and its `?query` (`""` without one).
+function _split_query(src)
+    i = findfirst('?', src)
+    isnothing(i) ? (src, "") : (src[1:prevind(src, i)], src[i:end])
+end
 # KaTeX is not loaded by the head: `src` names its directory, and the
 # template holds the two files `math_script` adds once the page shows math.
 # Template content is inert, so a page without math fetches nothing, and a
 # static export rewrites its `href`/`src` like any other address. A pinned
 # `?v=` (a linked shell) rides on each file, not on the directory.
 function _head_asset_node(::Val{:katex}, src)
-    i = findfirst('?', src)
-    dir, query = isnothing(i) ? (src, "") : (src[1:prevind(src, i)], src[i:end])
+    dir, query = _split_query(src)
     h.template(h.link(rel="stylesheet", href=dir * "/katex.min.css" * query),
         h.script(src=dir * "/katex.min.js" * query); id="htmxo-katex")
+end
+# PrismJS likewise: the template names its core and the autoloader, which
+# `syntax_script` adds in that order once the page shows code; the autoloader
+# then fetches each language's grammar from `components/` beside `plugins/`.
+function _head_asset_node(::Val{:prism}, src)
+    dir, query = _split_query(src)
+    h.template(h.script(src=dir * "/" * _PRISM_CORE * query),
+        h.script(src=dir * "/" * _PRISM_AUTOLOADER * query); id="htmxo-prism")
 end
 
 # htmx extensions register themselves against a loaded htmx, so they need
@@ -2670,10 +2692,14 @@ __page__(content) = htmx(content; assets=:vendor)
 
 KaTeX, which typesets Markdown math ([`render_markdown`](@ref)), is served
 as a directory, `/<mountdir>/katex/katex.min.css`, `…/katex.min.js` and the
-`…/katex/fonts/` its stylesheet loads.
+`…/katex/fonts/` its stylesheet loads. PrismJS, which highlights code
+([`syntax_script`](@ref)), is a directory too, in its npm layout:
+`/<mountdir>/prism/components/prism-core.min.js`,
+`…/prism/plugins/autoloader/prism-autoloader.min.js` and every language's
+grammar, `…/prism/components/prism-<language>.min.js`.
 
 The first call downloads the pinned npm tarballs from Artifacts.toml (about
-4.7 MB, cached in the depot); further calls re-read from disk. Files
+5.2 MB, cached in the depot); further calls re-read from disk. Files
 are served with [`staticfiles`](@ref)-style content types. A custom
 `mountdir` (or a second mount elsewhere) pairs with the matching
 `assets="/<mountdir>"` prefix on [`htmx`](@ref)/[`pico_page`](@ref).
@@ -2733,7 +2759,8 @@ _etag_matches(if_none_match, etag) =
 _vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[pkg].relpath)
 
 # Every file a package serves, as `served path => file`, in a stable order:
-# one for a library, KaTeX's stylesheet, script and fonts for `:katex`.
+# one for a library, KaTeX's stylesheet, script and fonts for `:katex`, and
+# PrismJS's core, autoloader and every language grammar for `:prism`.
 _vendor_files(pkg::Symbol) = _vendor_files(Val(pkg))
 _vendor_files(::Val{P}) where {P} = [_VENDOR_ASSETS[P].file => _vendor_file(P)]
 function _vendor_files(::Val{:katex})
@@ -2742,15 +2769,27 @@ function _vendor_files(::Val{:katex})
     [[served * "/" * f => joinpath(dir, f) for f in ("katex.min.css", "katex.min.js")];
      [served * "/fonts/" * f => joinpath(dir, "fonts", f) for f in fonts]]
 end
+function _vendor_files(::Val{:prism})
+    dir, served = _vendor_file(:prism), _VENDOR_ASSETS[:prism].file
+    [[served * "/" * f => joinpath(dir, split(f, '/')...) for f in (_PRISM_CORE, _PRISM_AUTOLOADER)];
+     [served * "/components/" * f => joinpath(dir, "components", f) for f in _prism_languages(dir)]]
+end
+# The language grammars the autoloader can fetch: every minified component
+# but the core, which the template loads itself.
+_prism_languages(dir=_vendor_file(:prism)) = sort!(filter(
+    f -> startswith(f, "prism-") && endswith(f, ".min.js") && f != basename(_PRISM_CORE),
+    readdir(joinpath(dir, "components"))))
 
 """
-    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex), runtime=true) -> Vector{String}
+    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex, :prism), runtime=true) -> Vector{String}
 
 Copy the vendored head assets — the same files [`vendorfiles`](@ref)
 serves — into `dir` (created if missing), for a static bundle that has no
 routes to serve them from. `packages` selects which pinned libraries to copy;
 `:katex` is the directory `dir/katex/` (stylesheet, script and fonts) that
-typesets Markdown math on pages whose `assets` prefix names `dir`.
+typesets Markdown math on pages whose `assets` prefix names `dir`, and
+`:prism` the directory `dir/prism/` (core, autoloader and every language's
+grammar) that highlights their code.
 With `runtime=true` (the default) HTMXObjects' own page runtime is copied
 too, to `dir/htmxo/<name>.css|js` — the files a `runtime=:linked` page links
 (see [`htmx`](@ref)), including the Treebars poll assets while that
@@ -2806,6 +2845,10 @@ An extension (`:sse`, `:ws`, `:preload`) without `:htmx` is an
 inert `<template id="htmxo-katex">` naming `<base>/katex/`, from which
 [`math_script`](@ref) loads KaTeX once the page shows math, so a hand-built
 head that wants typeset math adds `math_script()` and `math_styles()` too.
+`:prism` is likewise the inert `<template id="htmxo-prism">` naming
+`<base>/prism/`, from which [`syntax_script`](@ref) loads PrismJS once the
+page shows code; a hand-built head adds `syntax_script()` and
+`syntax_styles()` with it.
 """
 function vendor_head(base::AbstractString="vendor"; packages=(:htmx,))
     pkgs = _vendor_packages(packages)
@@ -2861,6 +2904,8 @@ _runtime_blocks() = (
     url_anchor = (:js, url_anchor_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
+    syntax_styles = (:css, syntax_styles),
+    syntax_script = (:js, syntax_script),
     # The table runtime. `htmx(...; tables=true)` carries it together with
     # `sortable_table_styles`, `caption_style` and `download_table` below.
     table_runtime = (:js, _table_runtime_js),
@@ -2962,7 +3007,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -3012,6 +3057,15 @@ stylesheet and script, which the runtime adds the first time the page shows
 math, on load or after a swap, so a page without math fetches nothing. Pass
 `nothing` to leave the template out; math then shows as its TeX source, unless
 the page loads KaTeX itself (`window.katex`), which the runtime then uses.
+`prism_version` is the PrismJS release that highlights code: every
+`<code class="language-…">` on the page, such as a [`SemanticCode`](@ref) or a
+Markdown code fence that names its language, in the page itself and in every
+fragment htmx swaps in ([`syntax_script`](@ref)). The shell carries an inert
+template naming PrismJS's core and its autoloader, which the runtime adds the
+first time the page shows such code; the autoloader then fetches the grammar
+of each language the page shows, so a page without code fetches nothing.
+Pass `nothing` to leave the template out; code then stays plain, unless the
+page loads PrismJS itself (`window.Prism`), which the runtime then uses.
 Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
 it defaults to `false` — the bundle is served only by the KB app, so standalone
 pages omit the fetch.
@@ -3069,6 +3123,7 @@ function htmx(args...;
     preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
     katex_version       = _KATEX_VERSION,
+    prism_version       = _PRISM_VERSION,
     assets              = :cdn,
     runtime             = :inline,
     feedback             = true,
@@ -3110,6 +3165,7 @@ function htmx(args...;
     # jsdelivr, not cdnjs: cdnjs was measured serving KaTeX 0.16.21's fonts
     # one byte short, which browsers reject as invalid font data.
     isnothing(katex_version)       || push!(cdn, _head_asset_node(Val(:katex), _head_asset_src(:katex, katex_version, "https://cdn.jsdelivr.net/npm/katex@$(katex_version)/dist", assets; versioned)))
+    isnothing(prism_version)       || push!(cdn, _head_asset_node(Val(:prism), _head_asset_src(:prism, prism_version, "https://cdn.jsdelivr.net/npm/prismjs@$(prism_version)", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
@@ -3161,6 +3217,10 @@ function htmx(args...;
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
         :math_styles, :math_script,
+        # Code that names its language is highlighted by PrismJS, which
+        # this runtime loads from the `prism_version` template the first
+        # time the page shows such code; inert on pages without any.
+        :syntax_styles, :syntax_script,
         # The tables' sort, search, selection, tree, regroup, linking and
         # CSV controls with their styles and captions; inert on pages
         # without a table.
@@ -6699,7 +6759,8 @@ can run inside a serving app (it renders in process with
   `hx-push-url` pages, and the head's script and style links, so the browser
   libraries and the linked HTMXObjects runtime come from the app's own
   [`vendorfiles`](@ref) or `staticfiles` routes, with every file a stylesheet
-  loads through `url(...)` (KaTeX's fonts). A relative address resolves
+  loads through `url(...)` (KaTeX's fonts) and every language grammar the
+  PrismJS autoloader can fetch. A relative address resolves
   against the address being rendered. Addresses on other sites, `#id`s and
   `?query` links of the page itself stay as they are.
 - **Page or fragment.** An address in `pages`, or reached through a link,
@@ -6861,6 +6922,7 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls
     written.rendered[i] = known
     _body_contains(body, crawl.marker) ? push!(written.marked, i) : delete!(written.marked, i)
     ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
+    endswith(path, "/" * _PRISM_AUTOLOADER) && _site_follow_autoloader!(crawl, e.address)
 end
 
 # The entries each marker in `text` names.
@@ -6890,6 +6952,15 @@ function _site_follow_stylesheet!(crawl::_SiteCrawl, address::AbstractString, bo
         else
             _site_target!(crawl, address, url, :full)
         end
+    end
+end
+
+# The PrismJS autoloader fetches each language's grammar by name from the
+# `components/` directory beside its `plugins/`, an address no answer names,
+# so every grammar it can fetch is queued beside it.
+function _site_follow_autoloader!(crawl::_SiteCrawl, address::AbstractString)
+    for f in _prism_languages()
+        _site_target!(crawl, address, "../../components/" * f, :full)
     end
 end
 
@@ -10282,6 +10353,107 @@ math_styles() = h.style(Raw("""
 .htmxo-math-display:not([data-htmxo-math-done]) { margin: 1em 0; }
 }
 """))
+
+"""
+    syntax_script()
+
+Client runtime that highlights code with PrismJS: every `<code
+class="language-…">` element, such as a [`SemanticCode`](@ref) or a Markdown
+code fence that names its language, on load and after every htmx swap, so
+code in a lazily loaded tab, a disclosure or an in-place demo is highlighted
+like code in the page itself. A code element that holds other elements is
+left as it is: it is either highlighted already or built with markup (links)
+that highlighting would replace.
+
+PrismJS itself is loaded on demand: the first time the page shows such code,
+the runtime adds the core and the autoloader named by the [`htmx`](@ref)
+shell's `<template id="htmxo-prism">` (`prism_version`), and the autoloader
+fetches the grammar of each language the page shows. A page without code
+fetches nothing. Without that template the runtime uses a PrismJS the page
+loaded itself (`window.Prism`), and otherwise leaves the code plain. A
+PrismJS that fails to load is reported in the console; a language PrismJS
+has no grammar for stays plain.
+
+`window.htmxoSyntax.highlight(root)` highlights code a script added outside
+htmx. Safe to include more than once. Auto-included by [`htmx`](@ref);
+include it yourself only on pages built without the shell.
+"""
+syntax_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoSyntax) return;
+  var loading = false, loaded = false;
+  function pending(scope) {
+    var els = Array.prototype.slice.call(scope.querySelectorAll('code[class*="language-"]'));
+    if (scope.matches && scope.matches('code[class*="language-"]')) els.unshift(scope);
+    return els.filter(function (el) { return !el.firstElementChild; });
+  }
+  function ready() {
+    return !loading && window.Prism && typeof window.Prism.highlightElement === 'function';
+  }
+  // PrismJS from the shell's template: the core, then the autoloader, which
+  // fetches each language's grammar when code in it is highlighted. Told to
+  // stay manual, so PrismJS highlights only what this runtime hands it.
+  function load() {
+    var template = document.getElementById('htmxo-prism');
+    if (loading || loaded || !template || !template.content) return;
+    var sources = Array.prototype.map.call(template.content.querySelectorAll('script[src]'),
+      function (s) { return s.getAttribute('src'); });
+    if (sources.length === 0) return;
+    loading = true;
+    window.Prism = window.Prism || {};
+    window.Prism.manual = true;
+    (function next(i) {
+      if (i === sources.length) {
+        loading = false;
+        loaded = true;
+        run(document);
+        return;
+      }
+      var script = document.createElement('script');
+      script.src = sources[i];
+      script.onload = function () { next(i + 1); };
+      script.onerror = function () {
+        console.warn('syntax: PrismJS did not load from ' + script.src + '; code stays plain');
+      };
+      document.head.appendChild(script);
+    })(0);
+  }
+  function run(root) {
+    var scope = root && root.querySelectorAll ? root : document;
+    var els = pending(scope);
+    if (els.length === 0) return;
+    if (ready()) els.forEach(function (el) { window.Prism.highlightElement(el); });
+    else load();
+  }
+  window.htmxoSyntax = { highlight: run };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { run(document); });
+  } else {
+    run(document);
+  }
+  document.addEventListener('htmx:load', function (e) { run(e.target); });
+  document.addEventListener('htmx:afterSettle', function (e) { run(e.target); });
+})();
+"""))
+
+"""
+    syntax_styles()
+
+`<style>` block coloring the tokens [`syntax_script`](@ref) marks, in the
+host theme: the colors follow a dark theme (Pico `data-theme="dark"`,
+VitePress `html.dark`, or the system's dark mode) and each meets WCAG AA
+contrast (4.5:1) on Pico's code background in both themes. Each color is a
+`--htmxo-syntax-*` variable a host stylesheet can set. Scoped under
+`@layer htmxo`, so host stylesheets win. Auto-included by [`htmx`](@ref).
+"""
+syntax_styles() = h.style(Raw("@layer htmxo {\n" * _syntax_css() * "}\n"))
+
+# The token stylesheet, also shipped to VitePress themes as is
+# (`vitepress_theme_install`), without its comments: inside an inline
+# `<style>` they are dead bytes on every page.
+_syntax_css() = replace(read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-syntax.css"), String),
+    r"/\*.*?\*/"s => "")
 
 # --- Error handling ---
 
@@ -29528,18 +29700,12 @@ htmxo_gallery_styles() = h.style(Raw(replace(
     r"/\*.*?\*/"s => "")))
 
 """
-    htmxo_syntax_head(; languages=("julia", "stan"))
+    htmxo_syntax_head() -> Tuple
 
-Head elements (script tags + theme-aware `<style>`) for client-side
-PrismJS syntax highlighting that flips with the host theme
-(VitePress `html.dark`, Pico `data-theme="dark"`). Any `<code
-class="language-…">` that PrismJS recognizes will be tokenized; the
-token coloring uses `--htmxo-syntax-*` CSS variables which adapt
-automatically.
-
-Use as a splat in `extra_head=` of `htmx(...)`:
-
-    extra_head=(htmxo_gallery_styles(), htmxo_syntax_head()...)
+The two runtime blocks that highlight code, [`syntax_styles`](@ref) and
+[`syntax_script`](@ref). Every [`htmx`](@ref) page carries both, so a copy in
+its `extra_head` is left out; a hand-built head adds them together with the
+PrismJS template from [`vendor_head`](@ref)`(base; packages=(:prism,))`.
 
 The same token CSS gets shipped to docs themes via
 `vitepress_theme_install` (alongside `htmxo-embed.ts`/`htmxo-gallery.css`)
@@ -29547,13 +29713,7 @@ so embedded fragments inherit the theme-aware coloring without
 needing the script tags from the fragment to execute (which they
 wouldn't, since `innerHTML` swaps don't run scripts).
 """
-function htmxo_syntax_head(; languages=("julia", "stan"))
-    base = "https://cdn.jsdelivr.net/npm/prismjs@1"
-    syntax_css = read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-syntax.css"), String)
-    (h.script(; src="$base/prism.min.js"),
-     (h.script(; src="$base/components/prism-$lang.min.js") for lang in languages)...,
-     h.style(Raw(syntax_css)))
-end
+htmxo_syntax_head() = (syntax_styles(), syntax_script())
 
 # Blob sha of `relpath` at revspec `rev` — a commit sha, `"HEAD"`, `"<sha>^2"`.
 # `""` when the revision does not resolve or the path does not exist there: an
