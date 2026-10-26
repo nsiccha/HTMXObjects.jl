@@ -22,7 +22,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
     semantic_card, SemanticTexts, semantic_texts
-export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles
+export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles, syntax_script, syntax_styles
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
@@ -2567,10 +2567,18 @@ const _PICO_VERSION = "2.1.1"
 # KaTeX typesets the math `render_markdown` marks (`math_script`). The shell
 # only names where it lives; the runtime fetches it when a page shows math.
 const _KATEX_VERSION = "0.19.0"
+# PrismJS highlights code (`syntax_script`). As with KaTeX, the shell only
+# names where it lives; the runtime fetches it when a page shows code.
+const _PRISM_VERSION = "1.30.0"
+const _PRISM_CORE = "components/prism-core.min.js"
+const _PRISM_AUTOLOADER = "plugins/autoloader/prism-autoloader.min.js"
 
 # pkg => (path inside its artifact, served filename, pinned version).
 # KaTeX is a directory: its stylesheet finds its fonts relative to itself, so
 # it is served as `katex/…` with the `fonts/` beside it (`_vendor_files`).
+# PrismJS is one too: its autoloader fetches each language's grammar from the
+# `components/` directory beside its own `plugins/`, so it is served as
+# `prism/…` in the npm package's layout.
 # The artifact itself resolves through `_vendor_artifact` below — the
 # `artifact"..."` macro needs a literal, so one method per asset.
 const _VENDOR_ASSETS = (
@@ -2588,6 +2596,7 @@ const _VENDOR_ASSETS = (
         file="pico.min.css", version=_PICO_VERSION),
     katex=(relpath=joinpath("package", "dist"),
         file="katex", version=_KATEX_VERSION),
+    prism=(relpath="package", file="prism", version=_PRISM_VERSION),
 )
 
 _vendor_artifact(::Val{:htmx}) = artifact"htmx"
@@ -2597,6 +2606,7 @@ _vendor_artifact(::Val{:preload}) = artifact"htmx-ext-preload"
 _vendor_artifact(::Val{:hyperscript}) = artifact"hyperscript"
 _vendor_artifact(::Val{:pico}) = artifact"pico"
 _vendor_artifact(::Val{:katex}) = artifact"katex"
+_vendor_artifact(::Val{:prism}) = artifact"prismjs"
 
 # Single validation point for the `assets` mode, so an unknown mode fails
 # even when every version kwarg is `nothing` and no URL is built.
@@ -2629,16 +2639,28 @@ end
 # library a script. Shared by the `htmx()` shell and `vendor_head`.
 _head_asset_node(::Val{:pico}, src) = h.link(rel="stylesheet", href=src)
 _head_asset_node(::Val, src) = h.script(src=src)
+# A head asset's address and its `?query` (`""` without one).
+function _split_query(src)
+    i = findfirst('?', src)
+    isnothing(i) ? (src, "") : (src[1:prevind(src, i)], src[i:end])
+end
 # KaTeX is not loaded by the head: `src` names its directory, and the
 # template holds the two files `math_script` adds once the page shows math.
 # Template content is inert, so a page without math fetches nothing, and a
 # static export rewrites its `href`/`src` like any other address. A pinned
 # `?v=` (a linked shell) rides on each file, not on the directory.
 function _head_asset_node(::Val{:katex}, src)
-    i = findfirst('?', src)
-    dir, query = isnothing(i) ? (src, "") : (src[1:prevind(src, i)], src[i:end])
+    dir, query = _split_query(src)
     h.template(h.link(rel="stylesheet", href=dir * "/katex.min.css" * query),
         h.script(src=dir * "/katex.min.js" * query); id="htmxo-katex")
+end
+# PrismJS likewise: the template names its core and the autoloader, which
+# `syntax_script` adds in that order once the page shows code; the autoloader
+# then fetches each language's grammar from `components/` beside `plugins/`.
+function _head_asset_node(::Val{:prism}, src)
+    dir, query = _split_query(src)
+    h.template(h.script(src=dir * "/" * _PRISM_CORE * query),
+        h.script(src=dir * "/" * _PRISM_AUTOLOADER * query); id="htmxo-prism")
 end
 
 # htmx extensions register themselves against a loaded htmx, so they need
@@ -2670,10 +2692,14 @@ __page__(content) = htmx(content; assets=:vendor)
 
 KaTeX, which typesets Markdown math ([`render_markdown`](@ref)), is served
 as a directory, `/<mountdir>/katex/katex.min.css`, `…/katex.min.js` and the
-`…/katex/fonts/` its stylesheet loads.
+`…/katex/fonts/` its stylesheet loads. PrismJS, which highlights code
+([`syntax_script`](@ref)), is a directory too, in its npm layout:
+`/<mountdir>/prism/components/prism-core.min.js`,
+`…/prism/plugins/autoloader/prism-autoloader.min.js` and every language's
+grammar, `…/prism/components/prism-<language>.min.js`.
 
 The first call downloads the pinned npm tarballs from Artifacts.toml (about
-4.7 MB, cached in the depot); further calls re-read from disk. Files
+5.2 MB, cached in the depot); further calls re-read from disk. Files
 are served with [`staticfiles`](@ref)-style content types. A custom
 `mountdir` (or a second mount elsewhere) pairs with the matching
 `assets="/<mountdir>"` prefix on [`htmx`](@ref)/[`pico_page`](@ref).
@@ -2733,7 +2759,8 @@ _etag_matches(if_none_match, etag) =
 _vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[pkg].relpath)
 
 # Every file a package serves, as `served path => file`, in a stable order:
-# one for a library, KaTeX's stylesheet, script and fonts for `:katex`.
+# one for a library, KaTeX's stylesheet, script and fonts for `:katex`, and
+# PrismJS's core, autoloader and every language grammar for `:prism`.
 _vendor_files(pkg::Symbol) = _vendor_files(Val(pkg))
 _vendor_files(::Val{P}) where {P} = [_VENDOR_ASSETS[P].file => _vendor_file(P)]
 function _vendor_files(::Val{:katex})
@@ -2742,15 +2769,27 @@ function _vendor_files(::Val{:katex})
     [[served * "/" * f => joinpath(dir, f) for f in ("katex.min.css", "katex.min.js")];
      [served * "/fonts/" * f => joinpath(dir, "fonts", f) for f in fonts]]
 end
+function _vendor_files(::Val{:prism})
+    dir, served = _vendor_file(:prism), _VENDOR_ASSETS[:prism].file
+    [[served * "/" * f => joinpath(dir, split(f, '/')...) for f in (_PRISM_CORE, _PRISM_AUTOLOADER)];
+     [served * "/components/" * f => joinpath(dir, "components", f) for f in _prism_languages(dir)]]
+end
+# The language grammars the autoloader can fetch: every minified component
+# but the core, which the template loads itself.
+_prism_languages(dir=_vendor_file(:prism)) = sort!(filter(
+    f -> startswith(f, "prism-") && endswith(f, ".min.js") && f != basename(_PRISM_CORE),
+    readdir(joinpath(dir, "components"))))
 
 """
-    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex), runtime=true) -> Vector{String}
+    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex, :prism), runtime=true) -> Vector{String}
 
 Copy the vendored head assets — the same files [`vendorfiles`](@ref)
 serves — into `dir` (created if missing), for a static bundle that has no
 routes to serve them from. `packages` selects which pinned libraries to copy;
 `:katex` is the directory `dir/katex/` (stylesheet, script and fonts) that
-typesets Markdown math on pages whose `assets` prefix names `dir`.
+typesets Markdown math on pages whose `assets` prefix names `dir`, and
+`:prism` the directory `dir/prism/` (core, autoloader and every language's
+grammar) that highlights their code.
 With `runtime=true` (the default) HTMXObjects' own page runtime is copied
 too, to `dir/htmxo/<name>.css|js` — the files a `runtime=:linked` page links
 (see [`htmx`](@ref)), including the Treebars poll assets while that
@@ -2806,6 +2845,10 @@ An extension (`:sse`, `:ws`, `:preload`) without `:htmx` is an
 inert `<template id="htmxo-katex">` naming `<base>/katex/`, from which
 [`math_script`](@ref) loads KaTeX once the page shows math, so a hand-built
 head that wants typeset math adds `math_script()` and `math_styles()` too.
+`:prism` is likewise the inert `<template id="htmxo-prism">` naming
+`<base>/prism/`, from which [`syntax_script`](@ref) loads PrismJS once the
+page shows code; a hand-built head adds `syntax_script()` and
+`syntax_styles()` with it.
 """
 function vendor_head(base::AbstractString="vendor"; packages=(:htmx,))
     pkgs = _vendor_packages(packages)
@@ -2861,6 +2904,8 @@ _runtime_blocks() = (
     url_anchor = (:js, url_anchor_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
+    syntax_styles = (:css, syntax_styles),
+    syntax_script = (:js, syntax_script),
     # The table runtime. `htmx(...; tables=true)` carries it together with
     # `sortable_table_styles`, `caption_style` and `download_table` below.
     table_runtime = (:js, _table_runtime_js),
@@ -2962,7 +3007,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -3014,6 +3059,15 @@ stylesheet and script, which the runtime adds the first time the page shows
 math, on load or after a swap, so a page without math fetches nothing. Pass
 `nothing` to leave the template out; math then shows as its TeX source, unless
 the page loads KaTeX itself (`window.katex`), which the runtime then uses.
+`prism_version` is the PrismJS release that highlights code: every
+`<code class="language-…">` on the page, such as a [`SemanticCode`](@ref) or a
+Markdown code fence that names its language, in the page itself and in every
+fragment htmx swaps in ([`syntax_script`](@ref)). The shell carries an inert
+template naming PrismJS's core and its autoloader, which the runtime adds the
+first time the page shows such code; the autoloader then fetches the grammar
+of each language the page shows, so a page without code fetches nothing.
+Pass `nothing` to leave the template out; code then stays plain, unless the
+page loads PrismJS itself (`window.Prism`), which the runtime then uses.
 Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
 it defaults to `false` — the bundle is served only by the KB app, so standalone
 pages omit the fetch.
@@ -3071,6 +3125,7 @@ function htmx(args...;
     preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
     katex_version       = _KATEX_VERSION,
+    prism_version       = _PRISM_VERSION,
     assets              = :cdn,
     runtime             = :inline,
     feedback             = true,
@@ -3112,6 +3167,7 @@ function htmx(args...;
     # jsdelivr, not cdnjs: cdnjs was measured serving KaTeX 0.16.21's fonts
     # one byte short, which browsers reject as invalid font data.
     isnothing(katex_version)       || push!(cdn, _head_asset_node(Val(:katex), _head_asset_src(:katex, katex_version, "https://cdn.jsdelivr.net/npm/katex@$(katex_version)/dist", assets; versioned)))
+    isnothing(prism_version)       || push!(cdn, _head_asset_node(Val(:prism), _head_asset_src(:prism, prism_version, "https://cdn.jsdelivr.net/npm/prismjs@$(prism_version)", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
     html_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
@@ -3163,6 +3219,10 @@ function htmx(args...;
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
         :math_styles, :math_script,
+        # Code that names its language is highlighted by PrismJS, which
+        # this runtime loads from the `prism_version` template the first
+        # time the page shows such code; inert on pages without any.
+        :syntax_styles, :syntax_script,
         # The tables' sort, search, selection, tree, regroup, linking and
         # CSV controls with their styles and captions; inert on pages
         # without a table.
@@ -6701,7 +6761,8 @@ can run inside a serving app (it renders in process with
   `hx-push-url` pages, and the head's script and style links, so the browser
   libraries and the linked HTMXObjects runtime come from the app's own
   [`vendorfiles`](@ref) or `staticfiles` routes, with every file a stylesheet
-  loads through `url(...)` (KaTeX's fonts). A relative address resolves
+  loads through `url(...)` (KaTeX's fonts) and every language grammar the
+  PrismJS autoloader can fetch. A relative address resolves
   against the address being rendered. Addresses on other sites, `#id`s and
   `?query` links of the page itself stay as they are.
 - **Page or fragment.** An address in `pages`, or reached through a link,
@@ -6863,6 +6924,7 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls
     written.rendered[i] = known
     _body_contains(body, crawl.marker) ? push!(written.marked, i) : delete!(written.marked, i)
     ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
+    endswith(path, "/" * _PRISM_AUTOLOADER) && _site_follow_autoloader!(crawl, e.address)
 end
 
 # The entries each marker in `text` names.
@@ -6892,6 +6954,15 @@ function _site_follow_stylesheet!(crawl::_SiteCrawl, address::AbstractString, bo
         else
             _site_target!(crawl, address, url, :full)
         end
+    end
+end
+
+# The PrismJS autoloader fetches each language's grammar by name from the
+# `components/` directory beside its `plugins/`, an address no answer names,
+# so every grammar it can fetch is queued beside it.
+function _site_follow_autoloader!(crawl::_SiteCrawl, address::AbstractString)
+    for f in _prism_languages()
+        _site_target!(crawl, address, "../../components/" * f, :full)
     end
 end
 
@@ -10285,6 +10356,107 @@ math_styles() = h.style(Raw("""
 }
 """))
 
+"""
+    syntax_script()
+
+Client runtime that highlights code with PrismJS: every `<code
+class="language-…">` element, such as a [`SemanticCode`](@ref) or a Markdown
+code fence that names its language, on load and after every htmx swap, so
+code in a lazily loaded tab, a disclosure or an in-place demo is highlighted
+like code in the page itself. A code element that holds other elements is
+left as it is: it is either highlighted already or built with markup (links)
+that highlighting would replace.
+
+PrismJS itself is loaded on demand: the first time the page shows such code,
+the runtime adds the core and the autoloader named by the [`htmx`](@ref)
+shell's `<template id="htmxo-prism">` (`prism_version`), and the autoloader
+fetches the grammar of each language the page shows. A page without code
+fetches nothing. Without that template the runtime uses a PrismJS the page
+loaded itself (`window.Prism`), and otherwise leaves the code plain. A
+PrismJS that fails to load is reported in the console; a language PrismJS
+has no grammar for stays plain.
+
+`window.htmxoSyntax.highlight(root)` highlights code a script added outside
+htmx. Safe to include more than once. Auto-included by [`htmx`](@ref);
+include it yourself only on pages built without the shell.
+"""
+syntax_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoSyntax) return;
+  var loading = false, loaded = false;
+  function pending(scope) {
+    var els = Array.prototype.slice.call(scope.querySelectorAll('code[class*="language-"]'));
+    if (scope.matches && scope.matches('code[class*="language-"]')) els.unshift(scope);
+    return els.filter(function (el) { return !el.firstElementChild; });
+  }
+  function ready() {
+    return !loading && window.Prism && typeof window.Prism.highlightElement === 'function';
+  }
+  // PrismJS from the shell's template: the core, then the autoloader, which
+  // fetches each language's grammar when code in it is highlighted. Told to
+  // stay manual, so PrismJS highlights only what this runtime hands it.
+  function load() {
+    var template = document.getElementById('htmxo-prism');
+    if (loading || loaded || !template || !template.content) return;
+    var sources = Array.prototype.map.call(template.content.querySelectorAll('script[src]'),
+      function (s) { return s.getAttribute('src'); });
+    if (sources.length === 0) return;
+    loading = true;
+    window.Prism = window.Prism || {};
+    window.Prism.manual = true;
+    (function next(i) {
+      if (i === sources.length) {
+        loading = false;
+        loaded = true;
+        run(document);
+        return;
+      }
+      var script = document.createElement('script');
+      script.src = sources[i];
+      script.onload = function () { next(i + 1); };
+      script.onerror = function () {
+        console.warn('syntax: PrismJS did not load from ' + script.src + '; code stays plain');
+      };
+      document.head.appendChild(script);
+    })(0);
+  }
+  function run(root) {
+    var scope = root && root.querySelectorAll ? root : document;
+    var els = pending(scope);
+    if (els.length === 0) return;
+    if (ready()) els.forEach(function (el) { window.Prism.highlightElement(el); });
+    else load();
+  }
+  window.htmxoSyntax = { highlight: run };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { run(document); });
+  } else {
+    run(document);
+  }
+  document.addEventListener('htmx:load', function (e) { run(e.target); });
+  document.addEventListener('htmx:afterSettle', function (e) { run(e.target); });
+})();
+"""))
+
+"""
+    syntax_styles()
+
+`<style>` block coloring the tokens [`syntax_script`](@ref) marks, in the
+host theme: the colors follow a dark theme (Pico `data-theme="dark"`,
+VitePress `html.dark`, or the system's dark mode) and each meets WCAG AA
+contrast (4.5:1) on Pico's code background in both themes. Each color is a
+`--htmxo-syntax-*` variable a host stylesheet can set. Scoped under
+`@layer htmxo`, so host stylesheets win. Auto-included by [`htmx`](@ref).
+"""
+syntax_styles() = h.style(Raw("@layer htmxo {\n" * _syntax_css() * "}\n"))
+
+# The token stylesheet, also shipped to VitePress themes as is
+# (`vitepress_theme_install`), without its comments: inside an inline
+# `<style>` they are dead bytes on every page.
+_syntax_css() = replace(read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-syntax.css"), String),
+    r"/\*.*?\*/"s => "")
+
 # --- Error handling ---
 
 """
@@ -11505,9 +11677,12 @@ end
 # Here, once, is the right place: it is the single seam every request's root
 # passes through, and it runs before any property is read, so a request never
 # observes a half-invalidated object. A `:request`-scoped root is freshly built
-# and has nothing to drop, which costs one integer compare per tracked value;
-# `:session`/`:job` roots outlive requests and are exactly the case that needs
-# it. There is no hot-path cost — property reads are untouched.
+# and has computed nothing, so this walks only its fields and constructor
+# overrides. One of those can be an object the app retains across requests by
+# handing it to `route!` (`route!(App(; rows=Rows(dir)))`, docs "Scoped root
+# lifecycle"): it is synced here on every request, at one probe per tracked file
+# it holds. `:session`/`:job` roots outlive requests and need it for everything
+# they cached. Property reads are untouched.
 #
 # Guarded, not required: an older DynamicObjects has no `sync!`, and a non-DO
 # root (a custom provider may return one) has no method for it. Neither is an
@@ -18462,6 +18637,16 @@ function htmxoUpdateRows(update, origin) {
         if (shown !== update.dataset.htmxoGrouped) throw new Error('htmxoUpdateRows: the rows are grouped by ' +
             JSON.stringify(update.dataset.htmxoGrouped) + ' but the table by ' + JSON.stringify(shown));
     }
+    // The table's `group_order` as the update ranks it: a group key the
+    // change brought keeps its place in the next regroup in the browser.
+    if ('htmxoGroupOrder' in update.dataset) {
+        const wrapper = tbody.closest('[data-htmxo-regroup]');
+        if (wrapper) {
+            const cfg = JSON.parse(wrapper.dataset.htmxoRegroup);
+            cfg.order = JSON.parse(update.dataset.htmxoGroupOrder);
+            wrapper.dataset.htmxoRegroup = JSON.stringify(cfg);
+        }
+    }
     const table = tbody.closest('table');
     const masters = () => Array.from(tbody.rows).filter(r => !isDetail(r));
     const byId = new Map(masters().map(r => [r.id, r]));
@@ -18883,6 +19068,132 @@ if (!window.htmxoStickyBound) {
 }
 if (document.body) htmxoStickyTrack(document.body);
 
+// --- Columns keep their widths: every sortable_table (`data-htmxo-columns`) ---
+// Auto table layout sizes the columns over the rows that are shown, so a
+// detail opening, a lazy detail or lazy group rows arriving, a group or
+// branch expanding or a search hiding rows moved every column. The runtime
+// sizes the columns once with that same layout over every row the table
+// holds, shown or hidden ("sizing": the CSS shows hidden rows collapsed;
+// detail rows stay out), then holds them ("held": `table-layout: fixed`, one
+// `<col>` per column). A table filling its room holds shares of it, so a
+// scrollbar coming or going narrows the columns together; a wider or
+// narrower one holds pixels. It sizes them again when the room changes by
+// more than two scrollbars, when the browser regroups the table and once web
+// fonts have loaded. A table that is not laid out yet (a closed tab or detail
+// row) is sized when it first shows. A morph keeps the element but drops the
+// colgroup and marks the server did not render: they are put back on the
+// swap, before the browser paints.
+window.htmxoColumnsHeld = window.htmxoColumnsHeld || new WeakMap();
+window.htmxoColumnsWatched = window.htmxoColumnsWatched || new Map();
+// The header cell of each column: the one spanning that column alone (a
+// grouped header's leaf, or a cell spanning both header rows).
+function htmxoColumnCells(table) {
+    const cells = [], taken = [];
+    if (!table.tHead) return cells;
+    Array.from(table.tHead.rows).forEach((row, r) => {
+        let c = 0;
+        Array.from(row.cells).forEach(cell => {
+            while (taken[r] && taken[r][c]) c++;
+            for (let i = 0; i < Math.max(cell.rowSpan, 1); i++)
+                for (let j = 0; j < cell.colSpan; j++) (taken[r + i] = taken[r + i] || [])[c + j] = true;
+            if (cell.colSpan === 1) cells[c] = cell;
+            c += cell.colSpan;
+        });
+    });
+    return cells;
+}
+function htmxoColumnsApply(table, held) {
+    let group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
+    if (!group) {
+        group = document.createElement('colgroup');
+        group.setAttribute('data-htmxo-columns', '');
+        table.insertBefore(group, table.caption ? table.caption.nextSibling : table.firstChild);
+    }
+    group.replaceChildren(...held.widths.map(w => {
+        const col = document.createElement('col');
+        col.style.width = held.fill ? (100 * w / held.width) + '%' : w + 'px';
+        return col;
+    }));
+    table.style.width = held.fill ? '100%' : held.width + 'px';
+    table.dataset.htmxoColumns = 'held';
+}
+function htmxoColumnsMeasure(table, force) {
+    if (!table.isConnected || !('htmxoColumns' in table.dataset)) return;
+    const room = table.parentElement.clientWidth, cells = htmxoColumnCells(table);
+    if (!room || !cells.length || cells.length !== cells.filter(Boolean).length) return;
+    const held = window.htmxoColumnsHeld.get(table);
+    if (held && !force && held.widths.length === cells.length && Math.abs(held.room - room) <= 40) {
+        if (table.dataset.htmxoColumns !== 'held' ||
+            !table.querySelector(':scope > colgroup[data-htmxo-columns]')) htmxoColumnsApply(table, held);
+        return;
+    }
+    const group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
+    if (group) group.remove();
+    // Size with the table's own width, if the app gave it one.
+    const own = held ? held.own : table.style.width;
+    table.style.width = own;
+    table.dataset.htmxoColumns = 'sizing';
+    const width = table.getBoundingClientRect().width;
+    const next = {room, own, width, fill: Math.abs(width - room) < 1,
+                  widths: cells.map(c => c.getBoundingClientRect().width)};
+    window.htmxoColumnsHeld.set(table, next);
+    htmxoColumnsApply(table, next);
+}
+// The observer's notices are measured in a task of their own: the layout a
+// measurement changes would re-notify inside the callback.
+function htmxoColumnsQueue(table, force) {
+    const pending = window.htmxoColumnsPending || (window.htmxoColumnsPending = new Map());
+    pending.set(table, pending.get(table) || !!force);
+    if (window.htmxoColumnsFrame) return;
+    window.htmxoColumnsFrame = setTimeout(() => {
+        window.htmxoColumnsFrame = 0;
+        const due = Array.from(pending);
+        pending.clear();
+        due.forEach(([t, f]) => htmxoColumnsMeasure(t, f));
+    }, 0);
+}
+// Size the tables in `elt` not seen before, put back what a swap dropped,
+// observe each table's room and forget tables that left the document.
+function htmxoColumnsTrack(elt) {
+    if (!elt || !elt.querySelectorAll) return;
+    const watched = window.htmxoColumnsWatched;
+    const ro = typeof ResizeObserver === 'function' && (window.htmxoColumnsObserver ||
+        (window.htmxoColumnsObserver = new ResizeObserver(entries => entries.forEach(e => {
+            const t = e.target.querySelector(':scope > table[data-htmxo-columns]');
+            if (t) htmxoColumnsQueue(t);
+        }))));
+    watched.forEach((room, t) => {
+        if (t.isConnected && t.parentElement === room) return;
+        if (ro) ro.unobserve(room);
+        watched.delete(t);
+    });
+    const found = Array.from(elt.querySelectorAll('table[data-htmxo-columns]'));
+    if (elt.matches && elt.matches('table[data-htmxo-columns]')) found.unshift(elt);
+    found.forEach(t => {
+        if (!t.isConnected) return;
+        if (!watched.has(t) && t.parentElement) {
+            watched.set(t, t.parentElement);
+            if (ro) ro.observe(t.parentElement);
+        }
+        htmxoColumnsMeasure(t);
+    });
+}
+if (!window.htmxoColumnsBound) {
+    window.htmxoColumnsBound = true;
+    // `htmx:afterSwap` runs before the browser paints the swap: a new table
+    // is sized and a morphed one held again without a frame in between.
+    document.addEventListener('htmx:afterSwap', () => htmxoColumnsTrack(document.body));
+    document.addEventListener('htmx:load', e => htmxoColumnsTrack(e.target));
+    document.addEventListener('htmxo:regrouped', e => {
+        const t = e.target.querySelector('table[data-htmxo-columns]');
+        if (t) htmxoColumnsMeasure(t, true);
+    });
+    document.addEventListener('DOMContentLoaded', () => htmxoColumnsTrack(document.body));
+    if (document.fonts && document.fonts.status !== 'loaded')
+        document.fonts.ready.then(() => window.htmxoColumnsWatched.forEach((room, t) => htmxoColumnsQueue(t, true)));
+}
+if (document.body) htmxoColumnsTrack(document.body);
+
 // --- Row selection: `selectable` on sortable_table / master_detail_table ---
 // State is keyed per selection (input name, form, page path) and per row key,
 // never held by row elements, so it survives sorting, filtering, a row's
@@ -19303,13 +19614,20 @@ function htmxoRegroup(wrapper, levels) {
     const template = wrapper.querySelector('template[data-htmxo-group-template]');
     const out = [];
     const keysAt = (m, depth) => depth < levels.length ? m.keys[levels[depth]] || [] : [];
-    // The groups of `list` at a level, in first-appearance order.
+    // The groups of `list` at a level, in first-appearance order, or in the
+    // grouping's `group_order` (`_md_group_ranks`: a key it has no place for
+    // goes after, in first-appearance order).
     const groupsAt = (list, depth) => {
         const order = [], byKey = new Map();
         list.forEach(m => keysAt(m, depth).forEach(k => {
             if (!byKey.has(k)) { byKey.set(k, []); order.push(k); }
             byKey.get(k).push(m);
         }));
+        const ranked = cfg.order && cfg.order[levels[depth]];
+        if (ranked) {
+            const rank = new Map(ranked.map((k, i) => [k, i])), at = k => rank.has(k) ? rank.get(k) : ranked.length;
+            order.sort((a, b) => at(a) - at(b));
+        }
         return order.map(k => [k, byKey.get(k)]);
     };
     const leaf = (m, path, parent, level) => {
@@ -20224,6 +20542,21 @@ inside a card, set `--htmxo-sticky-bg` to the card's background.
 `sticky=false` keeps one table's line and header in the flow. None of this
 reaches Markdown or PDF output.
 
+# Columns keep their widths
+Opening a detail row, a lazy detail or lazy group rows arriving, expanding a
+group or branch, a search or filter hiding rows and a row update never move
+the columns (`data-htmxo-columns` on the `<table>`). The table runtime sizes
+the columns once, with the browser's own table layout over every row the
+table holds, shown or hidden: the leaves of collapsed groups and branches and
+the rows a search hides count, detail rows do not. It then holds those widths
+(`table-layout: fixed` and a `<colgroup>`), so a row shown later wraps its
+text inside its column, breaking a word too long for it. It sizes them again
+when the room the table has changes by more than a scrollbar (the window or a
+sidebar resizes), when the browser regroups the table, when a table first
+shows (a closed tab or detail row) and once web fonts have loaded. A detail
+row's content never takes part in sizing the columns: it gets the width the
+columns give it. Nothing here reaches Markdown or PDF output.
+
 # Row selection
 With `selectable=name`, every keyed row (`data-htmxo-select-key`, else its
 `id`; `detail-<key>` companions excluded) becomes a selectable grid row:
@@ -20367,7 +20700,10 @@ function sortable_table(headers, rows;
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
     # A `detail-<key>` companion is no row of the Markdown table.
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
-    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)..., kwargs...)(
+    # `data-htmxo-columns`: the table runtime holds the columns' widths
+    # (see "Columns keep their widths" above).
+    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)...,
+                         data_htmxo_columns="", kwargs...)(
         thead,
         h.tbody(body_rows...; body_attrs...),
     )
@@ -21079,10 +21415,12 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     isnothing(detail_class) || (detail_kwargs[:class] = detail_class)
     # Lazy mode: the detail cell hosts a slot that fetches `detail_url` on the
     # first expand (see `_md_lazy_slot`); `detail_body` becomes its pre-load
-    # placeholder. Eager mode: `detail_body` is the final content, unchanged.
+    # placeholder. Eager mode: `detail_body` is the final content, in a
+    # `div.htmxo-md-detail`. Either element keeps its content out of the
+    # columns' widths (`contain: inline-size`, `htmxo_utility_styles`).
     cell_body = lazy ?
         _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open, texts) :
-        detail_body
+        h.div(; class="htmxo-md-detail")(detail_body)
     detail = h.tr(; detail_kwargs...)(
         h.td(colspan=string(ncols))(cell_body),
     )
@@ -21253,7 +21591,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   vector of `name => grouping` pairs where `grouping(item)` returns a group key
   or several (the leaf is then listed under each) and `nothing` means the flat
   view. Replaces `children`. Each group is a collapsible branch, in
-  first-appearance order. Leaves keep their own selection key in every group,
+  first-appearance order unless `group_order` orders the grouping's groups.
+  Leaves keep their own selection key in every group,
   so selecting one selects all its copies, and the selection survives
   regrouping; selectable group rows submit their key under `<selectable>_group`.
   An `initially_open` predicate is called with leaves only; each group holding
@@ -21280,6 +21619,20 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   of the group's leaves, a sum, mean, minimum, maximum, count or ratio of two
   sums, written with the table's `decimal` and `thousands` texts. The first
   column holds the group's key and count.
+- `group_order`: `grouping name => order` pairs that put a grouping's groups
+  in an order of their own instead of first-appearance order, at every level
+  it is nested at, in the server's render and in every regroup in the browser
+  (a recorded page included). `order` is a list of keys (the groups of those
+  keys first, in that order; any others after them, in first-appearance order)
+  or a function `key -> sort key` (the groups sorted by it, ties in
+  first-appearance order), called with the group's key at its own level:
+  `group_order = ["Status" => ["To do", "Counted", "Not counted"],
+  "Year" => k -> -parse(Int, k)]`. Leaves keep the order of `items` within
+  their group. A grouping it does not name keeps first-appearance order; a
+  name that is not a grouping, the flat grouping, a name given twice, a key
+  listed twice or an order that is neither a list nor a function throws an
+  `ArgumentError`. A column sort the reader picks still sorts the group rows
+  by that column.
 - `group_master(key, members)`: the group row's cells instead of the default
   (the group's own key in bold, the member count and the `group_summary`
   cells); `members` are all the leaves under the group. Controls in it keep
@@ -21389,6 +21742,7 @@ function master_detail_table(headers, items;
                              group_rows_url=nothing,
                              group_rows=nothing,
                              group_summary=nothing,
+                             group_order=nothing,
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
@@ -21410,9 +21764,9 @@ function master_detail_table(headers, items;
         initially_open, children, branches_collapsible, detail_toggle, searchable,
         search_text, selectable, select_form, select_value, select_submit,
         expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
-    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, update_groups)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/update_groups require `groupings`"))
+        group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+    all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/update_groups require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -21703,15 +22057,52 @@ _md_group_keys(::Nothing) = String[]
 _md_group_keys(k) = [string(k)]
 
 # The groups `grouping` sorts `items` into, as `key => members` in
-# first-appearance order.
-function _md_groups(items, grouping)
+# first-appearance order, or by `rank` (key => place, from `group_order`).
+function _md_groups(items, grouping, rank=nothing)
     order = String[]
     members = Dict{String,Vector{Any}}()
     for item in items, k in _md_group_keys(grouping(item))
         haskey(members, k) || (push!(order, k); members[k] = Any[])
         push!(members[k], item)
     end
+    isnothing(rank) || sort!(order; by=k -> rank[k])
     [k => members[k] for k in order]
+end
+
+# `group_order` as (grouping name => its keys, ranked) pairs: a list's keys
+# first, all of them (a key a row update brings later still has its place),
+# then the other keys of `items` in first-appearance order; or the keys of
+# `items` sorted by a function's sort key, ties in first-appearance order.
+_md_group_ranks(items, names, by_name, ::Nothing) = Pair{String,Vector{String}}[]
+function _md_group_ranks(items, names, by_name, group_order)
+    out = Pair{String,Vector{String}}[]
+    for entry in group_order
+        entry isa Pair || throw(ArgumentError(string("master_detail_table: group_order takes ",
+            "`grouping name => order` pairs, got ", repr(entry))))
+        name, order = string(first(entry)), last(entry)
+        haskey(by_name, name) || throw(ArgumentError(string("master_detail_table: group_order names no grouping ",
+            repr(name), "; groupings are ", join(repr.(names), ", "))))
+        # Refused: the flat view has no groups to order.
+        isnothing(by_name[name]) && throw(ArgumentError(string(
+            "master_detail_table: group_order names the flat grouping ", repr(name))))
+        any(p -> first(p) == name, out) && throw(ArgumentError(
+            "master_detail_table: group_order names $(repr(name)) twice"))
+        present = unique(k for item in items for k in _md_group_keys(by_name[name](item)))
+        ranked = if order isa AbstractVector
+            listed = String[string(k) for k in order]
+            # Refused: a key listed twice has no one place.
+            allunique(listed) || throw(ArgumentError(
+                "master_detail_table: group_order lists a key of $(repr(name)) twice: $(repr(listed))"))
+            [listed; [k for k in present if !(k in listed)]]
+        elseif order isa Base.Callable
+            sort(present; by=order, alg=MergeSort)
+        else
+            throw(ArgumentError(string("master_detail_table: group_order ", repr(name),
+                " must be a list of keys or a function `key -> sort key`, got ", typeof(order))))
+        end
+        push!(out, name => ranked)
+    end
+    out
 end
 
 """
@@ -22121,7 +22512,7 @@ end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, children, groupings, group_by, group_master,
-        group_by_url, group_rows_url, group_rows, group_summary, update_rows, update_groups, selectable,
+        group_by_url, group_rows_url, group_rows, group_summary, group_order, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
     isnothing(children) || throw(ArgumentError(
         "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
@@ -22161,6 +22552,15 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     allunique(levels) || throw(ArgumentError("master_detail_table: group_by lists a grouping twice: $(repr(levels))"))
     nlevels = length(levels)
     fns = [by_name[n] for n in levels]
+    # `group_order`: each ordered grouping's keys, ranked over all `items`.
+    # The server's groups follow the ranks at every level; the browser
+    # regroups by the same lists (`htmxoRegroup`), and a row update brings
+    # them again, ranked with its change.
+    ranked = _md_group_ranks(items, names, by_name, group_order)
+    ranks = Dict(n => Dict(k => i for (i, k) in enumerate(ks)) for (n, ks) in ranked)
+    level_ranks = [get(ranks, n, nothing) for n in levels]
+    order_json = isempty(ranked) ? nothing :
+        "{" * join((_md_json_string(n) * ":" * _md_json_list(ks) for (n, ks) in ranked), ",") * "}"
     # What the rows are grouped by (a row update must match it), and the
     # `group_by` values a request sends to render this grouping again.
     grouped_by = _md_json_list(levels)
@@ -22208,7 +22608,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     gid(path) = "group:" * join(path, "/")
     leaf_row_key(x) = isempty(x.group) ? string(key(x.item)) : x.group * "/" * string(key(x.item))
     # What the browser regroups a leaf by: its keys under every grouping, its
-    # place among `items` (groups keep first-appearance order) and its
+    # place among `items` (unranked groups keep first-appearance order) and its
     # `group_summary` inputs, on every row of the leaf, so a leaf's rows are
     # the same whether its group loads lazily or not.
     grouping_names = String[n for n in names if !isnothing(by_name[n])]
@@ -22232,7 +22632,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     gmaster = something(group_master, default_master)
     subgroups(members, depth, prefix) =
         [let path = String[prefix..., k]; _MDGroup(gkey(path), path, ms) end
-         for (k, ms) in _md_groups(members, fns[depth])]
+         for (k, ms) in _md_groups(members, fns[depth], level_ranks[depth])]
     isprefix(a, b) = length(a) <= length(b) && view(b, 1:length(a)) == a
     target = isnothing(group_rows) ? nothing : gpath(group_rows)
     # The flat view has no groups: `update_groups` names none of its rows.
@@ -22364,7 +22764,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
-            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope])))
+            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
+            order=browser ? order_json : nothing))
     built = tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
@@ -22389,7 +22790,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     config = string("{\"names\":", _md_json_list(grouping_names),
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
         ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
-        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]}")
+        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]",
+        isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
     h.div(; grouping..., data_htmxo_regroup=config)(template..., store, built)
 end
 
@@ -22472,10 +22874,12 @@ end
 # hx-target. Its scope says which of the table's rows the update speaks for,
 # so it can remove those it no longer lists: rows by id, every copy of a
 # leaf (`data-htmxo-leaf`), and a group row with all its rows. `places` (see
-# `_md_record_places!`) says where its rows go.
-function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=())
+# `_md_record_places!`) says where its rows go; `order`, the `group_order`
+# lists the table's browser regrouping goes by from now on.
+function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(), order=nothing)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
+    isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
     isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
@@ -26775,6 +27179,19 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { position: sticky; z-index: 1; }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead th { background-color: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
+
+/* A table's columns keep their widths while its rows open, load and filter
+   (`data-htmxo-columns`, held by the table runtime). While the runtime sizes
+   them ("sizing"), the hidden rows take part, collapsed, so the widths fit
+   every row the table holds; detail rows stay out. Held, the layout is
+   fixed, and a word too long for its column breaks inside its cell instead
+   of running into the next one. A detail row's content never sizes the
+   columns, held or not: it fills the width they give it. `!important`
+   beats Pico's `[hidden] { display: none !important }`. */
+table[data-htmxo-columns="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { display: table-row !important; visibility: collapse; }
+table[data-htmxo-columns="held"] { table-layout: fixed; }
+table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; }
+tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
 """))
 
 # --- Request feedback ---
@@ -29524,18 +29941,12 @@ htmxo_gallery_styles() = h.style(Raw(replace(
     r"/\*.*?\*/"s => "")))
 
 """
-    htmxo_syntax_head(; languages=("julia", "stan"))
+    htmxo_syntax_head() -> Tuple
 
-Head elements (script tags + theme-aware `<style>`) for client-side
-PrismJS syntax highlighting that flips with the host theme
-(VitePress `html.dark`, Pico `data-theme="dark"`). Any `<code
-class="language-…">` that PrismJS recognizes will be tokenized; the
-token coloring uses `--htmxo-syntax-*` CSS variables which adapt
-automatically.
-
-Use as a splat in `extra_head=` of `htmx(...)`:
-
-    extra_head=(htmxo_gallery_styles(), htmxo_syntax_head()...)
+The two runtime blocks that highlight code, [`syntax_styles`](@ref) and
+[`syntax_script`](@ref). Every [`htmx`](@ref) page carries both, so a copy in
+its `extra_head` is left out; a hand-built head adds them together with the
+PrismJS template from [`vendor_head`](@ref)`(base; packages=(:prism,))`.
 
 The same token CSS gets shipped to docs themes via
 `vitepress_theme_install` (alongside `htmxo-embed.ts`/`htmxo-gallery.css`)
@@ -29543,13 +29954,7 @@ so embedded fragments inherit the theme-aware coloring without
 needing the script tags from the fragment to execute (which they
 wouldn't, since `innerHTML` swaps don't run scripts).
 """
-function htmxo_syntax_head(; languages=("julia", "stan"))
-    base = "https://cdn.jsdelivr.net/npm/prismjs@1"
-    syntax_css = read(joinpath(_VITEPRESS_ASSETS_DIR, "htmxo-syntax.css"), String)
-    (h.script(; src="$base/prism.min.js"),
-     (h.script(; src="$base/components/prism-$lang.min.js") for lang in languages)...,
-     h.style(Raw(syntax_css)))
-end
+htmxo_syntax_head() = (syntax_styles(), syntax_script())
 
 # Blob sha of `relpath` at revspec `rev` — a commit sha, `"HEAD"`, `"<sha>^2"`.
 # `""` when the revision does not resolve or the path does not exist there: an
