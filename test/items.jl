@@ -8466,7 +8466,7 @@ end
         "<text style=\"small\"> — no draws at this level</text></text>"
     @test all(repr(m, declined) == repr(m, SemanticUnavailable(
         "no draws at this level"; texts=semantic_texts(:en))) for m in formats)
-    @test semantic_texts() == semantic_texts(:en) == SemanticTexts("unavailable")
+    @test semantic_texts() == semantic_texts(:en) == SemanticTexts("unavailable", ".")
 
     # A German page states the refusal in German in every peer format; the
     # framework-owned class keeps its name, it is a styling hook, not text.
