@@ -37,7 +37,7 @@
         "tree" => master_detail_table(["N", "G"], items; key=it -> it.id, master=linked,
             children=it -> it.kids, detail_url=it -> "/d/$(it.id)", expand_controls=true,
             searchable=true, selectable="s", id="m", texts),
-        "group_select" => grouped(; group_by="Group", searchable=true, texts),
+        "group_search" => grouped(; group_by=["Group"], searchable=true, texts),
         "pills_none" => grouped(; group_by=["None"], texts),
         "pills_one" => grouped(; group_by=["Group"], texts),
         "pills_two" => grouped(; group_by=["Group", "Party"], texts),
@@ -138,8 +138,8 @@ end
     update = repr("text/html", base(; update_rows="k2"))
     @test contains(update, "data-htmxo-row-update") && contains(update, "⟨details⟩") &&
         contains(update, "⟨loading⟩") && !contains(update, "data-htmxo-texts")
-    lazy = repr("text/html", base(; groupings=["Group" => it -> it.grp], group_by="Group",
-        group_rows_url=(k, ms) -> "/rows?k=$k", group_rows="A"))
+    lazy = repr("text/html", base(; groupings=["Group" => it -> it.grp], group_by=["Group"],
+        group_rows_url=(k, ms) -> "/rows?k=$k", group_rows="[\"A\"]"))
     @test contains(lazy, "data-htmxo-group-rows") && contains(lazy, "⟨loading⟩") && !contains(lazy, "data-htmxo-texts")
     m, d = master_detail_pair("a", (h.td("x"),), nothing, 1; detail_url="/d", texts)
     @test contains(repr("text/html", d), ">⟨loading⟩<")
@@ -175,7 +175,7 @@ end
             searchable=true, selectable="ids", id="de", texts=de)
         groups = master_detail_table(["Name", "Ort"], places; key=p -> p.id,
             master=p -> (h.td(p.name), h.td(p.ort)), detail=p -> h.p(p.name),
-            groupings=["Ort" => p -> p.ort == "Kiel" ? "Nord" : "Rest"], group_by="Ort",
+            groupings=["Ort" => p -> p.ort == "Kiel" ? "Nord" : "Rest"], group_by=["Ort"],
             group_rows_url=(k, ms) -> "/rows?k=$(HTTP.escapeuri(k))", id="gr", texts=table_texts(:de))
         english = sortable_table(["Name"], [h.tr(h.td(n)) for n in ("Alpha", "Beta")]; searchable=true, id="en")
         driver = h.script(Raw(raw"""

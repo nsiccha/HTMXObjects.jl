@@ -2,7 +2,8 @@
 # `assets=:vendor` (see `_VENDOR_ASSETS` in src/HTMXObjects.jl). Each tarball's
 # served file is byte-identical to the CDN file at the pinned version
 # (verified 2026-09-28; KaTeX's 62 served files 2026-10-23 against jsdelivr;
-# re-verify with `cmp` against the CDN URL on any bump).
+# PrismJS's core, autoloader and language files 2026-10-26; re-verify with
+# `cmp` against the CDN URL on any bump).
 # Downloads are lazy (`LazyArtifacts`): CDN users fetch nothing.
 
 [htmx]
@@ -53,3 +54,10 @@ git-tree-sha1 = "1d407929285782f62be1dbeff21349b266ebe725"
 [[katex.download]]
 url = "https://registry.npmjs.org/katex/-/katex-0.19.0.tgz"
 sha256 = "d8e49f2fea6eeed7cdae2cf4fd48e2f1d348758aa9e5740715e4533c2c96d1ee"
+
+[prismjs]
+lazy = true
+git-tree-sha1 = "92695bc7735ebec34d41bceba195174098f989c0"
+[[prismjs.download]]
+url = "https://registry.npmjs.org/prismjs/-/prismjs-1.30.0.tgz"
+sha256 = "ac16a9106a28c53b6a6313993c816a3a02525fdfefd7614fc1703df915a9fc11"

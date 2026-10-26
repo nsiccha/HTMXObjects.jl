@@ -323,7 +323,7 @@ document.addEventListener('htmxo:table-filtered', e => {
 #### Controls and headers stay in view {#table-sticky}
 
 The controls a table draws itself share one line above it: the search field
-with its count, then a `master_detail_table`'s *Group by* (select or pills) and
+with its count, then a `master_detail_table`'s *Group by* pills and
 *Expand all* / *Collapse all*, then the selection bar. The line wraps only
 when the window is too narrow. While the table is in view, that line stays at
 the top of the window and the column headers stay just below it, so a reader
@@ -356,6 +356,35 @@ article { --htmxo-sticky-bg: var(--pico-card-background-color); }
 each `.table-wrap` `data-htmxo-width="fits"` or `"wide"`. Without the runtime
 the table keeps its sideways scroll and its header scrolls away. Markdown and
 PDF output are unchanged: the line is HTML only.
+
+#### Columns keep their widths {#table-columns}
+
+A reader opening a row's detail, a lazy detail or lazy group rows arriving,
+a group or branch expanding, a search or filter hiding rows, or a row update
+never moves the columns of a `sortable_table`, `render_table` or
+`master_detail_table`, flat or hierarchical. Apps write nothing for it: no
+fixed column widths, no script.
+
+- **The widths fit every row the table holds.** The table runtime sizes the
+  columns once with the browser's own table layout over all its rows, shown
+  or hidden: the leaves of collapsed groups and branches and the rows a
+  search hides count as if they were shown. Detail rows do not: a detail's
+  content (a form, a PDF preview, a sub-table) fills the width the columns
+  give it and never widens them.
+- **Then the widths hold.** A row that arrives later (lazy group rows, a row
+  update) wraps its text inside its column, breaking a word too long for it.
+- **The columns are sized again** when the table's room changes by more than
+  two scrollbars (the window or a sidebar resizes), when the reader regroups
+  the table, when a table first shows (inside a closed tab or detail row) and
+  once web fonts have loaded. A table filling its room keeps its columns' shares
+  of it, so a scrollbar appearing narrows them all a little instead of
+  re-sizing them.
+
+The table carries `data-htmxo-columns` (`"held"` once sized, with a
+`<colgroup>` of the widths and `table-layout: fixed`); a morph swap that
+drops them gets them back before the browser paints. Without the runtime the
+browser's auto layout runs, with detail content still left out of the widths.
+Markdown and PDF output are unchanged.
 
 #### Row selection {#table-selection}
 
@@ -427,10 +456,17 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
 - **Keys.** `master_detail_table` keys each item row by `link_key(item)`,
   which defaults to its `key` (as a string, not the sanitised row id),
   including every copy of a leaf that a regrouped table lists under several
-  groups; group rows have no key. `render_table` keys rows by `link_key(row)`.
-  Hand-built `sortable_table` rows carry `data-htmxo-link-key`, or are keyed
-  by their `data-htmxo-select-key`. A detail row counts as its master. Keys
-  compare as strings.
+  groups; group rows have no key of their own. `render_table` keys rows by
+  `link_key(row)`. Hand-built `sortable_table` rows carry
+  `data-htmxo-link-key`, or are keyed by their `data-htmxo-select-key`. A
+  detail row counts as its master. Keys compare as strings.
+- **Group rows.** Hovering or focusing a group row (of `groupings`, at any
+  level) or a branch of a `children` tree announces every item in it: the
+  street over its street sides, the district over its zones. That includes
+  collapsed rows and the leaves of a lazy group that have not loaded, and
+  leaves out the items the search or a filter hides, so the hover names what
+  the table shows. A branch announces its own key too. The other tables light
+  every one of those items, and a linked plot highlights all of them.
 - **Several tables of the same items.** A `master_detail_table`'s `key` names
   its row and detail ids, so it must be unique on the page. When two tables on
   one page show the same items, keep each table's `key` unique and give both
@@ -444,21 +480,27 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
   ```
 
   `link_key` without `link` throws, since it would highlight nothing.
-- **The event.** Hovering or keyboard-focusing a keyed row dispatches
-  `htmxo:link` on `document` with `detail` `{group, key, source}`; when the
-  hover ends, `key` is `null`. Every linked table listens for it and marks the
-  rows of its group that hold the key (`data-htmxo-linked`). A plot or any
-  other element joins the group by listening for the same event and
-  dispatching it on its own hover; page script can call
-  `htmxoLink(group, key)` (`null` clears). The latest key per group is kept in
-  `window.htmxoLinkState`, so a table that is swapped in, regrouped or filtered
-  later shows it too.
+- **The event.** Hovering or keyboard-focusing a row dispatches `htmxo:link`
+  on `document` with `detail` `{group, key, keys, source}`. `keys` lists the
+  items the row stands for (one for an item row, all of them for a group row)
+  and is empty when the hover ends; `key` is the row's own key, else the one
+  item a group holds, else `null`. Every linked table listens for it and marks
+  the rows of its group that hold one of the keys (`data-htmxo-linked`). A
+  plot or any other element joins the group by listening for the same event,
+  reading `keys` (an announcement without `keys` names `key` alone), and
+  dispatching it on its own hover; page script can call `htmxoLink(group, key)`
+  or `htmxoLink(group, [key1, key2])` (`null` clears). The latest
+  announcement per group is kept in `window.htmxoLinkState`, so a table that
+  is swapped in, regrouped or filtered later shows it too. All of it runs in
+  the browser, so it works the same in a page recorded with `record!` and
+  served as plain files.
 - **Hidden rows.** A highlight never changes the table. An item inside a
   collapsed group or branch lights up the innermost shown row above it, with a
-  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`
-  (the `linked_inside` and `linked_deep` texts, below). That includes a group
-  whose rows load lazily. A row that the search or a filter hides lights up
-  nothing. A lit row that is out of view scrolls into view inside the table's
+  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`,
+  or `↳ 3 inside` when it holds several hovered items (the `linked_inside`,
+  `linked_deep` and `linked_inside_many` texts, below). That includes a group
+  whose rows load lazily. The row the hover is on lights up as itself. A row
+  that the search or a filter hides lights up nothing. A lit row that is out of view scrolls into view inside the table's
   own scroll box (an `overflow: auto` wrapper), never the page, and only when
   the hover started outside that table.
 - **Theme.** Lit rows are tinted and outlined from `--htmxo-accent`; set
@@ -484,20 +526,21 @@ The texts cover everything these tables write themselves: the search field
 (`search`, `count`, `empty`), the selection bar (`selected`,
 `selected_filtered`, `selected_collapsed`, `select_all`, `clear_selection`),
 *Expand all* / *Collapse all*, the accessible names of the ▸ and ⓘ controls
-(`toggle_children`, `details`), the *Group by* select and its pills
+(`toggle_children`, `details`), the *Group by* pills
 (`group_by`, `group_add`, `group_add_inner`, `group_level`, `group_kept`,
 `group_stop`, `group_earlier`, `group_later`), lazy-detail status lines
 (`loading`, `retrying`, `load_failed`), the toasts of a lazy group that fails
 to load (`rows_failed`, `rows_missing`), the CSV button (`csv`), the toggle
 of the table's caption (`more`, the same word as `caption_texts`, see
 [Captions](#captions)) and the note on a row that holds a hovered item in a
-collapsed group (`linked_inside`, `linked_deep`, see
+collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`, see
 [Hover linking](#table-linking)). The `TableTexts` docstring names them all.
 
 A text in braces is a placeholder: `count` takes `{shown}` and `{total}` (items,
 not rows: see [Client-side search](#table-search)), the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
-`{level}`), `rows_failed` takes `{status}` and `linked_deep` `{levels}`. The browser writes the live count
+`{level}`), `rows_failed` takes `{status}`, `linked_deep` `{levels}` and `linked_inside_many`
+`{count}`. The browser writes the live count
 and status lines from the same templates, so they are strings, not Julia
 functions: the count changes on every keystroke without asking the server. An
 unknown locale, text name or placeholder throws an `ArgumentError`.
@@ -700,7 +743,7 @@ groupings = ["None" => nothing,
              "IBAN" => t -> t.iban,
              "Rule" => t -> matching_rule_names(t)]   # several keys: listed under each
 
-transactions_table(group_by="Counterparty") = master_detail_table(
+transactions_table(group_by=["Counterparty"]) = master_detail_table(
     ["Counterparty", "Date", "Amount"], transactions;
     key = t -> t.id,
     master = t -> (h.td(t.party), h.td(t.date), h.td(string(t.amount))),
@@ -712,7 +755,8 @@ transactions_table(group_by="Counterparty") = master_detail_table(
 ```
 
 - **Groups.** A grouping renders one collapsible branch per group key, in
-  first-appearance order, with its leaves below. A group row shows the key and
+  first-appearance order unless `group_order` orders it (below), with its
+  leaves below. A group row shows the key and
   the member count, and in each column `group_summary` names, a
   `ColumnSummary` of the group's leaves: `:sum`, `:mean`, `:min`, `:max` of
   `item -> number`, `:count`, or `:ratio` of two sums (Σ demand / Σ capacity).
@@ -722,18 +766,51 @@ transactions_table(group_by="Counterparty") = master_detail_table(
   `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`); the CSV
   download writes the same decimals as a number (`1234.5`). Group rows
   sort among themselves by the same columns; leaves sort within their group.
+- **Group order.** `group_order` gives a grouping's groups an order of their
+  own, so one table serves groupings that each need a different one. Each
+  entry is a grouping name and either a list of keys (those groups first, in
+  that order, any other after them in first-appearance order) or a function
+  `key -> sort key` (ties keep first-appearance order):
+
+  ```julia
+  group_order = ["Status" => ["To do", "Counted", "Not counted"],
+                 "Supplier" => k -> (k == "Not extracted", lowercase(k)),  # A–Z, unread last
+                 "Year" => k -> k == "No date" ? 0 : -parse(Int, k)]       # newest first
+  ```
+
+  The server ranks each grouping's keys once and sorts its groups by them at
+  every level the grouping is nested at, and the browser regroups by the same
+  ranked lists, live and in a recorded page alike, so the order needs neither
+  `group_master` nor `group_by_url`. A row update carries the lists again,
+  ranked with its change, so a key it brings (a newly read supplier) takes its
+  place at the next regroup. Leaves keep the order of `items`
+  within their group, and a column sort the reader picks sorts the group rows
+  by that column instead. A name that is not a grouping, the flat grouping, a
+  name given twice, a key listed twice or an order that is neither a list nor a
+  function throws an `ArgumentError`.
 - **The same leaves.** Leaf rows render through `master`, `detail` /
   `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
   (a shared IBAN, a rule matching several counterparties) gets one row per
   group, each with its own id.
-- **Group by.** With two or more groupings a *Group by* select joins the tree
-  controls (for a `group_by` list, pills: see
-  [Nested levels](#table-grouping-levels)). A change regroups in the browser:
-  the search, the selection, the sort and the groups the reader opened carry
-  over, a group holding a leaf whose detail is open opens, and the table fires
-  `htmxo:regrouped` with the new `group_by` values. With `select_form` the
-  select is associated with that form, so a bulk submission carries the active
-  grouping. An unknown `group_by` throws an `ArgumentError`.
+- **Group by.** With two or more groupings the *Group by* pills join the tree
+  controls, one per grouping, and the reader can nest, reorder and drag them
+  (see [Nested levels](#table-grouping-levels)). A change regroups in the
+  browser: the search, the selection, the sort and the groups the reader
+  opened carry over, a group holding a leaf whose detail is open opens, and
+  the table fires `htmxo:regrouped` with the new `group_by` values. With
+  `select_form` the grouping is submitted with that form, so a bulk
+  submission carries the active levels. An unknown `group_by` throws an
+  `ArgumentError`.
+- **`group_by` is a list of levels.** `group_by=["Counterparty"]` groups by
+  one level; a single name, `group_by="Counterparty"`, is the same one-name
+  list. Group keys are paths (`["Acme"]`, see
+  [Nested levels](#table-grouping-levels)) and a route receives the levels as
+  repeated `group_by` values, so a table that gives the grouping or its group
+  keys to your own code (`group_master`, `group_by_url`, `group_rows_url`,
+  `select_form`, `group_rows`, `update_groups`) passes `group_by` as a list,
+  and every route taking it declares `group_by::Vector{String}`. A single name
+  there throws an `ArgumentError` saying so, rather than handing code written
+  for plain keys a path.
 - **Group rows from the server.** The browser cannot run two things: your own
   `group_master(key, members)`, whose group row cells may hold anything Julia
   renders (links, a rule-mode select), and lazy groups (`group_rows_url`),
@@ -758,20 +835,20 @@ transactions_table(group_by="Counterparty") = master_detail_table(
       group_by_url = self / "table",
       group_rows_url = (key, members) -> length(members) > 200 ?
           query_url(self / "rows"; group_by, key) : nothing,
-      group_master = (key, members) -> (h.td(h.strong(key)), h.td(rule_mode_select(key)),
-          h.td(string(sum(m.amount for m in members)))),
+      group_master = (key, members) -> (h.td(h.strong(last(HTMXObjects.group_path(key)))),
+          h.td(rule_mode_select(key)), h.td(string(sum(m.amount for m in members)))),
       searchable = true, search_query = q, expand_controls = true,
       selectable = "tx", select_form = "bulk")
 
-  @get table(; group_by::String="Counterparty", q::String="") =
+  @get table(; group_by::Vector{String}=["Counterparty"], q::String="") =
       transactions_table(__self__, group_by, q)
-  @get rows(; group_by::String="Counterparty", key::String="") =
+  @get rows(; group_by::Vector{String}=["Counterparty"], key::String="") =
       transactions_table(__self__, group_by; group_rows=key)
   ```
 - **Selection.** Keys are per leaf. Selecting a leaf selects every copy, it is
   submitted once, and the selection survives regrouping and the flat view.
   Group rows are selectable too and submit their key under
-  `<selectable>_group` (here `tx_group=Shops`), so a bulk action can apply to
+  `<selectable>_group` (here `tx_group=["Shops"]`), so a bulk action can apply to
   whole groups; a group selection ends when the grouping changes.
 - **Search.** A group row's text (its key and summary) is matched like any
   ancestor's, so search finds groups and leaves. `search_query` pre-fills the
@@ -804,10 +881,10 @@ transactions_table(group_by="Counterparty") = master_detail_table(
 
 ##### Nested levels and grouping pills {#table-grouping-levels}
 
-Pass `group_by` as an ordered list to nest the groups level by level, the
-first outermost. The *Group by* control is then a row of pills, one per
-grouping: a pill turns its level on (as the innermost) or off, and the active
-pills reorder by dragging, by their ‹ › buttons, or with ←/→ on a focused pill.
+`group_by` lists the levels that nest the groups, the first outermost. The
+*Group by* control is a row of pills, one per grouping: a pill turns its level
+on (as the innermost) or off, and the active pills reorder by dragging, by
+their ‹ › buttons, or with ←/→ on a focused pill.
 No active pill is the flat view. Each change regroups in the browser, at
 every level. A table whose group rows or lazy groups need the server also
 re-renders through `group_by_url`, sending the levels as repeated `group_by`
@@ -839,18 +916,17 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
   `key` that `group_master` and `group_rows_url` receive, the value a selected
   group row submits (`tx_group=["Open","Invoice"]`), and what `group_rows` and
   `update_groups` take. `HTMXObjects.group_path(key)` decodes it. The default
-  group row shows the group's own key; indentation shows the level. A single
-  `group_by` name keeps one level, plain keys and the select.
+  group row shows the group's own key; indentation shows the level. One level
+  has paths too (`["Acme"]`), also when `group_by` is written as a single name.
 - **The flat view.** With no active pill the pills send the flat grouping's
   name (here `None`); a `group_by` list of `[]`, `[""]` or `["None"]` renders
-  the leaves. Without a flat grouping the last active pill stays on, as the
-  select offers only the declared groupings: an empty `group_by` would reach a
-  `Vector{String}` route as no values, and `query_url` would drop it from the
-  action URLs.
+  the leaves. Without a flat grouping the last active pill stays on: an empty
+  `group_by` would reach a `Vector{String}` route as no values, and
+  `query_url` would drop it from the action URLs.
 - **The grouping elsewhere.** A bulk form named by `select_form` receives the
   levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
-  returns the `group_by` values of the table's current grouping, for either
-  form of `group_by`, e.g. for an action's `hx-vals`
+  returns the `group_by` values of the table's current grouping, e.g. for an
+  action's `hx-vals`
   (`js:{group_by: htmxoGroupBy('#documents')}`).
 - **Lazy groups** load at any level. The subgroups of a loaded group can be
   lazy in turn, and *Expand all* loads and opens them all.
@@ -874,15 +950,15 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
     master = t -> (h.td(t.party), h.td(t.category),
         h.td(h.button("Flag"; hx_post=query_url(self / "flag"; id=t.id, group_by),
                       hx_target="closest tr", hx_swap="outerHTML"))),
-    group_master = (key, members) -> (h.td(h.strong(key)),
+    group_master = (key, members) -> (h.td(h.strong(last(HTMXObjects.group_path(key)))),
         h.td(rule_mode_select(self, key, group_by)), h.td(count_flagged(members))),
     groupings, group_by, searchable = true, search_query = q, id = "transactions", kw...)
 
-@direct @post flag(; id::String, group_by::String) =
+@direct @post flag(; id::String, group_by::Vector{String}) =
     (toggle_flag!(id); transactions_table(__self__, group_by; update_rows=id))
-@direct @post rule_mode(; group::String, mode::String, group_by::String) =
+@direct @post rule_mode(; group::String, mode::String, group_by::Vector{String}) =
     hx_response(transactions_table(__self__, group_by; update_groups=group);
-                toast="Rule for $group: $mode")
+                toast="Rule for $(last(HTMXObjects.group_path(group))): $mode")
 ```
 
 - **What comes back.** A `<tbody data-htmxo-row-update>` with each copy of the
@@ -1180,7 +1256,7 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
-### `loading_indicator_script()` and `request_feedback_*`
+### `loading_indicator_script()` and `request_feedback_*` {#request-feedback}
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.
 `htmx()` includes `request_feedback()` by default (`feedback=true`);
@@ -1191,6 +1267,30 @@ and the element htmx resolved as the request's target. That covers an inherited
 a timeout) flashes red, and the shell's
 [failure toast](api.md#failure-toasts) says why. A request the page aborted, or
 an answer that navigates, only clears the outline.
+
+A part of the page that the request will replace says so while the request
+runs, once it has taken 0.3 s (a faster answer just swaps in). The part is
+dimmed (class `htmxo-loading`) and carries `aria-busy="true"`, and a status
+line (`div.htmxo-loading-status`, `role="status"`) sits over the middle of its
+visible box. When the reader chose what is coming, for a GET request, the line
+names it: a select's option, a radio button's label, a link's text
+("Loading Kreuzberg…"). Otherwise it says "Loading…". The words are `loading`
+and `loading_named` of the page's [`error_texts`](api.md#failure-toasts), so
+`htmx(...; error_texts=error_texts(:de))` gives "Kreuzberg wird geladen…".
+This applies to swaps that replace the part's content (`innerHTML`,
+`outerHTML`, `textContent`, the morph swaps), not to `hx-swap="none"`, an
+insertion beside or inside the part, or `delete`, and not when the part is a
+control (button, input, select, textarea, link, label, summary) or the whole
+`body`. Set `data-htmxo-loading="…"` on the requesting element, or an element
+around it, for other words, and `data-htmxo-loading="false"` to leave its parts
+unmarked, for an app that draws its own placeholder. The mark ends when the
+answer is swapped in, or when the request fails, times out or is aborted. A
+request that replaces a running one on the same part
+(`hx-sync="this:replace"`, a second pick) keeps the part marked without a gap.
+Pico styles every `[aria-busy=true]` element (a spinner before it,
+`white-space: nowrap`, no pointer events), and none of that reaches the part:
+the spinner is removed, the other two are held as they were, and a part with a
+`::before` of its own that Pico would change is not marked busy.
 
 Only requests the reader started are marked. A request the page sends by
 itself draws no outline, and its element does not dim: a poll, a preload, and

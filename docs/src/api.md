@@ -76,7 +76,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `htmx_or(htmx_value, full_value)` | Pick which to return based on `is_htmx(req)`                   |
 | `safely(f; obj, req)` | Run `f()` and return an inline error widget if it throws — keeps a panel from crashing the whole page |
 | `CallerFault(status, message)` | Throw from a route body for a request at fault (`4xx` only): answered with `status` (200 under HTMX) and `message`, recorded like every error answer |
-| `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles and failure toasts (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
+| `error_texts(locale; texts...)`, `ErrorTexts` | The words of the framework's error articles, failure toasts and loading status line (`:en`, `:de`, per-text overrides); set once as `__error_texts__` on the root struct — see [Error articles in the app's language](#error-texts) |
 
 A route may return a raw `HTTP.Response` — e.g. a `206` byte-range media
 response — and it passes through the response pipeline unchanged.
@@ -403,6 +403,13 @@ KaTeX, which typesets [Markdown math](#markdown-math), is a directory:
 in an inert template; nothing is fetched until a page shows math.
 `vendor_head(base; packages=(:katex,))` returns that template, for a
 hand-built head that also adds `math_script()` and `math_styles()`.
+PrismJS, which [highlights code](#syntax-highlighting), is a directory in its
+npm layout: `/vendor/prism/components/prism-core.min.js`,
+`…/prism/plugins/autoloader/prism-autoloader.min.js` and every language's
+grammar, `…/prism/components/prism-<language>.min.js`; `copy_vendorfiles`
+writes them to `dir/prism/`, and `vendor_head(base; packages=(:prism,))`
+returns its template, for a hand-built head that also adds `syntax_script()`
+and `syntax_styles()`.
 
 ```julia
 copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico))
@@ -749,6 +756,7 @@ For authoring Markdown that renders to HTML — the reverse direction:
 | `markdown_text_run(renderer, run, in_link, rules, context)` | Joined-run override point (sees runs inside links too) |
 | `markdown_parser(; extra_rules, math)` / `render_markdown(::CommonMark.Node)` | Parse with extra parser rules / render an inspected AST |
 | `math_script()` / `math_styles()` | The browser runtime that typesets Markdown math with KaTeX; `htmx()` pages carry both |
+| `syntax_script()` / `syntax_styles()` | The browser runtime that highlights code with PrismJS; `htmx()` pages carry both |
 | `decorated_link(label, href, entry; class, attrs, base)` | `base` attrs always; `attrs(entry)` merged over them once known |
 
 `render_markdown` parses with CommonMark.jl, so intra-word underscores in
@@ -817,6 +825,36 @@ SemanticProse(BRM.brm_description_markdown(BRM.brm_description(d)))
 An app that renders math nodes its own way adds `markdown_node` methods for
 `CommonMark.Math` / `CommonMark.DisplayMath` on its renderer; a
 `parser_rules=[CommonMark.DollarMathRule()]` workaround is no longer needed.
+
+### Syntax highlighting {#syntax-highlighting}
+
+Code that names its language is highlighted on every `htmx()` page, with
+nothing added to the page: a `SemanticCode(:julia, source)`, a Markdown fence
+such as ` ```stan `, or any other `<code class="language-…">`.
+
+- **Everywhere code arrives.** The shell's `syntax_script` highlights the
+  page's code on load and the code in every fragment htmx swaps in, so code
+  in a lazily loaded tab, a disclosure or an in-place demo is highlighted
+  too. A code element that holds other elements (links, or a highlight
+  already applied) is left as it is. Code without a language stays plain.
+- **PrismJS loads only for pages that show code.** The shell carries an inert
+  `<template id="htmxo-prism">` naming PrismJS's core and its autoloader; the
+  runtime adds them the first time such code appears, and the autoloader
+  fetches each language's grammar (Julia, Stan, Python, JSON, TOML, R, Bash
+  and about 290 more). `prism_version` selects the release (default the
+  vendored pin, `1.30.0`): from jsdelivr under `assets=:cdn`, from the vendor
+  mount under `assets=:vendor` (see [Offline pages](#offline-pages)).
+  `prism_version=nothing` leaves the template out; the runtime then uses a
+  PrismJS the page loaded itself (`window.Prism`), or the code stays plain.
+- **Light and dark.** `syntax_styles` colors the tokens through
+  `--htmxo-syntax-*` variables that follow a dark theme (Pico
+  `data-theme="dark"`, VitePress `html.dark`, or the system's dark mode); each
+  color meets WCAG AA contrast on Pico's code background. The rules sit in
+  `@layer htmxo`, so a host stylesheet that sets the variables wins.
+- **Static sites too.** `export_site` writes the template's files and every
+  grammar the autoloader can fetch, so an exported page highlights its code
+  from the bundle, offline. `?plain`, `pdf_report` and the Markdown of a page
+  carry the code unchanged.
 
 Deferred decoration pairs a [`MarkdownRule`](@ref) with a DynamicObjects
 `BackgroundCache` in batch mode: the build function reads `cache[key]` on the
@@ -1067,7 +1105,11 @@ that names its log file; `/probe/x` reads `Nicht gefunden` / `Sonde x
 unbekannt`; a missing parameter reads `Ungültige Anfrage` / `Pflichtangabe
 fehlt: n`. A stalled operation's terminal and its **Run again** button follow
 too. Passing the same value to the page shell translates the
-[failure toasts](#failure-toasts). Any text can be replaced by keyword, and
+[failure toasts](#failure-toasts) and the status line over a part that a
+running request will replace (`Wird geladen…`, or `Kreuzberg wird geladen…`
+when the reader chose Kreuzberg; `loading` and `loading_named`, which takes
+`{label}`; see [request feedback](components.md#request-feedback)).
+Any text can be replaced by keyword, and
 `reasons` replaces the phrases of the statuses it names:
 `error_texts(:de; server_fault="Ein Fehler ist aufgetreten (Fehler-ID {id}).",
 reasons=Dict(404 => "Unbekannt"))`. `server_fault` and `error_id` (the
@@ -1674,6 +1716,8 @@ MARKDOWN_URL_RULE
 render_markdown
 math_script
 math_styles
+syntax_script
+syntax_styles
 MarkdownRenderer
 DefaultMarkdownRenderer
 markdown_node
@@ -2252,6 +2296,49 @@ it built from the earlier instance. A custom `RootProvider(factory)` builds its
 own roots. Before HTMXObjects `4472df4`, `route!` used only the instance's type,
 and every root was built from the type's defaults (snag
 `route-drops-the-0fde2d8d`).
+
+An object the instance was constructed with is the same object in every root.
+So an app whose root stays fresh per request can still keep one part of itself
+across requests: hand that `@dynamicstruct` object to `route!` as a keyword
+override or a fixed field. Its memoized, indexed and inline-child work is then
+shared by every request, while every property the instance did not override is
+still computed per root. Before anything renders, HTMXObjects passes each
+request's root, a fresh one included, through `DynamicObjects.sync!`, which
+examines the root's fields and constructor overrides. A changed `TrackedFile`
+or `TrackedDirectory` the object read therefore drops only what was derived
+from it:
+
+```julia
+@dynamicstruct struct Rows
+    dir::String
+    @struct row(name::String) = begin
+        file = TrackedFile(joinpath(dir, name); read = path -> Base.read(path, String))
+        html = HTMLSnapshot(render_row(read(file)))
+    end
+end
+
+@htmx struct App
+    rows = Rows(DATA_DIR)                # without an override: one per root
+    @get table() = h.div((rows.row(name).html for name in row_names())...)
+    @get status() = read_status_now()    # still computed per request
+end
+
+route!(App(; rows=Rows(DATA_DIR)))       # one Rows, shared and synced
+```
+
+- The object reads no request context. It is built outside any request and has
+  no `__parent__`, so give it what it needs as its own inputs.
+- Every request that root serves syncs the object, including a request to a
+  route that never reads it. `sync!` probes each tracked file the object holds
+  once, under DynamicObjects' process-wide sync lock, so concurrent requests
+  take turns. Measured: an object holding 320 rows with 5 tracked files each
+  added about 8.7 ms to every request when nothing had changed (a trivial
+  route went from 0.06 ms to 8.7 ms).
+- An object reached through a computed property instead (`rows = ROWS`, with a
+  module-level `ROWS`) is never synced. On a fresh root that property has not
+  been computed yet when `sync!` runs, so its tracked inputs stay stale.
+- Retain the whole root (`RootProvider(scope=:job, …)` below) only when every
+  property that reads no request context should be shared.
 
 For a `semantic_app`, HTMXObjects automatically owns the keyed store, locking,
 and root remounting. The default identity is `(root type, normalized mount
@@ -2888,7 +2975,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `ColumnSummary(reduce, values...; digits)` | A group row's sum, mean, min, max, count or ratio of its leaves in a regroupable `master_detail_table` (`group_summary=`), recomputed in the browser on every regroup; see [components](components.md#table-regrouping) |
 | `table_texts(locale; texts...)`, `TableTexts` | The words of a table's built-in controls (`:en`, `:de`, per-text overrides), passed as `texts=`; see [components](components.md#table-texts) |
 | `number_cell(x; texts, digits, sigdigits, attrs...)`, `format_number(x; texts, digits, sigdigits)` | A number in the table's language (`0,156`, `3,81·10⁻⁵`): a `<td>` that sorts and exports to CSV by the exact value, or the text alone; `render_table` and `master` cells make floats such cells by themselves; see [components](components.md#table-numbers) |
-| `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a `master_detail_table` grouped by an ordered `group_by` list; see [components](components.md#table-regrouping) |
+| `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a regroupable `master_detail_table` (its key is a JSON path); see [components](components.md#table-regrouping) |
 | `CaptionSpec`, `render_caption`, `with_caption`, `caption_style` | Plot/table captions |
 | `caption_texts(locale; …)`, `CaptionTexts` | A caption's own words (the toggle that opens its long text) in English or German, with per-text overrides; pass as `texts=` to `render_caption` / `with_caption`; see [components](components.md#captions) |
 | `semantic_texts(locale; …)`, `SemanticTexts` | The semantic vocabulary's own words (the marker of a `SemanticUnavailable`) in English or German, with per-text overrides; pass as `texts=` to `SemanticUnavailable`; see [The semantic element vocabulary](@ref) |
