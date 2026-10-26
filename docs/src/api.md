@@ -225,7 +225,8 @@ The declared language also sets the language of Treebars' progress words: the
 whose renderers follow the page language unless given `texts=`). Code that
 writes words of its own reads the language with
 [`HTMXObjects.page_lang`](@ref), on the request's task while the route runs
-and its answer is rendered.
+and its answer is rendered. A `dispatch(…; lang)` answers in the language it
+names instead of the declared one ([In-process dispatch](#In-process-dispatch)).
 
 ```@docs
 HTMXObjects.page_lang
@@ -3543,6 +3544,7 @@ markdown = String(resp.body)
 | `static` | An optional `StaticExport` spec: this one request runs blocking and comes back in static form ([below](#request-scoped-static-export)) |
 | `operation_policy` | An optional `OperationPolicy`, or its mode Symbol, this one request runs under instead of its root's ([below](#a-per-request-operation-policy)) |
 | `audience` | `:public` or `:private`: who the answer is for. By default `static`'s audience, else that of the request the `dispatch` is made in, else `:public` ([Public and private content](#private-content)) |
+| `lang` | A BCP 47 tag (`"de-DE"`): the answer's language in place of the route's `__lang__`, which the route reads as `HTMXObjects.page_lang()` and the page shell takes as its `lang` default. The words HTMXObjects writes follow it, such as the Markdown label of private content. Without it the route's `__lang__` holds; a tag such as `"German"` is an `ArgumentError` |
 
 The request resolves through the live router, so `:index` collapse, verb
 dispatch, path/query/body extraction (including repeated-key vectors), the
@@ -3838,8 +3840,11 @@ outlined and labelled "not public", with no code in the app.
   ```
 
   `[*not public:* Normal(0, 1)]{.htmxo-private}` for inline content. The label
-  follows `HTMXObjects.page_lang()` (a route's `__lang__`), and a `pdf_report`'s
-  `lang`.
+  is in the language of `HTMXObjects.page_lang()`: a route's `__lang__`, or the
+  `lang` of `to_markdown_string(x; lang)`, of `dispatch(…; lang)` and of a
+  `pdf_report` of a value. A Markdown string keeps the language it was rendered
+  in, so code that renders a German report's Markdown itself passes
+  `lang="de-DE"` there, next to `audience`.
 - Private content inside private content, or loaded into it, is marked once.
 - `private(x; mark=false)` shows `x` to a private reader without the mark.
 
@@ -3896,15 +3901,16 @@ An address of a private page that a public answer names where the walk cannot
 remove it (a script, a JSON payload via `static_url`) fails `export_site` too.
 
 **A PDF for the public.** `pdf_report(value, path; audience=:public)` renders
-the value for its audience. A Markdown string is rendered already, so render or
-fetch it for the report's reader: `to_markdown_string(value; audience)`, or a
-`dispatch` (outside a request both are public by default).
+the value for its audience and in its language. A Markdown string is rendered
+already, so render or fetch it for the report's reader and language:
+`to_markdown_string(value; audience, lang)`, or a `dispatch(…; audience, lang)`
+(outside a request both are public by default).
 
 ```julia
-markdown = String(dispatch(:GET, "/model"; headers=["Accept" => "text/markdown"]).body)
+markdown = String(dispatch(:GET, "/model"; headers=["Accept" => "text/markdown"], lang="de-DE").body)
 pdf_report(markdown, "konzept.pdf"; title="Konzept", lang="de-DE")   # public
 
-chunks = [to_markdown_string(section; audience) for section in sections]
+chunks = [to_markdown_string(section; audience, lang="de-DE") for section in sections]
 pdf_report(join(chunks, "\n\n"), "konzept.pdf"; title="Konzept", lang="de-DE", audience)
 ```
 

@@ -9,7 +9,7 @@ using TestItemRunner
 @testmodule AudienceFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw, to_markdown_string
-    export AudienceApp, AudienceScriptApp, bundle_bytes,
+    export AudienceApp, AudienceScriptApp, AudienceEnglishApp, bundle_bytes,
         AudienceDocApp, AudienceKeptApp, BUILDS, DOCS_DIR, document_pack
 
     const base = ""
@@ -45,6 +45,15 @@ using TestItemRunner
         # Library code inside a route assembling Markdown for a public reader.
         @get aud_libmd() = MIMEResponse("text/plain",
             to_markdown_string(private(h.p("SECRET-LIB"); public = h.p("Kurz")); audience=:public))
+    end
+
+    # An English subtree, which a `dispatch(…; lang)` can ask for in German.
+    @htmx struct AudienceEnglishApp
+        __lang__ = "en"
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get aud_english() = h.div(h.p("Offen"), private(h.p("SECRET-EN")))
+        @direct @get aud_english_lang() = h.p("lang=", something(HTMXObjects.page_lang(), "none"))
     end
 
     @htmx struct AudienceScriptApp
@@ -177,6 +186,23 @@ end
     @test !occursin("not public", to_markdown_string(private(h.p("S"); public=h.p("P")); audience=:public))
     # The label follows the page's language.
     @test occursin("*nicht öffentlich*", _with_page_meta(() -> md(private(h.p("S"))), (; lang="de-DE", title=nothing)))
+    # Code that renders Markdown itself names its language, as it names its
+    # audience (snag build-a-german-i-8056d211).
+    de(x) = to_markdown_string(x; audience=:private, lang="de-DE")
+    @test de(private(h.p("S"))) == "::: {.htmxo-private}\n\n*nicht öffentlich*\n\nS\n\n:::\n\n"
+    @test strip(de(h.p("Prior ", private("Normal(0, 1)"), "."))) == "Prior [*nicht öffentlich:* Normal(0, 1)]{.htmxo-private}."
+    @test occursin("| *nicht öffentlich:* b |",
+                   de(h.table(h.thead(h.tr(h.th("k"))), h.tbody(h.tr(h.td("a")), private(h.tr(h.td("b")))))))
+    # It wins over the page's language, and holds only while it renders.
+    @test occursin("*not public*", _with_page_meta((; lang="de-DE", title=nothing)) do
+        to_markdown_string(private(h.p("S")); audience=:private, lang="en")
+    end)
+    @test HTMXObjects.page_lang() === nothing
+    @test occursin("*not public*", md(private(h.p("S"))))
+    # refused: a lang is a BCP 47 tag, as `__lang__` is (no silent errors, dev §1)
+    err = try to_markdown_string(h.p("x"); lang="German"); nothing catch e e end
+    @test err isa ArgumentError && occursin("to_markdown_string", err.msg)
+    @test_throws ArgumentError to_markdown_string(h.p("x"); lang=:de)
     # Plain text names the mark in brackets.
     @test repr("text/plain", HTMXObjects._PrivateMark("Normal(0, 1)")) == "[not public] Normal(0, 1)"
 
@@ -405,6 +431,33 @@ end
     @test_throws ArgumentError dispatch(:GET, "/"; audience=:all)
     # refused: one request has one audience
     @test_throws ArgumentError dispatch(:GET, "/"; static=StaticExport(), audience=:private)
+end
+
+@testitem "a dispatch answers in the language it asks for" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    route!(AudienceApp())
+    route!(AudienceEnglishApp())
+    body(resp) = String(resp.body)
+    md = ["Accept" => "text/markdown"]
+
+    # A route that declares no language (snag build-a-german-i-8056d211).
+    german = body(dispatch(:GET, "/"; headers=md, audience=:private, lang="de-DE"))
+    @test occursin("*nicht öffentlich*", german) && !occursin("not public", german)
+    @test occursin("*not public*", body(dispatch(:GET, "/"; headers=md, audience=:private)))
+    # It wins over the route's `__lang__`, in the page shell too.
+    german = body(dispatch(:GET, "/aud_english"; headers=md, audience=:private, lang="de"))
+    @test occursin("*nicht öffentlich*", german) && occursin("SECRET-EN", german)
+    @test occursin("*not public*", body(dispatch(:GET, "/aud_english"; headers=md, audience=:private)))
+    @test occursin("<html lang=\"de\"", body(dispatch(:GET, "/aud_english"; audience=:private, lang="de")))
+    @test occursin("<html lang=\"en\"", body(dispatch(:GET, "/aud_english"; audience=:private)))
+    # The route reads it as page_lang().
+    hx = ["HX-Request" => "true"]
+    @test occursin("lang=de-CH", body(dispatch(:GET, "/aud_english_lang"; headers=hx, lang="de-CH")))
+    @test occursin("lang=en", body(dispatch(:GET, "/aud_english_lang"; headers=hx)))
+
+    # refused: a lang is a BCP 47 tag, as `__lang__` is (no silent errors, dev §1)
+    err = try dispatch(:GET, "/"; lang="German"); nothing catch e e end
+    @test err isa ArgumentError && occursin("dispatch", err.msg)
 end
 
 @testitem "export_site leaves private content and private pages out of a public site" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
