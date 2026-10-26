@@ -1862,7 +1862,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticTable(source)` | Any Tables.jl-compatible source |
 | `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
-| `SemanticStatus(state; detail="")` | A state, not a colour |
+| `SemanticStatus(state; detail="", label=string(state))` | A state, not a colour; `label` is the word shown for it |
 | `SemanticUnavailable(reason; texts=semantic_texts())` | A declined computation, and why — not a state |
 | `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
@@ -1901,6 +1901,16 @@ vocabulary writes itself, so it follows `texts=`, a `SemanticTexts` from
 Markdown and `[nicht verfügbar] reason` in plain text;
 `semantic_texts(:de; unavailable="entfällt")` puts the app's own word there.
 The `htmxo-semantic-unavailable` class keeps its name in every language.
+
+A status prints its state's name after the glyph unless it has a `label`. The
+state stays the data, so it still picks the glyph (✓ for `:ok`/`:available`, !
+for `:warn`/`:blocked`, ✗ for `:fail`, … for `:pending`, • otherwise) and the
+`data-status` attribute, while the label is the word in every format. A German
+page keeps the recognised state and names it in its own words:
+`SemanticStatus(:warn; label="im Projekt zu klären")` reads
+`! **im Projekt zu klären**` in Markdown and `[im Projekt zu klären]` in plain
+text. Do not make the German word the state: `SemanticStatus(Symbol("im Projekt
+zu klären"))` loses the glyph and the `data-status="warn"` hook.
 
 Four points where a projection is deliberately not a translation of the HTML:
 
