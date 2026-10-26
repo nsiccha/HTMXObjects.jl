@@ -721,7 +721,9 @@ place. Sortable column headers and `master_detail_table(...;
 detail_toggle=:label)` row buttons carry it, so column and row names survive.
 A master/detail table's detail rows are never rows of the Markdown table;
 `master_detail_table` writes its eager details after it (see [Details in
-Markdown](components.md#master-detail-markdown)).
+Markdown](components.md#master-detail-markdown)). A `tabset` has no tab bar in
+Markdown: each tab follows in order, its label in bold and then its content
+(see [Tabs in Markdown](components.md#tabset-markdown)).
 
 A semantic element whose HTML peer is a block — any but `SemanticStatus`,
 `SemanticLink`, `SemanticAction` and `SemanticArtifact`, which are inline and

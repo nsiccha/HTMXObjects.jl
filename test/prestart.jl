@@ -66,6 +66,10 @@ using TestItemRunner
                 PRIVATE_BUILDS[] += 1
                 h.p("private-plain")
             end)
+        "A page whose fragment sits in a tab"
+        @get prestart_tabset_page() = h.section(tabset(
+            "Eins" => lazy(query_url(__self__/"prestart_fragment"; key="tab"); id="frag-tab"),
+            "Zwei" => h.p("zwei"); id="prestart-tabs"))
         "A page whose fragment lacks its required argument"
         @get prestart_broken_page() =
             h.section(lazy(string(__self__/"prestart_fragment"); id="broken"))
@@ -210,6 +214,21 @@ end
         @test timedwait(() -> runs("private") == 1, 10.0; pollint=0.01) === :ok
     end
     release!("private")
+end
+
+@testitem "a fragment in a tab starts with the page" setup=[PrestartFixtures] tags=[:unit] begin
+    using HTMXObjects, HTTP, Test
+
+    reset_prestart!()
+    route!(PrestartApp())
+    with_prestart() do
+        page = body_text(served_get("/prestart_tabset_page", "Accept" => "text/html"))
+        @test prestart_token(page, "tab") !== nothing
+        @test timedwait(() -> runs("tab") == 1, 10.0; pollint=0.01) === :ok
+        # The prestarted fragment stays in its panel.
+        @test occursin(r"<div id=\"prestart-tabs-tab-1\"[^>]*><div[^>]*hx-get=\"[^\"]*key=tab&amp;__htmxo_operation=", page)
+    end
+    release!("tab")
 end
 
 @testitem "a prestart that finished is answered bare to the browser's first request" setup=[PrestartFixtures] tags=[:unit] begin
