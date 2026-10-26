@@ -18308,9 +18308,13 @@ function htmxoFilterTable(target) {
         if (!leaves.length) return;
         const kept = visible.has(row), path = [ownText(row).toLocaleLowerCase()];
         for (let r = byId.get(row.dataset.htmxoParent); r; r = byId.get(r.dataset.htmxoParent)) path.unshift(text(r));
+        // The unloaded leaves this pass hides, for hover linking.
+        row.htmxoLazyFiltered = new Set();
         leaves.forEach(([key, t]) => {
             const ctx = {query, input: raw, text: (path.join(' ') + ' ' + t.toLocaleLowerCase()).replace(/\s+/g, ' ')};
-            tally('leaf:' + key, kept && search(row, ctx), kept ? 'search' : rejectedBy.get(row));
+            const shown = kept && search(row, ctx);
+            if (!shown) row.htmxoLazyFiltered.add(key);
+            tally('leaf:' + key, shown, kept ? 'search' : rejectedBy.get(row));
         });
     });
     // hiddenBy counts the hidden items per predicate that first rejected
@@ -19525,41 +19529,76 @@ if (document.body) htmxoSelectionRestore(document.body);
 
 // --- Hover linking: `link` on sortable_table / render_table / master_detail_table ---
 // Tables, plots and maps showing the same items name one link group. A hover
-// (or keyboard focus) on an item announces its key to the page as an
-// `htmxo:link` event on `document`, detail {group, key, source} (key null
-// when the hover ends), and every participant of the group highlights its
-// items with that key. Anything joins by listening for the event and
-// dispatching it; `htmxoLink(group, key)` dispatches it from page script. The
-// latest key per group is kept, so a table rendered, regrouped or filtered
-// later shows it too.
+// (or keyboard focus) announces the items it is on to the page as an
+// `htmxo:link` event on `document`, detail {group, key, keys, source}: `keys`
+// lists the items (one row: its own; a group or branch row: every item below
+// it too, a branch's own first) and is empty when the hover ends; `key` is the
+// row's own item, else the one item a group holds, else null. Every
+// participant of the group highlights the items in `keys` (an announcement
+// without `keys` names `key` alone). Anything joins by listening for the event
+// and dispatching it; `htmxoLink(group, key | [keys] | null)` dispatches it
+// from page script. The latest announcement per group is kept, so a table
+// rendered, regrouped or filtered later shows it too.
 window.htmxoLinkState = window.htmxoLinkState || new Map();
-function htmxoLink(group, key, source) {
-    document.dispatchEvent(new CustomEvent('htmxo:link', {detail:
-        {group: String(group), key: key == null ? null : String(key), source: source || null}}));
+function htmxoLinkAnnounce(group, key, keys, source) {
+    document.dispatchEvent(new CustomEvent('htmxo:link', {detail: {group: String(group),
+        key: key == null ? null : String(key), keys: keys.map(String), source: source || null}}));
 }
-// A row's item key: `data-htmxo-link-key`, else its selection key.
-function htmxoLinkKey(row) { return row.dataset.htmxoLinkKey ?? row.dataset.htmxoSelectKey; }
-// The keyed body row of a linked table that holds `el`, as {group, key, row},
-// else null. A detail row stands for its master, and the rows of a table
-// nested in a detail for the row around them.
+function htmxoLink(group, keys, source) {
+    const list = keys == null ? [] : Array.isArray(keys) ? keys.map(String) : [String(keys)];
+    htmxoLinkAnnounce(group, list.length === 1 ? list[0] : null, list, source);
+}
+// A row's item key: `data-htmxo-link-key`, else its selection key. A group
+// row (`data-htmxo-group`) is no item: its selection key names the group.
+function htmxoLinkKey(row) { return 'htmxoGroup' in row.dataset ? null : row.dataset.htmxoLinkKey ?? row.dataset.htmxoSelectKey; }
+// The body row of a linked table that holds `el`, as {group, row}, else null.
+// A detail row stands for its master, and the rows of a table nested in a
+// detail for the row around them.
 function htmxoLinkRow(el) {
     for (let tr = el && el.closest ? el.closest('tr') : null; tr; tr = tr.parentElement.closest('tr')) {
         const table = tr.parentElement.parentElement;
         if (!table || !table.matches('table[data-htmxo-link]') || tr.parentElement !== table.tBodies[0]) continue;
         const row = tr.id.startsWith('detail-') ? document.getElementById('row-' + tr.id.slice(7)) : tr;
-        const key = row ? htmxoLinkKey(row) : null;
-        return key == null ? null : {group: table.dataset.htmxoLink, key, row};
+        return row ? {group: table.dataset.htmxoLink, row} : null;
     }
     return null;
 }
+// The items `row` stands for, as {key, keys}, else null: its own key, and on
+// a group or branch row every item below it, open or collapsed, loaded or not
+// (a lazy group's unloaded leaves by their link key), except those the search
+// or a filter hides, so a hover names what the table shows.
+function htmxoLinkItems(row) {
+    const own = htmxoLinkKey(row), keys = new Set(own == null ? [] : [own]);
+    const lazy = r => htmxoLazyLeaves(r).forEach(([k, , link]) => {
+        if (!(r.htmxoLazyFiltered && r.htmxoLazyFiltered.has(k))) keys.add(link ?? k);
+    });
+    lazy(row);
+    // A row's rows follow it in the body, so one pass finds everything below.
+    const below = new Set([row.id]);
+    if (row.id) for (const r of row.parentElement.rows) {
+        if (!r.id || r.id.startsWith('detail-') || !below.has(r.dataset.htmxoParent)) continue;
+        below.add(r.id);
+        if ('htmxoFiltered' in r.dataset) continue;
+        const k = htmxoLinkKey(r);
+        if (k != null) keys.add(k);
+        lazy(r);
+    }
+    const list = Array.from(keys);
+    return list.length ? {key: own ?? (list.length === 1 ? list[0] : null), keys: list} : null;
+}
 // The pointer or the focus moved from `from` to `to`: the row it left ends
-// its hover, unless another row of its group takes over, and the row it
-// entered announces its key.
+// its hover, unless another row of its group takes over or the group shows
+// something else (a plot's hover), and the row it entered announces its
+// items. A hovered row that a swap or a regroup replaced ends its hover too.
 function htmxoLinkMove(to, from) {
     const left = htmxoLinkRow(from), entered = htmxoLinkRow(to);
     if (left && entered && left.row === entered.row) return;
-    if (left && !(entered && entered.group === left.group)) htmxoLink(left.group, null, left.row);
-    if (entered) htmxoLink(entered.group, entered.key, entered.row);
+    const items = entered && htmxoLinkItems(entered.row);
+    const shown = left && window.htmxoLinkState.get(left.group);
+    const own = shown && (shown.source === left.row || !(shown.source && shown.source.isConnected));
+    if (own && shown.keys.size && !(items && entered.group === left.group))
+        htmxoLinkAnnounce(left.group, null, [], left.row);
+    if (items) htmxoLinkAnnounce(entered.group, items.key, items.keys, entered.row);
 }
 // How many levels a group row whose rows have not loaded sits above its
 // leaves: the grouping levels below its own (`data-htmxo-grouped` holds a
@@ -19579,12 +19618,13 @@ function htmxoLinkReveal(row) {
         return;
     }
 }
-// Mark the rows of `table` that hold its group's current key. A highlight
+// Mark the rows of `table` that hold its group's current items. A highlight
 // never changes the table: a row inside a collapsed group or branch lights up
 // the innermost shown row above it instead (`data-htmxo-linked="inside"`, its
-// first cell noting how many levels down the item is), and a row the search
-// or a filter hides lights up nothing. With `reveal`, the first lit row
-// scrolls into view inside the table's own scroll box.
+// first cell noting how many levels down the item is, or how many items it
+// holds), and a row the search or a filter hides lights up nothing. The row a
+// hover is on lights up as itself. With `reveal`, the first lit row scrolls
+// into view inside the table's own scroll box.
 function htmxoLinkApply(table, reveal) {
     const body = table.tBodies[0];
     if (!body) return;
@@ -19593,25 +19633,36 @@ function htmxoLinkApply(table, reveal) {
         if (r.cells[0]) delete r.cells[0].dataset.htmxoLinkedNote;
     });
     const state = window.htmxoLinkState.get(table.dataset.htmxoLink);
-    if (!state || state.key == null) return;
+    if (!state || !state.keys.size) return;
     const rows = Array.from(body.rows);
     const byId = new Map(rows.filter(r => r.id).map(r => [r.id, r]));
-    const depths = new Map();
-    const light = (row, depth) => {
+    // Each lit row: the fewest levels down an item sits, and its items.
+    const lit = new Map();
+    const light = (row, depth, key) => {
         for (; row && row.hidden; depth++) row = byId.get(row.dataset.htmxoParent);
-        if (row && !(depths.get(row) <= depth)) depths.set(row, depth);
+        if (!row) return;
+        const at = lit.get(row) || lit.set(row, {depth, keys: new Set()}).get(row);
+        at.depth = Math.min(at.depth, depth);
+        at.keys.add(key);
     };
     rows.forEach(r => {
         if (r.id.startsWith('detail-') || 'htmxoFiltered' in r.dataset) return;
-        if (htmxoLinkKey(r) === state.key) light(r, 0);
-        else if (htmxoLazyLeaves(r).some(([k, , link]) => (link ?? k) === state.key)) light(r, htmxoLinkLazyDepth(r));
+        const k = htmxoLinkKey(r);
+        if (k != null && state.keys.has(k)) light(r, 0, k);
+        htmxoLazyLeaves(r).forEach(([lk, , link]) => {
+            if (state.keys.has(link ?? lk) && !(r.htmxoLazyFiltered && r.htmxoLazyFiltered.has(lk)))
+                light(r, htmxoLinkLazyDepth(r), link ?? lk);
+        });
     });
-    depths.forEach((depth, row) => {
+    if (state.source && state.source.parentElement === body && !state.source.hidden)
+        lit.set(state.source, {depth: 0, keys: new Set()});
+    lit.forEach(({depth, keys}, row) => {
         row.dataset.htmxoLinked = depth ? 'inside' : '';
-        if (depth && row.cells[0]) row.cells[0].dataset.htmxoLinkedNote =
+        if (depth && row.cells[0]) row.cells[0].dataset.htmxoLinkedNote = keys.size > 1 ?
+            htmxoText(table, 'linked_inside_many', {count: keys.size}) :
             htmxoText(table, depth > 1 ? 'linked_deep' : 'linked_inside', {levels: depth});
     });
-    const first = reveal && rows.find(r => depths.has(r));
+    const first = reveal && rows.find(r => lit.has(r));
     if (first) htmxoLinkReveal(first);
 }
 // Show the current keys again in the linked tables in or around `elt`.
@@ -19632,7 +19683,9 @@ if (!window.htmxoLinkBound) {
         const d = e.detail || {};
         if (d.group == null) return;
         const group = String(d.group);
-        window.htmxoLinkState.set(group, {key: d.key == null ? null : String(d.key), source: d.source || null});
+        const keys = Array.isArray(d.keys) ? d.keys : d.key == null ? [] : [d.key];
+        window.htmxoLinkState.set(group, {key: d.key == null ? null : String(d.key),
+            keys: new Set(keys.map(String)), source: d.source || null});
         // The tables the hover did not start in bring their match into view.
         document.querySelectorAll('table[data-htmxo-link]').forEach(t => {
             if (t.dataset.htmxoLink === group) htmxoLinkApply(t, !(d.source && t.contains(d.source)));
@@ -19832,7 +19885,8 @@ caption's long text (`more`, as in [`caption_texts`](@ref)), the number
 separators of the numbers the table writes (`decimal`, `thousands`: its float
 cells and [`number_cell`](@ref)s, see [`format_number`](@ref), and the group
 sums of `group_summary` in [`master_detail_table`](@ref)) and the note on a row that holds a hovered item
-in a collapsed group (`linked_inside`, `linked_deep`; see *Hover linking* in
+in a collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`; see
+*Hover linking* in
 [`sortable_table`](@ref)). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
@@ -19843,7 +19897,8 @@ browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
 *Client-side search* in [`sortable_table`](@ref)); `selected`,
 `selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
 texts take `{name}` (the grouping), `group_level` also `{level}`;
-`rows_failed` takes `{status}`; `linked_deep` takes `{levels}`.
+`rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
+`linked_inside_many` takes `{count}`.
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -19877,6 +19932,7 @@ struct TableTexts
     thousands::String           # their thousands separator
     linked_inside::String       # note: the hovered item is in this collapsed row
     linked_deep::String         # note: ... several levels down
+    linked_inside_many::String  # note: several hovered items are in this collapsed row
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -19884,7 +19940,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     selected = (:count,), selected_filtered = (:count,), selected_collapsed = (:count,),
     group_add = (:name,), group_add_inner = (:name,), group_level = (:level, :name),
     group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
-    rows_failed = (:status,), linked_deep = (:levels,),
+    rows_failed = (:status,), linked_deep = (:levels,), linked_inside_many = (:count,),
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -19920,6 +19976,7 @@ const _TABLE_TEXT_LOCALES = (
         thousands = ",",
         linked_inside = "↳ inside",
         linked_deep = "↳ {levels} levels down",
+        linked_inside_many = "↳ {count} inside",
     ),
     de = (
         search = "Suche",
@@ -19953,6 +20010,7 @@ const _TABLE_TEXT_LOCALES = (
         thousands = ".",
         linked_inside = "↳ darin",
         linked_deep = "↳ {levels} Ebenen tiefer",
+        linked_inside_many = "↳ {count} darin",
     ),
 )
 
@@ -20278,14 +20336,24 @@ no app script. Each body row is keyed by its `data-htmxo-link-key`, else its
 `data-htmxo-select-key`; [`master_detail_table`](@ref) keys its rows by
 `link_key(item)` (default: its `key`) and [`render_table`](@ref) by
 `link_key(row)`. Hovering or keyboard-focusing
-a keyed row announces it to the page as an `htmxo:link` event on `document`
-with `detail` `{group, key, source}` (`key` is `null` when the hover ends), and
-every table of the group marks its rows with that key (`data-htmxo-linked`),
-including each copy of a leaf that a regrouped table lists under several
-groups. A detail row counts as its master. Anything else joins the group by
-listening for that event and dispatching it on its own hover; page script
-announces a key with `htmxoLink(group, key)` (`null` clears). Keys compare as
-strings.
+a row announces its items to the page as an `htmxo:link` event on `document`
+with `detail` `{group, key, keys, source}`, and every table of the group marks
+its rows with those keys (`data-htmxo-linked`), including each copy of a leaf
+that a regrouped table lists under several groups:
+
+- `keys` lists the items: a keyed row's own key, and for a group row or a
+  branch of a `children` tree every item below it too, open or collapsed,
+  loaded or not, except those the search or a filter hides (a branch's own key
+  first). It is empty when the hover ends.
+- `key` is the row's own key, else the one item a group holds, else `null`
+  (a group of several items, and the end of a hover).
+
+A detail row counts as its master. Anything else joins the group by listening
+for that event (reading `keys`; an announcement without `keys` names `key`
+alone) and dispatching it on its own hover; page script announces items with
+`htmxoLink(group, key)` or `htmxoLink(group, [keys...])` (`null` clears). Keys
+compare as strings. All of this runs in the browser, so it works the same in a
+page recorded with `record!` and served as plain files.
 
 ```julia
 master_detail_table(headers, probes; key=p -> p.kenn, master=cells, detail=info,
@@ -20296,13 +20364,15 @@ A highlight never changes the table:
 
 - a row inside a collapsed group or branch lights up the innermost shown row
   above it instead, with a dashed outline and a note on how far down the item
-  is (`linked_inside`, `linked_deep` in [`TableTexts`](@ref): "↳ inside",
-  "↳ 2 levels down");
+  is, or how many hovered items it holds (`linked_inside`, `linked_deep`,
+  `linked_inside_many` in [`TableTexts`](@ref): "↳ inside", "↳ 2 levels down",
+  "↳ 3 inside");
+- the row the hover is on lights up as itself;
 - a row that the search or a filter hides lights up nothing;
 - a lit row out of view scrolls into view only inside the table's own scroll
   box, never the page, and only when the hover started outside the table.
 
-The latest key of each group is kept (`window.htmxoLinkState`), so a table
+The latest announcement of each group is kept (`window.htmxoLinkState`), so a table
 that is re-rendered, regrouped or filtered shows it again. Override the tint
 with `--htmxo-linked-row`. Hover linking needs [`sortable_table_js`](@ref) and
 [`sortable_table_styles`](@ref) on the page, which the [`htmx`](@ref) shell
@@ -21228,9 +21298,11 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `link`: a link group name, e.g. `link="probes"`: hovering an item's row
   highlights the same item in every other table or plot of that group, and
   hovering it there highlights its rows here (every copy of a leaf listed
-  under several groups). Rows are keyed by `string(link_key(item))`. A hovered
-  item inside a collapsed group lights up that group's row, with a note on how
-  many levels down it is; nothing opens. See *Hover linking* in
+  under several groups). Rows are keyed by `string(link_key(item))`. Hovering
+  a group row (of `groupings` or a `children` branch) highlights every item in
+  it, the branch's own included. A hovered item inside a collapsed group lights
+  up that group's row, with a note on how many levels down it is or how many
+  hovered items it holds; nothing opens. See *Hover linking* in
   [`sortable_table`](@ref).
 - `link_key(item)`: with `link`, the item's key in the link group (default:
   its `key`). Give it when several tables on one page show the same items:
