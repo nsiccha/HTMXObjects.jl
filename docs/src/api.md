@@ -2,6 +2,10 @@
 
 The full set of HTMXObjects exports, organised by use case. For walkthroughs see the [Home page](index.md), [Components catalog](components.md), [Testing](testing.md) and [Examples](examples.md).
 
+## Which HTMXObjects version {#versions}
+
+HTMXObjects is not in the General registry, so a dependant pins a commit, but the commit's `version` still says which API it carries. Every landing that adds or changes public API bumps the patch digit (0.1.1, 0.1.2, …), and [`CHANGELOG.md`](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/CHANGELOG.md) lists what each version adds. A package that calls an API states the version that carries it as its floor, for example `[compat] HTMXObjects = "0.1.1"`. An environment that pins an older HTMXObjects commit is then refused when it resolves (`Unsatisfiable requirements detected for package HTMXObjects`) instead of failing at render with a `MethodError`. Before 1.0 the minor digit is the breaking one, so `"0.1.1"` accepts every later 0.1 version. Every commit before 0.1.1 says `0.1.0`, which names no API line.
+
 ## App scaffolding
 
 ```@docs
