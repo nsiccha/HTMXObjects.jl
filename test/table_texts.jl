@@ -211,7 +211,7 @@ end
             check('retrying', await wait(() => status('kiel') === 'Verbindung unterbrochen — neuer Versuch…'));
             check('retry-gives-up', await wait(() => status('kiel') === 'Laden fehlgeschlagen — zum Wiederholen klicken', 400));
             // A lazy group's failed rows raise a German toast.
-            document.querySelector('#row-group--Rest [data-htmxo-tree-toggle]').click();
+            document.querySelector('#row-gr--group--Rest [data-htmxo-tree-toggle]').click();
             check('rows-failed', await wait(() => toasts.includes('Laden der Zeilen fehlgeschlagen (500)')));
             check('group-count', count('gr') === '4 von 4 Zeilen angezeigt');
             // A table without texts= keeps English on the same page.
