@@ -626,8 +626,9 @@ headings and model-name detail controls, pass `branches_collapsible=false,
 detail_toggle=:label`. Branches then have no disclosure control, while the
 complete first-cell label becomes a native button. Supply non-interactive label
 content in that cell; links or inputs can live in the other cells. Markdown
-keeps that label and the column names; it drops the search field. Detail
-expansion still follows `initially_open`; search and sort retain loaded DOM.
+keeps that label and the column names; it drops the search field. A branch's
+detail then opens with `initially_open`, as a click on its row opens it; search
+and sort retain loaded DOM.
 By default, clicking a branch row opens or closes its immediate children;
 clicking a nested branch does the same at the next level. A non-interactive
 branch label is a native button for keyboard use, with the disclosure glyph
@@ -652,10 +653,28 @@ auto-wired sort headers. Sorting, search and CSV export read the cell's content,
 not its controls. However narrow the first column, its controls stay on their
 label's line: the cell never wraps between a control and its label, only the
 label's own text wraps. To keep a label on one line, give its content
-`white-space: nowrap`, not the cell. `initially_open` accepts a Boolean or
-predicate and controls both branch expansion and leaf detail expansion. Groups
-without a detail body or URL have no companion or request. Keys must be unique
-after sanitisation throughout the tree and page.
+`white-space: nowrap`, not the cell. Groups without a detail body or URL have
+no companion or request. Keys must be unique after sanitisation throughout the
+tree and page.
+
+`initially_open` accepts a Boolean or predicate and opens, on first paint, what
+a click on the row opens: a collapsible branch shows its child rows, and a leaf
+(or a branch of a `branches_collapsible=false` table) shows its detail. A
+branch's own detail stays closed, so a tree whose sections each carry a live
+demo can open with every section's rows shown and no demo loaded. To open
+details explicitly, pass `initially_open_detail` (a Boolean or a predicate,
+asked only about rows that have a detail). When given, it alone decides every
+row's detail on first paint, and `initially_open` then decides only which
+branches show their child rows:
+
+```julia
+master_detail_table(headers, sections;
+    key = s -> s.id, master = cells, children = s -> s.clauses,
+    detail = s -> s isa Section ? live_demo(s) : clause_text(s),
+    initially_open = s -> s isa Section,                 # every section's clauses
+    initially_open_detail = s -> s.id == open_section,   # one section's demo
+    expand_controls = true)
+```
 
 Search matches a case-insensitive phrase against visible master cells and
 ancestor text. A matching group includes its descendants; a matching leaf
@@ -914,7 +933,9 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   group renders its rows eagerly even when `group_rows_url` would make it
   lazy. A page reached from "open this document" passes
   `initially_open = t -> t.id == open_id`; it needs no script to open the
-  group.
+  group. To show that leaf with its detail closed, add
+  `initially_open_detail = false`: it is asked about leaves only and decides
+  their details, while the groups still open by `initially_open`.
 - **Row actions.** A route that changes rows renders the same call with
   `update_rows` / `update_groups` instead of the whole table; see
   [Row updates](#table-row-updates).
