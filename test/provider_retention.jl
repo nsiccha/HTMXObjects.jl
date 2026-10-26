@@ -378,3 +378,82 @@ end
     @test contains(instance_get("/instance/show?fit=second-fit").body, "dir=$second_dir")
     @test instance_get("/instance/show?fit=first-fit").status == 400
 end
+
+# A fresh-per-request app can still keep one object across requests: hand it to
+# `route!` as a constructor override or a fixed field. Every request root
+# receives that same object, and the request-boundary `sync!` reaches it through
+# the root's construction inputs, so a changed tracked file drops only what was
+# derived from it while the rest of the root stays per request (snag
+# `in-the-knowledge-9d9c3a5c`).
+@testmodule RetainedObjectFixtures begin
+    using HTMXObjects
+    using HTMXObjects.DynamicObjects: TrackedFile
+    import HTMXObjects: h
+
+    export Rows, OverrideRowsApp, FixedRowsApp, rows_dir, rows_get, row_runs,
+        reset_row_runs!
+
+    const runs_lock = ReentrantLock()
+    const runs = Dict{String,Int}()
+    hit!(key) = lock(() -> (runs[key] = get(runs, key, 0) + 1), runs_lock)
+    row_runs(key) = lock(() -> get(runs, key, 0), runs_lock)
+    reset_row_runs!() = lock(() -> empty!(runs), runs_lock)
+
+    @dynamicstruct struct Rows
+        dir::String
+        @struct row(name::String) = begin
+            file = TrackedFile(joinpath(dir, name); read = path -> Base.read(path, String))
+            html = (hit!(name); read(file))
+        end
+    end
+
+    rows_html(rows) = join((rows.row(name).html for name in ("a", "b")), ",")
+
+    # The default is never read: the routed instance overrides it.
+    @htmx struct OverrideRowsApp
+        rows = Rows(mktempdir())
+        request = hit!("request")
+        @direct @get index() = h.p("rows=$(rows_html(rows)) request=$request")
+    end
+
+    @htmx struct FixedRowsApp
+        rows::Rows
+        @direct @get index() = h.p("rows=$(rows_html(rows))")
+    end
+
+    function rows_dir()
+        dir = mktempdir()
+        write(joinpath(dir, "a"), "A1")
+        write(joinpath(dir, "b"), "B1")
+        dir
+    end
+
+    rows_get(target) = String(HTMXObjects._message_body_bytes(
+        dispatch(:GET, target; headers=["HX-Request" => "true"])))
+end
+
+@testitem "an object handed to route! is shared by every request root and synced per request" setup=[RetainedObjectFixtures] tags=[:unit] begin
+    using HTMXObjects
+
+    reset_row_runs!()
+    dir = rows_dir()
+    route!(OverrideRowsApp(; rows=Rows(dir)); prefix="retained-override",
+           root_provider=RootProvider())
+    @test contains(rows_get("/retained-override"), "rows=A1,B1 request=1")
+    @test contains(rows_get("/retained-override"), "rows=A1,B1 request=2")
+    @test (row_runs("a"), row_runs("b")) == (1, 1)
+    # A different size moves the tracked stamp at any timestamp granularity.
+    write(joinpath(dir, "a"), "A2-changed")
+    @test contains(rows_get("/retained-override"), "rows=A2-changed,B1 request=3")
+    @test (row_runs("a"), row_runs("b")) == (2, 1)
+
+    reset_row_runs!()
+    dir = rows_dir()
+    route!(FixedRowsApp(Rows(dir)); prefix="retained-fixed", root_provider=RootProvider())
+    @test contains(rows_get("/retained-fixed"), "rows=A1,B1")
+    @test contains(rows_get("/retained-fixed"), "rows=A1,B1")
+    @test (row_runs("a"), row_runs("b")) == (1, 1)
+    write(joinpath(dir, "b"), "B2-changed")
+    @test contains(rows_get("/retained-fixed"), "rows=A1,B2-changed")
+    @test (row_runs("a"), row_runs("b")) == (1, 2)
+end
