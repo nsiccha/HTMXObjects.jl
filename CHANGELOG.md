@@ -1,12 +1,13 @@
 # Changelog
 
-All notable changes to HTMXObjects.jl are documented here, newest first. This
-project follows [semantic versioning](https://semver.org/): before 1.0 the
-minor digit is the breaking one.
+All notable changes to HTMXObjects.jl are documented here, newest first.
 
 Every landing that adds or changes public API (an export, a keyword, a method,
 or documented behaviour a dependant can call) bumps the patch digit in
 `Project.toml` and adds its entry under a new heading at the top of this file.
+An entry that breaks something a dependant relies on says **Breaking:** and
+what to change. The minor digit, the breaking one in
+[semantic versioning](https://semver.org/) before 1.0, has not moved yet.
 A package or app that calls that API states the version as its floor, for
 example `[compat] HTMXObjects = "0.1.1"`. An environment that pins an older
 HTMXObjects commit is then refused when it resolves, with
