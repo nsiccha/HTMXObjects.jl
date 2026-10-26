@@ -3281,8 +3281,10 @@ _is_title_node(node) = node isa Node && HTMX.tag(node) === :title
 # defaults. A dynamic scope rather than keywords, because the shell is a plain
 # function that the root's `__page__` calls, and neither sees the leaf; the
 # response handler sets it around the whole answer, error page included.
+# `__progress_pause__` rides along for Treebars, which reads it while it
+# renders a poller or a live board (`page_progress_pause`).
 const _PAGE_META = :htmxo_page_meta
-const _NO_PAGE_META = (; lang=nothing, title=nothing)
+const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing)
 
 _page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
 _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
@@ -3307,17 +3309,40 @@ the value before handing work off.
 """
 page_lang() = _page_meta().lang
 
+"""
+    HTMXObjects.page_progress_pause() -> Union{Bool,Nothing}
+
+Whether the progress displays of the answer being produced offer a pause
+control: the `__progress_pause__` that the route's mount chain declares (the
+innermost declaration wins), or `nothing` when it declares none, as outside a
+route. `false` asks for no pause control; `true` asks for one.
+
+A visitor-facing app declares `__progress_pause__ = false` once on its root
+struct. Pausing a poller only freezes what the page shows while the work runs
+on, which a visitor reads as a stuck page. Treebars' `:auto` pollers and live
+boards read the value and leave out their ❚❚ / Pause control; `nothing` shows
+it, as before.
+
+It holds where [`HTMXObjects.page_lang`](@ref) holds: on the request's own
+task, while the route's property runs and while its answer is rendered (an
+`:auto` poller and its poll answers, the page shell, an error page). A
+computation that runs in the background sees `nothing`.
+"""
+page_progress_pause() = _page_meta().progress_pause
+
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
-    lang = title = nothing
+    lang = title = progress_pause = nothing
     for obj in objects
         declared = _page_declaration(obj, :__lang__)
         isnothing(declared) || (lang = _page_lang_value(obj, declared))
         declared = _page_declaration(obj, :__title__)
         isnothing(declared) || (title = _page_title_value(obj, declared))
+        declared = _page_declaration(obj, :__progress_pause__)
+        isnothing(declared) || (progress_pause = _page_progress_pause_value(obj, declared))
     end
-    (; lang, title)
+    (; lang, title, progress_pause)
 end
 
 _page_declaration(obj, name) = hasproperty(obj, name) ? getproperty(obj, name) : nothing
@@ -3329,6 +3354,8 @@ _page_lang_value(obj, lang) =
 _page_title_value(obj, title::AbstractString) = isempty(title) ?
     _page_declaration_error(obj, :__title__, "a non-empty string", title) : String(title)
 _page_title_value(obj, title) = _page_declaration_error(obj, :__title__, "a non-empty string", title)
+_page_progress_pause_value(obj, pause::Bool) = pause
+_page_progress_pause_value(obj, pause) = _page_declaration_error(obj, :__progress_pause__, "true or false", pause)
 
 _page_declaration_error(obj, name, wanted, got) = throw(ArgumentError(string(
     "`", name, "` on ", nameof(typeof(obj)), " must be ", wanted,
@@ -19424,6 +19451,31 @@ function htmxoGroupBy(target) {
     if (!wrapper) throw new Error('htmxoGroupBy: no regroupable table at ' + target);
     return JSON.parse(wrapper.dataset.htmxoGroupBy);
 }
+// A request from inside a regroupable table that carries `group_by` (in its
+// URL, a form field or `hx-vals`) sends the table's current grouping, once.
+// The browser regroups without rendering the rows again, so a `group_by` the
+// server wrote into a row's action URL, form or `detail_url` names the
+// grouping of that render; an update rendered for it would be refused. The
+// pills' own request asks for the grouping they are changing to.
+if (!window.htmxoGroupByBound) {
+    window.htmxoGroupByBound = true;
+    document.addEventListener('htmx:configRequest', e => {
+        const d = e.detail, el = d.elt;
+        const wrapper = el && el.closest && el.closest('[data-htmxo-group-by]');
+        if (!wrapper || el.closest('.htmxo-group-pills')) return;
+        const url = new URL(d.path, document.baseURI);
+        const inUrl = url.searchParams.has('group_by'), inParams = d.parameters.group_by !== undefined;
+        if (!inUrl && !inParams) return;
+        const levels = JSON.parse(wrapper.dataset.htmxoGroupBy);
+        if (inParams) d.parameters.group_by = levels;
+        // A GET sends its parameters in the URL as well: keep one copy.
+        const urlLevels = inParams && d.useUrlParams ? [] : levels;
+        if (!inUrl || JSON.stringify(url.searchParams.getAll('group_by')) === JSON.stringify(urlLevels)) return;
+        url.searchParams.delete('group_by');
+        urlLevels.forEach(v => url.searchParams.append('group_by', v));
+        d.path = url.origin === location.origin ? url.pathname + url.search + url.hash : url.href;
+    });
+}
 
 // --- Grouping pills: master_detail_table(...; groupings, group_by) ---
 // The active pills name the grouping levels, outermost first. A change sets
@@ -21786,9 +21838,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   level stays on. Every
   leaf carries its keys under each grouping, and leaves the current grouping
   leaves out wait beside the table. With `select_form` the grouping is also
-  submitted with that form. In the browser, `htmxoGroupBy(target)` returns the
-  `group_by` values of the table's current grouping, e.g. for an action's
-  `hx-vals`, and the table fires `htmxo:regrouped` after each change.
+  submitted with that form. An htmx request from inside the table that carries
+  `group_by` (in its URL, a form field or `hx-vals`) sends the current
+  grouping, once, so a `group_by` written into a row's action URL, form or
+  `detail_url` before a regroup still reaches the route as the grouping the
+  reader sees. In the browser, `htmxoGroupBy(target)` returns the `group_by`
+  values of the table's current grouping, e.g. for the `hx-vals` of an
+  element outside the table, and the table fires `htmxo:regrouped` after each
+  change.
 - `group_by_url`: the route that renders this table for the `group_by` and `q`
   (the current search) it receives, for what the browser cannot build: group
   rows from `group_master`, which replace the browser's after each regroup (a

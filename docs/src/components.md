@@ -929,9 +929,12 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
   `group_by` would reach a `Vector{String}` route as no values, and
   `query_url` would drop it from the action URLs.
 - **The grouping elsewhere.** A bulk form named by `select_form` receives the
-  levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
-  returns the `group_by` values of the table's current grouping, e.g. for an
-  action's `hx-vals`
+  levels as `group_by` values. An htmx request from inside the table that
+  carries `group_by` (in its URL, a form field or `hx-vals`) sends the
+  table's current grouping, once, whatever grouping the row was rendered for
+  (see *Row updates*). In the browser, `htmxoGroupBy('#documents')` returns
+  the `group_by` values of the table's current grouping, e.g. for a script, or
+  for the `hx-vals` of an element outside the table
   (`js:{group_by: htmxoGroupBy('#documents')}`).
 - **Lazy groups** load at any level. The subgroups of a loaded group can be
   lazy in turn, and *Expand all* loads and opens them all.
@@ -1086,9 +1089,13 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
   `update_rows=id, update_groups=[old, new]`.
 - **The grouping.** Render the update for the grouping the reader sees: pass
   `group_by` into the action URLs that `master` and `group_master` build, as
-  above. An update rendered for another grouping is refused with an error
-  toast, and the table is left as it was. In the flat view `update_groups`
-  names no rows.
+  above, or into a form in a detail, or a `detail_url`. The browser regroups
+  without rendering the rows again, so those values still name the grouping
+  of their render; an htmx request from inside the table that carries
+  `group_by` therefore sends the table's current grouping instead, once (a
+  `group_by` in both the URL and `hx-vals` is not doubled). An update rendered
+  for another grouping is refused with an error toast, and the table is left
+  as it was. In the flat view `update_groups` names no rows.
 - **Transport and toasts.** Like any route whose response is table rows,
   declare the action `@direct` (see `OperationPolicy`): an interim poller
   cannot stand in a table row. The response body is rows, so name a success
