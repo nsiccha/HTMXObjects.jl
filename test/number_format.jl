@@ -115,7 +115,7 @@ end
     tx = [(; id="p$i", party=isodd(i) ? "Acme" : "Bakery", amount=-1000.5 * i) for i in 1:4]
     lazy = html(master_detail_table(["Party", "Amount"], tx; key=t -> t.id,
         master=t -> (h.td(t.party), t.amount), detail=t -> h.p("d"), texts=de,
-        groupings=["party" => t -> t.party], group_by="party", group_rows_url=(k, ms) -> "/rows?key=$k"))
+        groupings=["party" => t -> t.party], group_by=["party"], group_rows_url=(k, ms) -> "/rows?key=$k"))
     @test contains(lazy, "[&quot;p1&quot;,&quot;Acme -1.000,5&quot;]")
 end
 

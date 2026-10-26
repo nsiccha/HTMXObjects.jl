@@ -11491,9 +11491,12 @@ end
 # Here, once, is the right place: it is the single seam every request's root
 # passes through, and it runs before any property is read, so a request never
 # observes a half-invalidated object. A `:request`-scoped root is freshly built
-# and has nothing to drop, which costs one integer compare per tracked value;
-# `:session`/`:job` roots outlive requests and are exactly the case that needs
-# it. There is no hot-path cost — property reads are untouched.
+# and has computed nothing, so this walks only its fields and constructor
+# overrides. One of those can be an object the app retains across requests by
+# handing it to `route!` (`route!(App(; rows=Rows(dir)))`, docs "Scoped root
+# lifecycle"): it is synced here on every request, at one probe per tracked file
+# it holds. `:session`/`:job` roots outlive requests and need it for everything
+# they cached. Property reads are untouched.
 #
 # Guarded, not required: an older DynamicObjects has no `sync!`, and a non-DO
 # root (a custom provider may return one) has no method for it. Neither is an
@@ -19209,7 +19212,7 @@ function htmxoGroupedQuery(el) {
     return input ? input.value : '';
 }
 // The `group_by` values that render a regroupable table's current grouping
-// again (repeated values for an ordered grouping), e.g. for an action's
+// again (one value per level), e.g. for an action's
 // `hx-vals`: `js:{group_by: htmxoGroupBy('#tx')}`. `target` is a selector or
 // an element in or around the table.
 function htmxoGroupBy(target) {
@@ -19220,7 +19223,7 @@ function htmxoGroupBy(target) {
     return JSON.parse(wrapper.dataset.htmxoGroupBy);
 }
 
-// --- Grouping pills: master_detail_table(...; groupings, group_by=[...]) ---
+// --- Grouping pills: master_detail_table(...; groupings, group_by) ---
 // The active pills name the grouping levels, outermost first. A change sets
 // the pending levels and fires `htmxo-regroup`, which the pills' own hx-get
 // answers by re-rendering the table (`htmxoGroupPending` supplies the values).
@@ -19459,7 +19462,7 @@ function htmxoRegroup(wrapper, levels) {
         toggle.setAttribute('aria-expanded', open);
         if ('htmxoSelectKey' in row.dataset) {
             row.dataset.htmxoSelectKey = gid;
-            row.dataset.htmxoSelectValue = cfg.ordered ? htmxoJsonList(path) : name;
+            row.dataset.htmxoSelectValue = htmxoJsonList(path);
         }
         if ('htmxoSearch' in row.dataset) row.dataset.htmxoSearch = name;
         row.querySelector('[data-htmxo-group-label]').textContent = name;
@@ -19487,12 +19490,10 @@ function htmxoRegroup(wrapper, levels) {
     body.replaceChildren(placedRows);
     if (store) store.content.replaceChildren(rest);
     if (window.htmx) out.forEach(r => { if (fresh.has(r)) htmx.process(r); });
-    wrapper.dataset.htmxoGrouped = cfg.ordered ? htmxoJsonList(levels) : (levels.length ? levels[0] : cfg.flat);
+    wrapper.dataset.htmxoGrouped = htmxoJsonList(levels);
     wrapper.dataset.htmxoGroupBy = htmxoJsonList(levels.length ? levels : [cfg.flat ?? '']);
     const pills = wrapper.querySelector('.htmxo-group-pills');
     if (pills) htmxoGroupPillsSync(pills, levels);
-    const select = wrapper.querySelector('select[name="group_by"]');
-    if (select) select.value = wrapper.dataset.htmxoGrouped;
     htmxoResort(table);
     const root = wrapper.querySelector('.htmxo-searchable-table');
     if (root) { htmxoTreeRestore(root, htmxoSearchOf(root)); htmxoFilterTable(root); }
@@ -19556,11 +19557,6 @@ function htmxoGroupPillsSync(pills, levels) {
         input.setAttribute('form', form);
         pills.append(input);
     });
-}
-// The single-name Group by select.
-function htmxoGroupSelect(select) {
-    const wrapper = select.closest('[data-htmxo-grouped]'), cfg = htmxoRegroupConfig(wrapper);
-    htmxoRegroup(wrapper, select.value === cfg.flat ? [] : [select.value]);
 }
 // htmx returns focus to the pill control the user pressed (same id) after
 // the table is re-rendered; one that is now disabled (a ‹/› at the end of
@@ -19676,11 +19672,10 @@ function htmxoLinkMove(to, from) {
 }
 // How many levels a group row whose rows have not loaded sits above its
 // leaves: the grouping levels below its own (`data-htmxo-grouped` holds a
-// JSON list of the levels, else names the one grouping).
+// JSON list of the levels).
 function htmxoLinkLazyDepth(row) {
     const wrapper = row.closest('[data-htmxo-grouped]');
-    const grouped = wrapper ? wrapper.dataset.htmxoGrouped : '';
-    const levels = grouped.startsWith('[') ? JSON.parse(grouped).length : 1;
+    const levels = wrapper ? JSON.parse(wrapper.dataset.htmxoGrouped).length : 1;
     return Math.max(1, levels + 1 - Number(row.getAttribute('aria-level') || 1));
 }
 // Scroll `row` into view inside the nearest scroll box around it, never the
@@ -19972,7 +19967,7 @@ struct TableTexts
     collapse_all::String
     toggle_children::String     # accessible name of a branch's ▸/▾ control
     details::String             # accessible name of a row's detail control
-    group_by::String            # label of the Group by select or pills
+    group_by::String            # label of the Group by pills
     group_add::String           # tooltip: an inactive pill, nothing grouped yet
     group_add_inner::String     # tooltip: an inactive pill beside active levels
     group_level::String         # tooltip: an active pill among several levels
@@ -21401,15 +21396,20 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   with `group_rows_url`), so that leaf and its detail show on first paint. With
   `initially_open=true` every rendered group is open and lazy groups stay lazy.
   See *Regroupable tables* in `docs/src/components.md`.
-- `group_by`: the active grouping's name (default: the first), or an ordered
-  list of names that nests the groups level by level, the first outermost
-  (`["Review stage", "Document type"]`). A member with no key at an inner
-  level is listed directly in its outer group. A list names each group by its
-  path, a JSON array of its level keys (`["Open","Invoice"]`, decoded by
-  `HTMXObjects.group_path`): the `key` the group callbacks
-  receive, the value a selected group row submits, and what `group_rows` and
-  `update_groups` take. In a list, the flat grouping's name or `""` (alone)
-  means no levels. An unknown or repeated name throws an `ArgumentError`.
+- `group_by`: the active levels, an ordered list of grouping names that nests
+  the groups level by level, the first outermost (`["Review stage",
+  "Document type"]`); a single name (default: the first grouping) is a
+  one-name list. A member with no key at an inner level is listed directly in
+  its outer group. Each group is named by its path, a JSON array of its level
+  keys (`["Open","Invoice"]`, decoded by `HTMXObjects.group_path`): the `key`
+  the group callbacks receive, the value a selected group row submits, and
+  what `group_rows` and `update_groups` take. The flat grouping's name or `""`
+  (alone) means no levels. An unknown or repeated name throws an
+  `ArgumentError`, and so does a single name (or none) together with
+  `group_master`, `group_by_url`, `group_rows_url`, `select_form`,
+  `group_rows` or `update_groups`: those give the grouping and the group keys
+  to your own code, so write `group_by` as a list there and declare every
+  route's `group_by::Vector{String}`.
 - `group_summary`: `column label => ColumnSummary(...)` pairs (see
   [`ColumnSummary`](@ref)): each named column of a group row shows that summary
   of the group's leaves, a sum, mean, minimum, maximum, count or ratio of two
@@ -21422,10 +21422,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   `group_by_url`.
 - The *Group by* control: a table with two or more groupings regroups in the
   browser, with no request, so a page recorded with [`record!`](@ref) and
-  served as plain files regroups too. A single `group_by` name gets a select.
-  A list gets one pill per grouping: a pill turns its level on (as the
-  innermost) or off, and the active pills reorder by drag, by their ‹ ›
-  buttons or with ←/→; without a flat grouping the last level stays on. Every
+  served as plain files regroups too. It has one pill per grouping: a pill
+  turns its level on (as the innermost) or off, and the active pills reorder
+  by drag, by their ‹ › buttons or with ←/→; without a flat grouping the last
+  level stays on. Every
   leaf carries its keys under each grouping, and leaves the current grouping
   leaves out wait beside the table. With `select_form` the grouping is also
   submitted with that form. In the browser, `htmxoGroupBy(target)` returns the
@@ -21437,9 +21437,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   hidden element asks for them, so a recording, which strips that request,
   keeps the control live with the browser's group rows), and lazy groups
   (`group_rows_url`), whose control asks this URL instead of regrouping in the
-  browser and appears only with it. A list sends its levels
-  as repeated `group_by` values, or for none the flat grouping's name, so
-  declare the route's `group_by::Vector{String}`.
+  browser and appears only with it. It receives the levels as repeated
+  `group_by` values, or for none the flat grouping's name, so declare the
+  route's `group_by::Vector{String}`.
 - `group_rows_url(key, members)`: return a URL to load that group's rows on
   first expand (or `nothing` to render them). The route renders the same call
   with `group_rows=key`, which returns a `<tbody data-htmxo-group-rows>` of just
@@ -21852,13 +21852,13 @@ end
 """
     HTMXObjects.group_path(key) -> Vector{String}
 
-The level keys, outermost first, of a group in a [`master_detail_table`](@ref)
-grouped by an ordered `group_by` list. Such a table names each group by its
-path, encoded as a JSON array of strings (`["Open","Invoice"]`): the `key` its
-`group_master` and `group_rows_url` callbacks receive, the value a selected
-group row submits, and what `group_rows` and `update_groups` take. A table
-grouped by a single name keeps plain keys and needs no decoding. Malformed
-input throws an `ArgumentError`.
+The level keys, outermost first, of a group in a regroupable
+[`master_detail_table`](@ref). Such a table names each group by its path,
+encoded as a JSON array of strings (`["Open","Invoice"]`, `["Acme"]` for one
+level): the `key` its `group_master` and `group_rows_url` callbacks receive,
+the value a selected group row submits, and what `group_rows` and
+`update_groups` take. Display a group's own key with `last(group_path(key))`.
+Malformed input throws an `ArgumentError`.
 """
 function group_path(key::AbstractString)
     bad() = throw(ArgumentError("group_path: not a JSON array of strings: $(repr(key))"))
@@ -22266,14 +22266,28 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     by_name = Dict(n => last(g) for (n, g) in zip(names, groupings))
     flat = findfirst(n -> isnothing(by_name[n]), names)
     flat_name = isnothing(flat) ? nothing : names[flat]
-    # A list of names orders several levels, outermost first, and names each
-    # group by its path (`group_path`); a single name keeps one level and
-    # plain group keys. In a list, the flat grouping or "" means no levels.
-    ordered = group_by isa Union{AbstractVector,Tuple}
-    requested = ordered ? String[string(n) for n in group_by] :
-        String[isnothing(group_by) ? first(names) : string(group_by)]
+    # `group_by` lists the levels, outermost first, and each group is named
+    # by its path (`group_path`); a single name is a one-name list. The flat
+    # grouping or "" means no levels.
+    single = !(group_by isa Union{AbstractVector,Tuple})
+    requested = single ? String[isnothing(group_by) ? first(names) : string(group_by)] :
+        String[string(n) for n in group_by]
+    # These hand the grouping and the group keys to the app's own code, which
+    # gets a list and paths whichever way `group_by` is written; a single name
+    # there is code written for the plain keys a single name used to give.
+    if single
+        hooks = [string(n) for (n, v) in (:group_master => group_master, :group_by_url => group_by_url,
+            :group_rows_url => group_rows_url, :select_form => select_form, :group_rows => group_rows,
+            :update_groups => update_groups) if !isnothing(v)]
+        isempty(hooks) || throw(ArgumentError(string("master_detail_table: group_by=", repr(group_by),
+            " is a single name, but ", join(hooks, ", "), length(hooks) == 1 ? " gives" : " give",
+            " the grouping and the group keys to your own code, ",
+            "and they arrive as a list of levels and as paths such as [\"Acme\"]. Pass group_by as a list (group_by=",
+            repr(requested), "), declare every route's `group_by::Vector{String}`, and read a group's own key ",
+            "with last(HTMXObjects.group_path(key))")))
+    end
     for n in requested
-        ordered && isempty(n) || n in names || throw(ArgumentError(string("master_detail_table: unknown group_by ",
+        isempty(n) || n in names || throw(ArgumentError(string("master_detail_table: unknown group_by ",
             repr(n), "; groupings are ", join(repr.(names), ", "))))
     end
     levels = String[n for n in requested if !isempty(n) && !isnothing(by_name[n])]
@@ -22284,10 +22298,10 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     fns = [by_name[n] for n in levels]
     # What the rows are grouped by (a row update must match it), and the
     # `group_by` values a request sends to render this grouping again.
-    grouped_by = ordered ? _md_json_list(levels) : only(requested)
-    group_by_values = !ordered ? requested : isempty(levels) ? [something(flat_name, "")] : levels
+    grouped_by = _md_json_list(levels)
+    group_by_values = isempty(levels) ? [something(flat_name, "")] : levels
     nlevels == 0 && !isnothing(group_rows) && throw(ArgumentError(
-        "master_detail_table: group_rows needs a grouping, but $(repr(ordered ? requested : only(requested))) is ungrouped"))
+        "master_detail_table: group_rows needs a grouping, but $(repr(requested)) is ungrouped"))
     update = !isnothing(update_rows) || !isnothing(update_groups)
     update && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows loads a lazy group; update_rows/update_groups are a separate response"))
@@ -22308,20 +22322,12 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     serve = !isnothing(group_by_url) && !browser
     refresh = !isnothing(group_by_url) && browser && !isnothing(group_master)
     table_id = string(get(kwargs, :id, "htmxo-grouped-" * string(hash(names); base=36)))
-    # The Group by control joins the tree controls; with a bulk form it is
-    # also submitted there, so a group selection arrives with its grouping.
-    # An ordered `group_by` gets pills that turn levels on and off and
-    # reorder them; a single name, the select.
+    # The Group by control, pills that turn levels on and off and reorder
+    # them, joins the tree controls; with a bulk form the grouping is also
+    # submitted there, so a group selection arrives with its grouping.
     control = isnothing(group_rows) && !update && (browser ? length(names) > 1 : !isnothing(group_by_url))
-    toolbar = !control ? () :
-        ordered ? (_md_group_pills(names, by_name, levels, flat_name, group_by_values, serve ? group_by_url : nothing,
-            select_form, table_id, texts),) :
-        (h.label(texts.group_by,
-            h.select(; name="group_by", (browser ? (; onchange="htmxoGroupSelect(this)") : (;))...,
-                (serve ? (; hx_get=string(group_by_url), hx_target="closest [data-htmxo-grouped]",
-                            hx_swap="outerHTML", hx_vals="js:{q: htmxoGroupedQuery(this)}") : (;))...,
-                (isnothing(select_form) ? (;) : (; form=select_form))...)(
-                (h.option(n; value=n, (n == grouped_by ? (; selected=true) : (;))...) for n in names)...)),)
+    toolbar = !control ? () : (_md_group_pills(names, by_name, levels, flat_name, group_by_values,
+        serve ? group_by_url : nothing, select_form, table_id, texts),)
     toolbar = !(control && refresh) ? toolbar : (toolbar...,
         h.span(; hidden=true, data_htmxo_group_refresh="", hx_get=string(group_by_url), hx_trigger="htmxo-regroup",
             hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
@@ -22332,8 +22338,8 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # row key (and so its row id) joins its level keys. A leaf's row key
     # names the group it is listed under; the flat view lists each leaf once,
     # under its own key.
-    gkey(path) = ordered ? _md_json_list(path) : only(path)
-    gpath(k) = ordered ? group_path(string(k)) : [string(k)]
+    gkey(path) = _md_json_list(path)
+    gpath(k) = group_path(string(k))
     gid(path) = "group:" * join(path, "/")
     leaf_row_key(x) = isempty(x.group) ? string(key(x.item)) : x.group * "/" * string(key(x.item))
     # What the browser regroups a leaf by: its keys under every grouping, its
@@ -22466,7 +22472,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         path
     end
     # Indentation for every level the browser can regroup to.
-    deepest = !browser ? 0 : ordered ? length(grouping_names) + 1 : isempty(grouping_names) ? 1 : 2
+    deepest = !browser ? 0 : length(grouping_names) + 1
     tree(roots, children_of, group_row; rows_only=false) = master_detail_table(headers, roots;
         key = x -> x isa _MDGroup ? gid(x.path) : leaf_row_key(x),
         master = x -> x isa _MDGroup ? group_row(x.key, x.members) : master(x.item),
@@ -22517,12 +22523,12 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         (isempty(unplaced) ? () : tree(unplaced, _ -> (), gmaster; rows_only=true))...))
     config = string("{\"names\":", _md_json_list(grouping_names),
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
-        ",\"ordered\":", ordered, ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
+        ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
         ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",\"digits\":$(s.digits)}" for (_, s) in summaries), ","), "]}")
     h.div(; grouping..., data_htmxo_regroup=config)(template..., store, built)
 end
 
-# The ordered Group by control: one pill per grouping, the active ones first
+# The Group by control: one pill per grouping, the active ones first
 # in level order. A pill toggles its level (on as the innermost one); the
 # active pills reorder by drag, by their ‹ › buttons or by ←/→. Each change
 # regroups the table in the browser (`htmxoRegroup`), which then sets the

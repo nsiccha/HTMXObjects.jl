@@ -323,7 +323,7 @@ document.addEventListener('htmxo:table-filtered', e => {
 #### Controls and headers stay in view {#table-sticky}
 
 The controls a table draws itself share one line above it: the search field
-with its count, then a `master_detail_table`'s *Group by* (select or pills) and
+with its count, then a `master_detail_table`'s *Group by* pills and
 *Expand all* / *Collapse all*, then the selection bar. The line wraps only
 when the window is too narrow. While the table is in view, that line stays at
 the top of the window and the column headers stay just below it, so a reader
@@ -513,7 +513,7 @@ The texts cover everything these tables write themselves: the search field
 (`search`, `count`, `empty`), the selection bar (`selected`,
 `selected_filtered`, `selected_collapsed`, `select_all`, `clear_selection`),
 *Expand all* / *Collapse all*, the accessible names of the ▸ and ⓘ controls
-(`toggle_children`, `details`), the *Group by* select and its pills
+(`toggle_children`, `details`), the *Group by* pills
 (`group_by`, `group_add`, `group_add_inner`, `group_level`, `group_kept`,
 `group_stop`, `group_earlier`, `group_later`), lazy-detail status lines
 (`loading`, `retrying`, `load_failed`), the toasts of a lazy group that fails
@@ -729,7 +729,7 @@ groupings = ["None" => nothing,
              "IBAN" => t -> t.iban,
              "Rule" => t -> matching_rule_names(t)]   # several keys: listed under each
 
-transactions_table(group_by="Counterparty") = master_detail_table(
+transactions_table(group_by=["Counterparty"]) = master_detail_table(
     ["Counterparty", "Date", "Amount"], transactions;
     key = t -> t.id,
     master = t -> (h.td(t.party), h.td(t.date), h.td(string(t.amount))),
@@ -755,14 +755,25 @@ transactions_table(group_by="Counterparty") = master_detail_table(
   `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
   (a shared IBAN, a rule matching several counterparties) gets one row per
   group, each with its own id.
-- **Group by.** With two or more groupings a *Group by* select joins the tree
-  controls (for a `group_by` list, pills: see
-  [Nested levels](#table-grouping-levels)). A change regroups in the browser:
-  the search, the selection, the sort and the groups the reader opened carry
-  over, a group holding a leaf whose detail is open opens, and the table fires
-  `htmxo:regrouped` with the new `group_by` values. With `select_form` the
-  select is associated with that form, so a bulk submission carries the active
-  grouping. An unknown `group_by` throws an `ArgumentError`.
+- **Group by.** With two or more groupings the *Group by* pills join the tree
+  controls, one per grouping, and the reader can nest, reorder and drag them
+  (see [Nested levels](#table-grouping-levels)). A change regroups in the
+  browser: the search, the selection, the sort and the groups the reader
+  opened carry over, a group holding a leaf whose detail is open opens, and
+  the table fires `htmxo:regrouped` with the new `group_by` values. With
+  `select_form` the grouping is submitted with that form, so a bulk
+  submission carries the active levels. An unknown `group_by` throws an
+  `ArgumentError`.
+- **`group_by` is a list of levels.** `group_by=["Counterparty"]` groups by
+  one level; a single name, `group_by="Counterparty"`, is the same one-name
+  list. Group keys are paths (`["Acme"]`, see
+  [Nested levels](#table-grouping-levels)) and a route receives the levels as
+  repeated `group_by` values, so a table that gives the grouping or its group
+  keys to your own code (`group_master`, `group_by_url`, `group_rows_url`,
+  `select_form`, `group_rows`, `update_groups`) passes `group_by` as a list,
+  and every route taking it declares `group_by::Vector{String}`. A single name
+  there throws an `ArgumentError` saying so, rather than handing code written
+  for plain keys a path.
 - **Group rows from the server.** The browser cannot run two things: your own
   `group_master(key, members)`, whose group row cells may hold anything Julia
   renders (links, a rule-mode select), and lazy groups (`group_rows_url`),
@@ -787,20 +798,20 @@ transactions_table(group_by="Counterparty") = master_detail_table(
       group_by_url = self / "table",
       group_rows_url = (key, members) -> length(members) > 200 ?
           query_url(self / "rows"; group_by, key) : nothing,
-      group_master = (key, members) -> (h.td(h.strong(key)), h.td(rule_mode_select(key)),
-          h.td(string(sum(m.amount for m in members)))),
+      group_master = (key, members) -> (h.td(h.strong(last(HTMXObjects.group_path(key)))),
+          h.td(rule_mode_select(key)), h.td(string(sum(m.amount for m in members)))),
       searchable = true, search_query = q, expand_controls = true,
       selectable = "tx", select_form = "bulk")
 
-  @get table(; group_by::String="Counterparty", q::String="") =
+  @get table(; group_by::Vector{String}=["Counterparty"], q::String="") =
       transactions_table(__self__, group_by, q)
-  @get rows(; group_by::String="Counterparty", key::String="") =
+  @get rows(; group_by::Vector{String}=["Counterparty"], key::String="") =
       transactions_table(__self__, group_by; group_rows=key)
   ```
 - **Selection.** Keys are per leaf. Selecting a leaf selects every copy, it is
   submitted once, and the selection survives regrouping and the flat view.
   Group rows are selectable too and submit their key under
-  `<selectable>_group` (here `tx_group=Shops`), so a bulk action can apply to
+  `<selectable>_group` (here `tx_group=["Shops"]`), so a bulk action can apply to
   whole groups; a group selection ends when the grouping changes.
 - **Search.** A group row's text (its key and summary) is matched like any
   ancestor's, so search finds groups and leaves. `search_query` pre-fills the
@@ -833,10 +844,10 @@ transactions_table(group_by="Counterparty") = master_detail_table(
 
 ##### Nested levels and grouping pills {#table-grouping-levels}
 
-Pass `group_by` as an ordered list to nest the groups level by level, the
-first outermost. The *Group by* control is then a row of pills, one per
-grouping: a pill turns its level on (as the innermost) or off, and the active
-pills reorder by dragging, by their ‹ › buttons, or with ←/→ on a focused pill.
+`group_by` lists the levels that nest the groups, the first outermost. The
+*Group by* control is a row of pills, one per grouping: a pill turns its level
+on (as the innermost) or off, and the active pills reorder by dragging, by
+their ‹ › buttons, or with ←/→ on a focused pill.
 No active pill is the flat view. Each change regroups in the browser, at
 every level. A table whose group rows or lazy groups need the server also
 re-renders through `group_by_url`, sending the levels as repeated `group_by`
@@ -868,18 +879,17 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
   `key` that `group_master` and `group_rows_url` receive, the value a selected
   group row submits (`tx_group=["Open","Invoice"]`), and what `group_rows` and
   `update_groups` take. `HTMXObjects.group_path(key)` decodes it. The default
-  group row shows the group's own key; indentation shows the level. A single
-  `group_by` name keeps one level, plain keys and the select.
+  group row shows the group's own key; indentation shows the level. One level
+  has paths too (`["Acme"]`), also when `group_by` is written as a single name.
 - **The flat view.** With no active pill the pills send the flat grouping's
   name (here `None`); a `group_by` list of `[]`, `[""]` or `["None"]` renders
-  the leaves. Without a flat grouping the last active pill stays on, as the
-  select offers only the declared groupings: an empty `group_by` would reach a
-  `Vector{String}` route as no values, and `query_url` would drop it from the
-  action URLs.
+  the leaves. Without a flat grouping the last active pill stays on: an empty
+  `group_by` would reach a `Vector{String}` route as no values, and
+  `query_url` would drop it from the action URLs.
 - **The grouping elsewhere.** A bulk form named by `select_form` receives the
   levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
-  returns the `group_by` values of the table's current grouping, for either
-  form of `group_by`, e.g. for an action's `hx-vals`
+  returns the `group_by` values of the table's current grouping, e.g. for an
+  action's `hx-vals`
   (`js:{group_by: htmxoGroupBy('#documents')}`).
 - **Lazy groups** load at any level. The subgroups of a loaded group can be
   lazy in turn, and *Expand all* loads and opens them all.
@@ -903,15 +913,15 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
     master = t -> (h.td(t.party), h.td(t.category),
         h.td(h.button("Flag"; hx_post=query_url(self / "flag"; id=t.id, group_by),
                       hx_target="closest tr", hx_swap="outerHTML"))),
-    group_master = (key, members) -> (h.td(h.strong(key)),
+    group_master = (key, members) -> (h.td(h.strong(last(HTMXObjects.group_path(key)))),
         h.td(rule_mode_select(self, key, group_by)), h.td(count_flagged(members))),
     groupings, group_by, searchable = true, search_query = q, id = "transactions", kw...)
 
-@direct @post flag(; id::String, group_by::String) =
+@direct @post flag(; id::String, group_by::Vector{String}) =
     (toggle_flag!(id); transactions_table(__self__, group_by; update_rows=id))
-@direct @post rule_mode(; group::String, mode::String, group_by::String) =
+@direct @post rule_mode(; group::String, mode::String, group_by::Vector{String}) =
     hx_response(transactions_table(__self__, group_by; update_groups=group);
-                toast="Rule for $group: $mode")
+                toast="Rule for $(last(HTMXObjects.group_path(group))): $mode")
 ```
 
 - **What comes back.** A `<tbody data-htmxo-row-update>` with each copy of the
