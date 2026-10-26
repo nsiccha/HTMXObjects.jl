@@ -1092,6 +1092,42 @@ host page and is left alone. `htmx()` pages carry the script that does
 this, `tabset_script()`; a page with its own `<head>` adds it next to
 `tabset_styles()`.
 
+#### Tabs in Markdown {#tabset-markdown}
+
+A `?plain` reader and a PDF ([`pdf_report`](api.md#pdf-report)) have no tab
+to click, so a tabset's Markdown has no tab bar. Every tab follows in order,
+its label in bold and then its content, the way a `SemanticDisclosure` writes
+its label and body:
+
+```julia
+tabset("Überblick" => SemanticProse("Bayes-Regression der Nettokaltmiete …"),
+       "Modelldefinition" => private(SemanticCode(:julia, model_source)),
+       "Ergebnisse" => "/ergebnisse")
+```
+
+reads, for a private reader:
+
+```markdown
+**Überblick**
+
+Bayes-Regression der Nettokaltmiete …
+
+**Modelldefinition**
+
+::: {.htmxo-private}
+…
+:::
+
+**[Ergebnisse](/ergebnisse)**
+```
+
+A tab whose content its reader does not see is left out with its label:
+read publicly, the `private` tab above has no stand-in, so its label goes too.
+A lazy tab has no content on the page, so its label links the address that
+has it. A label that is not text reads as its words. This holds for `?plain`,
+`to_markdown_string` and a direct `repr("text/markdown", …)` alike. The HTML
+does not change.
+
 ### `comparison_view` — tabs and selectable comparison columns {#comparison-view}
 
 ```julia

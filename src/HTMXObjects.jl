@@ -28910,6 +28910,54 @@ const _TABSET_URL_RESTORE = "(window.htmxoTabset || (ts => ts.closest('.htmxo-em
 _tabset_url_restore(::Nothing) = ()
 _tabset_url_restore(url_param) = (h.script(Raw(_TABSET_URL_RESTORE)),)
 
+# The tab bar or one panel of a `tabset`, in every format. HTML and HXML write
+# the node as the browser shows it. Markdown, which a `?plain` reader or a PDF
+# reads top to bottom with no tab to click, writes `markdown` instead: nothing
+# for the tab bar, and each tab as its label in bold followed by its content —
+# what `SemanticDisclosure` writes for a label and the body it opens, so a tab
+# whose content its reader does not see goes with its label. A lazy tab's
+# content is not on the page, so its label links the address that has it. The
+# walkers that read the HTML (`?error`, static export, prestart, layout checks)
+# see through to the node.
+struct _TabsetPart
+    node::Node
+    markdown::Any
+end
+Base.show(io::IO, m::MIME"text/html", p::_TabsetPart) = show(io, m, p.node)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", p::_TabsetPart) = show(io, m, p.node)
+function Base.show(io::IO, m::MIME"text/markdown", p::_TabsetPart)
+    _shows_nothing(p.markdown, _ambient_audience()) || show(io, m, p.markdown)
+    nothing
+end
+HTMX.markdown_block(p::_TabsetPart) = !_shows_nothing(p.markdown, _ambient_audience())
+filter_errors(p::_TabsetPart) = filter_errors(p.node)
+_filter_errors_child(p::_TabsetPart) = _filter_errors_child(p.node)
+_strip_md_chrome(p::_TabsetPart) = let markdown = _strip_md_chrome(p.markdown)
+    isnothing(markdown) ? nothing : _TabsetPart(p.node, markdown)
+end
+_strip_md_chrome_child(p::_TabsetPart) = _strip_md_chrome(p)
+_rescue_semantic!(out, p::_TabsetPart) = _rescue_semantic!(out, p.node)
+function _static_walk(p::_TabsetPart, rules::_StaticRules)
+    walked = _static_walk(p.node, rules)
+    walked === _STATIC_REMOVED ? walked : _TabsetPart(walked, p.markdown)
+end
+_static_walk_child(p::_TabsetPart, rules) = _static_walk(p, rules)
+_prestart_walk(p::_TabsetPart, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(p.node, walk, blocked), node -> _TabsetPart(node, p.markdown))
+_semantic_layout_children(p::_TabsetPart) = (p.node,)
+
+# A label that is not text reads as its words, as a master/detail row label does.
+_tabset_label_text(label::AbstractString) = label
+_tabset_label_text(label) = _md_label_text(Any[label])
+function _tabset_markdown(label, content)
+    name = _tabset_label_text(label)
+    isempty(name) ? content : SemanticDisclosure(name, Any[content])
+end
+function _tabset_markdown(label, url::AbstractString)
+    name = _tabset_label_text(label)
+    string("**[", isempty(name) ? url : name, "](", url, ")**")
+end
+
 include("comparison.jl")
 
 """
@@ -28958,6 +29006,13 @@ load after the page, and scrolls to a tabset that arrives in a fragment
 `active` picks the tab shown when the URL names none, by position or by name
 (`active="sonden"`). Keeping the tab in the URL needs [`tabset_script`](@ref),
 which [`htmx`](@ref) pages carry.
+
+Markdown (`?plain`, [`to_markdown_string`](@ref), [`pdf_report`](@ref)) has no
+tab to click, so it writes no tab bar: every tab follows in order, its label in
+bold and then its content, as a [`SemanticDisclosure`](@ref) writes its label
+and body. A tab whose content its reader does not see ([`private`](@ref)
+content read publicly, with no stand-in) is left out with its label, and a lazy
+tab is its label as a link to its address (`**[Details](/api/details)**`).
 """
 function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing,
                 url_param="tab", names=nothing)
@@ -28965,7 +29020,7 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
         _tabset_checked_names(_tabset_names(tabs, names))
     active = _tabset_active_index(active, tab_names)
     h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload)...)(
-        h.nav(
+        _TabsetPart(h.nav(
             h.ul([
                 h.li(h.a(label;
                     href="#",
@@ -28986,8 +29041,9 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
                 ))
                 for (i, (label, content)) in enumerate(tabs)
             ]...)
-        ),
-        [_tabset_panel(content, i, active, id) for (i, (_, content)) in enumerate(tabs)]...,
+        ), nothing),
+        [_TabsetPart(_tabset_panel(content, i, active, id), _tabset_markdown(label, content))
+         for (i, (label, content)) in enumerate(tabs)]...,
         _tabset_url_restore(url_param)...
     )
 end
