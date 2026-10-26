@@ -228,8 +228,31 @@ writes words of its own reads the language with
 and its answer is rendered. A `dispatch(…; lang)` answers in the language it
 names instead of the declared one ([In-process dispatch](#In-process-dispatch)).
 
+A struct on the mount chain can also declare `__progress_pause__`. A
+visitor-facing app sets `__progress_pause__ = false` once on its root, and
+Treebars' `:auto` pollers and live boards then show no ❚❚ / Pause control:
+pausing only freezes what the page shows while the work runs on, which a
+visitor reads as a stuck page. The status, bar, elapsed time and any Stop
+button stay. `true` shows the control and `nothing` keeps the enclosing
+struct's, with the innermost declaration winning as for `__lang__`; a struct
+mounted under such a root can switch it back on for an internal subtree. Any
+other value fails the route with an `ArgumentError` naming the struct. Treebars
+reads the value through [`HTMXObjects.page_progress_pause`](@ref), which holds
+where `page_lang` does, and follows it on a Treebars whose renderers take
+`pause=`; an explicit `pause=true`/`false` on a Treebars renderer wins.
+
+```julia
+@htmx struct App
+    __lang__ = "de"
+    __progress_pause__ = false
+    __page__(content) = HTMXObjects.pico_page(content)
+    # ...
+end
+```
+
 ```@docs
 HTMXObjects.page_lang
+HTMXObjects.page_progress_pause
 ```
 
 ### Tables on every page — `tables=true` {#page-tables}
@@ -1841,7 +1864,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticTable(source)` | Any Tables.jl-compatible source |
 | `SemanticPlot(layer)` | A plot as its specification, normally an AlgebraOfVega layer |
 | `SemanticMetric(label, value; unit="")` | One labelled measurement, unit kept as data |
-| `SemanticStatus(state; detail="")` | A state, not a colour |
+| `SemanticStatus(state; detail="", label=string(state))` | A state, not a colour; `label` is the word shown for it |
 | `SemanticUnavailable(reason; texts=semantic_texts())` | A declined computation, and why — not a state |
 | `SemanticLink(label, target; external=false, code=false)` | A navigation target (`external=true` opens a new tab with a `↗` marker; `code=true` keeps an identifier label as code) |
 | `SemanticAction(label, target)` | An operation offered to the reader |
@@ -1880,6 +1903,16 @@ vocabulary writes itself, so it follows `texts=`, a `SemanticTexts` from
 Markdown and `[nicht verfügbar] reason` in plain text;
 `semantic_texts(:de; unavailable="entfällt")` puts the app's own word there.
 The `htmxo-semantic-unavailable` class keeps its name in every language.
+
+A status prints its state's name after the glyph unless it has a `label`. The
+state stays the data, so it still picks the glyph (✓ for `:ok`/`:available`, !
+for `:warn`/`:blocked`, ✗ for `:fail`, … for `:pending`, • otherwise) and the
+`data-status` attribute, while the label is the word in every format. A German
+page keeps the recognised state and names it in its own words:
+`SemanticStatus(:warn; label="im Projekt zu klären")` reads
+`! **im Projekt zu klären**` in Markdown and `[im Projekt zu klären]` in plain
+text. Do not make the German word the state: `SemanticStatus(Symbol("im Projekt
+zu klären"))` loses the glyph and the `data-status="warn"` hook.
 
 Four points where a projection is deliberately not a translation of the HTML:
 
@@ -2974,7 +3007,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `master_detail_js` | Shared runtime for `master_detail_table`/`master_detail_pair` rows; auto-included by `htmx`, also carried by `sortable_table_js` |
 | `master_detail_table(headers, roots; children, searchable, …)` | Hierarchical sibling sorting, ancestor-preserving search, keyboard branch/detail controls, and lazy details; see [components](components.md#hierarchical-master-detail-tables) |
 | `ColumnSpec(label; help)` | A `sortable_table`/`master_detail_table` header with an explanation that stays sortable; see [components](components.md#column-explanations) |
-| `ColumnSummary(reduce, values...; digits)` | A group row's sum, mean, min, max, count or ratio of its leaves in a regroupable `master_detail_table` (`group_summary=`), recomputed in the browser on every regroup; see [components](components.md#table-regrouping) |
+| `ColumnSummary(reduce, values...; digits, sigdigits)` | A group row's sum, mean, min, max, count or ratio of its leaves in a regroupable `master_detail_table` (`group_summary=`), recomputed in the browser on every regroup; see [components](components.md#table-regrouping) |
 | `table_texts(locale; texts...)`, `TableTexts` | The words of a table's built-in controls (`:en`, `:de`, per-text overrides), passed as `texts=`; see [components](components.md#table-texts) |
 | `number_cell(x; texts, digits, sigdigits, attrs...)`, `format_number(x; texts, digits, sigdigits)` | A number in the table's language (`0,156`, `3,81·10⁻⁵`): a `<td>` that sorts and exports to CSV by the exact value, or the text alone; `render_table` and `master` cells make floats such cells by themselves; see [components](components.md#table-numbers) |
 | `HTMXObjects.group_path(key)` (unexported) | The level keys of a group in a regroupable `master_detail_table` (its key is a JSON path); see [components](components.md#table-regrouping) |
@@ -2997,7 +3030,7 @@ HTMXObjects ships its own CSS variables and matches the host environment (raw Pi
 | `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
 | `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }`. Buttons without a colour class get Pico's slate `secondary outline` look instead of its azure fill; see [the page shell](#pico-page-size) |
 | `vitepress_bridge()`      | Map `--htmxo-*` (including `--htmxo-bg`) onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
-| `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight) |
+| `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight), and every definition list's look with no class: bold terms in a column beside their values, `div`-wrapped pairs sharing the columns. Tune it from your stylesheet with `--htmxo-dl-label-width` (default `16rem`, never more than 40% of the list), `--htmxo-dl-row-gap` and `--htmxo-dl-column-gap`; `display: block` on a list and its `div` pairs keeps it stacked |
 | `escape_html(s)`          | HTML-escape (`HTMX.escape`, 5 chars) — for hand-built HTML strings only; `h.*` escapes text + attrs itself, use `Raw` for trusted markup |
 | `html_escape(s)`          | Minimal `&` / `<` / `>` escape — for hand-built HTML strings (never pre-escape a value passed through `h.*`) |
 

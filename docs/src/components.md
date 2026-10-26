@@ -456,10 +456,17 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
 - **Keys.** `master_detail_table` keys each item row by `link_key(item)`,
   which defaults to its `key` (as a string, not the sanitised row id),
   including every copy of a leaf that a regrouped table lists under several
-  groups; group rows have no key. `render_table` keys rows by `link_key(row)`.
-  Hand-built `sortable_table` rows carry `data-htmxo-link-key`, or are keyed
-  by their `data-htmxo-select-key`. A detail row counts as its master. Keys
-  compare as strings.
+  groups; group rows have no key of their own. `render_table` keys rows by
+  `link_key(row)`. Hand-built `sortable_table` rows carry
+  `data-htmxo-link-key`, or are keyed by their `data-htmxo-select-key`. A
+  detail row counts as its master. Keys compare as strings.
+- **Group rows.** Hovering or focusing a group row (of `groupings`, at any
+  level) or a branch of a `children` tree announces every item in it: the
+  street over its street sides, the district over its zones. That includes
+  collapsed rows and the leaves of a lazy group that have not loaded, and
+  leaves out the items the search or a filter hides, so the hover names what
+  the table shows. A branch announces its own key too. The other tables light
+  every one of those items, and a linked plot highlights all of them.
 - **Several tables of the same items.** A `master_detail_table`'s `key` names
   its row and detail ids, so it must be unique on the page. When two tables on
   one page show the same items, keep each table's `key` unique and give both
@@ -473,21 +480,27 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
   ```
 
   `link_key` without `link` throws, since it would highlight nothing.
-- **The event.** Hovering or keyboard-focusing a keyed row dispatches
-  `htmxo:link` on `document` with `detail` `{group, key, source}`; when the
-  hover ends, `key` is `null`. Every linked table listens for it and marks the
-  rows of its group that hold the key (`data-htmxo-linked`). A plot or any
-  other element joins the group by listening for the same event and
-  dispatching it on its own hover; page script can call
-  `htmxoLink(group, key)` (`null` clears). The latest key per group is kept in
-  `window.htmxoLinkState`, so a table that is swapped in, regrouped or filtered
-  later shows it too.
+- **The event.** Hovering or keyboard-focusing a row dispatches `htmxo:link`
+  on `document` with `detail` `{group, key, keys, source}`. `keys` lists the
+  items the row stands for (one for an item row, all of them for a group row)
+  and is empty when the hover ends; `key` is the row's own key, else the one
+  item a group holds, else `null`. Every linked table listens for it and marks
+  the rows of its group that hold one of the keys (`data-htmxo-linked`). A
+  plot or any other element joins the group by listening for the same event,
+  reading `keys` (an announcement without `keys` names `key` alone), and
+  dispatching it on its own hover; page script can call `htmxoLink(group, key)`
+  or `htmxoLink(group, [key1, key2])` (`null` clears). The latest
+  announcement per group is kept in `window.htmxoLinkState`, so a table that
+  is swapped in, regrouped or filtered later shows it too. All of it runs in
+  the browser, so it works the same in a page recorded with `record!` and
+  served as plain files.
 - **Hidden rows.** A highlight never changes the table. An item inside a
   collapsed group or branch lights up the innermost shown row above it, with a
-  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`
-  (the `linked_inside` and `linked_deep` texts, below). That includes a group
-  whose rows load lazily. A row that the search or a filter hides lights up
-  nothing. A lit row that is out of view scrolls into view inside the table's
+  dashed outline and a note in its first cell, `↳ inside` or `↳ 2 levels down`,
+  or `↳ 3 inside` when it holds several hovered items (the `linked_inside`,
+  `linked_deep` and `linked_inside_many` texts, below). That includes a group
+  whose rows load lazily. The row the hover is on lights up as itself. A row
+  that the search or a filter hides lights up nothing. A lit row that is out of view scrolls into view inside the table's
   own scroll box (an `overflow: auto` wrapper), never the page, and only when
   the hover started outside that table.
 - **Theme.** Lit rows are tinted and outlined from `--htmxo-accent`; set
@@ -520,13 +533,14 @@ The texts cover everything these tables write themselves: the search field
 to load (`rows_failed`, `rows_missing`), the CSV button (`csv`), the toggle
 of the table's caption (`more`, the same word as `caption_texts`, see
 [Captions](#captions)) and the note on a row that holds a hovered item in a
-collapsed group (`linked_inside`, `linked_deep`, see
+collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`, see
 [Hover linking](#table-linking)). The `TableTexts` docstring names them all.
 
 A text in braces is a placeholder: `count` takes `{shown}` and `{total}` (items,
 not rows: see [Client-side search](#table-search)), the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
-`{level}`), `rows_failed` takes `{status}` and `linked_deep` `{levels}`. The browser writes the live count
+`{level}`), `rows_failed` takes `{status}`, `linked_deep` `{levels}` and `linked_inside_many`
+`{count}`. The browser writes the live count
 and status lines from the same templates, so they are strings, not Julia
 functions: the count changes on every keystroke without asking the server. An
 unknown locale, text name or placeholder throws an `ArgumentError`.
@@ -573,11 +587,14 @@ How much is written:
   `2.0` writes `2`. A float below 10⁻⁴ or from 10¹⁵ up (in absolute value)
   is a power of ten with superscript digits, `3,81·10⁻⁵`, which reads the same
   in HTML, Markdown, a `pdf_report` and a pasted copy.
-- `sigdigits = 3` rounds to three significant digits first, as
-  `round(x; sigdigits = 3)` does: `0,156`, `1.230.000`.
-- `digits = 2` writes exactly two decimals (0 to 10), halves away from zero,
-  the same way as a [group summary](#table-regrouping): `0,16`. It never
-  switches to a power of ten.
+- `sigdigits = 3` rounds to three significant digits first (1 to 15), halves
+  away from zero: `0,156`, `1.230.000`; `2850` with `sigdigits = 2` writes
+  `2.900` (Julia's `round(x; sigdigits = 2)` rounds that half to even, `2800`).
+- `digits = 2` writes exactly two decimals (0 to 10), halves away from zero:
+  `0,16`. It never switches to a power of ten.
+
+A [group summary](#table-regrouping) takes the same `digits` or `sigdigits`
+and writes the same text.
 
 `missing` and `nothing` write `–` (no sort key, an empty CSV field); `Inf`,
 `-Inf` and `NaN` write `∞`, `-∞` and `NaN`. The cell carries its value twice:
@@ -748,10 +765,14 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   `item -> number`, `:count`, or `:ratio` of two sums (Σ demand / Σ capacity).
   A leaf whose function returns `nothing` or `missing` is left out. The
   browser computes the summaries again for every grouping the reader picks,
-  rounded to `digits` decimals and written with the table's `decimal` and
-  `thousands` texts (`texts = table_texts(:de)` writes `1.234,5`); the CSV
-  download writes the same decimals as a number (`1234.5`). Group rows
-  sort among themselves by the same columns; leaves sort within their group.
+  rounded to `digits` decimals (default 0) or to `sigdigits` significant
+  digits, halves away from zero, and written as `format_number` writes them,
+  with the table's `decimal` and `thousands` texts (`texts = table_texts(:de)`
+  writes `1.234,5`); the CSV download writes the rounded number (`1234.5`).
+  A sum of estimates that are each good to two digits shows no more than
+  that with `ColumnSummary(:sum, r -> r.estimate; sigdigits = 2)`: `29.000`,
+  not `29.210`. Group rows sort among themselves by the same columns; leaves
+  sort within their group.
 - **Group order.** `group_order` gives a grouping's groups an order of their
   own, so one table serves groupings that each need a different one. Each
   entry is a grouping name and either a list of keys (those groups first, in
@@ -910,9 +931,12 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
   `group_by` would reach a `Vector{String}` route as no values, and
   `query_url` would drop it from the action URLs.
 - **The grouping elsewhere.** A bulk form named by `select_form` receives the
-  levels as `group_by` values. In the browser, `htmxoGroupBy('#documents')`
-  returns the `group_by` values of the table's current grouping, e.g. for an
-  action's `hx-vals`
+  levels as `group_by` values. An htmx request from inside the table that
+  carries `group_by` (in its URL, a form field or `hx-vals`) sends the
+  table's current grouping, once, whatever grouping the row was rendered for
+  (see *Row updates*). In the browser, `htmxoGroupBy('#documents')` returns
+  the `group_by` values of the table's current grouping, e.g. for a script, or
+  for the `hx-vals` of an element outside the table
   (`js:{group_by: htmxoGroupBy('#documents')}`).
 - **Lazy groups** load at any level. The subgroups of a loaded group can be
   lazy in turn, and *Expand all* loads and opens them all.
@@ -1016,9 +1040,13 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
   `update_rows=id, update_groups=[old, new]`.
 - **The grouping.** Render the update for the grouping the reader sees: pass
   `group_by` into the action URLs that `master` and `group_master` build, as
-  above. An update rendered for another grouping is refused with an error
-  toast, and the table is left as it was. In the flat view `update_groups`
-  names no rows.
+  above, or into a form in a detail, or a `detail_url`. The browser regroups
+  without rendering the rows again, so those values still name the grouping
+  of their render; an htmx request from inside the table that carries
+  `group_by` therefore sends the table's current grouping instead, once (a
+  `group_by` in both the URL and `hx-vals` is not doubled). An update rendered
+  for another grouping is refused with an error toast, and the table is left
+  as it was. In the flat view `update_groups` names no rows.
 - **Transport and toasts.** Like any route whose response is table rows,
   declare the action `@direct` (see `OperationPolicy`): an interim poller
   cannot stand in a table row. The response body is rows, so name a success
