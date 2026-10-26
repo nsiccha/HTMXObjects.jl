@@ -2253,6 +2253,49 @@ own roots. Before HTMXObjects `4472df4`, `route!` used only the instance's type,
 and every root was built from the type's defaults (snag
 `route-drops-the-0fde2d8d`).
 
+An object the instance was constructed with is the same object in every root.
+So an app whose root stays fresh per request can still keep one part of itself
+across requests: hand that `@dynamicstruct` object to `route!` as a keyword
+override or a fixed field. Its memoized, indexed and inline-child work is then
+shared by every request, while every property the instance did not override is
+still computed per root. Before anything renders, HTMXObjects passes each
+request's root, a fresh one included, through `DynamicObjects.sync!`, which
+examines the root's fields and constructor overrides. A changed `TrackedFile`
+or `TrackedDirectory` the object read therefore drops only what was derived
+from it:
+
+```julia
+@dynamicstruct struct Rows
+    dir::String
+    @struct row(name::String) = begin
+        file = TrackedFile(joinpath(dir, name); read = path -> Base.read(path, String))
+        html = HTMLSnapshot(render_row(read(file)))
+    end
+end
+
+@htmx struct App
+    rows = Rows(DATA_DIR)                # without an override: one per root
+    @get table() = h.div((rows.row(name).html for name in row_names())...)
+    @get status() = read_status_now()    # still computed per request
+end
+
+route!(App(; rows=Rows(DATA_DIR)))       # one Rows, shared and synced
+```
+
+- The object reads no request context. It is built outside any request and has
+  no `__parent__`, so give it what it needs as its own inputs.
+- Every request that root serves syncs the object, including a request to a
+  route that never reads it. `sync!` probes each tracked file the object holds
+  once, under DynamicObjects' process-wide sync lock, so concurrent requests
+  take turns. Measured: an object holding 320 rows with 5 tracked files each
+  added about 8.7 ms to every request when nothing had changed (a trivial
+  route went from 0.06 ms to 8.7 ms).
+- An object reached through a computed property instead (`rows = ROWS`, with a
+  module-level `ROWS`) is never synced. On a fresh root that property has not
+  been computed yet when `sync!` runs, so its tracked inputs stay stale.
+- Retain the whole root (`RootProvider(scope=:job, …)` below) only when every
+  property that reads no request context should be shared.
+
 For a `semantic_app`, HTMXObjects automatically owns the keyed store, locking,
 and root remounting. The default identity is `(root type, normalized mount
 prefix)`, so the declaration and ordinary `route!(ModelApp())` call need no
