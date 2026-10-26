@@ -2298,8 +2298,10 @@ end
     @test count("data-htmxo-select-key=\"c2\"", sel) == 2 && count("data-htmxo-link-key=\"c2\"", sel) == 2 &&
         contains(sel, "data-htmxo-link-key=\"s1\"")
     # Without leaf_key a leaf is each row without children, under its own key:
-    # section 3 too.
-    default = html(outline_table(leaf_key=nothing, leaf_order=nothing))
+    # section 3 too (so the groupings here read no clause field).
+    default = html(master_detail_table(["Item", "Status", "Points"], OUTLINE; key=outline_key(""),
+        children=outline_children, master=outline_master, detail=r -> h.p("x"),
+        groupings=["Outline" => :children, "None" => nothing, "Kind" => r -> string(r.kind)]))
     @test contains(default, "data-htmxo-leaf=\"s3\"") && contains(default, "data-htmxo-leaf=\"c2-c2\"") &&
         count("data-htmxo-branch=\"\"", default) == 3
     # A table without collapsible branches keeps its groups open, with no toggle.
