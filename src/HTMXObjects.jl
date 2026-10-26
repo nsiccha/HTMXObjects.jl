@@ -3414,11 +3414,24 @@ end
 SemanticFields(; kwargs...) = SemanticFields(
     Pair{Symbol,Any}[Symbol(key) => value for (key, value) in pairs(kwargs)])
 
+# A language is one word: the HTML `language-` class and the Markdown fence's
+# info string. Source text given first would otherwise render as the info
+# string, with the language as the code.
+function _semantic_code_language(language)
+    name = string(language)
+    any(isspace, name) && throw(ArgumentError(string(
+        "SemanticCode(language, text): the language must be one word, such as :julia or :stan; got ",
+        repr(name), ". The language comes first, the source text second.")))
+    Symbol(name)
+end
+
 """
     SemanticCode(language, text; anchor="")
 
 Store source code without choosing markup. `language` is converted to a
-`Symbol` and becomes the HTML language class / Markdown fence info string.
+`Symbol` and becomes the HTML language class / Markdown fence info string. It
+is one word, given first: a language containing whitespace, such as source
+text passed in its place, throws an `ArgumentError`.
 
 `anchor`, when non-empty, becomes the HTML `id`, so a code block that is cited
 from elsewhere has a document address. In Markdown the block is wrapped in a
@@ -3430,7 +3443,7 @@ struct SemanticCode <: SemanticNode
     text::String
     anchor::String
     SemanticCode(language, text; anchor="") =
-        new(Symbol(language), String(text), String(anchor))
+        new(_semantic_code_language(language), String(text), String(anchor))
 end
 
 """
@@ -5098,9 +5111,9 @@ the function free of side effects. It runs after the route's operation, so the
 ```julia
 @get model() = h.article(
     h.h2("Model"),
-    private(SemanticCode(stan_code(spec), "stan");
+    private(SemanticCode(:stan, stan_code(spec));
             public = h.p("A hierarchical model of the measured doses.")))
-@get specification() = private(SemanticCode(stan_code(spec), "stan"))  # a private page
+@get specification() = private(SemanticCode(:stan, stan_code(spec)))  # a private page
 @get document(id::String) = private() do  # read for a private reader only
     file = get(DOCUMENTS, id, nothing)
     isnothing(file) && throw(CallerFault(404, "no document \$(repr(id))"))

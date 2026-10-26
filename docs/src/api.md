@@ -3775,9 +3775,9 @@ stand-in such as a short summary.
 ```julia
 @get model() = h.article(
     h.h2("Model"),
-    private(SemanticCode(stan_code(spec), "stan");
+    private(SemanticCode(:stan, stan_code(spec));
             public = h.p("A hierarchical model of the measured doses.")))
-@get specification() = private(SemanticCode(stan_code(spec), "stan"))
+@get specification() = private(SemanticCode(:stan, stan_code(spec)))
 ```
 
 **Who reads an answer.** Every answer is for an audience, `:public` or
