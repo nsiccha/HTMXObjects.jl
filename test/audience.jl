@@ -103,9 +103,9 @@ end
         h.p("Ende"))
     live = with_audience(() -> repr("text/html", page), :private)
     @test occursin("<p>SECRET</p>", live) && !occursin("Kurzfassung", live)
-    # The live markup marks the private part, so markup rendered ahead of an
-    # export can be recognised in its answer.
-    @test occursin("<!--htmxo-private--><p>SECRET</p><!--/htmxo-private-->", live)
+    # The live markup marks the private part, for the reader and in comments,
+    # so markup rendered ahead of an export can be recognised in its answer.
+    @test occursin("<!--htmxo-private--><div class=\"htmxo-private\"><p>SECRET</p></div><!--/htmxo-private-->", live)
     public = _with_audience(() -> repr("text/html", page), :public)
     @test occursin("<p>Kurzfassung</p>", public) && !occursin("SECRET", public)
     @test !occursin("htmxo-private", public)
@@ -124,7 +124,7 @@ end
     # element's child is; several values render in order.
     @test _with_audience(() -> repr("text/html", h.div("a", private("<b>x</b>"), "c")), :public) == "<div>ac</div>"
     @test _with_audience(() -> repr("text/html", h.div(private("<b>x</b>"))), :private) ==
-          "<div><!--htmxo-private-->&lt;b&gt;x&lt;/b&gt;<!--/htmxo-private--></div>"
+          "<div><!--htmxo-private--><span class=\"htmxo-private\">&lt;b&gt;x&lt;/b&gt;</span><!--/htmxo-private--></div>"
     @test occursin("<p>a</p><p>b</p>",
                    _with_audience(() -> repr("text/html", h.div(private([h.p("a"), h.p("b")]))), :private))
     # A semantic element stays a block of its own in Markdown.
@@ -132,8 +132,62 @@ end
     @test _with_audience(() -> HTMXObjects.HTMX.markdown_block(card), :private)
     @test !_with_audience(() -> HTMXObjects.HTMX.markdown_block(card), :public)
     # A whole answer renders what it shows; an empty one for a public reader.
-    @test _with_audience(() -> String(to_response(private(h.p("SECRET"))).body), :private) == "<p>SECRET</p>"
+    @test _with_audience(() -> String(to_response(private(h.p("SECRET"))).body), :private) ==
+          "<div class=\"htmxo-private\"><p>SECRET</p></div>"
     @test _with_audience(() -> String(to_response(private(h.p("SECRET"))).body), :public) == ""
+end
+
+@testitem "a private reader sees which parts are not public" setup=[HTMXOTestImports] tags=[:unit] begin
+    import HTMXObjects: h, _with_audience, _with_page_meta, to_markdown_string, htmxo_utility_styles
+    # Snag mark-a-tender-pr-fd4b7782: the live app and a private export mark
+    # every private part, so a reviewer can tell what a public export leaves out.
+    html(x) = with_audience(() -> repr("text/html", x), :private)
+    md(x) = to_markdown_string(x; audience=:private)
+
+    # A block sits in a div, phrasing content (text included) in a span.
+    @test html(h.div(private(h.p("S")))) ==
+          "<div><!--htmxo-private--><div class=\"htmxo-private\"><p>S</p></div><!--/htmxo-private--></div>"
+    @test html(h.p("a ", private("x"), " b")) ==
+          "<p>a <!--htmxo-private--><span class=\"htmxo-private\">x</span><!--/htmxo-private--> b</p>"
+    @test occursin("<span class=\"htmxo-private\"><code>y</code></span>", html(h.p(private(h.code("y")))))
+    @test startswith(html(private(SemanticCode(:stan, "y ~ x"))), "<!--htmxo-private--><div class=\"htmxo-private\"><pre")
+    # An element that must stay its parent's child carries the class itself,
+    # so the table or list stays intact.
+    table = html(h.table(h.tbody(h.tr(h.td("a")), private(h.tr(h.td("b"); class="row")))))
+    @test occursin("<!--htmxo-private--><tr class=\"row htmxo-private\"><td>b</td></tr><!--/htmxo-private-->", table)
+    @test occursin("<li class=\"htmxo-private\">x</li>", html(h.ul(private(h.li("x")))))
+    @test count("<tr class=\"htmxo-private\">", html(h.tbody(private([h.tr(h.td("1")), h.tr(h.td("2"))])))) == 2
+    # Marked once, however deep private content nests.
+    @test count("htmxo-private\"", html(private(h.div(h.p("o"), private(h.p("i")))))) == 1
+    # mark=false shows it plain; a public reader sees no mark.
+    @test html(h.div(private(h.p("S"); mark=false))) == "<div><!--htmxo-private--><p>S</p><!--/htmxo-private--></div>"
+    @test !occursin("htmxo-private", _with_audience(() -> repr("text/html", h.div(private(h.p("S")), h.p("x"))), :public))
+
+    # Markdown: a block is a fenced div opening with the label, inline content
+    # a span, a list item or table row starts with the label.
+    @test occursin("## Modell\n\n::: {.htmxo-private}\n\n*not public*\n\nSECRET\n\n:::\n\nEnde",
+                   md(h.article(h.h2("Modell"), private(h.p("SECRET")), h.p("Ende"))))
+    @test md(private(h.p("S"))) == "::: {.htmxo-private}\n\n*not public*\n\nS\n\n:::\n\n"
+    @test strip(md(h.p("Prior ", private("Normal(0, 1)"), "."))) == "Prior [*not public:* Normal(0, 1)]{.htmxo-private}."
+    @test occursin("- a\n- *not public:* b", md(h.ul(h.li("a"), private(h.li("b")))))
+    rows = md(h.table(h.thead(h.tr(h.th("k"))), h.tbody(h.tr(h.td("a")), private(h.tr(h.td("b"))))))
+    @test occursin("| a |", rows) && occursin("| *not public:* b |", rows)
+    @test count("not public", md(private(h.div(h.p("o"), private(h.p("i")))))) == 1
+    @test !occursin("not public", md(private(h.p("S"); mark=false)))
+    @test !occursin("not public", to_markdown_string(private(h.p("S"); public=h.p("P")); audience=:public))
+    # The label follows the page's language.
+    @test occursin("*nicht öffentlich*", _with_page_meta(() -> md(private(h.p("S"))), (; lang="de-DE", title=nothing)))
+
+    # A whole answer is marked too, except a finished response.
+    @test _with_audience(() -> String(to_response(private(h.li("x"))).body), :private) == "<li class=\"htmxo-private\">x</li>"
+    pdf = private(MIMEResponse("application/pdf", "%PDF"))
+    @test String(_with_audience(() -> HTMXObjects._finalized_response(pdf), :private).body) == "%PDF"
+
+    # Every htmx() page carries the outline and the label, in each element's language.
+    css = repr("text/html", htmxo_utility_styles())
+    @test occursin(".htmxo-private {", css) && occursin("content: var(--htmxo-private-label);", css)
+    @test occursin("[lang|=\"de\"] { --htmxo-private-label: \"nicht \\0000f6ffentlich\"; }", css)
+    @test occursin(".htmxo-private {", repr("text/html", htmx(h.p("x"))))
 end
 
 @testitem "code that renders a value itself asks for its audience" setup=[HTMXOTestImports] tags=[:unit] begin
@@ -154,7 +208,7 @@ end
     html = with_audience(:private) do
         repr("text/html", page)
     end
-    @test occursin("<!--htmxo-private--><p>SECRET</p><!--/htmxo-private-->", html)
+    @test occursin("<!--htmxo-private--><div class=\"htmxo-private\"><p>SECRET</p></div><!--/htmxo-private-->", html)
     @test !occursin("SECRET", with_audience(() -> repr("text/html", page), :public))
     @test with_audience(() -> 42, :public) == 42
     snapshot = with_audience(() -> HTMLSnapshot(page), :public)
@@ -203,11 +257,12 @@ end
     @test occursin("<p>Kurzfassung<a href=\"/summary\">mehr</a></p>", html)
     @test seen == ["/start", "/summary"]
     empty!(seen)
-    # A private export shows everything; content shown as several values takes
-    # its place among the element's children.
+    # A private export shows everything, marked as the live app marks it;
+    # content shown as several values is marked as one.
     private_html = repr("text/html", static_transform(frag, StaticExport(; url_map=target, audience=:private)))
     @test occursin("<p>SECRET</p>", private_html) && !occursin("Kurzfassung", private_html)
-    @test occursin("<p>a</p><a href=\"/b\">b</a></div>", private_html)
+    @test occursin("<div class=\"htmxo-private\"><p>a</p><a href=\"/b\">b</a></div></div>", private_html)
+    @test count("class=\"htmxo-private\"", private_html) == 2
     @test seen == ["/start", "/spec", "/b"]
     # Recordings are public too.
     @test !occursin("SECRET", repr("text/html", static_transform(frag; record_base="/r")))
@@ -230,6 +285,8 @@ end
     # The live app's answer, and any asked for :private, shows everything.
     live = body(dispatch(:GET, "/"; audience=:private))
     @test occursin("SECRET-SPEC", live) && !occursin("Kurzfassung", live)
+    @test occursin("<div class=\"htmxo-private\"><div><p>SECRET-SPEC", live)
+    @test occursin("::: {.htmxo-private}", body(dispatch(:GET, "/"; headers=md, audience=:private)))
     @test occursin("Leser: private", live)
     @test occursin("SECRET-SPEC", body(dispatch(:GET, "/"; headers=md, audience=:private)))
     # A static export follows its audience, in Markdown too.
@@ -285,6 +342,11 @@ end
     @test occursin("SECRET-PAGE", read(joinpath(full, "aud_spec.html"), String))
     @test isfile(joinpath(full, "hx/aud_spec.html")) && isfile(joinpath(full, "aud_detail.html"))
     @test occursin("SECRET-SPEC", read(joinpath(full, "index.html"), String))
+    # The private site marks what the public one leaves out, and carries the
+    # stylesheet that outlines and labels it; the public site marks nothing.
+    @test occursin("<div class=\"htmxo-private\"><div><p>SECRET-SPEC", read(joinpath(full, "index.html"), String))
+    @test occursin(".htmxo-private {", bundle_bytes(full))
+    @test !occursin("class=\"htmxo-private\"", index)
 
     # refused: an audience is :public or :private (user pick 0id3m3n)
     @test_throws ArgumentError export_site(mktempdir(); pages=["/"], audience=:team)
@@ -445,6 +507,8 @@ end
                 text(path) = read(`pdftotext -enc UTF-8 $path -`, String)
                 @test occursin("Eine Kurzfassung.", text(public)) && !occursin("Spezifikation", text(public))
                 @test occursin("Die vollständige Spezifikation.", text(full)) && !occursin("Kurzfassung", text(full))
+                # The private report marks the private part, in the report's language.
+                @test occursin("nicht öffentlich", text(full)) && !occursin("öffentlich", text(public))
             end
         end
     end

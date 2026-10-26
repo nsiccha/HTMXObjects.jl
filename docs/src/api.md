@@ -60,7 +60,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `StaticExport(; url_map, controls, record_base, runtime, audience)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
 | `export_site(dir; pages, file_name, controls, aliases, parent, audience)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
-| `private(content; public=nothing)`, `Private` | Content a public reader must not see: the live app and a private export show `content`, a public export shows `public` (nothing by default); `content` can be a function (`private() do … end`) that builds it for a private reader only — see [Public and private content](#private-content) |
+| `private(content; public=nothing, mark=true)`, `Private` | Content a public reader must not see: the live app and a private export show `content`, outlined and labelled "not public", a public export shows `public` (nothing by default); `content` can be a function (`private() do … end`) that builds it for a private reader only — see [Public and private content](#private-content) |
 | `export_audience(req)` | Who the answer to this request is for: `:private` for the live app, the audience of an export or `dispatch` otherwise |
 | `with_audience(f, audience)` | Call `f()` rendering everything for `audience` (`:public` / `:private`): HTML a library builds itself, or work in a task it starts — see [Public and private content](#private-content) |
 | `PrivateContentEscaped` | Thrown when a public answer still holds private markup rendered before the export could leave it out |
@@ -3799,6 +3799,41 @@ Without them a value renders for the answer it is part of, and for the public
 outside any request. Pass the reader's audience whenever you assemble a
 document for someone other than the answer's reader, as library code building
 a public PDF inside a live request (which is `:private`) does.
+
+**What a private reader sees.** A private reader can tell which parts no
+public answer holds: the live app and a private export show private content
+outlined and labelled "not public", with no code in the app.
+
+- In HTML the content sits in a `div` (a `span` for phrasing content, text
+  included) of class `htmxo-private`. A table row, row group or cell, a list
+  item, a `summary` and the other elements that must stay a direct child of
+  their parent carry the class themselves, so the table or list stays intact;
+  a row shows its label in its first cell.
+- The outline and the label come from `htmxo_utility_styles()`, which every
+  `htmx()` page carries (a hand-built `<head>` includes it). The label is in
+  the element's language (`lang` on it or an ancestor, the page's `<html
+  lang>` included): "nicht öffentlich" in German, "not public" otherwise. An
+  app restyles it in its own stylesheet: `--htmxo-private-color`,
+  `--htmxo-private-label`.
+- In Markdown a block becomes a fenced div that opens with the label, and
+  inline content a bracketed span (a block in a table cell too), both kept by
+  Pandoc, so a private `pdf_report` shows the label as well:
+
+  ```
+  ::: {.htmxo-private}
+
+  *not public*
+
+  The full specification.
+
+  :::
+  ```
+
+  `[*not public:* Normal(0, 1)]{.htmxo-private}` for inline content. The label
+  follows `HTMXObjects.page_lang()` (a route's `__lang__`), and a `pdf_report`'s
+  `lang`.
+- Private content inside private content, or loaded into it, is marked once.
+- `private(x; mark=false)` shows `x` to a private reader without the mark.
 
 **What a public answer holds.**
 
