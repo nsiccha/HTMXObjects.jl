@@ -5010,13 +5010,26 @@ Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text
 # --- Audience: content that public views leave out ---
 
 """
-    private(content; public=nothing)
-    private(; public=nothing) do … end
+    private(content; public=nothing, mark=true)
+    private(; public=nothing, mark=true) do … end
 
 Content that a public reader must not see, such as a model's full
 specification. The live app and a private export show `content`. A public
 answer shows `public` in its place: nothing (the default), or a stand-in such
 as a short summary of the model.
+
+A private reader sees which parts no public answer holds: `content` is
+outlined and labelled "not public" ("nicht öffentlich" on a German page). In
+HTML it sits in a `div` or `span` of class `htmxo-private`, or carries that
+class itself where a wrapper would break the markup (a table row or cell, a
+list item, a `summary`); the outline and the label, in the language of the
+element's `lang`, come from [`htmxo_utility_styles`](@ref), which every
+[`htmx`](@ref) page carries. In Markdown a block is a fenced div
+`::: {.htmxo-private}` that opens with the label, `*not public*`, and inline
+content a span `[*not public:* …]{.htmxo-private}`; the label follows
+`HTMXObjects.page_lang()`, and a [`pdf_report`](@ref) its `lang`. Private
+content inside private content is marked once. `mark=false` shows `content`
+without the mark.
 
 Public answers are those of an export, unless it asks for `audience=:private`:
 a [`StaticExport`](@ref) or [`export_site`](@ref) bundle, a
@@ -5068,8 +5081,9 @@ end
 struct Private
     content::Any
     public::Any
+    mark::Bool
 end
-private(content; public=nothing) = Private(content, public)
+private(content; public=nothing, mark::Bool=true) = Private(content, public, mark)
 
 # Content a function builds is built when it is shown.
 _built(content) = content
@@ -5116,18 +5130,157 @@ An `audience` other than `:public` and `:private` is an `ArgumentError`.
 """
 with_audience(f, audience) = _with_audience(f, _check_audience(audience, "with_audience"))
 
-# What an answer for `audience` shows of `p`.
-_shown(p::Private, audience) = audience === :public ? p.public : _built(p.content)
+# What an answer for `audience` shows of `p`: for a private reader its content,
+# marked as no public answer's part.
+_shown(p::Private, audience) = audience === :public ? p.public : _marked(p, _built(p.content))
 _shown(p::Private) = _shown(p, _ambient_audience())
+
+# Private content as a private reader sees it: marked, so the reader can tell
+# what a public export leaves out (snag mark-a-tender-pr-fd4b7782). Every
+# projection treats it as its content, plus the mark.
+struct _PrivateMark
+    content::Any
+end
+
+# Inside marked content a private part is not marked again. The scope covers
+# rendering the content and every walk that rebuilds it for a later render.
+const _IN_PRIVATE_MARK = :htmxo_in_private_mark
+_in_private_mark() = get(task_local_storage(), _IN_PRIVATE_MARK, false)
+_in_private_mark(f) = task_local_storage(f, _IN_PRIVATE_MARK, true)
+
+_marked(p::Private, ::Nothing) = nothing
+_marked(p::Private, content) = p.mark && !_in_private_mark() ? _PrivateMark(content) : content
+
+# The label, in the language of the answer; the page's stylesheet writes it in
+# each element's (`htmxo_utility_styles`).
+const _PRIVATE_LABELS = (en = "not public", de = "nicht öffentlich")
+# A CSS string literal, ASCII only, so it reads the same in a linked stylesheet
+# of any encoding.
+_css_string(s) = string('"', join(isascii(c) ? (c in ('"', '\\') ? "\\" * c : string(c)) :
+    "\\" * lpad(string(UInt32(c); base=16), 6, '0') for c in s), '"')
+_private_label(::Nothing) = _PRIVATE_LABELS.en
+_private_label(lang::AbstractString) =
+    get(_PRIVATE_LABELS, Symbol(lowercase(first(split(lang, '-')))), _PRIVATE_LABELS.en)
+
+# Elements that must stay a direct child of their parent carry the mark
+# themselves; anything else sits in a `span` when it is phrasing content (text
+# included), else in a `div`.
+const _PRIVATE_IN_PLACE_TAGS = Set{Symbol}((:tr, :td, :th, :thead, :tbody, :tfoot, :caption,
+    :col, :colgroup, :li, :dt, :dd, :option, :optgroup, :summary, :legend, :figcaption,
+    :source, :track, :html, :head, :body, :title, :meta, :link, :base, :script, :style))
+const _PRIVATE_INLINE_TAGS = Set{Symbol}((:a, :abbr, :b, :bdi, :bdo, :br, :cite, :code, :data,
+    :del, :dfn, :em, :i, :img, :input, :ins, :kbd, :label, :mark, :meter, :output, :progress,
+    :q, :s, :samp, :select, :small, :span, :strong, :sub, :sup, :textarea, :time, :u, :var,
+    :wbr, :button, :svg, :math))
+_private_block(x) = HTMX.markdown_block(x)
+_private_block(node::Node) = !(Symbol(lowercase(string(HTMX.tag(node)))) in _PRIVATE_INLINE_TAGS)
+_private_block(xs::Union{AbstractVector,Tuple}) = any(_private_block, xs)
+_private_block(x::Union{HtmlOnly,_PrivateMark}) = _private_block(x.content)
+_private_block(p::Private) = _private_block(_shown(p))
+
+_private_in_place(x) = false
+_private_in_place(node::Node) = Symbol(lowercase(string(HTMX.tag(node)))) in _PRIVATE_IN_PLACE_TAGS
+_private_wrapped(content) = (_private_block(content) ? h.div : h.span)(content; class="htmxo-private")
+
+_private_mark_node(doc::HTMLDocument) = doc
+_private_mark_node(content) = _private_wrapped(content)
+# Rows of a table body, items of a list: each carries the mark.
+_private_mark_node(xs::AbstractVector) =
+    !isempty(xs) && all(_private_in_place, xs) ? map(_private_mark_node, xs) : _private_wrapped(xs)
+function _private_mark_node(node::Node)
+    _private_in_place(node) || return _private_wrapped(node)
+    attrs = copy(HTMX.attrs(node))
+    class = get(attrs, :class, nothing)
+    attrs[:class] = class isa AbstractString && !isempty(class) ? class * " htmxo-private" : "htmxo-private"
+    Node(HTMX.tag(node), attrs, copy(HTMX.children(node)))
+end
+
+Base.show(io::IO, m::MIME"text/html", x::_PrivateMark) =
+    _in_private_mark(() -> _show_html_content(io, m, _private_mark_node(x.content)))
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", x::_PrivateMark) =
+    _in_private_mark(() -> _show_html_content(io, m, x.content))
+# A block is a fenced div that opens with the label, inline content (and a
+# block in a table cell, which a fence would break) a span; Pandoc keeps both
+# (Quarto shows the label), HTMX.jl writes its language parts the same way. An
+# element that marks itself in HTML (a row, a cell, a list item) starts with
+# the label instead, so its table or list stays one.
+const _PRIVATE_LABELLED_TAGS = Set{Symbol}((:li, :td, :th, :dt, :dd, :summary, :caption,
+    :legend, :figcaption))
+_private_md_labelled(x, label) = x
+_private_md_labelled(xs::AbstractVector, label) = map(x -> _private_md_labelled(x, label), xs)
+function _private_md_labelled(node::Node, label)
+    tag = Symbol(lowercase(string(HTMX.tag(node))))
+    kids = HTMX.children(node)
+    if tag in _PRIVATE_LABELLED_TAGS
+        kids = Any[h.em(label * ":"), " ", kids...]
+    else
+        part = tag === :tr ? (:td, :th) : tag in (:thead, :tbody, :tfoot) ? (:tr,) : ()
+        i = findfirst(c -> c isa Node && Symbol(lowercase(string(HTMX.tag(c)))) in part, kids)
+        isnothing(i) && return node
+        kids = copy(kids)
+        kids[i] = _private_md_labelled(kids[i], label)
+    end
+    Node(HTMX.tag(node), copy(HTMX.attrs(node)), kids)
+end
+_private_md_in_place(x) = _private_in_place(x)
+_private_md_in_place(xs::AbstractVector) = !isempty(xs) && all(_private_in_place, xs)
+# HTMX.jl's Markdown stream knows where a block starts and a line ends, so the
+# fence is laid out as its own fenced divs (`_md_fenced_div`, which writes an
+# id and a language but no class). Outside a stream the mark enters one.
+function Base.show(io::IO, m::MIME"text/markdown", x::_PrivateMark)
+    io isa HTMX._MDStream || return show(io, m, h.div(x))
+    label = _private_label(page_lang())
+    _in_private_mark() do
+        if _private_md_in_place(x.content)
+            foreach(c -> show(io, m, c), vcat(_private_md_labelled(x.content, label)))
+        elseif _private_block(x.content) && !get(io, :md_table_cell, false)
+            HTMX._md_block_start(io)
+            HTMX._md_blank_line(io)
+            print(io, "::: {.htmxo-private}\n\n*", label, "*")
+            show(io, m, h.div(x.content))
+            HTMX._md_end_line(io)
+            print(io, ":::\n\n")
+        else
+            print(io, "[*", label, ":* ")
+            show(io, m, h.span(x.content))
+            print(io, "]{.htmxo-private}")
+        end
+    end
+end
+# Plain text names the mark in brackets, as `SemanticUnavailable`'s plain peer
+# names its own.
+function Base.show(io::IO, m::MIME"text/plain", x::_PrivateMark)
+    print(io, "[", _private_label(page_lang()), "] ")
+    _in_private_mark(() -> foreach(c -> _semantic_show_leaf(io, m, c), vcat(x.content)))
+end
+HTMX.markdown_block(x::_PrivateMark) = _private_block(x.content)
+_finalized_response(x::_PrivateMark) = _finalized_response(x.content)
+filter_errors(x::_PrivateMark) = _in_private_mark(() -> filter_errors(x.content))
+_filter_errors_child(x::_PrivateMark) = _in_private_mark(() -> _filter_errors_child(x.content))
+# An element labelled in place is that element again, so the table or list it
+# belongs to still holds it (HTMX.jl's table writer reads only nodes).
+function _strip_md_chrome(x::_PrivateMark)
+    stripped = _in_private_mark(() -> _strip_md_chrome(x.content))
+    isnothing(stripped) && return nothing
+    _private_md_in_place(stripped) ? _private_md_labelled(stripped, _private_label(page_lang())) :
+        _PrivateMark(stripped)
+end
+_strip_md_chrome_child(x::_PrivateMark) = _strip_md_chrome(x)
+# Semantic content rescued out of dropped chrome stays marked.
+function _rescue_semantic!(out, x::_PrivateMark)
+    rescued = Any[]
+    _in_private_mark(() -> _rescue_semantic!(rescued, x.content))
+    isempty(rescued) || push!(out, _PrivateMark(rescued))
+    nothing
+end
 
 const _PRIVATE_OPEN = "<!--htmxo-private-->"
 const _PRIVATE_CLOSE = "<!--/htmxo-private-->"
 
 function Base.show(io::IO, m::MIME"text/html", p::Private)
     _ambient_audience() === :public && return _show_html_content(io, m, p.public)
-    content = _built(p.content)
     print(io, _PRIVATE_OPEN)
-    _show_html_content(io, m, content)
+    _show_html_content(io, m, _shown(p, :private))
     print(io, _PRIVATE_CLOSE)
 end
 Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", p::Private) =
@@ -5167,7 +5320,7 @@ _private_page_response(resp::HTTP.Response) = HTTP.header(resp, "X-HTMXO-Private
 # the answer is made from it; a public reader's answer builds none.
 _built_answer(req::HTTP.Request, val) = val
 _built_answer(req::HTTP.Request, p::Private) =
-    export_audience(req) === :public ? p : Private(_built(p.content), p.public)
+    export_audience(req) === :public ? p : Private(_built(p.content), p.public, p.mark)
 
 """
     PrivateContentEscaped <: Exception
@@ -5231,6 +5384,7 @@ Base.show(io::IO, s::HTMLSnapshot) =
 # Every projection other than HTML reads the retained value. The walker
 # methods for static export sit beside `_static_walk_child`.
 filter_errors(s::HTMLSnapshot) = filter_errors(s.value)
+_private_block(s::HTMLSnapshot) = _private_block(s.value)
 _filter_errors_child(s::HTMLSnapshot) = _filter_errors_child(s.value)
 _strip_md_chrome(s::HTMLSnapshot) = _strip_md_chrome(s.value)
 _strip_md_chrome_child(s::HTMLSnapshot) = _strip_md_chrome_child(s.value)
@@ -6053,6 +6207,12 @@ function _static_walk(p::Private, rules::_StaticRules)
     isnothing(shown) ? _STATIC_REMOVED : _static_walk(shown, rules)
 end
 _static_walk_child(p::Private, rules) = _static_walk(p, rules)
+# A private export keeps the mark around what it walks.
+function _static_walk(x::_PrivateMark, rules::_StaticRules)
+    walked = _in_private_mark(() -> _static_walk(x.content, rules))
+    walked === _STATIC_REMOVED ? walked : _PrivateMark(walked)
+end
+_static_walk_child(x::_PrivateMark, rules) = _static_walk(x, rules)
 # A snapshot's stored bytes predate the rewrite, so export walks its value.
 _static_walk(s::HTMLSnapshot, rules::_StaticRules) = _static_walk(_html_value(s.value), rules)
 _static_walk_child(s::HTMLSnapshot, rules) = _static_walk(s, rules)
@@ -6729,14 +6889,14 @@ _prestart_walk(doc::HTMLDocument, walk, blocked) =
 _prestart_walk(val::HtmlOnly, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.content, walk, blocked), HtmlOnly)
 _prestart_walk(p::Private, walk, blocked) = _ambient_audience() === :public ?
-    _prestart_rewrap(_prestart_walk(p.public, walk, blocked), x -> Private(p.content, x)) :
+    _prestart_rewrap(_prestart_walk(p.public, walk, blocked), x -> Private(p.content, x, p.mark)) :
     _prestart_walk_private(_built(p.content), p, walk, blocked)
 # Content built for the walk replaces its function, so the page that renders
 # the walked value does not build it again.
 function _prestart_walk_private(content, p::Private, walk, blocked)
     walked = _prestart_walk(content, walk, blocked)
     isnothing(walked) && content === p.content && return nothing
-    Private(isnothing(walked) ? content : walked, p.public)
+    Private(isnothing(walked) ? content : walked, p.public, p.mark)
 end
 _prestart_walk(val::_LabelledControl, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.control, walk, blocked), _LabelledControl)
@@ -17371,9 +17531,12 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     end
     return pdf_path
 end
-pdf_report(value, pdf_path::AbstractString; audience=:public, kwargs...) =
-    pdf_report(to_markdown_string(value; audience=_check_audience(audience, "pdf_report")),
-               pdf_path; audience, kwargs...)
+# The value renders in the report's language, which the words HTMXObjects
+# writes itself follow (`page_lang`: the label of private content).
+pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString, kwargs...) =
+    pdf_report(_with_page_meta((; _page_meta()..., lang=String(lang))) do
+                   to_markdown_string(value; audience=_check_audience(audience, "pdf_report"))
+               end, pdf_path; audience, lang, kwargs...)
 
 # --- Captions ---
 
@@ -26354,6 +26517,41 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
     color: var(--htmxo-muted, currentColor);
 }
 .htmxo-back-link:hover { text-decoration: underline; }
+
+/* `private` content as a private reader sees it (the live app, a private
+   export): outlined and labelled, so the reader can tell what no public
+   answer holds. The label is in the element's language. A table row or row
+   group carries its label in its first cell. Private content shown inside
+   private content (a fragment loaded into it) is marked once. An app restyles
+   it in its own stylesheet: `--htmxo-private-color`, `--htmxo-private-label`. */
+:root { --htmxo-private-label: $(_css_string(_PRIVATE_LABELS.en)); }
+$(join(("[lang|=\"$k\"] { --htmxo-private-label: $(_css_string(v)); }" for (k, v) in pairs(_PRIVATE_LABELS)), "\n"))
+.htmxo-private {
+    outline: 1px dashed var(--htmxo-private-color, var(--htmxo-muted, currentColor));
+    outline-offset: 2px;
+}
+.htmxo-private::before,
+tr.htmxo-private > :first-child::before,
+:is(thead, tbody, tfoot).htmxo-private > tr:first-child > :first-child::before {
+    content: var(--htmxo-private-label);
+    display: inline-block;
+    margin-inline-end: .5em;
+    padding: 0 .4em;
+    border: 1px solid var(--htmxo-private-color, var(--htmxo-muted, currentColor));
+    border-radius: .25rem;
+    color: var(--htmxo-private-color, var(--htmxo-muted, currentColor));
+    font-size: .75rem;
+    font-style: normal;
+    font-weight: normal;
+    line-height: 1.5;
+    vertical-align: .1em;
+    white-space: nowrap;
+}
+div.htmxo-private::before { display: table; margin-block-end: .35rem; }
+:is(tr, thead, tbody, tfoot, colgroup, col, option, optgroup, script, style, head, html, body).htmxo-private::before { content: none; }
+.htmxo-private .htmxo-private { outline: none; }
+.htmxo-private .htmxo-private::before,
+.htmxo-private tr.htmxo-private > :first-child::before { content: none; }
 }
 
 /* While its request is in flight, htmx itself adds `htmx-request` to the
