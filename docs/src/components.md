@@ -168,11 +168,13 @@ The CSV holds the text each cell shows, except in a number cell, which exports i
 `sortable_table_js()` also ships the accessor
 
 ```js
-htmxoSortState(target) // -> {sort_col, sort_dir} | {}   (sort_col is 1-based)
+htmxoSortState(target) // -> {sort_col, sort_dir[, sort_key]} | {}   (sort_col is 1-based)
 ```
 
 where `target` is a CSS selector or element. An unsorted table yields `{}`, so
-it spreads cleanly into an htmx `hx-vals`.
+it spreads cleanly into an htmx `hx-vals`. A column with several sort keys
+(see [Several sort orders for one column](#table-sort-keys)) adds `sort_key`,
+the name of its active key.
 
 !!! warning "A `morph:` swap wipes a client-side sort"
     An idiomorph `hx-swap="morph:*"` re-imposes the server's child order on the
@@ -201,7 +203,9 @@ it spreads cleanly into an htmx `hx-vals`.
 
     `default_sort` **declares** the order (stamping `data-sort-dir` /
     `aria-sort` / the caret on that header); it does not sort `rows` for you.
-    It forwards through `render_table` and `master_detail_table` too.
+    It forwards through `render_table` and `master_detail_table` too. A table
+    with a multi-key column also takes `@param sort_key::String = ""` and
+    `default_sort = (col = sort_col, key = sort_key, dir = Symbol(sort_dir))`.
 
 #### Column explanations {#column-explanations}
 
@@ -222,7 +226,67 @@ technology reads it as the button's description; a `ⓘ` marker after the label
 shows that the column has one. The marker is HTML-only: `?plain` and the CSV
 export keep the label alone. With `sortable=false` the explanation stays, as
 the `<th>`'s `title`. `ColumnSpec` works in every `headers` vector of
-`sortable_table` and `master_detail_table`.
+`sortable_table` and `master_detail_table`, and as a `render_table` column
+through `columns = ["name" => ColumnSpec(...)]`.
+
+#### Several sort orders for one column {#table-sort-keys}
+
+A cell that combines several quantities can be sorted by each of them. The
+usual case is an estimate with its interval in one cell, `22 Tsd. (13–34 Tsd.)`:
+the reader sorts by the estimate, by either bound, or by the interval's
+absolute or relative width. Name the orders in the column's `ColumnSpec`; the
+first is the column's default:
+
+```julia
+DE = table_texts(:de)
+master_detail_table([ColumnSpec("Zelle"),
+                     ColumnSpec("Beschäftigte"; help = "Schätzwert mit 95-%-Intervall",
+                         sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975; texts = DE))],
+    zones; key = r -> r.id, master = r -> (h.td(r.name), h.td(r.estimate_text)),
+    detail_url = r -> "/zelle?id=$(r.id)", texts = DE)
+```
+
+`interval_sort_keys` gives the five orders of an estimate with its interval,
+named from the table's texts (`Schätzwert`, `Untergrenze`, `Obergrenze`,
+`Intervallbreite`, `Relative Breite`; in English `Estimate`, `Lower bound`,
+`Upper bound`, `Interval width`, `Relative width`); the relative width is
+`(upper - lower) / abs(estimate)`. Any other orders are `name => f` pairs:
+`sort_keys = ["Last activity" => a -> a.last_seen, "Liveness" => a -> a.liveness_rank]`.
+
+- **The header.** A click on the label sorts by the column's active key (its
+  first, until the reader picks another) and flips the direction, as for any
+  column. A `▾` button beside the label opens a menu listing every key with
+  `▲` and `▼`; one click there sorts by that key in that direction, so any
+  order takes two clicks. While a key other than the first is active, the
+  header names it after the caret (`▲ Untergrenze`). The menu is reachable by
+  keyboard: `▾` and each `▲`/`▼` are buttons, Escape closes the menu and
+  returns the focus to `▾`, and the pressed button (`aria-pressed`) is the
+  order in force.
+- **The values.** `master_detail_table` calls each `f(item)` and writes the
+  values on the column's cell (`data-htmxo-sort-keys`), so `master` returns
+  its cells unchanged; `render_table` calls `f(row)` with the Tables.jl row
+  (`columns = ["mean" => ColumnSpec(...)]`). A `sortable_table` gets rows
+  that are built already, so its column names the keys alone and each cell
+  carries its values:
+
+  ```julia
+  sortable_table([ColumnSpec("Beschäftigte"; sort_keys = interval_sort_keys(; texts = DE)), "Abschnitt"],
+      [h.tr(h.td(text; interval_sort_values(e.mean, e.q025, e.q975)...), h.td(e.section)) for e in rows];
+      texts = DE)
+  h.td("…"; sort_values(estimate, lower, upper)...)   # any keys, in their order
+  ```
+
+  Numbers sort as numbers and other values as text; `missing`, `nothing`,
+  `NaN` and infinite values sort last in both directions. A group row has no
+  values and sorts by its own cell (its `group_summary` or its text).
+- **What stays the same.** `?plain`, Markdown and PDF show the column label
+  and the cell text; the CSV holds what the cell shows; search reads the
+  cell's text. Sorting runs in the browser, so every key works in a
+  `record!` bundle or a static snapshot. Regrouping, lazy group rows and row
+  updates keep the reader's key and direction.
+- **State.** `htmxoSortState` returns `sort_key`, and `default_sort =
+  (col = "Beschäftigte", key = "Untergrenze", dir = :desc)` renders that
+  order's marker server-side (see the `morph:` note above).
 
 #### Multilevel headers {#table-header-groups}
 

@@ -30,7 +30,7 @@ export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, ColumnSummary, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
@@ -18060,36 +18060,168 @@ function _sort_dir_token(dir)
 end
 
 """
-    ColumnSpec(label; help=nothing)
+    ColumnSpec(label; help=nothing, sort_keys=())
 
-A table column header that carries an explanation. Use it among the `headers`
-of [`sortable_table`](@ref) (and so of [`master_detail_table`](@ref)) wherever a
-`String` header would go: the column stays auto-wired exactly like a `String` —
-the sort button with keyboard sorting, `default_sort` by `label`, the column
-name in Markdown — and `help` adds the explanation. It becomes the header
-button's `title`, so it shows on hover and assistive technology reads it as
-the button's description, and a `ⓘ` marker follows the label to show that the
-column has one. The marker is HTML-only: Markdown and CSV export keep `label`
-alone. A blank or absent `help` renders the same header as the `String` label.
+A table column header that carries an explanation, several sort orders, or
+both. Use it among the `headers` of [`sortable_table`](@ref) (and so of
+[`master_detail_table`](@ref)), or as a column of [`render_table`](@ref)
+(`columns=`), wherever a `String` header would go: the column stays auto-wired
+exactly like a `String` — the sort button with keyboard sorting,
+`default_sort` by `label`, the column name in Markdown.
+
+`help` adds the explanation. It becomes the header button's `title`, so it
+shows on hover and assistive technology reads it as the button's description,
+and a `ⓘ` marker follows the label to show that the column has one. The marker
+is HTML-only: Markdown and CSV export keep `label` alone. A blank or absent
+`help` renders the same header as the `String` label.
 
 ```julia
 master_detail_table([ColumnSpec("Model"; help="Select a model to compare its sources."),
                      ColumnSpec("Primal"; help="RK / Stan log-density time; below 1× RK is faster.")],
     roots; key, master, children, searchable=true)
 ```
+
+# Several sort orders: `sort_keys`
+
+A cell that combines several quantities, such as an estimate with its interval
+(`22 Tsd. (13–34 Tsd.)`), can be sorted by each of them. `sort_keys` names the
+orders, at least two, the first being the column's default:
+
+```julia
+ColumnSpec("Employees"; sort_keys = ["Estimate" => r -> r.mean, "Lower bound" => r -> r.q025,
+    "Upper bound" => r -> r.q975, "Interval width" => r -> r.q975 - r.q025])
+ColumnSpec("Employees"; sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975; texts))
+```
+
+A click on the column's label sorts by its active key (the first, until the
+reader picks another) and flips the direction, as for any column. A `▾` button
+beside the label opens a menu listing every key with `▲`/`▼`; one click there
+sorts by that key in that direction. While a key other than the first is
+active, the header names it after the caret. [`interval_sort_keys`](@ref)
+gives the five orders of an estimate with its interval.
+
+Each row's cell carries the values (see [`sort_values`](@ref)):
+- `name => f` pairs, for [`master_detail_table`](@ref) and
+  [`render_table`](@ref): the table calls `f(item)` (`f(row)` for a Tables.jl
+  row) and writes the values on the column's cell itself;
+- bare names, for [`sortable_table`](@ref), whose rows are built already: each
+  cell carries its values, `h.td(text; sort_values(m, lo, hi)...)`.
+
+Numbers sort as numbers and other values as text; `missing`, `nothing`, `NaN`
+and infinite values sort last in both directions. A cell without values (a
+group row) sorts by its `data-sort-value` or its text. Sorting runs in the
+browser, so every key works in a static export too; Markdown, CSV and search
+read the cell as it shows. The reader's choice is part of the sort state:
+`htmxoSortState` returns its `sort_key` and `default_sort` takes it back
+(see [`sortable_table`](@ref)).
 """
 struct ColumnSpec
     label::String
     help::Union{Nothing,String}
+    # `name => f` (computed per item by the table) or `name => nothing` (each
+    # cell carries the values); empty for a column with one order.
+    sort_keys::Vector{Pair{String,Any}}
 end
-ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing) =
-    ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help))
+ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=()) =
+    ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
+        _column_sort_keys(label, sort_keys))
+
+_column_sort_key(label, name::Union{AbstractString,Symbol}) = String(name) => nothing
+_column_sort_key(label, key::Pair) = last(key) isa Base.Callable ? string(first(key)) => last(key) :
+    throw(ArgumentError(string("ColumnSpec(", repr(label), "): a sort key is a name or `name => f`, ",
+        "f a function of the row; got ", repr(key))))
+_column_sort_key(label, key) = throw(ArgumentError(string("ColumnSpec(", repr(label),
+    "): a sort key is a name or `name => f`, f a function of the row; got ", repr(key))))
+
+function _column_sort_keys(label, sort_keys)
+    keys = Pair{String,Any}[_column_sort_key(label, k) for k in sort_keys]
+    isempty(keys) && return keys
+    # Refused: one order is the cell's `data-sort-value`; a menu of one is noise.
+    length(keys) >= 2 || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): sort_keys names at least two orders; a column with one sorts by its cells' data-sort-value")))
+    names = first.(keys)
+    all(n -> !isempty(strip(n)), names) || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): a sort key needs a name")))
+    allunique(names) || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): sort key names must be unique, got ", repr(names))))
+    computed = count(k -> !isnothing(last(k)), keys)
+    computed in (0, length(keys)) || throw(ArgumentError(string("ColumnSpec(", repr(label),
+        "): give every sort key a function (the table computes the values) or none (each cell carries them)")))
+    keys
+end
 
 # Header entries: a `String` or a `ColumnSpec` is auto-wired; any other value
 # (a pre-built `<th>` node) is the caller's own header, used as-is.
 _header_label(hdr::AbstractString) = String(hdr)
 _header_label(col::ColumnSpec) = col.label
 _header_label(_) = nothing
+
+# The names of a column's sort keys (empty: one order), and whether the table
+# computes their values from its items.
+_sort_key_names(col::ColumnSpec) = String[first(k) for k in col.sort_keys]
+_sort_key_names(_) = String[]
+_computed_sort_keys(col::ColumnSpec) = !isempty(col.sort_keys) && !isnothing(last(first(col.sort_keys)))
+_computed_sort_keys(_) = false
+# The header as `sortable_table` sees it once the table has written the values.
+_sort_key_names_only(col::ColumnSpec) = _computed_sort_keys(col) ?
+    ColumnSpec(col.label, col.help, Pair{String,Any}[first(k) => nothing for k in col.sort_keys]) : col
+_sort_key_names_only(hdr) = hdr
+
+"""
+    sort_values(values...)
+
+The attributes that give a table cell its values for the sort keys of its
+column ([`ColumnSpec`](@ref)`(label; sort_keys)`), in the order of the keys:
+
+```julia
+h.td("22 Tsd. (13–34 Tsd.)"; sort_values(22_000, 13_000, 34_000)...)
+```
+
+A number sorts as a number and any other value as its text; `missing`,
+`nothing`, `NaN` and infinite values sort last in both directions.
+[`master_detail_table`](@ref) and [`render_table`](@ref) write them themselves
+when the column's keys are `name => f` pairs; use this for the hand-built rows
+of [`sortable_table`](@ref). [`interval_sort_values`](@ref) gives the five
+values of an estimate with its interval.
+"""
+sort_values(values...) = (; data_htmxo_sort_keys = _sort_values_json(values))
+
+# One JSON array: a finite number as a number, a missing value as `null`,
+# anything else as its text.
+_sort_values_json(values) = "[" * join((_sort_value_json(v) for v in values), ",") * "]"
+_sort_value_json(::Union{Nothing,Missing}) = "null"
+_sort_value_json(x::Bool) = string(Int(x))
+_sort_value_json(x::Integer) = string(x)
+_sort_value_json(x::Real) = isfinite(x) ? string(Float64(x)) : "null"   # `2.0e4` is valid JSON
+_sort_value_json(x) = _md_json_string(string(x))
+
+# The number of values in a flat JSON array of numbers, strings and `null`
+# (what `sort_values` writes), to check a cell against its column's keys.
+function _sort_values_count(json::AbstractString)
+    s = strip(json)
+    startswith(s, '[') && endswith(s, ']') || return -1
+    inner = strip(SubString(s, 2, prevind(s, lastindex(s))))
+    isempty(inner) && return 0
+    n, quoted, escaped = 1, false, false
+    for c in inner
+        if quoted
+            escaped ? (escaped = false) : c == '\\' ? (escaped = true) : c == '"' && (quoted = false)
+        elseif c == '"'
+            quoted = true
+        elseif c == ','
+            n += 1
+        end
+    end
+    n
+end
+
+_interval_missing(x) = x === nothing || x === missing
+function _interval_values(estimate, lower, upper)
+    width = _interval_missing(lower) || _interval_missing(upper) ? missing : upper - lower
+    relative = _interval_missing(width) || _interval_missing(estimate) || iszero(estimate) ?
+        missing : width / abs(estimate)
+    (estimate, lower, upper, width, relative)
+end
 
 # The label plus, for an explained column, its HTML-only marker; and the
 # attributes that carry the explanation itself.
@@ -18099,17 +18231,26 @@ _header_content(col::ColumnSpec) = isnothing(col.help) ? (col.label,) :
 _header_help_attrs(::AbstractString) = (;)
 _header_help_attrs(col::ColumnSpec) = isnothing(col.help) ? (;) : (; title=col.help)
 
-_table_th(hdr, i, ds, sortable) = hdr
-_table_th(hdr::Union{AbstractString,ColumnSpec}, i, ds, sortable) = sortable ?
-    _sortable_th(hdr, i, ds) : h.th(_header_content(hdr)...; _header_help_attrs(hdr)...)
+_table_th(hdr, i, ds, sortable, texts) = hdr
+_table_th(hdr::Union{AbstractString,ColumnSpec}, i, ds, sortable, texts) = sortable ?
+    _sortable_th(hdr, i, ds, texts) : h.th(_header_content(hdr)...; _header_help_attrs(hdr)...)
 
-# Resolve `default_sort` to a `(1-based column index, "asc"|"desc")` pair.
-# Accepts `col`, `col => dir`, where `col` is a 1-based `Integer` or the label
-# of one of the auto-wired (`String` or `ColumnSpec`) headers.
+# Resolve `default_sort` to `(1-based column index, "asc"|"desc", key)`, `key`
+# the 0-based index of the column's sort key (0 for a column with one order).
+# Accepts `col`, `col => dir` and `(; col, key, dir)`, where `col` is a
+# 1-based `Integer` or the label of one of the auto-wired (`String` or
+# `ColumnSpec`) headers and `key` the name of one of its `sort_keys`.
 function _resolve_default_sort(default_sort, headers)
     isnothing(default_sort) && return nothing
-    col, dir = default_sort isa Pair ?
-        (first(default_sort), last(default_sort)) : (default_sort, :asc)
+    col, dir, key = if default_sort isa NamedTuple
+        issubset(keys(default_sort), (:col, :key, :dir)) && haskey(default_sort, :col) || error(
+            "sortable_table: default_sort as a NamedTuple takes `col` and optionally `key` and `dir`, got $(repr(default_sort))")
+        (default_sort.col, get(default_sort, :dir, :asc), get(default_sort, :key, nothing))
+    elseif default_sort isa Pair
+        (first(default_sort), last(default_sort), nothing)
+    else
+        (default_sort, :asc, nothing)
+    end
     idx = if col isa Integer
         Int(col)
     else
@@ -18127,27 +18268,69 @@ function _resolve_default_sort(default_sort, headers)
         "sortable_table: default_sort column $idx is a pre-built header node. Only " *
         "auto-wired String or ColumnSpec headers can be stamped; wire the marker yourself with " *
         "`data_sort_dir=` + `aria_sort=` if the header is a custom node.")
-    (idx, _sort_dir_token(dir))
+    names = _sort_key_names(headers[idx])
+    # A request that rides `htmxoSortState` out sends `sort_key=""` for a
+    # column with one order; that is no key.
+    k = isnothing(key) || key == "" ? 0 : something(findfirst(==(string(key)), names), -1) - 1
+    k >= 0 || error(isempty(names) ?
+        "sortable_table: default_sort key $(repr(key)) given for column $(repr(_header_label(headers[idx]))), which has one order (no sort_keys)" :
+        "sortable_table: default_sort key $(repr(key)) is not one of the sort keys $(repr(names)) of column $(repr(_header_label(headers[idx])))")
+    (idx, _sort_dir_token(dir), k)
 end
 
+# The `▾` beside a multi-key column's label and the menu it opens: one row per
+# key with a `▲` and a `▼` button. HTML-only: Markdown and CSV keep the label.
+# The menu is a popover, so a scroll box or the sticky header never clips it;
+# a manual one, because `htmxoSortMenu` closes it itself (an auto popover
+# closes on the ▾'s own pointerdown, and the click then opens it again).
+function _sort_menu(names, state, texts)
+    rows = map(enumerate(names)) do (j, name)
+        picks = map((("asc", "▲", :sort_ascending), ("desc", "▼", :sort_descending))) do (dir, glyph, text)
+            h.button(glyph; type="button", class="htmxo-sort-pick",
+                aria_label=_table_text(texts, text; name), title=_table_text(texts, text; name),
+                aria_pressed=string(state == (j - 1, dir)), data_htmxo_sort_pick="$(j - 1):$dir",
+                onclick="htmxoSortPick(this,$(j - 1),'$dir',event)")
+        end
+        h.div(; class="htmxo-sort-menu-row")(h.span(name), picks...)
+    end
+    html_only(h.span(; class="htmxo-sort-menu-holder")(
+        h.button("▾"; type="button", class="htmxo-sort-menu-toggle", aria_label=texts.sort_by,
+            title=texts.sort_by, aria_expanded="false", onclick="htmxoSortMenu(this,event)"),
+        h.div(; class="htmxo-sort-menu", popover="manual", onclick="event.stopPropagation()")(
+            h.div(; class="htmxo-sort-menu-title")(texts.sort_by), rows...)))
+end
+
+# The caret after a sorted column's label, naming its key when it is not the
+# column's first; `sortTable` writes the same span.
+_sort_caret(dir, key, names) = h.span(dir == "asc" ? " ▲" : " ▼",
+    (key > 0 ? (h.small(" " * names[key + 1]; class="htmxo-sort-key"),) : ())...; class="htmxo-sort-caret")
+
 # Build one auto-wired sortable `<th>` (1-based column `i`). When `ds = (idx,
-# dir)` names this column, stamp exactly what `sortTable` sets client-side:
-# `data-sort-dir`, `aria-sort`, and the trailing caret `<span>`. That makes a
-# `morph:` swap re-impose the sorted state rather than wipe it, keeps the caret
-# consistent with the rows the server actually emitted, and lets the next click
-# toggle from the right direction (`sortTable` reads `data-sort-dir`).
-function _sortable_th(hdr, i, ds)
+# dir, key)` names this column, stamp exactly what `sortTable` sets
+# client-side: `data-sort-dir`, `aria-sort`, the active key and the trailing
+# caret `<span>`. That makes a `morph:` swap re-impose the sorted state rather
+# than wipe it, keeps the caret consistent with the rows the server actually
+# emitted, and lets the next click toggle from the right direction
+# (`sortTable` reads `data-sort-dir`). A column with several sort keys also
+# carries their names and the `▾` menu.
+function _sortable_th(hdr, i, ds, texts)
     onclick = "sortTable($(i-1), this)"
     control = _LabelledControl(h.button(_header_content(hdr)...; type="button",
         class="htmxo-sort-control", data_htmxo_label="", _header_help_attrs(hdr)...,
         onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))"))
-    if !isnothing(ds) && first(ds) == i
-        dir = last(ds)
-        h.th(control, h.span(dir == "asc" ? " ▲" : " ▼"; class="htmxo-sort-caret");
+    names = _sort_key_names(hdr)
+    sorted = !isnothing(ds) && first(ds) == i
+    key = sorted ? ds[3] : 0
+    menu = isempty(names) ? () : (_sort_menu(names, sorted ? (key, ds[2]) : nothing, texts),)
+    key_attrs = isempty(names) ? (;) : (; data_htmxo_sort_keys=_sort_values_json(names),
+        (key > 0 ? (; data_htmxo_sort_key=string(key)) : (;))...)
+    if sorted
+        dir = ds[2]
+        h.th(control, menu..., _sort_caret(dir, key, names);
             onclick, class="u-pointer", data_sort_dir=dir,
-            aria_sort=(dir == "asc" ? "ascending" : "descending"))
+            aria_sort=(dir == "asc" ? "ascending" : "descending"), key_attrs...)
     else
-        h.th(control; onclick, class="u-pointer")
+        h.th(control, menu...; onclick, class="u-pointer", key_attrs...)
     end
 end
 
@@ -18221,10 +18404,12 @@ sorted numerically; everything else uses `localeCompare`.
 and `aria-sort="ascending"|"descending"`, and clears both from every sibling
 `<th>`. Read that state with:
 
-    htmxoSortState(target) -> {sort_col, sort_dir} | {}
+    htmxoSortState(target) -> {sort_col, sort_dir[, sort_key]} | {}
 
 `target` is a CSS selector or element; `sort_col` is **1-based** (matching
-`default_sort`), `sort_dir` is `"asc"`/`"desc"`. An unsorted table yields `{}`.
+`default_sort`), `sort_dir` is `"asc"`/`"desc"`. A column with several sort
+keys ([`ColumnSpec`](@ref)`(label; sort_keys)`) adds `sort_key`, the name of
+its active key. An unsorted table yields `{}`.
 
 # Sort state vs. `morph:` swaps
 An idiomorph `hx-swap="morph:*"` syncs attributes against the server's HTML and
@@ -18240,8 +18425,9 @@ h.button("↻"; hx_get=string(__self__),
 ```
 
 then render with `sortable_table(rows...; default_sort=sort_col => sort_dir)`
-so the server-rendered header agrees with the server-rendered row order.
-See [`sortable_table`](@ref).
+(`default_sort=(col=sort_col, key=sort_key, dir=sort_dir)` when the table has a
+column with several sort keys) so the server-rendered header agrees with the
+server-rendered row order. See [`sortable_table`](@ref).
 """
 sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
     # The master/detail runtime rides along: every master/detail table needs
@@ -18293,7 +18479,22 @@ function sortTable(col, th) {
     // visible text. This lets callers force a semantic order (e.g. status:
     // proposed → approved → rejected) without re-encoding the displayed text.
     const sortKey = cell => (cell.dataset.sortValue ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
-    const compare = (a, b) => {
+    // A column with several sort keys (`ColumnSpec(...; sort_keys)`) sorts by
+    // its active key: the value at that place in each cell's
+    // `data-htmxo-sort-keys`. A missing value sorts last in both directions.
+    const keys = th.dataset.htmxoSortKeys ? JSON.parse(th.dataset.htmxoSortKeys) : null;
+    const key = keys ? Number(th.dataset.htmxoSortKey || 0) : 0;
+    const keyed = new Map();
+    const keyOf = row => {
+        if (!keyed.has(row)) keyed.set(row, htmxoSortValue(row.cells[col], key, keys.length, sortKey));
+        return keyed.get(row);
+    };
+    const compare = keys ? (a, b) => {
+        const av = keyOf(a), bv = keyOf(b);
+        if (av === null || bv === null) return av === bv ? 0 : av === null ? 1 : -1;
+        const c = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
+        return asc ? c : -c;
+    } : (a, b) => {
         const av = sortKey(a.cells[col]);
         const bv = sortKey(b.cells[col]);
         const an = parseFloat(av), bn = parseFloat(bv);
@@ -18336,7 +18537,86 @@ function sortTable(col, th) {
     const caret = document.createElement('span');
     caret.className = 'htmxo-sort-caret';
     caret.textContent = asc ? ' ▲' : ' ▼';
+    // A key other than the column's first is named after the caret.
+    if (keys && key > 0) {
+        const name = document.createElement('small');
+        name.className = 'htmxo-sort-key';
+        name.textContent = ' ' + keys[key];
+        caret.appendChild(name);
+    }
     th.appendChild(caret);
+    // The ▾ menus mark the order now in force.
+    const order = key + ':' + (asc ? 'asc' : 'desc');
+    th.closest('thead').querySelectorAll('.htmxo-sort-pick').forEach(b =>
+        b.setAttribute('aria-pressed', String(b.closest('th') === th && b.dataset.htmxoSortPick === order)));
+}
+
+// A cell's value for sort key `key` of its column's `n`: from its
+// `data-htmxo-sort-keys`, else (a group row) its `data-sort-value` or text.
+function htmxoSortValue(cell, key, n, sortKey) {
+    if (cell && cell.dataset.htmxoSortKeys) {
+        const values = JSON.parse(cell.dataset.htmxoSortKeys);
+        if (values.length !== n) throw new Error('sortTable: a cell carries ' + values.length +
+            ' sort values for the ' + n + ' sort keys of its column');
+        return values[key] ?? null;
+    }
+    const text = cell ? sortKey(cell) : '';
+    const number = parseFloat(text);
+    return text === '' ? null : isNaN(number) ? text : number;
+}
+
+// The ▾ beside a multi-key column's label: open or close its menu, a
+// popover placed under the button so no scroll box or sticky header clips
+// it. A click elsewhere, Escape or moving the focus out closes it.
+function htmxoSortMenu(button, event) {
+    if (event) event.stopPropagation();
+    const menu = button.nextElementSibling;
+    if (menu.matches(':popover-open')) { htmxoSortMenuClose(menu, true); return; }
+    document.querySelectorAll('.htmxo-sort-menu:popover-open').forEach(m => htmxoSortMenuClose(m, false));
+    menu.showPopover();
+    button.setAttribute('aria-expanded', 'true');
+    const place = () => {
+        const r = button.getBoundingClientRect();
+        menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+        menu.style.top = (r.bottom + 2) + 'px';
+    };
+    place();
+    const close = e => {
+        if (e.type === 'keydown' ? e.key === 'Escape'
+            : e.type === 'focusout' ? e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== button
+            : !menu.contains(e.target) && !button.contains(e.target))
+            htmxoSortMenuClose(menu, e.type === 'keydown');
+    };
+    document.addEventListener('pointerdown', close, true);
+    document.addEventListener('keydown', close, true);
+    menu.addEventListener('focusout', close);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    menu.htmxoSortMenuDone = () => {
+        document.removeEventListener('pointerdown', close, true);
+        document.removeEventListener('keydown', close, true);
+        menu.removeEventListener('focusout', close);
+        window.removeEventListener('scroll', place, true);
+        window.removeEventListener('resize', place);
+    };
+    (menu.querySelector('.htmxo-sort-pick[aria-pressed="true"]') || menu.querySelector('.htmxo-sort-pick')).focus();
+}
+function htmxoSortMenuClose(menu, refocus) {
+    if (menu.htmxoSortMenuDone) { menu.htmxoSortMenuDone(); menu.htmxoSortMenuDone = null; }
+    if (menu.matches(':popover-open')) menu.hidePopover();
+    const button = menu.previousElementSibling;
+    button.setAttribute('aria-expanded', 'false');
+    if (refocus) button.focus();
+}
+// A ▲/▼ in the menu: sort the column by that key in that direction.
+function htmxoSortPick(button, key, dir, event) {
+    if (event) event.stopPropagation();
+    const th = button.closest('th'), menu = button.closest('.htmxo-sort-menu');
+    th.dataset.htmxoSortKey = String(key);
+    // `sortTable` flips the direction it finds.
+    th.dataset.sortDir = dir === 'asc' ? 'desc' : 'asc';
+    sortTable(th);
+    if (menu) htmxoSortMenuClose(menu, true);
 }
 
 // Pair lookup uses literal ids, so punctuation in a hand-built key cannot
@@ -20130,8 +20410,9 @@ if (!window.htmxoLinkBound) {
 
 // Read a table's CURRENT client-side sort state. `target` is a CSS selector
 // or an element (the <table>, or any node inside or around it). Returns
-// {sort_col, sort_dir} — 1-based column index, 'asc'|'desc' — or {} when the
-// table is unsorted, so it spreads cleanly into an htmx hx-vals:
+// {sort_col, sort_dir} — 1-based column index, 'asc'|'desc' — plus
+// `sort_key`, the active key's name, for a column with several sort keys; or
+// {} when the table is unsorted, so it spreads cleanly into an htmx hx-vals:
 //
 //     hx-vals="js:{...htmxoSortState('#my-table')}"
 //
@@ -20141,7 +20422,7 @@ if (!window.htmxoLinkBound) {
 // span are all gone once the morph lands, and the server's child order is
 // re-imposed on the rows. Ride the state out with the request, render the
 // rows in that order, and stamp it back with
-// `sortable_table(...; default_sort=col => dir)`.
+// `sortable_table(...; default_sort=col => dir)` (or `(col=, key=, dir=)`).
 function htmxoSortState(target) {
     const root = typeof target === 'string' ? document.querySelector(target) : target;
     if (!root) return {};
@@ -20150,11 +20431,15 @@ function htmxoSortState(target) {
     if (!table) return {};
     const th = table.querySelector('thead th[data-sort-dir]');
     if (!th) return {};
-    return {
+    const state = {
         sort_col: th.dataset.htmxoSortCol ? Number(th.dataset.htmxoSortCol)
             : Array.prototype.indexOf.call(th.parentNode.children, th) + 1,
         sort_dir: th.dataset.sortDir,
     };
+    // A column with several sort keys: the name of the active one.
+    if (th.dataset.htmxoSortKeys)
+        state.sort_key = JSON.parse(th.dataset.htmxoSortKeys)[Number(th.dataset.htmxoSortKey || 0)];
+    return state;
 }
 """
 
@@ -20265,7 +20550,7 @@ function downloadTableCsv(btn, filename) {
     // still one name.
     const name = th => {
         const copy = th.cloneNode(true);
-        copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help').forEach(e => e.remove());
+        copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help, .htmxo-sort-menu-holder').forEach(e => e.remove());
         return lines(copy).join(' ');
     };
     const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
@@ -20318,8 +20603,10 @@ separators of the numbers the table writes (`decimal`, `thousands`: its float
 cells and [`number_cell`](@ref)s, see [`format_number`](@ref), and the group
 sums of `group_summary` in [`master_detail_table`](@ref)) and the note on a row that holds a hovered item
 in a collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`; see
-*Hover linking* in
-[`sortable_table`](@ref)). Build one with
+*Hover linking* in [`sortable_table`](@ref)), the `▾` menu of a column with
+several sort keys (`sort_by`, `sort_ascending`, `sort_descending`) and the
+names [`interval_sort_keys`](@ref) gives its five orders (`sort_estimate`,
+`sort_lower`, `sort_upper`, `sort_width`, `sort_relative_width`). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -20330,7 +20617,8 @@ browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
 `selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
 texts take `{name}` (the grouping), `group_level` also `{level}`;
 `rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
-`linked_inside_many` takes `{count}`.
+`linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
+take `{name}` (the sort key).
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -20365,6 +20653,14 @@ struct TableTexts
     linked_inside::String       # note: the hovered item is in this collapsed row
     linked_deep::String         # note: ... several levels down
     linked_inside_many::String  # note: several hovered items are in this collapsed row
+    sort_by::String             # a multi-key column's ▾ menu: its button and heading
+    sort_ascending::String      # its ▲ button for one key
+    sort_descending::String     # its ▼ button for one key
+    sort_estimate::String       # `interval_sort_keys`: the five orders of an estimate
+    sort_lower::String          #   with its interval
+    sort_upper::String
+    sort_width::String
+    sort_relative_width::String
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -20373,6 +20669,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     group_add = (:name,), group_add_inner = (:name,), group_level = (:level, :name),
     group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
     rows_failed = (:status,), linked_deep = (:levels,), linked_inside_many = (:count,),
+    sort_ascending = (:name,), sort_descending = (:name,),
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -20409,6 +20706,14 @@ const _TABLE_TEXT_LOCALES = (
         linked_inside = "↳ inside",
         linked_deep = "↳ {levels} levels down",
         linked_inside_many = "↳ {count} inside",
+        sort_by = "Sort by",
+        sort_ascending = "{name}, ascending",
+        sort_descending = "{name}, descending",
+        sort_estimate = "Estimate",
+        sort_lower = "Lower bound",
+        sort_upper = "Upper bound",
+        sort_width = "Interval width",
+        sort_relative_width = "Relative width",
     ),
     de = (
         search = "Suche",
@@ -20443,6 +20748,14 @@ const _TABLE_TEXT_LOCALES = (
         linked_inside = "↳ darin",
         linked_deep = "↳ {levels} Ebenen tiefer",
         linked_inside_many = "↳ {count} darin",
+        sort_by = "Sortieren nach",
+        sort_ascending = "{name}, aufsteigend",
+        sort_descending = "{name}, absteigend",
+        sort_estimate = "Schätzwert",
+        sort_lower = "Untergrenze",
+        sort_upper = "Obergrenze",
+        sort_width = "Intervallbreite",
+        sort_relative_width = "Relative Breite",
     ),
 )
 
@@ -20466,6 +20779,46 @@ table_texts(locale::Symbol=:en; texts...) =
 
 const _EN_TABLE_TEXTS = table_texts(:en)
 
+"""
+    interval_sort_keys(estimate, lower, upper; texts=table_texts())
+    interval_sort_keys(; texts=table_texts())
+
+The five sort keys of a column that shows an estimate with its interval
+(`22 Tsd. (13–34 Tsd.)`), for [`ColumnSpec`](@ref)`(label; sort_keys)`: the
+estimate, the lower bound, the upper bound, the interval's width
+(`upper - lower`) and its relative width (`(upper - lower) / abs(estimate)`).
+`estimate`, `lower` and `upper` are functions of the row; the names come from
+`texts` (`table_texts(:de)`: Schätzwert, Untergrenze, Obergrenze,
+Intervallbreite, relative Breite).
+
+```julia
+ColumnSpec("Beschäftigte"; sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975; texts = DE))
+```
+
+Without functions it returns the names alone, for [`sortable_table`](@ref)
+rows whose cells carry [`interval_sort_values`](@ref).
+"""
+interval_sort_keys(estimate, lower, upper; texts::TableTexts=_EN_TABLE_TEXTS) =
+    Pair{String,Any}[name => (r -> _interval_values(estimate(r), lower(r), upper(r))[i])
+                     for (i, name) in enumerate(_interval_key_names(texts))]
+interval_sort_keys(; texts::TableTexts=_EN_TABLE_TEXTS) = _interval_key_names(texts)
+
+_interval_key_names(texts::TableTexts) = String[texts.sort_estimate, texts.sort_lower,
+    texts.sort_upper, texts.sort_width, texts.sort_relative_width]
+
+"""
+    interval_sort_values(estimate, lower, upper)
+
+[`sort_values`](@ref) for a cell of a column whose keys are
+[`interval_sort_keys`](@ref): the estimate, both bounds, the interval's width
+and its relative width.
+
+```julia
+h.td("22 Tsd. (13–34 Tsd.)"; interval_sort_values(22_000, 13_000, 34_000)...)
+```
+"""
+interval_sort_values(estimate, lower, upper) = sort_values(_interval_values(estimate, lower, upper)...)
+
 # A table text with its placeholders filled in. The browser runtime's
 # `htmxoText` fills the same templates from the same values.
 _table_text(texts::TableTexts, name::Symbol; values...) = _fill_text(getfield(texts, name); values...)
@@ -20486,7 +20839,7 @@ _with_table_texts(node, texts::TableTexts) = texts == _EN_TABLE_TEXTS ? node :
 _table_count_text(texts::TableTexts, shown, total) = _table_text(texts, :count; shown, total)
 
 """
-    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
+    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, columns=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
@@ -20504,6 +20857,12 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 - `download_filename`: filename for the CSV download (default: `id * ".csv"`
   when `id` is supplied, otherwise `"table.csv"`)
 - `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
+- `columns`: give columns a header other than their name, as `name => label`
+  or `name => ColumnSpec(...)` pairs (a `Dict` or `NamedTuple` works too), e.g.
+  an explanation or several sort orders computed from each Tables.jl row:
+  `columns = ["mean" => ColumnSpec("Employees"; help = "…",
+  sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975))]`
+  (see [`ColumnSpec`](@ref)). A name that is not a column throws.
 - `cell(value, column_name, row_index)`: custom renderer of a cell's content.
   By default a float is a [`number_cell`](@ref) in the table's language
   (`texts`): `0.15623` shows `0,15623` with `texts=table_texts(:de)`,
@@ -20533,21 +20892,53 @@ cap = CaptionSpec(; title="Scores", short="Ranked test scores.", long="Data coll
 page = htmx(h.main(render_table(df; download=true, caption=cap)); pico_version="2")
 ```
 """
-function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
+function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, columns=nothing, kwargs...)
     isnothing(link) == isnothing(link_key) || throw(ArgumentError(
         "render_table: `link` names the group and `link_key(row)` keys each row; give both or neither"))
     cols = Tables.columnnames(Tables.columns(table))
     texts = get(kwargs, :texts, _EN_TABLE_TEXTS)
+    headers = _render_table_headers(columns, cols)
 
     body_rows = [
-        h.tr([_render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts) for c in cols]...;
+        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts), row)
+              for (j, c) in enumerate(cols)]...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
              (isnothing(link_key) ? (;) : (; data_htmxo_link_key=string(link_key(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
-    sortable_table([string(c) for c in cols], body_rows;
+    sortable_table(map(_sort_key_names_only, headers), body_rows;
         id, sortable, download, download_filename, caption, class, link, kwargs...)
+end
+
+# Each column's header: its name, or what `columns` gives for it (a label or
+# a `ColumnSpec`).
+_render_table_headers(::Nothing, cols) = Any[string(c) for c in cols]
+function _render_table_headers(columns, cols)
+    names = [string(c) for c in cols]
+    headers = Any[names...]
+    for (c, spec) in pairs(columns isa AbstractDict || columns isa NamedTuple ? columns : Dict(columns))
+        j = findfirst(==(string(c)), names)
+        isnothing(j) && throw(ArgumentError(string("render_table: `columns` names ", repr(string(c)),
+            ", which is not a column of the table; its columns are ", repr(names))))
+        spec isa Union{AbstractString,ColumnSpec} || throw(ArgumentError(string("render_table: ",
+            "`columns` gives column ", repr(string(c)), " a String label or a ColumnSpec, got ", repr(spec))))
+        # Refused: render_table builds the cells, so it computes their values.
+        isempty(_sort_key_names(spec)) || _computed_sort_keys(spec) || throw(ArgumentError(string(
+            "render_table: column ", repr(string(c)), " names its sort keys without functions; ",
+            "give each a function of the row (`\"Estimate\" => r -> r.mean`)")))
+        headers[j] = spec isa AbstractString ? String(spec) : spec
+    end
+    headers
+end
+
+# A cell of a column whose sort keys `render_table` computes from the row.
+_render_sort_values(hdr, td, row) = td
+function _render_sort_values(hdr::ColumnSpec, td, row)
+    _computed_sort_keys(hdr) || return td
+    Node(HTMX.tag(td), merge(copy(HTMX.attrs(td)), Dict{Symbol,Any}(
+        Symbol("data-htmxo-sort-keys") => _sort_values_json(last(k)(row) for k in hdr.sort_keys))),
+        HTMX.children(td))
 end
 
 # A `render_table` cell: a float is a number cell in the table's language,
@@ -20579,10 +20970,14 @@ that fits its column drops that scroll box so its header can stay in view
 - `headers`: `Vector` of header entries. Each entry is either:
     - a `String` — auto-wired into `h.th(label; onclick="sortTable(i, this)", class="u-pointer")`
       when `sortable=true`, or a plain `h.th(label)` otherwise.
-    - a [`ColumnSpec`](@ref)`(label; help)` — auto-wired exactly like its `label`,
+    - a [`ColumnSpec`](@ref)`(label; help, sort_keys)` — auto-wired exactly like its `label`,
       plus an explanation: `help` becomes the header button's `title` (hover
       text and accessible description) with an HTML-only `ⓘ` marker after the
       label. Use it rather than a hand-built node to explain a column.
+      `sort_keys` names several orders for the column (an estimate, its
+      interval's bounds and widths), picked from a `▾` menu beside the label;
+      here, with rows built already, it names them only, and each cell carries
+      its values with [`sort_values`](@ref).
     - any HTML node (e.g. `h.th("")`, `h.th("Actions")`) — used as-is.
       That's the per-column opt-out: pass a node and the auto-wiring is skipped.
       To make a RICH header sortable anyway (e.g. one holding a button), wire
@@ -20614,7 +21009,10 @@ that fits its column drops that scroll box so its header can stay in view
   caret on that header, exactly as a client-side `sortTable` click would.
   It **declares** the order, it does not perform it: `sortable_table` receives
   pre-built row nodes, so the caller must emit `rows` in that order. Requires
-  `sortable=true` and a `String` or `ColumnSpec` header at `col`.
+  `sortable=true` and a `String` or `ColumnSpec` header at `col`. For a column
+  with several sort keys, `(col=..., key="Lower bound", dir=:desc)` names the
+  key too (default: its first; `key=""`, as a request carries for a column
+  with one order, is the same).
 - `searchable`: add a labelled client-side search field above the table
   (default `false`), with a live "N of M rows shown" count as its helper text
   and a "No matching rows" state below. See *Client-side search* below.
@@ -20876,8 +21274,18 @@ function sortable_table(headers, rows;
         kwargs = (; aria_multiselectable="true", kwargs...)
     end
     ds = _resolve_default_sort(default_sort, headers)
+    # Its rows are built already: a column's sort keys name the orders, and
+    # each cell carries the values (`sort_values`).
+    for (i, hdr) in enumerate(headers)
+        _computed_sort_keys(hdr) && throw(ArgumentError(string("sortable_table: column ",
+            repr(_header_label(hdr)), " gives its sort keys functions, but sortable_table's rows are ",
+            "built already. Name the keys (`sort_keys = [\"Estimate\", …]`) and give each cell its ",
+            "values with `sort_values(…)`, or use master_detail_table or render_table, which compute them")))
+        names = _sort_key_names(hdr)
+        isempty(names) || _check_sort_values(rows, i, names, _header_label(hdr))
+    end
 
-    th_nodes = [_table_th(hdr, i, ds, sortable) for (i, hdr) in enumerate(headers)]
+    th_nodes = [_table_th(hdr, i, ds, sortable, texts) for (i, hdr) in enumerate(headers)]
 
     # Always include `htmxo-sortable-table` when sorting is on — that's
     # the hook `sortable_table_styles()` reads, and it makes call sites
@@ -20944,6 +21352,23 @@ function sortable_table(headers, rows;
         _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!searchable)
     # `master_detail_table` wraps this table and marks its own outermost element.
     _stamp_texts ? _with_table_texts(selected, texts) : selected
+end
+
+# A hand-built cell that carries sort values carries one per key of its
+# column; a cell without them sorts by its `data-sort-value` or text.
+function _check_sort_values(rows, col, names, label)
+    attr = Symbol("data-htmxo-sort-keys")
+    for row in rows
+        row isa Node && HTMX.tag(row) === :tr && _is_master_row(row) || continue
+        cells = [c for c in HTMX.children(row) if c isa Node && HTMX.tag(c) in (:td, :th)]
+        length(cells) >= col || continue
+        json = get(HTMX.attrs(cells[col]), attr, nothing)
+        isnothing(json) && continue
+        n = _sort_values_count(string(json))
+        n == length(names) || throw(ArgumentError(string("sortable_table: a cell of column ", repr(label),
+            " carries ", n < 0 ? "malformed sort values $(repr(json))" : "$n sort value$(n == 1 ? "" : "s")",
+            " for its ", length(names), " sort keys ", repr(names))))
+    end
 end
 
 # A selectable row's key: `data-htmxo-select-key`, else its id. Keyed state
@@ -21668,7 +22093,11 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 `row-…` / `detail-…` ids, and a `colspan`-spanning detail cell.
 
 # Arguments
-- `headers`: as in [`sortable_table`](@ref).
+- `headers`: as in [`sortable_table`](@ref). A [`ColumnSpec`](@ref) whose
+  `sort_keys` are `name => f` pairs gets its values from the table: it calls
+  `f(item)` for every row and writes them on the column's cell, so `master`
+  returns its cells as usual (and may not write them itself). Group rows have
+  no values and sort by their own cell.
 - `items`: any iterable.
 
 # Keyword arguments
@@ -21976,6 +22405,7 @@ function master_detail_table(headers, items;
                              link_key=nothing,
                              sticky::Bool=true,
                              _rows_only::Bool=false,
+                             _sort_item=identity,
                              _toolbar=(),
                              _level_marks::Bool=false,
                              _max_level::Int=0,
@@ -22009,6 +22439,9 @@ function master_detail_table(headers, items;
     # (same URL for every row — unusual, but supported).
     _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
     rows = Any[]
+    # Columns whose sort keys the table computes: (column, functions).
+    sort_columns = [(i, Any[last(k) for k in hdr.sort_keys])
+                    for (i, hdr) in enumerate(headers) if _computed_sort_keys(hdr)]
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     _open_detail = initially_open_detail isa Bool ? (_ -> initially_open_detail) : initially_open_detail
     seen = Set{String}()
@@ -22077,6 +22510,9 @@ function master_detail_table(headers, items;
         detail_open = has_detail && (isnothing(_open_detail) ?
             open && !(branch && branches_collapsible) : _open_detail(item))
         cells, row_attrs = _md_master_row(master(item), texts)
+        # A group row (`_sort_item` gives `nothing`) sorts by its own value.
+        sort_item = isempty(sort_columns) ? nothing : _sort_item(item)
+        isnothing(sort_item) || _md_sort_values!(cells, sort_columns, sort_item, headers)
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
         if branch && branches_collapsible && !selecting && !haskey(attrs, :onclick)
             attrs[:onclick] = "htmxoTreeRow(this,event)"
@@ -22190,7 +22626,8 @@ function master_detail_table(headers, items;
     # gets one from its root keys, which are unique on the page.
     body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
-    table = sortable_table(headers, rows; table_attrs..., texts, link, sticky, _stamp_texts=false, kwargs...)
+    table = sortable_table(map(_sort_key_names_only, headers), rows; table_attrs..., texts, link, sticky,
+        _stamp_texts=false, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries. A narrow first column
@@ -22812,6 +23249,26 @@ function _md_json_string(s::AbstractString)
     String(take!(io))
 end
 
+# Write each computed sort key's value of `item` on its column's cell
+# (`sort_values`); `cells` is the table's own copy of the master cells.
+function _md_sort_values!(cells, sort_columns, item, headers)
+    attr = Symbol("data-htmxo-sort-keys")
+    for (col, fs) in sort_columns
+        label = repr(_header_label(headers[col]))
+        length(cells) >= col || throw(ArgumentError(string("master_detail_table: column ", label,
+            " has sort keys, but `master` returned ", length(cells), " cells")))
+        cell = cells[col]
+        cell isa Node || throw(ArgumentError(string("master_detail_table: the cell of column ", label,
+            " must be a <td> node to carry its sort values, got ", typeof(cell))))
+        haskey(HTMX.attrs(cell), attr) && throw(ArgumentError(string("master_detail_table: column ",
+            label, " computes its sort values from `sort_keys`; its cell may not set them too")))
+        cells[col] = Node(HTMX.tag(cell),
+            merge(copy(HTMX.attrs(cell)), Dict{Symbol,Any}(attr => _sort_values_json(f(item) for f in fs))),
+            HTMX.children(cell))
+    end
+    cells
+end
+
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
         master_attrs, initially_open, initially_open_detail, children, groupings, group_by, group_master,
         group_by_url, group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, selectable,
@@ -23078,6 +23535,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         selectable, select_form, select_submit = isnothing(select_submit) ? nothing :
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
+        _sort_item = x -> x isa _MDGroup ? nothing : x.item,
         _detail_key = x -> x isa _MDGroup ? gid(x.path) : string(key(x.item)),
         update_rows = update ? rendered : nothing,
         # A leaf is linked by its `link_key` (default: its own key), under
@@ -27585,6 +28043,37 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 .htmxo-sortable-table thead th > .htmxo-sort-control:focus-visible {
     outline: 2px solid var(--htmxo-accent, currentColor); outline-offset: .15em;
 }
+/* A column with several sort keys: the ▾ beside its label and the menu it
+   opens (a popover in the top layer, placed by `htmxoSortMenu`), one row per
+   key with ▲/▼; the pressed one is the order in force. Buttons reset as above. */
+.htmxo-sort-menu-holder { white-space: nowrap; }
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle,
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick {
+    width: auto; margin: 0; border: none; background: transparent; color: inherit;
+    font: inherit; box-shadow: none; cursor: pointer; line-height: inherit;
+}
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle { padding: 0 .2em; margin-left: .15em; opacity: .65; }
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle:is(:hover, [aria-expanded="true"]) { opacity: 1; }
+.htmxo-sort-menu {
+    position: fixed; inset: auto; margin: 0; padding: .4rem .5rem; min-width: 12em;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: .375rem;
+    background: var(--pico-background-color, Canvas); color: var(--pico-color, CanvasText);
+    box-shadow: 0 .25rem 1rem rgb(0 0 0 / .2); font-size: .875rem; font-weight: normal;
+    text-align: left; white-space: nowrap;
+}
+.htmxo-sort-menu-title { font-weight: 600; opacity: .75; margin-bottom: .2rem; }
+.htmxo-sort-menu-row { display: flex; align-items: center; gap: .25rem; }
+.htmxo-sort-menu-row > span { flex: 1; padding-right: .75rem; }
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick { padding: .1rem .45rem; border-radius: .25rem; }
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick[aria-pressed="true"] {
+    background: color-mix(in srgb, currentColor 18%, transparent); font-weight: 700;
+}
+.htmxo-sortable-table thead th .htmxo-sort-menu-toggle:focus-visible,
+.htmxo-sortable-table thead th .htmxo-sort-menu .htmxo-sort-pick:focus-visible {
+    outline: 2px solid var(--htmxo-accent, currentColor); outline-offset: .1em;
+}
+.htmxo-sort-caret .htmxo-sort-key { font-weight: normal; opacity: .8; }
 
 /* A table's own controls (the search field with its count, Group by,
    Expand/Collapse all, the selection bar) share one line, wrapping only when
