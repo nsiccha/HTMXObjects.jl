@@ -2425,9 +2425,11 @@ end
         groupings=["Outline" => :children, "None" => nothing, "Kind" => r -> string(r.kind)]))
     @test contains(default, "data-htmxo-leaf=\"s3\"") && contains(default, "data-htmxo-leaf=\"c2-c2\"") &&
         count("data-htmxo-branch=\"\"", default) == 3
-    # A table without collapsible branches keeps its groups open, with no toggle.
-    open_groups = html(outline_table(group_by=["Status"], branches_collapsible=false))
-    @test !contains(tbody(open_groups), "data-htmxo-tree-toggle") && !contains(tbody(open_groups), " hidden=")
+    # A table without collapsible branches keeps its groups open, with no
+    # toggle: no master row is hidden (detail rows start hidden as always).
+    open_groups = tbody(html(outline_table(group_by=["Status"], branches_collapsible=false)))
+    masters = [m.match for m in eachmatch(r"<tr\b[^>]*\sid=\"row-[^>]*>", open_groups)]
+    @test length(masters) == 7 && !any(contains(" hidden="), masters) && !contains(open_groups, "data-htmxo-tree-toggle")
     # refused: `=> :children` shows the tree `children` builds, and there is none
     @test_throws ArgumentError master_detail_table(["Item"], OUTLINE; key=outline_key(""), master=r -> (h.td(""),),
         detail=r -> "", groupings=OUTLINE_GROUPINGS)
