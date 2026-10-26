@@ -1242,7 +1242,7 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
-### `loading_indicator_script()` and `request_feedback_*`
+### `loading_indicator_script()` and `request_feedback_*` {#request-feedback}
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.
 `htmx()` includes `request_feedback()` by default (`feedback=true`);
@@ -1253,6 +1253,30 @@ and the element htmx resolved as the request's target. That covers an inherited
 a timeout) flashes red, and the shell's
 [failure toast](api.md#failure-toasts) says why. A request the page aborted, or
 an answer that navigates, only clears the outline.
+
+A part of the page that the request will replace says so while the request
+runs, once it has taken 0.3 s (a faster answer just swaps in). The part is
+dimmed (class `htmxo-loading`) and carries `aria-busy="true"`, and a status
+line (`div.htmxo-loading-status`, `role="status"`) sits over the middle of its
+visible box. When the reader chose what is coming, for a GET request, the line
+names it: a select's option, a radio button's label, a link's text
+("Loading Kreuzberg…"). Otherwise it says "Loading…". The words are `loading`
+and `loading_named` of the page's [`error_texts`](api.md#failure-toasts), so
+`htmx(...; error_texts=error_texts(:de))` gives "Kreuzberg wird geladen…".
+This applies to swaps that replace the part's content (`innerHTML`,
+`outerHTML`, `textContent`, the morph swaps), not to `hx-swap="none"`, an
+insertion beside or inside the part, or `delete`, and not when the part is a
+control (button, input, select, textarea, link, label, summary) or the whole
+`body`. Set `data-htmxo-loading="…"` on the requesting element, or an element
+around it, for other words, and `data-htmxo-loading="false"` to leave its parts
+unmarked, for an app that draws its own placeholder. The mark ends when the
+answer is swapped in, or when the request fails, times out or is aborted. A
+request that replaces a running one on the same part
+(`hx-sync="this:replace"`, a second pick) keeps the part marked without a gap.
+Pico styles every `[aria-busy=true]` element (a spinner before it,
+`white-space: nowrap`, no pointer events), and none of that reaches the part:
+the spinner is removed, the other two are held as they were, and a part with a
+`::before` of its own that Pico would change is not marked busy.
 
 Only requests the reader started are marked. A request the page sends by
 itself draws no outline, and its element does not dim: a poll, a preload, and
