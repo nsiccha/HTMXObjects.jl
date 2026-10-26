@@ -580,6 +580,10 @@ end
         (node for action in parts.actions for node in (action.button, action.result))...)
     @test count("</button><div class=\"htmxo-semantic-operation-result\"",
                 repr("text/html", action_surface(root.rows(1); layout=together))) == 4
+    # A layout may place the parts in a tab.
+    in_tab(parts) = tabset("Run" => together(parts), "About" => h.p("about"))
+    @test count("</button><div class=\"htmxo-semantic-operation-result\"",
+                repr("text/html", action_surface(root.rows(1); layout=in_tab))) == 4
     @test_throws ArgumentError action_surface(root.rows(1); results=:row)
 
     # Forms keep the shared host when compact is off.
