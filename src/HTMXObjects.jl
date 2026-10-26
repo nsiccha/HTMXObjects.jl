@@ -3229,8 +3229,11 @@ _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
     HTMXObjects.page_lang() -> Union{String,Nothing}
 
 The language of the answer being produced: the BCP 47 tag that the route's
-mount chain declares with `__lang__` (the innermost declaration wins), or
-`nothing` when none declares one, or outside a route.
+mount chain declares with `__lang__` (the innermost declaration wins), or the
+one the answer is asked for in. `dispatch(…; lang)` wins over the declaration;
+[`to_markdown_string`](@ref)`(x; lang)` and a [`pdf_report`](@ref) of a value
+set it while they render. It is `nothing` when none of them sets one, as
+outside a route.
 
 It holds on the request's own task, while the route's property runs and while
 its answer is rendered (a poller, the page shell, an error page). So code that
@@ -3268,6 +3271,24 @@ _page_title_value(obj, title) = _page_declaration_error(obj, :__title__, "a non-
 _page_declaration_error(obj, name, wanted, got) = throw(ArgumentError(string(
     "`", name, "` on ", nameof(typeof(obj)), " must be ", wanted,
     ", or nothing to keep the enclosing page's; got ", repr(got))))
+
+# A language a caller asks for what it renders (`to_markdown_string`,
+# `dispatch`), in place of the answer's own: a BCP 47 tag, or `nothing`.
+_check_lang(::Nothing, who) = nothing
+_check_lang(lang::AbstractString, who) = occursin(_HTML_LANG, lang) ? String(lang) :
+    throw(ArgumentError(string(who, ": lang must be a BCP 47 language tag such as \"de\" or ",
+        "\"de-CH\", or nothing to keep the answer's; got ", repr(lang))))
+_check_lang(lang, who) = throw(ArgumentError(string(
+    who, ": lang must be a BCP 47 language tag string such as \"de\", or nothing; got ", repr(lang))))
+
+_with_page_lang(f, ::Nothing) = f()
+_with_page_lang(f, lang::AbstractString) = _with_page_meta(f, (; _page_meta()..., lang=String(lang)))
+
+# A `dispatch(…; lang)` names the answer's language itself, over the chain's.
+_page_meta_of(objects, req::HTTP.Request) =
+    _page_meta_with_lang(_page_meta_of(objects), get(req.context, :htmxo_lang, nothing))
+_page_meta_with_lang(meta, ::Nothing) = meta
+_page_meta_with_lang(meta, lang::String) = (; meta..., lang)
 
 """
     pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, tables=true, error_texts=nothing, lang=nothing, title=nothing)
@@ -4964,7 +4985,7 @@ _finalized_response(r::HTTP.Response) = r
 _finalized_response(m::MIMEResponse) = to_response(m)
 
 """
-    to_markdown_string(val; audience=nothing) -> String
+    to_markdown_string(val; audience=nothing, lang=nothing) -> String
 
 The Markdown of `val`, as a `?plain` or `Accept: text/markdown` answer holds it:
 `show(io, MIME"text/markdown"(), val)` once interactive chrome (forms, inputs,
@@ -4974,18 +4995,28 @@ buttons) is dropped, or `""` when nothing else is left.
 [`private`](@ref) content shows its stand-in, or nothing, for `:public`, and in
 full for `:private`. Without it, `val` renders for the audience of the answer
 it is rendered in (a route's `export_audience(__req__)`), and for the public
-outside any request. Library code that assembles a document from values it
-renders itself passes the document's audience, also when it runs inside a live
-request, which is `:private`:
+outside any request.
+
+`lang` (a BCP 47 tag such as `"de-DE"`) is the language of the words
+HTMXObjects writes itself, such as the label of private content ("nicht
+öffentlich"). Without it they follow the answer `val` is rendered in
+([`HTMXObjects.page_lang`](@ref)), and are English outside any route. The
+Markdown keeps the language it is rendered in.
+
+Library code that assembles a document from values it renders itself passes
+the document's audience and language, also when it runs inside a live request,
+which is `:private`:
 
 ```julia
-chunks = [to_markdown_string(section; audience) for section in sections]
+chunks = [to_markdown_string(section; audience, lang="de-DE") for section in sections]
 pdf_report(join(chunks, "\\n\\n"), "konzept.pdf"; title="Konzept", lang="de-DE", audience)
 ```
 
-An `audience` other than `:public` and `:private` is an `ArgumentError`.
+An `audience` other than `:public` and `:private`, and a `lang` that is not a
+language tag (`"German"`), are an `ArgumentError`.
 """
-to_markdown_string(val; audience=nothing) = _to_markdown_string(val, audience)
+to_markdown_string(val; audience=nothing, lang=nothing) =
+    _with_page_lang(() -> _to_markdown_string(val, audience), _check_lang(lang, "to_markdown_string"))
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
 # Interactive chrome (form/input/textarea/button) is dropped first by
 # `_strip_md_chrome` so a `?plain`/`?markdown` read never serializes a form's
@@ -5066,10 +5097,12 @@ list item, a `summary`); the outline and the label, in the language of the
 element's `lang`, come from [`htmxo_utility_styles`](@ref), which every
 [`htmx`](@ref) page carries. In Markdown a block is a fenced div
 `::: {.htmxo-private}` that opens with the label, `*not public*`, and inline
-content a span `[*not public:* …]{.htmxo-private}`; the label follows
-`HTMXObjects.page_lang()`, and a [`pdf_report`](@ref) its `lang`. Private
-content inside private content is marked once. `mark=false` shows `content`
-without the mark.
+content a span `[*not public:* …]{.htmxo-private}`. The label is in the
+language of `HTMXObjects.page_lang()`: a route's `__lang__`, or the `lang` of
+[`to_markdown_string`](@ref)`(x; lang)`, of `dispatch(…; lang)` and of a
+[`pdf_report`](@ref) of a value. A Markdown string keeps the language it was
+rendered in. Private content inside private content is marked once.
+`mark=false` shows `content` without the mark.
 
 Public answers are those of an export, unless it asks for `audience=:private`:
 a [`StaticExport`](@ref) or [`export_site`](@ref) bundle, a
@@ -14050,8 +14083,9 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             context = root_target.context
             root = root_target.root
             # The root's `__lang__` / `__title__` hold for an answer whose mount
-            # chain cannot be walked; the full chain refines them below.
-            page_meta = _page_meta_of(Any[root])
+            # chain cannot be walked; the full chain refines them below. A
+            # `dispatch(…; lang)` wins over both.
+            page_meta = _page_meta_of(Any[root], req)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -14073,7 +14107,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         try
             objects = isempty(chain) ? Any[root] :
                       _chain_steps(root, chain, req, root_segs)
-            page_meta = _page_meta_of(objects)
+            page_meta = _page_meta_of(objects, req)
             target = merge(root_target, (; leaf, objects, chain,
                                            root_segs, request=req))
             # In-process callers (`dispatch`) thread a Treebars progress
@@ -16559,7 +16593,7 @@ dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, no
 
 """
     dispatch(method, url; headers=[], body=UInt8[], parent=nothing, static=nothing,
-             operation_policy=nothing, audience=nothing) -> HTTP.Response
+             operation_policy=nothing, audience=nothing, lang=nothing) -> HTTP.Response
 
 Run one request against the registered route tree in-process and return the
 handler's `HTTP.Response` — no listener, no socket, no serialization
@@ -16630,6 +16664,15 @@ for a loopback request.
   An `audience` other than `static`'s is an `ArgumentError`. A public answer
   that still holds private markup rendered before the answer (a `Raw` string)
   throws [`PrivateContentEscaped`](@ref).
+- `lang` — the language of the answer, a BCP 47 tag such as `"de-DE"`, in
+  place of the one the route's mount chain declares with `__lang__`: the
+  route reads it as [`HTMXObjects.page_lang`](@ref)`()`, the page shell takes
+  it as its `lang` default, and the words HTMXObjects writes itself follow it,
+  such as the label of [`private`](@ref) content in Markdown ("nicht
+  öffentlich"). Without it the route's `__lang__` holds, also for a
+  `dispatch` made inside another request. A follow-up poll is a request of its
+  own: dispatch it with the same `lang`. A `lang` that is not a language tag
+  (`"German"`) is an `ArgumentError`.
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
@@ -16648,15 +16691,17 @@ markdown = String(resp.body)
 ```
 """
 function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
-        parent=nothing, static=nothing, operation_policy=nothing, audience=nothing)
+        parent=nothing, static=nothing, operation_policy=nothing, audience=nothing, lang=nothing)
     spec = _dispatch_static(static)
     audience = _dispatch_audience(audience, spec)
     policy = _dispatch_operation_policy(operation_policy)
+    lang = _check_lang(lang, "dispatch")
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
     spec !== nothing && (req.context[:htmxo_static_export] = spec)
     policy !== nothing && (req.context[:htmxo_operation_policy] = policy)
+    lang !== nothing && (req.context[:htmxo_lang] = lang)
     req.context[:htmxo_audience] = audience
     resp = _with_dispatch_parent(() -> ROUTER(req), parent)
     audience === :public ? _check_public(resp, "the answer to $(req.method) $(req.target)") : resp
@@ -17504,11 +17549,13 @@ image within a line of text stays in its paragraph, and PAC still warns about it
 `audience` says who reads the report: `:public` (default) or `:private`. A
 value is rendered for it, so a public report shows the stand-in of each
 [`private`](@ref) part, or nothing. A Markdown string is rendered already:
-render it for the report's audience, with [`to_markdown_string`](@ref)`(x;
-audience)` or `dispatch(...; audience)` (both public by default outside a
-request; a live request is `:private`, so pass the audience inside one). A
-public report refuses Markdown that holds private markup rendered for the live
-app, raw HTML carrying `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
+render it for the report's audience and language, with
+[`to_markdown_string`](@ref)`(x; audience, lang)` or `dispatch(...; audience,
+lang)` (both public by default outside a request; a live request is
+`:private`, so pass the audience inside one). Its label of private content
+stays in the language it was rendered in. A public report refuses Markdown
+that holds private markup rendered for the live app, raw HTML carrying
+`<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
 
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
@@ -17618,7 +17665,7 @@ end
 # The value renders in the report's language, which the words HTMXObjects
 # writes itself follow (`page_lang`: the label of private content).
 pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString, kwargs...) =
-    pdf_report(_with_page_meta((; _page_meta()..., lang=String(lang))) do
+    pdf_report(_with_page_lang(lang) do
                    to_markdown_string(value; audience=_check_audience(audience, "pdf_report"))
                end, pdf_path; audience, lang, kwargs...)
 
