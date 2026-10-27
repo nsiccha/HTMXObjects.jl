@@ -1,7 +1,7 @@
 name = "HTMXObjects"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.1.1"
+version = "0.1.2"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"

@@ -10,7 +10,8 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw, to_markdown_string
     export AudienceApp, AudienceScriptApp, AudienceEnglishApp, bundle_bytes,
-        AudienceDocApp, AudienceKeptApp, BUILDS, DOCS_DIR, document_pack
+        AudienceDocApp, AudienceKeptApp, BUILDS, DOCS_DIR, document_pack,
+        AudienceQueuedApp, QUEUED_GATE
 
     const base = ""
     # Rendered for the live app before any export runs, so the export cannot
@@ -103,6 +104,25 @@ using TestItemRunner
 
     # Every byte the bundle holds, as text.
     bundle_bytes(dir) = join(read(joinpath(d, f), String) for (d, _, fs) in walkdir(dir) for f in fs)
+
+    # Writes the page language it is rendered in.
+    struct LangMark end
+    Base.show(io::IO, ::MIME"text/html", ::LangMark) =
+        print(io, "<i>lang=", something(HTMXObjects.page_lang(), "none"), "</i>")
+
+    # A `@queued` body runs in DynamicObjects' job queue, which carries neither
+    # the request's audience nor its page language (snag queued-hx-respon-fb8c1312).
+    const QUEUED_GATE = Ref(Base.Event())
+    @htmx struct AudienceQueuedApp
+        __lang__ = "de"
+        part() = h.section(; id="aud-q")(h.p("OPEN-QUEUED"), private(h.p("SECRET-QUEUED")), LangMark())
+        @queued @post aud_q_hx() = hx_response(part(); toast="ok")
+        @queued @post aud_q_node() = part()
+        @queued @get aud_qg_hx() = hx_response(part(); trigger="done")
+        @post aud_p_hx() = hx_response(part(); toast="ok")
+        @queued @post aud_q_slow() = (wait(QUEUED_GATE[]);
+            hx_response(part(); toast="slow", retarget="#aud-q", reswap="outerHTML"))
+    end
 end
 
 @testitem "private shows its content to the live app and its stand-in to a public reader" setup=[HTMXOTestImports] tags=[:unit] begin
@@ -267,6 +287,47 @@ end
     # Library code inside a live request asks for its own reader.
     lib = body(dispatch(:GET, "/aud_libmd"; audience=:private))
     @test occursin("Kurz", lib) && !occursin("SECRET", lib)
+end
+
+@testitem "a @queued route's hx_response answers for its reader in its language" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    route!(AudienceQueuedApp())
+    body(resp) = String(HTMXObjects._message_body_bytes(resp))
+    hx = ["HX-Request" => "true", "HTMXO-Swap" => "innerHTML"]
+    # `hx_response`'s value renders when HTMXObjects answers, not in the body's
+    # task (snag queued-hx-respon-fb8c1312): queued, memoized, a plain node,
+    # and an unqueued route alike.
+    for (verb, path) in ((:POST, "/aud_q_hx"), (:GET, "/aud_qg_hx"), (:POST, "/aud_q_node"),
+                         (:POST, "/aud_p_hx")), operation_policy in (:blocking, :auto)
+        private = body(dispatch(verb, path; headers=hx, operation_policy, audience=:private))
+        public = body(dispatch(verb, path; headers=hx, operation_policy, audience=:public))
+        @test occursin("SECRET-QUEUED", private) && occursin("lang=de", private)
+        @test occursin("OPEN-QUEUED", public) && !occursin("SECRET-QUEUED", public)
+        @test occursin("lang=de", public)
+    end
+    @test HTTP.header(dispatch(:POST, "/aud_q_hx"; headers=hx, audience=:private), "X-HTMXO-Toast") == "ok"
+    @test HTTP.header(dispatch(:GET, "/aud_qg_hx"; headers=hx, audience=:private), "HX-Trigger") == "done"
+    # A slow one answers a poller first; its polled terminal keeps the headers.
+    for audience in (:private, :public)
+        QUEUED_GATE[] = Base.Event()
+        first = body(dispatch(:POST, "/aud_q_slow"; headers=hx, audience))
+        found = match(r"hx-get=\"([^\"]*__htmxo_poll=1[^\"]*)\"", first)
+        @test found !== nothing
+        notify(QUEUED_GATE[])
+        found === nothing && continue
+        url = replace(only(found.captures), "&amp;" => "&")
+        terminal = nothing
+        for _ in 1:400
+            terminal = dispatch(:GET, url; headers=["HX-Request" => "true"], audience)
+            contains(body(terminal), "hx-trigger=\"every ") || break
+            sleep(0.025)
+        end
+        @test terminal.status == 286
+        @test HTTP.header(terminal, "X-HTMXO-Toast") == "slow"
+        @test HTTP.header(terminal, "HX-Retarget") == "#aud-q"
+        @test occursin("SECRET-QUEUED", body(terminal)) == (audience === :private)
+        @test occursin("lang=de", body(terminal))
+    end
 end
 
 @testitem "a static export walks private content as its audience reads it" setup=[HTMXOTestImports] tags=[:unit] begin

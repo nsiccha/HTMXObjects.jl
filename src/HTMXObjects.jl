@@ -7746,10 +7746,17 @@ _hx_history_restore(req::HTTP.Request) =
 _hx_partial_swap(req::HTTP.Request) = is_htmx(req) && !_hx_history_restore(req)
 
 """
-    hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location, toast)
+    hx_response(val; trigger, push_url, replace_url, redirect, refresh, retarget, reswap, location, toast) -> HXResponse
 
-Wrap any value (via `to_response`) and attach HX-* response headers that
-instruct the HTMX client to perform additional actions after swap.
+Answer with `val` and attach HX-* response headers that instruct the HTMX
+client to perform additional actions after swap.
+
+`val` is rendered when HTMXObjects answers the request, for that request's
+reader and in its page language, like any other value a route returns: a
+`private` part is shown to the live app's reader and left out for a public
+one, also from a `@queued` route, whose body runs in the job queue's task.
+`to_response(hx_response(…))` gives the `HTTP.Response`, rendered for the
+current task's audience (public outside a request; see [`with_audience`](@ref)).
 
 `toast` names the success toast the [`htmx`](@ref) page shell shows once the
 request completes (the percent-encoded `X-HTMXO-Toast` header read by
@@ -7764,8 +7771,7 @@ function hx_response(val;
     redirect=nothing, refresh=false,
     retarget=nothing, reswap=nothing, location=nothing, toast=nothing,
 )
-    resp = to_response(val)
-    hdrs = copy(resp.headers)
+    hdrs = Pair{String,String}[]
     isnothing(trigger)     || push!(hdrs, "HX-Trigger"     => trigger)
     isnothing(push_url)    || push!(hdrs, "HX-Push-Url"    => push_url)
     isnothing(replace_url) || push!(hdrs, "HX-Replace-Url" => replace_url)
@@ -7775,8 +7781,33 @@ function hx_response(val;
     isnothing(reswap)      || push!(hdrs, "HX-Reswap"      => reswap)
     isnothing(location)    || push!(hdrs, "HX-Location"    => location)
     isnothing(toast)       || push!(hdrs, "X-HTMXO-Toast"  => HTTP.escapeuri(toast))
-    HTTP.Response(resp.status, hdrs; body=resp.body)
+    HXResponse(val, hdrs)
 end
+
+"""
+    HXResponse
+
+What [`hx_response`](@ref) returns: a value and the HX-* headers to answer it
+with. HTMXObjects renders it when it answers; `to_response` turns it into the
+`HTTP.Response`.
+"""
+struct HXResponse
+    value::Any
+    headers::Vector{Pair{String,String}}
+end
+
+to_response(r::HXResponse) = let resp = to_response(r.value)
+    HTTP.Response(resp.status, [copy(resp.headers); r.headers]; body=resp.body)
+end
+
+# A route answer that is a finished response. An `HXResponse` is rendered
+# here, on the task answering the request, which holds that request's audience
+# and page language: a route body may run elsewhere (a `@queued` body runs in
+# DynamicObjects' job queue, which carries neither; snag
+# `queued-hx-respon-fb8c1312`).
+_answer_value(value) = value
+_answer_value(r::HXResponse) = to_response(r)
+_finalized_response(r::HXResponse) = to_response(r)
 
 const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
@@ -11528,6 +11559,7 @@ _with_error_status(req, resp::HTTP.Response, err) =
 # method) carries only a body and its type, so it gets the status the error
 # would have had.
 _hook_response(req, r::HTTP.Response, err) = r
+_hook_response(req, r::HXResponse, err) = to_response(r)
 function _hook_response(req, val, err)
     finalized = _finalized_response(val)
     isnothing(finalized) ? nothing : _error_answer_status(req, finalized, err)
@@ -13336,8 +13368,10 @@ end
 # treated as the finished value and passed straight to `render_result`. That is a
 # skew-tolerant design on Treebars' side, but it means the guard has to exist on
 # ours too — a `render_result` of bare `identity` renders whatever arrives.
+# Every operation's answer, inline or polled, passes here on the answering
+# request's task, so this is also where an `HXResponse` is rendered.
 _resolve_operation_value(value) =
-    value isa _OperationHandle ? fetch(value) : value
+    _answer_value(value isa _OperationHandle ? fetch(value) : value)
 
 # Speculative preloads (`@preload`). htmx's `preload` extension issues the GET
 # a link WOULD issue — early, on hover or mousedown — marked `HX-Preloaded:

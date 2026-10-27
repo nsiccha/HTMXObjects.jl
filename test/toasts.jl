@@ -34,11 +34,11 @@ end
 
 @testitem "route-named toasts: header, shell runtime and compose reuse" tags=[:unit] begin
     using HTMXObjects, HTTP
-    resp = hx_response(h.p("ok"); toast="Gespeichert ✓ 100%")
+    resp = to_response(hx_response(h.p("ok"); toast="Gespeichert ✓ 100%"))
     @test HTTP.header(resp, "X-HTMXO-Toast") == HTTP.escapeuri("Gespeichert ✓ 100%")
     # Header values are ASCII: the text arrives percent-encoded.
     @test isascii(HTTP.header(resp, "X-HTMXO-Toast"))
-    @test !HTTP.hasheader(hx_response(h.p("ok")), "X-HTMXO-Toast")
+    @test !HTTP.hasheader(to_response(hx_response(h.p("ok"))), "X-HTMXO-Toast")
     page = repr("text/html", htmx(h.p("x")))
     @test count("window.htmxoToast = toast", page) == 1
     @test count(".htmxo-toasts {", page) == 1
@@ -154,7 +154,7 @@ end
             if path == "/"
                 HTTP.Response(200, ["Content-Type" => "text/html"], page)
             elseif path == "/save"
-                hx_response("saved"; toast="Invoice saved ✓ 100%")
+                to_response(hx_response("saved"; toast="Invoice saved ✓ 100%"))
             elseif path == "/fail"
                 HTTP.Response(500, ["Content-Type" => "text/html"], "<article aria-invalid=\"true\">boom</article>")
             elseif path == "/act"
