@@ -335,7 +335,11 @@ end
     @test contains(th, "onclick=\"sortTable(0, this)\"")
     @test contains(th, "data-sort-dir=\"asc\"") && contains(th, "aria-sort=\"ascending\"")
     @test contains(th, "title=\"$help\"")
-    @test contains(th, ">Primal<span class=\"htmxo-column-help\" aria-hidden=\"true\"> ⓘ</span></button>")
+    # The ⓘ is a tap target of its own beside the button: its box shows the
+    # help, and a click on it stops before the <th>'s sort.
+    @test contains(th, ">Primal</button><span class=\"htmxo-term htmxo-column-help\" aria-hidden=\"true\" " *
+        "onclick=\"event.stopPropagation()\"><span class=\"htmxo-column-help-mark\"> ⓘ</span>" *
+        "<span class=\"htmxo-term-def\">$help</span></span>")
     # Markdown keeps the column name only.
     md = HTMXObjects.to_markdown_string(table)
     @test contains(md, "Primal") && contains(md, "Name")
@@ -346,7 +350,8 @@ end
               repr("text/html", sortable_table(["Primal", "Name"], rows))
     end
     plain = repr("text/html", sortable_table([ColumnSpec("Primal"; help), "Name"], rows; sortable=false))
-    @test contains(plain, "<th title=\"$help\">Primal<span class=\"htmxo-column-help\" aria-hidden=\"true\"> ⓘ</span></th>")
+    @test contains(plain, "<th><span title=\"$help\">Primal</span><span class=\"htmxo-term htmxo-column-help\"")
+    @test contains(plain, "<span class=\"htmxo-term-def\">$help</span></span></th>")
     @test !contains(plain, "htmxo-sort-control")
     # master_detail_table forwards its headers.
     tree = repr("text/html", master_detail_table([ColumnSpec("Model"; help="Pick one."), "Score"], [(; id="a")];

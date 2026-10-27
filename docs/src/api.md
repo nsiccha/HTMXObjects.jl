@@ -3174,8 +3174,11 @@ glossary. The link reads as the surrounding text with a dotted underline.
 Hovering it or focusing it with the keyboard opens the definition in a small
 box beside it, kept inside the window and outside a scrolling table, and
 Escape closes it ([`glossary_script`](@ref), in every `htmx()` shell). Screen
-readers read the definition as the link's description. Clicking it, or
-tapping it on a touch screen, opens the glossary entry.
+readers read the definition as the link's description. Clicking it opens the
+glossary entry. On a touch screen, where nothing hovers, a tap shows the
+definition instead and the reader stays on the page: the box stays open, with
+a link to the entry (the glossary's `title` with →), until a second tap on the
+term, a tap elsewhere or Escape.
 
 ```julia
 const GLOSSAR = Glossary([
@@ -3206,7 +3209,8 @@ end
   `title` tooltip), and content already rendered to markup (`Raw`, an
   `HTMLSnapshot`, a plot's axis and legend titles, which Vega draws). A
   sortable column named after a term explains it instead: its ⓘ shows the
-  definition, unless the `ColumnSpec` has a `help` of its own.
+  definition (on hover, or pinned by a click or tap), unless the `ColumnSpec`
+  has a `help` of its own.
 - **The glossary.** `glossary_section(g)` lists the terms alphabetically, each
   at `#term-<id>` (`id` defaults to the term in lower case, `ä` as `ae`). Mount
   it at `href`. On a page that is the glossary alone, pass `level=1`: the

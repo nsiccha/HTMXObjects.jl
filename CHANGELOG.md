@@ -14,6 +14,29 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.16
+
+- Touch screens reach every explanation a mouse reaches by hovering, without
+  leaving the page or triggering the element's other action
+  (`glossary_script`, in every `htmx()` shell):
+  - A tap (touch or pen) on a glossary term's use shows its definition in the
+    same box instead of opening the glossary. The box stays open, with a link
+    to the entry (the glossary's `title` with →), until a second tap on the
+    term, a tap elsewhere or Escape. A mouse click or Enter still opens the
+    entry, and hover and focus are unchanged.
+  - An explained column's `ⓘ` (`ColumnSpec` `help`, or a header named after a
+    term) is a target of its own beside the label's sort button: hovering it
+    shows the explanation in the box of a term's use, and a click or tap on it
+    pins the box open, without sorting. A click or tap on the label still
+    sorts, and the label keeps the explanation as its `title`.
+- Markup: the term box is `<span class="htmxo-term-def">` holding the
+  definition (`<span id=… role="tooltip">`, the link's `aria-describedby`)
+  and the entry link `a.htmxo-term-more`. The column `ⓘ` is
+  `<span class="htmxo-term htmxo-column-help">` after the sort button (before:
+  inside it), holding `.htmxo-column-help-mark` and the box; with
+  `sortable=false` the `title` moves from the `<th>` to a `<span>` around the
+  label. Markdown, `?plain` and CSV export are unchanged.
+
 ## 0.1.15
 
 - `semantic_app(obj; presentation=:tabs)` lays a semantic graph out as an app

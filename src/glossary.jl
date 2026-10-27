@@ -441,8 +441,10 @@ section of a page (a heading, `section` or `SemanticSection` starts one), and
 again in each table, figure, caption and disclosure, the first use of a term
 becomes a link to `glossary.href * "#term-<id>"`. Hovering it or focusing it
 shows the term's definition beside it, and screen readers read the definition
-as the link's description. A [`term`](@ref) always links. Markdown writes the
-link as `[text](href#term-<id>)`.
+as the link's description. On a touch screen a tap shows the definition, with
+a link to the entry, and stays on the page ([`glossary_script`](@ref)). A
+[`term`](@ref) always links. Markdown writes the link as
+`[text](href#term-<id>)`.
 
 The answers of a root that declares `__glossary__` are linked this way before
 they are sent, so an app rarely calls it. It walks HTML nodes, the semantic
@@ -521,13 +523,17 @@ function _link_text(text::AbstractString, w::_TermWalk)
 end
 
 # A private term links for a private reader only; a public one reads the text.
+# The box holds the definition, which the link names as its description, and
+# a link to the entry that shows once a tap has pinned the box open.
 function _term_link(w::_TermWalk, text::AbstractString, entry::GlossaryTerm)
     push!(w.seen, entry.id)
     w.count += 1
     id = string("htmxo-term-", entry.id, "-", w.token, "-", w.count)
-    link = h.span(h.a(String(text); href=_glossary_href(w.glossary, entry), aria_describedby=id),
-                  html_only(h.span(entry.definition; id, class="htmxo-term-def", role="tooltip"));
-                  class="htmxo-term")
+    href = _glossary_href(w.glossary, entry)
+    box = h.span(h.span(entry.definition; id, role="tooltip"),
+                 h.a(w.glossary.title * " →"; href, class="htmxo-term-more", tabindex="-1");
+                 class="htmxo-term-def")
+    link = h.span(h.a(String(text); href, aria_describedby=id), html_only(box); class="htmxo-term")
     entry.private ? private(link; public=String(text), mark=false) : link
 end
 
@@ -618,7 +624,7 @@ _glossary_answer(val, g::Glossary) = link_terms(val, g)
 
 # A column whose header is a term, and which has no explanation of its own,
 # is explained by the definition, as a `ColumnSpec`'s `help` is: the `title`
-# of its sort button (or of the `<th>` of a table that does not sort) and the
+# of its sort button (or of its label in a table that does not sort) and the
 # ⓘ after its label. Only a header whose whole label is the term qualifies; a
 # private term's only in an answer for a private reader (an attribute cannot
 # hold private content, so the walk asks the answer's audience).
@@ -626,22 +632,25 @@ function _explained_th(th::Node, g::Glossary)
     kids = HTMX.children(th)
     i = findfirst(c -> c isa _LabelledControl, kids)
     if isnothing(i)
-        explained = _explained_header(th, g)
-        return isnothing(explained) ? th : explained
+        col = _explained_column(th, g)
+        return isnothing(col) ? th : Node(:th, copy(HTMX.attrs(th)), collect(Any, _plain_th_content(col)))
     end
-    button = _explained_header(kids[i].control, g)
-    isnothing(button) && return th
-    Node(:th, copy(HTMX.attrs(th)), Any[k == i ? _LabelledControl(button) : c for (k, c) in enumerate(kids)])
+    button = kids[i].control
+    col = _explained_column(button, g)
+    isnothing(col) && return th
+    explained = copy(HTMX.attrs(button))
+    explained[:title] = col.help
+    control = _LabelledControl(Node(HTMX.tag(button), explained, Any[col.label]))
+    Node(:th, copy(HTMX.attrs(th)), Any[kids[1:i-1]..., control, _column_help(col)..., kids[i+1:end]...])
 end
-function _explained_header(node::Node, g::Glossary)
-    attrs = HTMX.attrs(node)
+# The column a header's label explains: a term, shown to the answer's reader,
+# that is the whole label of a header without an explanation of its own.
+function _explained_column(node::Node, g::Glossary)
     kids = HTMX.children(node)
-    (haskey(attrs, :title) || length(kids) != 1 || !(only(kids) isa AbstractString)) && return nothing
+    (haskey(HTMX.attrs(node), :title) || length(kids) != 1 || !(only(kids) isa AbstractString)) && return nothing
     entry = _glossary_entry(g, only(kids))
     (isnothing(entry) || !_glossary_shown(entry, _ambient_audience())) && return nothing
-    explained = copy(attrs)
-    explained[:title] = entry.definition
-    Node(HTMX.tag(node), explained, collect(Any, _header_content(ColumnSpec(only(kids); help=entry.definition))))
+    ColumnSpec(only(kids); help=entry.definition)
 end
 
 _check_glossary(g::Union{Nothing,Glossary}, who) = g
@@ -671,14 +680,25 @@ end
 """
     glossary_script()
 
-Client runtime of the term links [`link_terms`](@ref) writes. Hovering a term
-or focusing its link opens the term's definition beside it; the runtime places
-the box below the term (above it when there is no room below), inside the
-window, and outside any scrolling container such as a wide table's, which
+Client runtime of the term links [`link_terms`](@ref) writes, and of the ⓘ
+after an explained column's label ([`ColumnSpec`](@ref) `help`). Hovering a
+term or focusing its link opens the term's definition beside it; the runtime
+places the box below the term (above it when there is no room below), inside
+the window, and outside any scrolling container such as a wide table's, which
 would otherwise clip it, and keeps it there while the page scrolls. Escape
-closes it until the pointer or the focus leaves the term. Without the runtime,
-the stylesheet ([`htmxo_utility_styles`](@ref)) still opens the box below the
-term.
+closes it until the pointer or the focus leaves the term.
+
+A finger cannot hover, so a tap (touch or pen) on a term pins its box open
+instead of following the link: the reader stays on the page, and the box then
+shows a link to the entry (the glossary's `title` with →). A second tap on the
+term, a tap elsewhere or Escape closes it. A mouse click or Enter still opens
+the entry. The ⓘ of an explained column opens its box the same way: on hover,
+and pinned by a click or tap of any pointer; a click or tap on the ⓘ never
+sorts the column, a tap on its label still does.
+
+Without the runtime, the stylesheet ([`htmxo_utility_styles`](@ref)) still
+opens the box below the term while it is hovered or focused, and a tap follows
+the link.
 
 Safe to include more than once. Auto-included by [`htmx`](@ref); include it
 yourself only on pages built without the shell.
@@ -690,41 +710,56 @@ glossary_script() = h.script(Raw(raw"""
   window.htmxoGlossary = true;
   document.documentElement.classList.add('htmxo-terms');
   var MARGIN = 8, open = new Set();
+  // The kind of pointer the reader is using (`mouse`, `touch`, `pen`), and the
+  // term the current tap pinned before its click arrived.
+  var pointer = '', tapped = null;
+  var PINNED = 'data-htmxo-term-pinned', DISMISSED = 'data-htmxo-term-dismissed';
   var termOf = function (node) { return node instanceof Element ? node.closest('.htmxo-term') : null; };
+  // A term's use opens from its link, a column's explanation from its ⓘ.
   var parts = function (term) {
-    return {link: term.querySelector(':scope > a'), box: term.querySelector(':scope > .htmxo-term-def')};
+    return {trigger: term.querySelector(':scope > a, :scope > .htmxo-column-help-mark'),
+            box: term.querySelector(':scope > .htmxo-term-def')};
   };
   function place(term) {
     var p = parts(term);
-    if (!p.link || !p.box) return;
+    if (!p.trigger || !p.box) return;
     term.setAttribute('data-htmxo-term-open', '');
     open.add(term);
     // Measured at its own width first, then moved where it fits.
     p.box.style.left = '0px';
     p.box.style.top = '0px';
-    var r = p.link.getBoundingClientRect(), b = p.box.getBoundingClientRect();
+    var r = p.trigger.getBoundingClientRect(), b = p.box.getBoundingClientRect();
     var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
     var left = Math.max(MARGIN, Math.min(r.left, vw - b.width - MARGIN));
     var top = r.bottom + b.height > vh - MARGIN && r.top - b.height >= MARGIN ? r.top - b.height : r.bottom;
     p.box.style.left = left + 'px';
     p.box.style.top = top + 'px';
   }
+  function pin(term) { term.setAttribute(PINNED, ''); place(term); }
   function close(term) {
     term.removeAttribute('data-htmxo-term-open');
+    term.removeAttribute(PINNED);
     var box = parts(term).box;
     if (box) { box.style.left = ''; box.style.top = ''; }
     open.delete(term);
   }
+  function dismiss(term) { term.setAttribute(DISMISSED, ''); close(term); }
+  // A finger cannot hover: the hover a tap emulates pins the box open.
   function enter(e) {
     var term = termOf(e.target);
-    if (term && !open.has(term) && !term.hasAttribute('data-htmxo-term-dismissed')) place(term);
+    if (!term || term.hasAttribute(PINNED) || term.hasAttribute(DISMISSED)) return;
+    if (e.type === 'mouseover' && pointer === 'touch') { pin(term); tapped = term; }
+    else if (!open.has(term)) place(term);
   }
   function leave(e, stays) {
     var term = termOf(e.target);
     if (!term || term.contains(e.relatedTarget)) return;
-    term.removeAttribute('data-htmxo-term-dismissed');
-    if (!stays(term)) close(term);
+    term.removeAttribute(DISMISSED);
+    if (!term.hasAttribute(PINNED) && !stays(term)) close(term);
   }
+  var track = function (e) { pointer = e.pointerType; };
+  document.addEventListener('pointerover', track, true);
+  document.addEventListener('pointerdown', function (e) { track(e); tapped = null; }, true);
   document.addEventListener('mouseover', enter);
   document.addEventListener('focusin', enter);
   document.addEventListener('mouseout', function (e) {
@@ -733,9 +768,24 @@ glossary_script() = h.script(Raw(raw"""
   document.addEventListener('focusout', function (e) {
     leave(e, function (term) { return term.matches(':hover'); });
   });
+  // A tap or click elsewhere closes a pinned box. A tap (touch or pen) on a
+  // term's link pins its box, which then shows a link to the entry, instead of
+  // leaving the page; a second tap closes it. A mouse click or Enter follows
+  // the link as before. A click or tap on a ⓘ opens or closes its box.
+  document.addEventListener('click', function (e) {
+    open.forEach(function (term) { if (term.hasAttribute(PINNED) && !term.contains(e.target)) close(term); });
+    var term = termOf(e.target), p = term && parts(term);
+    if (!p || !p.trigger || !p.trigger.contains(e.target)) return;
+    var tap = e.detail > 0 && /^(touch|pen)$/.test(e.pointerType || pointer);
+    if (p.trigger.tagName === 'A' && !tap) return;
+    e.preventDefault();
+    if (tapped === term) tapped = null;
+    else if (term.hasAttribute(PINNED)) dismiss(term);
+    else pin(term);
+  }, true);
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape' || !open.size) return;
-    open.forEach(function (term) { term.setAttribute('data-htmxo-term-dismissed', ''); close(term); });
+    open.forEach(dismiss);
   });
   // An open box follows its term when the page or a container scrolls.
   var follow = function () {
