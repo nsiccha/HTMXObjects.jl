@@ -483,13 +483,18 @@ end
             out = pdf_report(page, joinpath(dir, "glossar-$audience.pdf"); title="Bericht", lang="de-DE",
                              glossary=TopicGlossaryFixture.GT, audience)
             @test isfile(out)
-            isnothing(Sys.which("pdftotext")) ? nothing : read(`pdftotext -layout $out -`, String)
+            # pdftotext's default encoding is Latin-1 on Windows (xpdf), which
+            # would turn "ö" into another byte; ask for UTF-8 everywhere.
+            isnothing(Sys.which("pdftotext")) ? nothing : read(`pdftotext -enc UTF-8 -layout $out -`, String)
         end
         if !any(isnothing, texts)
             inside, public = texts
-            @test contains(inside, "Auch: Verkehrsbezirk") && contains(inside, "Siehe auch:")
-            @test contains(inside, "Vergleicht die Ketten.") && contains(inside, "nicht öffentlich")
-            @test !contains(public, "Vergleicht die Ketten.") && contains(public, "Auch: Mittelwert")
+            @test contains(inside, "Auch: Verkehrsbezirk")
+            @test contains(inside, "Siehe auch:")
+            @test contains(inside, "Vergleicht die Ketten.")
+            @test contains(inside, "nicht öffentlich")
+            @test !contains(public, "Vergleicht die Ketten.")
+            @test contains(public, "Auch: Mittelwert")
         end
     end
 end
