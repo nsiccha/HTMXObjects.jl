@@ -18476,9 +18476,13 @@ function sortTable(col, th) {
         if (h !== th) { delete h.dataset.sortDir; h.removeAttribute('aria-sort'); }
     });
     // Sort key: prefer `data-sort-value` if the cell sets one, else the
+    // exact number a number cell or a group sum carries for the CSV
+    // (`data-htmxo-number`; the shown `1.234,5` would read as 1.234), else the
     // visible text. This lets callers force a semantic order (e.g. status:
     // proposed → approved → rejected) without re-encoding the displayed text.
-    const sortKey = cell => (cell.dataset.sortValue ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
+    // `sortable_table(...; default_sort)` writes its rows in this same order
+    // on the server (`_default_sort_rows`): change the two together.
+    const sortKey = cell => (cell.dataset.sortValue ?? cell.dataset.htmxoNumber ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
     // A column with several sort keys (`ColumnSpec(...; sort_keys)`) sorts by
     // its active key: the value at that place in each cell's
     // `data-htmxo-sort-keys`. A missing value sorts last in both directions.
@@ -18489,7 +18493,7 @@ function sortTable(col, th) {
         if (!keyed.has(row)) keyed.set(row, htmxoSortValue(row.cells[col], key, keys.length, sortKey));
         return keyed.get(row);
     };
-    const compare = keys ? (a, b) => {
+    const byValue = keys ? (a, b) => {
         const av = keyOf(a), bv = keyOf(b);
         if (av === null || bv === null) return av === bv ? 0 : av === null ? 1 : -1;
         const c = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
@@ -18501,6 +18505,10 @@ function sortTable(col, th) {
         if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
         return asc ? av.localeCompare(bv) : bv.localeCompare(av);
     };
+    // A pinned row (`data-htmxo-pinned`) stays ahead of the others in every
+    // sort; pinned rows sort among themselves.
+    const pinned = r => r.dataset.htmxoPinned !== undefined && r.dataset.htmxoPinned !== 'false';
+    const compare = (a, b) => (pinned(b) - pinned(a)) || byValue(a, b);
     const append = r => {
         tbody.appendChild(r);
         const c = companions.get(r.id);
