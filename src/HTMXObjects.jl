@@ -25627,7 +25627,7 @@ A labeled `<select>` wrapped in a `<label>`. Each element of `options` is render
 via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
 
 When `show_when=(field, op, value)` is set, the label gets `data-show-when-*`
-attributes and `class="u-hidden"`. Include [`show_when_script`](@ref) once per
+attributes and starts `hidden`. Include [`show_when_script`](@ref) once per
 page to wire up the client-side visibility logic.
 """
 sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
@@ -27444,13 +27444,18 @@ const _SHOW_WHEN_OPS = Dict{Function,String}(
 # The value is spelled the way the controls carry it (`option_wire_value`), so
 # `show_when=(:basis, ==, option)` matches the radio or `<option>` that
 # `radio_group` / `sinput` render for that same option.
+# A widget is hidden with the `hidden` attribute, not a class: Pico styles
+# `label` unlayered (`display: block`), which beats any rule in `@layer htmxo`,
+# so a layered class could never hide a labeled widget on a Pico page. Pico's
+# own `[hidden] { display: none !important }` and, without Pico, the browser's
+# `[hidden]` rule hide it on every shell.
 function _show_when_attrs((field, op, value))
     op_name = get(_SHOW_WHEN_OPS, op, nothing)
     isnothing(op_name) && error("show_when: unsupported predicate $op; use ==, !=, startswith, or endswith")
     (;  data_show_when_field=string(field),
         data_show_when_op=op_name,
         data_show_when_value=_option_wire_string(value),
-        class="u-hidden")
+        hidden=true)
 end
 
 """
@@ -27458,7 +27463,9 @@ end
 
 Return a `<script>` that shows each `[data-show-when-field]` element (a widget
 built with `show_when=(field, op, value)`) exactly while its predicate holds.
-Include once per page (like [`loading_indicator_script`](@ref)).
+Include once per page (like [`loading_indicator_script`](@ref)). The element
+is hidden with its `hidden` attribute, so a `<label>` hides on a Pico page
+too, where Pico gives every label `display: block`.
 
 The field is read in the element's `<form>` (including controls attached to it
 with `form=`), else in its nearest `[hx-target]` container, else on the page,
@@ -27518,7 +27525,7 @@ show_when_script() = h.script(Raw(raw"""
            : op === 'endswith' ? v.endsWith(val)
            : false;
     });
-    el.classList.toggle('u-hidden', op === 'neq' ? hit : !hit);
+    el.hidden = op === 'neq' ? hit : !hit;
   }
   function evalAll() {
     document.querySelectorAll('[data-show-when-field]').forEach(evalShowWhen);
