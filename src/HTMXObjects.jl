@@ -28018,9 +28018,12 @@ heading text with a focus ring.
 It also gives every definition list (`dl`) its look, with no class: bold
 terms in a column beside their values, `div`-wrapped pairs sharing the
 columns. `--htmxo-dl-label-width` (default `16rem`, and never more than 40% of
-the list), `--htmxo-dl-row-gap` (`0.5rem`) and `--htmxo-dl-column-gap`
+the list; a longer term, a one-word one included, hyphenates in the page's
+language), `--htmxo-dl-row-gap` (`0.5rem`) and `--htmxo-dl-column-gap`
 (`1.25rem`) tune it from an app's stylesheet; `display: block` on a list and
-its `div` pairs keeps it stacked.
+its `div` pairs keeps it stacked. A list inside a `SemanticGroup` item
+narrower than `24rem` stacks each term above its value; an app's own narrow
+column gets the same with `container-type: inline-size` on its wrapper.
 
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
@@ -28084,8 +28087,14 @@ htmxo_utility_styles() = h.style(Raw("""
    sits side by side on a wide viewport and stacks on a narrow one with no
    consumer input — which is what a "run" reads like. `min-width: 0` lets a wide
    child (a table, a `pre`) scroll inside its own box instead of blowing the row
-   out. Apps that want a different run width set the variables in their own
-   scoped stylesheet — never inline:
+   out. Each sibling is also a size container, so what it holds can lay out by
+   its width: a definition list in a narrow card stacks (the `@container` rule
+   below the `dl` rules). Its width comes from the row, not its content, so the
+   container changes nothing in an ordinary layout; in a parent that sizes to
+   its content (an inline-block, an auto-width table cell) a container's
+   content would count as zero width, so it counts as one basis instead. Apps
+   that want a different run width set the variables in their own scoped
+   stylesheet — never inline:
        .my-app-wide-run { --htmxo-semantic-group-min: 30rem; } */
 .htmxo-semantic-group {
     display: flex;
@@ -28096,6 +28105,8 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-semantic-group > * {
     flex: 1 1 var(--htmxo-semantic-group-min, 20rem);
     min-width: 0;
+    container-type: inline-size;
+    contain-intrinsic-inline-size: var(--htmxo-semantic-group-min, 20rem);
 }
 
 /* `SemanticMetric` is the OTHER element with no HTML counterpart (see the group
@@ -28122,7 +28133,13 @@ htmxo_utility_styles() = h.style(Raw("""
    setting one pair off from the next — and apps re-rolled their own lists.
    Every `dl` is a two-column grid instead: bold terms in a column as wide as
    the longest term, capped at `--htmxo-dl-label-width` and at 40% of the list
-   in a narrow column (a longer term wraps), and the values beside them. A
+   in a narrow column, and the values beside them. A longer term wraps, a
+   one-word one too: `fit-content` never narrows a column below its content's
+   longest unbreakable run, and Pico's `overflow-wrap: break-word` does not
+   shorten that run, so a German compound such as "Leistungsbeschreibung" kept
+   its full width and squeezed its values to a few pixels. `overflow-wrap:
+   anywhere` lets the cap hold, and `hyphens: auto` puts the break at a
+   syllable, with a hyphen, in the page's language (`htmx(...; lang)`). A
    term with several values puts each on its own row of the value column, and
    a `div` around a pair (valid HTML) is a `subgrid` row, so grouped pairs
    share the columns. A paragraph or list inside a value drops its outer
@@ -28147,10 +28164,21 @@ dl > div:not([hidden]) {
     row-gap: var(--htmxo-dl-row-gap, 0.5rem);
     align-items: baseline;
 }
-:is(dl, dl > div) > dt { grid-column: 1; font-weight: 600; }
+:is(dl, dl > div) > dt { grid-column: 1; font-weight: 600; hyphens: auto; overflow-wrap: anywhere; }
 :is(dl, dl > div) > dd { grid-column: 2; margin: 0; }
 :is(dl, dl > div) > dd > :first-child { margin-top: 0; }
 :is(dl, dl > div) > dd > :last-child { margin-bottom: 0; }
+/* In a narrow container (a `SemanticGroup` card, or an app's own column that
+   declares `container-type: inline-size`) the two columns leave the values
+   too little width to read, so each term sits above its value, unindented,
+   with the pairs spaced apart. 24rem is where a 40% term column and the
+   values beside it both stop reading as ordinary lines; a container condition
+   cannot read a variable, so it is fixed. */
+@container (width < 24rem) {
+    dl:not([hidden]), dl > div:not([hidden]) { display: block; }
+    :is(dl, dl > div) > dd { margin-top: 0.15rem; }
+    :is(dl, dl > div) > dd + dt, dl > div + div { margin-top: 0.75rem; }
+}
 
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the

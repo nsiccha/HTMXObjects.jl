@@ -2025,7 +2025,9 @@ inside a fenced div (`::: {#anchor}` … `:::`). An anchor outside Pandoc's
 Most elements project into the HTML element whose native rendering already
 carries their meaning — `article` for a card, `section` for a division, `dl` for
 fields, `details` for a disclosure, `pre`/`code` for code — which is why
-HTMXObjects ships almost no CSS for them: Pico styles the element. So the audit
+HTMXObjects ships almost no CSS for them: Pico styles the element (a `dl` is the
+exception, since Pico styles no `dt`/`dd`: every `dl` gets the definition-list
+look of [`htmxo_utility_styles`](@ref), with no class). So the audit
 question for a semantic class is never *does it have CSS* but **does its HTML
 element render as anything by itself** — and where the answer is no, a missing
 rule is a bug rather than a deliberate default. **Two elements answer no**, and
@@ -2037,7 +2039,9 @@ inline.
 peer is a bare `div`, and **a group is a row that wraps.** Siblings share the
 width and each keeps a minimum before the row breaks, so a pair of figures sits
 side by side on a wide viewport and stacks on a narrow one, with nothing passed
-at the call site.
+at the call site. Each sibling is also a size container, so what it holds can
+lay out by its width: a `SemanticFields` list in a card narrower than `24rem`
+puts each term above its value instead of beside it.
 
 `SemanticMetric` is the **inline** case: its peer is a `span` next to a
 `strong`, and adjacent inline elements carry no separation of their own, so
@@ -3073,7 +3077,7 @@ HTMXObjects ships its own CSS variables and matches the host environment (raw Pi
 | `htmxo_theme()`           | The package's CSS-variable defaults — included automatically by `htmx()` |
 | `pico_bridge()`           | Map `--htmxo-*` (page background `--htmxo-bg`, accent, muted, status colors) onto Pico's CSS tokens — also injected by `htmx()` when `pico_version` is set; borders keep the text color. It also keeps text at the browser's 16 px at every window width (Pico scales it up to 21 px) and, from a 1280 px window, lets `.container` fill the window up to 1600 px with 2rem margins (Pico caps it at 1200/1450 px). Override after it: `:root { --pico-font-size: …; --htmxo-container-max-width: …; --htmxo-container-gutter: …; }`. Buttons without a colour class get Pico's slate `secondary outline` look instead of its azure fill, and every `<details>` disclosure is a bordered box with a bold label bar and the chevron before the label; see [the page shell](#pico-page-size) |
 | `vitepress_bridge()`      | Map `--htmxo-*` (including `--htmxo-bg`) onto VitePress's `--vp-*` tokens — for docs pages embedding HTMXO components |
-| `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight), and every definition list's look with no class: bold terms in a column beside their values, `div`-wrapped pairs sharing the columns. Tune it from your stylesheet with `--htmxo-dl-label-width` (default `16rem`, never more than 40% of the list), `--htmxo-dl-row-gap` and `--htmxo-dl-column-gap`; `display: block` on a list and its `div` pairs keeps it stacked |
+| `htmxo_utility_styles()`  | Small set of `u-*` utility classes (`u-inline`, `u-w-full`, `u-text-success`, spacing scale `0..6`, …) used by built-in widgets, plus generic `[hx-*]` behavior conventions (`cursor: pointer` at rest, `cursor: progress` + dim while `htmx-request` is in flight), and every definition list's look with no class: bold terms in a column beside their values, `div`-wrapped pairs sharing the columns. Tune it from your stylesheet with `--htmxo-dl-label-width` (default `16rem`, never more than 40% of the list; a longer term, a one-word one included, hyphenates in the page's language), `--htmxo-dl-row-gap` and `--htmxo-dl-column-gap`; `display: block` on a list and its `div` pairs keeps it stacked. A list in a `SemanticGroup` item narrower than `24rem` puts each term above its value; `container-type: inline-size` on an app's own narrow column does the same there |
 | `escape_html(s)`          | HTML-escape (`HTMX.escape`, 5 chars) — for hand-built HTML strings only; `h.*` escapes text + attrs itself, use `Raw` for trusted markup |
 | `html_escape(s)`          | Minimal `&` / `<` / `>` escape — for hand-built HTML strings (never pre-escape a value passed through `h.*`) |
 
