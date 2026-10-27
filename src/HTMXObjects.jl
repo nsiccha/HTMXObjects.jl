@@ -3597,16 +3597,18 @@ end
 
 The words the semantic vocabulary writes itself, besides the caller's own
 content: `unavailable` is the marker of a [`SemanticUnavailable`](@ref), in
-every peer format. Build one with [`semantic_texts`](@ref) and pass it as
-`texts=`.
+every peer format, and `decimal` is the decimal mark of a
+[`SemanticArtifact`](@ref)'s file size (`1.4 MB`, `1,4 MB`). Build one with
+[`semantic_texts`](@ref) and pass it as `texts=`.
 """
 struct SemanticTexts
     unavailable::String  # the marker of a declined computation
+    decimal::String      # the decimal mark of the numbers the vocabulary writes
 end
 
 const _SEMANTIC_TEXT_LOCALES = (
-    en = (unavailable = "unavailable",),
-    de = (unavailable = "nicht verfügbar",),
+    en = (unavailable = "unavailable", decimal = "."),
+    de = (unavailable = "nicht verfügbar", decimal = ","),
 )
 
 """
@@ -3620,6 +3622,8 @@ const DE = semantic_texts(:de)
 SemanticUnavailable("Die Auswertung war beim Export noch nicht berechnet."; texts=DE)
 # HTML: ∅ nicht verfügbar — Die Auswertung …; Markdown: ∅ **nicht verfügbar** — …
 SemanticUnavailable("…"; texts=semantic_texts(:de; unavailable="entfällt"))
+SemanticArtifact("bericht.pdf", "application/pdf"; target="/datei/bericht.pdf",
+    size=1_468_006, texts=DE)  # PDF · 1,4 MB
 ```
 
 An unknown locale or text name, or a placeholder in a text (semantic texts take
@@ -3767,7 +3771,8 @@ struct SemanticAction <: SemanticNode
 end
 
 """
-    SemanticArtifact(name, mime, bytes=nothing; target=nothing)
+    SemanticArtifact(name, mime, bytes=nothing; target=nothing, label=nothing,
+                     size=nothing, texts=semantic_texts())
 
 A downloadable payload: a name, a MIME type, and a PLACE to fetch it from.
 `bytes` stays positional and optional because an artifact is sometimes a payload
@@ -3776,16 +3781,47 @@ the route already holds and sometimes just a name for what a URL will produce.
 With no `target` the artifact addresses itself by `name` — the pre-`target`
 behaviour, which could only ever resolve by accident, kept so an in-memory
 payload still renders.
+
+- `name` is the file name the download is saved under. Its extension, in
+  capitals, is the format every peer names: `XLSX`, `PDF`, `ZIP`.
+- `label` is the text shown in place of the name (`"Bericht als PDF"`); the
+  name then becomes the link's tooltip.
+- `size` is the file's size in bytes. It defaults to the size of `bytes` when
+  they are a string or a byte vector, and is written short in every peer:
+  `820 KB`, `1.4 MB` (1024 bytes to a KB, one decimal below 10), with the
+  decimal mark of `texts`, a [`SemanticTexts`](@ref) (`semantic_texts(:de)`
+  writes `1,4 MB`).
+
+In HTML it is one download control: a download icon, the label, and the
+format and size in a `small`, inside an `<a class="htmxo-semantic-artifact"
+download type=…>`. A Pico page (`htmx(...; pico_version)`, `pico_page`) draws
+it as a slate outlined button, through [`pico_bridge`](@ref). Markdown writes
+`[label](target) (XLSX, 1.4 MB)` and plain text `label [XLSX, 1.4 MB]
+(target)`; a name without an extension names the MIME type there instead.
 """
 struct SemanticArtifact <: SemanticNode
     name::String
     mime::String
     bytes
     target
+    label::String
+    size::Union{Nothing,Int}
+    texts::SemanticTexts
+    SemanticArtifact(name, mime, bytes=nothing; target=nothing, label=nothing,
+                     size=nothing, texts::SemanticTexts=semantic_texts()) =
+        new(String(name), String(mime), bytes, target,
+            String(something(label, name)), _semantic_artifact_size(size, bytes), texts)
 end
 
-SemanticArtifact(name, mime, bytes=nothing; target=nothing) =
-    SemanticArtifact(String(name), String(mime), bytes, target)
+# A size given by keyword is a byte count; without one, a payload the artifact
+# holds as text or bytes has the size of its bytes, and any other has none.
+_semantic_artifact_size(size::Integer, bytes) = size >= 0 ? Int(size) :
+    throw(ArgumentError(string("SemanticArtifact: size is a byte count; got ", size)))
+_semantic_artifact_size(size, bytes) = throw(ArgumentError(string(
+    "SemanticArtifact: size is a byte count (an integer); got ", repr(size))))
+_semantic_artifact_size(::Nothing, bytes::AbstractString) = ncodeunits(bytes)
+_semantic_artifact_size(::Nothing, bytes::AbstractVector{UInt8}) = length(bytes)
+_semantic_artifact_size(::Nothing, bytes) = nothing
 
 # The containers declare INNER constructors on purpose. With a `Vector{Any}`
 # field, Julia's auto-generated converting constructor and an outer `children...`
@@ -3968,6 +4004,35 @@ _semantic_metric_text(metric::SemanticMetric) = isempty(metric.unit) ?
 # behaviour, kept so an in-memory payload still renders.
 _semantic_artifact_href(artifact::SemanticArtifact) =
     isnothing(artifact.target) ? artifact.name : string(artifact.target)
+
+# The file name's extension in capitals (`XLSX`), or "" for a name without one.
+_semantic_artifact_format(artifact::SemanticArtifact) =
+    uppercase(lstrip(last(splitext(artifact.name)), '.'))
+
+# A byte count written short, 1024 bytes to a KB, with one decimal below 10:
+# `512 B`, `820 KB`, `1.4 MB`.
+function _semantic_artifact_size_text(bytes::Int, texts::SemanticTexts)
+    bytes < 1024 && return string(bytes, " B")
+    value, unit = bytes / 1024, 1
+    while value >= 1024 && unit < length(_SEMANTIC_ARTIFACT_UNITS)
+        value, unit = value / 1024, unit + 1
+    end
+    digits = round(value; digits=1) < 10 ? 1 : 0
+    string(_format_fixed(value, digits, texts.decimal, ""), " ", _SEMANTIC_ARTIFACT_UNITS[unit])
+end
+const _SEMANTIC_ARTIFACT_UNITS = ("KB", "MB", "GB", "TB")
+
+# What every peer says about the file besides its label: its format and its
+# size. A name without an extension has no format to name; the text peers name
+# the MIME type instead (`mime`, already in their spelling), while HTML keeps it
+# in the link's `type` attribute and passes `mime=nothing`.
+function _semantic_artifact_facts(artifact::SemanticArtifact, mime)
+    format = _semantic_artifact_format(artifact)
+    facts = String[]
+    isempty(format) ? isnothing(mime) || push!(facts, mime) : push!(facts, format)
+    isnothing(artifact.size) || push!(facts, _semantic_artifact_size_text(artifact.size, artifact.texts))
+    facts
+end
 
 """
     _semantic_table_columns(source) -> (names, columns) or nothing
@@ -4684,9 +4749,21 @@ _semantic_html_node(action::SemanticAction) = h.a(
     action.label; href=string(action.target), hx_get=string(action.target),
     hx_target="this", hx_swap="outerHTML", aria_live="polite",
     class="htmxo-semantic-action")
-_semantic_html_node(artifact::SemanticArtifact) = h.a(
-    artifact.name; href=_semantic_artifact_href(artifact),
-    download=artifact.name, type=artifact.mime, class="htmxo-semantic-artifact")
+# An artifact is one download control: icon, label, then format and size in a
+# `small`. The spaces between them separate the parts on a page without
+# `pico_bridge()`, whose flex layout drops them. The icon is an SVG drawn in the
+# text colour, not `⬇`, which Chrome draws as a blue colour emoji.
+function _semantic_html_node(artifact::SemanticArtifact)
+    facts = _semantic_artifact_facts(artifact, nothing)
+    h.a(_semantic_artifact_icon(), " ", artifact.label,
+        (isempty(facts) ? () : (" ", h.small(join(facts, " · "))))...;
+        href=_semantic_artifact_href(artifact), download=artifact.name,
+        type=artifact.mime, class="htmxo-semantic-artifact",
+        (artifact.label == artifact.name ? (;) : (; title=artifact.name))...)
+end
+_semantic_artifact_icon() = h.svg(h.path(; d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11");
+    viewBox="0 0 16 16", width="1em", height="1em", fill="none", stroke="currentColor",
+    stroke_width="1.6", stroke_linecap="round", stroke_linejoin="round", aria_hidden="true")
 # The heading level a `SemanticSection` opens where it renders: 2 at the top of
 # a document (below its title), one more inside each enclosing heading. It is a
 # dynamic scope rather than an `IOContext` key, because it must reach every
@@ -4898,9 +4975,11 @@ end
 Base.show(io::IO, ::MIME"text/markdown", action::SemanticAction) =
     print(io, "[", action.label, "](", string(action.target), ")")
 
-Base.show(io::IO, ::MIME"text/markdown", artifact::SemanticArtifact) = print(
-    io, "[", artifact.name, "](", _semantic_artifact_href(artifact), ") (`",
-    artifact.mime, "`)")
+function Base.show(io::IO, ::MIME"text/markdown", artifact::SemanticArtifact)
+    facts = _semantic_artifact_facts(artifact, string("`", artifact.mime, "`"))
+    print(io, "[", artifact.label, "](", _semantic_artifact_href(artifact), ")")
+    isempty(facts) || print(io, " (", join(facts, ", "), ")")
+end
 
 # A Markdown table row is one line, and GFM splits a cell at every `|`, code
 # spans included. So a cell's line breaks fold into an inline `<br>` and its
@@ -4999,7 +5078,7 @@ Base.show(io::IO, ::MIME"text/plain", action::SemanticAction) =
     print(io, action.label, " (", string(action.target), ")")
 
 Base.show(io::IO, ::MIME"text/plain", artifact::SemanticArtifact) = print(
-    io, artifact.name, " [", artifact.mime, "]",
+    io, artifact.label, " [", join(_semantic_artifact_facts(artifact, artifact.mime), ", "), "]",
     isnothing(artifact.target) ? "" : " ($(artifact.target))")
 
 function Base.show(io::IO, mime::MIME"text/plain", table::SemanticTable)
@@ -6853,12 +6932,15 @@ can run inside a serving app (it renders in process with
   [`export_audience`](@ref)`(__req__)`.
 
 `.nojekyll` is written too (GitHub Pages otherwise drops `_`-prefixed files
-such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get`,
-`hx-push-url`/`hx-replace-url` and Vega `"url"` in the written HTML is checked
-to name a file of the bundle, which also catches an address a route wrote into
-raw text the walk never sees. An answer with a status other than 200 or an
-`X-HTMXO-Error-Id` header (a failed fragment answers 200 under htmx) is not
-written; the crawl carries on, so one run finds every failure, and then throws
+such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get` and
+`hx-push-url`/`hx-replace-url` of an element in the written HTML, and every
+Vega `"url"` in its scripts, is checked to name a file of the bundle, which
+also catches an address a route wrote into raw markup the walk never sees. The
+text of a `<style>` or `<script>` and an HTML comment are not markup, so an
+`href="…"` there (a CSS comment of the inline runtime) is not checked. An
+answer with a status other than 200 or an `X-HTMXO-Error-Id` header (a failed
+fragment answers 200 under htmx) is not written; the crawl carries on, so one
+run finds every failure, and then throws
 [`StaticSiteIncomplete`](@ref) listing each failed address and each unresolved
 reference. Otherwise it returns the number of files and bytes written.
 
@@ -7017,8 +7099,37 @@ end
 _body_contains(body::AbstractString, s::AbstractString) = occursin(s, body)
 _body_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(findfirst(codeunits(s), body))
 
-const _SITE_REFERENCE =
-    r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\"|\"url\":\"([^\"]*)\""
+const _SITE_ATTRIBUTE = r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\""
+const _SITE_SCRIPT_URL = r"\"url\":\"([^\"]*)\""
+# An HTML comment, or a `<script>`/`<style>` element: its tag's attributes,
+# then its text, which ends at the first closing tag (as a browser reads it).
+const _SITE_RAW_TEXT = r"<!--.*?-->|<(script|style)\b((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>(.*?)</\1\b[^>]*>"si
+
+# The addresses an HTML file names, in order: each `href`, `src`, `hx-get`,
+# `hx-push-url` and `hx-replace-url` attribute of an element (its character
+# references decoded), and each `"url"` in a script (a Vega spec's
+# `data.url`). The text of a `<script>` or `<style>` and an HTML comment hold
+# no elements, so an `href="…"` written there (a comment of the inline
+# runtime's styles) is not one.
+function _site_references(html::AbstractString)
+    references = String[]
+    markup(text) = for m in eachmatch(_SITE_ATTRIBUTE, text)
+        push!(references, replace(m[1], "&quot;" => "\"", "&#39;" => "'",
+                                  "&lt;" => "<", "&gt;" => ">", "&amp;" => "&"))
+    end
+    at = 1
+    for m in eachmatch(_SITE_RAW_TEXT, html)
+        markup(SubString(html, at, prevind(html, m.offset)))
+        if !isnothing(m[1])
+            markup(m[2])
+            lowercase(m[1]) == "script" &&
+                foreach(u -> push!(references, u[1]), eachmatch(_SITE_SCRIPT_URL, m[3]))
+        end
+        at = m.offset + ncodeunits(m.match)
+    end
+    markup(SubString(html, at))
+    references
+end
 
 # Every reference in the bundle's HTML that names no file of it, as
 # `file => address`: a rooted address (it escaped the export, and would point
@@ -7029,10 +7140,7 @@ function _site_unresolved(root::AbstractString, failed::Set{String})
     for (dirpath, _, files) in walkdir(root), f in sort(files)
         endswith(f, ".html") || continue
         file = joinpath(dirpath, f)
-        html = read(file, String)
-        for m in eachmatch(_SITE_REFERENCE, html)
-            address = replace(something(m[1], m[2]), "&quot;" => "\"", "&#39;" => "'",
-                              "&lt;" => "<", "&gt;" => ">", "&amp;" => "&")
+        for address in _site_references(read(file, String))
             (_site_internal(address) && address != "true" && address != "false") || continue
             path = first(split(address, r"[?#]"; limit=2))
             ok = startswith(path, '/') ? path in failed :
@@ -20745,7 +20853,7 @@ const _TABLE_TEXT_LOCALES = (
         rows_missing = "Loading rows failed: no rows in the response",
         csv = "⬇ CSV",
         more = _CAPTION_TEXT_LOCALES.en.more,
-        decimal = ".",
+        decimal = _SEMANTIC_TEXT_LOCALES.en.decimal,
         thousands = ",",
         linked_inside = "↳ inside",
         linked_deep = "↳ {levels} levels down",
@@ -20787,7 +20895,7 @@ const _TABLE_TEXT_LOCALES = (
         rows_missing = "Laden der Zeilen fehlgeschlagen: keine Zeilen in der Antwort",
         csv = "⬇ CSV",
         more = _CAPTION_TEXT_LOCALES.de.more,
-        decimal = ",",
+        decimal = _SEMANTIC_TEXT_LOCALES.de.decimal,
         thousands = ".",
         linked_inside = "↳ darin",
         linked_deep = "↳ {levels} Ebenen tiefer",
@@ -27612,6 +27720,10 @@ The box's rules are as weak as Pico's own, so a component that draws its own
 `<details>` (a menu badge) keeps every property it sets in its own class
 rules. `--htmxo-disclosure-padding` (default `1rem`) is the box's inner
 spacing.
+
+A [`SemanticArtifact`](@ref) download takes the same slate outline, in place
+of Pico's underlined azure link; a later stylesheet restyles it with a
+selector at least as specific as `.app a.htmxo-semantic-artifact`.
 """
 pico_bridge() = h.style(Raw("""
 :root {
@@ -27723,6 +27835,41 @@ details:where(:not(.dropdown, :has(> summary[role])))[open] > summary {
 }
 details:where(:not(.dropdown, :has(> summary[role]))) > summary:focus-visible:not([role]) {
     outline-offset: calc(-1 * var(--pico-outline-width));
+}
+/* A `SemanticArtifact` is a download control, drawn in the buttons' slate
+   outline: icon, label, then format and size in muted `small` text, which
+   wraps below the label in a narrow box. Unlayered, because Pico's own `a`
+   rule is, and with direct colours, because Pico sets `--pico-color` on every
+   link to its azure. */
+a.htmxo-semantic-artifact {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: .5rem;
+    row-gap: .1rem;
+    max-width: 100%;
+    padding: .4rem .85rem;
+    border: var(--pico-border-width, 1px) solid var(--pico-secondary);
+    border-radius: var(--pico-border-radius);
+    color: var(--pico-secondary);
+    text-decoration: none;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+}
+a.htmxo-semantic-artifact:is(:hover, :active, :focus) {
+    color: var(--pico-secondary-hover);
+    border-color: var(--pico-secondary-hover);
+}
+a.htmxo-semantic-artifact:focus-visible {
+    box-shadow: 0 0 0 var(--pico-outline-width) var(--pico-secondary-focus);
+}
+a.htmxo-semantic-artifact > svg {
+    flex: none;
+}
+a.htmxo-semantic-artifact > small {
+    color: var(--pico-muted-color);
+    font-size: .85em;
+    white-space: nowrap;
 }
 """))
 
@@ -27928,7 +28075,9 @@ htmxo_utility_styles() = h.style(Raw("""
    the element whose native rendering already says it (`article` for a card,
    `section` for a division, `dl` for fields, `details` for a disclosure,
    `pre>code` for code), which is why those classes need no rule here (`dl`
-   gets the generic definition-list rule below, on every `dl`). A group
+   gets the generic definition-list rule below, on every `dl`; an artifact's
+   `a` would read as one more link, and its download-button look is in
+   `pico_bridge()`, because only an unlayered rule restyles Pico's links). A group
    falls to a bare `div`, so without this rule it renders as nothing at all and
    its children merely stack. Laid out as a row that WRAPS: siblings share the
    width and each keeps a minimum before the row breaks, so a pair of figures
