@@ -18514,8 +18514,14 @@ of it unless `tables=false`; include this once per page only in a `<head>` you
 build without it. A copy in `htmx`'s `extra_head` is left out.
 
 The JS finds the `<tbody>` relative to the clicked header (no hardcoded ID),
-so multiple sortable tables can coexist on the same page. Numeric values are
-sorted numerically; everything else uses `localeCompare`.
+so multiple sortable tables can coexist on the same page. A cell sorts by its
+`data-sort-value`, else by its `data-htmxo-number` (the exact number a
+[`number_cell`](@ref) or a group sum carries), else by its text (a
+master/detail row's label, without its controls). Two values that both start
+with a number sort numerically; everything else uses `localeCompare`. Rows
+marked `data-htmxo-pinned` stay ahead of the others in either direction.
+`sortable_table(...; default_sort)` writes its rows in the same order on the
+server.
 
 # Sort state — the public read surface
 `sortTable` marks the active `<th>` with **both** `data-sort-dir="asc"|"desc"`
@@ -18533,8 +18539,7 @@ its active key. An unsorted table yields `{}`.
 An idiomorph `hx-swap="morph:*"` syncs attributes against the server's HTML and
 removes any the server did not render — so a client-set sort marker **and the
 row order** are wiped by the next morph that covers the `<thead>`/`<tbody>`.
-To make a user's sort survive a morph, send the state out with the request and
-have the server render rows in that order:
+To make a user's sort survive a morph, send the state out with the request:
 
 ```julia
 h.button("↻"; hx_get=string(__self__),
@@ -18544,8 +18549,8 @@ h.button("↻"; hx_get=string(__self__),
 
 then render with `sortable_table(rows...; default_sort=sort_col => sort_dir)`
 (`default_sort=(col=sort_col, key=sort_key, dir=sort_dir)` when the table has a
-column with several sort keys) so the server-rendered header agrees with the
-server-rendered row order. See [`sortable_table`](@ref).
+column with several sort keys): the server writes the rows in that order and
+stamps the header to match. See [`sortable_table`](@ref).
 """
 sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
     # The master/detail runtime rides along: every master/detail table needs
@@ -18594,9 +18599,13 @@ function sortTable(col, th) {
         if (h !== th) { delete h.dataset.sortDir; h.removeAttribute('aria-sort'); }
     });
     // Sort key: prefer `data-sort-value` if the cell sets one, else the
+    // exact number a number cell or a group sum carries for the CSV
+    // (`data-htmxo-number`; the shown `1.234,5` would read as 1.234), else the
     // visible text. This lets callers force a semantic order (e.g. status:
     // proposed → approved → rejected) without re-encoding the displayed text.
-    const sortKey = cell => (cell.dataset.sortValue ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
+    // `sortable_table(...; default_sort)` writes its rows in this same order
+    // on the server (`_default_sort_rows`): change the two together.
+    const sortKey = cell => (cell.dataset.sortValue ?? cell.dataset.htmxoNumber ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
     // A column with several sort keys (`ColumnSpec(...; sort_keys)`) sorts by
     // its active key: the value at that place in each cell's
     // `data-htmxo-sort-keys`. A missing value sorts last in both directions.
@@ -18607,7 +18616,7 @@ function sortTable(col, th) {
         if (!keyed.has(row)) keyed.set(row, htmxoSortValue(row.cells[col], key, keys.length, sortKey));
         return keyed.get(row);
     };
-    const compare = keys ? (a, b) => {
+    const byValue = keys ? (a, b) => {
         const av = keyOf(a), bv = keyOf(b);
         if (av === null || bv === null) return av === bv ? 0 : av === null ? 1 : -1;
         const c = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
@@ -18619,6 +18628,10 @@ function sortTable(col, th) {
         if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
         return asc ? av.localeCompare(bv) : bv.localeCompare(av);
     };
+    // A pinned row (`data-htmxo-pinned`) stays ahead of the others in every
+    // sort; pinned rows sort among themselves.
+    const pinned = r => r.dataset.htmxoPinned !== undefined && r.dataset.htmxoPinned !== 'false';
+    const compare = (a, b) => (pinned(b) - pinned(a)) || byValue(a, b);
     const append = r => {
         tbody.appendChild(r);
         const c = companions.get(r.id);
@@ -21109,6 +21122,266 @@ _render_table_cell(::Nothing, value::AbstractFloat, c, ri, texts) = number_cell(
 _render_table_cell(::Nothing, value, c, ri, texts) = h.td(string(value))
 _render_table_cell(cell, value, c, ri, texts) = h.td(cell(value, c, ri))
 
+# --- The row order `default_sort` writes ---
+# `sortable_table` writes its rows in the order a click on the `default_sort`
+# header gives in the browser, so the header, the first paint, `?plain`, a PDF
+# and a static bundle agree. Everything here mirrors `sortTable` (in
+# `_table_runtime_text`): which rows move, a detail row kept under its master,
+# the sibling sets of a hierarchy, pinned rows first, the cell's sort key and
+# the comparison. Change the two together.
+
+_node_attr(x::Node, name::AbstractString) = get(HTMX.attrs(x), Symbol(name), nothing)
+_node_attr(_, ::AbstractString) = nothing
+_row_id(row) = string(something(_node_attr(row, "id"), ""))
+_row_cells(row::Node) = Any[c for c in HTMX.children(row) if c isa Node && HTMX.tag(c) in (:td, :th)]
+# A pinned row (`data-htmxo-pinned`) stays ahead of the others in every sort.
+_row_pinned(row) = let v = _node_attr(row, "data-htmxo-pinned")
+    !isnothing(v) && string(v) != "false"
+end
+
+# The text the browser reads from a cell (`textContent`): a node's text
+# children as they are, rendered markup (`Raw`, a value that renders itself)
+# without its tags and with its character references decoded, and nothing
+# from hyperscript, which goes into the `_` attribute.
+_text_content!(io::IO, x::AbstractString) = print(io, x)
+_text_content!(::IO, ::HyperscriptString) = nothing
+_text_content!(io::IO, x::Node) = foreach(c -> _text_content!(io, c), HTMX.children(x))
+_text_content!(io::IO, x) = showable("text/html", x) ?
+    print(io, _html_text_content(repr("text/html", x))) : print(io, string(x))
+_html_text_content(html::AbstractString) = replace(replace(html, r"<[^>]*>" => ""),
+    r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z]+);" => _html_char_reference)
+const _HTML_NAMED_REFERENCES = Dict("amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"",
+    "apos" => "'", "nbsp" => " ", "ndash" => "–", "mdash" => "—", "minus" => "−")
+function _html_char_reference(ref::AbstractString)
+    name = ref[nextind(ref, 1):prevind(ref, lastindex(ref))]
+    startswith(name, '#') || return get(_HTML_NAMED_REFERENCES, name, ref)
+    hex = startswith(name, "#x") || startswith(name, "#X")
+    code = tryparse(UInt32, name[(hex ? 3 : 2):end]; base=hex ? 16 : 10)
+    isnothing(code) || !isvalid(Char, code) ? ref : string(Char(code))
+end
+
+# A cell's sort key as `sortTable` reads it: its `data-sort-value`, else the
+# number a number cell or a group sum carries for the CSV
+# (`data-htmxo-number`), else the text of its row label (a master/detail
+# row's controls are no part of it) or of the whole cell.
+function _cell_sort_text(cell)
+    cell isa Node || return ""
+    for name in ("data-sort-value", "data-htmxo-number")
+        v = _node_attr(cell, name)
+        isnothing(v) || return String(strip(string(v)))
+    end
+    kids = HTMX.children(cell)
+    label = findfirst(c -> !isnothing(_node_attr(c, "data-htmxo-row-label")), kids)
+    io = IOBuffer()
+    _text_content!(io, isnothing(label) ? cell : kids[label])
+    String(strip(String(take!(io))))
+end
+
+# JavaScript's `parseFloat`: the number a string starts with, else `NaN`.
+function _js_parse_float(s::AbstractString)
+    m = match(r"^[+-]?(?:Infinity|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)", lstrip(s))
+    isnothing(m) && return NaN
+    t = m.match
+    endswith(t, "Infinity") && return startswith(t, '-') ? -Inf : Inf
+    # Out of `Float64`'s range: `parseFloat` gives ±Infinity or 0.
+    something(tryparse(Float64, t), Float64(parse(BigFloat, t)))
+end
+
+# A cell's value for sort key `key` (0-based) of its column's `n`, as
+# `htmxoSortValue` reads it: `nothing` (sorts last), a number or a text.
+function _cell_sort_value(cell, key::Int, n::Int)
+    json = _node_attr(cell, "data-htmxo-sort-keys")
+    if !isnothing(json) && !isempty(string(json))
+        values = _sort_values_parse(string(json))
+        length(values) == n || throw(ArgumentError(string("sortable_table: a cell carries ",
+            length(values), " sort values for the ", n, " sort keys of its column")))
+        return values[key + 1]
+    end
+    text = _cell_sort_text(cell)
+    isempty(text) && return nothing
+    x = _js_parse_float(text)
+    isnan(x) ? text : x
+end
+
+# The values of a flat JSON array of numbers, strings and `null` (what
+# `sort_values` writes): `Float64`, `String` or `nothing` each.
+function _sort_values_parse(json::AbstractString)
+    bad() = throw(ArgumentError("sortable_table: data-htmxo-sort-keys must be a flat JSON array of numbers, strings and null, got $(repr(json))"))
+    s = collect(strip(json))
+    (length(s) >= 2 && first(s) == '[' && last(s) == ']') || bad()
+    values = Any[]
+    i, stop = 2, length(s)
+    skip() = (while i < stop && isspace(s[i]); i += 1; end)
+    skip()
+    i == stop && return values
+    while true
+        if s[i] == '"'
+            io = IOBuffer()
+            i += 1
+            while true
+                i < stop || bad()
+                c = s[i]
+                c == '"' && break
+                if c == '\\'
+                    i + 1 < stop || bad()
+                    e = s[i += 1]
+                    if e == 'u'
+                        i + 4 < stop || bad()
+                        code = something(tryparse(UInt16, String(s[i+1:i+4]); base=16), 0x0000)
+                        i += 4
+                        if 0xd800 <= code <= 0xdbff && i + 6 < stop && s[i+1] == '\\' && s[i+2] == 'u'
+                            low = something(tryparse(UInt16, String(s[i+3:i+6]); base=16), 0x0000)
+                            if 0xdc00 <= low <= 0xdfff
+                                code = 0x10000 + (UInt32(code - 0xd800) << 10) + (low - 0xdc00)
+                                i += 6
+                            end
+                        end
+                        print(io, isvalid(Char, UInt32(code)) ? Char(UInt32(code)) : '�')
+                    else
+                        print(io, get(Dict('b' => '\b', 'f' => '\f', 'n' => '\n', 'r' => '\r', 't' => '\t'), e, e))
+                    end
+                else
+                    print(io, c)
+                end
+                i += 1
+            end
+            push!(values, String(take!(io)))
+            i += 1
+        else
+            j = i
+            while j < stop && s[j] != ',' && !isspace(s[j]); j += 1; end
+            token = String(s[i:j-1])
+            value = token == "null" ? nothing : tryparse(Float64, token)
+            token == "null" || !isnothing(value) || bad()
+            push!(values, value)
+            i = j
+        end
+        skip()
+        i == stop && return values
+        s[i] == ',' || bad()
+        i += 1
+        skip()
+    end
+end
+
+# The browser compares texts with `localeCompare`. This approximates its
+# default collation: letters first without case or accents, then by accent,
+# then lower case before upper case; spaces and punctuation come before
+# digits, and digits before letters.
+function _collation_key(s::AbstractString)
+    class(c) = isletter(c) ? 2 : isdigit(c) || Base.Unicode.category_code(c) == Base.Unicode.UTF8PROC_CATEGORY_ND ? 1 : 0
+    swapcase(c) = islowercase(c) ? uppercase(c) : isuppercase(c) ? lowercase(c) : c
+    base = Base.Unicode.normalize(s; casefold=true, stripmark=true)
+    (Tuple{Int,Char}[(class(c), c) for c in base], Base.Unicode.normalize(s; casefold=true), map(swapcase, s))
+end
+_compare_numbers(a, b) = a < b ? -1 : a > b ? 1 : 0
+# `String(x)` in the browser, for a number compared with a text.
+_js_number_string(x::Float64) = isinteger(x) && abs(x) < 1e21 ? string(BigInt(x)) : string(x)
+
+# What `sortTable` reads from one row, read once.
+struct _RowSortKey
+    pinned::Bool
+    has_cell::Bool       # the row has a cell in the sorted column
+    value::Any           # one order: the text; several: nothing, a Float64 or a String
+    number::Float64      # one order: the number the text starts with, else NaN
+    text::Union{Nothing,String}  # the value as the text `localeCompare` reads
+    text_key::Any        # its collation key, once a text is compared (`_collated`)
+end
+function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
+    cells = _row_cells(row)
+    has_cell = length(cells) >= col
+    cell = has_cell ? cells[col] : nothing
+    if nkeys == 0
+        text = has_cell ? _cell_sort_text(cell) : ""
+        _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), text, nothing)
+    else
+        value = has_cell ? _cell_sort_value(cell, key, nkeys) : nothing
+        text = value isa Float64 ? _js_number_string(value) : value
+        _RowSortKey(_row_pinned(row), has_cell, value, NaN, text, nothing)
+    end
+end
+# A row compares by text unless its value is a number on both sides.
+_compares_text(k::_RowSortKey, nkeys::Int) = k.has_cell && (nkeys == 0 ? isnan(k.number) : k.value isa String)
+_collated(k::_RowSortKey) = isnothing(k.text) ? k :
+    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.text, _collation_key(k.text))
+
+# `sortTable`'s comparison of two rows, `asc` or not, as -1, 0 or 1: pinned
+# rows first; with one order, numbers by value when both texts start with
+# one, else texts; with several, a missing value last in either direction.
+function _compare_rows(a::_RowSortKey, b::_RowSortKey, asc::Bool, nkeys::Int)
+    pin = Int(b.pinned) - Int(a.pinned)
+    pin == 0 || return pin
+    c = if nkeys == 0
+        !isnan(a.number) && !isnan(b.number) ? _compare_numbers(a.number, b.number) : cmp(a.text_key, b.text_key)
+    else
+        (isnothing(a.value) || isnothing(b.value)) &&
+            return isnothing(a.value) == isnothing(b.value) ? 0 : isnothing(a.value) ? 1 : -1
+        a.value isa Float64 && b.value isa Float64 ? _compare_numbers(a.value, b.value) : cmp(a.text_key, b.text_key)
+    end
+    asc ? c : -c
+end
+
+# `rows` in the order `default_sort = ds` puts them, as `sortTable` would.
+# A flat table sorts the rows that have a cell in the column, each followed
+# by its `detail-<key>` row; a hierarchy sorts each set of siblings
+# (`data-htmxo-parent`) and writes whole subtrees in preorder. The rows
+# neither moves (no such cell, a detail row without its master, a row outside
+# the tree) keep their order before the moved ones, where the browser leaves
+# them. Stable, as the browser's sort is: equal rows keep their order.
+function _default_sort_rows(rows, ds, headers; hierarchy::Bool)
+    col, dir, key = ds
+    nkeys = length(_sort_key_names(headers[col]))
+    asc = dir == "asc"
+    rows = collect(Any, rows)
+    is_tr(r) = r isa Node && HTMX.tag(r) === :tr
+    ids = String[is_tr(r) ? _row_id(r) : "" for r in rows]
+    companion = [is_tr(r) && startswith(ids[i], "detail-") for (i, r) in enumerate(rows)]
+    detail_at = Dict(ids[i] => i for i in eachindex(rows) if companion[i])
+    detail_of(i) = let dash = findfirst('-', ids[i])
+        isnothing(dash) ? nothing : get(detail_at, "detail-" * ids[i][nextind(ids[i], dash):end], nothing)
+    end
+    # Each row's key, read once; texts get their collation keys only when
+    # some row of the column compares by text.
+    sort_keys = Dict(i => _RowSortKey(rows[i], col, key, nkeys) for i in eachindex(rows) if is_tr(rows[i]) && !companion[i])
+    any(k -> _compares_text(k, nkeys), values(sort_keys)) && map!(_collated, values(sort_keys))
+    sort_key(i) = sort_keys[i]
+    order = Int[]
+    placed = Set{Int}()
+    function append(i)
+        push!(order, i)
+        d = detail_of(i)
+        isnothing(d) || d in placed || (push!(order, d); push!(placed, d))
+    end
+    if hierarchy
+        siblings = Dict{String,Vector{Int}}()
+        for i in eachindex(rows)
+            is_tr(rows[i]) && !companion[i] || continue
+            parent = string(something(_node_attr(rows[i], "data-htmxo-parent"), ""))
+            push!(get!(Vector{Int}, siblings, parent), i)
+        end
+        visited = Set{String}()
+        function visit(parent)
+            parent in visited && return
+            push!(visited, parent)
+            level = get(siblings, parent, Int[])
+            sort!(level; alg=MergeSort, lt=(i, j) -> let a = sort_key(i), b = sort_key(j)
+                a.has_cell && b.has_cell && _compare_rows(a, b, asc, nkeys) < 0
+            end)
+            for i in level
+                append(i)
+                isempty(ids[i]) || visit(ids[i])
+            end
+        end
+        visit("")
+    else
+        primaries = [i for i in eachindex(rows) if is_tr(rows[i]) && !companion[i] && sort_key(i).has_cell]
+        sort!(primaries; alg=MergeSort, lt=(i, j) -> _compare_rows(sort_key(i), sort_key(j), asc, nkeys) < 0)
+        foreach(append, primaries)
+    end
+    moved = Set(order)
+    Any[Any[rows[i] for i in eachindex(rows) if !(i in moved)]; rows[order]]
+end
+
 """
     sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
                    download=false, download_filename=nothing, caption=nothing,
@@ -21152,7 +21425,8 @@ that fits its column drops that scroll box so its header can stay in view
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
   `id="detail-X"` for the paired-row pattern. A `detail-X` row is no row of
   the Markdown table; [`master_detail_table`](@ref) writes eager details
-  after the table instead. Write a number as
+  after the table instead. A row with `data_htmxo_pinned=""` stays at the top
+  in every sort (`data_htmxo_pinned="false"` pins nothing). Write a number as
   [`number_cell`](@ref)`(x; texts)` with the table's `texts`: it shows the
   number in the table's language and sorts and exports by its exact value.
 - `header_groups`: optional `label => first:last` pairs for a two-row header,
@@ -21164,17 +21438,21 @@ that fits its column drops that scroll box so its header can stay in view
 - `sortable`: master toggle for the auto-wiring of `String` and `ColumnSpec`
   headers (default `true`); with `false` a `ColumnSpec` keeps its explanation
   as the `<th>`'s `title`. Pre-built `h.th` headers are unaffected.
-- `default_sort`: declare the order `rows` are ALREADY in, as `col` or
-  `col => dir` — `col` a 1-based column index or the label of a `String` or
-  `ColumnSpec` header, `dir`
-  `:asc` (default) or `:desc`. Stamps `data-sort-dir` / `aria-sort` / the sort
-  caret on that header, exactly as a client-side `sortTable` click would.
-  It **declares** the order, it does not perform it: `sortable_table` receives
-  pre-built row nodes, so the caller must emit `rows` in that order. Requires
-  `sortable=true` and a `String` or `ColumnSpec` header at `col`. For a column
-  with several sort keys, `(col=..., key="Lower bound", dir=:desc)` names the
-  key too (default: its first; `key=""`, as a request carries for a column
-  with one order, is the same).
+- `default_sort`: the order the table opens in, as `col` or `col => dir` —
+  `col` a 1-based column index or the label of a `String` or `ColumnSpec`
+  header, `dir` `:asc` (default) or `:desc`. The table writes `rows` in the
+  order a click on that header gives in the browser, and stamps
+  `data-sort-dir` / `aria-sort` / the sort caret on the header. So the first
+  paint, `?plain`, a PDF and a static bundle all show the order the header
+  says, with or without the script. It sorts as `sortTable` does (see
+  `sortable_table_js`): by each cell's `data-sort-value`, else its
+  `data-htmxo-number`, else its text; equal rows keep the order they came in;
+  a `detail-X` row stays under its master; rows marked `data-htmxo-pinned`
+  come first. Requires `sortable=true` and a `String` or `ColumnSpec` header
+  at `col`. For a column with several sort keys,
+  `(col=..., key="Lower bound", dir=:desc)` names the key too (default: its
+  first; `key=""`, as a request carries for a column with one order, is the
+  same).
 - `searchable`: add a labelled client-side search field above the table
   (default `false`), with a live "N of M rows shown" count as its helper text
   and a "No matching rows" state below. See *Client-side search* below.
@@ -21399,7 +21677,7 @@ An idiomorph `hx-swap="morph:*"` re-imposes the server's child order on the
 client-side sort (rows *and* caret) is silently wiped by the next morph, and
 that swap is idiomorph's worst case, since a client-sorted DOM is maximally
 divergent from the server's order. Ride the sort state out with the request and
-render rows in that order:
+hand it back as `default_sort`, which writes the rows in that order:
 
 ```julia
 h.button("↻"; hx_get=string(__self__),
@@ -21407,7 +21685,7 @@ h.button("↻"; hx_get=string(__self__),
     hx_target="#entries", hx_swap="morph:outerHTML")
 
 # ...and in the route, with `@param sort_col::Int = 0` / `@param sort_dir::String = "asc"`:
-sortable_table(headers, sorted_rows; id="entries",
+sortable_table(headers, rows; id="entries",
     default_sort=(sort_col == 0 ? nothing : sort_col => Symbol(sort_dir)))
 ```
 
@@ -21423,7 +21701,8 @@ function sortable_table(headers, rows;
                         searchable::Bool=false, search_query::AbstractString="",
                         selectable=nothing, select_form=nothing, link=nothing,
                         sticky::Bool=true,
-                        texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true, kwargs...)
+                        texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true,
+                        _presorted::Bool=false, kwargs...)
     isnothing(link) || link isa Union{AbstractString,Symbol} && !isempty(string(link)) || throw(ArgumentError(
         "sortable_table: link must be the non-empty name of a link group; got $(repr(link))"))
     if !isnothing(default_sort) && !sortable
@@ -21446,6 +21725,11 @@ function sortable_table(headers, rows;
         names = _sort_key_names(hdr)
         isempty(names) || _check_sort_values(rows, i, names, _header_label(hdr))
     end
+    # The rows come in the order the header says (`_default_sort_rows`);
+    # `master_detail_table` sorts them itself, to write its details after the
+    # table in the same order.
+    isnothing(ds) || _presorted ||
+        (rows = _default_sort_rows(rows, ds, headers; hierarchy=haskey(kwargs, :data_htmxo_hierarchy)))
 
     th_nodes = [_table_th(hdr, i, ds, sortable, texts) for (i, hdr) in enumerate(headers)]
 
@@ -22653,6 +22937,7 @@ function master_detail_table(headers, items;
     # The eager details Markdown writes after the table, each item's once
     # (`_detail_key`: a leaf listed under several groups is one item).
     details = Pair{Vector{Any},Any}[]
+    detail_rows = String[]      # the id of each detail's master row
     detailed = Set{String}()
     function visit(item, parent, level, ancestors_open)
         item_key = key(item)
@@ -22744,6 +23029,7 @@ function master_detail_table(headers, items;
         if !isnothing(body) && isnothing(url) && !(string(_detail_key(item)) in detailed)
             push!(detailed, string(_detail_key(item)))
             push!(details, label => body)
+            push!(detail_rows, "row-$safe")
         end
         if branch && branches_collapsible
             # An update names the child rows it renders; the runtime then
@@ -22822,8 +23108,17 @@ function master_detail_table(headers, items;
     # gets one from its root keys, which are unique on the page.
     body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
+    # The rows in the `default_sort` order, as `sortable_table` would write
+    # them, and the details written after the table in the same order.
+    ds = _resolve_default_sort(get(kwargs, :default_sort, nothing), headers)
+    if !isnothing(ds)
+        rows = _default_sort_rows(rows, ds, headers; hierarchy=haskey(table_attrs, :data_htmxo_hierarchy))
+        position = Dict(_row_id(r) => i for (i, r) in enumerate(rows))
+        perm = sortperm(detail_rows; by=id -> get(position, id, typemax(Int)), alg=MergeSort)
+        permute!(details, perm)
+    end
     table = sortable_table(map(_sort_key_names_only, headers), rows; table_attrs..., texts, link, sticky,
-        _stamp_texts=false, kwargs...)
+        _stamp_texts=false, _presorted=true, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries. A narrow first column
