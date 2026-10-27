@@ -1925,7 +1925,7 @@ end
                 "const CHANGED = $(repr(changed)), GROWN = $(repr(grown)), FIRST = $(repr(first_group)), LAZY = $(repr(lazy_rows));\n" * raw"""
             const ws = () => Array.from(document.querySelectorAll('[data-htmxo-grouped]'));
             const group = (w, key) => document.getElementById('row-' + htmxoSafeKey(w.dataset.htmxoGroupScope + 'group:' + key));
-            const rowsOf = w => Array.from(w.querySelector('table').tBodies[0].rows).map(r => r.outerHTML).join('');
+            const bodyOf = w => Array.from(w.querySelector('table').tBodies[0].rows).map(r => r.outerHTML).join('');
             const dupes = () => { const ids = Array.from(document.querySelectorAll('[id]'), e => e.id); return ids.filter((x, i) => ids.indexOf(x) !== i); };
             window.addEventListener('load', async function() {
                 try {""" * js * raw"""
@@ -1941,24 +1941,24 @@ end
             isnothing(checks) ? ["no checks"] : split(checks[1], '\n')
         end
         eager = run((grouped(group_by=["party"]), two(other)), raw"""
-            const [t1, t2] = ws(), first = rowsOf(t1);
+            const [t1, t2] = ws(), first = bodyOf(t1);
             check('unique', dupes().length === 0 || dupes().join(' '));
             check('named-apart', t1.dataset.htmxoGroupScope !== t2.dataset.htmxoGroupScope && group(t1, 'Acme') !== group(t2, 'Acme'));
             htmxoUpdateRows(CHANGED);
-            check('update-lands', rowsOf(t1) === first && document.getElementById('row-group--Acme--q1').cells[2].textContent === '-11.0' &&
+            check('update-lands', bodyOf(t1) === first && document.getElementById('row-group--Acme--q1').cells[2].textContent === '-11.0' &&
                 document.getElementById('row-group--Acme--q1').closest('[data-htmxo-grouped]') === t2);
             // Rendered under another name: the rows take the table's.
             htmxoUpdateRows(GROWN, t2.querySelector('tbody tr'));
             const q8 = document.getElementById('row-group--Acme--q8');
             check('renamed-update', q8 && q8.closest('[data-htmxo-grouped]') === t2 && q8.dataset.htmxoParent === group(t2, 'Acme').id &&
-                group(t2, 'Acme').cells[0].textContent.includes('(4)') && rowsOf(t1) === first);
+                group(t2, 'Acme').cells[0].textContent.includes('(4)') && bodyOf(t1) === first);
             htmxoUpdateRows(FIRST, t2.querySelector('tbody tr'));
             const labels = () => Array.from(t2.querySelector('tbody').rows).filter(r => 'htmxoGroup' in r.dataset)
                 .map(r => r.querySelector('[data-htmxo-group-label]').textContent).join(',');
             check('renamed-new-group', labels() === 'Aaa,Acme,Acme Prime,Bakery,Prime Video' || labels());
             check('unique-after', dupes().length === 0 || dupes().join(' '));
             htmxoRegroup(t2, ['iban']);
-            check('regroup', group(t2, 'DE01') && group(t2, 'DE01').closest('[data-htmxo-grouped]') === t2 && rowsOf(t1) === first &&
+            check('regroup', group(t2, 'DE01') && group(t2, 'DE01').closest('[data-htmxo-grouped]') === t2 && bodyOf(t1) === first &&
                 (dupes().length === 0 || dupes().join(' ')));
             """)
         for line in eager
