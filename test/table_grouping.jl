@@ -21,7 +21,12 @@
         detail=t -> h.p(t.memo), groupings=GROUPINGS, kw...)
     # A table's own rows, without the template row the browser builds groups from.
     table_rows(html) = replace(html, r"<template data-htmxo-group-template.*?</template>"s => "")
-    export table_rows
+    # The id of a group row of the table (or update, or lazy rows) rendered in
+    # `html`: group rows carry the table's name, its `id` or, without one, a
+    # name from its leaves' keys (`data-htmxo-group-scope`).
+    group_scope(html) = match(r"data-htmxo-group-scope=\"([^\"]*)\"", html).captures[1]
+    group_row(html, path...) = "row-" * HTMXObjects.master_detail_safe_key(group_scope(html) * "group:" * join(path, "/"))
+    export table_rows, group_scope, group_row
 
     export OUTLINE, OUTLINE_GROUPINGS, outline_children, outline_key, outline_master, outline_table, plain_outline
 
@@ -106,14 +111,14 @@ end
     party = html(grouped(group_by=["party"], selectable="tx", select_form="bulk", id="g",
         group_by_url="/table", searchable=true, search_query="acme"))
     @test contains(party, "data-htmxo-grouped=\"[&quot;party&quot;]\"")
-    @test contains(party, "id=\"row-group--Acme\"") && contains(party, "data-htmxo-group=\"\"")
+    @test contains(party, "id=\"row-g--group--Acme\"") && contains(party, "data-htmxo-group=\"\"")
     @test count("data-htmxo-group=\"\"", table_rows(party)) == 4
     # Leaves keep their own selection key and value; group rows submit their path under <name>_group.
     @test contains(party, "data-htmxo-select-key=\"p1\"") && contains(party, "data-htmxo-select-value=\"p1\"")
     @test occursin(r"<tr[^>]*data-htmxo-select-key=\"group:Acme\"[^>]*>", party) &&
         contains(match(r"<tr[^>]*data-htmxo-select-key=\"group:Acme\"[^>]*>", party).match, "data-htmxo-select-value=\"[&quot;Acme&quot;]\"") &&
         contains(party, "data-htmxo-select-name=\"tx_group\"")
-    @test contains(party, "data-htmxo-parent=\"row-group--Acme\"")
+    @test contains(party, "data-htmxo-parent=\"row-g--group--Acme\"")
     # The Group by control: a pill per grouping, the active one pressed, the
     # grouping posted with the bulk form; no select. It regroups in the
     # browser; the server is asked only for what needs it.
@@ -179,6 +184,52 @@ end
         detail=t -> "", groupings=["a" => nothing, "a" => nothing])
 end
 
+@testitem "two regroupable tables on one page name their group rows apart" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    ids(page) = [m[1] for m in eachmatch(r"\bid=\"([^\"]*)\"", page)]
+    # Groups that share their keys across two tables (snag render-two-regro-84404c6f):
+    # a group row has no key of the caller's, so the table's name tells the two
+    # apart; a leaf's own key already does.
+    other = [(; t..., id="q" * t.id[2:end]) for t in TX]
+    pair(; kw1=(;), kw2=(;)) = html(h.div(grouped(; group_by=["party"], kw1...),
+        master_detail_table(["Party", "IBAN", "Amount"], other; key=t -> t.id,
+            master=t -> (h.td(t.party), h.td(t.iban), h.td(string(t.amount))), detail=t -> h.p(t.memo),
+            groupings=GROUPINGS, group_by=["party"], kw2...)))
+    for (kw1, kw2) in (((;), (;)), ((; id="t1"), (; id="t2")), ((; id=nothing), (; id=nothing)))
+        page = pair(; kw1, kw2)
+        @test allunique(ids(page))
+        @test !any(contains("nothing"), ids(page))
+    end
+    page = pair(kw1=(; id="t1"), kw2=(; id="t2"))
+    @test contains(page, "id=\"row-t1--group--Acme\"") && contains(page, "id=\"row-t2--group--Acme\"")
+    @test contains(page, "data-htmxo-parent=\"row-t2--group--Acme\"") && contains(page, "data-htmxo-group-scope=\"t1:\"")
+    @test contains(page, "id=\"row-group--Acme--p1\"") && contains(page, "id=\"row-group--Acme--q1\"")
+    @test contains(page, "id=\"t1-group-party\"") && contains(page, "id=\"t2-group-party\"")
+    nested = html(grouped(group_by=["rule", "party"], id="g"))
+    @test contains(nested, "id=\"row-g--group--Shops--Acme\"") && contains(nested, "data-htmxo-parent=\"row-g--group--Shops\"")
+    # Without an id, the name comes from the leaves' keys; `id=nothing` is no id.
+    @test html(grouped(group_by=["party"])) == html(grouped(group_by=["party"], id=nothing))
+    # An update's rows and a lazy group's rows carry the name they were
+    # rendered under: a leaf added or removed since the page was rendered
+    # changes it, and the runtime gives them the table's own (`htmxoRescope`).
+    scope = match(r"data-htmxo-group-scope=\"([^\"]*)\"", html(grouped(group_by=["party"]))).captures[1]
+    @test startswith(scope, "htmxo-grouped-")
+    safe = HTMXObjects.master_detail_safe_key(scope)
+    upd = html(grouped(group_by=["party"], update_rows="p1"))
+    @test contains(upd, "data-htmxo-group-scope=\"$scope\"") && contains(upd, "id=\"row-$(safe)group--Acme\"")
+    rows = html(grouped(group_by=["party"], group_rows_url=(k, ms) -> "/rows", group_rows="[\"Acme\"]"))
+    @test startswith(rows, "<tbody data-htmxo-group-rows=\"[&quot;Acme&quot;]\" data-htmxo-group-scope=\"$scope\">")
+    scope_of(page) = match(r"data-htmxo-group-scope=\"([^\"]*)\"", page).captures[1]
+    @test scope_of(html(regroup_table(group_by=["party"]))) == scope_of(html(regroup_table(group_by=["iban"])))
+    @test scope_of(html(regroup_table(items=TX[1:6], group_by=["party"]))) != scope_of(html(regroup_table(group_by=["party"])))
+    # A tree without an id: Expand all and Collapse all name the body's own id.
+    tree = html(master_detail_table(["X"], ["a"]; key=identity, master=k -> (h.td(k),), detail=k -> h.p(k),
+        children=k -> k == "a" ? ["b"] : String[], expand_controls=true, id=nothing))
+    body = match(r"<tbody id=\"([^\"]+)\"", tree)
+    @test !isnothing(body) && count("aria-controls=\"$(body[1])\"", tree) == 2 && !contains(tree, "nothing")
+end
+
 @testitem "lazy groups: placeholders carry search text and selection keys" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
     html(x) = repr("text/html", x)
@@ -193,19 +244,19 @@ end
     @test contains(page, "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme DE02 -20.0&quot;],[&quot;p7&quot;,&quot;Acme DE01 -70.0&quot;]]\"")
     @test contains(page, "data-htmxo-select-members=\"{&quot;p1&quot;:&quot;p1&quot;,&quot;p2&quot;:&quot;p2&quot;,&quot;p7&quot;:null}\"")
     # A lazy group starts collapsed and names no child rows yet.
-    acme = match(r"<tr[^>]*id=\"row-group--Acme\"[^>]*>.*?</tr>"s, page).match
+    acme = match(Regex("<tr[^>]*id=\"$(group_row(page, "Acme"))\"[^>]*>.*?</tr>", "s"), page).match
     @test contains(acme, "data-htmxo-tree-open=\"false\"") && !contains(acme, "aria-controls")
     # The lazy-load response: exactly the rows an eager render gives that group.
     rows = html(grouped(group_by=["party"], selectable="tx", group_rows_url=lazy_url,
         select_submit=t -> t.id != "p7", group_rows="[\"Acme\"]", initially_open=true))
-    @test startswith(rows, "<tbody data-htmxo-group-rows=\"[&quot;Acme&quot;]\">")
+    @test startswith(rows, "<tbody data-htmxo-group-rows=\"[&quot;Acme&quot;]\" data-htmxo-group-scope=\"$(group_scope(page))\">")
     eager = html(grouped(group_by="party", selectable="tx", select_submit=t -> t.id != "p7",
         initially_open=true))
     for id in ("p1", "p2", "p7")
         tr = match(Regex("<tr[^>]*id=\"row-group--Acme--$id\"[^>]*>.*?</tr>", "s"), rows).match
         @test contains(eager, tr)
     end
-    @test !contains(rows, "id=\"row-group--Acme\"") && !contains(rows, "Bakery")
+    @test !contains(rows, "id=\"$(group_row(page, "Acme"))\"") && !contains(rows, "Bakery")
     @test contains(rows, "id=\"detail-group--Acme--p1\"")
     @test_throws ArgumentError grouped(group_by=["none"], group_rows="[\"Acme\"]")
     # Search text from `search_text` when given.
@@ -241,13 +292,13 @@ end
     page = table_rows(html(grouped(group_by="party", initially_open=t -> t.id == "p1",
         initially_open_detail=t -> (push!(calls, t); false))))
     @test !isempty(calls) && all(c -> c in TX, calls)
-    @test contains(tr(page, "row-group--Acme"), "data-htmxo-tree-open=\"true\"")
+    @test contains(tr(page, group_row(page, "Acme")), "data-htmxo-tree-open=\"true\"")
     @test !contains(tr(page, "row-group--Acme--p1"), "hidden")
     @test contains(tr(page, "row-group--Acme--p1"), "data-htmxo-detail-open=\"false\"")
     @test contains(tr(page, "detail-group--Acme--p1"), "hidden")
     # A leaf whose detail opens in a closed group shows it once its group opens.
     closed = table_rows(html(grouped(group_by="party", initially_open_detail=t -> t.id == "p4")))
-    @test contains(tr(closed, "row-group--Bakery"), "data-htmxo-tree-open=\"false\"")
+    @test contains(tr(closed, group_row(closed, "Bakery")), "data-htmxo-tree-open=\"false\"")
     @test contains(tr(closed, "row-group--Bakery--p4"), "data-htmxo-detail-open=\"true\"")
     @test contains(tr(closed, "detail-group--Bakery--p4"), "hidden")
 end
@@ -262,48 +313,48 @@ end
     @test !isempty(calls) && all(c -> c in TX, calls)
     # p3 is in both rule groups: each opens, and each copy shows with its detail open.
     for g in ("Shops", "Media")
-        @test contains(tr(page, "row-group--$g"), "data-htmxo-tree-open=\"true\"")
-        @test contains(tr(page, "row-group--$g"), "aria-expanded=\"true\"")
+        @test contains(tr(page, group_row(page, g)), "data-htmxo-tree-open=\"true\"")
+        @test contains(tr(page, group_row(page, g)), "aria-expanded=\"true\"")
         leaf = tr(page, "row-group--$g--p3")
         @test contains(leaf, "data-htmxo-detail-open=\"true\"") && !contains(leaf, "hidden")
         @test !contains(tr(page, "detail-group--$g--p3"), "hidden")
     end
     # Groups without an opened leaf stay closed, their rows hidden.
     party = html(grouped(group_by="party", initially_open=t -> t.id == "p1"))
-    @test contains(tr(party, "row-group--Acme"), "data-htmxo-tree-open=\"true\"")
+    @test contains(tr(party, group_row(party, "Acme")), "data-htmxo-tree-open=\"true\"")
     @test !contains(tr(party, "row-group--Acme--p1"), "hidden") && !contains(tr(party, "detail-group--Acme--p1"), "hidden")
     # Its siblings show too, with their details closed.
     @test !contains(tr(party, "row-group--Acme--p2"), "hidden") && contains(tr(party, "detail-group--Acme--p2"), "hidden")
-    @test contains(tr(party, "row-group--Bakery"), "data-htmxo-tree-open=\"false\"")
+    @test contains(tr(party, group_row(party, "Bakery")), "data-htmxo-tree-open=\"false\"")
     @test contains(tr(party, "row-group--Bakery--p4"), "hidden")
     # A lazy group holding an opened leaf renders its rows eagerly; the others stay lazy.
     lazy_url = (k, ms) -> length(ms) > 1 ? "/rows?key=$(join(HTMXObjects.group_path(k), '/'))" : nothing
     lazy = html(grouped(group_by=["party"], group_rows_url=lazy_url, initially_open=t -> t.id == "p1"))
-    @test !contains(tr(lazy, "row-group--Acme"), "data-htmxo-lazy-rows") &&
-        contains(tr(lazy, "row-group--Acme"), "data-htmxo-tree-open=\"true\"")
+    @test !contains(tr(lazy, group_row(lazy, "Acme")), "data-htmxo-lazy-rows") &&
+        contains(tr(lazy, group_row(lazy, "Acme")), "data-htmxo-tree-open=\"true\"")
     @test all(contains(lazy, "id=\"row-group--Acme--$id\"") for id in ("p1", "p2", "p7"))
-    @test contains(tr(lazy, "row-group--Bakery"), "data-htmxo-lazy-rows=\"/rows?key=Bakery\"")
+    @test contains(tr(lazy, group_row(lazy, "Bakery")), "data-htmxo-lazy-rows=\"/rows?key=Bakery\"")
     # `true` keeps its meaning: every rendered group open, lazy groups lazy.
     all_open = html(grouped(group_by=["party"], group_rows_url=lazy_url, initially_open=true))
-    @test contains(tr(all_open, "row-group--Acme"), "data-htmxo-lazy-rows=\"/rows?key=Acme\"")
-    @test contains(tr(all_open, "row-group--Acme--Prime"), "data-htmxo-tree-open=\"true\"")
+    @test contains(tr(all_open, group_row(all_open, "Acme")), "data-htmxo-lazy-rows=\"/rows?key=Acme\"")
+    @test contains(tr(all_open, group_row(all_open, "Acme Prime")), "data-htmxo-tree-open=\"true\"")
     # A predicate that opens nothing changes nothing.
     @test html(grouped(group_by=["party"], group_rows_url=lazy_url, initially_open=_ -> false)) ==
         html(grouped(group_by=["party"], group_rows_url=lazy_url))
     # Nested levels: every group on an opened leaf's path opens (eagerly), at every level.
     by = ["rule", "party"]
     nested = html(grouped(group_by=by, group_rows_url=lazy_url, initially_open=t -> t.id == "p1"))
-    for g in ("Shops", "Shops--Acme")
-        @test contains(tr(nested, "row-group--$g"), "data-htmxo-tree-open=\"true\"") &&
-            !contains(tr(nested, "row-group--$g"), "data-htmxo-lazy-rows")
+    for g in (("Shops",), ("Shops", "Acme"))
+        @test contains(tr(nested, group_row(nested, g...)), "data-htmxo-tree-open=\"true\"") &&
+            !contains(tr(nested, group_row(nested, g...)), "data-htmxo-lazy-rows")
     end
     @test !contains(tr(nested, "row-group--Shops--Acme--p1"), "hidden") &&
         !contains(tr(nested, "detail-group--Shops--Acme--p1"), "hidden")
     # Groups off that path stay closed, and lazy ones lazy, inside an opened group too.
-    @test contains(tr(nested, "row-group--Shops--Bakery"), "data-htmxo-tree-open=\"false\"") &&
-        contains(tr(nested, "row-group--Shops--Bakery"), "data-htmxo-lazy-rows=")
-    @test contains(tr(nested, "row-group--Media"), "data-htmxo-tree-open=\"false\"") &&
-        contains(tr(nested, "row-group--Media"), "data-htmxo-lazy-rows=")
+    @test contains(tr(nested, group_row(nested, "Shops", "Bakery")), "data-htmxo-tree-open=\"false\"") &&
+        contains(tr(nested, group_row(nested, "Shops", "Bakery")), "data-htmxo-lazy-rows=")
+    @test contains(tr(nested, group_row(nested, "Media")), "data-htmxo-tree-open=\"false\"") &&
+        contains(tr(nested, group_row(nested, "Media")), "data-htmxo-lazy-rows=")
     @test html(grouped(group_by=by, group_rows_url=lazy_url, initially_open=_ -> false)) ==
         html(grouped(group_by=by, group_rows_url=lazy_url))
 end
@@ -321,40 +372,40 @@ end
     # the full table's, with its detail, plus the summary row of each group it
     # is in (computed over all members).
     upd = html(grouped(group_by="rule", selectable="tx", id="g", update_rows="p3"))
-    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;rule&quot;]\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\"")
+    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;rule&quot;]\" data-htmxo-group-scope=\"g:\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\"")
     for id in ("row-group--Shops--p3", "row-group--Media--p3", "detail-group--Shops--p3")
         @test row(upd, id) == row(full, id)
     end
     # A group row names the child rows the update renders (the runtime
     # recomputes the list from the page), not the group's other members.
-    @test contains(row(upd, "row-group--Shops"), "aria-controls=\"row-group--Shops--p3\"")
+    @test contains(row(upd, "row-g--group--Shops"), "aria-controls=\"row-group--Shops--p3\"")
     # Where each row sits in the full table: its neighbours among its siblings
     # ("" at either end), for a row that is new to the page or has moved.
     places(page) = replace(match(r"data-htmxo-update-places=\"([^\"]*)\"", page)[1], "&quot;" => "'")
-    @test places(upd) == "{'row-group--Shops':['','row-group--Media']," *
+    @test places(upd) == "{'row-g--group--Shops':['','row-g--group--Media']," *
         "'row-group--Shops--p3':['row-group--Shops--p2','row-group--Shops--p4']," *
         "'row-group--Media--p3':['','row-group--Media--p5']}"
-    @test contains(upd, "id=\"row-group--Shops\"") && contains(upd, "<strong data-htmxo-group-label=\"\">Shops</strong> <small data-htmxo-group-count=\"\">(6)</small>")
+    @test contains(upd, "id=\"row-g--group--Shops\"") && contains(upd, "<strong data-htmxo-group-label=\"\">Shops</strong> <small data-htmxo-group-count=\"\">(6)</small>")
     @test !contains(upd, "--p1\"") && count("<tr", upd) == 6
     # A group update: the group row and all its rows; a lazy group's row keeps
     # its lazy marks for a table that has not loaded it.
     lazy_url = (k, ms) -> length(ms) > 2 ? "/rows?key=$(last(HTMXObjects.group_path(k)))" : nothing
     acme = html(grouped(group_by=["party"], id="g", group_rows_url=lazy_url, update_groups="[\"Acme\"]"))
-    @test contains(acme, "data-htmxo-update-groups=\"[&quot;row-group--Acme&quot;]\"")
+    @test contains(acme, "data-htmxo-update-groups=\"[&quot;row-g--group--Acme&quot;]\"")
     # A run of listed siblings names the neighbours of its first row only;
     # the others follow the row before them in the update.
-    @test places(acme) == "{'row-group--Acme':['','row-group--Acme--Prime'],'row-group--Acme--p1':['','row-group--Acme--p2']}"
+    @test places(acme) == "{'row-g--group--Acme':['','row-g--group--Acme--Prime'],'row-group--Acme--p1':['','row-group--Acme--p2']}"
     @test contains(acme, "data-htmxo-lazy-rows=\"/rows?key=Acme\"") && contains(acme, "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme DE02 -20.0&quot;],[&quot;p7&quot;,&quot;Acme DE01 -70.0&quot;]]\"")
     @test all(contains(acme, "id=\"row-group--Acme--$id\"") for id in ("p1", "p2", "p7"))
     @test !contains(acme, "Bakery")
     # Several keys at once; a group that no longer exists is in the scope with no rows.
     both = html(grouped(group_by=["party"], update_rows=["p4", "p1"], update_groups=("[\"Gone\"]",)))
     @test contains(both, "data-htmxo-update-leaves=\"[&quot;p4&quot;,&quot;p1&quot;]\"") &&
-        contains(both, "data-htmxo-update-groups=\"[&quot;row-group--Gone&quot;]\"")
+        contains(both, "data-htmxo-update-groups=\"[&quot;$(group_row(both, "Gone"))&quot;]\"")
     @test contains(both, "id=\"row-group--Acme--p1\"") && contains(both, "id=\"row-group--Bakery--p4\"") &&
         !contains(both, "id=\"row-group--Bakery--p6\"")
     @test html(grouped(group_by=["party"], update_groups="[\"Gone\"]", id="g")) ==
-        "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;party&quot;]\" data-htmxo-update-groups=\"[&quot;row-group--Gone&quot;]\"></tbody>"
+        "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;party&quot;]\" data-htmxo-group-scope=\"g:\" data-htmxo-update-groups=\"[&quot;row-g--group--Gone&quot;]\"></tbody>"
     # The flat view names its leaves; it has no groups to update.
     flat = html(grouped(group_by=["none"], selectable="tx", update_rows=["p1", "gone"], update_groups="[\"Acme\"]"))
     @test contains(flat, "data-htmxo-grouped=\"[]\"") &&
@@ -391,7 +442,7 @@ end
     # own group rows asks for those alone, not for the whole table again.
     html(x) = repr("text/html", x)
     row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
-    group_ids(page) = [m[1] for m in eachmatch(r"<tr[^>]*? id=\"(row-group--[^\"]*)\"[^>]*data-htmxo-group=", page)]
+    group_ids(page) = [m[1] for m in eachmatch(r"<tr[^>]*? id=\"(row-[^\"]*)\"[^>]*data-htmxo-group=", page)]
     # What a full render's group row and the answer's share: everything but the
     # child rows its toggle names, which the runtime takes from the page.
     bare(r) = replace(r, r" aria-controls=\"[^\"]*\"" => "")
@@ -416,20 +467,20 @@ end
         # A row update marked as the group rows of this grouping: nothing in
         # its scope to remove, only where the first row of each level goes.
         @test startswith(answer, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"" *
-            replace(HTMXObjects._md_json_list(group_by), "\"" => "&quot;") * "\" data-htmxo-group-masters=\"\" data-htmxo-update-places=")
+            replace(HTMXObjects._md_json_list(group_by), "\"" => "&quot;") * "\" data-htmxo-group-scope=\"g:\" data-htmxo-group-masters=\"\" data-htmxo-update-places=")
         @test !contains(answer, "data-htmxo-update-ids") && !contains(answer, "data-htmxo-update-leaves") &&
             !contains(answer, "data-htmxo-update-groups")
     end
     places(page) = replace(match(r"data-htmxo-update-places=\"([^\"]*)\"", page)[1], "&quot;" => "'")
-    @test places(html(table(["party"]; group_masters=true))) == "{'row-group--Acme':['','row-group--Acme--Prime']}"
+    @test places(html(table(["party"]; group_masters=true))) == "{'row-g--group--Acme':['','row-g--group--Acme--Prime']}"
     # A group with subgroups names its first subgroup's neighbours; the leaves
     # listed directly in it (no key at the inner level) are not rendered.
     @test places(html(table(["rule", "iban"]; group_masters=true))) ==
-        "{'row-group--Shops':['','row-group--Media'],'row-group--Shops--DE01':['','row-group--Shops--DE02']," *
-        "'row-group--Media--DE01':['','row-group--Media--DE04']}"
+        "{'row-g--group--Shops':['','row-g--group--Media'],'row-g--group--Shops--DE01':['','row-g--group--Shops--DE02']," *
+        "'row-g--group--Media--DE01':['','row-g--group--Media--DE04']}"
     # The flat view has no group rows: an answer with no rows.
     @test html(table(["none"]; group_masters=true)) ==
-        "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[]\" data-htmxo-group-masters=\"\"></tbody>"
+        "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[]\" data-htmxo-group-scope=\"g:\" data-htmxo-group-masters=\"\"></tbody>"
     # Refused: no rows of the app's own (the browser builds the default ones),
     # lazy groups (the server regroups that table whole), the other answers,
     # and a table that is not regroupable.
@@ -449,8 +500,8 @@ end
     end
     route!(GroupMastersApp())
     answer = String(dispatch(:GET, "/gm_masters?group_by=iban&q=&group_masters=true").body)
-    @test startswith(answer, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;iban&quot;]\" data-htmxo-group-masters")
-    @test group_ids(answer) == ["row-group--DE01", "row-group--DE02", "row-group--DE03", "row-group--DE04"]
+    @test startswith(answer, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;iban&quot;]\" data-htmxo-group-scope=\"g:\" data-htmxo-group-masters")
+    @test group_ids(answer) == ["row-g--group--DE01", "row-g--group--DE02", "row-g--group--DE03", "row-g--group--DE04"]
     whole = String(dispatch(:GET, "/gm_whole?group_by=iban&q=&group_masters=true").body)
     @test contains(whole, "data-htmxo-regroup=") && contains(whole, "data-htmxo-leaf=\"p1\"") &&
         !contains(whole, "data-htmxo-row-update")
@@ -467,16 +518,16 @@ end
     # What the rows are grouped by, and what a request sends to render them again.
     @test contains(page, "data-htmxo-grouped=\"[&quot;rule&quot;,&quot;party&quot;]\" data-htmxo-group-by=\"[&quot;rule&quot;,&quot;party&quot;]\"")
     # Level 2 nests inside level 1; leaves sit at level 3 under their innermost group.
-    acme = row(page, "row-group--Shops--Acme")
-    @test attr(acme, "data-htmxo-parent")[1] == "row-group--Shops" && attr(acme, "aria-level")[1] == "2"
+    acme = row(page, "row-g--group--Shops--Acme")
+    @test attr(acme, "data-htmxo-parent")[1] == "row-g--group--Shops" && attr(acme, "aria-level")[1] == "2"
     @test contains(acme, "<strong data-htmxo-group-label=\"\">Acme</strong> <small data-htmxo-group-count=\"\">(3)</small>")
     leaf = row(page, "row-group--Shops--Acme--p1")
-    @test attr(leaf, "data-htmxo-parent")[1] == "row-group--Shops--Acme" && attr(leaf, "aria-level")[1] == "3"
+    @test attr(leaf, "data-htmxo-parent")[1] == "row-g--group--Shops--Acme" && attr(leaf, "aria-level")[1] == "3"
     @test attr(leaf, "data-htmxo-select-key")[1] == "p1" && attr(leaf, "data-htmxo-leaf")[1] == "p1"
     # Groups are named by their path, as a JSON array: their selection value and key.
     @test attr(acme, "data-htmxo-select-value")[1] == "[&quot;Shops&quot;,&quot;Acme&quot;]"
     @test attr(acme, "data-htmxo-select-key")[1] == "group:Shops/Acme"
-    @test attr(row(page, "row-group--Shops"), "data-htmxo-select-value")[1] == "[&quot;Shops&quot;]"
+    @test attr(row(page, "row-g--group--Shops"), "data-htmxo-select-value")[1] == "[&quot;Shops&quot;]"
     # A vector-valued grouping lists a leaf under each of its groups, at every level.
     @test count("data-htmxo-leaf=\"p3\"", page) == 2 &&
         contains(page, "id=\"row-group--Shops--Acme--Prime--p3\"") && contains(page, "id=\"row-group--Media--Acme--Prime--p3\"")
@@ -530,7 +581,7 @@ end
     gaps = html(master_detail_table(["Party"], TX; key=t -> t.id, master=t -> (h.td(t.party),), detail=t -> "",
         groupings=["party" => t -> t.party, "big" => t -> t.amount < -40 ? "big" : nothing], group_by=["party", "big"]))
     @test contains(gaps, "id=\"row-group--Bakery--big--p6\"") &&
-        attr(row(gaps, "row-group--Bakery--p4"), "data-htmxo-parent")[1] == "row-group--Bakery"
+        attr(row(gaps, "row-group--Bakery--p4"), "data-htmxo-parent")[1] == group_row(gaps, "Bakery")
     # Markdown has no indentation: a mark per level keeps the nesting readable.
     md = to_markdown_string(grouped(group_by=["rule", "party"], group_by_url="/table"))
     @test contains(md, "| **Shops** (6) |") && contains(md, "| › **Acme** (3) |") && contains(md, "| › › Acme | DE01 | -10.0 |")
@@ -559,58 +610,59 @@ end
     page = html(grouped(group_by=by, group_rows_url=lazy_url, selectable="tx"))
     # "Shops" (6) loads lazily; its leaves count as if loaded, each once:
     # p3 is in Shops and in Media, so the 8 listings are 7 items.
-    shops = row(page, "row-group--Shops")
+    shops = row(page, group_row(page, "Shops"))
     @test contains(page, "7 of 7 rows shown")
     @test contains(shops, "data-htmxo-lazy-rows=\"/rows?key=%5B%22Shops%22%5D\"")
     # Search reaches the unloaded leaves, each with its keys at the levels below.
     @test contains(shops, "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme Acme DE02 -20.0&quot;],[&quot;p3&quot;,&quot;Acme Prime Acme Prime DE01 -30.0&quot;],[&quot;p4&quot;,&quot;Bakery Bakery DE03 -40.0&quot;],[&quot;p6&quot;,&quot;Bakery Bakery DE03 -60.0&quot;],[&quot;p7&quot;,&quot;Acme Acme DE01 -70.0&quot;]]\"")
-    @test !contains(page, "row-group--Shops--Acme\"")
+    @test !contains(page, group_row(page, "Shops", "Acme") * "\"")
     # The lazy load: the group's rows as an eager render gives them; a big
     # subgroup inside loads lazily in turn.
     rows = html(grouped(group_by=by, group_rows_url=lazy_url, selectable="tx", group_rows="[\"Shops\"]", initially_open=true))
-    @test startswith(rows, "<tbody data-htmxo-group-rows=\"[&quot;Shops&quot;]\"><tr id=\"row-group--Shops--Acme\"")
-    @test contains(row(rows, "row-group--Shops--Acme"), "data-htmxo-lazy-rows=\"/rows?key=%5B%22Shops%22%2C%22Acme%22%5D\"")
+    @test startswith(rows, "<tbody data-htmxo-group-rows=\"[&quot;Shops&quot;]\" data-htmxo-group-scope=\"$(group_scope(page))\"><tr id=\"$(group_row(page, "Shops", "Acme"))\"")
+    @test contains(row(rows, group_row(rows, "Shops", "Acme")), "data-htmxo-lazy-rows=\"/rows?key=%5B%22Shops%22%2C%22Acme%22%5D\"")
     eager = html(grouped(group_by=by, selectable="tx", initially_open=true))
-    for id in ("row-group--Shops--Bakery", "row-group--Shops--Bakery--p4", "row-group--Shops--Acme--Prime--p3", "detail-group--Shops--Bakery--p6")
+    for id in (group_row(rows, "Shops", "Bakery"), "row-group--Shops--Bakery--p4", "row-group--Shops--Acme--Prime--p3", "detail-group--Shops--Bakery--p6")
         @test row(rows, id) == row(eager, id)
     end
-    @test !contains(rows, "id=\"row-group--Shops\"") && !contains(rows, "id=\"row-group--Media")
+    @test !contains(rows, "id=\"$(group_row(rows, "Shops"))\"") && !contains(rows, "id=\"$(group_row(rows, "Media"))") &&
+        !contains(rows, "id=\"row-group--Media")
     inner = html(grouped(group_by=by, group_rows_url=lazy_url, selectable="tx", group_rows="[\"Shops\",\"Acme\"]", initially_open=true))
-    @test startswith(inner, "<tbody data-htmxo-group-rows=\"[&quot;Shops&quot;,&quot;Acme&quot;]\"><tr ") &&
+    @test startswith(inner, "<tbody data-htmxo-group-rows=\"[&quot;Shops&quot;,&quot;Acme&quot;]\" data-htmxo-group-scope=\"$(group_scope(page))\"><tr ") &&
         contains(match(r"<tr [^>]*>", inner).match, "data-htmxo-leaf=\"p1\"")
     @test all(row(inner, "row-group--Shops--Acme--$id") == row(eager, "row-group--Shops--Acme--$id") for id in ("p1", "p2", "p7"))
     @test count("<tr", inner) == 6
     # A leaf update: every copy of the leaf, and the rows of every group it is in.
     full = html(grouped(group_by=by, id="g"))
     upd = html(grouped(group_by=by, id="g", update_rows="p3"))
-    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;rule&quot;,&quot;party&quot;]\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\"")
+    @test startswith(upd, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"[&quot;rule&quot;,&quot;party&quot;]\" data-htmxo-group-scope=\"g:\" data-htmxo-update-leaves=\"[&quot;p3&quot;]\"")
     # Places come from the full grouping at every level: Acme Prime follows
     # Acme in Shops, and comes first in Media.
     @test replace(match(r"data-htmxo-update-places=\"([^\"]*)\"", upd)[1], "&quot;" => "'") ==
-        "{'row-group--Shops':['','row-group--Media']," *
-        "'row-group--Shops--Acme--Prime':['row-group--Shops--Acme','row-group--Shops--Bakery']," *
+        "{'row-g--group--Shops':['','row-g--group--Media']," *
+        "'row-g--group--Shops--Acme--Prime':['row-g--group--Shops--Acme','row-g--group--Shops--Bakery']," *
         "'row-group--Shops--Acme--Prime--p3':['','']," *
-        "'row-group--Media--Acme--Prime':['','row-group--Media--Prime--Video']," *
+        "'row-g--group--Media--Acme--Prime':['','row-g--group--Media--Prime--Video']," *
         "'row-group--Media--Acme--Prime--p3':['','']}"
-    @test ids(upd) == ["row-group--Shops", "row-group--Shops--Acme--Prime", "row-group--Shops--Acme--Prime--p3",
-        "row-group--Media", "row-group--Media--Acme--Prime", "row-group--Media--Acme--Prime--p3"]
+    @test ids(upd) == ["row-g--group--Shops", "row-g--group--Shops--Acme--Prime", "row-group--Shops--Acme--Prime--p3",
+        "row-g--group--Media", "row-g--group--Media--Acme--Prime", "row-group--Media--Acme--Prime--p3"]
     @test row(upd, "row-group--Media--Acme--Prime--p3") == row(full, "row-group--Media--Acme--Prime--p3")
-    @test contains(row(upd, "row-group--Shops"), "<strong data-htmxo-group-label=\"\">Shops</strong> <small data-htmxo-group-count=\"\">(6)</small>")
+    @test contains(row(upd, "row-g--group--Shops"), "<strong data-htmxo-group-label=\"\">Shops</strong> <small data-htmxo-group-count=\"\">(6)</small>")
     # A group update, by path: the group whole, with the rows on its path.
     bakery = html(grouped(group_by=by, id="g", update_groups="[\"Shops\",\"Bakery\"]"))
-    @test contains(bakery, "data-htmxo-update-groups=\"[&quot;row-group--Shops--Bakery&quot;]\"")
-    @test ids(bakery) == ["row-group--Shops", "row-group--Shops--Bakery", "row-group--Shops--Bakery--p4", "row-group--Shops--Bakery--p6"]
+    @test contains(bakery, "data-htmxo-update-groups=\"[&quot;row-g--group--Shops--Bakery&quot;]\"")
+    @test ids(bakery) == ["row-g--group--Shops", "row-g--group--Shops--Bakery", "row-group--Shops--Bakery--p4", "row-group--Shops--Bakery--p6"]
     # A named group that is gone: the outermost level of its path that no
     # longer exists leaves, and a group shown for its summary stays a branch.
     gone = html(grouped(group_by=by, id="g", update_groups=["[\"Shops\",\"Gone\"]", "[\"Nope\",\"x\"]"]))
-    @test contains(gone, "data-htmxo-update-groups=\"[&quot;row-group--Shops--Gone&quot;,&quot;row-group--Nope&quot;]\"")
-    @test ids(gone) == ["row-group--Shops"] && contains(gone, "data-htmxo-tree-toggle") &&
+    @test contains(gone, "data-htmxo-update-groups=\"[&quot;row-g--group--Shops--Gone&quot;,&quot;row-g--group--Nope&quot;]\"")
+    @test ids(gone) == ["row-g--group--Shops"] && contains(gone, "data-htmxo-tree-toggle") &&
         contains(gone, "data-htmxo-tree-open=\"false\"") && !contains(gone, "aria-controls")
     # A lazy group in an update keeps its marks, and its rows come along.
     lz = html(grouped(group_by=by, id="g", group_rows_url=lazy_url, update_rows="p1"))
-    @test contains(row(lz, "row-group--Shops"), "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme Acme DE02 -20.0&quot;],[&quot;p3&quot;,&quot;Acme Prime Acme Prime DE01 -30.0&quot;],[&quot;p4&quot;,&quot;Bakery Bakery DE03 -40.0&quot;],[&quot;p6&quot;,&quot;Bakery Bakery DE03 -60.0&quot;],[&quot;p7&quot;,&quot;Acme Acme DE01 -70.0&quot;]]\"") && contains(lz, "id=\"row-group--Shops--Acme--p1\"")
+    @test contains(row(lz, "row-g--group--Shops"), "data-htmxo-lazy-leaves=\"[[&quot;p1&quot;,&quot;Acme Acme DE01 -10.0&quot;],[&quot;p2&quot;,&quot;Acme Acme DE02 -20.0&quot;],[&quot;p3&quot;,&quot;Acme Prime Acme Prime DE01 -30.0&quot;],[&quot;p4&quot;,&quot;Bakery Bakery DE03 -40.0&quot;],[&quot;p6&quot;,&quot;Bakery Bakery DE03 -60.0&quot;],[&quot;p7&quot;,&quot;Acme Acme DE01 -70.0&quot;]]\"") && contains(lz, "id=\"row-group--Shops--Acme--p1\"")
     # The flat view of an ordered grouping names its leaves.
-    @test contains(html(grouped(group_by=String[], update_rows="p1", id="g")), "data-htmxo-grouped=\"[]\" data-htmxo-update-leaves=")
+    @test contains(html(grouped(group_by=String[], update_rows="p1", id="g")), "data-htmxo-grouped=\"[]\" data-htmxo-group-scope=\"g:\" data-htmxo-update-leaves=")
     @test_throws ArgumentError grouped(group_by=by, update_groups="[]")
     @test_throws ArgumentError grouped(group_by=by, update_groups="Shops")
 end
@@ -653,62 +705,62 @@ end
                 await new Promise(r => setTimeout(r, 50));
             };
             const total = () => g().querySelector('[data-htmxo-table-count]').textContent;
-            check('initial', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '7 of 7 rows shown');
-            check('lazy-placeholder', row('group--Acme').dataset.htmxoLazyRows && !row('group--Acme--p1'));
+            check('initial', shown() === 'g--group--Acme,g--group--Acme--Prime,g--group--Bakery,g--group--Prime--Video' && total() === '7 of 7 rows shown');
+            check('lazy-placeholder', row('g--group--Acme').dataset.htmxoLazyRows && !row('group--Acme--p1'));
             // The count reaches the leaves of a group that has not loaded: only p2 is DE02.
             search('DE02');
             check('lazy-search-count', total() === '1 of 7 rows shown' && !row('group--Acme--p2'));
             search('');
             // Expanding a lazy group fetches its rows once and opens it.
-            toggle('group--Acme');
+            toggle('g--group--Acme');
             await wait(() => row('group--Acme--p1'));
-            check('lazy-loaded', shown() === 'group--Acme,group--Acme--p1,group--Acme--p2,group--Acme--p7,group--Acme--Prime,group--Bakery,group--Prime--Video' &&
-                row('group--Acme').getAttribute('aria-expanded') === 'true' && !('htmxoLazyRows' in row('group--Acme').dataset));
+            check('lazy-loaded', shown() === 'g--group--Acme,group--Acme--p1,group--Acme--p2,group--Acme--p7,g--group--Acme--Prime,g--group--Bakery,g--group--Prime--Video' &&
+                row('g--group--Acme').getAttribute('aria-expanded') === 'true' && !('htmxoLazyRows' in row('g--group--Acme').dataset));
             check('lazy-count', total() === '7 of 7 rows shown');
-            check('lazy-aria-controls', row('group--Acme').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Acme--p1 row-group--Acme--p2 row-group--Acme--p7');
+            check('lazy-aria-controls', row('g--group--Acme').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Acme--p1 row-group--Acme--p2 row-group--Acme--p7');
             click(row('group--Acme--p1').cells[2]);
             click(row('group--Acme--p2').cells[2], {ctrlKey: true});
             check('select-leaves', count() === '2 selected' && inputs() === 'p1,p2' && !document.getElementById('apply').disabled);
             // A caller control in a group row keeps its own behaviour.
             click(document.getElementById('mode-Bakery'));
-            check('group-control-no-select', count() === '2 selected' && row('group--Bakery').getAttribute('aria-selected') === 'false');
+            check('group-control-no-select', count() === '2 selected' && row('g--group--Bakery').getAttribute('aria-selected') === 'false');
             // Regroup by rule: p1/p2 sit in the lazy "Shops" group, not loaded.
             // (A re-render keeps the branches the user opened: close Acme first.)
-            toggle('group--Acme');
+            toggle('g--group--Acme');
             await regroup('rule');
             check('regroup-keeps-selection', count() === '2 selected (2 in collapsed groups)' && inputs() === 'p1,p2');
-            check('rule-groups', shown() === 'group--Shops,group--Media');
+            check('rule-groups', shown() === 'g--group--Shops,g--group--Media');
             // p3 is listed in Shops (not loaded) and in Media: one item.
             check('rule-count-once', total() === '7 of 7 rows shown');
             // Selecting a whole group submits it under tx_group, with its grouping.
-            click(row('group--Media').cells[2], {ctrlKey: true});
+            click(row('g--group--Media').cells[2], {ctrlKey: true});
             check('group-selection', groups() === '["Media"]' && new FormData(document.getElementById('bulk')).get('group_by') === 'rule' &&
                 count() === '3 selected (2 in collapsed groups)');
             // Media is eager: p3 and p5 are listed there and (lazily) in Shops too.
-            toggle('group--Media');
+            toggle('g--group--Media');
             click(row('group--Media--p3').cells[2], {ctrlKey: true});
             check('copy-selected', count() === '4 selected (2 in collapsed groups)' && inputs() === 'p1,p2,p3');
             // Search reaches the rows of a group that has not loaded yet.
             search('bakery');
-            check('search-lazy-members', shown() === 'group--Shops' && !row('group--Shops').querySelector('[data-htmxo-tree-toggle]').disabled);
+            check('search-lazy-members', shown() === 'g--group--Shops' && !row('g--group--Shops').querySelector('[data-htmxo-tree-toggle]').disabled);
             check('search-lazy-count', total() === '2 of 7 rows shown');
-            toggle('group--Shops');
+            toggle('g--group--Shops');
             await wait(() => row('group--Shops--p4'));
-            check('search-after-load', shown() === 'group--Shops,group--Shops--p4,group--Shops--p6' && total() === '2 of 7 rows shown');
+            check('search-after-load', shown() === 'g--group--Shops,group--Shops--p4,group--Shops--p6' && total() === '2 of 7 rows shown');
             check('both-copies-selected', row('group--Shops--p3').getAttribute('aria-selected') === 'true' &&
                 row('group--Media--p3').getAttribute('aria-selected') === 'true');
             check('filter-wording', count() === '4 selected (4 hidden by the filter)' && inputs() === 'p1,p2,p3');
             search('');
             check('collapsed-wording', count() === '4 selected');
-            toggle('group--Shops');
-            toggle('group--Media');
+            toggle('g--group--Shops');
+            toggle('g--group--Media');
             // Sorting by amount applies to rows that load later.
             await regroup('party');
             check('party-again', count() === '3 selected (3 in collapsed groups)' && inputs() === 'p1,p2,p3');
             g().querySelectorAll('thead th')[2].click();
-            toggle('group--Acme');
+            toggle('g--group--Acme');
             await wait(() => row('group--Acme--p1'));
-            const order = rows().filter(r => r.dataset.htmxoParent === 'row-group--Acme').map(r => r.id.slice(-2)).join(',');
+            const order = rows().filter(r => r.dataset.htmxoParent === 'row-g--group--Acme').map(r => r.id.slice(-2)).join(',');
             check('sorted-after-load', order === 'p7,p2,p1');
             // Expand all loads every lazy group.
             await regroup('iban');
@@ -724,14 +776,14 @@ end
             // j/k move across group and leaf rows alike.
             search('');
             await regroup('rule');
-            toggle('group--Media');
+            toggle('g--group--Media');
             const press = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}));
-            row('group--Media').focus();
-            press(row('group--Media'), 'j');
+            row('g--group--Media').focus();
+            press(row('g--group--Media'), 'j');
             check('j-group-to-leaf', document.activeElement === row('group--Media--p3') && htmxoSelectedKeys('#g').join(',') === 'p3');
             press(document.activeElement, 'k');
             press(document.activeElement, 'k');
-            check('k-leaf-to-groups', document.activeElement === row('group--Shops') && htmxoSelectedKeys('#g').join(',') === 'group:Shops');
+            check('k-leaf-to-groups', document.activeElement === row('g--group--Shops') && htmxoSelectedKeys('#g').join(',') === 'group:Shops');
             const result = document.createElement('pre'); result.id = 'checks';
             result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
             document.body.appendChild(result);
@@ -846,7 +898,7 @@ end
             const leaked = () => document.querySelectorAll('tr tbody, tr tr, td > tbody').length;
 
             // A lazy group, an open detail and a selection to keep.
-            toggle('group--Acme');
+            toggle('g--group--Acme');
             await wait(() => row('group--Acme--p1'));
             row('group--Acme--p1').querySelector('[data-htmxo-detail-toggle]').click();
             click(row('group--Acme--p1').cells[2]);
@@ -864,8 +916,8 @@ end
                 p1.querySelector('[data-htmxo-detail-toggle]').getAttribute('aria-expanded') === 'true' && p1.dataset.htmxoDetailOpen === 'true');
             check('leaf-keeps-selection', count() === '2 selected' && inputs() === 'p1,p2' && p1.getAttribute('aria-selected') === 'true');
             check('leaf-keeps-focus', document.activeElement === p1.querySelector('[data-flag]'));
-            check('group-summary', row('group--Acme').cells[2].textContent === '1 flagged' &&
-                row('group--Acme').dataset.htmxoTreeOpen === 'true' && !('htmxoLazyRows' in row('group--Acme').dataset) && !p1.hidden);
+            check('group-summary', row('g--group--Acme').cells[2].textContent === '1 flagged' &&
+                row('g--group--Acme').dataset.htmxoTreeOpen === 'true' && !('htmxoLazyRows' in row('g--group--Acme').dataset) && !p1.hidden);
             // The search and its predicates hold across an update.
             search('acme');
             const matching = shown();
@@ -874,33 +926,33 @@ end
                 g().querySelector('input[type="search"]').value === 'acme');
             search('');
             // A group update: Bakery (eager, closed) changes mode in place and stays closed.
-            const bakery = row('group--Bakery');
+            const bakery = row('g--group--Bakery');
             const mode = bakery.querySelector('select[data-mode]');
             mode.value = 'on';
             mode.dispatchEvent(new Event('change', {bubbles: true}));
-            await wait(() => row('group--Bakery') !== bakery);
+            await wait(() => row('g--group--Bakery') !== bakery);
             await settle();
-            check('group-replaced', row('group--Bakery').cells[3].textContent === 'on' && row('group--Bakery').querySelector('select').value === 'on');
-            check('group-stays-closed', row('group--Bakery').dataset.htmxoTreeOpen === 'false' && under('group--Bakery') === 'group--Bakery--p4,group--Bakery--p6' &&
+            check('group-replaced', row('g--group--Bakery').cells[3].textContent === 'on' && row('g--group--Bakery').querySelector('select').value === 'on');
+            check('group-stays-closed', row('g--group--Bakery').dataset.htmxoTreeOpen === 'false' && under('g--group--Bakery') === 'group--Bakery--p4,group--Bakery--p6' &&
                 row('group--Bakery--p4').hidden && order() === layout);
             // A leaf that moves (update_rows + both groups): it leaves Acme and
             // joins Bakery where a full render has it (first: p2 comes before
             // p4 and p6), still selected; both summaries follow, and Bakery,
             // which p2 now opens, moves up behind Acme.
             await post('/move?id=p2&to=Bakery&group_by=party', row('group--Acme--p2'));
-            check('moved', !row('group--Acme--p2') && !detail('group--Acme--p2') && under('group--Bakery') === 'group--Bakery--p2,group--Bakery--p4,group--Bakery--p6' &&
-                row('group--Acme').cells[0].textContent.includes('(2)') && row('group--Bakery').cells[0].textContent.includes('(3)'));
+            check('moved', !row('group--Acme--p2') && !detail('group--Acme--p2') && under('g--group--Bakery') === 'group--Bakery--p2,group--Bakery--p4,group--Bakery--p6' &&
+                row('g--group--Acme').cells[0].textContent.includes('(2)') && row('g--group--Bakery').cells[0].textContent.includes('(3)'));
             check('moved-selection', inputs() === 'p1,p2' && count() === '2 selected (1 in collapsed groups)');
-            check('moved-controls', row('group--Acme').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Acme--p1 row-group--Acme--p7' &&
-                row('group--Bakery').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Bakery--p2 row-group--Bakery--p4 row-group--Bakery--p6');
+            check('moved-controls', row('g--group--Acme').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Acme--p1 row-group--Acme--p7' &&
+                row('g--group--Bakery').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === 'row-group--Bakery--p2 row-group--Bakery--p4 row-group--Bakery--p6');
             // A deleted leaf leaves; a group that empties leaves; a new group
             // joins where a full render has it (here, last).
             await post('/delete?id=p7&group_by=party', row('group--Acme--p7'));
-            check('deleted', !row('group--Acme--p7') && !detail('group--Acme--p7') && under('group--Acme') === 'group--Acme--p1');
-            await post('/move?id=p5&to=Zed&group_by=party', row('group--Prime--Video'));
+            check('deleted', !row('group--Acme--p7') && !detail('group--Acme--p7') && under('g--group--Acme') === 'group--Acme--p1');
+            await post('/move?id=p5&to=Zed&group_by=party', row('g--group--Prime--Video'));
             const groups = rows().filter(r => 'htmxoGroup' in r.dataset).map(r => r.id.slice(4)).join(',');
-            check('groups-follow', !row('group--Prime--Video') && !row('group--Prime--Video--p5') && row('group--Zed--p5') &&
-                groups === 'group--Acme,group--Bakery,group--Acme--Prime,group--Zed');
+            check('groups-follow', !row('g--group--Prime--Video') && !row('group--Prime--Video--p5') && row('group--Zed--p5') &&
+                groups === 'g--group--Acme,g--group--Bakery,g--group--Acme--Prime,g--group--Zed');
             check('no-leaks', leaked() === 0 && document.querySelectorAll('tbody[data-htmxo-row-update]').length === 0);
             // Rows rendered for another grouping are refused, loudly, and change
             // nothing (htmx leaves an empty class on the row it sent the request from).
@@ -914,19 +966,19 @@ end
                 /grouped by .*iban.* but the table by .*party/.test((document.querySelector('.htmxo-toast-error') || {}).textContent || ''));
             await stale();   // back to flagged on the server
             // Every copy of a leaf: p3 is listed under Shops and Media.
-            toggle('group--Bakery');
+            toggle('g--group--Bakery');
             await regroup('rule');
-            toggle('group--Shops');
+            toggle('g--group--Shops');
             await wait(() => row('group--Shops--p3'));
-            toggle('group--Media');
+            toggle('g--group--Media');
             await flag('group--Media--p3');
             check('copies', flagText('group--Shops--p3') === 'flagged' && flagText('group--Media--p3') === 'flagged' &&
-                row('group--Shops').cells[2].textContent === '3 flagged' && row('group--Media').cells[2].textContent === '1 flagged');
+                row('g--group--Shops').cells[2].textContent === '3 flagged' && row('g--group--Media').cells[2].textContent === '1 flagged');
             // A re-render keeps the branches the user opened: party again.
             await regroup('party');
             await wait(() => row('group--Bakery--p4') && !row('group--Bakery--p4').hidden);
-            check('branches-kept', row('group--Acme').dataset.htmxoTreeOpen === 'true' && row('group--Bakery').dataset.htmxoTreeOpen === 'true' &&
-                row('group--Zed').dataset.htmxoTreeOpen === 'false' && !row('group--Acme--p1').hidden && row('group--Zed--p5').hidden);
+            check('branches-kept', row('g--group--Acme').dataset.htmxoTreeOpen === 'true' && row('g--group--Bakery').dataset.htmxoTreeOpen === 'true' &&
+                row('g--group--Zed').dataset.htmxoTreeOpen === 'false' && !row('group--Acme--p1').hidden && row('group--Zed--p5').hidden);
             // The flat view: rows by id, detail state kept; the leaf's label
             // is its detail control, as in a grouping.
             await regroup('none');
@@ -1049,11 +1101,11 @@ end
             toggle('iban').click();
             check('add-level', await regrouped(['party', 'iban']));
             check('add-pills', pressed() === 'party+,iban+,rule-' && document.activeElement && document.activeElement.id === 'g-group-iban');
-            check('nested-rows', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' && total() === '7 of 7 rows shown');
-            row('group--Bakery').querySelector('[data-htmxo-tree-toggle]').click();
-            row('group--Bakery--DE03').querySelector('[data-htmxo-tree-toggle]').click();
-            check('open-nested', shown().includes('group--Bakery,group--Bakery--DE03,group--Bakery--DE03--p4,group--Bakery--DE03--p6') &&
-                row('group--Bakery--DE03').getAttribute('aria-level') === '2' && row('group--Bakery--DE03--p4').getAttribute('aria-level') === '3');
+            check('nested-rows', shown() === 'g--group--Acme,g--group--Acme--Prime,g--group--Bakery,g--group--Prime--Video' && total() === '7 of 7 rows shown');
+            row('g--group--Bakery').querySelector('[data-htmxo-tree-toggle]').click();
+            row('g--group--Bakery--DE03').querySelector('[data-htmxo-tree-toggle]').click();
+            check('open-nested', shown().includes('g--group--Bakery,g--group--Bakery--DE03,group--Bakery--DE03--p4,group--Bakery--DE03--p6') &&
+                row('g--group--Bakery--DE03').getAttribute('aria-level') === '2' && row('group--Bakery--DE03--p4').getAttribute('aria-level') === '3');
             // ←/→ on a focused active pill reorders it, keeping the focus.
             stage('arrow');
             key(document.activeElement, 'ArrowLeft');
@@ -1075,14 +1127,14 @@ end
             stage('drag-move');
             check('drag-marker-after', drag('party', 'iban', true) === 'after');
             check('drag-move', await regrouped(['rule', 'iban', 'party']));
-            check('three-levels', shown() === 'group--Shops,group--Media' && total() === '7 of 7 rows shown' &&
-                'htmxoLazyRows' in row('group--Shops').dataset);
+            check('three-levels', shown() === 'g--group--Shops,g--group--Media' && total() === '7 of 7 rows shown' &&
+                'htmxoLazyRows' in row('g--group--Shops').dataset);
             // A selected nested group submits its path, with the grouping.
             stage('select');
-            row('group--Media').querySelector('[data-htmxo-tree-toggle]').click();
-            click(row('group--Media--DE01').cells[2], {ctrlKey: true});
+            row('g--group--Media').querySelector('[data-htmxo-tree-toggle]').click();
+            click(row('g--group--Media--DE01').cells[2], {ctrlKey: true});
             check('select-path', form('tx_group') === '["Media","DE01"]' && form('group_by') === 'rule,iban,party');
-            click(row('group--Media').cells[2], {ctrlKey: true});
+            click(row('g--group--Media').cells[2], {ctrlKey: true});
             check('select-outer-path', form('tx_group').split(',["').length === 2 && form('tx_group').includes('["Media"]'));
             // Expand all loads the lazy group and, inside it, its own lazy subgroup.
             stage('expand');
@@ -1261,10 +1313,10 @@ end
             // Nested groups: the new subgroup A/y lands between A/w and A/z,
             // and B/y, now empty, leaves.
             const nkids = parent => masters('nest').filter(r => r.dataset.htmxoParent === 'row-' + parent).map(r => r.id.slice(4)).join(',');
-            check('nested-setup', nkids('group--A') === 'group--A--w,group--A--z' && nkids('group--B') === 'group--B--y,group--B--x');
+            check('nested-setup', nkids('nest--group--A') === 'nest--group--A--w,nest--group--A--z' && nkids('nest--group--B') === 'nest--group--B--y,nest--group--B--x');
             await post('/nmove?id=n4&cat=A', row('group--B--y--n4'));
-            check('nested-place', nkids('group--A') === 'group--A--w,group--A--y,group--A--z' && nkids('group--A--y') === 'group--A--y--n4' &&
-                nkids('group--B') === 'group--B--x' && !row('group--B--y') && paired('nest'));
+            check('nested-place', nkids('nest--group--A') === 'nest--group--A--w,nest--group--A--y,nest--group--A--z' && nkids('nest--group--A--y') === 'group--A--y--n4' &&
+                nkids('nest--group--B') === 'nest--group--B--x' && !row('nest--group--B--y') && paired('nest'));
             check('no-leaks', document.querySelectorAll('tbody[data-htmxo-row-update], tr tr').length === 0);
             const result = document.createElement('pre'); result.id = 'checks';
             result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
@@ -1363,24 +1415,24 @@ end
                 .filter(r => !r.id.startsWith('detail-') && !r.hidden).map(r => r.id.slice(4)).join(',');
             // Rule grouping, p3 opened: it is in both groups, so both open.
             const rule = shown('g-rule');
-            check('rule-shown ' + rule, rule === 'group--Shops,group--Shops--p1,group--Shops--p2,group--Shops--p3,group--Shops--p4,' +
-                'group--Shops--p6,group--Shops--p7,group--Media,group--Media--p3,group--Media--p5');
+            check('rule-shown ' + rule, rule === 'g-rule--group--Shops,group--Shops--p1,group--Shops--p2,group--Shops--p3,group--Shops--p4,' +
+                'group--Shops--p6,group--Shops--p7,g-rule--group--Media,group--Media--p3,group--Media--p5');
             await wait(() => detail('group--Shops--p3').textContent.includes('memo 3') && detail('group--Media--p3').textContent.includes('memo 3'));
             check('rule-details', !detail('group--Shops--p3').hidden && detail('group--Shops--p3').textContent.includes('memo 3') &&
                 !detail('group--Media--p3').hidden && detail('group--Media--p3').textContent.includes('memo 3'));
-            check('rule-aria', row('group--Shops').getAttribute('aria-expanded') === 'true' &&
+            check('rule-aria', row('g-rule--group--Shops').getAttribute('aria-expanded') === 'true' &&
                 row('group--Shops--p3').querySelector('[data-htmxo-detail-toggle]').getAttribute('aria-expanded') === 'true');
             check('rule-others-closed', detail('group--Shops--p1').hidden);
             // Party grouping, p1 opened: lazy-sized Acme renders eagerly and open.
             const party = shown('g-party');
-            check('party-shown ' + party, party === 'group--Acme,group--Acme--p1,group--Acme--p2,group--Acme--p7,group--Acme--Prime,group--Bakery,group--Prime--Video');
-            check('party-not-lazy', !('htmxoLazyRows' in row('group--Acme').dataset));
+            check('party-shown ' + party, party === 'g-party--group--Acme,group--Acme--p1,group--Acme--p2,group--Acme--p7,g-party--group--Acme--Prime,g-party--group--Bakery,g-party--group--Prime--Video');
+            check('party-not-lazy', !('htmxoLazyRows' in row('g-party--group--Acme').dataset));
             await wait(() => detail('group--Acme--p1').textContent.includes('memo 1'));
             check('party-detail', !detail('group--Acme--p1').hidden && detail('group--Acme--p1').textContent.includes('memo 1'));
             // The user's own toggles still work on a group opened by the predicate.
-            row('group--Acme').querySelector('[data-htmxo-tree-toggle]').click();
+            row('g-party--group--Acme').querySelector('[data-htmxo-tree-toggle]').click();
             const collapsed = shown('g-party');
-            check('party-collapse ' + collapsed, collapsed === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video' &&
+            check('party-collapse ' + collapsed, collapsed === 'g-party--group--Acme,g-party--group--Acme--Prime,g-party--group--Bakery,g-party--group--Prime--Video' &&
                 detail('group--Acme--p1').hidden);
             } catch (e) { check('threw ' + e, false); }
             const result = document.createElement('pre'); result.id = 'checks';
@@ -1477,41 +1529,41 @@ end
             // A document whose detail is open, the focus in it, moves to a
             // group the update creates: the group opens, the detail stays
             // open (and loads again), the focus goes to the row's control.
-            toggle('group--Review');
+            toggle('docs--group--Review');
             await openDetail('group--Review--a1');
             await act(detail('group--Review--a1').querySelector('[data-approve]'), row('group--Review--a1'));
-            check('new-group-opens', row('group--Approved') && row('group--Approved').dataset.htmxoTreeOpen === 'true' &&
-                row('group--Approved').getAttribute('aria-expanded') === 'true' && !row('group--Review--a1'));
+            check('new-group-opens', row('docs--group--Approved') && row('docs--group--Approved').dataset.htmxoTreeOpen === 'true' &&
+                row('docs--group--Approved').getAttribute('aria-expanded') === 'true' && !row('group--Review--a1'));
             check('new-group-detail', shownOpen('group--Approved--a1'));
             check('new-group-focus', document.activeElement === control('group--Approved--a1'));
             await wait(() => detail('group--Approved--a1').textContent.includes('a1 Approved'));
             check('new-group-detail-loads', detail('group--Approved--a1').textContent.includes('a1 Approved'));
             // The same into a group the reader closed.
-            toggle('group--Approved');
+            toggle('docs--group--Approved');
             await openDetail('group--Review--a2');
             await act(detail('group--Review--a2').querySelector('[data-approve]'), row('group--Review--a2'));
-            check('closed-group-opens', row('group--Approved').dataset.htmxoTreeOpen === 'true' &&
+            check('closed-group-opens', row('docs--group--Approved').dataset.htmxoTreeOpen === 'true' &&
                 shownOpen('group--Approved--a2') && !row('group--Approved--a1').hidden);
             check('closed-group-focus', document.activeElement === control('group--Approved--a2'));
             // A document whose detail is closed: its new group stays as it
             // is, and the focus goes to the group row that now holds it.
             await act(row('group--Review--a3').querySelector('[data-exclude]'), row('group--Review--a3'));
-            check('closed-detail-stays', row('group--Excluded').dataset.htmxoTreeOpen === 'false' && row('group--Excluded--a3').hidden &&
+            check('closed-detail-stays', row('docs--group--Excluded').dataset.htmxoTreeOpen === 'false' && row('group--Excluded--a3').hidden &&
                 detail('group--Excluded--a3').hidden);
-            check('closed-detail-focus', document.activeElement === row('group--Excluded').querySelector('[data-htmxo-tree-toggle]'));
+            check('closed-detail-focus', document.activeElement === row('docs--group--Excluded').querySelector('[data-htmxo-tree-toggle]'));
             // Two levels of lazy groups: Done and its new subgroup load and
             // open on the way to the document; Done's other subgroup stays as it is.
-            toggle('group--Todo');
-            await wait(() => row('group--Todo--Invoice'));
-            toggle('group--Todo--Invoice');
+            toggle('nest--group--Todo');
+            await wait(() => row('nest--group--Todo--Invoice'));
+            toggle('nest--group--Todo--Invoice');
             await wait(() => row('group--Todo--Invoice--b1'));
             await openDetail('group--Todo--Invoice--b1');
-            check('lazy-setup', 'htmxoLazyRows' in row('group--Done').dataset && !row('group--Done--Invoice'));
+            check('lazy-setup', 'htmxoLazyRows' in row('nest--group--Done').dataset && !row('nest--group--Done--Invoice'));
             await act(detail('group--Todo--Invoice--b1').querySelector('[data-approve]'), row('group--Todo--Invoice--b1'));
             await wait(() => row('group--Done--Invoice--b1') && document.activeElement === control('group--Done--Invoice--b1'));
-            check('lazy-groups-open', !row('group--Todo') && !('htmxoLazyRows' in row('group--Done').dataset) &&
-                row('group--Done').dataset.htmxoTreeOpen === 'true' && row('group--Done--Invoice').dataset.htmxoTreeOpen === 'true' &&
-                'htmxoLazyRows' in row('group--Done--Receipt').dataset);
+            check('lazy-groups-open', !row('nest--group--Todo') && !('htmxoLazyRows' in row('nest--group--Done').dataset) &&
+                row('nest--group--Done').dataset.htmxoTreeOpen === 'true' && row('nest--group--Done--Invoice').dataset.htmxoTreeOpen === 'true' &&
+                'htmxoLazyRows' in row('nest--group--Done--Receipt').dataset);
             check('lazy-detail', shownOpen('group--Done--Invoice--b1'));
             check('lazy-focus', document.activeElement === control('group--Done--Invoice--b1'));
             // A tree: a child moves under a closed parent with its (eager)
@@ -1893,6 +1945,93 @@ end
     end
 end
 
+@testitem "two regroupable tables on one page keep their rows apart browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # Snag render-two-regro-84404c6f: two tables without ids whose groups
+        # share their keys. Before, a row update for the second table's
+        # "Acme" replaced the first table's group and leaves.
+        html(x) = repr("text/html", x)
+        other = [(; t..., id="q" * t.id[2:end]) for t in TX]
+        two(items; kw...) = master_detail_table(["Party", "IBAN", "Amount"], items; key=t -> t.id,
+            master=t -> (h.td(t.party), h.td(t.iban), h.td(string(t.amount))), detail=t -> h.p(t.memo),
+            groupings=GROUPINGS, group_by=["party"], kw...)
+        # A leaf joins the second table's "Acme": its name from its leaves
+        # changes, so the answers rendered after it carry another name.
+        added = [other; (; id="q8", party="Acme", iban="DE09", amount=-80.0, memo="memo 8")]
+        @test group_scope(html(two(added))) != group_scope(html(two(other)))
+        changed = html(two([t.id == "q1" ? (; t..., amount=-11.0) : t for t in other]; update_groups="[\"Acme\"]"))
+        grown = html(two(added; update_rows="q8"))
+        # A leaf in a new group, which comes first: the update places it by
+        # the siblings it names, under yet another name.
+        first_group = html(two([(; id="q0", party="Aaa", iban="DE00", amount=-1.0, memo="memo 0"); added]; update_rows="q0"))
+        lazy_url = (k, ms) -> "/rows?key=$k"
+        lazy_rows = html(two(added; group_rows_url=lazy_url, group_rows="[\"Acme\"]"))
+        shell(tables, js) = "<!DOCTYPE html>" * html(h.html(h.head(h.meta(; charset="utf-8"), sortable_table_js()),
+            h.body(tables..., h.script(Raw(regroup_driver_prelude() *
+                "const CHANGED = $(repr(changed)), GROWN = $(repr(grown)), FIRST = $(repr(first_group)), LAZY = $(repr(lazy_rows));\n" * raw"""
+            const ws = () => Array.from(document.querySelectorAll('[data-htmxo-grouped]'));
+            const group = (w, key) => document.getElementById('row-' + htmxoSafeKey(w.dataset.htmxoGroupScope + 'group:' + key));
+            const bodyOf = w => Array.from(w.querySelector('table').tBodies[0].rows).map(r => r.outerHTML).join('');
+            const dupes = () => { const ids = Array.from(document.querySelectorAll('[id]'), e => e.id); return ids.filter((x, i) => ids.indexOf(x) !== i); };
+            window.addEventListener('load', async function() {
+                try {""" * js * raw"""
+                } catch (e) { check('error', String(e)); }
+                finish();
+            });
+            """)))))
+        run(tables, js) = mktempdir() do directory
+            fixture = joinpath(directory, "two.html")
+            write(fixture, shell(tables, js))
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$(joinpath(directory, "profile")) file://$fixture`)
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            isnothing(checks) ? ["no checks"] : split(checks[1], '\n')
+        end
+        eager = run((grouped(group_by=["party"]), two(other)), raw"""
+            const [t1, t2] = ws(), first = bodyOf(t1);
+            check('unique', dupes().length === 0 || dupes().join(' '));
+            check('named-apart', t1.dataset.htmxoGroupScope !== t2.dataset.htmxoGroupScope && group(t1, 'Acme') !== group(t2, 'Acme'));
+            htmxoUpdateRows(CHANGED);
+            check('update-lands', bodyOf(t1) === first && document.getElementById('row-group--Acme--q1').cells[2].textContent === '-11.0' &&
+                document.getElementById('row-group--Acme--q1').closest('[data-htmxo-grouped]') === t2);
+            // Rendered under another name: the rows take the table's.
+            htmxoUpdateRows(GROWN, t2.querySelector('tbody tr'));
+            const q8 = document.getElementById('row-group--Acme--q8');
+            check('renamed-update', q8 && q8.closest('[data-htmxo-grouped]') === t2 && q8.dataset.htmxoParent === group(t2, 'Acme').id &&
+                group(t2, 'Acme').cells[0].textContent.includes('(4)') && bodyOf(t1) === first);
+            htmxoUpdateRows(FIRST, t2.querySelector('tbody tr'));
+            const labels = () => Array.from(t2.querySelector('tbody').rows).filter(r => 'htmxoGroup' in r.dataset)
+                .map(r => r.querySelector('[data-htmxo-group-label]').textContent).join(',');
+            check('renamed-new-group', labels() === 'Aaa,Acme,Acme Prime,Bakery,Prime Video' || labels());
+            check('unique-after', dupes().length === 0 || dupes().join(' '));
+            htmxoRegroup(t2, ['iban']);
+            check('regroup', group(t2, 'DE01') && group(t2, 'DE01').closest('[data-htmxo-grouped]') === t2 && bodyOf(t1) === first &&
+                (dupes().length === 0 || dupes().join(' ')));
+            """)
+        for line in eager
+            @test endswith(line, ":true")
+        end
+        @test length(eager) == 7
+        lazy = run((grouped(group_by=["party"], group_rows_url=lazy_url), two(other; group_rows_url=lazy_url)), raw"""
+            const [t1, t2] = ws();
+            window.fetch = async () => new Response(LAZY);
+            const acme = group(t2, 'Acme');
+            await htmxoLoadRows(acme);
+            const loaded = Array.from(t2.querySelector('tbody').rows).filter(r => r.dataset.htmxoParent === acme.id).map(r => r.id).join(' ');
+            check('lazy-rows', loaded === 'row-group--Acme--q1 row-group--Acme--q2 row-group--Acme--q7 row-group--Acme--q8' || loaded);
+            check('lazy-controls', acme.querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') === loaded);
+            check('lazy-apart', 'htmxoLazyRows' in group(t1, 'Acme').dataset && (dupes().length === 0 || dupes().join(' ')));
+            """)
+        for line in lazy
+            @test endswith(line, ":true")
+        end
+        @test length(lazy) == 3
+    end
+end
+
 @testitem "group summaries: ColumnSummary columns of a group row" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h, to_markdown_string
@@ -1904,39 +2043,39 @@ end
     number(r, i) = let m = match(r"data-htmxo-number=\"([^\"]*)\"", summary(r, i).match); isnothing(m) ? nothing : m[1] end
     # Acme holds p1, p2, p7 (-10, -20, -70); Bakery p4, p6; Prime Video p5.
     sums = html(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount; digits=1)]))
-    @test cell(row(sums, "row-group--Acme"), 0) == "-100.0" && cell(row(sums, "row-group--Prime--Video"), 0) == "-50.0"
-    @test number(row(sums, "row-group--Acme"), 0) == "-100.0"
+    @test cell(row(sums, group_row(sums, "Acme")), 0) == "-100.0" && cell(row(sums, group_row(sums, "Prime Video")), 0) == "-50.0"
+    @test number(row(sums, group_row(sums, "Acme")), 0) == "-100.0"
     # The other columns stay blank; the first holds the key and count.
-    @test contains(row(sums, "row-group--Acme"), "<small data-htmxo-group-count=\"\">(3)</small></button></span></td><td></td>")
+    @test contains(row(sums, group_row(sums, "Acme")), "<small data-htmxo-group-count=\"\">(3)</small></button></span></td><td></td>")
     each = html(grouped(group_by="party", group_summary=[
         "IBAN" => ColumnSummary(:count),
         "Amount" => ColumnSummary(:mean, t -> t.amount)]))
-    @test cell(row(each, "row-group--Acme"), 0) == "3" && cell(row(each, "row-group--Acme"), 1) == "-33"
+    @test cell(row(each, group_row(each, "Acme")), 0) == "3" && cell(row(each, group_row(each, "Acme")), 1) == "-33"
     for (reduce, f, acme, bakery) in ((:min, t -> t.amount, "-70", "-60"), (:max, t -> t.amount, "-10", "-40"),
                                       (:sum, t -> t.id == "p1" ? nothing : t.amount, "-90", "-100"),
                                       (:sum, _ -> missing, "", ""))
         page = html(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(reduce, f)]))
-        @test cell(row(page, "row-group--Acme"), 0) == acme && cell(row(page, "row-group--Bakery"), 0) == bakery
+        @test cell(row(page, group_row(page, "Acme")), 0) == acme && cell(row(page, group_row(page, "Bakery")), 0) == bakery
     end
     # A ratio divides sums; a zero denominator leaves the cell empty.
     ratio = html(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:ratio,
         t -> t.amount, t -> t.party == "Bakery" ? 0 : 2.0; digits=2)]))
-    @test cell(row(ratio, "row-group--Acme"), 0) == "-16.67" && cell(row(ratio, "row-group--Bakery"), 0) == ""
-    @test number(row(ratio, "row-group--Acme"), 0) == "-16.67" && isnothing(number(row(ratio, "row-group--Bakery"), 0))
+    @test cell(row(ratio, group_row(ratio, "Acme")), 0) == "-16.67" && cell(row(ratio, group_row(ratio, "Bakery")), 0) == ""
+    @test number(row(ratio, group_row(ratio, "Acme")), 0) == "-16.67" && isnothing(number(row(ratio, group_row(ratio, "Bakery")), 0))
     # German texts write German numbers.
     de = html(grouped(group_by="rule", texts=table_texts(:de),
         group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount * 100; digits=2)]))
-    @test cell(row(de, "row-group--Shops"), 0) == "-23.000,00" && number(row(de, "row-group--Shops"), 0) == "-23000.00"
+    @test cell(row(de, group_row(de, "Shops")), 0) == "-23.000,00" && number(row(de, group_row(de, "Shops")), 0) == "-23000.00"
     # Significant digits: Acme's and Bakery's amounts × 28.5 sum to -2850, a
     # half, which rounds away from zero. The CSV gets the rounded number, and
     # no power of ten where the cell shows one.
     sig = html(grouped(group_by="party", texts=table_texts(:de), group_summary=[
         "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
         "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)]))
-    @test cell(row(sig, "row-group--Acme"), 1) == "-2.900" && number(row(sig, "row-group--Acme"), 1) == "-2900"
-    @test cell(row(sig, "row-group--Bakery"), 1) == "-2.900" && cell(row(sig, "row-group--Prime--Video"), 1) == "-1.400"
-    @test cell(row(sig, "row-group--Acme--Prime"), 1) == "-860"
-    @test cell(row(sig, "row-group--Acme"), 0) == "-3,3·10⁻⁵" && number(row(sig, "row-group--Acme"), 0) == "-0.000033"
+    @test cell(row(sig, group_row(sig, "Acme")), 1) == "-2.900" && number(row(sig, group_row(sig, "Acme")), 1) == "-2900"
+    @test cell(row(sig, group_row(sig, "Bakery")), 1) == "-2.900" && cell(row(sig, group_row(sig, "Prime Video")), 1) == "-1.400"
+    @test cell(row(sig, group_row(sig, "Acme Prime")), 1) == "-860"
+    @test cell(row(sig, group_row(sig, "Acme")), 0) == "-3,3·10⁻⁵" && number(row(sig, group_row(sig, "Acme")), 0) == "-0.000033"
     @test contains(sig, "&quot;summary&quot;:[{&quot;reduce&quot;:&quot;mean&quot;,&quot;sigdigits&quot;:2}," *
         "{&quot;reduce&quot;:&quot;sum&quot;,&quot;sigdigits&quot;:2}]")
     # The cells' `format_number(x; digits | sigdigits)` writes the same text: test/number_format.jl.
@@ -1993,8 +2132,8 @@ end
     using HTMXObjects
     import HTMXObjects: h, to_markdown_string
     html(x) = repr("text/html", x)
-    # The group rows' ids, in the order the table renders them.
-    groups(page) = [match(r"id=\"row-group--([^\"]*)\"", m.match)[1]
+    # The group rows' ids (after the table's name), in the order the table renders them.
+    groups(page) = [match(r"id=\"row-[^\"]*?--group--([^\"]*)\"", m.match)[1]
                     for m in eachmatch(r"<tr[^>]*data-htmxo-group=\"\"[^>]*>", table_rows(page))]
     regroup_config(page) = match(r"data-htmxo-regroup=\"([^\"]*)\"", page)[1]
     # Bakery and Prime Video before the Acmes, ties in first-appearance order;
@@ -2085,46 +2224,46 @@ end
                 check('parity-' + v, g().dataset.htmxoGrouped === JSON.stringify(levels(v)) && await parity(g(), '/flat?group_by=' + v));
             }
             regroup('rule');
-            check('summary', summary('group--Shops', 0) === '-230.0' && summary('group--Shops', 1) === '6' && summary('group--Media', 0) === '-80.0');
+            check('summary', summary('g--group--Shops', 0) === '-230.0' && summary('g--group--Shops', 1) === '6' && summary('g--group--Media', 0) === '-80.0');
             // A row update the server renders for this grouping fits the rows the browser built.
             htmxoUpdateRows(await (await fetch('/flat?group_by=rule&update=p3')).text());
             check('row-update', await parity(g(), '/flat?group_by=rule'));
-            check('unplaced', (regroup('media'), shown(g())) === 'group--Prime' &&
+            check('unplaced', (regroup('media'), shown(g())) === 'g--group--Prime' &&
                 g().querySelector('template[data-htmxo-unplaced]').content.querySelectorAll('tr[data-htmxo-leaf]').length === 5);
             regroup('party');
             check('unplaced-back', g().querySelector('template[data-htmxo-unplaced]').content.children.length === 0 &&
                 rows(g()).filter(r => 'htmxoLeaf' in r.dataset).length === 7);
             // Selection is per leaf: it survives regrouping, and both copies of p3 show it.
-            toggle('group--Acme');
+            toggle('g--group--Acme');
             click(row('group--Acme--p1').cells[2]);
             regroup('rule');
-            toggle('group--Shops'); toggle('group--Media');
+            toggle('g--group--Shops'); toggle('g--group--Media');
             click(row('group--Media--p3').cells[2], {ctrlKey: true});
             check('select-copies', inputs() === 'p1,p3' && row('group--Shops--p3').getAttribute('aria-selected') === 'true' &&
                 count().startsWith('2 selected'));
             // Branches the reader opened stay open by id; others start closed.
             regroup('party');
-            check('remembered-open', row('group--Acme').dataset.htmxoTreeOpen === 'true' && row('group--Bakery').dataset.htmxoTreeOpen === 'false');
+            check('remembered-open', row('g--group--Acme').dataset.htmxoTreeOpen === 'true' && row('g--group--Bakery').dataset.htmxoTreeOpen === 'false');
             // An open detail moves with its leaf, and opens the groups above it.
             row('group--Acme--p2').querySelector('[data-htmxo-detail-toggle]').click();
             regroup('iban');
             check('detail-moves', !row('group--DE02--p2').hidden && !document.getElementById('detail-group--DE02--p2').hidden &&
-                row('group--DE02').dataset.htmxoTreeOpen === 'true');
+                row('g--group--DE02').dataset.htmxoTreeOpen === 'true');
             // The search applies to the new rows; the sort to the new siblings.
             search('bakery');
             regroup('party');
-            check('search', shown(g()) === 'group--Bakery,group--Bakery--p4,group--Bakery--p6');
+            check('search', shown(g()) === 'g--group--Bakery,group--Bakery--p4,group--Bakery--p6');
             search('');
             g().querySelectorAll('thead th')[2].click();
             regroup('rule');
-            const order = rows(g()).filter(r => r.dataset.htmxoParent === 'row-group--Shops').map(r => r.id.slice(-2)).join(',');
+            const order = rows(g()).filter(r => r.dataset.htmxoParent === 'row-g--group--Shops').map(r => r.id.slice(-2)).join(',');
             check('sorted', order === 'p7,p6,p4,p3,p2,p1');
             // Pills: nested levels, built like the server's rows and pills, in
             // German, on a table whose `group_by` is a single name.
             const pill = name => n().querySelector('[data-htmxo-group-name="' + name + '"] > button');
             pill('iban').click();
             check('pills-add', await parity(n(), '/nested?group_by=party&group_by=iban', true));
-            check('german', row('group--Acme--DE01').querySelector('[data-htmxo-group-summary="0"]').textContent === '-80,0' &&
+            check('german', row('n--group--Acme--DE01').querySelector('[data-htmxo-group-summary="0"]').textContent === '-80,0' &&
                 row('group--Acme--DE01--np1').dataset.htmxoLeaf === 'np1');
             document.getElementById('n-group-iban-earlier').click();
             check('pills-move', n().dataset.htmxoGrouped === '["iban","party"]' && await parity(n(), '/nested?group_by=iban&group_by=party', true));
@@ -2196,23 +2335,23 @@ end
                 check('parity-' + v, await parity(o(), '/flat?group_by=' + v));
             }
             regroup('iban');
-            check('listed-first', groups(o()) === 'group--DE04,group--DE03,group--DE01,group--DE02');
+            check('listed-first', groups(o()) === 'o--group--DE04,o--group--DE03,o--group--DE01,o--group--DE02');
             regroup('party');
-            check('sorted', groups(o()) === 'group--Bakery,group--Prime--Video,group--Acme,group--Acme--Prime');
+            check('sorted', groups(o()) === 'o--group--Bakery,o--group--Prime--Video,o--group--Acme,o--group--Acme--Prime');
             // Nested pills: each level in its own grouping's order.
             const pill = name => n().querySelector('[data-htmxo-group-name="' + name + '"] > button');
             pill('rule').click();
             check('nested', await parity(n(), '/nested?group_by=party&group_by=rule', true));
             document.getElementById('on-group-rule-earlier').click();
             check('nested-moved', await parity(n(), '/nested?group_by=rule&group_by=party', true) && groups(n()) ===
-                'group--Media,group--Media--Prime--Video,group--Media--Acme--Prime,group--Shops,group--Shops--Bakery,group--Shops--Acme,group--Shops--Acme--Prime');
+                'on--group--Media,on--group--Media--Prime--Video,on--group--Media--Acme--Prime,on--group--Shops,on--group--Shops--Bakery,on--group--Shops--Acme,on--group--Shops--Acme--Prime');
             check('no-requests', requests === 0);
             // A row update brings a group key new to the page: the next regroup
             // in the browser puts it where the server does.
             htmxoUpdateRows(await (await fetch('/flat?group_by=party&moved=1&update=p1')).text());
             regroup('iban');
             regroup('party');
-            check('update-order', groups(o()).startsWith('group--Zeta,group--Bakery') && await parity(o(), '/flat?group_by=party&moved=1'));
+            check('update-order', groups(o()).startsWith('o--group--Zeta,o--group--Bakery') && await parity(o(), '/flat?group_by=party&moved=1'));
             finish();
         });
         """))
@@ -2280,8 +2419,8 @@ end
             for (const v of ['iban', 'rule', 'media', 'none', 'party'])
                 (regroup(v), check('parity-' + v, await parity(s(), '/s?group_by=' + v)));
             const cell = (id, i) => document.getElementById('row-' + id).querySelector('[data-htmxo-group-summary="' + i + '"]');
-            check('half', cell('group--Acme', 1).textContent === '-2.900' && cell('group--Acme', 1).dataset.htmxoNumber === '-2900');
-            check('power-of-ten', cell('group--Acme', 0).textContent === '-3,3·10⁻⁵' && cell('group--Acme', 0).dataset.htmxoNumber === '-0.000033');
+            check('half', cell('s--group--Acme', 1).textContent === '-2.900' && cell('s--group--Acme', 1).dataset.htmxoNumber === '-2900');
+            check('power-of-ten', cell('s--group--Acme', 0).textContent === '-3,3·10⁻⁵' && cell('s--group--Acme', 0).dataset.htmxoNumber === '-0.000033');
             const numbers = document.createElement('pre'); numbers.id = 'numbers';
             numbers.textContent = CASES.map(([x, k]) => htmxoSummaryText(x, {sigdigits: k}, ',', '.', false) + '\t' +
                 htmxoSummaryText(x, {sigdigits: k}, '.', '', true)).join('\n');
@@ -2343,9 +2482,9 @@ end
             htmxoGroupRequest(c().querySelector('.htmxo-group-pills'), ['iban'], null);
             // At once: the browser's rows, default group rows included.
             check('browser-first', c().dataset.htmxoGrouped === '["iban"]' &&
-                document.getElementById('row-group--DE01').querySelector('[data-htmxo-group-label]').textContent === 'DE01');
+                document.getElementById('row-c--group--DE01').querySelector('[data-htmxo-group-label]').textContent === 'DE01');
             // Then the server's own render, with its group rows.
-            check('server-after', await wait(() => document.getElementById('row-group--DE01').textContent.includes('G DE01')));
+            check('server-after', await wait(() => document.getElementById('row-c--group--DE01').textContent.includes('G DE01')));
             check('same-rows', await parity(c(), '/custom?group_by=iban'));
             finish();
         });
@@ -2408,7 +2547,9 @@ end
             const pills = () => c().querySelector('.htmxo-group-pills');
             const leafRows = () => Array.from(table().rows).filter(r => 'htmxoLeaf' in r.dataset);
             const groupRows = () => Array.from(table().rows).filter(r => 'htmxoGroup' in r.dataset);
-            const row = id => document.getElementById('row-group--' + id);
+            // Group rows carry the table's name; a leaf's row its group and key.
+            const row = id => document.getElementById('row-c--group--' + id);
+            const leaf = id => document.getElementById('row-group--' + id);
             const served = (id, name) => wait(() => row(id) && row(id).textContent.includes('G ' + name));
             const same = rows => rows.every(r => r.isConnected && document.getElementById(r.id) === r);
             // A regroup: the browser's rows at once, then the server's group
@@ -2442,7 +2583,7 @@ end
             const kept = leafRows();
             htmxoTableSearch(table(), 'prime');
             htmxoTreeToggle(row('DE01').querySelector('[data-htmxo-tree-toggle]'));
-            row('DE01--p3').querySelector('[data-htmxo-detail-toggle]').click();
+            leaf('DE01--p3').querySelector('[data-htmxo-detail-toggle]').click();
             htmxoSelectRows(table(), ['p4', 'group:DE04']);
             // The group row itself (a search disables the tree toggles).
             row('DE01').focus();
@@ -2451,11 +2592,11 @@ end
             check('state-answered', await served('DE01', 'DE01'));
             check('state-leaves', same(kept));
             check('state-open', row('DE01').dataset.htmxoTreeOpen === 'true' && row('DE01').getAttribute('aria-expanded') === 'true' &&
-                !row('DE01--p3').hidden && !document.getElementById('detail-group--DE01--p3').hidden);
+                !leaf('DE01--p3').hidden && !document.getElementById('detail-group--DE01--p3').hidden);
             check('state-search', c().querySelector('input[type="search"]').value === 'prime' && row('DE02').hidden &&
-                row('DE03').hidden && !row('DE04').hidden && row('DE01--p1').hidden);
+                row('DE03').hidden && !row('DE04').hidden && leaf('DE01--p1').hidden);
             check('state-selection', JSON.stringify(htmxoSelectedKeys(table()).sort()) === '["group:DE04","p4"]' &&
-                row('DE04').getAttribute('aria-selected') === 'true' && row('DE03--p4').getAttribute('aria-selected') === 'true');
+                row('DE04').getAttribute('aria-selected') === 'true' && leaf('DE03--p4').getAttribute('aria-selected') === 'true');
             check('state-focus', document.activeElement === row('DE01') ||
                 (document.activeElement && document.activeElement.outerHTML.slice(0, 200)));
             check('no-error', toasts.length === 0 || toasts.join('; '));
@@ -2473,7 +2614,7 @@ end
             // A route that does not pass `group_masters` on: the whole table
             // replaces the browser's, leaf rows included.
             check('whole-swapped', await wait(() => w() !== wrapper &&
-                document.getElementById('row-group--DE01').textContent.includes('G DE01')));
+                document.getElementById('row-w--group--DE01').textContent.includes('G DE01')));
             check('whole-leaves', placed.every(r => !r.isConnected));
             check('whole-render', await parity(w(), '/whole?group_by=iban'));
           } catch (err) { check('exception', (err && err.stack) || err); }
@@ -2532,15 +2673,15 @@ end
             const w = () => document.querySelector('[data-htmxo-grouped]');
             const shown = () => Array.from(w().querySelector('tbody').rows).filter(r => !r.hidden && !r.id.startsWith('detail-')).map(r => r.id.slice(4)).join(',');
             const pill = name => w().querySelector('[data-htmxo-group-name="' + name + '"] > button');
-            check('recorded', shown() === 'group--Acme,group--Acme--Prime,group--Bakery,group--Prime--Video');
+            check('recorded', shown() === 'r--group--Acme,r--group--Acme--Prime,r--group--Bakery,r--group--Prime--Video');
             pill('party').click();
             pill('rule').click();
-            check('regrouped', w().dataset.htmxoGrouped === '["rule"]' && shown() === 'group--Shops,group--Media' &&
-                document.getElementById('row-group--Shops').querySelector('[data-htmxo-group-summary="0"]').textContent === '-230.0');
+            check('regrouped', w().dataset.htmxoGrouped === '["rule"]' && shown() === 'r--group--Shops,r--group--Media' &&
+                document.getElementById('row-r--group--Shops').querySelector('[data-htmxo-group-summary="0"]').textContent === '-230.0');
             pill('iban').click();
             check('nested', w().dataset.htmxoGrouped === '["rule","iban"]' &&
-                document.getElementById('row-group--Shops').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') ===
-                    'row-group--Shops--DE01 row-group--Shops--DE02 row-group--Shops--DE03');
+                document.getElementById('row-r--group--Shops').querySelector('[data-htmxo-tree-toggle]').getAttribute('aria-controls') ===
+                    'row-r--group--Shops--DE01 row-r--group--Shops--DE02 row-r--group--Shops--DE03');
             finish();
         });
         """))
@@ -2737,8 +2878,8 @@ end
     # Another grouping lists each leaf once, with its first row in the tree
     # (c2 as section 1.1 covers it), in leaf order; the tree waits beside it.
     status = html(outline_table(group_by=["Status"], searchable=true, id="o"))
-    @test ids(tbody(status)) == ["group--open", "group--open--c4", "group--shown", "group--shown--c1", "group--shown--c3",
-                                 "group--described", "group--described--c2"]
+    @test ids(tbody(status)) == ["o--group--open", "group--open--c4", "o--group--shown", "group--shown--c1", "group--shown--c3",
+                                 "o--group--described", "group--described--c2"]
     @test contains(tbody(status), "c2 in 1.1") && !contains(tbody(status), "c2 in 2") && contains(status, "4 of 4 rows shown")
     stash = match(r"<template data-htmxo-tree=\"\">.*?</template>"s, status).match
     @test ids(stash) == ids(tbody(tree)) && contains(stash, "c2 in 2")
@@ -2828,7 +2969,7 @@ end
             el('o', 'row-s1--1').querySelector('[data-htmxo-tree-toggle]').click();
             el('o', 'row-c1--1-c2').querySelector('[data-htmxo-detail-toggle]').click();
             pill('o', 'Status').click();
-            check('detail-goes-along', !el('o', 'detail-group--described--c2').hidden && el('o', 'row-group--described').dataset.htmxoTreeOpen === 'true');
+            check('detail-goes-along', !el('o', 'detail-group--described--c2').hidden && el('o', 'row-o--group--described').dataset.htmxoTreeOpen === 'true');
             pill('o', 'Outline').click();
             check('tree-as-left', !el('o', 'detail-c1--1-c2').hidden && el('o', 'detail-c2-c2').hidden &&
                 shown('o') === 's1,c1-c1,s1--1,c1--1-c2,c1--1-c3,s2,s3');
@@ -2836,7 +2977,7 @@ end
             search('c3');
             check('search-tree', count('o') === '1 of 4 rows shown' && shown('o') === 's1,s1--1,c1--1-c3');
             pill('o', 'Status').click();
-            check('search-status', shown('o') === 'group--shown,group--shown--c3' && count('o') === '1 of 4 rows shown');
+            check('search-status', shown('o') === 'o--group--shown,group--shown--c3' && count('o') === '1 of 4 rows shown');
             search('');
             // A table that opens grouped: its tree comes from the page.
             check('p-first', await parity(w('p'), '/p?group_by=Status', true));
@@ -2896,8 +3037,8 @@ end
             const pill = name => w().querySelector('[data-htmxo-group-name="' + name + '"] > button');
             check('recorded', shown() === 's1,s2,s3');
             pill('Status').click();
-            check('regrouped', w().dataset.htmxoGrouped === '["Status"]' && shown() === 'group--open,group--shown,group--described' &&
-                document.getElementById('row-group--shown').querySelector('[data-htmxo-group-summary="0"]').textContent === '7');
+            check('regrouped', w().dataset.htmxoGrouped === '["Status"]' && shown() === 'r--group--open,r--group--shown,r--group--described' &&
+                document.getElementById('row-r--group--shown').querySelector('[data-htmxo-group-summary="0"]').textContent === '7');
             pill('Outline').click();
             check('tree-back', w().dataset.htmxoGrouped === '["Outline"]' && shown() === 's1,s2,s3');
             finish();

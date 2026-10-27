@@ -144,7 +144,7 @@ end
     # Regroupable: leaves carry values, group rows (their summary) do not.
     grouped = repr("text/html", zone_table(; groupings=["None" => nothing, "Group" => z -> z.grp], group_by=["Group"],
         group_summary=["Employees" => ColumnSummary(:sum, z -> z.mean)], id="g"))
-    group_row = match(r"<tr[^>]*id=\"row-group--X\"[^>]*>.*?</tr>"s, grouped).match
+    group_row = match(r"<tr[^>]*id=\"row-g--group--X\"[^>]*>.*?</tr>"s, grouped).match
     @test !contains(group_row, "data-htmxo-sort-keys")
     @test valued(grouped) == 5
     # A row update renders the leaf's values as the table does.
@@ -223,7 +223,7 @@ end
                 check('toggle-closes', !open());
                 // Regrouping keeps the key and direction: interval width, ascending.
                 htmxoGroupRequest(wrapper.querySelector('.htmxo-group-pills'), ['Group'], null);
-                check('regrouped', leaves('row-group--X') === 'a,c,e' && leaves('row-group--Y') === 'd,b' &&
+                check('regrouped', leaves('row-k--group--X') === 'a,c,e' && leaves('row-k--group--Y') === 'd,b' &&
                     caret() === ' ▲ Interval width');
                 htmxoGroupRequest(wrapper.querySelector('.htmxo-group-pills'), [], null);
                 check('flat-again', leaves() === 'd,b,a,c,e');

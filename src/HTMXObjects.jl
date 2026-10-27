@@ -19117,6 +19117,8 @@ function htmxoLoadRows(row, expand) {
             const body = template.content.querySelector('tbody[data-htmxo-group-rows]');
             if (!body) throw new Error(htmxoText(row, 'rows_missing'));
             const rows = Array.from(body.rows);
+            const wrapper = row.closest('[data-htmxo-group-scope]');
+            if (wrapper) htmxoRescope(rows, body.dataset.htmxoGroupScope, wrapper.dataset.htmxoGroupScope);
             row.after(...rows);
             ['htmxoLazyRows', 'htmxoLazyLeaves', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
             delete row.htmxoMembers;
@@ -19200,7 +19202,13 @@ function htmxoUpdateRows(update, origin) {
     let tbody = update.dataset.htmxoRowUpdate ? document.getElementById(update.dataset.htmxoRowUpdate) : null;
     const named = [...incoming.flatMap(r => [r.id, r.dataset.htmxoParent]), ...ids, ...groups];
     for (let i = 0; !tbody && i < named.length; i++) tbody = bodyOf(named[i]);
-    if (!tbody && origin && origin.closest) { const t = origin.closest('table'); tbody = t && t.tBodies[0]; }
+    // The element that asked may sit beside the table, in its toolbar (the
+    // hidden element asking for `group_masters`).
+    if (!tbody && origin && origin.closest) {
+        const around = origin.closest('[data-htmxo-grouped]');
+        const t = origin.closest('table') || (around && around.querySelector('table'));
+        tbody = t && t.tBodies[0];
+    }
     // The group rows of a browser regroup (`group_masters`) have nothing to
     // do once their table has left the page, or the reader has regrouped
     // again: they are dropped, quietly.
@@ -19224,6 +19232,22 @@ function htmxoUpdateRows(update, origin) {
             const cfg = JSON.parse(wrapper.dataset.htmxoRegroup);
             cfg.order = JSON.parse(update.dataset.htmxoGroupOrder);
             wrapper.dataset.htmxoRegroup = JSON.stringify(cfg);
+        }
+    }
+    // Group rows rendered under another name than the table's (a table
+    // without an id whose leaves changed since it was rendered) take the
+    // table's name, and so do the groups the update speaks for and the
+    // siblings it places rows between.
+    if ('htmxoGroupScope' in update.dataset) {
+        const wrapper = tbody.closest('[data-htmxo-group-scope]');
+        if (wrapper) {
+            const rename = htmxoRescope(incoming, update.dataset.htmxoGroupScope, wrapper.dataset.htmxoGroupScope);
+            const renamed = [...groups].map(rename);
+            groups.clear();
+            renamed.forEach(g => groups.add(g));
+            const placed = update.getAttribute('data-htmxo-update-places');
+            if (placed) update.setAttribute('data-htmxo-update-places', JSON.stringify(Object.fromEntries(
+                Object.entries(JSON.parse(placed)).map(([id, around]) => [rename(id), around.map(rename)]))));
         }
     }
     const table = tbody.closest('table');
@@ -20153,6 +20177,24 @@ function htmxoRegroupConfig(wrapper) {
 }
 // `_md_safe_key` and `_md_json_list`, as the server writes them.
 function htmxoSafeKey(key) { return String(key).replace(/[^A-Za-z0-9_\-]/gu, '--'); }
+// A group row's id holds the name of its table (`data-htmxo-group-scope`,
+// see `_grouped_master_detail_table`). Give `rows`, rendered under the name
+// `from`, the name `to` of the table they join: their group rows' ids and
+// what names them (a row's `data-htmxo-parent`, a toggle's `aria-controls`).
+// Leaf ids (`row-group--<path>--<key>`) hold the caller's key and stay.
+// Returns the renaming of an id.
+function htmxoRescope(rows, from, to) {
+    if (!from || !to || from === to) return id => id;
+    const a = 'row-' + htmxoSafeKey(from + 'group:'), b = 'row-' + htmxoSafeKey(to + 'group:');
+    const rename = id => id.startsWith(a) ? b + id.slice(a.length) : id;
+    rows.forEach(r => {
+        r.id = rename(r.id);
+        if (r.dataset.htmxoParent) r.dataset.htmxoParent = rename(r.dataset.htmxoParent);
+        r.querySelectorAll('[data-htmxo-tree-toggle][aria-controls]').forEach(t => t.setAttribute('aria-controls',
+            t.getAttribute('aria-controls').split(' ').map(rename).join(' ')));
+    });
+    return rename;
+}
 function htmxoJsonString(s) {
     let out = '"';
     for (const c of String(s))
@@ -20320,7 +20362,7 @@ function htmxoRegroup(wrapper, levels) {
     };
     const group = (path, list, parent, level) => {
         const row = template.content.querySelector('tr').cloneNode(true), name = path[path.length - 1];
-        const gid = 'group:' + path.join('/'), id = 'row-' + htmxoSafeKey(gid), children = [];
+        const gid = 'group:' + path.join('/'), id = 'row-' + htmxoSafeKey(wrapper.dataset.htmxoGroupScope + gid), children = [];
         out.push(row);
         if (path.length < levels.length) {
             groupsAt(list, path.length).forEach(([k, ms]) => children.push(group([...path, k], ms, id, level + 1)));
@@ -22784,6 +22826,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   Leaves keep their own selection key in every group,
   so selecting one selects all its copies, and the selection survives
   regrouping; selectable group rows submit their key under `<selectable>_group`.
+  A group row's id carries the table's name (`row-<id>--group--<path>`; without
+  an `id`, a name from the leaves' keys), so two regroupable tables on one page
+  whose groups share a key keep their ids apart.
   An `initially_open` predicate is called with leaves only; each group holding
   a leaf it opens, at every level, renders open (and its rows eagerly, even
   with `group_rows_url`), so that leaf and its detail show on first paint. With
@@ -22996,6 +23041,9 @@ function master_detail_table(headers, items;
     # Refused: a link key with no link group would highlight nothing.
     isnothing(link) && !isnothing(link_key) && throw(ArgumentError(
         "master_detail_table: `link_key(item)` keys the rows of the link group `link`; give `link` too"))
+    # `id=nothing` is no id: no element is named after it, and the names a
+    # table without an id makes for itself are not overridden by it.
+    get(kwargs, :id, missing) === nothing && (kwargs = pairs(Base.structdiff(values(kwargs), NamedTuple{(:id,)})))
     if !isnothing(groupings)
         # A `name => :children` grouping regroups the leaves of the tree
         # `children` builds: the other groupings list each leaf once.
@@ -24035,7 +24083,18 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     browser = isnothing(group_rows_url)
     serve = !isnothing(group_by_url) && !browser
     refresh = !isnothing(group_by_url) && browser && !isnothing(group_master)
-    table_id = string(get(kwargs, :id, "htmxo-grouped-" * string(hash(names); base=36)))
+    # The table's name. A group row has no key of the caller's, so its row
+    # key (and so its id, `row-<name>--group--<path>`) and the pills' ids
+    # carry this name: two tables on one page whose groups share a key name
+    # their rows apart. It is the table's `id`; without one, it comes from
+    # the leaves' keys, which are unique on the page. A row update that adds
+    # or removes leaves renders under another such name, so the rows of an
+    # update or of a lazy group carry the name they were rendered under
+    # (`data-htmxo-group-scope`), and the runtime gives them the name of the
+    # table they arrive in (`htmxoRescope`).
+    table_id = string(something(get(kwargs, :id, nothing),
+        "htmxo-grouped-" * string(hash([_md_safe_key(key(item)) for item in items]); base=36)))
+    row_scope = table_id * ":"
     # The Group by control, pills that turn levels on and off and reorder
     # them, joins the tree controls; with a bulk form the grouping is also
     # submitted there, so a group selection arrives with its grouping.
@@ -24050,12 +24109,14 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     _open_detail = initially_open_detail isa Bool ? (_ -> initially_open_detail) : initially_open_detail
     # A group's key names it in callbacks, selections and requests; its
-    # row key (and so its row id) joins its level keys. A leaf's row key
-    # names the group it is listed under; the flat view lists each leaf once,
-    # under its own key.
+    # row key (and so its row id) joins its level keys under the table's
+    # name (`grow`). A leaf's row key names the group it is listed under
+    # (`gid`, the caller's key keeps it unique); the flat view lists each
+    # leaf once, under its own key.
     gkey(path) = _md_json_list(path)
     gpath(k) = group_path(string(k))
     gid(path) = "group:" * join(path, "/")
+    grow(path) = row_scope * gid(path)
     leaf_row_key(x) = isempty(x.group) ? string(key(x.item)) : x.group * "/" * string(key(x.item))
     # What the browser regroups a leaf by: its keys under every grouping, its
     # place among `items` (unranked groups keep first-appearance order) and its
@@ -24141,7 +24202,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     render!(x::_MDGroupLeaf) = string(key(x.item)) in leaf_set && push!(rendered, leaf_row_key(x))
     function render!(g::_MDGroup)
         keep(g) || return
-        push!(rendered, gid(g.path))
+        push!(rendered, grow(g.path))
         subs, direct = contents(g)
         foreach(render!, subs)
         append!(rendered, [gid(g.path) * "/" * string(key(m)) for m in direct if shown_leaf(g, m)])
@@ -24210,7 +24271,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             something(link_key, x -> something(outline.leaf(x), string(outline.key(x)))),
         _max_level = deepest, _rows_only = rows_only, _toolbar = toolbar, texts, kwargs...)
     tree(roots, children_of, group_row; rows_only=false) = master_detail_table(headers, roots;
-        key = x -> x isa _MDGroup ? gid(x.path) : leaf_row_key(x),
+        key = x -> x isa _MDGroup ? grow(x.path) : leaf_row_key(x),
         master = x -> x isa _MDGroup ? group_row(x.key, x.members) : master(x.item),
         children = children_of,
         detail = isnothing(detail) ? nothing : (x -> x isa _MDGroup ? nothing : detail(x.item)),
@@ -24231,7 +24292,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
         _sort_item = x -> x isa _MDGroup ? nothing : x.item,
-        _detail_key = x -> x isa _MDGroup ? gid(x.path) : string(key(x.item)),
+        _detail_key = x -> x isa _MDGroup ? grow(x.path) : string(key(x.item)),
         update_rows = update ? rendered : nothing,
         # A leaf is linked by its `link_key` (default: its own key), under
         # whichever group it is listed; a group row has none.
@@ -24239,17 +24300,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
-            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
-            order=browser ? order_json : nothing, group_masters))
+            groups=unique!(["row-" * _md_safe_key(grow(p)) for p in scope]),
+            order=browser ? order_json : nothing, group_masters, group_scope=row_scope))
     built = tree_active ? outline_rows(false) : tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
         end, gmaster)
     # The lazy-load response: the target group's rows (the rows of its
     # path and its own row dropped: each is one <tr>).
-    isnothing(target) || return h.tbody(; data_htmxo_group_rows=string(group_rows))(built[length(target)+1:end]...)
+    isnothing(target) || return h.tbody(; data_htmxo_group_rows=string(group_rows),
+        data_htmxo_group_scope=row_scope)(built[length(target)+1:end]...)
     update && return built
-    grouping = (; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values))
+    grouping = (; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values),
+        data_htmxo_group_scope=row_scope)
     browser || return h.div(; grouping...)(built)
     # The browser builds each group row from this one, rendered like the
     # rest, keeps the leaves this grouping leaves out (no key at its first
@@ -24361,11 +24424,13 @@ end
 # `_md_record_places!`) says where its rows go; `order`, the `group_order`
 # lists the table's browser regrouping goes by from now on. `group_masters`
 # marks the group rows of a browser regroup, which the runtime drops once the
-# reader has regrouped again.
+# reader has regrouped again. `group_scope`, the name the group rows were
+# rendered under, which the runtime swaps for the table's own.
 function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(),
-                        order=nothing, group_masters::Bool=false)
+                        order=nothing, group_masters::Bool=false, group_scope=nothing)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
+    isnothing(group_scope) || push!(attrs, :data_htmxo_group_scope => group_scope)
     isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
     group_masters && push!(attrs, :data_htmxo_group_masters => "")
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
