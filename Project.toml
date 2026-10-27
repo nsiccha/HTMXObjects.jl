@@ -1,7 +1,7 @@
 name = "HTMXObjects"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.1.0"
+version = "0.1.1"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
@@ -51,7 +51,7 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
-rev = "de253533c2e6d4884815100988630746c6801017"
+rev = "98344e0c5dc6c8bdf868d31b0fbe4bc2a14c8679"
 
 [targets]
 test = ["Artifacts", "Logging", "PrecompileTools", "TOML", "Test", "TestItemRunner", "Treebars"]

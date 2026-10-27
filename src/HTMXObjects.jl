@@ -6934,12 +6934,15 @@ can run inside a serving app (it renders in process with
   [`export_audience`](@ref)`(__req__)`.
 
 `.nojekyll` is written too (GitHub Pages otherwise drops `_`-prefixed files
-such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get`,
-`hx-push-url`/`hx-replace-url` and Vega `"url"` in the written HTML is checked
-to name a file of the bundle, which also catches an address a route wrote into
-raw text the walk never sees. An answer with a status other than 200 or an
-`X-HTMXO-Error-Id` header (a failed fragment answers 200 under htmx) is not
-written; the crawl carries on, so one run finds every failure, and then throws
+such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get` and
+`hx-push-url`/`hx-replace-url` of an element in the written HTML, and every
+Vega `"url"` in its scripts, is checked to name a file of the bundle, which
+also catches an address a route wrote into raw markup the walk never sees. The
+text of a `<style>` or `<script>` and an HTML comment are not markup, so an
+`href="…"` there (a CSS comment of the inline runtime) is not checked. An
+answer with a status other than 200 or an `X-HTMXO-Error-Id` header (a failed
+fragment answers 200 under htmx) is not written; the crawl carries on, so one
+run finds every failure, and then throws
 [`StaticSiteIncomplete`](@ref) listing each failed address and each unresolved
 reference. Otherwise it returns the number of files and bytes written.
 
@@ -7098,8 +7101,37 @@ end
 _body_contains(body::AbstractString, s::AbstractString) = occursin(s, body)
 _body_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(findfirst(codeunits(s), body))
 
-const _SITE_REFERENCE =
-    r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\"|\"url\":\"([^\"]*)\""
+const _SITE_ATTRIBUTE = r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\""
+const _SITE_SCRIPT_URL = r"\"url\":\"([^\"]*)\""
+# An HTML comment, or a `<script>`/`<style>` element: its tag's attributes,
+# then its text, which ends at the first closing tag (as a browser reads it).
+const _SITE_RAW_TEXT = r"<!--.*?-->|<(script|style)\b((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>(.*?)</\1\b[^>]*>"si
+
+# The addresses an HTML file names, in order: each `href`, `src`, `hx-get`,
+# `hx-push-url` and `hx-replace-url` attribute of an element (its character
+# references decoded), and each `"url"` in a script (a Vega spec's
+# `data.url`). The text of a `<script>` or `<style>` and an HTML comment hold
+# no elements, so an `href="…"` written there (a comment of the inline
+# runtime's styles) is not one.
+function _site_references(html::AbstractString)
+    references = String[]
+    markup(text) = for m in eachmatch(_SITE_ATTRIBUTE, text)
+        push!(references, replace(m[1], "&quot;" => "\"", "&#39;" => "'",
+                                  "&lt;" => "<", "&gt;" => ">", "&amp;" => "&"))
+    end
+    at = 1
+    for m in eachmatch(_SITE_RAW_TEXT, html)
+        markup(SubString(html, at, prevind(html, m.offset)))
+        if !isnothing(m[1])
+            markup(m[2])
+            lowercase(m[1]) == "script" &&
+                foreach(u -> push!(references, u[1]), eachmatch(_SITE_SCRIPT_URL, m[3]))
+        end
+        at = m.offset + ncodeunits(m.match)
+    end
+    markup(SubString(html, at))
+    references
+end
 
 # Every reference in the bundle's HTML that names no file of it, as
 # `file => address`: a rooted address (it escaped the export, and would point
@@ -7110,10 +7142,7 @@ function _site_unresolved(root::AbstractString, failed::Set{String})
     for (dirpath, _, files) in walkdir(root), f in sort(files)
         endswith(f, ".html") || continue
         file = joinpath(dirpath, f)
-        html = read(file, String)
-        for m in eachmatch(_SITE_REFERENCE, html)
-            address = replace(something(m[1], m[2]), "&quot;" => "\"", "&#39;" => "'",
-                              "&lt;" => "<", "&gt;" => ">", "&amp;" => "&")
+        for address in _site_references(read(file, String))
             (_site_internal(address) && address != "true" && address != "false") || continue
             path = first(split(address, r"[?#]"; limit=2))
             ok = startswith(path, '/') ? path in failed :
@@ -18891,8 +18920,9 @@ function htmxoFilterTable(target) {
         }
     });
     // The count is of the table's items, not its rows (`_table_item_counts`
-    // on the server): a group row is none, a leaf listed under several groups
-    // is one, and an item is shown when the search and the predicates keep
+    // on the server): a group row, or a tree grouping's row that is no leaf,
+    // is none, a leaf listed under several groups (or branches) is one, and
+    // an item is shown when the search and the predicates keep
     // it, whether or not its group or branch is open. The leaves of a group
     // that has not loaded yet count once each, shown when the group's row is
     // kept and the 'search' predicate keeps their own text.
@@ -18903,6 +18933,7 @@ function htmxoFilterTable(target) {
     };
     const search = filters[0][1];
     rows.forEach(row => {
+        if ('htmxoBranch' in row.dataset) return;
         if (!('htmxoGroup' in row.dataset)) {
             tally('htmxoLeaf' in row.dataset ? 'leaf:' + row.dataset.htmxoLeaf : row, visible.has(row), rejectedBy.get(row));
             return;
@@ -19892,7 +19923,12 @@ function htmxoGroupPending(pills) {
     return names.length ? names : [pills.dataset.htmxoGroupFlat ?? ''];
 }
 function htmxoGroupRequest(pills, names, focusId) {
-    if (names.join('\u0000') === htmxoGroupLevels(pills).join('\u0000')) return;
+    // The tree grouping (`name => :children`) stands alone: turning it on
+    // turns the other levels off, and a level turned on replaces it.
+    const tree = pills.dataset.htmxoGroupTree, current = htmxoGroupLevels(pills);
+    if (tree !== undefined && names.length > 1 && names.includes(tree))
+        names = current.includes(tree) ? names.filter(n => n !== tree) : [tree];
+    if (names.join('\u0000') === current.join('\u0000')) return;
     const wrapper = pills.closest('[data-htmxo-grouped]');
     pills.htmxoPending = names;
     // A server render that replaces the pills hands the focus back too.
@@ -20088,9 +20124,33 @@ function htmxoRegroup(wrapper, levels) {
     const cfg = htmxoRegroupConfig(wrapper);
     const table = wrapper.querySelector('table'), body = table.tBodies[0];
     const store = wrapper.querySelector('template[data-htmxo-unplaced]');
+    // A tree grouping (`name => :children`) shows the app's tree, which waits
+    // in `template[data-htmxo-tree]` while another grouping shows and comes
+    // back as the reader left it. The other groupings are built from copies
+    // of each leaf's first row in the tree, the row the server lists.
+    const stash = cfg.tree != null ? wrapper.querySelector('template[data-htmxo-tree]') : null;
+    if (stash && levels.includes(cfg.tree)) {
+        if (store) store.content.replaceChildren();
+        body.replaceChildren(stash.content);
+        if (window.htmx) Array.from(body.rows).forEach(r => htmx.process(r));
+        htmxoRegrouped(wrapper, table, levels, cfg);
+        return;
+    }
+    let source = Array.from(body.rows);
+    const fresh = new Set();
+    if (stash && JSON.parse(wrapper.dataset.htmxoGrouped).includes(cfg.tree)) {
+        const firsts = htmxoTableCompanions(source), seen = new Set(), copies = [];
+        source.forEach(r => {
+            if (!('htmxoLeaf' in r.dataset) || seen.has(r.dataset.htmxoLeaf)) return;
+            seen.add(r.dataset.htmxoLeaf);
+            [r, firsts.get(r.id)].forEach(x => { if (x) { const copy = x.cloneNode(true); copies.push(copy); fresh.add(copy); } });
+        });
+        source.forEach(r => stash.content.append(r));
+        source = copies;
+    }
     const stored = store ? Array.from(store.content.children) : [];
-    const rows = [...Array.from(body.rows), ...stored], companions = htmxoTableCompanions(rows);
-    const fresh = new Set(stored);
+    stored.forEach(r => fresh.add(r));
+    const rows = [...source, ...stored], companions = htmxoTableCompanions(rows);
     // One entry per leaf, in the order of the table's items. A leaf's own
     // rows are its copy with the detail open, else the first; they move
     // with what the reader loaded into them, and further copies clone them.
@@ -20151,11 +20211,15 @@ function htmxoRegroup(wrapper, levels) {
         row.id = id;
         row.dataset.htmxoParent = parent;
         row.setAttribute('aria-level', String(level));
-        row.dataset.htmxoTreeOpen = open;
-        row.setAttribute('aria-expanded', open);
-        const toggle = row.querySelector('[data-htmxo-tree-toggle]');
-        toggle.setAttribute('aria-controls', children.join(' '));
-        toggle.setAttribute('aria-expanded', open);
+        // A table whose branches are not collapsible keeps its groups open,
+        // with no toggle (`branches_collapsible=false`).
+        if ('htmxoTreeOpen' in row.dataset) {
+            row.dataset.htmxoTreeOpen = open;
+            row.setAttribute('aria-expanded', open);
+            const toggle = row.querySelector('[data-htmxo-tree-toggle]');
+            toggle.setAttribute('aria-controls', children.join(' '));
+            toggle.setAttribute('aria-expanded', open);
+        }
         if ('htmxoSelectKey' in row.dataset) {
             row.dataset.htmxoSelectKey = gid;
             row.dataset.htmxoSelectValue = htmxoJsonList(path);
@@ -20186,6 +20250,11 @@ function htmxoRegroup(wrapper, levels) {
     body.replaceChildren(placedRows);
     if (store) store.content.replaceChildren(rest);
     if (window.htmx) out.forEach(r => { if (fresh.has(r)) htmx.process(r); });
+    htmxoRegrouped(wrapper, table, levels, cfg);
+}
+// After a regroup: the wrapper names the grouping, the pills show it, and
+// the sort, open branches, search and selection apply to the new rows.
+function htmxoRegrouped(wrapper, table, levels, cfg) {
     wrapper.dataset.htmxoGrouped = htmxoJsonList(levels);
     wrapper.dataset.htmxoGroupBy = htmxoJsonList(levels.length ? levels : [cfg.flat ?? '']);
     const pills = wrapper.querySelector('.htmxo-group-pills');
@@ -20203,6 +20272,10 @@ function htmxoRegroup(wrapper, levels) {
 function htmxoGroupPillsSync(pills, levels) {
     const cfg = htmxoRegroupConfig(pills.closest('[data-htmxo-grouped]'));
     const n = levels.length, keepLast = !('htmxoGroupFlat' in pills.dataset) && n === 1;
+    // An inactive pill that replaces the levels instead of adding one: the
+    // tree grouping's, and every pill while the tree shows.
+    const tree = pills.dataset.htmxoGroupTree;
+    const replaces = name => n === 0 || (tree !== undefined && (name === tree || levels.includes(tree)));
     const byName = new Map(Array.from(pills.querySelectorAll(':scope > .htmxo-group-pill'), p => [p.dataset.htmxoGroupName, p]));
     const end = pills.querySelector(':scope > input[type="hidden"]');
     [...levels, ...cfg.names.filter(x => !levels.includes(x))].forEach(name => {
@@ -20214,7 +20287,7 @@ function htmxoGroupPillsSync(pills, levels) {
         button.setAttribute('aria-pressed', String(level > 0));
         if (!level) {
             delete pill.dataset.htmxoGroupLevel;
-            button.title = htmxoText(pills, n === 0 ? 'group_add' : 'group_add_inner', {name});
+            button.title = htmxoText(pills, replaces(name) ? 'group_add' : 'group_add_inner', {name});
             button.removeAttribute('onkeydown');
         } else {
             pill.dataset.htmxoGroupLevel = String(level);
@@ -21539,7 +21612,8 @@ _is_master_row(row) = !(row isa Node && startswith(string(get(HTMX.attrs(row), :
 _row_hidden(row) = row isa Node && get(HTMX.attrs(row), :hidden, false) ∉ (false, nothing)
 
 # The search count's (shown, total): of the table's items, not its rows, as
-# `htmxoFilterTable` counts them. A group row (`data-htmxo-group`) is none, a
+# `htmxoFilterTable` counts them. A group row (`data-htmxo-group`), or a row of
+# a tree grouping that is no leaf (`data-htmxo-branch`), is none, a
 # leaf listed under several groups (`data-htmxo-leaf`) is one, and a row hidden
 # only because its group or branch is collapsed (it has a parent) is shown.
 # `pending` are the keys of leaves whose group has not loaded yet: each counts
@@ -21549,7 +21623,7 @@ function _table_item_counts(rows, pending)
     for (i, row) in enumerate(rows)
         _is_master_row(row) || continue
         attrs = row isa Node ? HTMX.attrs(row) : Dict{Symbol,Any}()
-        haskey(attrs, Symbol("data-htmxo-group")) && continue
+        (haskey(attrs, Symbol("data-htmxo-group")) || haskey(attrs, Symbol("data-htmxo-branch"))) && continue
         leaf = get(attrs, Symbol("data-htmxo-leaf"), nothing)
         item = isnothing(leaf) ? i : "leaf:" * string(leaf)
         shown[item] = get(shown, item, false) || !_row_hidden(row) ||
@@ -22239,6 +22313,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   rows and a leaf's detail; a branch's own detail opens on first paint only
   with `initially_open_detail`. A group with neither a detail body nor URL has
   no companion or detail request.
+  To offer the flat list and other groupings beside the tree, add it to
+  `groupings` as `name => :children` (*Tree grouping* below).
 - `branches_collapsible`: with `children`, default `true`. Set `false` to
   keep every branch expanded without disclosure controls. This overrides
   `initially_open` for branch visibility only: `initially_open` then opens a
@@ -22312,7 +22388,8 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `groupings`: a regroupable table over the same leaf rows (`items`), as a
   vector of `name => grouping` pairs where `grouping(item)` returns a group key
   or several (the leaf is then listed under each) and `nothing` means the flat
-  view. Replaces `children`. Each group is a collapsible branch, in
+  view. Replaces `children`, unless one grouping is `name => :children` (see
+  *Tree grouping* below). Each group is a collapsible branch, in
   first-appearance order unless `group_order` orders the grouping's groups.
   Leaves keep their own selection key in every group,
   so selecting one selects all its copies, and the selection survives
@@ -22357,6 +22434,28 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   listed twice or an order that is neither a list nor a function throws an
   `ArgumentError`. A column sort the reader picks still sorts the group rows
   by that column.
+- *Tree grouping*: one grouping may be `name => :children`, which needs
+  `children`. With it active the table is the tree `children` builds over the
+  roots (`items`), rendered exactly as without `groupings` (`initially_open`
+  and `initially_open_detail` see the tree's rows); the other
+  groupings, and the flat view, list its leaves, each once, regrouped in the
+  browser (live and in a [`record!`](@ref) bundle). Its pill stands alone:
+  turning it on turns the other levels off, another pill replaces it, and
+  turning it on again brings the tree back as the reader left it (open
+  branches and details). `group_by` may open on it or on another grouping.
+  A leaf's rows under several branches share its `leaf_key`: they select,
+  hover-link and count as one item (the count counts leaves, not branches),
+  and the other groupings list its first row in the tree, with that row's
+  cells, detail and grouping keys. `group_order` cannot name it (the tree
+  keeps its own order); `group_master`, `group_by_url`, `group_rows_url`,
+  `group_rows`, `group_masters`, `update_rows`, `update_groups` and nesting a
+  level in the tree are not built with it yet and throw an `ArgumentError`.
+- `leaf_key(item)`: with a tree grouping, a row's leaf key, or `nothing` for
+  a row that is no leaf (default: its `key` for a row without children,
+  `nothing` for the others). A row with children cannot be a leaf.
+- `leaf_order(item)`: with a tree grouping, the sort key that orders the
+  leaves outside the tree (the flat view, and the leaves within each group);
+  default: the tree's order of their first rows.
 - `group_master(key, members)`: the group row's cells instead of the default
   (the group's own key in bold, the member count and the `group_summary`
   cells); `members` are all the leaves under the group. Controls in it keep
@@ -22488,6 +22587,8 @@ function master_detail_table(headers, items;
                              group_summary=nothing,
                              group_order=nothing,
                              group_masters::Bool=false,
+                             leaf_key=nothing,
+                             leaf_order=nothing,
                              update_rows=nothing,
                              update_groups=nothing,
                              link=nothing,
@@ -22505,14 +22606,20 @@ function master_detail_table(headers, items;
     # Refused: a link key with no link group would highlight nothing.
     isnothing(link) && !isnothing(link_key) && throw(ArgumentError(
         "master_detail_table: `link_key(item)` keys the rows of the link group `link`; give `link` too"))
-    isnothing(groupings) || return _grouped_master_detail_table(headers, items;
-        key, master, detail, detail_url, master_attrs, master_class, detail_class,
-        initially_open, initially_open_detail, children, branches_collapsible, detail_toggle, searchable,
-        search_text, selectable, select_form, select_value, select_submit,
-        expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-        group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
-    !group_masters && all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/group_masters/update_groups require `groupings`"))
+    if !isnothing(groupings)
+        # A `name => :children` grouping regroups the leaves of the tree
+        # `children` builds: the other groupings list each leaf once.
+        tree = _md_tree_grouping(groupings, items, key, children, leaf_key, leaf_order)
+        return _grouped_master_detail_table(headers, isnothing(tree) ? items : tree.leaves;
+            key = isnothing(tree) ? key : tree.leaf, master, detail, detail_url, master_attrs, master_class, detail_class,
+            initially_open, initially_open_detail, outline=tree, branches_collapsible, detail_toggle, searchable,
+            search_text, selectable, select_form, select_value, select_submit,
+            expand_controls, search_query, groupings, group_by, group_master, group_by_url,
+            group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+    end
+    !group_masters && all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups,
+                    leaf_key, leaf_order)) || throw(ArgumentError(
+        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/group_masters/update_groups/leaf_key/leaf_order require `groupings`"))
     detail_toggle in (:button, :label) || throw(ArgumentError(
         "master_detail_table: detail_toggle must be :button or :label"))
     # Refused: without collapsible branches there is nothing to expand.
@@ -22811,6 +22918,67 @@ struct _MDLazyRows
     leaves::Vector{String}  # the keys of the leaves it loads
 end
 
+# A `name => :children` grouping: the tree `children` builds over the roots,
+# shown as the app renders it, and its leaves, which the other groupings
+# list. A leaf is a row `leaf(item)` names (a String; `nothing` for any other
+# row); the rows a leaf has under several branches share its name, and the
+# other groupings list its first row (`first`), in leaf order (`leaves`).
+struct _MDTree
+    name::String
+    roots::Vector{Any}
+    key::Any        # the tree rows' `key`
+    children::Any
+    leaf::Any
+    first::Dict{String,Any}
+    leaves::Vector{Any}
+    depth::Int
+end
+
+# The tree grouping among `groupings`, or `nothing` when there is none.
+function _md_tree_grouping(groupings, items, key, children, leaf_key, leaf_order)
+    at = [i for (i, g) in enumerate(groupings) if last(g) isa Symbol]
+    for i in at
+        last(groupings[i]) === :children || throw(ArgumentError(string("master_detail_table: grouping ",
+            repr(string(first(groupings[i]))), " => ", repr(last(groupings[i])), " is no grouping: a grouping is a function, ",
+            "`nothing` (the flat view) or `:children` (the tree `children` builds)")))
+    end
+    if isempty(at)
+        isnothing(children) || throw(ArgumentError(string("master_detail_table: `groupings` builds the ",
+            "hierarchy itself; drop `children`, or offer its tree as one of the groupings (\"Outline\" => :children)")))
+        all(isnothing, (leaf_key, leaf_order)) || throw(ArgumentError(string("master_detail_table: leaf_key/leaf_order ",
+            "name the leaves of the tree a `name => :children` grouping shows; add one to `groupings`")))
+        return nothing
+    end
+    name = string(first(groupings[first(at)]))
+    # Refused: two groupings of one tree would be the same view twice.
+    length(at) == 1 || throw(ArgumentError(string("master_detail_table: groupings ",
+        join((repr(string(first(groupings[i]))) for i in at), " and "), " both show the tree `children` builds")))
+    isnothing(children) && throw(ArgumentError(string("master_detail_table: grouping ", repr(name),
+        " => :children shows the tree `children` builds; give `children`")))
+    leaf = isnothing(leaf_key) ? (item -> isempty(children(item)) ? string(key(item)) : nothing) :
+        (item -> let k = leaf_key(item); isnothing(k) ? nothing : string(k) end)
+    first_rows = Dict{String,Any}()
+    order = String[]
+    depth = Ref(0)
+    function walk(item, level)
+        depth[] = max(depth[], level)
+        below = collect(children(item))
+        k = leaf(item)
+        if !isnothing(k)
+            # Refused: the other groupings list a leaf alone, without the rows below it.
+            isempty(below) || throw(ArgumentError(string("master_detail_table: leaf_key names ", repr(k),
+                " for the row ", repr(key(item)), ", which has children; a leaf is a row without children")))
+            haskey(first_rows, k) || (first_rows[k] = item; push!(order, k))
+        end
+        foreach(c -> walk(c, level + 1), below)
+    end
+    roots = collect(Any, items)
+    foreach(r -> walk(r, 1), roots)
+    leaves = Any[first_rows[k] for k in order]
+    isnothing(leaf_order) || sort!(leaves; by=leaf_order, alg=MergeSort)
+    _MDTree(name, roots, key, children, leaf, first_rows, leaves, depth[])
+end
+
 _md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = [string(k) for k in keys if !isnothing(k)]
 _md_group_keys(::Nothing) = String[]
 _md_group_keys(k) = [string(k)]
@@ -22841,9 +23009,12 @@ function _md_group_ranks(items, names, by_name, group_order)
         name, order = string(first(entry)), last(entry)
         haskey(by_name, name) || throw(ArgumentError(string("master_detail_table: group_order names no grouping ",
             repr(name), "; groupings are ", join(repr.(names), ", "))))
-        # Refused: the flat view has no groups to order.
+        # Refused: the flat view has no groups to order, and a tree's
+        # branches come in the tree's own order.
         isnothing(by_name[name]) && throw(ArgumentError(string(
             "master_detail_table: group_order names the flat grouping ", repr(name))))
+        by_name[name] === :children && throw(ArgumentError(string(
+            "master_detail_table: group_order names the tree grouping ", repr(name), ", whose branches keep the tree's order")))
         any(p -> first(p) == name, out) && throw(ArgumentError(
             "master_detail_table: group_order names $(repr(name)) twice"))
         present = unique(k for item in items for k in _md_group_keys(by_name[name](item)))
@@ -23359,11 +23530,19 @@ function _md_sort_values!(cells, sort_columns, item, headers)
 end
 
 function _grouped_master_detail_table(headers, items; key, master, detail, detail_url,
-        master_attrs, initially_open, initially_open_detail, children, groupings, group_by, group_master,
+        master_attrs, initially_open, initially_open_detail, outline, groupings, group_by, group_master,
         group_by_url, group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, selectable,
         select_form, select_value, select_submit, search_text, link, link_key, texts, kwargs...)
-    isnothing(children) || throw(ArgumentError(
-        "master_detail_table: `groupings` builds the hierarchy itself; drop `children`"))
+    # A tree grouping regroups in the browser alone, and its rows come from
+    # the app's tree; what would ask the server for a group's rows, or update
+    # rows in place, is not built for it yet.
+    if !isnothing(outline)
+        hooks = [string(n) for (n, v) in (:group_master => group_master, :group_by_url => group_by_url,
+            :group_rows_url => group_rows_url, :group_rows => group_rows, :group_masters => (group_masters ? true : nothing),
+            :update_rows => update_rows, :update_groups => update_groups) if !isnothing(v)]
+        isempty(hooks) || throw(ArgumentError(string("master_detail_table: ", join(hooks, ", "),
+            " together with the tree grouping ", repr(outline.name), " (=> :children) is not built yet")))
+    end
     names = String[string(first(g)) for g in groupings]
     isempty(names) && throw(ArgumentError("master_detail_table: `groupings` is empty"))
     allunique(names) || throw(ArgumentError("master_detail_table: grouping names must be unique"))
@@ -23398,15 +23577,21 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     length(levels) == length(requested) || length(requested) == 1 || throw(ArgumentError(
         "master_detail_table: group_by lists the flat view among several levels: $(repr(requested))"))
     allunique(levels) || throw(ArgumentError("master_detail_table: group_by lists a grouping twice: $(repr(levels))"))
-    nlevels = length(levels)
-    fns = [by_name[n] for n in levels]
+    # The tree grouping shows the tree; no level nests in it yet.
+    tree_active = !isnothing(outline) && outline.name in levels
+    tree_active && length(levels) > 1 && throw(ArgumentError(string("master_detail_table: group_by ",
+        repr(levels), " nests levels in the tree grouping ", repr(outline.name), ", which is not built yet; it stands alone")))
+    # The levels the groups are built from: none while the tree shows.
+    glevels = tree_active ? String[] : levels
+    nlevels = length(glevels)
+    fns = [by_name[n] for n in glevels]
     # `group_order`: each ordered grouping's keys, ranked over all `items`.
     # The server's groups follow the ranks at every level; the browser
     # regroups by the same lists (`htmxoRegroup`), and a row update brings
     # them again, ranked with its change.
     ranked = _md_group_ranks(items, names, by_name, group_order)
     ranks = Dict(n => Dict(k => i for (i, k) in enumerate(ks)) for (n, ks) in ranked)
-    level_ranks = [get(ranks, n, nothing) for n in levels]
+    level_ranks = [get(ranks, n, nothing) for n in glevels]
     order_json = isempty(ranked) ? nothing :
         "{" * join((_md_json_string(n) * ":" * _md_json_list(ks) for (n, ks) in ranked), ",") * "}"
     # What the rows are grouped by (a row update must match it), and the
@@ -23455,7 +23640,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # submitted there, so a group selection arrives with its grouping.
     control = isnothing(group_rows) && !update && (browser ? length(names) > 1 : !isnothing(group_by_url))
     toolbar = !control ? () : (_md_group_pills(names, by_name, levels, flat_name, group_by_values,
-        serve ? group_by_url : nothing, select_form, table_id, texts),)
+        serve ? group_by_url : nothing, select_form, table_id, texts, isnothing(outline) ? nothing : outline.name),)
     toolbar = !(control && refresh) ? toolbar : (toolbar...,
         h.span(; hidden=true, data_htmxo_group_refresh="", hx_get=string(group_by_url), hx_trigger="htmxo-regroup",
             hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML", hx_sync="this:replace",
@@ -23475,7 +23660,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # place among `items` (unranked groups keep first-appearance order) and its
     # `group_summary` inputs, on every row of the leaf, so a leaf's rows are
     # the same whether its group loads lazily or not.
-    grouping_names = String[n for n in names if !isnothing(by_name[n])]
+    grouping_names = String[n for n in names if !isnothing(by_name[n]) && by_name[n] !== :children]
     place = Dict(string(key(item)) => i for (i, item) in enumerate(items))
     leaf_inputs = Dict{String,Vector{Any}}()
     inputs(item) = get!(() -> Any[_md_summary_input(s, item) for (_, s) in summaries], leaf_inputs, string(key(item)))
@@ -23602,7 +23787,27 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         path
     end
     # Indentation for every level the browser can regroup to.
-    deepest = !browser ? 0 : length(grouping_names) + 1
+    deepest = !browser ? 0 : max(length(grouping_names) + 1, isnothing(outline) ? 0 : outline.depth)
+    # The tree grouping's rows: the app's tree, rendered as without
+    # `groupings`. A leaf's rows carry what the browser regroups it by and
+    # its selection key, from its first row (the one the other groupings
+    # list), so they select, link and count as one item; the other rows are
+    # no items, like group rows.
+    function outline_attrs(x)
+        k = outline.leaf(x)
+        isnothing(k) || return merge(_md_attr_union(leaf_select(outline.first[k]), _attrs(x)),
+            Dict{Symbol,Any}(:data_htmxo_leaf => k), leaf_data(outline.first[k]))
+        value = isnothing(selectable) || isnothing(select_value) ? (;) : (; data_htmxo_select_value=string(select_value(x)))
+        _md_attr_union((; data_htmxo_branch="", value...), _attrs(x))
+    end
+    outline_rows(rows_only) = master_detail_table(headers, outline.roots;
+        key = outline.key, master, children = outline.children, detail, detail_url,
+        master_attrs = outline_attrs, initially_open, initially_open_detail, search_text, selectable, select_form,
+        select_submit = isnothing(select_submit) ? nothing :
+            (x -> let k = outline.leaf(x); select_submit(isnothing(k) ? x : outline.first[k]) end),
+        link, link_key = isnothing(link) ? nothing :
+            something(link_key, x -> something(outline.leaf(x), string(outline.key(x)))),
+        _max_level = deepest, _rows_only = rows_only, _toolbar = toolbar, texts, kwargs...)
     tree(roots, children_of, group_row; rows_only=false) = master_detail_table(headers, roots;
         key = x -> x isa _MDGroup ? gid(x.path) : leaf_row_key(x),
         master = x -> x isa _MDGroup ? group_row(x.key, x.members) : master(x.item),
@@ -23635,7 +23840,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
             order=browser ? order_json : nothing, group_masters))
-    built = tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
+    built = tree_active ? outline_rows(false) : tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
         end, gmaster)
@@ -23656,12 +23861,17 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     unplaced = nlevels == 0 ? Any[] : Any[_MDGroupLeaf("", m) for m in items if isempty(_md_group_keys(fns[1](m)))]
     store = html_only(h.template(; data_htmxo_unplaced="")(
         (isempty(unplaced) ? () : tree(unplaced, _ -> (), gmaster; rows_only=true))...))
-    config = string("{\"names\":", _md_json_list(grouping_names),
+    # While another grouping shows, the tree grouping's rows wait here, and
+    # the browser puts them back when the reader picks the tree again.
+    stash = isnothing(outline) ? () : (html_only(h.template(; data_htmxo_tree="")(
+        (tree_active ? () : outline_rows(true))...)),)
+    config = string("{\"names\":", _md_json_list([n for n in names if !isnothing(by_name[n])]),
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
+        isnothing(outline) ? "" : ",\"tree\":" * _md_json_string(outline.name),
         ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
         ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",$(_summary_rounding_json(s.rounding))}" for (_, s) in summaries), ","), "]",
         isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
-    h.div(; grouping..., data_htmxo_regroup=config)(template..., store, built)
+    h.div(; grouping..., data_htmxo_regroup=config)(template..., store, stash..., built)
 end
 
 # The Group by control: one pill per grouping, the active ones first
@@ -23674,18 +23884,21 @@ end
 # (`htmxoGroupPending`). With a bulk form, hidden inputs submit the grouping
 # alongside the selection. Without a flat grouping there is no view without
 # levels to ask for (an empty `group_by` reaches a `Vector{String}` route as
-# no values at all), so the last level stays on.
-function _md_group_pills(names, by_name, levels, flat_name, values, url, form, id, texts::TableTexts)
+# no values at all), so the last level stays on. The tree grouping's pill
+# (`tree`) stands alone: it replaces the active levels, and a level turned on
+# replaces it (`htmxoGroupRequest`).
+function _md_group_pills(names, by_name, levels, flat_name, values, url, form, id, texts::TableTexts, tree=nothing)
     nactive = length(levels)
     keep_last = isnothing(flat_name) && nactive == 1
     order = [levels; [n for n in names if !isnothing(by_name[n]) && !(n in levels)]]
+    replaces = n -> nactive == 0 || !isnothing(tree) && (n == tree || tree in levels)
     function pill(n)
         level = findfirst(==(n), levels)
         safe = _md_safe_key(n)
         if isnothing(level)
             return h.span(; class="htmxo-group-pill", data_htmxo_group_name=n, draggable="true")(
                 h.button(n; type="button", id="$id-group-$safe", aria_pressed="false",
-                    title=_table_text(texts, nactive == 0 ? :group_add : :group_add_inner; name=n),
+                    title=_table_text(texts, replaces(n) ? :group_add : :group_add_inner; name=n),
                     onclick="htmxoGroupToggle(this)"))
         end
         move(glyph, by, edge, where) = h.button(glyph; type="button", id="$id-group-$safe-$where",
@@ -23707,6 +23920,7 @@ function _md_group_pills(names, by_name, levels, flat_name, values, url, form, i
                 hx_target="closest [data-htmxo-grouped]", hx_swap="outerHTML",
                 hx_vals="js:{group_by: htmxoGroupPending(this), q: htmxoGroupedQuery(this)}"))...,
             (isnothing(flat_name) ? (;) : (; data_htmxo_group_flat=flat_name))...,
+            (isnothing(tree) ? (;) : (; data_htmxo_group_tree=tree))...,
             ondragstart="htmxoGroupDrag(event)", ondragover="htmxoGroupDragOver(event)",
             ondragleave="htmxoGroupDragLeave(event)", ondrop="htmxoGroupDrop(event)",
             ondragend="htmxoGroupDragEnd(event)")(

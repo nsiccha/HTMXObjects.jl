@@ -9,7 +9,7 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
-        bundle_files, subdirectory_misses
+        InlineSiteApp, bundle_files, subdirectory_misses
 
     const KS = (3.0, 4.0)
     # The mount prefix the apps' links start from (they are mounted at the root).
@@ -49,8 +49,10 @@ using TestItemRunner
             h.div(; hx_get=base * "/broken_part", hx_trigger="load"),
             h.a("Nirgends"; href=base * "/broken_nowhere"),
             h.a("Gut"; href=base * "/broken_fine"),
-            # Markup the walk never sees keeps its live address.
-            Raw("<a href=\"/broken_raw\">raw</a>"))
+            # Markup the walk never sees keeps its live address, as does a
+            # script's Vega url not passed to static_url.
+            Raw("<a href=\"/broken_raw\">raw</a>"),
+            h.script(Raw("var spec = {\"data\":{\"url\":\"/broken_vega\"}};")))
         @get broken_part() = error("the part failed")
         @get broken_fine() = h.p("fine")
     end
@@ -60,6 +62,20 @@ using TestItemRunner
             pico_version=HTMXObjects._PICO_VERSION)
         @get index() = h.div(h.a("1"; href=base * "/coll/a_b"), h.a("2"; href=base * "/coll/a%20b"))
         @get coll(id::String) = h.p("coll $id")
+    end
+
+    # The default shell inlines the runtime, whose styles carry a CSS comment
+    # naming `href="…"` (snag `export-site-of-a-8d3b76a9`).
+    @htmx struct InlineSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div(
+            h.a("Bericht"; href=base * "/inline_bericht"),
+            Raw("<!-- <a href=\"/inline_nowhere\">alt</a> -->"),
+            h.script(Raw("var spec = {\"data\":{\"url\":" *
+                         repr(static_url(__req__, base * "/inline_raster")) * "}};")))
+        @get inline_bericht() = h.p("Bericht")
+        @direct @get inline_raster() = MIMEResponse("application/geo+json", "{\"type\":\"FeatureCollection\",\"features\":[]}")
     end
 
     const PLACED_CALLS = Ref(0)
@@ -79,18 +95,18 @@ using TestItemRunner
     bundle_files(dir) = sort!([replace(relpath(joinpath(d, f), dir), '\\' => '/')
                                for (d, _, fs) in walkdir(dir) for f in fs])
 
-    # Each reference in the bundle's HTML that a browser, with the bundle
-    # served from `/repo/`, would not find: resolved as the browser resolves it
-    # (a fragment's links against the page that loads it, a page in the root),
-    # then looked up as a static server does, after decoding.
+    # Each reference in the bundle's HTML (as export_site reads them) that a
+    # browser, with the bundle served from `/repo/`, would not find: resolved
+    # as the browser resolves it (a fragment's links against the page that
+    # loads it, a page in the root), then looked up as a static server does,
+    # after decoding.
     function subdirectory_misses(dir)
         misses = String[]
         for file in bundle_files(dir)
             endswith(file, ".html") || continue
             page = startswith(file, "hx/") ? "index.html" : file
             html = read(joinpath(dir, file), String)
-            for m in eachmatch(r"\b(?:href|src|hx-get|hx-push-url)=\"([^\"]*)\"|\"url\":\"([^\"]*)\"", html)
-                address = replace(something(m[1], m[2]), "&amp;" => "&")
+            for address in HTMXObjects._site_references(html)
                 (isempty(address) || startswith(address, '#') || startswith(address, "https:")) && continue
                 uri = HTTP.URIs.resolvereference(HTTP.URI("http://host/repo/" * page), address)
                 path = HTTP.URIs.unescapeuri(uri.path)
@@ -210,10 +226,32 @@ end
     # The crawl carried on: the good page is written.
     @test isfile(joinpath(dir, "broken_fine.html"))
     # An address the walk never saw is reported, the failed ones are not again.
-    @test err.unresolved == ["index.html" => "/broken_raw"]
+    @test err.unresolved == ["index.html" => "/broken_raw", "index.html" => "/broken_vega"]
     msg = sprint(showerror, err)
-    @test occursin("2 addresses failed and 1 references", msg)
+    @test occursin("2 addresses failed and 2 references", msg)
     @test occursin("failed: /broken_part", msg) && occursin("unresolved: /broken_raw in index.html", msg)
+end
+
+@testitem "export_site checks the elements of a page that inlines the runtime, not its style text" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    using Treebars
+    route!(InlineSiteApp())
+    vendorfiles()
+    dir = joinpath(mktempdir(), "site")
+    r = export_site(dir; pages=["/"])
+    @test r.files == length(bundle_files(dir)) - 1
+    index = read(joinpath(dir, "index.html"), String)
+    # The runtime is in the page, and so is the `href` its styles' comment
+    # names; neither that nor an address inside an HTML comment is a link.
+    @test !isfile(joinpath(dir, "vendor/htmxo/live_region.js"))
+    @test occursin("htmxo-back-link\" href=\"…\"", index)
+    @test occursin("<!-- <a href=\"/inline_nowhere\">alt</a> -->", index)
+    @test !any(==("/inline_nowhere"), HTMXObjects._site_references(index))
+    # A script's Vega url is followed, and read as a reference.
+    @test occursin("\"url\":\"inline_raster.geojson\"", index)
+    @test isfile(joinpath(dir, "inline_raster.geojson"))
+    @test "inline_raster.geojson" in HTMXObjects._site_references(index)
+    @test isfile(joinpath(dir, "inline_bericht.html"))
+    @test isempty(subdirectory_misses(dir))
 end
 
 @testitem "export_site never puts two addresses into one file unasked" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
