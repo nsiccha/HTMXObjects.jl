@@ -6932,12 +6932,15 @@ can run inside a serving app (it renders in process with
   [`export_audience`](@ref)`(__req__)`.
 
 `.nojekyll` is written too (GitHub Pages otherwise drops `_`-prefixed files
-such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get`,
-`hx-push-url`/`hx-replace-url` and Vega `"url"` in the written HTML is checked
-to name a file of the bundle, which also catches an address a route wrote into
-raw text the walk never sees. An answer with a status other than 200 or an
-`X-HTMXO-Error-Id` header (a failed fragment answers 200 under htmx) is not
-written; the crawl carries on, so one run finds every failure, and then throws
+such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get` and
+`hx-push-url`/`hx-replace-url` of an element in the written HTML, and every
+Vega `"url"` in its scripts, is checked to name a file of the bundle, which
+also catches an address a route wrote into raw markup the walk never sees. The
+text of a `<style>` or `<script>` and an HTML comment are not markup, so an
+`href="…"` there (a CSS comment of the inline runtime) is not checked. An
+answer with a status other than 200 or an `X-HTMXO-Error-Id` header (a failed
+fragment answers 200 under htmx) is not written; the crawl carries on, so one
+run finds every failure, and then throws
 [`StaticSiteIncomplete`](@ref) listing each failed address and each unresolved
 reference. Otherwise it returns the number of files and bytes written.
 
@@ -7096,8 +7099,37 @@ end
 _body_contains(body::AbstractString, s::AbstractString) = occursin(s, body)
 _body_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(findfirst(codeunits(s), body))
 
-const _SITE_REFERENCE =
-    r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\"|\"url\":\"([^\"]*)\""
+const _SITE_ATTRIBUTE = r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\""
+const _SITE_SCRIPT_URL = r"\"url\":\"([^\"]*)\""
+# An HTML comment, or a `<script>`/`<style>` element: its tag's attributes,
+# then its text, which ends at the first closing tag (as a browser reads it).
+const _SITE_RAW_TEXT = r"<!--.*?-->|<(script|style)\b((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>(.*?)</\1\b[^>]*>"si
+
+# The addresses an HTML file names, in order: each `href`, `src`, `hx-get`,
+# `hx-push-url` and `hx-replace-url` attribute of an element (its character
+# references decoded), and each `"url"` in a script (a Vega spec's
+# `data.url`). The text of a `<script>` or `<style>` and an HTML comment hold
+# no elements, so an `href="…"` written there (a comment of the inline
+# runtime's styles) is not one.
+function _site_references(html::AbstractString)
+    references = String[]
+    markup(text) = for m in eachmatch(_SITE_ATTRIBUTE, text)
+        push!(references, replace(m[1], "&quot;" => "\"", "&#39;" => "'",
+                                  "&lt;" => "<", "&gt;" => ">", "&amp;" => "&"))
+    end
+    at = 1
+    for m in eachmatch(_SITE_RAW_TEXT, html)
+        markup(SubString(html, at, prevind(html, m.offset)))
+        if !isnothing(m[1])
+            markup(m[2])
+            lowercase(m[1]) == "script" &&
+                foreach(u -> push!(references, u[1]), eachmatch(_SITE_SCRIPT_URL, m[3]))
+        end
+        at = m.offset + ncodeunits(m.match)
+    end
+    markup(SubString(html, at))
+    references
+end
 
 # Every reference in the bundle's HTML that names no file of it, as
 # `file => address`: a rooted address (it escaped the export, and would point
@@ -7108,10 +7140,7 @@ function _site_unresolved(root::AbstractString, failed::Set{String})
     for (dirpath, _, files) in walkdir(root), f in sort(files)
         endswith(f, ".html") || continue
         file = joinpath(dirpath, f)
-        html = read(file, String)
-        for m in eachmatch(_SITE_REFERENCE, html)
-            address = replace(something(m[1], m[2]), "&quot;" => "\"", "&#39;" => "'",
-                              "&lt;" => "<", "&gt;" => ">", "&amp;" => "&")
+        for address in _site_references(read(file, String))
             (_site_internal(address) && address != "true" && address != "false") || continue
             path = first(split(address, r"[?#]"; limit=2))
             ok = startswith(path, '/') ? path in failed :
