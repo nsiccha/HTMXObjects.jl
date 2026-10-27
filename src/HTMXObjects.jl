@@ -29481,7 +29481,8 @@ last change:
 
 A hidden input is not sent, and an unchecked checkbox sends `false`. A new
 request replaces one still running (`hx-sync`), and the shown result stays on
-screen while the next one computes (`data-htmxo-live`). After a mutation of
+screen while the next one computes (`data-htmxo-live`); a result asked for the
+first time shows a `<progress>` until it arrives. After a mutation of
 the page finishes, every other result is asked for again when next shown.
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
 once per page when building a `<head>` by hand.
@@ -29546,6 +29547,8 @@ semantic_follow_script() = h.script(Raw(raw"""
     var key = keyOf(region, pairs);
     if (region.getAttribute('data-htmxo-shown') === key) return;
     region.setAttribute('data-htmxo-shown', key);
+    // A result asked for the first time shows that it is coming.
+    if (!region.children.length) region.appendChild(document.createElement('progress'));
     var url = region.getAttribute('data-htmxo-follow');
     var query = new URLSearchParams(pairs).toString();
     window.htmx.ajax('GET', query ? url + (url.indexOf('?') >= 0 ? '&' : '?') + query : url,
@@ -30028,6 +30031,24 @@ htmxo_utility_styles() = h.style(Raw("""
     position: relative;
     z-index: 2;
 }
+
+/* A `presentation=:tabs` page: a tab's own inputs sit side by side above its
+   result, each as wide as a field rather than the whole column; a row of
+   pills takes its own width. */
+.htmxo-semantic-inputs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 1.5rem;
+    align-items: flex-start;
+}
+.htmxo-semantic-inputs > .htmxo-semantic-controls { display: contents; }
+.htmxo-semantic-inputs > *,
+.htmxo-semantic-inputs > .htmxo-semantic-controls > * {
+    flex: 0 1 16rem;
+    min-width: 0;
+}
+.htmxo-semantic-inputs fieldset,
+.htmxo-semantic-inputs .htmxo-relevant:has(> fieldset) { flex-basis: auto; }
 .htmxo-semantic-card[data-rich="true"] > label {
     position: absolute;
     inset: 0;
