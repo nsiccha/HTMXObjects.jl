@@ -14,6 +14,33 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.13
+
+- `IntervalEstimate(estimate, lower, upper)`, `format_interval` and
+  `interval_cell`: an estimate with its interval in one table cell,
+  `22 (13–34)`, with no more digits than the interval supports. All three
+  numbers are rounded, halves away from zero, at the place of the second
+  significant digit of the interval's width, and every decimal of that place
+  is written: `3.21 (2.95–3.48)`, `3.20 (2.95–3.48)`, `22,400 (21,500–23,300)`.
+  `width_digits = 1` rounds at the first. `log = true` keeps the significant
+  digits that `upper / lower` supports, for a positive quantity spanning
+  decades: `0.5 (0.02–3)`. `digits` and `sigdigits` work as in
+  `format_number`.
+- A table writes an `IntervalEstimate` as that cell by itself, as it does a
+  float: in a `render_table` column, as a bare cell `master` returns, and as
+  text in a `SemanticTable`'s Markdown.
+- A column of interval cells gets the five `interval_sort_keys` by itself in
+  `sortable_table`, `render_table` and `master_detail_table`, chosen from the
+  `▾` beside its label, with no `ColumnSpec(sort_keys)`.
+- The ⬇ CSV, and a `SemanticTable`'s tab-separated text, write such a column
+  as three columns of exact numbers. The bounds are named with the
+  `sort_lower` and `sort_upper` texts: `Median`, `Median / Lower bound`,
+  `Median / Upper bound`.
+- New `TableTexts` `interval` (`{estimate} ({lower}–{upper})`) and
+  `interval_signed`, used when a bound is negative: `-5 (-8 to -2)`, German
+  `bis`.
+- Snag `show-a-posterior-83417d72`, design decision `1mges5z`.
+
 ## 0.1.12
 
 - `SemanticSection(...; level=1)` makes a section the page's title. `level`

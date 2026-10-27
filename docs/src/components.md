@@ -260,8 +260,10 @@ through `columns = ["name" => ColumnSpec(...)]`.
 A cell that combines several quantities can be sorted by each of them. The
 usual case is an estimate with its interval in one cell, `22 Tsd. (13–34 Tsd.)`:
 the reader sorts by the estimate, by either bound, or by the interval's
-absolute or relative width. Name the orders in the column's `ColumnSpec`; the
-first is the column's default:
+absolute or relative width. A column of interval cells (`IntervalEstimate`,
+`interval_cell`; see [An estimate with its interval](#table-intervals)) gets
+these five orders by itself. For other cells, name the orders in the column's
+`ColumnSpec`; the first is the column's default:
 
 ```julia
 DE = table_texts(:de)
@@ -306,8 +308,9 @@ named from the table's texts (`Schätzwert`, `Untergrenze`, `Obergrenze`,
   `NaN` and infinite values sort last in both directions. A group row has no
   values and sorts by its own cell (its `group_summary` or its text).
 - **What stays the same.** `?plain`, Markdown and PDF show the column label
-  and the cell text; the CSV holds what the cell shows; search reads the
-  cell's text. Sorting runs in the browser, so every key works in a
+  and the cell text; the CSV holds what the cell shows (an interval cell's
+  three exact numbers, see [An estimate with its interval](#table-intervals));
+  search reads the cell's text. Sorting runs in the browser, so every key works in a
   `record!` bundle or a static snapshot. Regrouping, lazy group rows and row
   updates keep the reader's key and direction.
 - **State.** `htmxoSortState` returns `sort_key`, and `default_sort =
@@ -696,6 +699,73 @@ and writes the same text.
 build yourself can carry them too, for example a number with a unit:
 `h.td("6,28 €/m²"; data_sort_value = string(x), data_htmxo_number = string(x))`
 sorts by `x` and exports `6.28`.
+
+#### An estimate with its interval {#table-intervals}
+
+An estimate and its interval share one cell, `22 (13–34)`, never a value
+column beside an interval column. The cell shows no more digits than the
+interval supports, sorts by any of its five quantities, and the ⬇ CSV writes
+its exact numbers.
+
+- **By themselves.** `IntervalEstimate(estimate, lower, upper)` is the value.
+  A table writes it as that cell wherever it writes a float as a number cell:
+  in a `render_table` column (and a `SemanticTable`), and as a bare cell among
+  those `master` returns (`master_detail_table`, `master_detail_pair`).
+- **In cells you build.** `interval_cell(estimate, lower, upper; texts)`
+  returns the `<td>`, for `sortable_table` rows. `format_interval(estimate,
+  lower, upper; texts)` returns the text alone.
+
+```julia
+const DE = table_texts(:de)
+# A posterior summary: one column instead of median, lower_95 and upper_95.
+band = select(draws_summary, :quantity,
+    [:q50, :q2_5, :q97_5] => ByRow(IntervalEstimate) => "Median (95-%-Intervall)")
+render_table(band; texts = DE)
+master_detail_table(["Zelle", "Beschäftigte"], zones; key, detail, texts = DE,
+    master = z -> (h.td(z.name), IntervalEstimate(z.mean, z.q025, z.q975)))
+sortable_table(["Zelle", "Beschäftigte"],
+    [h.tr(h.td(z.name), interval_cell(z.mean, z.q025, z.q975; texts = DE)) for z in zones]; texts = DE)
+```
+
+**The digits come from the interval.** All three numbers are rounded, halves
+away from zero, at the place of the second significant digit of the
+interval's width (`upper - lower`). Every decimal of that place is written,
+so the numbers end together:
+
+| `estimate, lower, upper` | written |
+| --- | --- |
+| `22.3, 13.1, 34.2` | `22 (13–34)` |
+| `52, 31, 78` | `52 (31–78)` |
+| `3.2, 2.95, 3.48` | `3.20 (2.95–3.48)`, German `3,20 (2,95–3,48)` |
+| `22_430, 21_510, 23_320` | `22,400 (21,500–23,300)`, German `22.400 (21.500–23.300)` |
+
+- `width_digits = 1` rounds at the width's first significant digit:
+  `50 (30–80)`.
+- `log = true` is for a positive quantity whose interval spans orders of
+  magnitude. Each number keeps the significant digits that `upper / lower`
+  supports, so a small lower bound does not round to zero: `0.5 (0.02–3)`,
+  where the default writes `0.5 (0.0–3.1)`.
+- `digits` or `sigdigits` set one precision for every number instead, as in
+  `format_number`.
+- Without both bounds the estimate is written alone, with every digit, since
+  there is no width to set them. Without an estimate it is `–`. A width of
+  zero sets no digits either. A negative bound turns the dash into a word,
+  `-5 (-8 to -2)` (German `bis`). The `interval` and `interval_signed` texts
+  hold both forms.
+
+**Sorting.** A column of interval cells sorts by the estimate, by either bound,
+and by the interval's absolute and relative width. It gets the five
+[`interval_sort_keys`](#table-sort-keys) by itself, picked from the `▾`
+beside its label, so its header stays a plain label. `default_sort =
+(col = "Beschäftigte", key = "Obergrenze", dir = :desc)` opens on one of them.
+A `ColumnSpec` that computes its own `sort_keys` refuses an interval cell,
+which carries its own; drop the keys.
+
+**CSV and Markdown.** The ⬇ CSV writes the column as three columns of exact
+numbers: `Beschäftigte`, `Beschäftigte / Untergrenze`,
+`Beschäftigte / Obergrenze` (the `sort_lower` and `sort_upper` texts). A
+`SemanticTable`'s tab-separated text does the same. Markdown and PDF write
+the cell as it shows.
 
 ## Layout / widgets
 

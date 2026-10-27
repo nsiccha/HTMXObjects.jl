@@ -31,7 +31,7 @@ export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
@@ -5112,15 +5112,22 @@ Base.show(io::IO, ::MIME"text/plain", artifact::SemanticArtifact) = print(
     io, artifact.label, " [", join(_semantic_artifact_facts(artifact, artifact.mime), ", "), "]",
     isnothing(artifact.target) ? "" : " ($(artifact.target))")
 
+# The tab-separated peer keeps exact values, as the ⬇ CSV does: a column of
+# `IntervalEstimate`s is three columns, the estimate and its two bounds.
 function Base.show(io::IO, mime::MIME"text/plain", table::SemanticTable)
     cells = _semantic_table_columns(table.source)
     isnothing(cells) && return _semantic_show_leaf(io, mime, table.source)
     names, columns = cells
-    print(io, join(names, '\t'), '\n')
+    wide = [any(v -> v isa IntervalEstimate, column) for column in columns]
+    texts = _EN_TABLE_TEXTS
+    print(io, join((w ? join((n, "$n / $(texts.sort_lower)", "$n / $(texts.sort_upper)"), '\t') : string(n)
+                    for (n, w) in zip(names, wide)), '\t'), '\n')
     for row in eachindex(first(columns))
-        print(io, join((string(column[row]) for column in columns), '\t'), '\n')
+        print(io, join((w ? _semantic_interval_fields(column[row]) : string(column[row])
+                        for (column, w) in zip(columns, wide)), '\t'), '\n')
     end
 end
+_semantic_interval_fields(x) = string(x, "\t\t")
 
 function Base.show(io::IO, mime::MIME"text/plain", section::SemanticSection)
     print(io, section.title)
@@ -20977,6 +20984,11 @@ field for one that shows `–`) and a group summary of [`ColumnSummary`](@ref)
 (its decimals, with a `.` and no thousands separator). A cell you build
 yourself, such as a number with a unit (`6,28 €/m²`), can carry it too:
 `h.td(text; data_sort_value=string(x), data_htmxo_number=string(x))`.
+A column of [`interval_cell`](@ref)s (an [`IntervalEstimate`](@ref)) exports
+three columns of exact numbers, `Median`, `Median / Lower bound` and
+`Median / Upper bound` (the `sort_lower` and `sort_upper` texts), so a cell
+that shows `22 (13–34)` exports `22.3,13.1,34.2`; a cell of that column that
+is no interval cell (a group row's) exports its own field and two empty ones.
 """
 function download_table_js()
     h.script(Raw(raw"""
@@ -21023,22 +21035,29 @@ function downloadTableCsv(btn, filename) {
                 groupNames[col++] = th.colSpan > 1 ? name(th) : '';
         }
     }
-    const headers = Array.from(table.querySelectorAll(grouped ? 'thead th[data-htmxo-sort-col]' : 'thead th'))
-        .sort((a, b) => grouped ? Number(a.dataset.htmxoSortCol) - Number(b.dataset.htmxoSortCol) : 0)
-        .map(th => {
-            const group = grouped ? groupNames[Number(th.dataset.htmxoSortCol) - 1] : '';
-            return esc(group ? group + ' / ' + name(th) : name(th));
-        });
+    // A column of interval cells (`interval_cell`) is three columns: the
+    // estimate, then its bounds, named with the words its header carries.
+    const ths = Array.from(table.querySelectorAll(grouped ? 'thead th[data-htmxo-sort-col]' : 'thead th'))
+        .sort((a, b) => grouped ? Number(a.dataset.htmxoSortCol) - Number(b.dataset.htmxoSortCol) : 0);
+    const bounds = ths.map(th => th.dataset.htmxoIntervalCsv ? JSON.parse(th.dataset.htmxoIntervalCsv) : null);
+    const headers = ths.flatMap((th, i) => {
+        const group = grouped ? groupNames[Number(th.dataset.htmxoSortCol) - 1] : '';
+        const n = group ? group + ' / ' + name(th) : name(th);
+        return (bounds[i] ? [n, n + ' / ' + bounds[i][0], n + ' / ' + bounds[i][1]] : [n]).map(esc);
+    });
     // A number cell (`number_cell`, a group summary) exports its number, not
-    // the text it shows in the table's language. A master/detail first cell
-    // holds its row controls beside the content; export the content only, as
-    // sorting and search read it. A cell's lines stay lines of one quoted field.
+    // the text it shows in the table's language, and an interval cell its
+    // three numbers. A master/detail first cell holds its row controls beside
+    // the content; export the content only, as sorting and search read it. A
+    // cell's lines stay lines of one quoted field.
     const text = td => td.dataset.htmxoNumber ??
         lines(td.querySelector(':scope > [data-htmxo-row-label]') || td).join('\n');
+    const fields = (td, i) => !bounds[i] ? [text(td)] :
+        td.dataset.htmxoInterval ? JSON.parse(td.dataset.htmxoInterval) : [text(td), '', ''];
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
         .map(tr =>
-            Array.from(tr.cells).map(td => esc(text(td))).join(','));
+            Array.from(tr.cells).flatMap((td, i) => fields(td, i).map(esc)).join(','));
     const csv = [headers.join(','), ...rows].join('\n');
     const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
     const url = URL.createObjectURL(blob);
@@ -21067,7 +21086,11 @@ in a collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`; see
 *Hover linking* in [`sortable_table`](@ref)), the `▾` menu of a column with
 several sort keys (`sort_by`, `sort_ascending`, `sort_descending`) and the
 names [`interval_sort_keys`](@ref) gives its five orders (`sort_estimate`,
-`sort_lower`, `sort_upper`, `sort_width`, `sort_relative_width`). Build one with
+`sort_lower`, `sort_upper`, `sort_width`, `sort_relative_width`; the ⬇ CSV
+also names an interval column's bounds with `sort_lower` and `sort_upper`) and
+the text of an estimate with its interval ([`format_interval`](@ref):
+`interval`, `22 (13–34)`, and `interval_signed` for a negative bound,
+`-5 (-8 to -2)`). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -21079,7 +21102,8 @@ browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
 texts take `{name}` (the grouping), `group_level` also `{level}`;
 `rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
 `linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
-take `{name}` (the sort key).
+take `{name}` (the sort key); `interval` and `interval_signed` take
+`{estimate}`, `{lower}` and `{upper}`.
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -21122,6 +21146,8 @@ struct TableTexts
     sort_upper::String
     sort_width::String
     sort_relative_width::String
+    interval::String            # an estimate with its interval (`format_interval`)
+    interval_signed::String     #   the same with a negative bound, where a dash would read as a minus
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -21131,6 +21157,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
     rows_failed = (:status,), linked_deep = (:levels,), linked_inside_many = (:count,),
     sort_ascending = (:name,), sort_descending = (:name,),
+    interval = (:estimate, :lower, :upper), interval_signed = (:estimate, :lower, :upper),
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -21175,6 +21202,8 @@ const _TABLE_TEXT_LOCALES = (
         sort_upper = "Upper bound",
         sort_width = "Interval width",
         sort_relative_width = "Relative width",
+        interval = "{estimate} ({lower}–{upper})",
+        interval_signed = "{estimate} ({lower} to {upper})",
     ),
     de = (
         search = "Suche",
@@ -21217,6 +21246,8 @@ const _TABLE_TEXT_LOCALES = (
         sort_upper = "Obergrenze",
         sort_width = "Intervallbreite",
         sort_relative_width = "Relative Breite",
+        interval = "{estimate} ({lower}–{upper})",
+        interval_signed = "{estimate} ({lower} bis {upper})",
     ),
 )
 
@@ -22000,6 +22031,9 @@ function sortable_table(headers, rows;
         rows = Any[_selectable_row(row) for row in rows]
         kwargs = (; aria_multiselectable="true", kwargs...)
     end
+    # A column of interval cells (`interval_cell`) sorts by their five keys.
+    interval_cols = _interval_columns(rows)
+    headers = _interval_headers(headers, interval_cols, texts)
     ds = _resolve_default_sort(default_sort, headers)
     # Its rows are built already: a column's sort keys name the orders, and
     # each cell carries the values (`sort_values`).
@@ -22017,7 +22051,8 @@ function sortable_table(headers, rows;
     isnothing(ds) || _presorted ||
         (rows = _default_sort_rows(rows, ds, headers; hierarchy=haskey(kwargs, :data_htmxo_hierarchy)))
 
-    th_nodes = [_table_th(hdr, i, ds, sortable, texts) for (i, hdr) in enumerate(headers)]
+    th_nodes = [i in interval_cols ? _interval_csv_th(_table_th(hdr, i, ds, sortable, texts), texts) :
+                _table_th(hdr, i, ds, sortable, texts) for (i, hdr) in enumerate(headers)]
 
     # Always include `htmxo-sortable-table` when sorting is on — that's
     # the hook `sortable_table_styles()` reads, and it makes call sites
@@ -23403,15 +23438,17 @@ function master_detail_table(headers, items;
     body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
     # The rows in the `default_sort` order, as `sortable_table` would write
-    # them, and the details written after the table in the same order.
-    ds = _resolve_default_sort(get(kwargs, :default_sort, nothing), headers)
+    # them, and the details written after the table in the same order. A
+    # column of interval cells has their five sort keys (`interval_cell`).
+    table_headers = _interval_headers(headers, _interval_columns(rows), texts)
+    ds = _resolve_default_sort(get(kwargs, :default_sort, nothing), table_headers)
     if !isnothing(ds)
-        rows = _default_sort_rows(rows, ds, headers; hierarchy=haskey(table_attrs, :data_htmxo_hierarchy))
+        rows = _default_sort_rows(rows, ds, table_headers; hierarchy=haskey(table_attrs, :data_htmxo_hierarchy))
         position = Dict(_row_id(r) => i for (i, r) in enumerate(rows))
         perm = sortperm(detail_rows; by=id -> get(position, id, typemax(Int)), alg=MergeSort)
         permute!(details, perm)
     end
-    table = sortable_table(map(_sort_key_names_only, headers), rows; table_attrs..., texts, link, sticky,
+    table = sortable_table(map(_sort_key_names_only, table_headers), rows; table_attrs..., texts, link, sticky,
         _stamp_texts=false, _presorted=true, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
@@ -24174,14 +24211,20 @@ function _round_sig(x::Float64, k::Int)
     a = abs(x)
     isfinite(a) || throw(ArgumentError("cannot round $x to significant digits: it is not a finite number"))
     a == 0 && return (false, "", 0)
-    e = floor(Int, log10(a))
-    while a < _exact_pow10(e); e -= 1; end
-    while a >= _exact_pow10(e + 1); e += 1; end
+    e = _decade(a)
     d = k - 1 - e
     n = round(d > 300 ? a * 1e300 * _exact_pow10(d - 300) : d >= 0 ? a * _exact_pow10(d) : a / _exact_pow10(-d),
               RoundNearestTiesAway)
     s = string(Int(n))
     (x < 0, rstrip(s, '0'), length(s) + e + 1 - k)
+end
+# The exponent of the leading digit of `a > 0`: 10^e ≤ a < 10^(e+1), from
+# exact powers of ten (`log10` only guesses it).
+function _decade(a::Float64)
+    e = floor(Int, log10(a))
+    while a < _exact_pow10(e); e -= 1; end
+    while a >= _exact_pow10(e + 1); e += 1; end
+    e
 end
 # 10ⁿ as the nearest Float64, as the literal `1e<n>` reads; 0 and Inf beyond,
 # as the browser's `Number('1e' + n)` reads them (`parse` refuses those).
@@ -24208,6 +24251,239 @@ _superscript(n::Int) = string(n < 0 ? "⁻" : "", join(_SUPERSCRIPT_DIGITS[d - '
 # and R/Python read back; `Infinity`, since `parseFloat` does not know `Inf`.
 _number_key(x::Integer) = string(x)
 _number_key(x::AbstractFloat) = isinf(x) ? (x > 0 ? "Infinity" : "-Infinity") : string(x)
+
+"""
+    IntervalEstimate(estimate, lower, upper)
+
+An estimate with its interval as one value, such as a posterior median with
+its 95 % credible interval. A table writes it as one cell, `22 (13–34)`, with
+no more digits than the interval supports (see [`format_interval`](@ref)), by
+itself wherever it writes a float as a [`number_cell`](@ref):
+
+- a column of them in [`render_table`](@ref) or a [`SemanticTable`](@ref);
+- a bare one among the cells `master` returns in [`master_detail_table`](@ref)
+  or [`master_detail_pair`](@ref).
+
+That cell sorts by the estimate, by either bound and by the interval's absolute
+and relative width: its column gets the five [`interval_sort_keys`](@ref) by
+itself, picked from the `▾` beside its label. The ⬇ CSV writes the column as
+three columns of exact numbers (the estimate, then the lower and the upper
+bound, named with the `sort_lower` and `sort_upper` texts), and Markdown and
+PDF write the cell's text. For a cell you build, use [`interval_cell`](@ref).
+
+```julia
+band = select(df, :quantity, [:q50, :q2_5, :q97_5] => ByRow(IntervalEstimate) => "Median (95 % CrI)")
+render_table(band; texts = table_texts(:de))       # 22 (13–34), 0,52 (0,36–0,71)
+master_detail_table(["Zone", "Employees"], zones; key, detail,
+    master = z -> (h.td(z.name), IntervalEstimate(z.mean, z.q025, z.q975)))
+```
+
+Each of `estimate`, `lower` and `upper` is a real number, `missing` or
+`nothing`; the fields keep them as given (`x.estimate`, `x.lower`, `x.upper`).
+`lower > upper` throws.
+"""
+struct IntervalEstimate
+    estimate::Union{Real,Missing,Nothing}
+    lower::Union{Real,Missing,Nothing}
+    upper::Union{Real,Missing,Nothing}
+    function IntervalEstimate(estimate, lower, upper)
+        _interval_value(estimate)
+        lo, hi = _interval_value(lower), _interval_value(upper)
+        # Refused: an interval that ends before it starts has no width to set digits by.
+        isnothing(lo) || isnothing(hi) || !(lo > hi) || throw(ArgumentError(string(
+            "IntervalEstimate: the lower bound ", lo, " is above the upper bound ", hi)))
+        new(estimate, lower, upper)
+    end
+end
+
+# A value of an `IntervalEstimate` as `format_number` takes it: `nothing` for
+# no value, other reals as their float.
+_interval_value(::Union{Nothing,Missing}) = nothing
+_interval_value(x::Bool) = throw(ArgumentError(string(
+    "IntervalEstimate: ", x, " is a Bool, not a number")))
+_interval_value(x::Real) = _number_value(x)
+_interval_value(x) = throw(ArgumentError(string(
+    "IntervalEstimate: expected a real number, missing or nothing; got ", repr(x))))
+_interval_parts(x::IntervalEstimate) = map(_interval_value, (x.estimate, x.lower, x.upper))
+
+"""
+    format_interval(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing) -> String
+    format_interval(x::IntervalEstimate; kw...)
+
+Write an estimate with its interval in a table's language (`texts`, a
+[`TableTexts`](@ref)): `22 (13–34)`, `0,52 (0,36–0,71)` with
+`table_texts(:de)`.
+
+By default the interval sets the digits: all three numbers are rounded, halves
+away from zero, at the place of the second significant digit of the interval's
+width `upper - lower` (`width_digits = 2`), and written with every decimal of
+that place, so the last digit shown is one the uncertainty supports:
+
+| values | written |
+| --- | --- |
+| `22.3, 13.1, 34.2` | `22 (13–34)` |
+| `22_430, 21_510, 23_320` | `22,400 (21,500–23,300)` |
+| `3.214, 2.951, 3.482` | `3.21 (2.95–3.48)` |
+| `3.2, 2.95, 3.48` | `3.20 (2.95–3.48)` |
+
+- `width_digits = 1` rounds at the width's first significant digit instead
+  (1 to 15).
+- `log = true`, for a positive quantity whose interval spans orders of
+  magnitude: each number keeps the significant digits that `upper / lower`
+  supports (two significant digits of its width in decades), so a small lower
+  bound does not round to zero: `0.5 (0.02–3)`, where the default writes
+  `0.5 (0.0–3.1)`. A lower bound of zero or below throws.
+- `digits` or `sigdigits` set one precision instead, as in
+  [`format_number`](@ref): `digits = 1` writes every number of a column with
+  one decimal.
+
+A number below 10⁻⁴ or from 10¹⁶ up is written as a power of ten
+(`1.20·10⁻⁵`), as `format_number` writes it. Without both bounds the estimate
+is written alone (`format_number`'s digits, since there is no width); without
+an estimate it is `–`. An interval of width zero, or with an infinite or `NaN`
+bound, sets no digits either. A negative bound changes the dash to a word
+(`-5 (-8 to -2)`, German `bis`): the `interval` and `interval_signed` texts.
+"""
+format_interval(estimate, lower, upper; kw...) = format_interval(IntervalEstimate(estimate, lower, upper); kw...)
+function format_interval(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Integer=2,
+                         log::Bool=false, digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing)
+    est, lo, hi = _interval_parts(x)
+    1 <= width_digits <= _MAX_SIGDIGITS || throw(ArgumentError(string(
+        "format_interval: width_digits must be between 1 and ", _MAX_SIGDIGITS, ", got ", width_digits)))
+    rounding = _interval_rounding(lo, hi, _number_rounding(digits, sigdigits, "format_interval"), width_digits, log)
+    shown(v) = _format_interval_number(v, texts, rounding)
+    (isnothing(lo) || isnothing(hi)) && return shown(est)
+    lower, upper = shown(lo), shown(hi)
+    _table_text(texts, startswith(lower, '-') || startswith(upper, '-') ? :interval_signed : :interval;
+        estimate=shown(est), lower, upper)
+end
+
+# How the numbers of an interval are rounded: the caller's `digits` or
+# `sigdigits`; else at the decimal place its width sets (`_PlaceDigits`), or
+# with `log` to the significant digits its ratio sets; `nothing` (every digit)
+# without a finite, nonzero width.
+struct _PlaceDigits; p::Int; end
+function _interval_rounding(lo, hi, rounding, width_digits, log)
+    # Refused: two rules for one interval's digits.
+    log && !isnothing(rounding) && throw(ArgumentError(
+        "format_interval: give log=true or digits/sigdigits, not both"))
+    isnothing(rounding) || return rounding
+    (isnothing(lo) || isnothing(hi) || !isfinite(lo) || !isfinite(hi) || hi == lo) && return nothing
+    log || return _PlaceDigits(_decade(Float64(hi) - Float64(lo)) - (width_digits - 1))
+    lo > 0 || throw(ArgumentError(string("format_interval: log=true is for positive quantities; the lower bound is ", lo)))
+    _SigDigits(clamp(width_digits - 1 - _decade(log10(Float64(hi) / Float64(lo))), 1, _MAX_SIGDIGITS))
+end
+
+_format_interval_number(v, texts, rounding) = _format_number(v, texts, rounding)
+_format_interval_number(v::Real, texts, r::_PlaceDigits) =
+    isfinite(v) ? _format_place(Float64(v), r.p, texts) : _format_number(v, texts, nothing)
+
+# `x` rounded at the decimal place 10^p (p < 0: a decimal), halves away from
+# zero, as `(negative, digits, point)` like `_round_sig`.
+function _round_place(x::Float64, p::Int)
+    a = abs(x)
+    a == 0 && return (false, "", 0)
+    k = _decade(a) - p + 1      # its significant digits down to that place
+    k >= 1 && return _round_sig(x, min(k, _MAX_SIGDIGITS))
+    # Below the place: one unit of it from half a unit up, else zero.
+    k == 0 && a >= parse(Float64, string("5e", p - 1)) ? (x < 0, "1", p + 1) : (false, "", 0)
+end
+
+# `x` rounded at 10^p and written with every decimal of that place, trailing
+# zeros kept (`3.20`), so the numbers of one interval end at the same place;
+# as a power of ten where `format_number` writes one (`1.20·10⁻⁵`).
+function _format_place(x::Float64, p::Int, texts)
+    negative, ds, point = _round_place(x, p)
+    isempty(ds) && return p < 0 ? string('0', texts.decimal, repeat('0', -p)) : "0"
+    digits = ds * repeat('0', point - p - length(ds))     # |x| / 10^p, rounded
+    io = IOBuffer()
+    negative && print(io, '-')
+    if _float_sci(point)
+        print(io, digits[1])
+        length(digits) > 1 && print(io, texts.decimal, digits[2:end])
+        print(io, "·10", _superscript(point - 1))
+    elseif p >= 0
+        _print_grouped(io, digits * repeat('0', p), texts.thousands)
+    else
+        _print_grouped(io, point > 0 ? digits[1:point] : "0", texts.thousands)
+        print(io, texts.decimal, point > 0 ? digits[point+1:end] : repeat('0', -point) * digits)
+    end
+    String(take!(io))
+end
+
+"""
+    interval_cell(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing, attrs...)
+    interval_cell(x::IntervalEstimate; kw...)
+
+A table cell, `<td>`, that shows [`format_interval`](@ref)`(estimate, lower,
+upper; …)` and keeps the exact numbers:
+
+- for its column's five sort keys ([`interval_sort_values`](@ref)); a column
+  of these cells gets [`interval_sort_keys`](@ref) by itself in
+  [`sortable_table`](@ref), [`render_table`](@ref) and
+  [`master_detail_table`](@ref), so its header needs no `sort_keys`;
+- as `data-sort-value` (the estimate), for a table whose header names no keys;
+- for the ⬇ CSV, which writes the column as three columns: the estimate, the
+  lower and the upper bound.
+
+[`render_table`](@ref) and the master cells of [`master_detail_table`](@ref)
+make an [`IntervalEstimate`](@ref) this cell by themselves; pass the table's
+`texts` to cells you build for [`sortable_table`](@ref). `attrs` are further
+attributes of the `<td>`.
+
+```julia
+sortable_table(["Zone", "Employees"],
+    [h.tr(h.td(z.name), interval_cell(z.mean, z.q025, z.q975; texts = DE)) for z in zones]; texts = DE)
+```
+"""
+interval_cell(estimate, lower, upper; kw...) = interval_cell(IntervalEstimate(estimate, lower, upper); kw...)
+function interval_cell(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Integer=2,
+                       log::Bool=false, digits::Union{Nothing,Integer}=nothing,
+                       sigdigits::Union{Nothing,Integer}=nothing, attrs...)
+    text = format_interval(x; texts, width_digits, log, digits, sigdigits)
+    est, lo, hi = _interval_parts(x)
+    key = isnothing(est) ? (;) : (; data_sort_value=_number_key(est))
+    h.td(; key..., data_htmxo_number=isnothing(est) ? "" : _number_key(est), interval_sort_values(est, lo, hi)...,
+         data_htmxo_interval=_interval_csv_json(est, lo, hi), attrs...)(text)
+end
+# The three exact numbers the ⬇ CSV writes for an interval cell, as JSON
+# strings (`""` for no value).
+_interval_csv_json(values...) = "[" * join((isnothing(v) ? "\"\"" : _md_json_string(_number_key(v)) for v in values), ",") * "]"
+
+# An `IntervalEstimate` is its cell wherever a table makes a float a
+# `number_cell`: a `render_table` column, a bare `master` cell, and the text
+# in a `SemanticTable`'s Markdown.
+_render_table_cell(::Nothing, value::IntervalEstimate, c, ri, texts) = interval_cell(value; texts)
+_md_master_cell(x::IntervalEstimate, texts) = interval_cell(x; texts)
+_semantic_table_cell(x::IntervalEstimate) = format_interval(x)
+_semantic_interval_fields(x::IntervalEstimate) =
+    join((isnothing(v) ? "" : _number_key(v) for v in _interval_parts(x)), '\t')
+
+# The columns whose master rows hold interval cells (`interval_cell`).
+function _interval_columns(rows)
+    cols = Set{Int}()
+    attr = Symbol("data-htmxo-interval")
+    for row in rows
+        row isa Node && HTMX.tag(row) === :tr && _is_master_row(row) || continue
+        cells = [c for c in HTMX.children(row) if c isa Node && HTMX.tag(c) in (:td, :th)]
+        for (i, cell) in enumerate(cells)
+            haskey(HTMX.attrs(cell), attr) && push!(cols, i)
+        end
+    end
+    cols
+end
+# A column of interval cells sorts by the five interval keys with no
+# `ColumnSpec(sort_keys)` of its own; a header that names its keys keeps them,
+# and a pre-built `<th>` stays as it is.
+_interval_headers(headers, cols, texts) = isempty(cols) ? headers :
+    Any[i in cols && !isnothing(_header_label(hdr)) && isempty(_sort_key_names(hdr)) ?
+            ColumnSpec(_header_label(hdr), hdr isa ColumnSpec ? hdr.help : nothing,
+                       Pair{String,Any}[name => nothing for name in interval_sort_keys(; texts)]) : hdr
+        for (i, hdr) in enumerate(headers)]
+# The header of a column of interval cells names its bounds for the ⬇ CSV.
+_interval_csv_th(th::Node, texts) = Node(HTMX.tag(th), merge(copy(HTMX.attrs(th)), Dict{Symbol,Any}(
+    Symbol("data-htmxo-interval-csv") => _sort_values_json((texts.sort_lower, texts.sort_upper)))), HTMX.children(th))
+_interval_csv_th(th, texts) = th
 
 # `group_summary` as (column index => summary) pairs, by header label.
 _md_group_summaries(headers, ::Nothing) = Pair{Int,ColumnSummary}[]
@@ -24280,7 +24556,9 @@ function _md_sort_values!(cells, sort_columns, item, headers)
         cell isa Node || throw(ArgumentError(string("master_detail_table: the cell of column ", label,
             " must be a <td> node to carry its sort values, got ", typeof(cell))))
         haskey(HTMX.attrs(cell), attr) && throw(ArgumentError(string("master_detail_table: column ",
-            label, " computes its sort values from `sort_keys`; its cell may not set them too")))
+            label, " computes its sort values from `sort_keys`; its cell may not set them too",
+            haskey(HTMX.attrs(cell), Symbol("data-htmxo-interval")) ? string(". An interval cell ",
+                "(`IntervalEstimate`, `interval_cell`) carries its own: drop `sort_keys` from the column's ColumnSpec") : "")))
         cells[col] = Node(HTMX.tag(cell),
             merge(copy(HTMX.attrs(cell)), Dict{Symbol,Any}(attr => _sort_values_json(f(item) for f in fs))),
             HTMX.children(cell))
