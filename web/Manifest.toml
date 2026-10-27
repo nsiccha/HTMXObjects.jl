@@ -121,14 +121,20 @@ uuid = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
 version = "1.1.0"
 
 [[deps.HTMXObjects]]
-deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "LazyArtifacts", "LibGit2", "Random", "Sockets", "Tables"]
+deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "LazyArtifacts", "LibGit2", "Random", "ScopedValues", "Sockets", "Tables"]
 path = ".."
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
-version = "0.1.0"
-weakdeps = ["Treebars"]
+version = "0.1.9"
 
     [deps.HTMXObjects.extensions]
+    HTMXObjectsReactiveKernelsPPLExt = "ReactiveKernelsPPL"
+    HTMXObjectsStanBlocksExt = "StanBlocks"
     HTMXObjectsTreebarsExt = "Treebars"
+
+    [deps.HTMXObjects.weakdeps]
+    ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
+    StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
+    Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 
 [[deps.HTTP]]
 deps = ["Base64", "CodecZlib", "Dates", "EnumX", "Logging", "PrecompileTools", "Random", "Reseau", "SHA", "URIs", "UUIDs", "Zlib_jll"]
