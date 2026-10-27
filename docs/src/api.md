@@ -3046,6 +3046,66 @@ See the [Components catalog](components.md) for the full list with examples.
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
 | `loading_indicator_script`, `request_feedback_*`, `show_when_script` | UX scripts injected into the page |
 
+## A glossary of the app's terms {#glossary}
+
+An app declares its technical terms once and every answer links the uses of
+them to their entries: the first use of a term in each section of a page, and
+again in each table, figure, caption and disclosure, becomes a link to the
+glossary. The link reads as the surrounding text with a dotted underline.
+Hovering it or focusing it with the keyboard opens the definition in a small
+box beside it, kept inside the window and outside a scrolling table, and
+Escape closes it ([`glossary_script`](@ref), in every `htmx()` shell). Screen
+readers read the definition as the link's description. Clicking it, or
+tapping it on a touch screen, opens the glossary entry.
+
+```julia
+const GLOSSAR = Glossary([
+    GlossaryTerm("Registerzelle", "Ein Bezirk × Wirtschaftsabschnitt mit einem Wert im Unternehmensregister.";
+                 forms=["Registerzellen"]),
+    GlossaryTerm("Modell vor Benchmarking", "Die Erwartung des Modells, bevor die Registerwerte die Zellen anpassen.";
+                 forms=["Modells vor dem Benchmarking"]),
+    "Realisierungsfaktor" => "SvB am Standort je gemeldete beschäftigte Person eines IHK-Betriebs.",
+]; href="/glossar", title="Glossar")
+
+@htmx struct App
+    __glossary__ = GLOSSAR
+    @get glossar() = glossary_section(__glossary__)
+    @get index() = h.article(h.p("Jede Registerzelle …"), sortable_table(["Registerzelle", "SvB"], rows))
+end
+```
+
+- **Declare once.** `__glossary__` on the root holds for every page and
+  fragment under it, like `__lang__`; a subtree declares its own. Anything but
+  a `Glossary` there is the route's error.
+- **What matches.** Each term and its `forms`, as whole words, longest first
+  ("Modell vor Benchmarking" wins over "Modell"), across line breaks, and with
+  a capital first letter at the start of a sentence. List the other spellings a
+  page uses (plurals, inflected phrases) as `forms`. `term(text; of)` links a
+  use no form covers, wherever it stands.
+- **What stays as written.** Links, buttons and other controls, code, headings,
+  table headers, an element marked `data-htmxo-no-terms`, attribute values (a
+  `title` tooltip), and content already rendered to markup (`Raw`, an
+  `HTMLSnapshot`, a plot's axis and legend titles, which Vega draws). A
+  sortable column named after a term explains it instead: its ⓘ shows the
+  definition, unless the `ColumnSpec` has a `help` of its own.
+- **The glossary.** `glossary_section(g)` lists the terms alphabetically, each
+  at `#term-<id>` (`id` defaults to the term in lower case, `ä` as `ae`). Mount
+  it at `href`.
+- **Markdown and exports.** `?plain` writes a use as
+  `[Registerzelle](/glossar#term-registerzelle)`; a static export rewrites the
+  link to the exported glossary page. `pdf_report` points every term link into
+  the report and appends a section headed `title` listing the terms the report
+  uses, so the links resolve inside the PDF.
+
+```@docs
+Glossary
+GlossaryTerm
+glossary_section
+term
+link_terms
+glossary_script
+```
+
 ## Tables and captions
 
 | Export | Returns |
@@ -3116,7 +3176,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 | `default_gallery_card(item)`   | The default card (title, description, code), built on `gallery_card` |
 | `htmxo_gallery_styles()`       | The gallery stylesheet (`gallery_grid` includes it; for galleries an app composes itself) |
 | `gallery_toolbar`, `gallery_controls_script` | Toolbar widget + JS for filter/group controls in the grid |
-| `record!(app; record_dir, record_base, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants. A recorded rooted `hx-get` names the fragment file it writes (`<record_base>/hx/<path>.html`; empty `record_base` = site root), so lazy parts load on any static server |
+| `record!(app; record_dir, record_base, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants. A recorded rooted `hx-get` names the fragment file it writes (`<record_base>/hx/<path>.html`; empty `record_base` = site root), so lazy parts load on any static server; one with a query, when the recording records that address (a query path in `paths`, a declared `url_params` value), names `<record_base>/hx/<path>@<query>.html`, and a query path is saved under its query |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
 | `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
 | `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline. Returned by an `__error__` hook, it is the error answer as it is, with the error's status (500, 400 for a caller fault, 200 under HTMX) |
@@ -4161,8 +4221,9 @@ the rest:
   every declared value (`/voralarme?k=4.0`), so an exporter that writes every
   mapped address writes those too; the element carries each value's file and
   its `hx-get` names the file of the value it was rendered with. `record!`
-  records them itself as `<record_dir>/hx/<path>@<query>.html`. A value with
-  no file keeps the element as it is.
+  records them itself as `<record_dir>/hx/<path>@<query>.html`, and a recorded
+  link whose `hx-get` asks for one of them (`hx-get="/voralarme?k=5.0"`) names
+  that file too. A value with no file keeps the element as it is.
 - **Pushed addresses.** A static export maps the path of an `hx-push-url` or
   `hx-replace-url` address like an `href` and keeps its query (`/?k=4.0` →
   `index.html?k=4.0`), because the page reads the query in the browser.

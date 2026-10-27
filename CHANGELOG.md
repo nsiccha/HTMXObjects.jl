@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.4
+## 0.1.6
 
 - The request's audience and page language reach every task that runs a
   route's work: an `:auto` operation's body, a memoized compute, a `@queued`
@@ -26,6 +26,41 @@ failing at render with a `MethodError`.
   DynamicObjects at or after `ffb9d70`, whose job queue carries the requester's
   `ScopedValue`s. HTMXObjects now depends on ScopedValues.jl. Todo `0qm6sdu`,
   from snag `queued-hx-respon-fb8c1312`.
+
+## 0.1.5
+
+- A glossary of an app's terms, linked wherever a page uses them (snag
+  `no-glossary-prim-026537ac`, design decision `0xuzhdk`). New exports
+  `Glossary`, `GlossaryTerm`, `glossary_section`, `term`, `link_terms` and
+  `glossary_script`. An app declares `__glossary__ = Glossary(terms; href,
+  title)` on its root and mounts `glossary_section(__glossary__)` at `href`.
+  Every answer under that root (a page, a fragment, an `hx_response`, `?plain`,
+  a static export) then links the first use of each term in each section, table, figure,
+  caption and disclosure to its entry, with the definition beside it on hover
+  or keyboard focus. A `sortable_table` / `master_detail_table` column named
+  after a term gets its definition as the column's ⓘ explanation.
+- `pdf_report(…; glossary)`: with a glossary (by default the route's
+  `__glossary__`), a report's term links point into the report, which ends
+  with a section listing the terms it uses.
+- `htmx()` page shells carry the glossary runtime (`glossary_script`) among
+  their runtime blocks. It marks `<html>` with the class `htmxo-terms` and
+  does nothing else on a page without terms.
+
+## 0.1.4
+
+- `record!`: a recorded `hx-get` whose address has a query (a zoom link,
+  `hx-get="/region?key=a&measure=x"`) names the fragment file the recording
+  writes for that address, `<record_base>/hx/region@key=a&measure=x.html`,
+  when it records the address: a value a `url_params` element declares, or a
+  query path in `paths`. The order of its parameters does not matter. Before,
+  every `hx-get` with a query was disabled. Any other one still is
+  (`b76c6ca`).
+- `record!`: a query path in `paths` is saved under its query
+  (`/region?key=a` → `region@key=a.html`, `hx/region@key=a.html`,
+  `md/region@key=a.md`), so two queries of one path are two files instead of
+  a `_RecordDestinationCollision`. **Breaking:** a single query path was saved
+  without its query (`region.html`); list the path without the query to keep
+  that file (`b76c6ca`).
 
 ## 0.1.3
 
