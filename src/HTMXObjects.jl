@@ -6228,7 +6228,9 @@ alike:
   link that swaps a new version of it in — the value is written into the
   address (`history.replaceState`; other parameters and htmx's history state
   stay). A first load that shows the rendered value leaves the address as it
-  is. A request whose route answers through a deferred operation's poller
+  is. The element's declaration then names the value it shows, so htmx's
+  history cache keeps that value with the element: Back or Forward to the
+  address requests nothing. A request whose route answers through a deferred operation's poller
   writes the value it asked for when the poller takes the element's place, so
   the element the polls bring matches the address. Reload, Back and a copied
   link then show the same view; no `hx-push-url` is needed for it.
@@ -9990,11 +9992,18 @@ url_params_script() = h.script(Raw(raw"""
     }
     return typeof node === 'string' ? node : null;
   }
-  // The values an element shows: those it was rendered with, until a request
-  // loaded it with others.
-  function shown(el, ps) {
-    var loaded = el._htmxoUrlShown || {};
-    return ps.map(function (p) { return p.name in loaded ? loaded[p.name] : p.value; });
+  // The values an element shows: those its declaration names. A request that
+  // loads it with others records them there (`show`). An attribute, unlike a
+  // property of the element, is part of htmx's history snapshot, so an element
+  // restored on Back/Forward still names what it shows and loads nothing
+  // (snag url-params-eleme-4feb3a12).
+  function shown(ps) {
+    return ps.map(function (p) { return p.value; });
+  }
+  function show(el, ps, vals) {
+    el.setAttribute('data-htmxo-url-params', JSON.stringify(ps.map(function (p, i) {
+      return [p.name, p.as, vals[i], p.values];
+    })));
   }
   // The address's value of a parameter, or null when it names none or one
   // outside the declared values.
@@ -10129,7 +10138,7 @@ url_params_script() = h.script(Raw(raw"""
     var d = e.detail, el = d.elt, ps = declared(el);
     d.htmxoUrlEdits = edits;
     if (!ps) return;
-    var table = files(el), base = shown(el, ps), address = wanted(ps, table, base);
+    var table = files(el), base = shown(ps), address = wanted(ps, table, base);
     var vals = ps.map(function (p, i) {
       var own = carried(d.parameters, p.as);
       return own === null || (table && !p.values) ? address[i] : own;
@@ -10162,7 +10171,7 @@ url_params_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:afterRequest', function (e) {
     var d = e.detail || {}, cfg = d.requestConfig, el = d.elt;
     var ps = cfg && cfg.htmxoUrlFollowed && !d.successful && el.isConnected && declared(el);
-    if (ps) follow(el, ps, shown(el, ps), cfg.htmxoUrlEdits);
+    if (ps) follow(el, ps, shown(ps), cfg.htmxoUrlEdits);
   });
 
   // An element entering the page (load, swap, Back/Forward) that shows other
@@ -10171,7 +10180,7 @@ url_params_script() = h.script(Raw(raw"""
   function apply(el) {
     var ps = declared(el);
     if (!ps) return;
-    var table = files(el), base = shown(el, ps), want = wanted(ps, table, base);
+    var table = files(el), base = shown(ps), want = wanted(ps, table, base);
     if (!differs(want, base) || el._htmxoUrlSent === JSON.stringify(want)) return;
     var path = table ? fileFor(table, ps, want) : el.getAttribute('hx-get');
     if (!path) {
@@ -10214,7 +10223,7 @@ url_params_script() = h.script(Raw(raw"""
     if (!pending) return apply(el);
     delete el._htmxoUrlPending;
     var ps = declared(el);
-    if (ps) write(byName(ps, ps.map(function (p) { return p.value; })), pending.before);
+    if (ps) write(byName(ps, shown(ps)), pending.before);
   }
   document.addEventListener('htmx:load', function (e) {
     var root = e.target;
@@ -10229,7 +10238,7 @@ url_params_script() = h.script(Raw(raw"""
     var el = e.target, ps = declared(el), pending = el._htmxoUrlPending;
     if (!ps || el._htmxoUrlInit) return;
     el._htmxoUrlInit = true;
-    follow(el, ps, shown(el, ps), pending && pending.edits);
+    follow(el, ps, shown(ps), pending && pending.edits);
   });
 
   // A request that loads a declared element writes its values into the
@@ -10254,7 +10263,7 @@ url_params_script() = h.script(Raw(raw"""
   function requested(el, ps, d) {
     var table = files(el), info = d.pathInfo || {};
     if (table) {
-      var file = new URL(info.requestPath || '', document.baseURI).href, found = null, fixed = shown(el, ps);
+      var file = new URL(info.requestPath || '', document.baseURI).href, found = null, fixed = shown(ps);
       (function walk(node, vals, i) {
         if (found) return;
         while (i < ps.length && !ps[i].values) { vals = vals.concat([fixed[i]]); i++; }
@@ -10269,7 +10278,7 @@ url_params_script() = h.script(Raw(raw"""
     }
     var query = new URL(info.finalRequestPath || info.requestPath || '', document.baseURI).searchParams;
     if (!ps.some(function (p) { return query.has(p.as); })) return null;
-    var base = shown(el, ps);
+    var base = shown(ps);
     return ps.map(function (p, i) { return query.has(p.as) ? query.get(p.as) : base[i]; });
   }
   // Another element's request replaced a declared element with content that
@@ -10282,11 +10291,11 @@ url_params_script() = h.script(Raw(raw"""
     var t = d.target, ps = declared(t);
     if (!ps || t === cfg.elt || t === el || t.isConnected) return;
     var vals = requested(t, ps, d);
-    if (vals) write(byName(ps, vals), byName(ps, shown(t, ps)));
+    if (vals) write(byName(ps, vals), byName(ps, shown(ps)));
   }
   document.addEventListener('htmx:beforeSwap', function (e) {
     var d = e.detail || {}, ps = declared(d.target);
-    if (ps && d.requestConfig) d.requestConfig.htmxoUrlBefore = byName(ps, shown(d.target, ps));
+    if (ps && d.requestConfig) d.requestConfig.htmxoUrlBefore = byName(ps, shown(ps));
   });
   document.addEventListener('htmx:afterSwap', function (e) {
     var d = e.detail || {}, cfg = d.requestConfig;
@@ -10294,8 +10303,9 @@ url_params_script() = h.script(Raw(raw"""
     var own = cfg.htmxoUrlValues && declared(cfg.elt);
     if (own) {
       if (cfg.elt.isConnected) {
-        cfg.elt._htmxoUrlShown = cfg.htmxoUrlValues;
-        follow(cfg.elt, own, shown(cfg.elt, own), cfg.htmxoUrlEdits);
+        var got = own.map(function (p) { return cfg.htmxoUrlValues[p.name]; });
+        show(cfg.elt, own, got);
+        follow(cfg.elt, own, got, cfg.htmxoUrlEdits);
       }
       write(cfg.htmxoUrlValues, cfg.htmxoUrlShown);
     }
@@ -10308,10 +10318,10 @@ url_params_script() = h.script(Raw(raw"""
     // Another element's request into this one.
     var vals = requested(el, ps, d);
     if (!vals) return;
-    var before = byName(ps, shown(el, ps));
-    el._htmxoUrlShown = byName(ps, vals);
+    var before = byName(ps, shown(ps));
+    show(el, ps, vals);
     follow(el, ps, vals, cfg.htmxoUrlEdits);
-    write(el._htmxoUrlShown, before);
+    write(byName(ps, vals), before);
   });
 
   window.htmxoUrlParams = { apply: apply };
@@ -28313,9 +28323,12 @@ heading text with a focus ring.
 It also gives every definition list (`dl`) its look, with no class: bold
 terms in a column beside their values, `div`-wrapped pairs sharing the
 columns. `--htmxo-dl-label-width` (default `16rem`, and never more than 40% of
-the list), `--htmxo-dl-row-gap` (`0.5rem`) and `--htmxo-dl-column-gap`
+the list; a longer term, a one-word one included, hyphenates in the page's
+language), `--htmxo-dl-row-gap` (`0.5rem`) and `--htmxo-dl-column-gap`
 (`1.25rem`) tune it from an app's stylesheet; `display: block` on a list and
-its `div` pairs keeps it stacked.
+its `div` pairs keeps it stacked. A list inside a `SemanticGroup` item
+narrower than `24rem` stacks each term above its value; an app's own narrow
+column gets the same with `container-type: inline-size` on its wrapper.
 
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
@@ -28379,8 +28392,14 @@ htmxo_utility_styles() = h.style(Raw("""
    sits side by side on a wide viewport and stacks on a narrow one with no
    consumer input — which is what a "run" reads like. `min-width: 0` lets a wide
    child (a table, a `pre`) scroll inside its own box instead of blowing the row
-   out. Apps that want a different run width set the variables in their own
-   scoped stylesheet — never inline:
+   out. Each sibling is also a size container, so what it holds can lay out by
+   its width: a definition list in a narrow card stacks (the `@container` rule
+   below the `dl` rules). Its width comes from the row, not its content, so the
+   container changes nothing in an ordinary layout; in a parent that sizes to
+   its content (an inline-block, an auto-width table cell) a container's
+   content would count as zero width, so it counts as one basis instead. Apps
+   that want a different run width set the variables in their own scoped
+   stylesheet — never inline:
        .my-app-wide-run { --htmxo-semantic-group-min: 30rem; } */
 .htmxo-semantic-group {
     display: flex;
@@ -28391,6 +28410,8 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-semantic-group > * {
     flex: 1 1 var(--htmxo-semantic-group-min, 20rem);
     min-width: 0;
+    container-type: inline-size;
+    contain-intrinsic-inline-size: var(--htmxo-semantic-group-min, 20rem);
 }
 
 /* `SemanticMetric` is the OTHER element with no HTML counterpart (see the group
@@ -28417,7 +28438,13 @@ htmxo_utility_styles() = h.style(Raw("""
    setting one pair off from the next — and apps re-rolled their own lists.
    Every `dl` is a two-column grid instead: bold terms in a column as wide as
    the longest term, capped at `--htmxo-dl-label-width` and at 40% of the list
-   in a narrow column (a longer term wraps), and the values beside them. A
+   in a narrow column, and the values beside them. A longer term wraps, a
+   one-word one too: `fit-content` never narrows a column below its content's
+   longest unbreakable run, and Pico's `overflow-wrap: break-word` does not
+   shorten that run, so a German compound such as "Leistungsbeschreibung" kept
+   its full width and squeezed its values to a few pixels. `overflow-wrap:
+   anywhere` lets the cap hold, and `hyphens: auto` puts the break at a
+   syllable, with a hyphen, in the page's language (`htmx(...; lang)`). A
    term with several values puts each on its own row of the value column, and
    a `div` around a pair (valid HTML) is a `subgrid` row, so grouped pairs
    share the columns. A paragraph or list inside a value drops its outer
@@ -28442,10 +28469,21 @@ dl > div:not([hidden]) {
     row-gap: var(--htmxo-dl-row-gap, 0.5rem);
     align-items: baseline;
 }
-:is(dl, dl > div) > dt { grid-column: 1; font-weight: 600; }
+:is(dl, dl > div) > dt { grid-column: 1; font-weight: 600; hyphens: auto; overflow-wrap: anywhere; }
 :is(dl, dl > div) > dd { grid-column: 2; margin: 0; }
 :is(dl, dl > div) > dd > :first-child { margin-top: 0; }
 :is(dl, dl > div) > dd > :last-child { margin-bottom: 0; }
+/* In a narrow container (a `SemanticGroup` card, or an app's own column that
+   declares `container-type: inline-size`) the two columns leave the values
+   too little width to read, so each term sits above its value, unindented,
+   with the pairs spaced apart. 24rem is where a 40% term column and the
+   values beside it both stop reading as ordinary lines; a container condition
+   cannot read a variable, so it is fixed. */
+@container (width < 24rem) {
+    dl:not([hidden]), dl > div:not([hidden]) { display: block; }
+    :is(dl, dl > div) > dd { margin-top: 0.15rem; }
+    :is(dl, dl > div) > dd + dt, dl > div + div { margin-top: 0.75rem; }
+}
 
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the
