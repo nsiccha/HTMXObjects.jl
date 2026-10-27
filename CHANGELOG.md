@@ -14,6 +14,22 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.4
+
+- `record!`: a recorded `hx-get` whose address has a query (a zoom link,
+  `hx-get="/region?key=a&measure=x"`) names the fragment file the recording
+  writes for that address, `<record_base>/hx/region@key=a&measure=x.html`,
+  when it records the address: a value a `url_params` element declares, or a
+  query path in `paths`. The order of its parameters does not matter. Before,
+  every `hx-get` with a query was disabled. Any other one still is
+  (`b76c6ca`).
+- `record!`: a query path in `paths` is saved under its query
+  (`/region?key=a` → `region@key=a.html`, `hx/region@key=a.html`,
+  `md/region@key=a.md`), so two queries of one path are two files instead of
+  a `_RecordDestinationCollision`. **Breaking:** a single query path was saved
+  without its query (`region.html`); list the path without the query to keep
+  that file (`b76c6ca`).
+
 ## 0.1.3
 
 - `hx_response(value; …)`'s value is rendered when HTMXObjects answers, for
