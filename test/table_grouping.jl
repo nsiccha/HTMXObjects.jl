@@ -2109,9 +2109,9 @@ end
     @test contains(md, "\n\n**Acme Prime**\n\nmemo 3\n\n")
     # Refused: an unknown reduce, digits or sigdigits (outside 1 to 15, the
     # digits the browser rounds exactly), digits and sigdigits together, the
-    # wrong number of functions, a column that is not a header or is the
-    # first, a column named twice, something other than a ColumnSummary, a
-    # value that is not a number.
+    # wrong number of functions, a column that is not a header, every column
+    # (no place is left for the key and count), a column named twice,
+    # something other than a ColumnSummary, a value that is not a number.
     @test_throws ArgumentError ColumnSummary(:median, identity)
     @test_throws ArgumentError ColumnSummary(:sum)
     @test_throws ArgumentError ColumnSummary(:ratio, identity)
@@ -2120,12 +2120,98 @@ end
     @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=16)
     @test_throws ArgumentError ColumnSummary(:sum, identity; digits=1, sigdigits=2)
     @test_throws ArgumentError grouped(group_summary=["Nope" => ColumnSummary(:count)])
-    @test_throws ArgumentError grouped(group_summary=["Party" => ColumnSummary(:count)])
+    @test_throws ArgumentError grouped(group_summary=["Party" => ColumnSummary(:count), "IBAN" => ColumnSummary(:count),
+        "Amount" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Amount" => ColumnSummary(:count), "Amount" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Amount" => :sum])
     @test_throws ArgumentError html(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.party)]))
     @test_throws ArgumentError master_detail_table(["A", "B"], TX; key=t -> t.id, master=t -> (h.td(t.id), h.td("")),
         detail=t -> "", group_summary=["B" => ColumnSummary(:count)])
+end
+
+@testitem "tally group summaries: a categorical column counted per category" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string
+    html(x) = repr("text/html", x)
+    row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
+    cell(r, i) = match(Regex("<td(?=[^>]* data-htmxo-group-summary=\"$i\")[^>]*>.*?</td>", "s"), r).match
+    attr(x, name) = let m = match(Regex(" $name=\"([^\"]*)\""), x); isnothing(m) ? nothing : m[1] end
+    segments(c) = [(m[1], m[2], m[3]) for m in eachmatch(r"<span style=\"--htmxo-tally-n:([^;]*);--htmxo-tally-color:([^\"]*)\" title=\"([^\"]*)\"></span>", c)]
+    # Acme holds p1, p2, p7 (DE01, DE02, DE01); Bakery p4, p6 (DE03, DE03).
+    # `order` puts DE03 first; the others follow as they first appear among
+    # the items, and keep their place and colour in every group.
+    tally = ColumnSummary(:tally, t -> t.iban; order=["DE03", "DE01"])
+    page = html(grouped(group_by="party", group_summary=["IBAN" => tally]))
+    acme = cell(row(page, group_row(page, "Acme")), 0)
+    @test attr(acme, "data-htmxo-number") == "3" && attr(acme, "data-htmxo-tally") == "3"
+    @test attr(acme, "aria-label") == "3 (DE01: 2; DE02: 1)" && contains(acme, "<span class=\"htmxo-tally-total\">3</span>")
+    @test segments(acme) == [("2", "var(--htmxo-category-2)", "DE01: 2"), ("1", "var(--htmxo-category-3)", "DE02: 1")]
+    @test segments(cell(row(page, group_row(page, "Bakery")), 0)) == [("2", "var(--htmxo-category-1)", "DE03: 2")]
+    # Its bar names the scale of its column and level; the table sets each
+    # to the longest total there (Acme's 3).
+    @test attr(acme, "style") == "--htmxo-tally-total:3;--htmxo-tally-max:var(--htmxo-tally-max-1-1)"
+    @test contains(page, "style=\"--htmxo-tally-max-1-1:3\"")
+    # The leaves carry their categories; the browser gets the categories' order, names and colours.
+    @test contains(match(r"<tr[^>]*id=\"row-group--Acme--p1\"[^>]*>", page).match, "data-htmxo-leaf-values=\"[[[&quot;DE01&quot;,1.0]]]\"")
+    @test contains(page, "{&quot;reduce&quot;:&quot;tally&quot;,&quot;digits&quot;:0,&quot;categories&quot;:[" *
+        "{&quot;key&quot;:&quot;DE03&quot;,&quot;label&quot;:&quot;DE03&quot;,&quot;color&quot;:&quot;var(--htmxo-category-1)&quot;}," *
+        "{&quot;key&quot;:&quot;DE01&quot;,&quot;label&quot;:&quot;DE01&quot;,&quot;color&quot;:&quot;var(--htmxo-category-2)&quot;}," *
+        "{&quot;key&quot;:&quot;DE02&quot;,&quot;label&quot;:&quot;DE02&quot;,&quot;color&quot;:&quot;var(--htmxo-category-3)&quot;}," *
+        "{&quot;key&quot;:&quot;DE04&quot;,&quot;label&quot;:&quot;DE04&quot;,&quot;color&quot;:&quot;var(--htmxo-category-4)&quot;}]}")
+    # Markdown (and so a PDF) writes the text, never the bar.
+    md = to_markdown_string(grouped(group_by="party", group_summary=["IBAN" => tally]))
+    @test contains(md, "| **Acme** (3) | 3 (DE01: 2; DE02: 1) |") && contains(md, "| **Bakery** (2) | 2 (DE03: 2) |")
+    @test !contains(md, "htmxo-tally")
+    # `label` names a category and `color` colours it; a leaf without one is left out.
+    named = html(grouped(group_by="party", group_summary=["IBAN" => ColumnSummary(:tally,
+        t -> t.id == "p2" ? nothing : t.iban; label=c -> "IBAN " * c, color=c -> c == "DE01" ? "#123456" : "gray")]))
+    @test segments(cell(row(named, group_row(named, "Acme")), 0)) == [("2", "#123456", "IBAN DE01: 2")]
+    @test attr(cell(row(named, group_row(named, "Acme")), 0), "aria-label") == "2 (IBAN DE01: 2)"
+    # A leaf may give its own breakdown, `category => number` pairs, which
+    # the group adds up; German texts write German numbers.
+    pairs = html(grouped(group_by="party", texts=table_texts(:de), group_summary=["Amount" => ColumnSummary(:tally,
+        t -> [t.iban => -t.amount * 100, "all" => 1]; digits=1)]))
+    acme_pairs = cell(row(pairs, group_row(pairs, "Acme")), 0)
+    @test attr(acme_pairs, "aria-label") == "10.003,0 (DE01: 8.000,0; all: 3,0; DE02: 2.000,0)"
+    @test attr(acme_pairs, "data-htmxo-number") == "10003.0"
+    # A group without any category shows an empty cell, still ready for the
+    # browser to fill when it regroups.
+    none_page = html(grouped(group_by="party", group_summary=["IBAN" => ColumnSummary(:tally,
+        t -> t.party == "Bakery" ? missing : t.iban)]))
+    none = cell(row(none_page, group_row(none_page, "Bakery")), 0)
+    @test isnothing(attr(none, "data-htmxo-number")) && contains(none, "data-htmxo-tally=\"0\"") && !contains(none, "role=")
+    # Nested levels: each level its own scale.
+    nested = html(grouped(group_by=["rule", "party"], group_summary=["IBAN" => ColumnSummary(:tally, t -> t.iban)]))
+    @test contains(nested, "style=\"--htmxo-tally-max-1-1:6;--htmxo-tally-max-1-2:3\"")
+    @test contains(cell(row(nested, group_row(nested, "Shops", "Bakery")), 0), "var(--htmxo-tally-max-1-2)")
+    # A summary in the first column: the key and count move to the first
+    # column no summary names, and the row's toggle stays a control of its
+    # own beside the bar. A number there keeps its value in an element too.
+    first_col = html(grouped(group_by="party", group_summary=["Party" => ColumnSummary(:tally, t -> t.iban),
+        "IBAN" => ColumnSummary(:count)]))
+    acme_row = row(first_col, group_row(first_col, "Acme"))
+    tds = [m.match for m in eachmatch(r"<td[^>]*>.*?</td>"s, acme_row)]
+    @test length(tds) == 3 && contains(tds[1], "data-htmxo-group-summary=\"0\"") && contains(tds[1], "aria-label=\"Toggle child rows\"")
+    @test !contains(tds[1], "data-htmxo-group-label") && contains(tds[3], "<strong data-htmxo-group-label=\"\">Acme</strong>")
+    @test contains(tds[2], ">3</td>")
+    number_first = html(grouped(group_by="party", group_summary=["Party" => ColumnSummary(:count)]))
+    @test contains(row(number_first, group_row(number_first, "Acme")), "<span data-htmxo-summary-value=\"\">3</span>")
+    # Grouped tables sort their groups by a tally's total.
+    sorted = table_rows(html(grouped(group_by="party", default_sort="IBAN" => :desc,
+        group_summary=["IBAN" => ColumnSummary(:tally, t -> t.iban)])))
+    @test [last(split(m[1], "--group--")) for m in eachmatch(r"<tr id=\"row-([^\"]*)\"", sorted)
+           if contains(m[1], "--group--") && !startswith(m[1], "group--")] == ["Acme", "Bakery", "Acme--Prime", "Prime--Video"]
+    # A row the app builds itself shows the same cell: `summary_cell`.
+    own = html(summary_cell(ColumnSummary(:tally, t -> t.iban), TX[1:3]))
+    @test startswith(own, "<td data-htmxo-number=\"3\">") && contains(own, "aria-label=\"3 (DE01: 2; DE02: 1)\"") &&
+        contains(own, "style=\"--htmxo-tally-total:3\"")
+    @test html(summary_cell(ColumnSummary(:sum, t -> t.amount), TX[1:3])) == "<td data-htmxo-number=\"-60\">-60</td>"
+    @test contains(to_markdown_string(h.table(h.tbody(h.tr(summary_cell(ColumnSummary(:tally, t -> t.iban), TX[1:3]))))),
+        "3 (DE01: 2; DE02: 1)")
+    # Refused: order/label/color on another reduce, a negative number.
+    @test_throws ArgumentError ColumnSummary(:sum, identity; order=["a"])
+    @test_throws ArgumentError ColumnSummary(:count; color=c -> "red")
+    @test_throws ArgumentError html(grouped(group_by="party", group_summary=["IBAN" => ColumnSummary(:tally, t -> [t.iban => t.amount])]))
 end
 
 @testitem "group_order: a grouping's groups in an order of its own" setup=[GroupingFixtures] tags=[:unit] begin
@@ -2301,6 +2387,107 @@ end
                     @test endswith(line, ":true")
                 end
                 @test count(==('\n'), checks[1]) + 1 == 21
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "tally group summaries regroup in the browser browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        tally = ColumnSummary(:tally, t -> t.iban; order=["DE03", "DE01"])
+        # A tally in the IBAN column; a breakdown (pairs) in the first column
+        # of a German nested table, whose key and count move to the second.
+        flat(group_by; kw...) = regroup_table(; group_by, id="g", searchable=true,
+            group_summary=["IBAN" => tally, "Amount" => ColumnSummary(:sum, t -> t.amount; digits=1)], kw...)
+        nested(group_by) = regroup_table(; group_by, id="n", key=t -> "n" * t.id, texts=table_texts(:de),
+            group_summary=["Party" => ColumnSummary(:tally, t -> [t.iban => -t.amount, "all" => 1]; digits=1)])
+        # Rows an app builds itself (`summary_cell`) take the column's scale too.
+        own = sortable_table(["Name", "IBAN"], [h.tr(h.td(n), summary_cell(tally, TX[r])) for (n, r) in (("three", 1:3), ("one", 3:3))];
+            id="own")
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            let requests = 0;
+            document.body.addEventListener('htmx:beforeRequest', () => requests++);
+            const g = () => document.getElementById('g').closest('[data-htmxo-grouped]');
+            const n = () => document.getElementById('n').closest('[data-htmxo-grouped]');
+            const row = id => document.getElementById('row-' + id);
+            const value = (id, i) => row(id).querySelector('[data-htmxo-group-summary="' + i + '"] [data-htmxo-tally]');
+            const width = (id, i) => value(id, i).querySelector('.htmxo-tally-bar').getBoundingClientRect().width;
+            const levels = v => v === 'none' ? [] : [v];
+            const regroup = v => htmxoGroupRequest(g().querySelector('.htmxo-group-pills'), levels(v), null);
+            // Every grouping: the server's rows, tally cells included, built in the browser.
+            for (const v of ['iban', 'rule', 'media', 'none', 'party']) {
+                regroup(v);
+                check('parity-' + v, await parity(g(), '/flat?group_by=' + v));
+            }
+            check('label', value('g--group--Acme', 0).getAttribute('aria-label') === '3 (DE01: 2; DE02: 1)' &&
+                value('g--group--Acme', 0).closest('td').dataset.htmxoNumber === '3' &&
+                Array.from(value('g--group--Acme', 0).querySelectorAll('.htmxo-tally-bar > span'), s => s.title).join('|') === 'DE01: 2|DE02: 1');
+            // One scale per column and level: Acme's 3 is the longest, Bakery's 2 is two thirds of it.
+            const table = g().querySelector('table');
+            check('scale', table.style.getPropertyValue('--htmxo-tally-max-1-1') === '3' &&
+                Math.abs(width('g--group--Bakery', 0) / width('g--group--Acme', 0) - 2 / 3) < 0.03 &&
+                Math.abs(width('g--group--Acme--Prime', 0) / width('g--group--Acme', 0) - 1 / 3) < 0.03 || [width('g--group--Acme', 0), width('g--group--Bakery', 0)]);
+            regroup('rule');
+            check('rescaled', table.style.getPropertyValue('--htmxo-tally-max-1-1') === '6' &&
+                value('g--group--Shops', 0).getAttribute('aria-label') === '6 (DE03: 2; DE01: 3; DE02: 1)' &&
+                Math.abs(width('g--group--Media', 0) / width('g--group--Shops', 0) - 2 / 6) < 0.03);
+            // Segments as long as their counts, 2px apart: DE01's 3 of Shops' 6.
+            const parts = Array.from(value('g--group--Shops', 0).querySelectorAll('.htmxo-tally-bar > span'), s => s.getBoundingClientRect().width);
+            check('segments', parts.length === 3 && Math.abs(parts[1] / (width('g--group--Shops', 0) - 4) - 0.5) < 0.03 || parts);
+            // A row update rendered by the server fits the browser's rows and keeps the scale.
+            htmxoUpdateRows(await (await fetch('/flat?group_by=rule&update=p4')).text());
+            check('row-update', await parity(g(), '/flat?group_by=rule') === true && table.style.getPropertyValue('--htmxo-tally-max-1-1') === '6');
+            // Nested pills on the German table with the breakdown in its first column.
+            const pill = name => n().querySelector('[data-htmxo-group-name="' + name + '"] > button');
+            pill('iban').click();
+            check('nested-parity', await parity(n(), '/nested?group_by=party&group_by=iban', true));
+            check('nested-cell', row('n--group--Acme--DE01').querySelector('[data-htmxo-group-summary="0"] [data-htmxo-tally]').getAttribute('aria-label') ===
+                    '82,0 (DE01: 80,0; all: 2,0)' &&
+                row('n--group--Acme--DE01').cells[1].querySelector('[data-htmxo-group-label]').textContent === 'DE01');
+            const nt = n().querySelector('table');
+            check('nested-scale', nt.style.getPropertyValue('--htmxo-tally-max-0-1') === '103' && nt.style.getPropertyValue('--htmxo-tally-max-0-2') === '102');
+            check('toggle', row('n--group--Acme').cells[0].querySelector('button[data-htmxo-tree-toggle]').getAttribute('aria-label') !== null);
+            // The app's own rows: named into the column's scale on load.
+            const ot = document.getElementById('own').closest('table') || document.querySelector('#own table');
+            const ownValues = Array.from(document.querySelectorAll('[data-htmxo-tally]')).filter(v => v.closest('table') === ot);
+            check('own-scale', ot.style.getPropertyValue('--htmxo-tally-max-1-0') === '3' &&
+                ownValues.every(v => v.style.getPropertyValue('--htmxo-tally-max') === 'var(--htmxo-tally-max-1-0)') ||
+                [ot.getAttribute('style'), ownValues.map(v => v.getAttribute('style')).join(' | ')]);
+            check('no-requests', requests === 0);
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(flat(["party"]), nested("party"), own, driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            q = HTTP.queryparams(uri)
+            uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
+            uri.path == "/flat" ? html(haskey(q, "update") ? flat(levels; update_rows=q["update"]) : flat(levels)) :
+            uri.path == "/nested" ? html(nested(levels)) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 16
             end
         finally
             close(server)
