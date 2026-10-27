@@ -21056,8 +21056,15 @@ _row_pinned(row) = let v = _node_attr(row, "data-htmxo-pinned")
     !isnothing(v) && string(v) != "false"
 end
 
-# The text the browser reads from rendered HTML (`textContent`): the markup
-# without its tags, character references decoded.
+# The text the browser reads from a cell (`textContent`): a node's text
+# children as they are, rendered markup (`Raw`, a value that renders itself)
+# without its tags and with its character references decoded, and nothing
+# from hyperscript, which goes into the `_` attribute.
+_text_content!(io::IO, x::AbstractString) = print(io, x)
+_text_content!(::IO, ::HyperscriptString) = nothing
+_text_content!(io::IO, x::Node) = foreach(c -> _text_content!(io, c), HTMX.children(x))
+_text_content!(io::IO, x) = showable("text/html", x) ?
+    print(io, _html_text_content(repr("text/html", x))) : print(io, string(x))
 _html_text_content(html::AbstractString) = replace(replace(html, r"<[^>]*>" => ""),
     r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z]+);" => _html_char_reference)
 const _HTML_NAMED_REFERENCES = Dict("amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"",
@@ -21082,7 +21089,9 @@ function _cell_sort_text(cell)
     end
     kids = HTMX.children(cell)
     label = findfirst(c -> !isnothing(_node_attr(c, "data-htmxo-row-label")), kids)
-    String(strip(_html_text_content(repr("text/html", isnothing(label) ? cell : kids[label]))))
+    io = IOBuffer()
+    _text_content!(io, isnothing(label) ? cell : kids[label])
+    String(strip(String(take!(io))))
 end
 
 # JavaScript's `parseFloat`: the number a string starts with, else `NaN`.
@@ -21192,7 +21201,8 @@ struct _RowSortKey
     has_cell::Bool       # the row has a cell in the sorted column
     value::Any           # one order: the text; several: nothing, a Float64 or a String
     number::Float64      # one order: the number the text starts with, else NaN
-    text_key::Any        # the collation key of the value's text, or nothing
+    text::Union{Nothing,String}  # the value as the text `localeCompare` reads
+    text_key::Any        # its collation key, once a text is compared (`_collated`)
 end
 function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
     cells = _row_cells(row)
@@ -21200,13 +21210,17 @@ function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
     cell = has_cell ? cells[col] : nothing
     if nkeys == 0
         text = has_cell ? _cell_sort_text(cell) : ""
-        _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), _collation_key(text))
+        _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), text, nothing)
     else
         value = has_cell ? _cell_sort_value(cell, key, nkeys) : nothing
         text = value isa Float64 ? _js_number_string(value) : value
-        _RowSortKey(_row_pinned(row), has_cell, value, NaN, isnothing(text) ? nothing : _collation_key(text))
+        _RowSortKey(_row_pinned(row), has_cell, value, NaN, text, nothing)
     end
 end
+# A row compares by text unless its value is a number on both sides.
+_compares_text(k::_RowSortKey, nkeys::Int) = k.has_cell && (nkeys == 0 ? isnan(k.number) : k.value isa String)
+_collated(k::_RowSortKey) = isnothing(k.text) ? k :
+    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.text, _collation_key(k.text))
 
 # `sortTable`'s comparison of two rows, `asc` or not, as -1, 0 or 1: pinned
 # rows first; with one order, numbers by value when both texts start with
@@ -21243,8 +21257,11 @@ function _default_sort_rows(rows, ds, headers; hierarchy::Bool)
     detail_of(i) = let dash = findfirst('-', ids[i])
         isnothing(dash) ? nothing : get(detail_at, "detail-" * ids[i][nextind(ids[i], dash):end], nothing)
     end
-    sort_keys = Dict{Int,_RowSortKey}()
-    sort_key(i) = get!(() -> _RowSortKey(rows[i], col, key, nkeys), sort_keys, i)
+    # Each row's key, read once; texts get their collation keys only when
+    # some row of the column compares by text.
+    sort_keys = Dict(i => _RowSortKey(rows[i], col, key, nkeys) for i in eachindex(rows) if is_tr(rows[i]) && !companion[i])
+    any(k -> _compares_text(k, nkeys), values(sort_keys)) && map!(_collated, values(sort_keys))
+    sort_key(i) = sort_keys[i]
     order = Int[]
     placed = Set{Int}()
     function append(i)
