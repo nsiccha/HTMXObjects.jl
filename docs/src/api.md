@@ -1321,7 +1321,9 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select, presentation, shared, active)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface. `presentation=:tabs` makes it an app page: shared inputs in a sidebar, one tab per operation, results that follow their inputs (see [An app page](@ref semantic-tabs)) |
+| `semantic_control(obj, ::Val{name}, control)` | Hook: define a method to render one input of your struct your own way in every generated form |
+| `semantic_follow_script()` | The page runtime that keeps a `presentation=:tabs` page's results on their inputs (the `htmx()` shell installs it) |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
@@ -1357,6 +1359,115 @@ the operation. The form, its attributes and target, and the original rich button
 remain in place. Submit content never rides a hidden input as Julia text;
 generated forms carry only the request/context inputs needed for submission.
 Older full-form refresh requests remain accepted for already-rendered pages.
+
+### An app page: `presentation = :tabs` {#semantic-tabs}
+
+`semantic_app(obj; presentation=:tabs)` lays a semantic graph out as an app
+page: the inputs several operations read go in a sidebar, each operation gets a
+tab with the inputs only it reads above its result, and every read's result
+follows its inputs. Nothing beyond the graph's own declarations is needed:
+
+```julia
+@htmx struct Simulator
+    "Prediction basis"
+    @param basis::String = "typical"
+    @options(basis) = option_domain(["typical" => "Typical subject", "cohort" => "New subjects"])
+    "Subjects"
+    @param subjects::Int = 100
+    @relevant(subjects) = basis != "typical"
+    "Dose (mg)"
+    @param dose::Float64 = 60.0
+    "Doses (mg)"
+    @param doses::String = "5, 10, 20"
+    scenario = (; basis, subjects)
+
+    "Time course"
+    @get timecourse() = timecourse_view(simulate(scenario, dose))
+    "Dose–response"
+    @get dose_response() = dose_response_view([simulate(scenario, d) for d in parse_doses(doses)])
+    "Fraction responding"
+    @get fraction(; threshold::Float64 = -50.0) = fraction_view(scenario, parse_doses(doses), threshold)
+    "Add a fit"
+    @post upload(; bundle::Upload) = add_fit(bundle)
+
+    @get index() = semantic_app(__self__; presentation=:tabs, title="Simulator",
+        select = entry -> entry.name !== :index)
+end
+```
+
+Here `basis`, `subjects` and `doses` sit in the sidebar, Time course's tab holds
+`dose`, Fraction responding's holds `threshold`, and Add a fit keeps its form
+and button.
+
+- **Where an input goes.** A `@param` (or fixed field) that two or more of the
+  page's operations read is shared and goes in the sidebar; one that a single
+  operation reads goes in that operation's tab, next to its own arguments. What
+  an operation reads is what DynamicObjects sees in its route's body and in the
+  properties it calls, transitively (`scenario` above reads `basis` and
+  `subjects`, so every view reads them). A `@param` no operation reads is left
+  out, unless an operation hands `__self__` to other code, whose reads no static
+  scan follows: then it goes in the sidebar, so nothing that operation might
+  read is missing. `shared=[:basis, :fit]` chooses the sidebar instead; every
+  other input then appears in the tab of each operation that reads it.
+- **Controls** come from each input's type, default, `@options` domain and
+  docstring (its label), as everywhere in generated forms: a few options are
+  pills, many a list, `Bool` a checkbox, a number a number input.
+- **Tabs.** One per selected operation, labelled with its docstring's first
+  line and named after its route in the page address (`?tab=dose_response`,
+  kept by [`tabset`](@ref)). The page opens on the tab the address names, else
+  `active` (a name or a position), else the first. The open tab's result starts
+  loading with the page, so with [`serve`](@ref)'s prestart it is computed while
+  the page travels.
+- **Results that follow their inputs.** A read's result (a `GET` operation)
+  is asked for again 300 ms after one of its inputs changes while it is shown,
+  and when its tab is opened, but only when the values it reads differ from the
+  ones its shown result was asked for: reopening a tab whose inputs did not
+  change requests nothing, and changing an input another tab owns, or one that
+  does not apply, requests nothing for this one. The result on screen stays
+  while the next one computes, and a newer request replaces one still running.
+  An operation that hands `__self__` to other code counts as reading every
+  input. A mutation (`POST`/`PUT`/`PATCH`/`DELETE`) keeps its form and button,
+  sent with the sidebar; once it finishes, the other results are asked for
+  again when next shown. [`semantic_follow_script`](@ref) does this, and the
+  `htmx()` shell installs it.
+
+Everything is overridable: `layout(parts)` composes the page (`parts` carries
+`object`, `title`, `id`, `sidebar`, the sidebar form or `nothing`; `tabs`,
+`label => content` pairs; `tab_names`, `active` and `operations`), so an app can
+replace the whole page or one region:
+
+```julia
+semantic_app(__self__; presentation=:tabs,
+    layout = parts -> h.div(h.hgroup(h.h2("Simulator"), h.p("Pick a scenario.")),
+        app_layout(h.aside(parts.sidebar, fits_summary(__self__)),
+                   tabset(parts.tabs...; names=parts.tab_names, active=parts.active))))
+```
+
+`render_operation(entry)` renders one tab's content from `entry.form` (its own
+inputs, or `nothing`) and `entry.result`, and [`semantic_control`](@ref)
+renders one input your own way, in the sidebar, a tab, or any other generated
+form:
+
+```julia
+HTMXObjects.semantic_control(::Simulator, ::Val{:subjects}, c) =
+    ninput((; subjects = c.value); label = c.label, min = 1, step = 1)
+```
+
+#### Inputs that apply only sometimes: `@relevant`
+
+`@relevant(name) = condition` declares when the `@param` `name` applies.
+Where the condition is false, the parameter is its default, whatever the
+request carries, so two requests that differ only in an input that does not
+apply compute alike, and a memoized property reading it is shared between
+them. Its control is hidden in every generated form while the condition is
+false. The condition is an ordinary property (`__relevant_<name>__`) of the
+struct and may read anything, but the browser evaluates it itself only when
+it compares `@param`s with literals: `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`,
+`∉`, a bare `Bool` parameter, and `!`, `&&` and `||` of those. Any other
+condition (`@relevant(output) = length(outputs) > 1`) re-renders the control
+from the server when an input it reads changes. A `@relevant` parameter needs a
+default, and the condition belongs to the struct that extracts the parameter,
+not to one that delegates it.
 
 ### Sharing settings across a table
 
@@ -1736,6 +1847,8 @@ application_explorer_styles
 ReflectionRoutes
 semantic_app
 operation_form
+semantic_control
+semantic_follow_script
 SemanticNode
 SemanticCard
 SemanticFields

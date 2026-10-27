@@ -28089,7 +28089,8 @@ end
 
 Return a `<script>` that shows each `[data-show-when-field]` element (a widget
 built with `show_when=(field, op, value)`) exactly while its predicate holds.
-Include once per page (like [`loading_indicator_script`](@ref)). The element
+The [`htmx`](@ref) shell installs it; include it once yourself only in a
+hand-built `<head>`. The element
 is hidden with its `hidden` attribute, so a `<label>` hides on a Pico page
 too, where Pico gives every label `display: block`.
 
@@ -28119,7 +28120,7 @@ in a form can follow a field of a sidebar beside it.
 Visibility is evaluated on load, on every `change` anywhere on the page (one
 listener, so every radio of a group counts, and controls swapped in later need
 no binding), and after every htmx swap settles, since a swap can replace either
-the element or the control it reads. The `htmx()` shell installs it.
+the element or the control it reads.
 """
 show_when_script() = h.script(Raw(raw"""
 (function() {

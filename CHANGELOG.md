@@ -14,6 +14,33 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.15
+
+- `semantic_app(obj; presentation=:tabs)` lays a semantic graph out as an app
+  page: the inputs two or more operations read in an `app_layout` sidebar, one
+  `tabset` tab per operation with the inputs only it reads above its result.
+  `shared=[…]` chooses the sidebar, `active=` the tab the page opens on when
+  its address names none (`?tab=` is kept), and `layout(parts)` /
+  `render_operation(entry)` replace the page or a tab. A mutation keeps its
+  form and button. The default `presentation=:stacked` is unchanged.
+- On that page a read's result follows its inputs: it is asked for again
+  300 ms after an input it reads changes while it is shown, and when its tab
+  is opened, but not when the values it reads are the ones its shown result
+  was asked for. The open tab's result starts with the page. The new page
+  runtime `semantic_follow_script()` does this; the `htmx()` shell installs it.
+- `@relevant(name) = condition` declares when a `@param` applies. Where the
+  condition is false the parameter is its default, whatever was submitted, so
+  such requests compute alike, and every generated form hides its control. The
+  browser evaluates comparisons of `@param`s with literals (and `!`, `&&`,
+  `||` of them); any other condition re-renders the control from the server.
+  `show_when_script()` reads such conditions as JSON in `data-show-when`, and
+  the `htmx()` shell now installs it, so a page no longer needs to add it.
+- `semantic_control(obj, ::Val{name}, control)`: define a method to render one
+  input of your struct your own way in every generated form.
+- A generated checkbox for a `Bool` input submits `true`; it submitted the
+  browser's `on`, which a `Bool` input refused (400). A `@param` read outside
+  a request is its default, as an `@options` one already was, where it threw.
+
 ## 0.1.14
 
 - A `show_when` widget hides on a Pico page too. It starts with the `hidden`
