@@ -3,8 +3,9 @@
     import HTMXObjects: h
     export row_ids, value_row, pinned_pairs, TREE, tree_table, ITEMS, grouped_table, keyed_rows, keyed_table
 
-    # The ids of a rendered table's rows, in document order.
-    row_ids(html) = [m[1] for m in eachmatch(r"<tr[^>]* id=\"([^\"]+)\"", html)]
+    # The ids of a rendered table's rows, in document order; the group-row
+    # `<template>` a regroupable table carries is no row.
+    row_ids(html) = [m[1] for m in eachmatch(r"<tr[^>]* id=\"([^\"]+)\"", replace(html, r"<template.*?</template>"s => ""))]
     # A section row as the snag reported it: a label and its estimate.
     value_row(label, v) = h.tr(id="row-$label")(h.td(label), h.td(string(v); data_sort_value=string(v)))
 
@@ -42,7 +43,7 @@
         detail=t -> h.p("Detail ", t.id), texts, kw...)
 
     # Hand-built cells with two sort keys; "z" has no lower bound.
-    keyed_rows() = [h.tr(id="row-$k")(h.td(k), h.td("$est ($lo–$hi)"; sort_values(est, lo, hi)...))
+    keyed_rows() = [h.tr(id="row-$k")(h.td(k), h.td("$est ($(lo)–$hi)"; sort_values(est, lo, hi)...))
                     for (k, est, lo, hi) in (("x", 5, 4, 6), ("y", 3, 1, 9), ("z", 4, missing, 5))]
     keyed_table(; kw...) = sortable_table(["Zone", ColumnSpec("Estimate"; sort_keys=["Estimate", "Lower", "Upper"])],
         keyed_rows(); kw...)
