@@ -4126,6 +4126,9 @@ the rest:
   "4 SD" links above — writes that value into the address with
   `history.replaceState`, keeping the other parameters and htmx's history
   state. A first load that shows the rendered value leaves the address alone.
+  The element's declaration (`data-htmxo-url-params`) then names the value it
+  shows, so htmx's history cache keeps that value with the element: Back or
+  Forward to the address requests nothing.
   A request whose route answers through a deferred operation's poller writes
   the value it asked for when the poller takes the element's place, so the
   element the polls bring matches the address. The app needs no
