@@ -5820,20 +5820,40 @@ end
 
 # Queues a `url_params` value a recording walk met (`_static_variant_target`)
 # for the running `record!`, which records its fragment after the requested
-# paths. `false` when no `record!` runs, so nothing will record it.
+# paths, and returns the address whose fragment file holds it: its own, or a
+# requested path or value recorded already with the same parameters in another
+# order. `nothing` when no `record!` runs, so nothing will record it.
 function _record_variant!(address::AbstractString)
     session = get(task_local_storage(), _RECORDING_SESSION_KEY, nothing)
-    isnothing(session) && return false
-    if !(address in session.variants_seen)
-        push!(session.variants_seen, address)
+    isnothing(session) && return nothing
+    get!(session.recorded, _record_query_identity(address)) do
         push!(session.variants, String(address))
+        String(address)
     end
-    true
 end
 
-# Where a recorded response is saved: its path without the query, except a
-# `url_params` value `record!` records, whose query names it.
-_record_save_path(req::HTTP.Request) = get(req.context, :htmxo_record_variant, false) ?
+# The address whose fragment file the running `record!` writes for an `hx-get`
+# with a query, or `nothing`: a requested path's or a declared value's, met so
+# far (a value counts once a response recorded before declared it, or the
+# same response did earlier in its markup).
+function _recorded_query_address(address::AbstractString)
+    session = get(task_local_storage(), _RECORDING_SESSION_KEY, nothing)
+    isnothing(session) && return nothing
+    get(session.recorded, _record_query_identity(address), nothing)
+end
+
+# What `record!` knows an address with a query by: its path and its
+# parameters in a fixed order, without a `#` fragment.
+function _record_query_identity(address::AbstractString)
+    path, query = _split_once(first(_split_once(address, '#')), '?')
+    isnothing(query) ? path : path * "?" * _sorted_query(query)
+end
+_sorted_query(query::AbstractString) = join(sort!(split(query, '&'; keepempty=false)), '&')
+
+# Where a recorded response is saved: its path without the query, except an
+# address with a query that `record!` drives (a requested path or a
+# `url_params` value), whose query names it.
+_record_save_path(req::HTTP.Request) = get(req.context, :htmxo_record_query, false) ?
     _record_variant_save_path(String(req.target)) : String(first(split(String(req.target), "?"; limit=2)))
 
 # Paths that use kwargs (query params) and thus can't vary by query string on static servers.
@@ -6091,7 +6111,8 @@ Walk a Node tree and make it static-safe under `rules`:
   recording, the fragment file it records, `<record_base>/hx/<path>.html`)
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
 - Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
-  routes) or names one of `rules.unservable` (kwargs routes)
+  routes; in a `record!` recording, unless it records that address,
+  `_static_query_hx_url`) or names one of `rules.unservable` (kwargs routes)
 - Mark affected elements with `data-static-disabled` and `disabled`, or —
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
 - Give a [`url_params`](@ref) element the file of each value it declares
@@ -6321,9 +6342,18 @@ _split_once(s, c) = (i = findfirst(c, s); isnothing(i) ? (String(s), nothing) : 
 _static_variant_target(rules::_StaticRules{<:StaticExport,_MappedVariants}, address) =
     _static_url_target(rules.spec, address, :fragment)
 _static_variant_target(rules::_StaticRules{<:StaticExport,_RecordedVariants}, address) =
-    _record_variant!(address) ?
-        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address)) :
-        nothing
+    _recorded_query_url(rules, _record_variant!(address))
+
+# What an unmapped `hx-get` with a query becomes, or `nothing` (it is
+# disabled): for a recording, the file `record!` writes for its address, when
+# it records that address; a request-scoped export names files only through
+# its `url_map`.
+_static_query_hx_url(::_StaticRules{<:StaticExport,_MappedVariants}, url) = nothing
+_static_query_hx_url(rules::_StaticRules{<:StaticExport,_RecordedVariants}, url) =
+    _recorded_query_url(rules, _recorded_query_address(url))
+_recorded_query_url(rules, ::Nothing) = nothing
+_recorded_query_url(rules, address::AbstractString) =
+    _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address))
 
 # The address of the fragment a recording saves for `save_path`: the file
 # `save_response` writes below `hx/`, under `record_base` (empty: the site
@@ -6423,14 +6453,17 @@ function _static_walk(node::Node, rules::_StaticRules)
         new_attrs[Symbol("data-htmxo-url-files")] = files
     end
 
-    # A mapped `hx-get` takes the caller's target verbatim. An unmapped one
-    # with a query string or pointing to a kwargs route is removed; otherwise
-    # it names its fragment under `record_base` (`_static_hx_url`).
+    # A mapped `hx-get` takes the caller's target verbatim, and an unmapped
+    # one with a query string the file a recording writes for its address
+    # (`_static_query_hx_url`). Any other with a query string or pointing to a
+    # kwargs route is removed; the rest name their fragment under
+    # `record_base` (`_static_hx_url`).
     if !isnothing(own)
         new_attrs[hx_get_sym] = own
     elseif haskey(new_attrs, hx_get_sym)
         url = new_attrs[hx_get_sym]
         target = _static_url_target(spec, url, :fragment)
+        isnothing(target) && occursin('?', url) && (target = _static_query_hx_url(rules, url))
         if !isnothing(target)
             new_attrs[hx_get_sym] = target
         elseif occursin('?', url) || url in rules.unservable
@@ -6784,7 +6817,7 @@ function _site_identity(address::AbstractString)
     path, query = _split_once(address, '?')
     path = isempty(path) || path == "/" ? "/" : rstrip(path, '/')
     isnothing(query) || !isnothing(_static_own_extension(path)) ? path :
-        path * "?" * join(sort!(split(query, '&'; keepempty=false)), '&')
+        path * "?" * _sorted_query(query)
 end
 
 # The address `url` names from the page at `base`, and the key of its entry
@@ -16819,6 +16852,9 @@ recorded page's path, `<record_base>/foo`: following one needs a host that
 serves `/foo` from `foo.html` (GitHub Pages does; `python -m http.server`
 does not).
 
+A requested path with a query is saved under it: `/region?key=a` at
+`<record_dir>/region@key=a.html`, `hx/region@key=a.html` and
+`md/region@key=a.md`, so several queries of one path are several files.
 Distinct requested paths that resolve to the same output file are rejected
 with an error before the later response can overwrite the earlier recording.
 
@@ -16826,6 +16862,14 @@ A recorded page or fragment holding a [`url_params`](@ref) element with
 declared `values` also gets the fragment of each of those values, recorded
 with `HX-Request: true` at `<record_dir>/hx/<path>@<query>.html` after the
 requested paths; that element's runtime loads them from the address.
+
+A recorded `hx-get` whose address has a query (a zoom link,
+`hx-get="/region?key=a"`) names the fragment file the recording writes for
+that address, a requested path's (with `hx=true`) or a declared value's,
+whatever the order of its parameters. A value counts once a response recorded
+before declared it, or the same response did earlier in its markup (a link
+inside the `url_params` element does). Any other `hx-get` with a query is
+disabled, since a static server cannot vary its answer by the query.
 
 Use this in place of the subprocess+HTTP recorder when you can drive an
 app from the same Julia process — much faster (no port, no warmup) and
@@ -16846,10 +16890,17 @@ function record!(app;
         record_dir=abspath(record_dir),
         source=Ref(""),
         destinations=Dict{String,String}(),
-        # `url_params` values the recorded responses declare (`_record_variant!`).
+        # `url_params` values the recorded responses declare, still to record
+        # (`_record_variant!`).
         variants=String[],
-        variants_seen=Set{String}(),
+        # The addresses with a query whose fragment the recording writes, by
+        # their parameters in any order: the requested paths, then each
+        # declared value (`_recorded_query_address`).
+        recorded=Dict{String,String}(),
     )
+    for path in paths
+        hx && occursin('?', path) && get!(session.recorded, _record_query_identity(path), String(path))
+    end
     storage[_RECORDING_SESSION_KEY] = session
     try
         route!(app; record_dir, record_base,
@@ -16866,7 +16917,7 @@ function record!(app;
         while !isempty(session.variants)
             address = popfirst!(session.variants)
             session.source[] = address
-            _drive_record_path(router, address, ["HX-Request" => "true"]; variant=true)
+            _drive_record_path(router, address, ["HX-Request" => "true"])
         end
     finally
         if had_session
@@ -16881,10 +16932,11 @@ end
 # In-process equivalent of an HTTP request: locate the registered handler
 # in the router's trie, invoke it with a synthesized Request. The
 # handler's normal save_response side effects still run.
-function _drive_record_path(router, path::AbstractString, headers; variant::Bool=false)
+function _drive_record_path(router, path::AbstractString, headers)
     req = HTTP.Request("GET", path, headers, UInt8[])
-    # A `url_params` value is saved under its query (`_record_save_path`).
-    variant && (req.context[:htmxo_record_variant] = true)
+    # An address with a query, a requested path's or a `url_params` value's,
+    # is saved under its query (`_record_save_path`).
+    occursin('?', path) && (req.context[:htmxo_record_query] = true)
     found = HTTP.Handlers.gethandler(router, req)
     handler = first(found)
     if handler === HTTP.Handlers.default404 || handler === nothing

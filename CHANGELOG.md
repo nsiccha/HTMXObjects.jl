@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.4
+## 0.1.5
 
 - `master_detail_table(...; groupings)`: a group row's id carries the
   table's name, `row-<id>--group--<path>` (`row-t1--group--20--mg`), or
@@ -23,6 +23,22 @@ failing at render with a `MethodError`.
   lazy group's rows land in their own table. `id = nothing` is no id. Leaf
   ids are unchanged (`5da191b`). **Breaking:** a page script that finds a
   group row by `row-group--<path>` builds `row-<id>--group--<path>` instead.
+
+## 0.1.4
+
+- `record!`: a recorded `hx-get` whose address has a query (a zoom link,
+  `hx-get="/region?key=a&measure=x"`) names the fragment file the recording
+  writes for that address, `<record_base>/hx/region@key=a&measure=x.html`,
+  when it records the address: a value a `url_params` element declares, or a
+  query path in `paths`. The order of its parameters does not matter. Before,
+  every `hx-get` with a query was disabled. Any other one still is
+  (`b76c6ca`).
+- `record!`: a query path in `paths` is saved under its query
+  (`/region?key=a` → `region@key=a.html`, `hx/region@key=a.html`,
+  `md/region@key=a.md`), so two queries of one path are two files instead of
+  a `_RecordDestinationCollision`. **Breaking:** a single query path was saved
+  without its query (`region.html`); list the path without the query to keep
+  that file (`b76c6ca`).
 
 ## 0.1.3
 

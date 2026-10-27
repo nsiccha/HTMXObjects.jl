@@ -3114,7 +3114,7 @@ For docs sites that want to embed a live or recorded HTMXObjects app:
 | `default_gallery_card(item)`   | The default card (title, description, code), built on `gallery_card` |
 | `htmxo_gallery_styles()`       | The gallery stylesheet (`gallery_grid` includes it; for galleries an app composes itself) |
 | `gallery_toolbar`, `gallery_controls_script` | Toolbar widget + JS for filter/group controls in the grid |
-| `record!(app; record_dir, record_base, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants. A recorded rooted `hx-get` names the fragment file it writes (`<record_base>/hx/<path>.html`; empty `record_base` = site root), so lazy parts load on any static server |
+| `record!(app; record_dir, record_base, paths, full, hx, markdown)` | In-process recorder — drives `app`'s routes against the registered handlers and saves HTML / fragment / markdown variants. A recorded rooted `hx-get` names the fragment file it writes (`<record_base>/hx/<path>.html`; empty `record_base` = site root), so lazy parts load on any static server; one with a query, when the recording records that address (a query path in `paths`, a declared `url_params` value), names `<record_base>/hx/<path>@<query>.html`, and a query path is saved under its query |
 | `RecordingRoutes`              | `@htmx struct` mountable under a docs build to drive `record!` from the running app |
 | `RECORDING_STATE`, `RecordingState` | Internal state for the recording UI (queue, progress) |
 | `MIMEResponse(content_type, body)` | Escape hatch for non-HTML route returns (JS, JSON, CSS, …). Bypasses `__page__` wrapping and the markdown/error branches of the response pipeline. Returned by an `__error__` hook, it is the error answer as it is, with the error's status (500, 400 for a caller fault, 200 under HTMX) |
@@ -4160,8 +4160,9 @@ the rest:
   every declared value (`/voralarme?k=4.0`), so an exporter that writes every
   mapped address writes those too; the element carries each value's file and
   its `hx-get` names the file of the value it was rendered with. `record!`
-  records them itself as `<record_dir>/hx/<path>@<query>.html`. A value with
-  no file keeps the element as it is.
+  records them itself as `<record_dir>/hx/<path>@<query>.html`, and a recorded
+  link whose `hx-get` asks for one of them (`hx-get="/voralarme?k=5.0"`) names
+  that file too. A value with no file keeps the element as it is.
 - **Pushed addresses.** A static export maps the path of an `hx-push-url` or
   `hx-replace-url` address like an `href` and keeps its query (`/?k=4.0` →
   `index.html?k=4.0`), because the page reads the query in the browser.
