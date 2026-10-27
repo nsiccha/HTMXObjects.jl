@@ -1,8 +1,8 @@
 @testmodule UrlParamsFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
-    export UrlParamsApp, SlowUrlParamsApp, PickedUrlParamsApp, FollowUrlParamsApp, ZoomUrlParamsApp, KS,
-           PROBES, alarms_view, bundle, bundle_name
+    export UrlParamsApp, SlowUrlParamsApp, PickedUrlParamsApp, FollowUrlParamsApp, ZoomUrlParamsApp,
+           RegionParamsApp, KS, PROBES, alarms_view, bundle, bundle_name
 
     const KS = (3.0, 4.0, 5.0)
     const PROBES = ("a", "b", "c")
@@ -381,6 +381,28 @@
         @get index() = h.div(zoom_frame(3.0), h.script(Raw(ZOOM_DRIVER)))
     end
 
+    # Two declared parameters, the address's `region` sent as `key`, as a
+    # region explorer's zoom target declares them. Its zoom links name each
+    # value with the parameters in the other order; `c` is no value.
+    const REGIONS = ("a", "b")
+    region_view(key, m) = h.div(; id="region", hx_get="/region", hx_trigger="none", hx_swap="outerHTML",
+                                url_params(region = key => :key, measure = m;
+                                           values = (region = REGIONS, measure = ("x", "y")))...)(
+        h.p("$key $m"; class="shown"),
+        (h.a("$r $v"; id="to-$r$v", href="/?region=$r&measure=$v", hx_get="/region?measure=$v&key=$r",
+             hx_target="#region", hx_swap="outerHTML", hx_push_url="/?region=$r&measure=$v")
+         for r in REGIONS for v in ("x", "y"))...,
+        h.a("c x"; id="to-cx", href="#", hx_get="/region?key=c&measure=x", hx_target="#region"))
+
+    @htmx struct RegionParamsApp
+        __page__(content) = htmx(h.main(content); assets="/test-assets", sse_version=nothing,
+            ws_version=nothing, preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false, overlay=false)
+        "Region"
+        @get region(; key::String="a", measure::String="x") = region_view(key, measure)
+        @get index() = region_view("a", "x")
+    end
+
     # The bundle file of an app address, flat, query folded into the name.
     bundle_name(address) = address == "/" ? "index.html" :
         replace(lstrip(address, '/'), r"[?=&]" => "-") * ".html"
@@ -491,6 +513,46 @@ end
     # Outside `record!` nothing would write those files, so none is named.
     @test occursin("data-htmxo-url-files=\"{}\"",
         repr("text/html", static_transform(alarms_view(3.0); record_base="/b")))
+end
+
+@testitem "a recorded hx-get with a query names the file record! writes for its address" setup=[UrlParamsFixture] tags=[:unit] begin
+    link(html, id) = match(Regex("<a [^>]*id=\"$id\"[^>]*>"), html).match
+    file(dir, parts...) = read(joinpath(dir, parts...), String)
+
+    # The zoom links name the declared values' files, in the page and in
+    # every recorded value, whatever the order of their parameters.
+    dir = mktempdir()
+    record!(RegionParamsApp(); record_dir=dir, record_base="/b", paths=["/"], markdown=false)
+    for html in (file(dir, "index.html"), file(dir, "hx", "region@key=b&measure=y.html")),
+        r in ("a", "b"), v in ("x", "y")
+        @test isfile(joinpath(dir, "hx", "region@key=$r&measure=$v.html"))
+        @test occursin("hx-get=\"/b/hx/region@key=$r&amp;measure=$v.html\"", link(html, "to-$r$v"))
+        @test !occursin("data-static-disabled", link(html, "to-$r$v"))
+    end
+    # A query no value and no requested path has stays disabled.
+    page = file(dir, "index.html")
+    @test occursin("data-static-disabled", link(page, "to-cx")) && !occursin("hx-get", link(page, "to-cx"))
+    # A control after the element that declares the value counts too.
+    dir = mktempdir()
+    record!(UrlParamsApp(); record_dir=dir, paths=["/"], markdown=false)
+    @test occursin("hx-get=\"/hx/probe@kenn=b.html\"", match(r"<button [^>]*id=\"pane-b\"[^>]*>", file(dir, "index.html")).match)
+    @test occursin("hx-get=\"/hx/alarms@k=4.0.html\"", link(file(dir, "hx", "alarms@k=5.0.html"), "k4"))
+
+    # A requested path with a query is saved under it, as a value is, so two
+    # queries of one path are two files; a value with the same parameters is
+    # that file.
+    dir = mktempdir()
+    record!(RegionParamsApp(); record_dir=dir, paths=["/region?measure=y&key=b", "/region?key=a&measure=y", "/"])
+    for name in ("region@measure=y&key=b", "region@key=a&measure=y")
+        @test occursin("class=\"shown\"", file(dir, "$name.html"))
+        @test occursin("class=\"shown\"", file(dir, "hx", "$name.html"))
+        @test isfile(joinpath(dir, "md", "$name.md"))
+    end
+    @test !isfile(joinpath(dir, "region.html")) && !isfile(joinpath(dir, "hx", "region@key=b&measure=y.html"))
+    page = file(dir, "index.html")
+    @test occursin("hx-get=\"/hx/region@measure=y&amp;key=b.html\"", link(page, "to-by"))
+    @test occursin("&quot;y&quot;:&quot;/hx/region@measure=y&amp;key=b.html&quot;", page)
+    @test occursin("hx-get=\"/hx/region@key=a&amp;measure=y.html\"", link(file(dir, "region@key=a&measure=y.html"), "to-ay"))
 end
 
 @testitem "url_params elements follow the address in a real browser, live and exported" setup=[UrlParamsFixture, ChromeDump] tags=[:unit, :browser] begin
