@@ -161,7 +161,19 @@ The `htmx(...)` / `pico_page` page shell carries the client-side sorting and CSV
 
 The CSV holds the text each cell shows, except in a number cell, which exports its exact number (see [Numbers in table cells](#table-numbers)). A cell shown on several lines (a `<br>`, or block children such as `div` or `p`) exports one quoted field with those lines, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))` becomes a field holding the two lines `6,28` and `6,01–6,55`, rather than `6,286,01–6,55`. A header shown on two lines exports its lines joined by a space.
 
-#### Reading and restoring the sort state
+#### Opening in a sort order, reading and restoring it {#table-default-sort}
+
+`default_sort` opens a table sorted by one column: `default_sort = "Score" =>
+:desc` (or a 1-based column index, `:asc` by default). The table writes its
+rows in the order a click on that header gives in the browser and stamps the
+header's caret and `aria-sort`, so the first paint, `?plain`, a PDF and a
+`record!` bundle show the same order, with or without the script. It forwards
+through `render_table` and `master_detail_table`; a tree sorts each set of
+siblings, a grouped table its groups (by their `group_summary`) and the items
+in each. A cell sorts by its `data-sort-value`, else by the exact number a
+[number cell](#table-numbers) or a group sum carries, else by its text; equal
+rows keep the order they came in, a `detail-X` row stays under its master, and
+a row marked `data_htmxo_pinned=""` stays first.
 
 `sortTable` marks the active `<th>` with both `data-sort-dir="asc"|"desc"` and
 `aria-sort="ascending"|"descending"`, clearing both from the sibling headers.
@@ -183,8 +195,8 @@ the name of its active key.
     is also idiomorph's worst case: a client-sorted DOM is maximally divergent
     from the server's order, so nearly every row must be relocated.
 
-    Fix both by sending the sort state with the request and rendering rows in
-    that order server-side:
+    Fix both by sending the sort state with the request and handing it back as
+    `default_sort`:
 
     ```julia
     h.button("↻"; hx_get=string(__self__),
@@ -193,19 +205,16 @@ the name of its active key.
     ```
 
     Then, in the route (with `@param sort_col::Int = 0` and
-    `@param sort_dir::String = "asc"`), sort the rows yourself and declare the
-    order so the header agrees with it:
+    `@param sort_dir::String = "asc"`), the table writes its rows in that order
+    and stamps the header to match:
 
     ```julia
-    sortable_table(headers, sorted_rows; id="entries",
+    sortable_table(headers, rows; id="entries",
         default_sort = sort_col == 0 ? nothing : sort_col => Symbol(sort_dir))
     ```
 
-    `default_sort` **declares** the order (stamping `data-sort-dir` /
-    `aria-sort` / the caret on that header); it does not sort `rows` for you.
-    It forwards through `render_table` and `master_detail_table` too. A table
-    with a multi-key column also takes `@param sort_key::String = ""` and
-    `default_sort = (col = sort_col, key = sort_key, dir = Symbol(sort_dir))`.
+    A table with a multi-key column also takes `@param sort_key::String = ""`
+    and `default_sort = (col = sort_col, key = sort_key, dir = Symbol(sort_dir))`.
 
 #### Column explanations {#column-explanations}
 
@@ -285,8 +294,8 @@ named from the table's texts (`Schätzwert`, `Untergrenze`, `Obergrenze`,
   `record!` bundle or a static snapshot. Regrouping, lazy group rows and row
   updates keep the reader's key and direction.
 - **State.** `htmxoSortState` returns `sort_key`, and `default_sort =
-  (col = "Beschäftigte", key = "Untergrenze", dir = :desc)` renders that
-  order's marker server-side (see the `morph:` note above).
+  (col = "Beschäftigte", key = "Untergrenze", dir = :desc)` opens the table in
+  that order, missing values last (see [Opening in a sort order](#table-default-sort)).
 
 #### Multilevel headers {#table-header-groups}
 

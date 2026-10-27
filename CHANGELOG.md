@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.2
+## 0.1.3
 
 - `master_detail_table(...; groupings)`: a group row's id carries the
   table's name, `row-<id>--group--<path>` (`row-t1--group--20--mg`), or
@@ -23,6 +23,23 @@ failing at render with a `MethodError`.
   lazy group's rows land in their own table. `id = nothing` is no id. Leaf
   ids are unchanged (`5da191b`). **Breaking:** a page script that finds a
   group row by `row-group--<path>` builds `row-<id>--group--<path>` instead.
+
+## 0.1.2
+
+- `sortable_table(headers, rows; default_sort)`, and `render_table` and
+  `master_detail_table` through it: the table writes its rows in the order a
+  click on that header gives in the browser, so the first paint, `?plain`, a
+  PDF and a `record!` bundle show the order the header says. Before, it only
+  marked the header (`c8f3fa3`). A tree sorts each set of siblings, a grouped
+  table its groups by their `group_summary`. **Breaking:** rows given in
+  another order with `default_sort` set are now reordered. A row that must
+  stay at the top marks itself `data_htmxo_pinned=""` (below); a caller that
+  sorted its rows to match the header can drop that sort.
+- `data-htmxo-pinned` on a table row: it stays ahead of the other rows in
+  every sort, on the server and in the browser (`c8f3fa3`).
+- A column sort in the browser reads a cell's `data-htmxo-number` when it has
+  no `data-sort-value`, so a group sum sorts by its exact number; `1.234,5`
+  sorted as 1.234 before (`c8f3fa3`).
 
 ## 0.1.1
 
@@ -47,6 +64,10 @@ earlier commit is met by 0.1.1. Among it:
   details (`7d111cc`).
 - `SemanticArtifact(name, mime, bytes; target, label, size, texts)`: a
   download control that names its format and size (`11943f4`).
+- `master_detail_table(...; groupings = [name => :children, …], leaf_key,
+  leaf_order)`: a `children` tree as one of the groupings; it opens as the
+  tree, and the flat list and the other groupings list its leaves, regrouped
+  in the browser (`cdea7fb`).
 
 ## 0.1.0
 
