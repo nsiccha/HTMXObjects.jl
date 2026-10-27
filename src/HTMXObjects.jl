@@ -18475,8 +18475,14 @@ of it unless `tables=false`; include this once per page only in a `<head>` you
 build without it. A copy in `htmx`'s `extra_head` is left out.
 
 The JS finds the `<tbody>` relative to the clicked header (no hardcoded ID),
-so multiple sortable tables can coexist on the same page. Numeric values are
-sorted numerically; everything else uses `localeCompare`.
+so multiple sortable tables can coexist on the same page. A cell sorts by its
+`data-sort-value`, else by its `data-htmxo-number` (the exact number a
+[`number_cell`](@ref) or a group sum carries), else by its text (a
+master/detail row's label, without its controls). Two values that both start
+with a number sort numerically; everything else uses `localeCompare`. Rows
+marked `data-htmxo-pinned` stay ahead of the others in either direction.
+`sortable_table(...; default_sort)` writes its rows in the same order on the
+server.
 
 # Sort state — the public read surface
 `sortTable` marks the active `<th>` with **both** `data-sort-dir="asc"|"desc"`
@@ -18494,8 +18500,7 @@ its active key. An unsorted table yields `{}`.
 An idiomorph `hx-swap="morph:*"` syncs attributes against the server's HTML and
 removes any the server did not render — so a client-set sort marker **and the
 row order** are wiped by the next morph that covers the `<thead>`/`<tbody>`.
-To make a user's sort survive a morph, send the state out with the request and
-have the server render rows in that order:
+To make a user's sort survive a morph, send the state out with the request:
 
 ```julia
 h.button("↻"; hx_get=string(__self__),
@@ -18505,8 +18510,8 @@ h.button("↻"; hx_get=string(__self__),
 
 then render with `sortable_table(rows...; default_sort=sort_col => sort_dir)`
 (`default_sort=(col=sort_col, key=sort_key, dir=sort_dir)` when the table has a
-column with several sort keys) so the server-rendered header agrees with the
-server-rendered row order. See [`sortable_table`](@ref).
+column with several sort keys): the server writes the rows in that order and
+stamps the header to match. See [`sortable_table`](@ref).
 """
 sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
     # The master/detail runtime rides along: every master/detail table needs
@@ -21320,7 +21325,8 @@ that fits its column drops that scroll box so its header can stay in view
   `sortable_table_js` for the sort-key resolution rules) and `id="row-X"` /
   `id="detail-X"` for the paired-row pattern. A `detail-X` row is no row of
   the Markdown table; [`master_detail_table`](@ref) writes eager details
-  after the table instead. Write a number as
+  after the table instead. A row with `data_htmxo_pinned=""` stays at the top
+  in every sort (`data_htmxo_pinned="false"` pins nothing). Write a number as
   [`number_cell`](@ref)`(x; texts)` with the table's `texts`: it shows the
   number in the table's language and sorts and exports by its exact value.
 - `header_groups`: optional `label => first:last` pairs for a two-row header,
@@ -21332,17 +21338,21 @@ that fits its column drops that scroll box so its header can stay in view
 - `sortable`: master toggle for the auto-wiring of `String` and `ColumnSpec`
   headers (default `true`); with `false` a `ColumnSpec` keeps its explanation
   as the `<th>`'s `title`. Pre-built `h.th` headers are unaffected.
-- `default_sort`: declare the order `rows` are ALREADY in, as `col` or
-  `col => dir` — `col` a 1-based column index or the label of a `String` or
-  `ColumnSpec` header, `dir`
-  `:asc` (default) or `:desc`. Stamps `data-sort-dir` / `aria-sort` / the sort
-  caret on that header, exactly as a client-side `sortTable` click would.
-  It **declares** the order, it does not perform it: `sortable_table` receives
-  pre-built row nodes, so the caller must emit `rows` in that order. Requires
-  `sortable=true` and a `String` or `ColumnSpec` header at `col`. For a column
-  with several sort keys, `(col=..., key="Lower bound", dir=:desc)` names the
-  key too (default: its first; `key=""`, as a request carries for a column
-  with one order, is the same).
+- `default_sort`: the order the table opens in, as `col` or `col => dir` —
+  `col` a 1-based column index or the label of a `String` or `ColumnSpec`
+  header, `dir` `:asc` (default) or `:desc`. The table writes `rows` in the
+  order a click on that header gives in the browser, and stamps
+  `data-sort-dir` / `aria-sort` / the sort caret on the header. So the first
+  paint, `?plain`, a PDF and a static bundle all show the order the header
+  says, with or without the script. It sorts as `sortTable` does (see
+  `sortable_table_js`): by each cell's `data-sort-value`, else its
+  `data-htmxo-number`, else its text; equal rows keep the order they came in;
+  a `detail-X` row stays under its master; rows marked `data-htmxo-pinned`
+  come first. Requires `sortable=true` and a `String` or `ColumnSpec` header
+  at `col`. For a column with several sort keys,
+  `(col=..., key="Lower bound", dir=:desc)` names the key too (default: its
+  first; `key=""`, as a request carries for a column with one order, is the
+  same).
 - `searchable`: add a labelled client-side search field above the table
   (default `false`), with a live "N of M rows shown" count as its helper text
   and a "No matching rows" state below. See *Client-side search* below.
@@ -21567,7 +21577,7 @@ An idiomorph `hx-swap="morph:*"` re-imposes the server's child order on the
 client-side sort (rows *and* caret) is silently wiped by the next morph, and
 that swap is idiomorph's worst case, since a client-sorted DOM is maximally
 divergent from the server's order. Ride the sort state out with the request and
-render rows in that order:
+hand it back as `default_sort`, which writes the rows in that order:
 
 ```julia
 h.button("↻"; hx_get=string(__self__),
@@ -21575,7 +21585,7 @@ h.button("↻"; hx_get=string(__self__),
     hx_target="#entries", hx_swap="morph:outerHTML")
 
 # ...and in the route, with `@param sort_col::Int = 0` / `@param sort_dir::String = "asc"`:
-sortable_table(headers, sorted_rows; id="entries",
+sortable_table(headers, rows; id="entries",
     default_sort=(sort_col == 0 ? nothing : sort_col => Symbol(sort_dir)))
 ```
 
