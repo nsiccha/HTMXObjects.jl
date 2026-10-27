@@ -37,6 +37,10 @@ earlier commit is met by 0.1.1. Among it:
   details (`7d111cc`).
 - `SemanticArtifact(name, mime, bytes; target, label, size, texts)`: a
   download control that names its format and size (`11943f4`).
+- `master_detail_table(...; groupings = [name => :children, …], leaf_key,
+  leaf_order)`: a `children` tree as one of the groupings; it opens as the
+  tree, and the flat list and the other groupings list its leaves, regrouped
+  in the browser (`cdea7fb`).
 
 ## 0.1.0
 
