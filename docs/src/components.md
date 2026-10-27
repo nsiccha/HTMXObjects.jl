@@ -297,6 +297,10 @@ named from the table's texts (`Schätzwert`, `Untergrenze`, `Obergrenze`,
   (col = "Beschäftigte", key = "Untergrenze", dir = :desc)` opens the table in
   that order, missing values last (see [Opening in a sort order](#table-default-sort)).
 
+Under an app's [glossary](api.md#glossary), a column whose header is one of its
+terms, a `String` or a `ColumnSpec` without `help`, is explained by the term's
+definition the same way.
+
 #### Multilevel headers {#table-header-groups}
 
 Use `header_groups` when adjacent columns share a heading. The ranges refer

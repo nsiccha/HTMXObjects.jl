@@ -26,6 +26,7 @@ export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_style
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
+export Glossary, GlossaryTerm, glossary_section, term, link_terms, glossary_script
 export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
@@ -2902,6 +2903,7 @@ _runtime_blocks() = (
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
+    glossary = (:js, glossary_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
     syntax_styles = (:css, syntax_styles),
@@ -3215,6 +3217,9 @@ function htmx(args...;
         # The address's `#id` reaches an element an htmx swap inserts
         # after the page loaded; inert on an address without one.
         :url_anchor,
+        # A glossary term's definition opens beside it, kept on screen
+        # and outside scrolling tables; inert on pages without terms.
+        :glossary,
         # Markdown math (`render_markdown`) is typeset by KaTeX, which
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
@@ -3284,7 +3289,7 @@ _is_title_node(node) = node isa Node && HTMX.tag(node) === :title
 # `__progress_pause__` rides along for Treebars, which reads it while it
 # renders a poller or a live board (`page_progress_pause`).
 const _PAGE_META = :htmxo_page_meta
-const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing)
+const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing, glossary=nothing)
 
 _page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
 _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
@@ -3333,7 +3338,7 @@ page_progress_pause() = _page_meta().progress_pause
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
-    lang = title = progress_pause = nothing
+    lang = title = progress_pause = glossary = nothing
     for obj in objects
         declared = _page_declaration(obj, :__lang__)
         isnothing(declared) || (lang = _page_lang_value(obj, declared))
@@ -3341,8 +3346,10 @@ function _page_meta_of(objects)
         isnothing(declared) || (title = _page_title_value(obj, declared))
         declared = _page_declaration(obj, :__progress_pause__)
         isnothing(declared) || (progress_pause = _page_progress_pause_value(obj, declared))
+        declared = _page_declaration(obj, :__glossary__)
+        isnothing(declared) || (glossary = _page_glossary_value(obj, declared))
     end
-    (; lang, title, progress_pause)
+    (; lang, title, progress_pause, glossary)
 end
 
 _page_declaration(obj, name) = hasproperty(obj, name) ? getproperty(obj, name) : nothing
@@ -7836,12 +7843,13 @@ to_response(r::HXResponse) = let resp = to_response(r.value)
 end
 
 # A route answer that is a finished response. An `HXResponse` is rendered
-# here, on the task answering the request, which holds that request's audience
-# and page language: a route body may run elsewhere (a `@queued` body runs in
-# DynamicObjects' job queue, which carries neither; snag
-# `queued-hx-respon-fb8c1312`).
+# here, on the task answering the request, which holds that request's audience,
+# page language and glossary: a route body may run elsewhere (a `@queued` body
+# runs in DynamicObjects' job queue, which carries none of them; snag
+# `queued-hx-respon-fb8c1312`). Its value links the glossary's terms first, as
+# any other answer does in `_resolve_response`.
 _answer_value(value) = value
-_answer_value(r::HXResponse) = to_response(r)
+_answer_value(r::HXResponse) = to_response(_glossary_answer(r))
 _finalized_response(r::HXResponse) = to_response(r)
 
 const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
@@ -11703,7 +11711,7 @@ _save_recording(record_dir, path, resp; kwargs...) =
 
 function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
     _private_page(req, val) && return _private_page_response()
-    val = _built_answer(req, val)
+    val = _glossary_answer(_built_answer(req, val))
     # Pre-finalized values (a route handler returning an `HTTP.Response`
     # or a `MIMEResponse` escape hatch for non-HTML bodies) bypass the
     # `__page__` wrap entirely — adding `<html>…</html>` around raw JS
@@ -15349,7 +15357,7 @@ _page_chain_to_apply(page_chain, req::HTTP.Request; root=nothing) =
 function _resolve_response_nested(page_chain, req, val; root=nothing,
         record_dir=nothing, save_path=nothing, record_base::String="")
     _private_page(req, val) && return _private_page_response()
-    val = _built_answer(req, val)
+    val = _glossary_answer(_built_answer(req, val))
     # Same finalized-value passthrough as `_resolve_response`. Routes
     # inside `@include`d substructs (e.g. `PipelineRoutes.aov_runtime_js`
     # returning `MIMEResponse("application/javascript", …)`) land here,
@@ -17919,8 +17927,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
 end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto", audience=:public) -> pdf_path
-    pdf_report(value, pdf_path; audience=:public, kwargs...) -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto", audience=:public, glossary) -> pdf_path
+    pdf_report(value, pdf_path; audience=:public, glossary, kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
 input is Markdown, typically a page's own projection: a `value` such as an
@@ -17998,6 +18006,14 @@ stays in the language it was rendered in. A public report refuses Markdown
 that holds private markup rendered for the live app, raw HTML carrying
 `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
 
+`glossary`, a [`Glossary`](@ref), is the app's glossary: by default the one a
+route's mount chain declares as `__glossary__` while `pdf_report` runs inside
+it, else none. A value's uses of its terms are linked as on a page
+([`link_terms`](@ref)), and so are those a Markdown string carries from a page
+answer. Every link to a term's entry then points into the report, which ends
+with a section headed `glossary.title` listing the terms it uses, unless the
+Markdown already holds an entry (a [`glossary_section`](@ref) of its own).
+
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
 `date_format` next to a text `date`, a `base_url` that is not an absolute URL,
@@ -18060,8 +18076,10 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     title::AbstractString, lang::AbstractString, metadata=(;),
                     base_url::Union{Nothing,AbstractString}=nothing, url_map=nothing,
                     resources::AbstractString=dirname(abspath(pdf_path)),
-                    quarto::AbstractString="quarto", audience=:public)
+                    quarto::AbstractString="quarto", audience=:public,
+                    glossary=_page_glossary())
     _check_audience(audience, "pdf_report") === :public && _check_public(markdown, "the report's Markdown")
+    markdown = _glossary_report(markdown, _check_glossary(glossary, "pdf_report"))
     isempty(strip(title)) &&
         throw(ArgumentError("pdf_report: `title` is blank; PDF/UA-1 requires a document title"))
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
@@ -18105,10 +18123,12 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
 end
 # The value renders in the report's language, which the words HTMXObjects
 # writes itself follow (`page_lang`: the label of private content).
-pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString, kwargs...) =
+pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString,
+           glossary=_page_glossary(), kwargs...) =
     pdf_report(_with_page_lang(lang) do
-                   to_markdown_string(value; audience=_check_audience(audience, "pdf_report"))
-               end, pdf_path; audience, lang, kwargs...)
+                   to_markdown_string(_glossary_answer(value, _check_glossary(glossary, "pdf_report"));
+                                      audience=_check_audience(audience, "pdf_report"))
+               end, pdf_path; audience, lang, glossary, kwargs...)
 
 # --- Captions ---
 
@@ -28757,7 +28777,53 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 .htmxo-private .htmxo-private { outline: none; }
 .htmxo-private .htmxo-private::before,
 .htmxo-private tr.htmxo-private > :first-child::before { content: none; }
+
+/* A glossary term's use (`link_terms`): its definition shows beside it while
+   the pointer is on the term or its box, or the link has keyboard focus. The
+   box stays out of the line's layout and of the link's accessible name; the
+   link names it as its description (`aria-describedby`). */
+.htmxo-term { position: relative; }
+.htmxo-term-def {
+    display: none;
+    position: absolute;
+    inset-inline-start: 0;
+    top: 100%;
+    z-index: 20;
+    width: max-content;
+    max-width: min(28rem, calc(100vw - 2rem));
+    padding: .4rem .6rem;
+    border: 1px solid var(--htmxo-muted, currentColor);
+    border-radius: .25rem;
+    background: var(--htmxo-bg, Canvas);
+    box-shadow: 0 .25rem .75rem rgb(0 0 0 / 15%);
+    font-size: .875rem;
+    font-style: normal;
+    font-weight: normal;
+    line-height: 1.4;
+    text-align: start;
+    text-indent: 0;
+    text-transform: none;
+    white-space: normal;
 }
+.htmxo-term:hover > .htmxo-term-def,
+.htmxo-term:focus-within > .htmxo-term-def { display: block; }
+/* With `glossary_script` the runtime opens it, in the window's coordinates,
+   so a scrolling table cannot clip it and it stays inside the window. */
+.htmxo-terms .htmxo-term:is(:hover, :focus-within) > .htmxo-term-def { display: none; }
+.htmxo-terms .htmxo-term[data-htmxo-term-open] > .htmxo-term-def { display: block; position: fixed; }
+.htmxo-glossary > dt { font-weight: bold; }
+.htmxo-glossary > dt > dfn { font-style: normal; }
+}
+
+/* Unlayered so it beats Pico's unlayered link colour: a term's use reads as
+   the surrounding text, marked by a dotted underline. */
+.htmxo-term > a {
+    color: inherit;
+    text-decoration: underline dotted;
+    text-underline-offset: .2em;
+}
+.htmxo-term > a:hover,
+.htmxo-term > a:focus-visible { text-decoration-style: solid; }
 
 /* While its request is in flight, htmx itself adds `htmx-request` to the
    triggering element (core `requestClass` — no HTMXObjects JS needed), so
@@ -30641,6 +30707,9 @@ function _tabset_markdown(label, url::AbstractString)
     name = _tabset_label_text(label)
     string("**[", isempty(name) ? url : name, "](", url, ")**")
 end
+
+# After the value types its walk sees through (`_TabsetPart` above).
+include("glossary.jl")
 
 include("comparison.jl")
 

@@ -14,6 +14,25 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.5
+
+- A glossary of an app's terms, linked wherever a page uses them (snag
+  `no-glossary-prim-026537ac`, design decision `0xuzhdk`). New exports
+  `Glossary`, `GlossaryTerm`, `glossary_section`, `term`, `link_terms` and
+  `glossary_script`. An app declares `__glossary__ = Glossary(terms; href,
+  title)` on its root and mounts `glossary_section(__glossary__)` at `href`.
+  Every answer under that root (a page, a fragment, an `hx_response`, `?plain`,
+  a static export) then links the first use of each term in each section, table, figure,
+  caption and disclosure to its entry, with the definition beside it on hover
+  or keyboard focus. A `sortable_table` / `master_detail_table` column named
+  after a term gets its definition as the column's ⓘ explanation.
+- `pdf_report(…; glossary)`: with a glossary (by default the route's
+  `__glossary__`), a report's term links point into the report, which ends
+  with a section listing the terms it uses.
+- `htmx()` page shells carry the glossary runtime (`glossary_script`) among
+  their runtime blocks. It marks `<html>` with the class `htmxo-terms` and
+  does nothing else on a page without terms.
+
 ## 0.1.4
 
 - `record!`: a recorded `hx-get` whose address has a query (a zoom link,
