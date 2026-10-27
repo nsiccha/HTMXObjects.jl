@@ -64,11 +64,19 @@ ainput((; q=""); type="search", placeholder="Search…")
 ainput("q"; type="search")                       # bare name version
 ```
 
-### `radio_group` — radio buttons
+### `radio_group` — a choice among a few options
 
 ```julia
 radio_group((; method="A"), ["A", "B", "C"])
 ```
+
+Every `htmx()` / `pico_page` shell draws it as a row of pills, one per option,
+the chosen one filled in the text colour, in light and dark themes alike. The
+radios stay inside the labels, invisible: the group submits with its form, Tab
+reaches it and the arrow keys choose. The rule keys off the markup (a
+`fieldset` whose labels wrap radios), so a generated single-choice control
+and a hand-written fieldset look the same; a `fieldset` with a `role` keeps
+Pico's look.
 
 ### `Long`
 

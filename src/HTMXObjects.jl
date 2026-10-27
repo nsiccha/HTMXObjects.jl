@@ -25482,6 +25482,11 @@ end
 A `<fieldset>` of radio buttons. Each element of `options` becomes
 `<label><input type="radio" .../> Label</label>`. Options can be plain values
 or `value => label` pairs. Extra `kwargs` go on each `<input>`.
+
+Every [`htmx`](@ref) page draws it as a row of pills, one per option, the
+chosen one filled in the text colour ([`htmxo_utility_styles`](@ref)). The
+radios stay inside the labels, so the group submits with its form and the
+keyboard chooses with the arrow keys.
 """
 radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
     name = _aname(nv)
@@ -28810,6 +28815,13 @@ its `div` pairs keeps it stacked. A list inside a `SemanticGroup` item
 narrower than `24rem` stacks each term above its value; an app's own narrow
 column gets the same with `container-type: inline-size` on its wrapper.
 
+A choice among a few options, a `fieldset` whose labels wrap radios (as
+[`radio_group`](@ref) and a generated single-choice control write it), is a
+row of pills with the chosen one filled in the text colour. The radios stay in
+the labels, invisible: the group submits with its form, Tab reaches it, the
+arrow keys choose, and the focused pill shows a focus ring. A `fieldset` with
+a `role` keeps Pico's look.
+
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
 - `u-text-*`      semantic text colors mapped to `--htmxo-*` tokens
@@ -29232,6 +29244,63 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 [hx-delete]:not([hx-trigger*="every"], [hx-trigger^="load"], [hx-trigger*="revealed"], [hx-trigger*="intersect"], .htmxo-loading).htmx-request {
     cursor: progress;
     opacity: 0.7;
+}
+
+/* A choice among a few options is a row of pills, one per option, the chosen
+   one filled in the text colour (never Pico's azure): a `fieldset` whose
+   labels wrap radios, as `radio_group` and a generated single-choice control
+   write it, and as an app writes one by hand. The radios stay in the label,
+   invisible, so the group submits with its form, Tab reaches it and the arrow
+   keys choose; the pill of the radio with keyboard focus carries the focus
+   ring. Pills wrap in a narrow column. A `fieldset` with a `role` keeps
+   Pico's look (`role="group"` joins its children into one bar), and option
+   cards (`presentation=:cards`) put their radio beside the label, so neither
+   matches. UNLAYERED: Pico styles `label` and radios unlayered. Pico's
+   contrast colours follow the theme; without Pico the pills take the text
+   and page colours. An app restyles them in its own stylesheet with a
+   selector at least as specific as these. */
+fieldset:not([role]) > label:has(> input[type="radio"]) {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    width: auto;
+    margin: 0 .35rem .35rem 0;
+    padding: .25em .85em;
+    border: 1px solid var(--pico-form-element-border-color, color-mix(in srgb, currentColor 35%, transparent));
+    border-radius: 1rem;
+    background: transparent;
+    color: inherit;
+    font-weight: inherit;
+    line-height: 1.5;
+    cursor: pointer;
+}
+fieldset:not([role]) > label:has(> input[type="radio"]) > input[type="radio"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    pointer-events: none;
+}
+fieldset:not([role]) > label:has(> input[type="radio"]:not(:disabled)):hover {
+    border-color: var(--pico-contrast, currentColor);
+}
+fieldset:not([role]) > label:has(> input[type="radio"]:focus-visible) {
+    outline: 2px solid var(--pico-contrast, currentColor);
+    outline-offset: 2px;
+}
+fieldset:not([role]) > label:has(> input[type="radio"]:checked) {
+    border-color: var(--pico-contrast-background, CanvasText);
+    background: var(--pico-contrast-background, CanvasText);
+    color: var(--pico-contrast-inverse, Canvas);
+}
+fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
+    opacity: .5;
+    cursor: not-allowed;
 }
 
 /* sortable_table header labels are native <button>s: read as heading text on
