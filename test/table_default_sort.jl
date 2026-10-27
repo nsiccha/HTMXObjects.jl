@@ -130,11 +130,11 @@ end
     # Grouped: the groups by their sums (German text, exact number), the leaves by theirs.
     html = repr("text/html", grouped_table(; default_sort=2 => :desc))
     @test filter(id -> startswith(id, "row-"), row_ids(html)) ==
-        ["row-group--Big", "row-group--Big--gd", "row-group--Big--gb", "row-group--Small", "row-group--Small--gc", "row-group--Small--ga"]
+        ["row-g--group--Big", "row-group--Big--gd", "row-group--Big--gb", "row-g--group--Small", "row-group--Small--gc", "row-group--Small--ga"]
     @test first(findfirst("1.234,5", html)) < first(findfirst("29,0", html))
     # Without default_sort, groups and leaves come as listed.
     @test filter(id -> startswith(id, "row-"), row_ids(repr("text/html", grouped_table()))) ==
-        ["row-group--Big", "row-group--Big--gb", "row-group--Big--gd", "row-group--Small", "row-group--Small--ga", "row-group--Small--gc"]
+        ["row-g--group--Big", "row-group--Big--gb", "row-group--Big--gd", "row-g--group--Small", "row-group--Small--ga", "row-group--Small--gc"]
 end
 
 @testitem "default_sort writes the order the browser's sort gives browser" setup=[DefaultSortFixtures, ChromeDump] tags=[:unit, :browser] begin

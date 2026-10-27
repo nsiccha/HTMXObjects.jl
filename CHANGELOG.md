@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.6
+## 0.1.7
 
 - The request's audience and page language reach every task that runs a
   route's work: an `:auto` operation's body, a memoized compute, a `@queued`
@@ -26,6 +26,16 @@ failing at render with a `MethodError`.
   DynamicObjects at or after `ffb9d70`, whose job queue carries the requester's
   `ScopedValue`s. HTMXObjects now depends on ScopedValues.jl. Todo `0qm6sdu`,
   from snag `queued-hx-respon-fb8c1312`.
+
+## 0.1.6
+
+- `master_detail_table(...; groupings)`: a group row's id carries the
+  table's name, `row-<id>--group--<path>` (`row-t1--group--20--mg`), or
+  without an `id` a name from the leaves' keys. Two regroupable tables on one
+  page whose groups share a key keep their ids apart, and a row update or a
+  lazy group's rows land in their own table. `id = nothing` is no id. Leaf
+  ids are unchanged (`5da191b`). **Breaking:** a page script that finds a
+  group row by `row-group--<path>` builds `row-<id>--group--<path>` instead.
 
 ## 0.1.5
 
