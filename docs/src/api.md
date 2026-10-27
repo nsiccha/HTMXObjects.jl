@@ -1889,7 +1889,7 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticAction(label, target)` | An operation offered to the reader |
 | `SemanticArtifact(name, mime, bytes=nothing; target=nothing, label=nothing, size=nothing, texts=semantic_texts())` | A downloadable file: one download control naming its format and size |
 | `SemanticCode(language, text; anchor="")` | Source code, language kept as data |
-| `SemanticSection(title, children...; anchor="")` | A document division — opens a heading level |
+| `SemanticSection(title, children...; anchor="", level=nothing)` | A document division — opens a heading level |
 | `SemanticCard(title, children...; anchor="")` | A self-contained titled summary |
 | `SemanticGroup(children...)` | An untitled run of siblings |
 | `SemanticDisclosure(summary, children...)` | Content the reader opens |
@@ -2012,7 +2012,12 @@ any section, where a card sits below the page's `##` headings; the card's own
 content continues one level below it. The level follows nesting within one
 render: a section answered by a response of its own (a lazily loaded detail, an
 `hx-get` result) starts at `<h2>` again, and an `HTMLSnapshot` keeps the HTML
-it rendered when it was made.
+it rendered when it was made. `level=` (1–6) fixes where a section opens
+instead, and the sections inside it follow from there: `level=1` makes a
+section the page's title, for a page made of that one section (a glossary
+page, `glossary_section(g; level=1)`), so the page has its `<h1>` / `#` and
+its sections at `<h2>` / `##`; a card directly inside it is then `##` in
+Markdown.
 
 `anchor`, where present, becomes the HTML `id` — a document address, so an
 element can be cited from elsewhere. An unaddressed element emits no attribute
@@ -3070,7 +3075,7 @@ const GLOSSAR = Glossary([
 
 @htmx struct App
     __glossary__ = GLOSSAR
-    @get glossar() = glossary_section(__glossary__)
+    @get glossar() = glossary_section(__glossary__; level=1)
     @get index() = h.article(h.p("Jede Registerzelle …"), sortable_table(["Registerzelle", "SvB"], rows))
 end
 ```
@@ -3091,7 +3096,8 @@ end
   definition, unless the `ColumnSpec` has a `help` of its own.
 - **The glossary.** `glossary_section(g)` lists the terms alphabetically, each
   at `#term-<id>` (`id` defaults to the term in lower case, `ä` as `ae`). Mount
-  it at `href`. A glossary given as `"topic" => terms` pairs lists each topic
+  it at `href`. On a page that is the glossary alone, pass `level=1`: the
+  glossary's `title` is then the page's `<h1>`, its topics `<h2>`. A glossary given as `"topic" => terms` pairs lists each topic
   under its own heading, topics and terms in the order written. The entry a
   link opens is highlighted.
 - **Other names and related entries.** A term's `also` names show after its

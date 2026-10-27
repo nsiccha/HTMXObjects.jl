@@ -347,6 +347,42 @@ end
     @test links(text) == 1 && !contains(text, "term-rhat")
 end
 
+@testitem "a page that is the glossary alone has the glossary's title as its h1" setup=[TopicGlossaryFixture] tags=[:unit] begin
+    # Snag `serving-verkehrs-a871a8f7`: `@get glossar() = glossary_section(__glossary__)`
+    # rendered `<h2>Glossar` and `<h3>` topics, with no `<h1>` on the page.
+    using HTMXObjects, Test
+    import HTMXObjects: h, to_markdown_string
+    (; GT, html, as, links) = TopicGlossaryFixture
+    page = as(:private, () -> html(glossary_section(GT; level=1)))
+    @test count("<h1>", page) == 1 && contains(page, "<h1>Glossar</h1>")
+    @test contains(page, "<h2>Raum</h2>") && contains(page, "<h2>Sampler</h2>") && !contains(page, "<h3>")
+    @test contains(page, "id=\"term-teilverkehrszelle\"")
+    md = as(:private, () -> to_markdown_string(glossary_section(GT; level=1)))
+    @test startswith(md, "# Glossar\n\n## Raum\n\n")
+    # Embedded in a larger page, the glossary opens where the nesting places it.
+    @test contains(as(:private, () -> html(glossary_section(GT))), "<h2>Glossar</h2>")
+    @test contains(as(:private, () -> html(glossary_section(GT))), "<h3>Raum</h3>")
+
+    @htmx struct GlossaryPageApp
+        __glossary__ = TopicGlossaryFixture.GT
+        __lang__ = "de"
+        @get glossary_page_glossar() = glossary_section(__glossary__; level=1)
+        @get glossary_page_text() = h.p("Der Schätzwert.")
+    end
+    route!(GlossaryPageApp())
+    body(target; headers=[], kw...) =
+        String(HTMXObjects._message_body_bytes(dispatch(:GET, target; headers, kw...)))
+    full = body("/glossary_page_glossar"; audience=:public)
+    @test count("<h1>", full) == 1 && contains(full, "<h1>Glossar</h1>") && contains(full, "<h2>Raum</h2>")
+    plain = body("/glossary_page_glossar"; headers=["Accept" => "text/markdown"])
+    @test occursin(r"(^|\n)# Glossar\n\n## Raum\n", plain) && !occursin(r"(^|\n)## Glossar", plain)
+    exported = body("/glossary_page_glossar"; static=StaticExport(; record_base="/base"))
+    @test contains(exported, "<h1>Glossar</h1>") && contains(exported, "<h2>Ergebnisse</h2>")
+    # The public answer still leaves out the topic whose terms are all private.
+    @test !contains(full, "Sampler")
+    @test links(body("/glossary_page_text")) == 1
+end
+
 @testitem "a root's __glossary__ links its answers and explains its columns" setup=[GlossaryFixture] tags=[:unit] begin
     using HTMXObjects, HTTP, Test
     import HTMXObjects: h

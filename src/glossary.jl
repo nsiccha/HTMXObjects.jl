@@ -132,7 +132,7 @@ const GLOSSAR = Glossary([
 
 @htmx struct App
     __glossary__ = GLOSSAR
-    @get glossar() = glossary_section(__glossary__)
+    @get glossar() = glossary_section(__glossary__; level=1)
     …
 end
 ```
@@ -254,7 +254,7 @@ _glossary_entry(g::Glossary, text::AbstractString) = get(g.lookup, replace(text,
 _glossary_href(g::Glossary, t::GlossaryTerm) = string(g.href, "#term-", t.id)
 
 """
-    glossary_section(g::Glossary)
+    glossary_section(g::Glossary; level=nothing)
 
 The glossary as a section headed `g.title`: each term with its definition, at
 its address `#term-<id>`, alphabetically, or for a glossary given by topic,
@@ -270,10 +270,16 @@ holding the term as a `dfn`); in Markdown each entry is a paragraph opening
 with the term as a span carrying its address
 (`[**Registerzelle**]{#term-registerzelle} — …`), which Pandoc reads, so links
 to it resolve in a [`pdf_report`](@ref) too. Its text links no terms.
+
+`level` is the section's [`SemanticSection`](@ref) level. A page that is the
+glossary alone passes `level=1`: `g.title` is then the page's `<h1>` / `#`
+and the topics `<h2>` / `##`, as on a page that writes its own title above its
+sections. Left out, the section opens where the nesting places it (`<h2>` at
+the top of a page, below the page's own title).
 """
-glossary_section(g::Glossary) = isempty(g.topics) ?
-    SemanticSection(g.title, _GlossaryEntries(g, g.terms)) :
-    SemanticSection(g.title, Any[_glossary_topic_section(g, topic, terms) for (topic, terms) in g.topics])
+glossary_section(g::Glossary; level=nothing) = isempty(g.topics) ?
+    SemanticSection(g.title, _GlossaryEntries(g, g.terms); level) :
+    SemanticSection(g.title, Any[_glossary_topic_section(g, topic, terms) for (topic, terms) in g.topics]; level)
 
 _glossary_topic_section(g, topic, terms) = let section = SemanticSection(topic, _GlossaryEntries(g, terms))
     all(t -> t.private, terms) ? private(section) : section
@@ -532,7 +538,8 @@ _link_children(children, w) = Any[_link_child(c, w) for c in children]
 _link_terms(card::SemanticCard, w::_TermWalk) =
     _term_scope(() -> SemanticCard(card.title, _link_children(card.children, w); anchor=card.anchor), w, true)
 _link_terms(section::SemanticSection, w::_TermWalk) =
-    _term_scope(() -> SemanticSection(section.title, _link_children(section.children, w); anchor=section.anchor), w, true)
+    _term_scope(() -> SemanticSection(section.title, _link_children(section.children, w);
+                                     anchor=section.anchor, level=section.level), w, true)
 _link_terms(group::SemanticGroup, w::_TermWalk) = SemanticGroup(_link_children(group.children, w))
 _link_terms(disclosure::SemanticDisclosure, w::_TermWalk) =
     _term_scope(() -> SemanticDisclosure(disclosure.summary, _link_children(disclosure.children, w)), w, true)

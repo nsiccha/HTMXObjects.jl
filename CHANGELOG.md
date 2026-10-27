@@ -14,6 +14,22 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.12
+
+- `SemanticSection(...; level=1)` makes a section the page's title. `level`
+  (1–6) fixes the heading level a section opens at wherever it renders, and
+  the sections inside it follow from there; left out (`level=nothing`), the
+  level follows the nesting as before. A page made of one section had no way
+  to have an `<h1>`: sections open at `<h2>` / `##` below a page's own title.
+  A card directly inside a `level=1` section is `##` in Markdown, one below
+  it.
+- `glossary_section(g; level=1)` for a page that is the glossary alone: the
+  glossary's `title` is the page's `<h1>` / `#`, its topics `<h2>` / `##`.
+  `@get glossar() = glossary_section(__glossary__)` rendered `<h2>Glossar`
+  and `<h3>` topics with no `<h1>`, and the app could not add its own `<h1>`
+  without repeating the heading. The glossary `pdf_report` appends is
+  unchanged. Snag `serving-verkehrs-a871a8f7`.
+
 ## 0.1.11
 
 - `show_when` follows a radio group and a checkbox. `show_when_script()` read
