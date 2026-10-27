@@ -32,6 +32,11 @@ earlier commit is met by 0.1.1. Among it:
 - `master_detail_table(...; group_masters)`: the group rows alone after a
   browser regroup (`d01e891`).
 - `ColumnSpec(label; sort_keys)`: several sort orders per column (`3ccf858`).
+- `master_detail_table(...; initially_open_detail)`: `initially_open` opens a
+  tree branch's rows and leaves its own detail closed; this keyword opens
+  details (`7d111cc`).
+- `SemanticArtifact(name, mime, bytes; target, label, size, texts)`: a
+  download control that names its format and size (`11943f4`).
 
 ## 0.1.0
 
