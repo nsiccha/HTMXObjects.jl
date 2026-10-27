@@ -1970,9 +1970,9 @@ end
     @test contains(md, "\n\n**Acme Prime**\n\nmemo 3\n\n")
     # Refused: an unknown reduce, digits or sigdigits (outside 1 to 15, the
     # digits the browser rounds exactly), digits and sigdigits together, the
-    # wrong number of functions, a column that is not a header or is the
-    # first, a column named twice, something other than a ColumnSummary, a
-    # value that is not a number.
+    # wrong number of functions, a column that is not a header, every column
+    # (no place is left for the key and count), a column named twice,
+    # something other than a ColumnSummary, a value that is not a number.
     @test_throws ArgumentError ColumnSummary(:median, identity)
     @test_throws ArgumentError ColumnSummary(:sum)
     @test_throws ArgumentError ColumnSummary(:ratio, identity)
@@ -1981,12 +1981,97 @@ end
     @test_throws ArgumentError ColumnSummary(:sum, identity; sigdigits=16)
     @test_throws ArgumentError ColumnSummary(:sum, identity; digits=1, sigdigits=2)
     @test_throws ArgumentError grouped(group_summary=["Nope" => ColumnSummary(:count)])
-    @test_throws ArgumentError grouped(group_summary=["Party" => ColumnSummary(:count)])
+    @test_throws ArgumentError grouped(group_summary=["Party" => ColumnSummary(:count), "IBAN" => ColumnSummary(:count),
+        "Amount" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Amount" => ColumnSummary(:count), "Amount" => ColumnSummary(:count)])
     @test_throws ArgumentError grouped(group_summary=["Amount" => :sum])
     @test_throws ArgumentError html(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.party)]))
     @test_throws ArgumentError master_detail_table(["A", "B"], TX; key=t -> t.id, master=t -> (h.td(t.id), h.td("")),
         detail=t -> "", group_summary=["B" => ColumnSummary(:count)])
+end
+
+@testitem "tally group summaries: a categorical column counted per category" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string
+    html(x) = repr("text/html", x)
+    row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
+    cell(r, i) = match(Regex("<td(?=[^>]* data-htmxo-group-summary=\"$i\")[^>]*>.*?</td>", "s"), r).match
+    attr(x, name) = let m = match(Regex(" $name=\"([^\"]*)\""), x); isnothing(m) ? nothing : m[1] end
+    segments(c) = [(m[1], m[2], m[3]) for m in eachmatch(r"<span style=\"--htmxo-tally-n:([^;]*);--htmxo-tally-color:([^\"]*)\" title=\"([^\"]*)\"></span>", c)]
+    # Acme holds p1, p2, p7 (DE01, DE02, DE01); Bakery p4, p6 (DE03, DE03).
+    # `order` puts DE03 first; the others follow as they first appear among
+    # the items, and keep their place and colour in every group.
+    tally = ColumnSummary(:tally, t -> t.iban; order=["DE03", "DE01"])
+    page = html(grouped(group_by="party", group_summary=["IBAN" => tally]))
+    acme = cell(row(page, "row-group--Acme"), 0)
+    @test attr(acme, "data-htmxo-number") == "3" && attr(acme, "data-htmxo-tally") == "3"
+    @test attr(acme, "aria-label") == "3 (DE01: 2; DE02: 1)" && contains(acme, "<span class=\"htmxo-tally-total\">3</span>")
+    @test segments(acme) == [("2", "var(--htmxo-category-2)", "DE01: 2"), ("1", "var(--htmxo-category-3)", "DE02: 1")]
+    @test segments(cell(row(page, "row-group--Bakery"), 0)) == [("2", "var(--htmxo-category-1)", "DE03: 2")]
+    # Its bar names the scale of its column and level; the table sets each
+    # to the longest total there (Acme's 3).
+    @test attr(acme, "style") == "--htmxo-tally-total:3;--htmxo-tally-max:var(--htmxo-tally-max-1-1)"
+    @test contains(page, "style=\"--htmxo-tally-max-1-1:3\"")
+    # The leaves carry their categories; the browser gets the categories' order, names and colours.
+    @test contains(match(r"<tr[^>]*id=\"row-group--Acme--p1\"[^>]*>", page).match, "data-htmxo-leaf-values=\"[[[&quot;DE01&quot;,1.0]]]\"")
+    @test contains(page, "{&quot;reduce&quot;:&quot;tally&quot;,&quot;digits&quot;:0,&quot;categories&quot;:[" *
+        "{&quot;key&quot;:&quot;DE03&quot;,&quot;label&quot;:&quot;DE03&quot;,&quot;color&quot;:&quot;var(--htmxo-category-1)&quot;}," *
+        "{&quot;key&quot;:&quot;DE01&quot;,&quot;label&quot;:&quot;DE01&quot;,&quot;color&quot;:&quot;var(--htmxo-category-2)&quot;}," *
+        "{&quot;key&quot;:&quot;DE02&quot;,&quot;label&quot;:&quot;DE02&quot;,&quot;color&quot;:&quot;var(--htmxo-category-3)&quot;}," *
+        "{&quot;key&quot;:&quot;DE04&quot;,&quot;label&quot;:&quot;DE04&quot;,&quot;color&quot;:&quot;var(--htmxo-category-4)&quot;}]}")
+    # Markdown (and so a PDF) writes the text, never the bar.
+    md = to_markdown_string(grouped(group_by="party", group_summary=["IBAN" => tally]))
+    @test contains(md, "| **Acme** (3) | 3 (DE01: 2; DE02: 1) |") && contains(md, "| **Bakery** (2) | 2 (DE03: 2) |")
+    @test !contains(md, "htmxo-tally")
+    # `label` names a category and `color` colours it; a leaf without one is left out.
+    named = html(grouped(group_by="party", group_summary=["IBAN" => ColumnSummary(:tally,
+        t -> t.id == "p2" ? nothing : t.iban; label=c -> "IBAN " * c, color=c -> c == "DE01" ? "#123456" : "gray")]))
+    @test segments(cell(row(named, "row-group--Acme"), 0)) == [("2", "#123456", "IBAN DE01: 2")]
+    @test attr(cell(row(named, "row-group--Acme"), 0), "aria-label") == "2 (IBAN DE01: 2)"
+    # A leaf may give its own breakdown, `category => number` pairs, which
+    # the group adds up; German texts write German numbers.
+    pairs = html(grouped(group_by="party", texts=table_texts(:de), group_summary=["Amount" => ColumnSummary(:tally,
+        t -> [t.iban => -t.amount * 100, "all" => 1]; digits=1)]))
+    acme_pairs = cell(row(pairs, "row-group--Acme"), 0)
+    @test attr(acme_pairs, "aria-label") == "10.003,0 (DE01: 8.000,0; all: 3,0; DE02: 2.000,0)"
+    @test attr(acme_pairs, "data-htmxo-number") == "10003.0"
+    # A group without any category shows an empty cell, still ready for the
+    # browser to fill when it regroups.
+    none = cell(row(html(grouped(group_by="party", group_summary=["IBAN" => ColumnSummary(:tally,
+        t -> t.party == "Bakery" ? missing : t.iban)])), "row-group--Bakery"), 0)
+    @test isnothing(attr(none, "data-htmxo-number")) && contains(none, "data-htmxo-tally=\"0\"") && !contains(none, "role=")
+    # Nested levels: each level its own scale.
+    nested = html(grouped(group_by=["rule", "party"], group_summary=["IBAN" => ColumnSummary(:tally, t -> t.iban)]))
+    @test contains(nested, "style=\"--htmxo-tally-max-1-1:6;--htmxo-tally-max-1-2:3\"")
+    @test contains(cell(row(nested, "row-group--Shops--Bakery"), 0), "var(--htmxo-tally-max-1-2)")
+    # A summary in the first column: the key and count move to the first
+    # column no summary names, and the row's toggle stays a control of its
+    # own beside the bar. A number there keeps its value in an element too.
+    first_col = html(grouped(group_by="party", group_summary=["Party" => ColumnSummary(:tally, t -> t.iban),
+        "IBAN" => ColumnSummary(:count)]))
+    acme_row = row(first_col, "row-group--Acme")
+    tds = [m.match for m in eachmatch(r"<td[^>]*>.*?</td>"s, acme_row)]
+    @test length(tds) == 3 && contains(tds[1], "data-htmxo-group-summary=\"0\"") && contains(tds[1], "aria-label=\"Toggle child rows\"")
+    @test !contains(tds[1], "data-htmxo-group-label") && contains(tds[3], "<strong data-htmxo-group-label=\"\">Acme</strong>")
+    @test contains(tds[2], ">3</td>")
+    number_first = html(grouped(group_by="party", group_summary=["Party" => ColumnSummary(:count)]))
+    @test contains(row(number_first, "row-group--Acme"), "<span data-htmxo-summary-value=\"\">3</span>")
+    # Grouped tables sort their groups by a tally's total.
+    sorted = table_rows(html(grouped(group_by="party", default_sort="IBAN" => :desc,
+        group_summary=["IBAN" => ColumnSummary(:tally, t -> t.iban)])))
+    @test [m[1] for m in eachmatch(r"<tr id=\"row-group--([^\"]*)\"", sorted) if !contains(m[1], "--p")] ==
+        ["Acme", "Bakery", "Acme--Prime", "Prime--Video"]
+    # A row the app builds itself shows the same cell: `summary_cell`.
+    own = html(summary_cell(ColumnSummary(:tally, t -> t.iban), TX[1:3]))
+    @test startswith(own, "<td data-htmxo-number=\"3\">") && contains(own, "aria-label=\"3 (DE01: 2; DE02: 1)\"") &&
+        contains(own, "style=\"--htmxo-tally-total:3\"")
+    @test html(summary_cell(ColumnSummary(:sum, t -> t.amount), TX[1:3])) == "<td data-htmxo-number=\"-60\">-60</td>"
+    @test contains(to_markdown_string(h.table(h.tbody(h.tr(summary_cell(ColumnSummary(:tally, t -> t.iban), TX[1:3]))))),
+        "3 (DE01: 2; DE02: 1)")
+    # Refused: order/label/color on another reduce, a negative number.
+    @test_throws ArgumentError ColumnSummary(:sum, identity; order=["a"])
+    @test_throws ArgumentError ColumnSummary(:count; color=c -> "red")
+    @test_throws ArgumentError html(grouped(group_by="party", group_summary=["IBAN" => ColumnSummary(:tally, t -> [t.iban => t.amount])]))
 end
 
 @testitem "group_order: a grouping's groups in an order of its own" setup=[GroupingFixtures] tags=[:unit] begin
