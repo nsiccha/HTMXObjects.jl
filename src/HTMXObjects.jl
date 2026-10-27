@@ -3847,7 +3847,7 @@ _semantic_artifact_size(::Nothing, bytes) = nothing
 # single mangled entry instead of N. Caught by running it, not by reading it.
 
 """
-    SemanticSection(title, children...; anchor="")
+    SemanticSection(title, children...; anchor="", level=nothing)
 
 A document-level division — it opens a heading level, unlike
 [`SemanticCard`](@ref), which is a self-contained summary.
@@ -3857,6 +3857,12 @@ of a document, below its title, and one level deeper inside each enclosing
 section, through any markup in between (an `h.div` or a card holding the inner
 section). `<h6>` / `######` is the deepest; a section nested deeper keeps it.
 
+`level` (1–6) fixes the level the section opens at, wherever it renders; the
+sections inside it follow from there. `level=1` makes the section the page's
+title: a page made of one section, such as a glossary page
+(`glossary_section(g; level=1)`), then has its `<h1>` / `#` and its sections
+at `<h2>` / `##`.
+
 `anchor`, when non-empty, becomes the HTML `id` and, in Markdown, the title
 heading's identifier (`## Title {#anchor}`), so a link to `#anchor` jumps to
 the section in the browser and in a [`pdf_report`](@ref) alike.
@@ -3865,11 +3871,19 @@ struct SemanticSection <: SemanticNode
     title::String
     children::Vector{Any}
     anchor::String
-    SemanticSection(title::AbstractString, children::AbstractVector; anchor="") =
-        new(String(title), Any[children...], String(anchor))
-    SemanticSection(title::AbstractString, children...; anchor="") =
-        new(String(title), Any[children...], String(anchor))
+    level::Union{Nothing,Int}
+    SemanticSection(title::AbstractString, children::AbstractVector; anchor="", level=nothing) =
+        new(String(title), Any[children...], String(anchor), _semantic_section_level(level))
+    SemanticSection(title::AbstractString, children...; anchor="", level=nothing) =
+        new(String(title), Any[children...], String(anchor), _semantic_section_level(level))
 end
+
+# A section's `level`: none (it follows the nesting), or one of HTML's six.
+_semantic_section_level(::Nothing) = nothing
+_semantic_section_level(level::Integer) = 1 <= level <= 6 ? Int(level) :
+    throw(ArgumentError("SemanticSection: level must be 1 to 6, not $level"))
+_semantic_section_level(level) =
+    throw(ArgumentError("SemanticSection: level must be an integer from 1 to 6 or `nothing`, not $(repr(level))"))
 
 """
     SemanticGroup(children...)
@@ -4781,17 +4795,25 @@ _semantic_artifact_icon() = h.svg(h.path(; d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 13
 # rendered to a buffer of its own, and through the static-export walk, which
 # builds HTML peers with no `IO` at all.
 const _SEMANTIC_HEADING_LEVEL = ScopedValues.ScopedValue{Int}(2)
+# Whether a section's or card's heading encloses the render: the level alone
+# cannot tell the top of a document from the inside of a `level=1` section.
+const _SEMANTIC_UNDER_HEADING = ScopedValues.ScopedValue{Bool}(false)
 
 _semantic_heading_level() = _SEMANTIC_HEADING_LEVEL[]
 
+# The level a section opens at here: its own `level`, or the one the nesting gives.
+_semantic_opening_level(section::SemanticSection) =
+    something(section.level, _semantic_heading_level())
+
 # Runs `f(level)` for a heading at `level`, with everything below it one deeper.
-_semantic_heading(f, level) =
-    ScopedValues.with(() -> f(level), _SEMANTIC_HEADING_LEVEL => level + 1)
+_semantic_heading(f, level) = ScopedValues.with(() -> f(level),
+    _SEMANTIC_HEADING_LEVEL => level + 1, _SEMANTIC_UNDER_HEADING => true)
 
 # A card's Markdown title sits at the level a section would open there, and at
 # `###` outside any section, below the page's `##` headings (an operation's
 # title, say). Its HTML title is not a heading, so only Markdown asks for this.
-_semantic_card_level() = max(_semantic_heading_level(), 3)
+_semantic_card_level() = _SEMANTIC_UNDER_HEADING[] ?
+    _semantic_heading_level() : max(_semantic_heading_level(), 3)
 
 # HTML and Markdown have six heading levels; a deeper division keeps the sixth.
 _semantic_heading_tag(level) = Symbol(:h, min(level, 6))
@@ -4800,7 +4822,7 @@ _semantic_heading_sigil(level) = "#"^min(level, 6)
 _semantic_html_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)), card.children...;
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
-_semantic_html_node(section::SemanticSection, level=_semantic_heading_level()) = h.section(
+_semantic_html_node(section::SemanticSection, level=_semantic_opening_level(section)) = h.section(
     h(_semantic_heading_tag(level), section.title), section.children...;
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
 _semantic_html_node(group::SemanticGroup) = h.div(
@@ -4846,7 +4868,7 @@ _semantic_hxml_node(card::SemanticCard) = h.article(
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
 # Children are classified here, before serializing, so a nested section must
 # already see the level below this one.
-_semantic_hxml_node(section::SemanticSection, level=_semantic_heading_level()) = h.section(
+_semantic_hxml_node(section::SemanticSection, level=_semantic_opening_level(section)) = h.section(
     h(_semantic_heading_tag(level), section.title),
     _semantic_heading(_ -> map(_semantic_hxml_child, section.children), level)...;
     class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
@@ -4881,7 +4903,7 @@ _show_semantic_peer(io::IO, mime::MIME, peer) = show(io, mime, peer)
 for (mime, peer) in ((MIME"text/html", :_semantic_html_node),
                      (MIME"application/vnd.hyperview+xml", :_semantic_hxml_node))
     @eval Base.show(io::IO, mime::$mime, section::SemanticSection) =
-        _semantic_heading(_semantic_heading_level()) do level
+        _semantic_heading(_semantic_opening_level(section)) do level
             show(io, mime, $peer(section, level))
         end
 end
@@ -5013,7 +5035,7 @@ function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
 end
 
 Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
-    _semantic_heading(_semantic_heading_level()) do level
+    _semantic_heading(_semantic_opening_level(section)) do level
         print(io, _semantic_heading_sigil(level), " ", section.title,
             _markdown_heading_anchor(section.anchor))
         _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
@@ -6592,7 +6614,7 @@ end
 # The sections a section holds are built while its children are walked, so the
 # walk runs one heading level below it, as its `show` does.
 _static_walk(section::SemanticSection, rules::_StaticRules) =
-    _semantic_heading(_semantic_heading_level()) do level
+    _semantic_heading(_semantic_opening_level(section)) do level
         _static_walk(_semantic_html_node(section, level), rules)
     end
 # A plot owns no markup: its layer renders itself, and an address inside its
@@ -17485,7 +17507,7 @@ _strip_md_chrome(card::SemanticCard) = SemanticCard(
     card.title, _strip_md_chrome_children(card.children); anchor=card.anchor)
 _strip_md_chrome(section::SemanticSection) = SemanticSection(
     section.title, _strip_md_chrome_children(section.children);
-    anchor=section.anchor)
+    anchor=section.anchor, level=section.level)
 _strip_md_chrome(group::SemanticGroup) =
     SemanticGroup(_strip_md_chrome_children(group.children))
 # A disclosure whose body strips to nothing (form controls, or private content

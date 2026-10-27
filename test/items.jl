@@ -8968,6 +8968,45 @@ end
     @test contains(html(SemanticSection("S", "s")), "<h2>S</h2>")
 end
 
+@testitem "a section's level= fixes where it opens in every peer" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    # A page made of one section has its title as the page's h1 (snag
+    # `serving-verkehrs-a871a8f7`: a glossary page had an h2 and no h1).
+    md = HTMXObjects.to_markdown_string
+    html(value) = repr("text/html", value)
+    hxml(value) = repr("application/vnd.hyperview+xml", value)
+
+    page = SemanticSection("Glossar", SemanticSection("Raum", "r"), SemanticSection("Daten", "d");
+                           anchor="g", level=1)
+    @test page.level == 1
+    @test md(page) == "# Glossar {#g}\n\n## Raum\n\nr\n\n## Daten\n\nd"
+    @test contains(html(page), "<h1>Glossar</h1>") && contains(html(page), "<h2>Raum</h2>")
+    @test !contains(html(page), "<h3>")
+    @test contains(hxml(page), "<text style=\"h1\">Glossar</text>")
+    @test contains(hxml(page), "<text style=\"h2\">Raum</text>")
+    @test contains(html(static_transform(page, StaticExport())), "<h2>Daten</h2>")
+    # The Markdown projection of a route keeps the level through its chrome stripping.
+    @test HTMXObjects._strip_md_chrome(page).level == 1
+    # Markup in between keeps the level below the section.
+    @test contains(html(SemanticSection("P", h.div(SemanticSection("S", "s")); level=1)), "<h2>S</h2>")
+
+    # A card directly inside it is one level below in Markdown; outside any
+    # section a card stays at `###`, below the page's `##` headings.
+    @test md(SemanticSection("P", SemanticCard("C", "c"); level=1)) == "# P\n\n## C\n\nc"
+    @test md(SemanticCard("C", "c")) == "### C\n\nc"
+
+    # The level holds wherever the section is placed; its sections follow from it.
+    @test md(SemanticSection("A", SemanticSection("B", SemanticSection("C", "c"); level=4))) ==
+        "## A\n\n#### B\n\n##### C\n\nc"
+    # Left out, the level follows the nesting as before.
+    @test SemanticSection("S", "s").level === nothing
+    @test md(SemanticSection("S", SemanticSection("T", "t"))) == "## S\n\n### T\n\nt"
+
+    # refused: HTML and Markdown have six heading levels, so no other level exists
+    @test_throws ArgumentError SemanticSection("S", "s"; level=0)
+    @test_throws ArgumentError SemanticSection("S", "s"; level=7)
+    @test_throws ArgumentError SemanticSection("S", ["s"]; level="1")
+end
+
 @testitem "render_markdown renders CommonMark and links bare URLs by default" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
     # Intra-word underscores stay verbatim — the stdlib parser deleted them.
     html = repr("text/html",
