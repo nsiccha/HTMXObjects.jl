@@ -178,3 +178,92 @@ end
         end
     end
 end
+
+@testitem "a SemanticArtifact on a Pico page is a slate outlined download, not an azure link, in Chrome" setup=[ChromeDump] tags=[:unit, :browser, :semantic] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # As in the button item above: hover and focus become attributes of the
+        # same specificity in the page and in Pico, transitions are off.
+        states(css) = foldl((s, st) -> replace(s, Regex(":$st(?![-\\w])") => "[data-$st]"),
+            ("hover", "focus-visible", "focus", "active");
+            init=replace(css, "[type=file]::file-selector-button" => "[data-htmxo-unmatched]"))
+        artifact = SemanticArtifact("vs_beschaeftigte_2025_tvz.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+            target="#", size=1_468_006, texts=semantic_texts(:de))
+        # The control is the same markup with the class renamed: Pico's link
+        # look, which the bridge's rules must be what replaces.
+        control = Raw(replace(repr("text/html", artifact), "htmxo-semantic-artifact" => "htmxo-control-artifact"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const art = document.querySelector('a.htmxo-semantic-artifact');
+            const ctl = document.querySelector('a.htmxo-control-artifact');
+            const btn = document.getElementById('secout');
+            const look = (e) => { const c = getComputedStyle(e);
+                return [c.color, c.borderTopColor, c.borderTopStyle, c.textDecorationLine, c.display].join(' / '); };
+            const out = ['artifact rest: ' + look(art), 'control rest: ' + look(ctl), 'button rest: ' + look(btn),
+                'small: ' + getComputedStyle(art.querySelector('small')).color,
+                'muted: ' + getComputedStyle(document.getElementById('muted-swatch')).color,
+                'secondary focus: ' + getComputedStyle(document.getElementById('focus-swatch')).color,
+                'icon: ' + Math.round(art.querySelector('svg').getBoundingClientRect().width)];
+            for (const e of [art, btn]) e.setAttribute('data-hover', '');
+            out.push('artifact hover: ' + look(art), 'button hover: ' + look(btn));
+            for (const e of [art, btn]) e.removeAttribute('data-hover');
+            art.setAttribute('data-focus-visible', '');
+            out.push('artifact ring: ' + getComputedStyle(art).boxShadow);
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = out.join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        content = h.main(; class="container")(
+            h.p(SemanticLink("Als Seite lesen", "#"), " ", artifact),
+            h.p(control), h.button("Secondary outline"; class="secondary outline", id="secout"),
+            h.p(h.span("muted"; id="muted-swatch"), h.span("focus"; id="focus-swatch")))
+        page = repr("text/html", htmx(content, driver; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION,
+            htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false,
+            extra_head=(h.style(Raw("""*, *::before, *::after { transition: none !important; }
+                #muted-swatch { color: var(--pico-muted-color); }
+                #focus-swatch { color: var(--pico-secondary-focus); }""")),)))
+        pages = Dict(
+            "/light" => states(page),
+            "/dark" => replace(states(page), "<html" => "<html data-theme=\"dark\""; count=1),
+            "/vendor/pico.min.css" => states(read(HTMXObjects._vendor_file(:pico), String)),
+        )
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            haskey(pages, path) || return HTTP.Response(404)
+            HTTP.Response(200, ["Content-Type" => endswith(path, ".css") ? "text/css" : "text/html"], pages[path])
+        end
+        measure(path) = mktempdir() do profile
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port$path`)
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            isnothing(checks) ? Dict{String,String}() :
+                Dict(String(k) => String(v) for (k, v) in (split(l, ": "; limit=2) for l in split(checks[1], '\n')))
+        end
+        colour(look) = first(split(look, " / "))
+        try
+            for path in ("/light", "/dark")
+                looks = measure(path)
+                @test length(looks) == 10
+                # The control proves the page draws Pico's underlined link look.
+                @test endswith(looks["control rest"], " / underline / inline")
+                # The artifact is drawn as the slate outline button instead.
+                @test looks["artifact rest"] == replace(looks["button rest"], r" / [a-z-]+$" => " / inline-flex")
+                @test colour(looks["artifact rest"]) != colour(looks["control rest"])
+                @test occursin(" / solid / none / ", looks["artifact rest"])
+                @test colour(looks["artifact hover"]) == colour(looks["button hover"])
+                @test colour(looks["artifact hover"]) != colour(looks["artifact rest"])
+                @test looks["small"] == looks["muted"]
+                @test looks["icon"] == "16"
+                @test looks["artifact ring"] == looks["secondary focus"] * " 0px 0px 0px 2px"
+            end
+        finally
+            close(server)
+        end
+    end
+end

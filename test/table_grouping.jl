@@ -253,6 +253,26 @@ end
     @test count_line(html(grouped(group_by="none", searchable=true))) == "7 of 7 rows shown"
 end
 
+@testitem "initially_open_detail: a grouped table opens leaf details apart from groups" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    tr(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>"), page).match
+    calls = Any[]
+    # initially_open reveals p1 and opens its group; the detail stays closed.
+    page = table_rows(html(grouped(group_by="party", initially_open=t -> t.id == "p1",
+        initially_open_detail=t -> (push!(calls, t); false))))
+    @test !isempty(calls) && all(c -> c in TX, calls)
+    @test contains(tr(page, group_row(page, "Acme")), "data-htmxo-tree-open=\"true\"")
+    @test !contains(tr(page, "row-group--Acme--p1"), "hidden")
+    @test contains(tr(page, "row-group--Acme--p1"), "data-htmxo-detail-open=\"false\"")
+    @test contains(tr(page, "detail-group--Acme--p1"), "hidden")
+    # A leaf whose detail opens in a closed group shows it once its group opens.
+    closed = table_rows(html(grouped(group_by="party", initially_open_detail=t -> t.id == "p4")))
+    @test contains(tr(closed, group_row(closed, "Bakery")), "data-htmxo-tree-open=\"false\"")
+    @test contains(tr(closed, "row-group--Bakery--p4"), "data-htmxo-detail-open=\"true\"")
+    @test contains(tr(closed, "detail-group--Bakery--p4"), "hidden")
+end
+
 @testitem "initially_open: a predicate opens the groups of the leaves it opens" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
     html(x) = repr("text/html", x)

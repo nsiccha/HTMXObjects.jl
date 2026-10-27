@@ -12,7 +12,7 @@
     # Fragments of the English texts that no fixture's own content contains.
     english_words = ["Search", "rows shown", "No matching rows", "0 selected", "Select all shown",
         "Clear", "Expand all", "Collapse all", "Toggle child rows", "Details", "Group by",
-        "grouping", "Move ", "Loading", "CSV", "More"]
+        "grouping", "Move ", "Loading", "CSV", "More", "Sort by", "Lower bound", "Relative width"]
 
     items = [(id="k$i", name="Item $i", grp=isodd(i) ? "A" : "B", party=i % 3 == 0 ? "X" : "Y",
               kids=i <= 2 ? [(id="c$i$j", name="Child $i.$j", grp="A", party="X", kids=[]) for j in 1:2] : [])
@@ -43,6 +43,8 @@
         "pills_two" => grouped(; group_by=["Group", "Party"], texts),
         "pills_kept" => master_detail_table(["N", "G"], items; key=it -> it.id, master=cells,
             detail=it -> h.p("d"), groupings=groupings[2:end], group_by=["Group"], group_by_url="/t", id="g", texts),
+        "sort_keys" => master_detail_table([ColumnSpec("N"; sort_keys=interval_sort_keys(it -> 2.0, it -> 1.0, it -> 3.0; texts)), "G"],
+            items; key=it -> it.id, master=cells, detail=it -> h.p("d"), id="k", texts),
     )
 
     without_texts_attr(html) = replace(html, r" data-htmxo-texts=\"[^\"]*\"" => "")
@@ -92,7 +94,8 @@ end
                    "⟨details⟩", "⟨group_by⟩", "⟨group_add Group⟩", "⟨group_add_inner Party⟩",
                    "⟨group_level 2 Party⟩", "⟨group_earlier Party⟩", "⟨group_later Group⟩",
                    "⟨group_stop Group⟩", "⟨group_kept Group⟩", "⟨loading⟩", "⟨csv⟩",
-                   "<summary>⟨more⟩</summary>"]
+                   "<summary>⟨more⟩</summary>", "⟨sort_by⟩", "⟨sort_ascending ⟨sort_estimate⟩⟩",
+                   "⟨sort_descending ⟨sort_lower⟩⟩", "⟨sort_upper⟩", "⟨sort_width⟩", "⟨sort_relative_width⟩"]
         @test contains(shown, marker)
     end
     # The browser's texts ride on the outermost element, once per table.
@@ -113,7 +116,7 @@ end
     # Markdown drops these controls, so it does not change. A lazy detail's
     # placeholder is not content there either: its detail row writes nothing
     # (user pick 1mu8842, snag master-detail-ma-e63263bb).
-    for name in ("search", "select", "csv", "pills_two", "flat_lazy")
+    for name in ("search", "select", "csv", "pills_two", "flat_lazy", "sort_keys")
         @test to_markdown_string(table_variants(texts)[name]) == to_markdown_string(table_variants(table_texts())[name])
     end
     @test !contains(to_markdown_string(table_variants(texts)["flat_lazy"]), "⟨loading⟩")
