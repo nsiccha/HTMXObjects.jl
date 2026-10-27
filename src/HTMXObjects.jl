@@ -31,7 +31,7 @@ export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
@@ -19405,6 +19405,7 @@ function htmxoUpdateRows(update, origin) {
     // A sorted table re-applies its sort to the rows the update placed or
     // changed, before focus returns (moving a row drops its focus).
     if (fresh.length) htmxoResort(table);
+    htmxoTallyScale(table);
     // A branch toggle names the child rows the branch now has.
     const kidsOf = new Map();
     if (touched.size) masters().forEach(r => {
@@ -20204,6 +20205,12 @@ function htmxoJsonList(xs) { return '[' + xs.map(htmxoJsonString).join(',') + ']
 // to right, and written as the table writes numbers (`_md_summary_cell`).
 function htmxoSummaryValue(reduce, inputs) {
     if (reduce === 'count') return inputs.length;
+    if (reduce === 'tally') {
+        // Each category's number added up, in first-appearance order.
+        const counts = new Map();
+        inputs.forEach(parts => (parts || []).forEach(([c, n]) => counts.set(c, (counts.get(c) || 0) + n)));
+        return counts.size ? counts : null;
+    }
     if (reduce === 'ratio') {
         let num = 0, den = 0, any = false;
         inputs.forEach(v => { if (v && v[0] !== null && v[1] !== null) { num += v[0]; den += v[1]; any = true; } });
@@ -20260,6 +20267,75 @@ function htmxoSummaryText(x, s, decimal, thousands, csv) {
     if (!s.sigdigits) return htmxoFixed(x, s.digits, decimal, thousands);
     const [negative, ds, point] = htmxoSigDigits(x, s.sigdigits);
     return htmxoDigitsText(negative, ds, point, decimal, thousands, !csv && (point <= -4 || point >= 16));
+}
+// `_md_summary_cell(::Val{:tally})`: a :tally cell's total, then one bar
+// segment per category with a count, in the table's category order (others
+// after them, grey), named for the screen reader as the Markdown writes it.
+// The bar takes its length from the scale of the column's rows of `level`
+// (`htmxoTallyScale`).
+function htmxoTallyFill(cell, counts, s, decimal, thousands, level) {
+    const value = cell.querySelector('[data-htmxo-tally]');
+    let total = 0;
+    if (counts) counts.forEach(n => { total += n; });
+    value.replaceChildren();
+    value.removeAttribute('role');
+    value.removeAttribute('aria-label');
+    value.dataset.htmxoTally = String(total);
+    value.setAttribute('style', '--htmxo-tally-total:' + total + ';--htmxo-tally-max:var(--htmxo-tally-max-' + cell.cellIndex + '-' + level + ')');
+    if (!counts) {
+        cell.removeAttribute('data-htmxo-number');
+        return;
+    }
+    const num = x => htmxoSummaryText(x, s, decimal, thousands, false);
+    const known = new Set(s.categories.map(c => c.key));
+    const shown = [...s.categories, ...Array.from(counts.keys()).filter(k => !known.has(k))
+        .map(k => ({key: k, label: k, color: 'var(--htmxo-category-other)'}))]
+        .filter(c => counts.get(c.key)).map(c => [c, counts.get(c.key)]);
+    const text = shown.length ? num(total) + ' (' + shown.map(([c, n]) => c.label + ': ' + num(n)).join('; ') + ')' : num(total);
+    const span = cls => { const el = document.createElement('span'); if (cls) el.className = cls; return el; };
+    const sum = span('htmxo-tally-total'), track = span('htmxo-tally-track'), bar = span('htmxo-tally-bar');
+    sum.textContent = num(total);
+    shown.forEach(([c, n]) => {
+        const segment = span();
+        segment.setAttribute('style', '--htmxo-tally-n:' + n + ';--htmxo-tally-color:' + c.color);
+        segment.title = c.label + ': ' + num(n);
+        bar.append(segment);
+    });
+    track.append(bar);
+    value.append(sum, track);
+    value.setAttribute('role', 'img');
+    value.setAttribute('aria-label', text);
+    cell.dataset.htmxoNumber = htmxoSummaryText(total, s, '.', '', true);
+}
+// The scale :tally bars share: the table sets, for each column and level
+// (`aria-level`), the longest total among its rows, hidden ones included (so
+// opening a group or searching never rescales), as the custom property
+// `--htmxo-tally-max-<column>-<level>` each bar names. A cell an app builds
+// (`summary_cell`) gets that name here. Run again whenever rows arrive: a
+// regroup, a row update, lazy rows, a page load.
+function htmxoTallyScale(table) {
+    const longest = new Map();
+    table.querySelectorAll(':scope > tbody > tr > td [data-htmxo-tally]').forEach(v => {
+        const cell = v.closest('td');
+        if (cell.closest('table') !== table) return;
+        const name = '--htmxo-tally-max-' + cell.cellIndex + '-' + (cell.parentElement.getAttribute('aria-level') || '0');
+        if (!v.style.getPropertyValue('--htmxo-tally-max')) v.style.setProperty('--htmxo-tally-max', 'var(' + name + ')');
+        longest.set(name, Math.max(longest.get(name) || 0, Number(v.dataset.htmxoTally) || 0));
+    });
+    longest.forEach((max, name) => table.style.setProperty(name, String(max || 1)));
+}
+if (!window.htmxoTallyBound) {
+    window.htmxoTallyBound = true;
+    const scaleIn = elt => {
+        if (!elt || !elt.querySelectorAll) return;
+        const inside = elt.closest && elt.closest('table');
+        const tables = new Set(inside ? [inside] : Array.from(elt.querySelectorAll('[data-htmxo-tally]'), v => v.closest('table')));
+        tables.forEach(t => { if (t) htmxoTallyScale(t); });
+    };
+    // A row update scales its table once, after all its rows are in.
+    document.addEventListener('htmx:load', e => { if (!window.htmxoRowsUpdating) scaleIn(e.target); });
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => scaleIn(document.body));
+    else scaleIn(document.body);
 }
 // Give a leaf's rows the row key `safe`: the ids, the row's own toggle call
 // (`master_detail_toggle_js`) and the controls naming its detail.
@@ -20387,14 +20463,19 @@ function htmxoRegroup(wrapper, levels) {
         row.querySelector('[data-htmxo-group-label]').textContent = name;
         row.querySelector('[data-htmxo-group-count]').textContent = '(' + list.length + ')';
         // `_md_summary_cell`: the shown summary, and the CSV's number.
+        // A cell whose row adds controls to it (the first) keeps its value
+        // in an element of its own.
         cfg.summary.forEach((s, i) => {
             const cell = row.querySelector('[data-htmxo-group-summary="' + i + '"]');
             const x = htmxoSummaryValue(s.reduce, list.map(m => m.values[i]));
-            if (x === null) {
-                cell.textContent = '';
+            const decimal = htmxoText(table, 'decimal'), thousands = htmxoText(table, 'thousands');
+            const target = cell.querySelector('[data-htmxo-summary-value]') || cell;
+            if (s.reduce === 'tally') htmxoTallyFill(cell, x, s, decimal, thousands, level);
+            else if (x === null) {
+                target.textContent = '';
                 cell.removeAttribute('data-htmxo-number');
             } else {
-                cell.textContent = htmxoSummaryText(x, s, htmxoText(table, 'decimal'), htmxoText(table, 'thousands'), false);
+                target.textContent = htmxoSummaryText(x, s, decimal, thousands, false);
                 cell.dataset.htmxoNumber = htmxoSummaryText(x, s, '.', '', true);
             }
         });
@@ -20418,6 +20499,7 @@ function htmxoRegrouped(wrapper, table, levels, cfg) {
     wrapper.dataset.htmxoGroupBy = htmxoJsonList(levels.length ? levels : [cfg.flat ?? '']);
     const pills = wrapper.querySelector('.htmxo-group-pills');
     if (pills) htmxoGroupPillsSync(pills, levels);
+    htmxoTallyScale(table);
     htmxoResort(table);
     const root = wrapper.querySelector('.htmxo-searchable-table');
     if (root) { htmxoTreeRestore(root, htmxoSearchOf(root)); htmxoFilterTable(root); }
@@ -20794,6 +20876,39 @@ function sortable_table_styles()
 /* Body cells with a hyperscript handler are clickable too (htmx-attr cells
    already get cursor:pointer from the global rule in htmxo_utility_styles). */
 .htmxo-sortable-table tbody td[_] { cursor: pointer; }
+/* A :tally group summary (`ColumnSummary(:tally, …)`): the total, then a
+   stacked bar as long as the total on the scale the column's rows of one
+   level share (`--htmxo-tally-max`, from `htmxoTallyScale`), one segment
+   per category, 2px of the row between segments. Every track has the same
+   width (`--htmxo-tally-width`, set it for a narrow column), so bars
+   compare; it wraps under the total where the cell is narrower. */
+.htmxo-tally { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .1em .4em; vertical-align: middle; }
+.htmxo-tally-total { font-variant-numeric: tabular-nums; }
+.htmxo-tally-track { display: block; flex: none; inline-size: var(--htmxo-tally-width, 5rem); }
+.htmxo-tally-bar { display: flex; gap: 2px; inline-size: calc(var(--htmxo-tally-total) / var(--htmxo-tally-max, var(--htmxo-tally-total)) * 100%); max-inline-size: 100%; block-size: .7em; }
+.htmxo-tally-bar > span { flex: var(--htmxo-tally-n, 1) 1 0; min-inline-size: 2px; background: var(--htmxo-tally-color, var(--htmxo-category-other)); }
+.htmxo-tally-bar > span:first-child { border-start-start-radius: 2px; border-end-start-radius: 2px; }
+.htmxo-tally-bar > span:last-child { border-start-end-radius: 2px; border-end-end-radius: 2px; }
+/* The categorical palette a :tally colours its first eight categories with,
+   in this order; the rest take the grey. Dark mode has its own steps of the
+   same hues. In the layer, so an app's own values win. */
+:root {
+    --htmxo-category-1: #2a78d6; --htmxo-category-2: #eb6834; --htmxo-category-3: #1baf7a; --htmxo-category-4: #eda100;
+    --htmxo-category-5: #e87ba4; --htmxo-category-6: #008300; --htmxo-category-7: #6250d6; --htmxo-category-8: #e34948;
+    --htmxo-category-other: #8f8e88;
+}
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --htmxo-category-1: #3987e5; --htmxo-category-2: #d95926; --htmxo-category-3: #199e70; --htmxo-category-4: #c98500;
+        --htmxo-category-5: #d55181; --htmxo-category-6: #008300; --htmxo-category-7: #9085e9; --htmxo-category-8: #e66767;
+        --htmxo-category-other: #75746e;
+    }
+}
+:root[data-theme="dark"] {
+    --htmxo-category-1: #3987e5; --htmxo-category-2: #d95926; --htmxo-category-3: #199e70; --htmxo-category-4: #c98500;
+    --htmxo-category-5: #d55181; --htmxo-category-6: #008300; --htmxo-category-7: #9085e9; --htmxo-category-8: #e66767;
+    --htmxo-category-other: #75746e;
+}
 }
 /* Master/detail paired-row rules — INTENTIONALLY UNLAYERED so they beat
    Pico's unlayered tr/td defaults. The sortable_table_js convention pairs
@@ -22448,8 +22563,10 @@ _md_master_cell(x, texts) = x
 _md_interactive_label(::Any) = false
 _md_interactive_label(::Raw) = true
 _md_interactive_label(::_LabelledControl) = true
+# A group summary in a group row's first cell is no label either: the row
+# keeps a separate toggle beside it.
 _md_interactive_label(node::Node) =
-    HTMX.tag(node) in _MD_ROW_CONTROLS ||
+    HTMX.tag(node) in _MD_ROW_CONTROLS || !isnothing(_node_attr(node, "data-htmxo-summary-value")) ||
     any(_md_interactive_label, HTMX.children(node))
 
 _md_attr_name(key) = Symbol(replace(string(key), '_' => '-'))
@@ -23603,6 +23720,7 @@ _number_rounding(::Integer, ::Integer, who="format_number") = throw(ArgumentErro
 
 """
     ColumnSummary(reduce, values...; digits=0, sigdigits=nothing)
+    ColumnSummary(:tally, item -> category; order=[], label=string, color=nothing, digits=0, sigdigits=nothing)
 
 One column of a group row in a regroupable [`master_detail_table`](@ref),
 computed from the leaves under the group: pass it in `group_summary` under the
@@ -23614,10 +23732,32 @@ in a recorded page with no server.
 - `:count` takes none: the number of leaves in the group.
 - `:ratio` takes two, `item -> numerator` and `item -> denominator`, and
   divides their sums (e.g. a utilisation, Σ demand / Σ capacity).
+- `:tally` takes one function, `item -> category`, for a column of categories
+  (a status, a class): the group row shows how many of its leaves fall in each
+  category. The function may instead return `category => number` pairs (a
+  vector or a `Dict`), a leaf's own breakdown (employees by size class), and
+  the group row adds them up per category.
 
 A function may return `nothing` or `missing` for a leaf without a value: that
 leaf is left out (both parts of a `:ratio`). A group without any value, or a
-`:ratio` whose denominators sum to zero, shows an empty cell. Numbers are
+`:ratio` whose denominators sum to zero, shows an empty cell.
+
+A `:tally` cell shows the group's total, then a small stacked bar: one
+segment per category, as long as its count, and the whole bar as long as the
+total on a scale the group rows of one level share, so groups compare at a
+glance (hovering a segment names its category and count; a screen reader
+hears the whole list). `order` lists the categories in the order the segments
+take (the others follow as they first appear among the items); `label(category)`
+names one (default `string`); `color(category)` gives its CSS colour, else the
+first eight categories take the table's categorical palette
+(`--htmxo-category-1` … `-8`, light and dark) and later ones a grey. The
+Markdown and PDF projection writes the cell as text, `5 (shown: 2; partly: 3)`,
+zero categories left out. The cell sorts by its total, and the ⬇ CSV writes
+the total. A row the app builds itself, such as a branch row of a tree
+grouping, shows the same cell with [`summary_cell`](@ref).
+
+A summary may name the first column: the group's key and count then move to
+the first column no summary names. Numbers are
 written with the table's `decimal` and `thousands` texts
 (`texts=table_texts(:de)` writes `1.234,5`), rounded halves away from zero:
 
@@ -23634,17 +23774,24 @@ struct ColumnSummary
     reduce::Symbol
     values::Tuple
     rounding::Union{_FixedDigits,_SigDigits}
+    # `:tally` only: the categories' order, names and colours.
+    order::Vector{Any}
+    label::Any
+    color::Any
     function ColumnSummary(reduce::Symbol, values...; digits::Union{Nothing,Integer}=nothing,
-                           sigdigits::Union{Nothing,Integer}=nothing)
+                           sigdigits::Union{Nothing,Integer}=nothing, order=nothing, label=nothing, color=nothing)
         arity = get(_SUMMARY_ARITY, reduce, nothing)
         isnothing(arity) && throw(ArgumentError(string("ColumnSummary: unknown reduce ", repr(reduce),
             "; use one of ", join(repr.(keys(_SUMMARY_ARITY)), ", "))))
         length(values) == arity || throw(ArgumentError(string("ColumnSummary: ", repr(reduce), " takes ",
             arity, arity == 1 ? " function" : " functions", ", got ", length(values))))
-        new(reduce, values, something(_number_rounding(digits, sigdigits, "ColumnSummary"), _FixedDigits(0)))
+        reduce === :tally || all(isnothing, (order, label, color)) || throw(ArgumentError(string(
+            "ColumnSummary: order, label and color name the categories of a :tally, not of ", repr(reduce))))
+        new(reduce, values, something(_number_rounding(digits, sigdigits, "ColumnSummary"), _FixedDigits(0)),
+            Any[something(order, ())...], something(label, string), color)
     end
 end
-const _SUMMARY_ARITY = (sum=1, mean=1, min=1, max=1, count=0, ratio=2)
+const _SUMMARY_ARITY = (sum=1, mean=1, min=1, max=1, count=0, ratio=2, tally=1)
 
 # A leaf's number for a summary: `nothing` when it has none.
 _md_summary_number(::Union{Nothing,Missing}) = nothing
@@ -23652,17 +23799,41 @@ _md_summary_number(x::Real) = isfinite(x) ? Float64(x) : nothing
 _md_summary_number(x) = throw(ArgumentError(string(
     "ColumnSummary: a value must be a real number, nothing or missing; got ", repr(x))))
 
-# What one leaf contributes to a summary: nothing for :count, a number, or a
-# (numerator, denominator) pair for :ratio. The browser reads the same values
-# from the leaf's `data-htmxo-leaf-values`.
+# What one leaf contributes to a summary: nothing for :count, a number, a
+# (numerator, denominator) pair for :ratio, or its categories with their
+# numbers for :tally. The browser reads the same values from the leaf's
+# `data-htmxo-leaf-values`.
 _md_summary_input(s::ColumnSummary, item) = _md_summary_input(Val(s.reduce), s, item)
 _md_summary_input(::Val{:count}, s, item) = nothing
 _md_summary_input(::Val{:ratio}, s, item) = (_md_summary_number(s.values[1](item)), _md_summary_number(s.values[2](item)))
+_md_summary_input(::Val{:tally}, s, item) = _md_tally_parts(only(s.values)(item))
 _md_summary_input(::Val, s, item) = _md_summary_number(only(s.values)(item))
+
+# A leaf's categories for a :tally, each with its number: a category counts
+# one, `category => number` adds that number, a collection holds several;
+# `nothing` when it has none.
+_md_tally_parts(::Union{Nothing,Missing}) = nothing
+_md_tally_parts(x) = let parts = _md_tally_part!(Pair{Any,Float64}[], x)
+    isempty(parts) ? nothing : parts
+end
+_md_tally_parts(xs::Union{AbstractVector,Tuple,AbstractSet,AbstractDict}) =
+    let parts = foldl(_md_tally_part!, xs; init=Pair{Any,Float64}[])
+        isempty(parts) ? nothing : parts
+    end
+_md_tally_part!(parts, ::Union{Nothing,Missing}) = parts
+_md_tally_part!(parts, (c, n)::Pair) = let x = _md_summary_number(n)
+    isnothing(x) && return parts
+    x < 0 && throw(ArgumentError(string("ColumnSummary(:tally): category ", repr(c),
+        " has the negative number ", x, "; a tally adds up counts and amounts")))
+    push!(parts, c => x)
+end
+_md_tally_part!(parts, c) = push!(parts, c => 1.0)
 
 _md_json_number(::Nothing) = "null"
 _md_json_number(x::Float64) = string(x)
 _md_json_number((a, b)::Tuple) = string("[", _md_json_number(a), ",", _md_json_number(b), "]")
+_md_json_number(parts::Vector{Pair{Any,Float64}}) =
+    "[" * join(("[" * _md_json_string(string(c)) * "," * _md_json_number(n) * "]" for (c, n) in parts), ",") * "]"
 
 # A group's summary over its leaves' inputs, folded left to right as the
 # browser does (`htmxoSummaryValue`), so both round the same number.
@@ -23680,6 +23851,24 @@ function _md_summary_value(v::Val, inputs)
     xs = Float64[x for x in inputs if !isnothing(x)]
     isempty(xs) ? nothing : _md_reduce(v, xs)
 end
+# A group's :tally: each category's number added up over its leaves, keyed
+# by the category's text (as the browser keys it), in first-appearance order.
+struct _Tally
+    counts::Vector{Pair{String,Float64}}
+end
+function _md_summary_value(::Val{:tally}, inputs)
+    at = Dict{String,Int}()
+    counts = Pair{String,Float64}[]
+    for parts in inputs, (c, n) in something(parts, ())
+        k = string(c)
+        i = get!(() -> (push!(counts, k => 0.0); length(counts)), at, k)
+        counts[i] = k => last(counts[i]) + n
+    end
+    isempty(counts) ? nothing : _Tally(counts)
+end
+# Added left to right over the categories, as `htmxoTallyFill` does.
+_md_tally_total(t::_Tally) = foldl(+, (last(p) for p in t.counts); init=0.0)
+_md_tally_total(::Nothing) = 0.0
 _md_reduce(::Val{:sum}, xs) = foldl(+, xs)
 _md_reduce(::Val{:mean}, xs) = foldl(+, xs) / length(xs)
 _md_reduce(::Val{:min}, xs) = minimum(xs)
@@ -23706,15 +23895,111 @@ function _print_grouped(io::IO, whole::AbstractString, thousands::AbstractString
     end
 end
 
+# How a :tally names and colours its categories, in the order its segments
+# take: `order` first, then the others as they first appear among `inputs`.
+# Without `color`, the first eight take the categorical palette in that
+# order (a category keeps its colour whatever the grouping), later ones grey.
+struct _TallyCategory
+    key::String
+    label::String
+    color::String
+end
+const _TALLY_PALETTE = 8
+_md_summary_categories(s::ColumnSummary, inputs) = _md_summary_categories(Val(s.reduce), s, inputs)
+_md_summary_categories(::Val, s, inputs) = nothing
+function _md_summary_categories(::Val{:tally}, s, inputs)
+    cats = _TallyCategory[]
+    seen = Set{String}()
+    function add(c)
+        k = string(c)
+        k in seen && return
+        push!(seen, k)
+        n = length(cats) + 1
+        color = !isnothing(s.color) ? string(s.color(c)) :
+            n <= _TALLY_PALETTE ? "var(--htmxo-category-$n)" : "var(--htmxo-category-other)"
+        push!(cats, _TallyCategory(k, string(s.label(c)), color))
+    end
+    foreach(add, s.order)
+    for parts in inputs, (c, _) in something(parts, ())
+        add(c)
+    end
+    cats
+end
+
 # A group summary cell: the summary as the table writes it
 # (`format_number(x; digits | sigdigits)`), and as the ⬇ CSV writes it
 # (`data-htmxo-number`: the same rounded number with a `.`, no grouping and no
-# power of ten). `htmxoSummaryText` fills the cells of the rows `htmxoRegroup`
-# builds the same way.
-_md_summary_cell(::Nothing, rounding, texts, i) = h.td(""; data_htmxo_group_summary=string(i))
-_md_summary_cell(x::Float64, rounding, texts::TableTexts, i) =
-    h.td(_format_finite(x, texts, rounding);
-         data_htmxo_group_summary=string(i), data_htmxo_number=_summary_key(x, rounding))
+# power of ten). `attrs` mark a group row's cell for the browser's regroup;
+# `wrap` puts the value in an element of its own, which a cell whose row adds
+# controls to it (a group row's first cell) needs. `htmxoSummaryText` and
+# `htmxoTallyFill` fill the cells of the rows `htmxoRegroup` builds the same way.
+_md_summary_cell(s::ColumnSummary, x, texts::TableTexts, attrs; kw...) =
+    _md_summary_cell(Val(s.reduce), s, x, texts, attrs; kw...)
+_md_summary_cell(::Val, s, x, texts, attrs; wrap=false, kw...) = _md_number_cell(s, x, texts, attrs, wrap)
+_md_number_cell(s, ::Nothing, texts, attrs, wrap) = h.td(wrap ? h.span(; data_htmxo_summary_value="") : ""; attrs...)
+_md_number_cell(s, x::Float64, texts, attrs, wrap) = let text = _format_finite(x, texts, s.rounding)
+    h.td(wrap ? h.span(text; data_htmxo_summary_value="") : text; attrs..., data_htmxo_number=_summary_key(x, s.rounding))
+end
+# A :tally cell: the total, then a bar of one segment per category with a
+# count. The bar is as long as the total on the scale of the column's rows of
+# its level: `scale` ("<column>-<level>", from 0 and 1) names the custom
+# property the table sets to their longest total (`_md_tally_scale_style`,
+# `htmxoTallyScale`), so a row reads the same whatever rows are beside it.
+# The Markdown and the screen reader get the text, `5 (shown: 2; partly: 3)`.
+# `htmxoTallyFill` writes the same in the browser.
+function _md_summary_cell(::Val{:tally}, s, t, texts, attrs; cats, scale=nothing, kw...)
+    total = _md_js_number(_md_tally_total(t))
+    value = (; class="htmxo-tally", data_htmxo_summary_value="", data_htmxo_tally=total,
+             style="--htmxo-tally-total:$(total)" * (isnothing(scale) ? "" : ";--htmxo-tally-max:var(--htmxo-tally-max-$(scale))"))
+    isnothing(t) && return h.td(; attrs...)(h.span(; value...)())
+    counts = Dict(t.counts)
+    num(x) = _format_finite(x, texts, s.rounding)
+    shown = [(c, get(counts, c.key, 0.0)) for c in _md_tally_order(cats, t) if get(counts, c.key, 0.0) != 0]
+    sum_text = num(_md_tally_total(t))
+    text = isempty(shown) ? sum_text :
+        string(sum_text, " (", join((string(c.label, ": ", num(n)) for (c, n) in shown), "; "), ")")
+    segments = (h.span(; style="--htmxo-tally-n:$(_md_js_number(n));--htmxo-tally-color:$(c.color)", title=string(c.label, ": ", num(n)))
+                for (c, n) in shown)
+    h.td(; attrs..., data_htmxo_number=_summary_key(_md_tally_total(t), s.rounding))(
+        h.span(; value..., role="img", aria_label=text)(
+            html_only(h.span(sum_text; class="htmxo-tally-total")),
+            html_only(h.span(; class="htmxo-tally-track")(h.span(; class="htmxo-tally-bar")(segments...)))),
+        markdown_only(text))
+end
+# A number as the browser's `String(x)` writes it (from 1e-7 up to 1e21), so
+# the rows the browser builds carry the same attributes as the server's.
+_md_js_number(x::Float64) = _format_digits(_shortest_digits(x)..., ".", "", false)
+# The longest :tally totals of each column and level, as the custom
+# properties the bars of a table take their scale from.
+_md_tally_scale_style(longest) = join(("--htmxo-tally-max-$(c)-$(l):$(_md_js_number(x > 0 ? x : 1.0))"
+                                       for ((c, l), x) in sort!(collect(longest))), ";")
+# The table's categories, then any the group holds that they miss (a row
+# the app builds over items of its own).
+_md_tally_order(cats, t::_Tally) = let known = Set(c.key for c in cats)
+    [cats; [_TallyCategory(k, k, "var(--htmxo-category-other)") for (k, _) in t.counts if !(k in known)]]
+end
+# The JSON the browser regroups a :tally by: its categories.
+_md_summary_categories_json(::Nothing) = ""
+_md_summary_categories_json(cats::Vector{_TallyCategory}) = ",\"categories\":[" * join(("{\"key\":" * _md_json_string(c.key) *
+    ",\"label\":" * _md_json_string(c.label) * ",\"color\":" * _md_json_string(c.color) * "}" for c in cats), ",") * "]"
+
+"""
+    summary_cell(summary::ColumnSummary, items; texts=table_texts())
+
+The `<td>` a group row of a regroupable [`master_detail_table`](@ref) shows
+for `summary` over `items`: for a row the app builds itself that stands for
+those items, such as a branch row of a tree grouping (`name => :children`),
+so it shows a group's sum or tally exactly as the group rows of the table's
+other groupings do. A `:tally` cell's bar takes its length on the scale the
+column's rows of its level share once the page's table runtime has run.
+Give a `:tally` its `order` (or `color`) so a category keeps its colour from
+row to row: without them, the categories take the palette in the order they
+appear among `items`.
+"""
+function summary_cell(s::ColumnSummary, items; texts::TableTexts=_EN_TABLE_TEXTS)
+    inputs = Any[_md_summary_input(s, item) for item in items]
+    _md_summary_cell(s, _md_summary_value(s, inputs), texts, (;); cats=_md_summary_categories(s, inputs))
+end
 _summary_key(x::Float64, r::_FixedDigits) = _format_fixed(x, r.k, ".", "")
 _summary_key(x::Float64, r::_SigDigits) = let (negative, ds, point) = _round_sig(x, r.k)
     _format_digits(negative, ds, point, ".", "", false)
@@ -23910,24 +24195,26 @@ function _md_group_summaries(headers, summaries)
         col = findfirst(==(string(label)), labels)
         isnothing(col) && throw(ArgumentError(string("master_detail_table: group_summary names no column ",
             repr(label), "; columns are ", join(repr.(filter(!isnothing, labels)), ", "))))
-        col == 1 && throw(ArgumentError(string("master_detail_table: group_summary cannot summarise ",
-            "the first column ", repr(label), ": a group row writes its key and count there")))
         any(p -> first(p) == col, out) && throw(ArgumentError(
             "master_detail_table: group_summary names $(repr(label)) twice"))
         push!(out, col => s)
     end
+    length(out) < length(labels) || throw(ArgumentError(string("master_detail_table: group_summary names ",
+        "every column, but a group row writes its key and count in one it leaves free")))
     out
 end
 
-# Default group row: the group's own key and member count, then a summary
-# in each column `group_summary` names and blank cells elsewhere. Nested
-# groups show the key of their level; the indentation shows where they sit.
-# The marks let the browser fill in a group it builds from the template row
-# (`htmxoRegroup`).
-_md_default_group_master(ncols, label, summary_cell) = (key, members) ->
-    Any[h.td(h.strong(label(key); data_htmxo_group_label=""), " ",
-             h.small("($(length(members)))"; data_htmxo_group_count="")),
-        (summary_cell(col, members) for col in 2:ncols)...]
+# Default group row: the group's own key and member count in the first
+# column no summary names (`label_col`), a summary in each column
+# `group_summary` names and blank cells elsewhere. Nested groups show the key
+# of their level; the indentation shows where they sit. The marks let the
+# browser fill in a group it builds from the template row (`htmxoRegroup`).
+_md_default_group_master(ncols, label_col, label, group_cell) = (key, members) ->
+    Any[col == label_col ?
+            h.td(h.strong(label(key); data_htmxo_group_label=""), " ",
+                 h.small("($(length(members)))"; data_htmxo_group_count="")) :
+            group_cell(col, key, members)
+        for col in 1:ncols]
 
 # The helper's selection attributes first; the caller's `master_attrs` win.
 _md_attr_union(a, b) = merge(Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(a)),
@@ -24132,12 +24419,32 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             "[" * join((_md_json_number(x) for x in inputs(item)), ",") * "]")
         data
     end
-    summary_cell(col, members) = let i = findfirst(p -> first(p) == col, summaries)
-        isnothing(i) ? h.td("") :
-            _md_summary_cell(_md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in members]),
-                             last(summaries[i]).rounding, texts, i - 1)
+    # A :tally's categories over every leaf, so a category keeps its place
+    # and colour in every group and grouping; and the longest total of each
+    # column and level, which its bars share as their scale.
+    categories = [_md_summary_categories(s, Any[inputs(m)[i] for m in items]) for (i, (_, s)) in enumerate(summaries)]
+    tallies = [i for (i, (_, s)) in enumerate(summaries) if s.reduce === :tally]
+    longest = Dict{Tuple{Int,Int},Float64}()
+    function measure!(members, depth)
+        for (_, ms) in _md_groups(members, fns[depth], level_ranks[depth])
+            for i in tallies
+                total = _md_tally_total(_md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in ms]))
+                at = (first(summaries[i]) - 1, depth)
+                longest[at] = max(get(longest, at, 0.0), total)
+            end
+            depth < nlevels && measure!(ms, depth + 1)
+        end
     end
-    default_master = _md_default_group_master(ncols, k -> last(gpath(k)), summary_cell)
+    isempty(tallies) || nlevels == 0 || measure!(items, 1)
+    scale_style = isempty(longest) ? (;) : (; style=_md_tally_scale_style(longest))
+    label_col = something(findfirst(c -> !any(p -> first(p) == c, summaries), 1:ncols), 1)
+    group_cell(col, k, members) = let i = findfirst(p -> first(p) == col, summaries)
+        isnothing(i) && return h.td("")
+        value = _md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in members])
+        _md_summary_cell(last(summaries[i]), value, texts, (; data_htmxo_group_summary=string(i - 1));
+                         wrap=col == 1, cats=categories[i], scale="$(col - 1)-$(length(gpath(k)))")
+    end
+    default_master = _md_default_group_master(ncols, label_col, k -> last(gpath(k)), group_cell)
     gmaster = something(group_master, default_master)
     subgroups(members, depth, prefix) =
         [let path = String[prefix..., k]; _MDGroup(gkey(path), path, ms) end
@@ -24311,7 +24618,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     update && return built
     grouping = (; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values),
         data_htmxo_group_scope=row_scope)
-    browser || return h.div(; grouping...)(built)
+    browser || return h.div(; grouping..., scale_style...)(built)
     # The browser builds each group row from this one, rendered like the
     # rest, keeps the leaves this grouping leaves out (no key at its first
     # level) beside the table, and reads how to regroup from the wrapper.
@@ -24331,9 +24638,10 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
         isnothing(outline) ? "" : ",\"tree\":" * _md_json_string(outline.name),
         ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
-        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",$(_summary_rounding_json(s.rounding))}" for (_, s) in summaries), ","), "]",
+        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",$(_summary_rounding_json(s.rounding))$(_md_summary_categories_json(categories[i]))}"
+                                 for (i, (_, s)) in enumerate(summaries)), ","), "]",
         isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
-    h.div(; grouping..., data_htmxo_regroup=config)(template..., store, stash..., built)
+    h.div(; grouping..., scale_style..., data_htmxo_regroup=config)(template..., store, stash..., built)
 end
 
 # The Group by control: one pill per grouping, the active ones first
