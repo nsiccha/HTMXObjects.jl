@@ -8,7 +8,7 @@
 # itself renders with `glossary_section`.
 
 """
-    GlossaryTerm(term, definition; forms=String[], id=nothing)
+    GlossaryTerm(term, definition; forms=String[], id=nothing, also=String[], see=String[], private=false)
 
 One entry of a [`Glossary`](@ref): `term` as the glossary lists it and its
 `definition`, a plain-text sentence or two. `forms` are the other spellings
@@ -18,22 +18,54 @@ form also matches with its first letter capitalized, as at the start of a
 sentence. `id` names the entry's address, `#term-<id>`; left out, it is built
 from `term` (`"Teilverkehrszelle"` → `#term-teilverkehrszelle`).
 
-A blank term, form or definition, and an `id` that is not letters, digits,
-`-` and `_`, are an `ArgumentError`.
+`also` are the other names the term goes by, which its entry shows after the
+definition (`Also: TVZ`, `Auch:` on a German page). A name can carry a note,
+`"Verkehrsbezirk" => "so in der Leistungsbeschreibung"`, shown in parentheses
+after it. An other name is shown, not matched: list it in `forms` too where a
+page's use of it should link. `see` names related entries, by term or by id;
+the entry ends with a line of links to them (`See also: KBA-Gebiet,
+Verkehrszelle`).
+
+`private=true` keeps the entry out of public answers (see [`private`](@ref)):
+the glossary shows it to private readers, marked, and leaves it out of a
+public answer, together with the links to it from the pages and from other
+entries. A public reader sees a private term's uses as plain text, without a
+link or a definition.
+
+```julia
+GlossaryTerm("Teilverkehrszelle", "Die Einheit der Schätzung …";
+             forms=["Teilverkehrszellen", "TVZ"],
+             also=["Verkehrsbezirk" => "so in der Leistungsbeschreibung", "TVZ"],
+             see=["KBA-Gebiet", "Verkehrszelle"])
+GlossaryTerm("R̂", "Vergleicht die Streuung innerhalb und zwischen den Ketten …";
+             id="rhat", private=!SHOW_DIAGNOSTICS)
+```
+
+A blank term, form, other name, note, related entry or definition, and an `id`
+that is not letters, digits, `-` and `_`, are an `ArgumentError`; so is a
+related entry the glossary does not declare, when the [`Glossary`](@ref) is
+built.
 """
 struct GlossaryTerm
     term::String
     definition::String
     forms::Vector{String}
     id::String
+    also::Vector{Pair{String,String}}   # name => note, "" for none
+    see::Vector{String}                 # as written; a `Glossary` holds their ids
+    private::Bool
 end
 
 function GlossaryTerm(term::AbstractString, definition::AbstractString;
-                      forms=String[], id::Union{Nothing,AbstractString}=nothing)
+                      forms=String[], id::Union{Nothing,AbstractString}=nothing,
+                      also=String[], see=String[], private::Bool=false)
     name = _glossary_text(term, "term")
     text = _glossary_text(definition, "definition of $(repr(name))")
     spellings = unique!([name; [_glossary_text(f, "form of $(repr(name))") for f in forms]])
-    GlossaryTerm(name, text, spellings, isnothing(id) ? _glossary_slug(name) : _glossary_id(id))
+    names = unique!(Pair{String,String}[_glossary_name(a, name) for a in also])
+    related = unique!(String[_glossary_text(s, "related entry of $(repr(name))") for s in see])
+    GlossaryTerm(name, text, spellings, isnothing(id) ? _glossary_slug(name) : _glossary_id(id),
+                 names, related, private)
 end
 GlossaryTerm(entry::Pair{<:AbstractString,<:AbstractString}) = GlossaryTerm(first(entry), last(entry))
 GlossaryTerm(entry::GlossaryTerm) = entry
@@ -43,6 +75,11 @@ function _glossary_text(s::AbstractString, what)
     text = replace(strip(s), r"\s+" => " ")
     isempty(text) && throw(ArgumentError("GlossaryTerm: the $what is blank"))
     String(text)
+end
+
+_glossary_name(name::AbstractString, of) = _glossary_text(name, "other name of $(repr(of))") => ""
+_glossary_name((name, note)::Pair, of) = let text = _glossary_text(name, "other name of $(repr(of))")
+    text => _glossary_text(note, "note on $(repr(text))")
 end
 
 function _glossary_id(id::AbstractString)
@@ -64,6 +101,7 @@ end
 
 """
     Glossary(terms; href="", title="Glossary")
+    Glossary(["topic" => terms, …]; href="", title="Glossary")
 
 An app's glossary: its [`GlossaryTerm`](@ref)s (a `"term" => "definition"`
 pair stands for a term without other forms) and `href`, the address of the
@@ -72,6 +110,16 @@ page that shows it with [`glossary_section`](@ref). A term's link is
 page they are on, for a glossary on the same page. `title` heads the glossary
 section and the glossary a [`pdf_report`](@ref) appends; write it in the app's
 language (`"Glossar"`).
+
+Without topics the glossary lists its terms alphabetically. Given as
+`"topic" => terms` pairs, it lists each topic under its own heading, topics
+and terms in the order written, so a reader meets a term before the terms
+defined through it:
+
+```julia
+Glossary(["Raum" => [GlossaryTerm("Teilverkehrszelle", …), GlossaryTerm("KBA-Gebiet", …)],
+          "Daten" => [GlossaryTerm("SvB", …), …]]; href="/glossar", title="Glossar")
+```
 
 Declare it once, on the app's root, as `__glossary__`:
 
@@ -96,30 +144,83 @@ it with the term's definition. A subtree declares its own `__glossary__`; the
 innermost declaration holds. Behind a path-stripping proxy, build `href` from
 `__prefix__`.
 
-Two terms with the same id, or one spelling claimed by two terms, are an
-`ArgumentError`.
+Two terms with the same id, one spelling claimed by two terms, a related entry
+the glossary does not declare, and terms given partly with and partly without
+a topic, are an `ArgumentError`.
 """
 struct Glossary
-    terms::Vector{GlossaryTerm}
+    terms::Vector{GlossaryTerm}                          # alphabetically
+    topics::Vector{Pair{String,Vector{GlossaryTerm}}}    # as written; none without topics
     href::String
     title::String
     pattern::Regex
     lookup::Dict{String,GlossaryTerm}
 end
 
-function Glossary(terms::AbstractVector; href::AbstractString="", title::AbstractString="Glossary")
-    entries = GlossaryTerm[GlossaryTerm(t) for t in terms]
-    isempty(entries) && throw(ArgumentError("Glossary: no terms"))
-    _glossary_unique(entries)
+function Glossary(items::AbstractVector; href::AbstractString="", title::AbstractString="Glossary")
+    isempty(items) && throw(ArgumentError("Glossary: no terms"))
+    topics = _glossary_topics(items)
+    written = isempty(topics) ? GlossaryTerm[GlossaryTerm(t) for t in items] : reduce(vcat, last.(topics))
+    _glossary_unique(written)
+    lookup = _glossary_lookup(written)
+    # Related entries are held by their ids, so an entry links them however they were named.
+    related = Dict(t.id => _glossary_related_ids(t, lookup, written) for t in written)
+    resolved(t) = GlossaryTerm(t.term, t.definition, t.forms, t.id, t.also, related[t.id], t.private)
+    entries = map(resolved, written)
+    topics = [topic => map(resolved, terms) for (topic, terms) in topics]
+    lookup = _glossary_lookup(entries)
+    heading = strip(title)
+    isempty(heading) && throw(ArgumentError("Glossary: the title is blank"))
+    sort!(entries; by=t -> lowercase(Base.Unicode.normalize(replace(t.term, _GLOSSARY_FOLDS...); stripmark=true)))
+    Glossary(entries, topics, String(href), String(heading), _glossary_pattern(keys(lookup)), lookup)
+end
+
+function _glossary_lookup(entries)
     lookup = Dict{String,GlossaryTerm}()
     for t in entries, form in t.forms, spelling in unique([form, uppercasefirst(form)])
         lookup[spelling] = t
     end
-    heading = strip(title)
-    isempty(heading) && throw(ArgumentError("Glossary: the title is blank"))
-    sort!(entries; by=t -> lowercase(Base.Unicode.normalize(replace(t.term, _GLOSSARY_FOLDS...); stripmark=true)))
-    Glossary(entries, String(href), String(heading), _glossary_pattern(keys(lookup)), lookup)
+    lookup
 end
+
+# The topics of a glossary given as `"topic" => terms` pairs, in the order
+# written; none for a glossary given as terms. A pair is read by its values: in
+# a list that mixes kinds, each pair is a `Pair{String,Any}`.
+_glossary_topic(item) = nothing
+_glossary_topic((topic, terms)::Pair) = _glossary_topic(topic, terms)
+_glossary_topic(topic, terms) = nothing
+_glossary_topic(topic::AbstractString, terms::AbstractVector) =
+    _glossary_topic_name(topic) => GlossaryTerm[GlossaryTerm(t) for t in terms]
+function _glossary_topic_name(topic)
+    name = replace(strip(topic), r"\s+" => " ")
+    isempty(name) && throw(ArgumentError("Glossary: a topic's name is blank"))
+    String(name)
+end
+function _glossary_topics(items)
+    topics = map(_glossary_topic, items)
+    all(isnothing, topics) && return Pair{String,Vector{GlossaryTerm}}[]
+    any(isnothing, topics) && throw(ArgumentError(
+        "Glossary: give every term under a topic (`\"topic\" => [terms…]`), or none"))
+    for (topic, terms) in topics
+        isempty(terms) && throw(ArgumentError("Glossary: the topic $(repr(topic)) has no terms"))
+        count(t -> first(t) == topic, topics) > 1 && throw(ArgumentError("Glossary: the topic $(repr(topic)) is given twice"))
+    end
+    Pair{String,Vector{GlossaryTerm}}[topics...]
+end
+
+# A related entry is named by one of its spellings or by its id.
+function _glossary_related_ids(t::GlossaryTerm, lookup, entries)
+    map(t.see) do name
+        entry = get(lookup, name, nothing)
+        isnothing(entry) && (i = findfirst(e -> e.id == name, entries); entry = isnothing(i) ? nothing : entries[i])
+        isnothing(entry) && throw(ArgumentError(
+            "Glossary: $(repr(t.term)) names $(repr(name)) as a related entry, which the glossary does not declare"))
+        entry.id == t.id && throw(ArgumentError("Glossary: $(repr(t.term)) names itself as a related entry"))
+        entry.id
+    end |> unique!
+end
+
+_glossary_by_id(g::Glossary, id) = g.terms[findfirst(t -> t.id == id, g.terms)]
 
 function _glossary_unique(entries)
     ids = Dict{String,String}()
@@ -155,33 +256,118 @@ _glossary_href(g::Glossary, t::GlossaryTerm) = string(g.href, "#term-", t.id)
 """
     glossary_section(g::Glossary)
 
-The glossary as a section headed `g.title`: each term, alphabetically, with its
-definition, at its address `#term-<id>`. In HTML the entries are a definition
-list (`dl.htmxo-glossary`, each `dt` holding the term as a `dfn`); in Markdown
-each entry is a paragraph opening with the term as a span carrying its address
+The glossary as a section headed `g.title`: each term with its definition, at
+its address `#term-<id>`, alphabetically, or for a glossary given by topic,
+each topic as a section of its own, in the order written. An entry shows the
+term's other names (`also`) and ends with links to its related entries
+(`see`), labelled in the page's language (`Also:` / `See also:`, `Auch:` /
+`Siehe auch:` under `__lang__ = "de"`). A link that opens an entry highlights
+it. A private entry is marked for a private reader and left out of a public
+answer; so is a topic whose terms are all private, its heading included.
+
+In HTML the entries are a definition list (`dl.htmxo-glossary`, each `dt`
+holding the term as a `dfn`); in Markdown each entry is a paragraph opening
+with the term as a span carrying its address
 (`[**Registerzelle**]{#term-registerzelle} — …`), which Pandoc reads, so links
 to it resolve in a [`pdf_report`](@ref) too. Its text links no terms.
 """
-glossary_section(g::Glossary) = SemanticSection(g.title, _GlossaryEntries(g.terms))
+glossary_section(g::Glossary) = isempty(g.topics) ?
+    SemanticSection(g.title, _GlossaryEntries(g, g.terms)) :
+    SemanticSection(g.title, Any[_glossary_topic_section(g, topic, terms) for (topic, terms) in g.topics])
 
-# The section's one child, written by each format in its own form; plain text
-# is the Markdown form without its markup. The walk leaves it alone (no
-# `_link_terms` method), so its text links no terms.
-struct _GlossaryEntries <: SemanticNode
-    terms::Vector{GlossaryTerm}
+_glossary_topic_section(g, topic, terms) = let section = SemanticSection(topic, _GlossaryEntries(g, terms))
+    all(t -> t.private, terms) ? private(section) : section
 end
-_semantic_html_node(entries::_GlossaryEntries) = h.dl(
-    (x for t in entries.terms for x in (h.dt(h.dfn(t.term); id="term-" * t.id), h.dd(t.definition)))...;
-    class="htmxo-glossary", data_htmxo_no_terms="")
+
+# A section's list of entries, written by each format in its own form; plain
+# text is the Markdown form without its markup. The walk leaves it alone (no
+# `_link_terms` method), so its text links no terms. In a report's appended
+# glossary, a related entry links into the report when the report lists it.
+struct _GlossaryEntries <: SemanticNode
+    glossary::Glossary
+    terms::Vector{GlossaryTerm}
+    report::Bool
+end
+_GlossaryEntries(g::Glossary, terms) = _GlossaryEntries(g, terms, false)
+
+const _GLOSSARY_LABELS = (en = (also = "Also", see = "See also"), de = (also = "Auch", see = "Siehe auch"))
+
+# What a reader of `audience` sees of an entry.
+_glossary_shown(t::GlossaryTerm, audience) = !t.private || audience !== :public
+
+_glossary_also_text(t::GlossaryTerm) =
+    join((isempty(note) ? name : "$name ($note)" for (name, note) in t.also), ", ")
+
+# The related entries a reader of `audience` sees, each with the address its
+# link opens: `nothing` in a report that does not list it.
+function _glossary_related(entries::_GlossaryEntries, t::GlossaryTerm, audience)
+    related = (_glossary_by_id(entries.glossary, id) for id in t.see)
+    [r => _glossary_related_href(entries, r) for r in related if _glossary_shown(r, audience)]
+end
+_glossary_related_href(entries::_GlossaryEntries, r::GlossaryTerm) = !entries.report ?
+    _glossary_href(entries.glossary, r) : any(t -> t.id == r.id, entries.terms) ? "#term-" * r.id : nothing
+
+function _semantic_html_node(entries::_GlossaryEntries)
+    audience = _ambient_audience()
+    labels = _lang_entry(_GLOSSARY_LABELS, page_lang())
+    h.dl((x for t in entries.terms if _glossary_shown(t, audience)
+            for x in _glossary_entry_html(entries, t, audience, labels))...;
+         class="htmxo-glossary", data_htmxo_no_terms="")
+end
+
+# The entry's term and definition; a private entry's each carry the private mark.
+function _glossary_entry_html(entries, t, audience, labels)
+    names = isempty(t.also) ? () : (h.small(labels.also, ": ", _glossary_also_text(t)),)
+    related = _glossary_related(entries, t, audience)
+    links = Any[]
+    for (i, (r, href)) in enumerate(related)
+        i > 1 && push!(links, ", ")
+        link = isnothing(href) ? r.term : h.a(r.term; href)
+        push!(links, r.private ? private(link; mark=false) : link)
+    end
+    see = isempty(links) ? () : (h.small(labels.see, ": ", links...),)
+    entry = Any[h.dt(h.dfn(t.term); id="term-" * t.id), h.dd(t.definition, names..., see...)]
+    t.private ? Any[private(entry)] : entry
+end
+
 Base.show(io::IO, mime::MIME"text/html", entries::_GlossaryEntries) = show(io, mime, _semantic_html_node(entries))
 Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", entries::_GlossaryEntries) =
     show(io, mime, _semantic_html_node(entries))
-Base.show(io::IO, ::MIME"text/markdown", entries::_GlossaryEntries) = print(io, _glossary_markdown(entries.terms))
-Base.show(io::IO, ::MIME"text/plain", entries::_GlossaryEntries) =
-    join(io, ("$(t.term) — $(t.definition)" for t in entries.terms), "\n\n")
+Base.show(io::IO, ::MIME"text/markdown", entries::_GlossaryEntries) = print(io, _glossary_markdown(entries))
+Base.show(io::IO, ::MIME"text/plain", entries::_GlossaryEntries) = print(io, _glossary_plain(entries))
 
-_glossary_markdown(terms) = join(("[**$(_md_escape_text(t.term))**]{#term-$(t.id)} — $(_md_escape_text(t.definition))"
-                                  for t in terms), "\n\n")
+# Markdown and plain text write the entry's lines as hard line breaks of one
+# paragraph. A private entry opens with the label, as an element marked in
+# place does (`_private_md_labelled`), unless it is inside marked content.
+function _glossary_markdown(entries::_GlossaryEntries)
+    audience = _ambient_audience()
+    labels = _lang_entry(_GLOSSARY_LABELS, page_lang())
+    join((_glossary_entry_markdown(entries, t, audience, labels)
+          for t in entries.terms if _glossary_shown(t, audience)), "\n\n")
+end
+function _glossary_entry_markdown(entries, t, audience, labels)
+    lines = ["[**$(_md_escape_text(t.term))**]{#term-$(t.id)} — $(_md_escape_text(t.definition))"]
+    isempty(t.also) || push!(lines, "*$(labels.also):* $(_md_escape_text(_glossary_also_text(t)))")
+    related = _glossary_related(entries, t, audience)
+    isempty(related) || push!(lines, "*$(labels.see):* " * join((isnothing(href) ? _md_escape_text(r.term) :
+        "[$(_md_escape_text(r.term))]($href)" for (r, href) in related), ", "))
+    _glossary_private_label(t, "*$(_private_label(page_lang())):* ") * join(lines, "\\\n")
+end
+function _glossary_plain(entries::_GlossaryEntries)
+    audience = _ambient_audience()
+    labels = _lang_entry(_GLOSSARY_LABELS, page_lang())
+    join((_glossary_entry_plain(entries, t, audience, labels)
+          for t in entries.terms if _glossary_shown(t, audience)), "\n\n")
+end
+function _glossary_entry_plain(entries, t, audience, labels)
+    lines = ["$(t.term) — $(t.definition)"]
+    isempty(t.also) || push!(lines, "$(labels.also): $(_glossary_also_text(t))")
+    related = _glossary_related(entries, t, audience)
+    isempty(related) || push!(lines, "$(labels.see): " * join((first(r).term for r in related), ", "))
+    _glossary_private_label(t, "[$(_private_label(page_lang()))] ") * join(lines, "\n")
+end
+_glossary_private_label(t::GlossaryTerm, label) = t.private && !_in_private_mark() ? label : ""
+
 _md_escape_text(s) = replace(s, r"([\\`*_\[\]<>])" => s"\\\1")
 
 """
@@ -328,13 +514,15 @@ function _link_text(text::AbstractString, w::_TermWalk)
     pieces
 end
 
+# A private term links for a private reader only; a public one reads the text.
 function _term_link(w::_TermWalk, text::AbstractString, entry::GlossaryTerm)
     push!(w.seen, entry.id)
     w.count += 1
     id = string("htmxo-term-", entry.id, "-", w.token, "-", w.count)
-    h.span(h.a(String(text); href=_glossary_href(w.glossary, entry), aria_describedby=id),
-           html_only(h.span(entry.definition; id, class="htmxo-term-def", role="tooltip"));
-           class="htmxo-term")
+    link = h.span(h.a(String(text); href=_glossary_href(w.glossary, entry), aria_describedby=id),
+                  html_only(h.span(entry.definition; id, class="htmxo-term-def", role="tooltip"));
+                  class="htmxo-term")
+    entry.private ? private(link; public=String(text), mark=false) : link
 end
 
 # Semantic containers keep their peers: rebuilt with linked children. A card,
@@ -424,7 +612,9 @@ _glossary_answer(val, g::Glossary) = link_terms(val, g)
 # A column whose header is a term, and which has no explanation of its own,
 # is explained by the definition, as a `ColumnSpec`'s `help` is: the `title`
 # of its sort button (or of the `<th>` of a table that does not sort) and the
-# ⓘ after its label. Only a header whose whole label is the term qualifies.
+# ⓘ after its label. Only a header whose whole label is the term qualifies; a
+# private term's only in an answer for a private reader (an attribute cannot
+# hold private content, so the walk asks the answer's audience).
 function _explained_th(th::Node, g::Glossary)
     kids = HTMX.children(th)
     i = findfirst(c -> c isa _LabelledControl, kids)
@@ -441,7 +631,7 @@ function _explained_header(node::Node, g::Glossary)
     kids = HTMX.children(node)
     (haskey(attrs, :title) || length(kids) != 1 || !(only(kids) isa AbstractString)) && return nothing
     entry = _glossary_entry(g, only(kids))
-    isnothing(entry) && return nothing
+    (isnothing(entry) || !_glossary_shown(entry, _ambient_audience())) && return nothing
     explained = copy(attrs)
     explained[:title] = entry.definition
     Node(HTMX.tag(node), explained, collect(Any, _header_content(ColumnSpec(only(kids); help=entry.definition))))
@@ -451,19 +641,24 @@ _check_glossary(g::Union{Nothing,Glossary}, who) = g
 _check_glossary(g, who) = throw(ArgumentError("$who: glossary must be a `Glossary` or nothing (got $(repr(g)))"))
 
 # A report's term links point into the report, whose end lists the terms it
-# uses (those it does not list itself already).
-_glossary_report(markdown::AbstractString, ::Nothing) = markdown
-function _glossary_report(markdown::AbstractString, g::Glossary)
+# uses (those it does not list itself already), for the report's audience and
+# in its language. A related entry links only where the report lists it, so
+# every link inside the PDF has a target.
+_glossary_report(markdown::AbstractString, ::Nothing; audience=:public, lang=nothing) = markdown
+function _glossary_report(markdown::AbstractString, g::Glossary; audience=:public, lang=nothing)
     used = String[]
     linked = replace(markdown, Regex(string("\\]\\(", _glossary_regex_text(g.href), "#term-([A-Za-z0-9_-]+)\\)")) => function (link)
         id = match(r"#term-([A-Za-z0-9_-]+)\)$", link).captures[1]
-        any(t -> t.id == id, g.terms) || return link
+        any(t -> t.id == id && _glossary_shown(t, audience), g.terms) || return link
         id in used || push!(used, id)
         "](#term-$id)"
     end)
     entries = [t for t in g.terms if t.id in used && !occursin("{#term-$(t.id)}", linked)]
     isempty(entries) && return linked
-    string(rstrip(linked), "\n\n## ", _md_escape_text(g.title), "\n\n", _glossary_markdown(entries), "\n")
+    appended = _with_page_lang(lang) do
+        _with_audience(() -> _glossary_markdown(_GlossaryEntries(g, entries, true)), audience)
+    end
+    string(rstrip(linked), "\n\n## ", _md_escape_text(g.title), "\n\n", appended, "\n")
 end
 
 """

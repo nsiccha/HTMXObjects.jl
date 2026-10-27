@@ -14,6 +14,23 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.8
+
+- A glossary by topic, with other names, related entries and private terms
+  (snag `moving-verkehrss-02fbe479`, design decision `16ra5z8`).
+  `Glossary(["topic" => terms, …])` lists each topic under its own heading in
+  `glossary_section`, topics and terms in the order written; a glossary given
+  as terms stays alphabetical. New `GlossaryTerm` keywords: `also` (other
+  names the entry shows, `"name" => "note"` for a note; shown, not matched),
+  `see` (related entries by term or id, linked from the entry; an undeclared
+  one is an `ArgumentError`) and `private` (the entry, its topic when all its
+  terms are private, and every link to it and its definition are left out of
+  public answers; a public reader sees its uses as plain text). The labels
+  follow the page language (`Also:` / `See also:`, `Auch:` / `Siehe auch:`).
+  The entry a link opens is highlighted. `pdf_report`'s appended glossary
+  follows the report's audience and language, and links a related entry only
+  where the report lists it.
+
 ## 0.1.7
 
 - `ColumnSummary(:tally, item -> category; order, label, color)`: a group row
