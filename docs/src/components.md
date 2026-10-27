@@ -248,10 +248,14 @@ master_detail_table([ColumnSpec("Model"; help="Select a model to compare its sou
 ```
 
 `help` becomes the header button's `title`, so it shows on hover and assistive
-technology reads it as the button's description; a `ⓘ` marker after the label
-shows that the column has one. The marker is HTML-only: `?plain` and the CSV
+technology reads it as the button's description. A `ⓘ` after the label, outside
+the button, is a target of its own: hovering it shows the explanation in a box
+(the box of a glossary term's use), and a click or tap on it pins the box open
+until a click or tap elsewhere or Escape. It never sorts the column; a click or
+tap on the label still does. That is how a touch screen, which shows no
+`title`, reaches the explanation. The `ⓘ` is HTML-only: `?plain` and the CSV
 export keep the label alone. With `sortable=false` the explanation stays, as
-the `<th>`'s `title`. `ColumnSpec` works in every `headers` vector of
+the label's `title` and the same `ⓘ`. `ColumnSpec` works in every `headers` vector of
 `sortable_table` and `master_detail_table`, and as a `render_table` column
 through `columns = ["name" => ColumnSpec(...)]`.
 

@@ -69,7 +69,10 @@ end
     for m in eachmatch(r"aria-describedby=\"([^\"]+)\"", out)
         @test count("id=\"$(m.captures[1])\"", out) == 1
     end
-    @test contains(out, "class=\"htmxo-term-def\" role=\"tooltip\">Ein Bezirk × Abschnitt")
+    @test occursin(r"class=\"htmxo-term-def\"><span id=\"[^\"]+\" role=\"tooltip\">Ein Bezirk × Abschnitt", out)
+    # The box also holds a link to the entry, for a tap (which pins the box
+    # instead of following the term's link); it is not part of the description.
+    @test contains(out, "</span><a href=\"/glossar#term-registerzelle\" class=\"htmxo-term-more\" tabindex=\"-1\">Glossar →</a></span>")
     # The value given is left as it was (inputs are read-only).
     @test links(html(page)) == 0
 
@@ -95,7 +98,8 @@ end
 
     # A header that is a term explains its column instead: `title` and ⓘ.
     header = html(link_terms(render_table([(Registerzelle="a", Wert=1)]; sortable=false), G))
-    @test contains(header, "<th title=\"Ein Bezirk × Abschnitt mit einem Wert im Unternehmensregister.\">Registerzelle<span class=\"htmxo-column-help\"")
+    @test contains(header, "<th><span title=\"Ein Bezirk × Abschnitt mit einem Wert im Unternehmensregister.\">Registerzelle</span>" *
+        "<span class=\"htmxo-term htmxo-column-help\"")
     @test links(header) == 0
     own = html(link_terms(h.table(h.thead(h.tr(h.th("Registerzelle"; title="eigene")))), G))
     @test !contains(own, "Ein Bezirk") && !contains(own, "htmxo-column-help")
@@ -416,7 +420,7 @@ end
     @test contains(fragment, "title=\"Ein Bezirk × Abschnitt mit einem Wert im Unternehmensregister.\"")
     @test contains(fragment, "title=\"Die Deklaration, die die Schätzung erzeugt.\"")
     @test contains(fragment, "title=\"eigene Hilfe\"")
-    @test count("htmxo-column-help", fragment) == 3
+    @test count("htmxo-column-help\"", fragment) == 3
     @test links(body("/glossary_root_page"; headers=[])) == 1      # the full page too
     md = body("/glossary_root_page"; headers=["Accept" => "text/markdown"])
     @test contains(md, "Die [Registerzelle](/glossar#term-registerzelle) im Text.")
@@ -549,7 +553,7 @@ end
           const runtime = document.documentElement.classList.contains('htmxo-terms');
           const parts = id => {
             const link = document.querySelector('#' + id + ' .htmxo-term > a');
-            return {link, box: document.getElementById(link.getAttribute('aria-describedby'))};
+            return {link, box: document.getElementById(link.getAttribute('aria-describedby')).closest('.htmxo-term-def')};
           };
           const shown = box => getComputedStyle(box).display === 'block';
           // Whether the box's centre is the box, i.e. nothing clips or covers it.
@@ -616,5 +620,118 @@ end
         @test length(results["shell"]) == 13
         @test results["shell"]["table cell unclipped"] && !results["bare"]["table cell unclipped"]
         @test results["bare"]["open on focus"] && results["bare"]["closed after focus"]
+    end
+end
+
+@testitem "a tap shows a term's definition in place, and a column's ⓘ explains it without sorting" setup=[GlossaryFixture, ChromeDump] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, Test
+        import HTMXObjects: h, Raw
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # The reported shape (snag `touch-input-glos-8670d990`): on a touch
+        # screen a tap on a term's use left the page for the glossary, and a
+        # tap on a column's ⓘ sorted the column while its help, a `title`
+        # alone, never showed. A tap is the event sequence a touch browser
+        # sends: pointer events of type touch, then the emulated mouseover and
+        # the click. A bubbling listener records whether the click's default
+        # (following a link) still stood, and stops it so the page stays.
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function () {
+          const checks = [];
+          const check = (name, ok) => checks.push(name + ':' + Boolean(ok));
+          let followed = null;
+          window.addEventListener('click', e => { followed = !e.defaultPrevented; e.preventDefault(); });
+          const tap = (el, type = 'touch') => {
+            followed = null;
+            for (const t of ['pointerover', 'pointerdown', 'pointerup'])
+              el.dispatchEvent(new PointerEvent(t, {bubbles: true, pointerType: type}));
+            if (type === 'touch') el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            el.dispatchEvent(new PointerEvent('click', {bubbles: true, cancelable: true, detail: 1, pointerType: type}));
+          };
+          const click = el => {
+            followed = null;
+            el.dispatchEvent(new PointerEvent('pointerover', {bubbles: true, pointerType: 'mouse'}));
+            el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            el.dispatchEvent(new PointerEvent('click', {bubbles: true, cancelable: true, detail: 1, pointerType: 'mouse'}));
+          };
+          const shown = el => getComputedStyle(el).display !== 'none';
+          const term = document.querySelector('#prose .htmxo-term');
+          const link = term.querySelector(':scope > a'), box = term.querySelector('.htmxo-term-def');
+          const more = box.querySelector('.htmxo-term-more');
+          const elsewhere = document.getElementById('elsewhere');
+          check('more hidden at rest', !shown(more));
+          tap(link);
+          check('tap stays on the page', followed === false);
+          check('tap shows the definition', shown(box));
+          check('tap shows the entry link', shown(more) && more.getAttribute('href') === link.getAttribute('href'));
+          tap(link);
+          check('second tap closes', !shown(box) && followed === false);
+          link.dispatchEvent(new MouseEvent('mouseout', {bubbles: true, relatedTarget: elsewhere}));
+          tap(link);
+          check('third tap opens again', shown(box));
+          tap(elsewhere);
+          check('tap elsewhere closes', !shown(box));
+          tap(link, 'pen');
+          check('pen tap stays and shows', followed === false && shown(box) && shown(more));
+          document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+          check('escape closes', !shown(box));
+          link.dispatchEvent(new MouseEvent('mouseout', {bubbles: true, relatedTarget: elsewhere}));
+          tap(more);
+          check('the entry link follows', followed === true);
+          tap(elsewhere);
+          click(link);
+          check('a mouse click follows the link', followed === true);
+          link.dispatchEvent(new MouseEvent('mouseout', {bubbles: true, relatedTarget: elsewhere}));
+          // Enter clicks with detail 0, also right after a tap elsewhere.
+          tap(elsewhere);
+          link.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, detail: 0}));
+          check('enter follows the link', followed === true);
+
+          const th = document.getElementById('explained').closest('table').tHead.rows[0].cells[0];
+          const help = th.querySelector('.htmxo-column-help'), mark = help.querySelector('.htmxo-column-help-mark');
+          const helpBox = help.querySelector('.htmxo-term-def');
+          const sort = () => th.getAttribute('aria-sort');
+          check('help hidden at rest', !shown(helpBox));
+          tap(mark);
+          check('ⓘ tap shows the help', shown(helpBox) && helpBox.textContent === 'Log-density time.');
+          check('ⓘ tap does not sort', sort() === null);
+          tap(mark);
+          check('second ⓘ tap closes', !shown(helpBox));
+          help.dispatchEvent(new MouseEvent('mouseout', {bubbles: true, relatedTarget: elsewhere}));
+          tap(th.querySelector('.htmxo-sort-control'));
+          check('label tap sorts', sort() === 'ascending' && !shown(helpBox));
+          mark.dispatchEvent(new PointerEvent('pointerover', {bubbles: true, pointerType: 'mouse'}));
+          mark.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+          check('ⓘ hover shows the help', shown(helpBox));
+          mark.dispatchEvent(new PointerEvent('click', {bubbles: true, cancelable: true, detail: 1, pointerType: 'mouse'}));
+          help.dispatchEvent(new MouseEvent('mouseout', {bubbles: true, relatedTarget: elsewhere}));
+          check('ⓘ click pins the help', shown(helpBox) && sort() === 'ascending');
+          click(elsewhere);
+          check('click elsewhere closes the help', !shown(helpBox));
+          const out = document.createElement('pre'); out.id = 'checks';
+          out.textContent = checks.join('\n'); document.body.appendChild(out);
+        });
+        """))
+        rows = [h.tr(h.td("2"), h.td("b")), h.tr(h.td("1"), h.td("a"))]
+        content = link_terms(h.main(
+            h.p("Die Registerzelle steht im Text."; id="prose"),
+            h.p("Hier steht nichts."; id="elsewhere"),
+            sortable_table([ColumnSpec("Primal"; help="Log-density time."), "Name"], rows; id="explained"),
+            driver), GlossaryFixture.G)
+        dom = mktempdir() do dir
+            shell = joinpath(dir, "shell.html")
+            write(shell, repr("text/html", htmx(content; htmx_version=nothing, sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, hyperscript_version=nothing, katex_version=nothing, feedback=false)))
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=400,800 --virtual-time-budget=2000 --dump-dom --user-data-dir=$(joinpath(dir, "profile")) file://$shell`)
+        end
+        m = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+        @test !isnothing(m)
+        results = Dict(String(first(split(l, ':'))) => endswith(l, ":true") for l in split(m.captures[1], '\n'))
+        for (name, ok) in sort!(collect(results))
+            @test (name, ok) == (name, true)
+        end
+        @test length(results) == 20
     end
 end

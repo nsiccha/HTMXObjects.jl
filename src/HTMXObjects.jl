@@ -18430,8 +18430,13 @@ exactly like a `String` — the sort button with keyboard sorting,
 
 `help` adds the explanation. It becomes the header button's `title`, so it
 shows on hover and assistive technology reads it as the button's description,
-and a `ⓘ` marker follows the label to show that the column has one. The marker
-is HTML-only: Markdown and CSV export keep `label` alone. A blank or absent
+and a `ⓘ` follows the label, outside the button. The `ⓘ` is a target of its
+own: hovering it shows the explanation in a box (that of a glossary term's
+use, [`glossary_script`](@ref)), and a click or tap on it pins the box open
+until a click or tap elsewhere or Escape, without sorting; a tap on the label
+still sorts. That is how a touch screen, which never shows a `title`, reaches
+the explanation. The `ⓘ` is HTML-only: Markdown and CSV export keep `label`
+alone. With `sortable=false` the label carries the `title`. A blank or absent
 `help` renders the same header as the `String` label.
 
 ```julia
@@ -18582,17 +18587,29 @@ function _interval_values(estimate, lower, upper)
     (estimate, lower, upper, width, relative)
 end
 
-# The label plus, for an explained column, its HTML-only marker; and the
-# attributes that carry the explanation itself.
+# The label; the attributes that carry an explained column's explanation (its
+# label's `title`, which assistive technology reads as the description); and
+# the HTML-only ⓘ after the label. The ⓘ is a target of its own: hovering it,
+# or a click or tap on it, opens the explanation in the box of a term's use
+# (`glossary_script`), and it never sorts the column. A finger cannot hover,
+# and touch browsers never show a `title`.
 _header_content(hdr::AbstractString) = (String(hdr),)
-_header_content(col::ColumnSpec) = isnothing(col.help) ? (col.label,) :
-    (col.label, html_only(h.span(" ⓘ"; class="htmxo-column-help", aria_hidden="true")))
+_header_content(col::ColumnSpec) = (col.label,)
 _header_help_attrs(::AbstractString) = (;)
 _header_help_attrs(col::ColumnSpec) = isnothing(col.help) ? (;) : (; title=col.help)
+_column_help(::AbstractString) = ()
+_column_help(col::ColumnSpec) = isnothing(col.help) ? () : (html_only(h.span(
+    h.span(" ⓘ"; class="htmxo-column-help-mark"), h.span(col.help; class="htmxo-term-def");
+    class="htmxo-term htmxo-column-help", aria_hidden="true", onclick="event.stopPropagation()")),)
+# The content of a `<th>` that does not sort: the label carries the title, so
+# the ⓘ beside it shows its box alone.
+_plain_th_content(hdr::AbstractString) = (String(hdr),)
+_plain_th_content(col::ColumnSpec) = isnothing(col.help) ? (col.label,) :
+    (h.span(col.label; title=col.help), _column_help(col)...)
 
 _table_th(hdr, i, ds, sortable, texts) = hdr
 _table_th(hdr::Union{AbstractString,ColumnSpec}, i, ds, sortable, texts) = sortable ?
-    _sortable_th(hdr, i, ds, texts) : h.th(_header_content(hdr)...; _header_help_attrs(hdr)...)
+    _sortable_th(hdr, i, ds, texts) : h.th(_plain_th_content(hdr)...)
 
 # Resolve `default_sort` to `(1-based column index, "asc"|"desc", key)`, `key`
 # the 0-based index of the column's sort key (0 for a column with one order).
@@ -18677,6 +18694,7 @@ function _sortable_th(hdr, i, ds, texts)
     control = _LabelledControl(h.button(_header_content(hdr)...; type="button",
         class="htmxo-sort-control", data_htmxo_label="", _header_help_attrs(hdr)...,
         onclick="event.stopPropagation(); sortTable($(i-1), this.closest('th'))"))
+    help = _column_help(hdr)
     names = _sort_key_names(hdr)
     sorted = !isnothing(ds) && first(ds) == i
     key = sorted ? ds[3] : 0
@@ -18685,11 +18703,11 @@ function _sortable_th(hdr, i, ds, texts)
         (key > 0 ? (; data_htmxo_sort_key=string(key)) : (;))...)
     if sorted
         dir = ds[2]
-        h.th(control, menu..., _sort_caret(dir, key, names);
+        h.th(control, help..., menu..., _sort_caret(dir, key, names);
             onclick, class="u-pointer", data_sort_dir=dir,
             aria_sort=(dir == "asc" ? "ascending" : "descending"), key_attrs...)
     else
-        h.th(control, menu...; onclick, class="u-pointer", key_attrs...)
+        h.th(control, help..., menu...; onclick, class="u-pointer", key_attrs...)
     end
 end
 
@@ -30370,10 +30388,11 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 .htmxo-private .htmxo-private::before,
 .htmxo-private tr.htmxo-private > :first-child::before { content: none; }
 
-/* A glossary term's use (`link_terms`): its definition shows beside it while
-   the pointer is on the term or its box, or the link has keyboard focus. The
-   box stays out of the line's layout and of the link's accessible name; the
-   link names it as its description (`aria-describedby`). */
+/* A glossary term's use (`link_terms`), and an explained column's ⓘ: the
+   explanation shows beside it while the pointer is on the term or its box, or
+   the link has keyboard focus. The box stays out of the line's layout and of
+   the link's accessible name; the link names the definition in it as its
+   description (`aria-describedby`). */
 .htmxo-term { position: relative; }
 .htmxo-term-def {
     display: none;
@@ -30403,6 +30422,12 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
    so a scrolling table cannot clip it and it stays inside the window. */
 .htmxo-terms .htmxo-term:is(:hover, :focus-within) > .htmxo-term-def { display: none; }
 .htmxo-terms .htmxo-term[data-htmxo-term-open] > .htmxo-term-def { display: block; position: fixed; }
+/* A tap pins a term's box open; the box then shows the link to the entry,
+   the tap's way to the glossary (a tap on the term itself stays on the page). */
+.htmxo-term-more { display: none; }
+.htmxo-term[data-htmxo-term-pinned] .htmxo-term-more { display: block; margin-top: .25rem; }
+/* An explained column's ⓘ: a target of its own beside the label's sort button. */
+.htmxo-column-help-mark { cursor: help; padding: 0 .2em; }
 .htmxo-glossary > dt { font-weight: bold; }
 .htmxo-glossary > dt > dfn { font-style: normal; }
 /* A glossary entry's other names and its related entries sit on lines of
