@@ -1,7 +1,7 @@
 name = "HTMXObjects"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.1.9"
+version = "0.1.10"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
@@ -31,7 +31,7 @@ HTMXObjectsTreebarsExt = "Treebars"
 CodecZlib = "0.7"
 CommonMark = "1"
 Dates = "1"
-DynamicObjects = "0.4.4, 0.5"
+DynamicObjects = "0.5.1"
 HTMX = "1.1"
 HTTP = "1.8, 2.4"
 LazyArtifacts = "1"

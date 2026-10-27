@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.10
+
+- `[compat] DynamicObjects = "0.5.1"`. DynamicObjects 0.5.1 is the first
+  version whose job queue carries the requester's `ScopedValue`s (`ffb9d70`),
+  which 0.1.9 relies on for a `@queued` body to render for the request's
+  reader in its page language. An environment that pins an older
+  DynamicObjects is now refused when it resolves, instead of rendering such a
+  body for the public. **Breaking:** DynamicObjects 0.4.x and 0.5.0 no longer
+  resolve; update DynamicObjects to 0.5.1 or later. Todo `1vkv7a1`, snag
+  `dynamicobjects-h-c580a9f3`.
+
 ## 0.1.9
 
 - The request's audience and page language reach every task that runs a

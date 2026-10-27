@@ -87,11 +87,11 @@ version = "1.6.0"
 
 [[deps.DynamicObjects]]
 deps = ["Mmap", "SHA", "ScopedValues", "Serialization", "Treebars"]
-git-tree-sha1 = "80097f56265624f057e110f16f44af6800002732"
-repo-rev = "bad865e9a87f29116d5cfbcf36352a0555076e09"
+git-tree-sha1 = "836b281bb173be3922c50891e6264daf79f303f2"
+repo-rev = "9dc4de0b3e9493be1b41da7a741e6d3b7850d31f"
 repo-url = "/home/niko/github/nsiccha/DynamicObjects.jl"
 uuid = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
-version = "0.5.0"
+version = "0.5.1"
 
     [deps.DynamicObjects.extensions]
     DataFramesArrowExt = ["Arrow", "DataFrames"]
@@ -124,7 +124,7 @@ version = "1.1.0"
 deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "LazyArtifacts", "LibGit2", "Random", "ScopedValues", "Sockets", "Tables"]
 path = ".."
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
-version = "0.1.9"
+version = "0.1.10"
 
     [deps.HTMXObjects.extensions]
     HTMXObjectsReactiveKernelsPPLExt = "ReactiveKernelsPPL"
