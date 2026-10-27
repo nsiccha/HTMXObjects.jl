@@ -76,7 +76,16 @@ A marker type that turns a `Symbol` field name into a human-readable label (`(:p
 
 ### `show_when=` kwarg
 
-All form widgets accept `show_when=(field, op, value)` — emits `data-show-when-*` attributes that the client-side script (`show_when_script()`) reads to hide the input until another widget's value matches. Supported ops: `==`, `!=`, `startswith`, `endswith`. Drop `show_when_script()` once per page (typically in your `__page__`).
+Every labeled widget (`linput`, `sinput`, `sinput_custom`, `rinput`, `ninput`, `cinput`, `tinput`, `radio_group`) accepts `show_when=(field, op, value)` — emits `data-show-when-*` attributes that the client-side script (`show_when_script()`) reads to hide the widget until another widget's value matches. Supported ops: `==`, `!=`, `startswith`, `endswith`. Drop `show_when_script()` once per page (typically in your `__page__`).
+
+The field is read the way the form submits it: a radio group by its checked radio, a checkbox by its `value` while checked (nothing while unchecked), a `<select multiple>` by every chosen option. A field that carries nothing reads as `""`. The value is spelled as the controls spell their options ([`option_wire_value`](@ref)), so it matches an option object passed to `radio_group` or `sinput`.
+
+```julia
+radio_group((; basis="typical"), ["typical" => "Typical subject", "cohort" => "New subjects"])
+linput((; subjects=10); show_when=(:basis, ==, "cohort"))   # shown while "New subjects" is checked
+cinput((; extended=false); value="true")
+tinput((; notes=""); show_when=(:extended, ==, true))       # shown while the box is checked
+```
 
 ## Forms
 

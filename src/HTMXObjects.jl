@@ -25304,15 +25304,21 @@ ainput(nt::NamedTuple; value=first(nt), kwargs...) = h.input(; name=_aname(nt), 
 ainput(name::AbstractString; kwargs...) = h.input(; name, kwargs...)
 
 """
-    linput(nv, placeholder=Long(nv); label=Long(nv), kwargs...)
+    linput(nv, placeholder=Long(nv); label=Long(nv), show_when=nothing, kwargs...)
 
 A labeled text `<input>` wrapped in a `<label>`.
 All extra `kwargs` (e.g. `hx_get`, `hx_target`) are passed to the `<input>`.
+`show_when=(field, op, value)` shows the label only while another field
+matches (see [`show_when_script`](@ref)).
 """
-linput(nv, placeholder=Long(nv); label=Long(nv), kwargs...) = h.label(
-    label,
-    ainput(nv; placeholder, kwargs...)
-)
+linput(nv, placeholder=Long(nv); label=Long(nv), show_when=nothing, kwargs...) = begin
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    h.label(
+        label,
+        ainput(nv; placeholder, kwargs...);
+        show_attrs...
+    )
+end
 
 """
     sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...)
@@ -27130,54 +27136,98 @@ const _SHOW_WHEN_OPS = Dict{Function,String}(
     startswith => "startswith", endswith => "endswith",
 )
 
+# The value is spelled the way the controls carry it (`option_wire_value`), so
+# `show_when=(:basis, ==, option)` matches the radio or `<option>` that
+# `radio_group` / `sinput` render for that same option.
 function _show_when_attrs((field, op, value))
     op_name = get(_SHOW_WHEN_OPS, op, nothing)
     isnothing(op_name) && error("show_when: unsupported predicate $op; use ==, !=, startswith, or endswith")
     (;  data_show_when_field=string(field),
         data_show_when_op=op_name,
-        data_show_when_value=string(value),
+        data_show_when_value=_option_wire_string(value),
         class="u-hidden")
 end
 
 """
     show_when_script()
 
-Return a `<script>` that wires `change` listeners for all `[data-show-when-field]`
-elements. Include once per page (like [`loading_indicator_script`](@ref)).
+Return a `<script>` that shows each `[data-show-when-field]` element (a widget
+built with `show_when=(field, op, value)`) exactly while its predicate holds.
+Include once per page (like [`loading_indicator_script`](@ref)).
 
-Evaluates visibility on load and re-initializes on `htmx:afterSettle` for
-dynamically swapped content.
+The field is read in the element's `<form>` (including controls attached to it
+with `form=`), else in its nearest `[hx-target]` container, else on the page,
+as the value the form would submit:
+
+- a radio group ([`radio_group`](@ref)) reads its checked radio's value;
+- a checkbox ([`cinput`](@ref)) reads its `value` while checked (the browser's
+  default is `"on"`; pass `value="true"` to compare with `true`);
+- a `<select multiple>` reads every chosen option;
+- any other control reads its `value`.
+
+A field that carries nothing (no radio checked, the checkbox unchecked) reads
+as `""`. For several values, `==`, `startswith` and `endswith` hold when one of
+them matches, `!=` when none equals the value. A field the scope does not
+contain leaves the element as it is.
+
+Visibility is evaluated on load, on every `change` anywhere on the page (one
+listener, so every radio of a group counts, and controls swapped in later need
+no binding), and after every htmx swap settles, since a swap can replace either
+the element or the control it reads.
 """
 show_when_script() = h.script(Raw(raw"""
 (function() {
+  // Controls that carry a value only when pressed never count.
+  var PRESSED = /^(submit|reset|button|image)$/;
+  function scopeOf(el) {
+    return el.closest('form') || el.closest('[hx-target]') || document.body;
+  }
+  // The values the field `name` carries in `scope` as the form would submit
+  // them; [''] when it carries nothing, null when the scope has no such field.
+  function fieldValues(scope, name) {
+    var controls = scope.tagName === 'FORM' ? scope.elements
+                 : scope.querySelectorAll('input, select, textarea');
+    var found = false, values = [];
+    Array.prototype.forEach.call(controls, function(c) {
+      if (c.name !== name || typeof c.value !== 'string' || PRESSED.test(c.type)) return;
+      found = true;
+      if (c.type === 'radio' || c.type === 'checkbox') {
+        if (c.checked) values.push(c.value);
+      } else if (c.type === 'select-multiple') {
+        Array.prototype.forEach.call(c.selectedOptions, function(o) { values.push(o.value); });
+      } else {
+        values.push(c.value);
+      }
+    });
+    if (!found) return null;
+    return values.length ? values : [''];
+  }
   function evalShowWhen(el) {
-    var field = el.dataset.showWhenField;
+    var values = fieldValues(scopeOf(el), el.dataset.showWhenField);
+    if (!values) return;
     var op = el.dataset.showWhenOp;
     var val = el.dataset.showWhenValue;
-    var form = el.closest('form') || el.closest('[hx-target]') || document.body;
-    var ctrl = form.querySelector('[name="' + field + '"]');
-    if (!ctrl) return;
-    var cv = ctrl.value;
-    var show = op === 'eq' ? cv === val
-             : op === 'neq' ? cv !== val
-             : op === 'startswith' ? cv.startsWith(val)
-             : op === 'endswith' ? cv.endsWith(val)
-             : false;
-    el.classList.toggle('u-hidden', !show);
-  }
-  function initShowWhen(root) {
-    (root || document).querySelectorAll('[data-show-when-field]').forEach(function(el) {
-      if (el.dataset.showWhenBound) return;
-      el.dataset.showWhenBound = '1';
-      evalShowWhen(el);
-      var field = el.dataset.showWhenField;
-      var form = el.closest('form') || el.closest('[hx-target]') || document.body;
-      var ctrl = form.querySelector('[name="' + field + '"]');
-      if (ctrl) ctrl.addEventListener('change', function() { evalShowWhen(el); });
+    var hit = values.some(function(v) {
+      return op === 'eq' || op === 'neq' ? v === val
+           : op === 'startswith' ? v.startsWith(val)
+           : op === 'endswith' ? v.endsWith(val)
+           : false;
     });
+    el.classList.toggle('u-hidden', op === 'neq' ? hit : !hit);
   }
-  initShowWhen();
-  document.body.addEventListener('htmx:afterSettle', function(e) { initShowWhen(e.detail.elt); });
+  function evalAll() {
+    document.querySelectorAll('[data-show-when-field]').forEach(evalShowWhen);
+  }
+  document.addEventListener('change', function(e) {
+    var name = e.target && e.target.name;
+    if (!name) return;
+    document.querySelectorAll('[data-show-when-field]').forEach(function(el) {
+      if (el.dataset.showWhenField === name) evalShowWhen(el);
+    });
+  });
+  document.addEventListener('htmx:afterSettle', evalAll);
+  evalAll();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', evalAll);
 })();
 """))
 
