@@ -1077,9 +1077,10 @@ work automatically (`th.closest('table')`).
 `tabset`, `request_feedback` (pulsating outline while in-flight, teal flash
 on success, coral on error — included by default in `htmx()`).
 
-**Conditional visibility:** `sinput(...; show_when=(field, op, value))` with
-`show_when_script()` once per page. Ops: `==`, `!=`, `startswith`,
-`endswith`.
+**Conditional visibility:** `sinput(...; show_when=(field, op, value))`; the
+`htmx()` shell carries `show_when_script()`. Ops: `==`, `!=`, `startswith`,
+`endswith`. A generated form hides the control of a `@param` while its
+`@relevant` condition is false.
 
 **Captions:** `CaptionSpec(; title, short, long)`, `render_caption(spec)`,
 `with_caption(spec, content)`; `texts=caption_texts(:de)` for a German toggle.

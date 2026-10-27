@@ -60,7 +60,7 @@ export OperationContext, RootProvider, RootRetention, OperationPolicy
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
-export semantic_descriptor, operation_form, semantic_app, internal_input
+export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input
 
 using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
@@ -1940,32 +1940,56 @@ The delegation form registers each listed name as a param on this struct (so
 via `source.<name>` — typically `__parent__.<name>` — rather than extracting
 from the request directly. See `_rewrite_param_delegation`.
 
-Returns the ordered list of declared param names for later `_param_names` emission.
+A `@relevant(name) = condition` line declares when the `@param` `name` applies.
+It becomes the property `__relevant_<name>__ = condition`, and the parameter
+extracts its submitted value only while that property is `true`: otherwise it
+is its default, whatever was submitted. A `@relevant` parameter therefore needs
+a default.
+
+Returns the ordered list of declared param names for later `_param_names`
+emission, and the `@relevant` conditions by name for `_param_relevance`.
 """
 function _convert_params!(struct_expr)
     body = struct_expr.args[3]
     option_names = Set{Symbol}()
+    relevance = Pair{Symbol,Any}[]
     for arg in body.args
         name = _option_parameter_name(arg)
         name === nothing || push!(option_names, name)
+        declared = _relevance_declaration(arg)
+        declared === nothing || push!(relevance, declared)
     end
+    relevant_names = Set{Symbol}(first.(relevance))
+    length(relevant_names) == length(relevance) || throw(ArgumentError(string(
+        "@htmx: a `@param` has two `@relevant` declarations: ",
+        join(unique(n for n in first.(relevance) if count(==(n), first.(relevance)) > 1), ", "))))
     names = Symbol[]
     new_args = Any[]
     process_line! = inner -> begin
         delegated = _rewrite_param_delegation(inner)
         if delegated !== nothing
             for (n, assign) in delegated
+                n in relevant_names && throw(ArgumentError(string(
+                    "@htmx: `@relevant($n)` names a `@param` that delegates to another ",
+                    "struct; declare the condition where `$n` is extracted from the request")))
                 push!(names, n)
                 push!(new_args, assign)
             end
             return
         end
-        rewritten = _rewrite_param_line(inner, option_names)
+        rewritten = _rewrite_param_line(inner, option_names, relevant_names)
         rewritten === nothing && return
         push!(names, rewritten[1])
         push!(new_args, rewritten[2])
     end
     for arg in body.args
+        declared = _relevance_declaration(arg)
+        if declared !== nothing
+            # The condition, as a property of its own: DynamicObjects reads its
+            # dependencies, and a page renders the control as it evaluates.
+            push!(new_args, Expr(:(=), _relevance_property(first(declared)), last(declared)))
+            continue
+        end
         if !(arg isa Expr)
             push!(new_args, arg); continue
         end
@@ -2014,8 +2038,42 @@ function _convert_params!(struct_expr)
         end
     end
     body.args = new_args
-    names
+    for (name, _) in relevance
+        name in names || throw(ArgumentError(string(
+            "@htmx: `@relevant($name)` names no `@param` of this struct; ",
+            "declare `@param $name = <default>` next to it")))
+    end
+    names, relevance
 end
+
+# `@relevant(name) = condition` and `@relevant name = condition`, as
+# `name => condition`; `nothing` for any other line.
+function _relevance_declaration(arg)
+    if Meta.isexpr(arg, :(=), 2) && Meta.isexpr(arg.args[1], :macrocall)
+        lhs = arg.args[1]
+        mname = lhs.args[1]
+        (mname isa GlobalRef ? mname.name : mname) === Symbol("@relevant") ||
+            return nothing
+        payload = Any[x for x in lhs.args[2:end] if !(x isa LineNumberNode)]
+        length(payload) == 1 && only(payload) isa Symbol || throw(ArgumentError(
+            "@htmx: write `@relevant(name) = condition` with the name of one `@param`"))
+        return only(payload) => arg.args[2]
+    end
+    Meta.isexpr(arg, :macrocall) || return nothing
+    mname = arg.args[1]
+    (mname isa GlobalRef ? mname.name : mname) === Symbol("@relevant") ||
+        return nothing
+    payload = Any[x for x in arg.args[2:end] if !(x isa LineNumberNode)]
+    length(payload) == 1 && Meta.isexpr(only(payload), :(=), 2) &&
+        only(payload).args[1] isa Symbol || throw(ArgumentError(
+            "@htmx: write `@relevant(name) = condition` with the name of one `@param`"))
+    only(payload).args[1] => only(payload).args[2]
+end
+
+_relevance_property(name::Symbol) = Symbol("__relevant_", name, "__")
+
+# Default: no `@relevant` declarations.
+_param_relevance(::Type) = (;)
 
 # Read the parameter name from either supported declaration spelling before
 # DynamicObjects lowers it:
@@ -2068,7 +2126,7 @@ end
 
 # Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
 # and return `(name_sym, rewritten_assignment)` or `nothing` if unrecognized.
-function _rewrite_param_line(expr, option_names=Set{Symbol}())
+function _rewrite_param_line(expr, option_names=Set{Symbol}(), relevant_names=Set{Symbol}())
     default_expr = nothing
     lhs = expr
     if Meta.isexpr(expr, :(=))
@@ -2079,8 +2137,20 @@ function _rewrite_param_line(expr, option_names=Set{Symbol}())
     name_sym === nothing && return nothing
     t = type_expr === nothing ? :nothing : type_expr
     req_expr = :($(_req_of)(__self__))
-    extractor = name_sym in option_names ? _extract_option_param : _extract_param
-    args = name_sym in option_names ? Any[:(__self__.__options__), req_expr] : Any[req_expr]
+    relevant = name_sym in relevant_names
+    relevant && default_expr === nothing && throw(ArgumentError(string(
+        "@htmx: `@param $name_sym` has a `@relevant` condition and no default; give it ",
+        "the default it takes where it does not apply (`@param $name_sym::T = default`)")))
+    # A `@relevant` parameter's extractor takes its condition first; the
+    # extractor stays the outermost call, which `_reflect_local_param` reads.
+    extractor, args = if name_sym in option_names
+        relevant ? (_extract_relevant_option_param,
+                    Any[_relevance_property(name_sym), :(__self__.__options__), req_expr]) :
+                   (_extract_option_param, Any[:(__self__.__options__), req_expr])
+    else
+        relevant ? (_extract_relevant_param, Any[_relevance_property(name_sym), req_expr]) :
+                   (_extract_param, Any[req_expr])
+    end
     append!(args, (QuoteNode(name_sym), t))
     default_expr === nothing || push!(args, default_expr)
     rhs = Expr(:call, extractor, args...)
@@ -2198,7 +2268,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     reroute && _warn_redundant_req_decl!(struct_expr)
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
-    own_params = _convert_params!(struct_expr)
+    own_params, own_relevance = _convert_params!(struct_expr)
     own_headers = _convert_headers!(struct_expr)
     # Merge: parent params/headers first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -2252,6 +2322,15 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
         push!(block.args[1].args, Expr(:(=),
             Expr(:call, _pn_fname, :(::Type{$type_name})),
             Tuple(param_names)))
+    end
+    # Emit `_param_relevance`: each `@relevant` condition as written, which a
+    # generated form evaluates in the browser where it can.
+    if !isempty(own_relevance)
+        _pr_fname = Expr(:., @__MODULE__, QuoteNode(:_param_relevance))
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _pr_fname, :(::Type{$type_name})),
+            Expr(:tuple, Expr(:parameters,
+                (Expr(:kw, name, QuoteNode(condition)) for (name, condition) in own_relevance)...))))
     end
     # Emit _inline_struct_props for backward compat
     all_nested = Symbol[p for (p, _) in inline_props]
@@ -2905,6 +2984,8 @@ _runtime_blocks() = (
     mutation_poll = (:js, mutation_poll_script),
     operation_stream = (:js, operation_stream_script),
     semantic_refresh = (:js, semantic_refresh_script),
+    semantic_follow = (:js, semantic_follow_script),
+    show_when = (:js, show_when_script),
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
     glossary = (:js, glossary_script),
@@ -3215,6 +3296,12 @@ function htmx(args...;
         # Semantic shared context groups follow their live declared
         # domains; inert on pages without a refreshable group.
         :semantic_refresh,
+        # A `presentation=:tabs` page's results follow their inputs;
+        # inert on pages without one.
+        :semantic_follow,
+        # Widgets built with `show_when=` and the controls of `@relevant`
+        # inputs show only while they apply; inert on pages without one.
+        :show_when,
         # `url_params` elements follow the page address and write
         # their values into it; inert on pages without one.
         :url_params,
@@ -8742,6 +8829,22 @@ function _extract_option_param(options, req::HTTP.Request, name, T,
 end
 _extract_option_param(_options, ::Nothing, name, _T, default=_NO_DEFAULT) =
     _resolve_extracted(_NO_DEFAULT, default, name)
+# Outside a request (a form rendered from a bare instance) a `@param` is its
+# default, as one with `@options` is.
+_extract_param(::Nothing, name, _T, default=_NO_DEFAULT) =
+    _resolve_extracted(_NO_DEFAULT, default, name)
+# A `@param` with a `@relevant` condition: its submitted value while the
+# condition holds, its default otherwise, so a value that does not apply never
+# reaches what reads it (and two requests differing only there compute alike).
+_extract_relevant_param(relevant, req, name, T, default) =
+    _checked_relevance(relevant, name) ? _extract_param(req, name, T, default) : default
+_extract_relevant_option_param(relevant, options, req, name, T, default) =
+    _checked_relevance(relevant, name) ?
+        _extract_option_param(options, req, name, T, default) : default
+_checked_relevance(relevant::Bool, _name) = relevant
+_checked_relevance(relevant, name) = throw(ArgumentError(string(
+    "`@relevant($name)` must be true or false, got ", repr(relevant), " (",
+    typeof(relevant), ")")))
 _resolve_extracted(::_NoDefault, ::_NoDefault, name) = throw(MissingRequiredParam(name))
 _resolve_extracted(::_NoDefault, default, _) = default
 _resolve_extracted(v, _default, _name) = v
@@ -15593,7 +15696,9 @@ function _reflect_local_param(T, nm)
     Meta.isexpr(rhs, :call) || return nothing
     extractor = rhs.args[1]
     type_index = extractor === _extract_param ? 4 :
-                 extractor === _extract_option_param ? 5 : nothing
+                 extractor === _extract_option_param ? 5 :
+                 extractor === _extract_relevant_param ? 5 :
+                 extractor === _extract_relevant_option_param ? 6 : nothing
     type_index === nothing && return nothing
     length(rhs.args) >= type_index || return nothing
     default_index = type_index + 1
@@ -26006,13 +26111,22 @@ function _semantic_control(obj, owner, param, values;
         radio_max::Int=4, presentation::Symbol=:auto)
     value = get(values, param.name, nothing)
     label = isnothing(param.doc) ? Long(param.name) : param.doc
-    input = (name=param.name, domain=get(param, :domain, nothing))
     control_obj, ControlT = if get(param, :kind, nothing) === :context
         source_obj = _semantic_source_object(obj, param.context_source)
         (source_obj, typeof(source_obj))
     else
         (obj, owner)
     end
+    default = _semantic_default_control(control_obj, ControlT, param, label, value, values;
+                                        radio_max, presentation)
+    control = semantic_control(control_obj, Val(param.name),
+                               (; name=param.name, label, value, param, default))
+    _relevance_wrapped(control, obj, param)
+end
+
+function _semantic_default_control(control_obj, ControlT, param, label, value, values;
+        radio_max::Int=4, presentation::Symbol=:auto)
+    input = (name=param.name, domain=get(param, :domain, nothing))
     domain = _resolved_input_domain(control_obj, ControlT, input, values)
 
     if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
@@ -26037,11 +26151,266 @@ function _semantic_control(obj, owner, param, values;
                    param.required ? (; required="true") : (;))
 end
 
+"""
+    semantic_control(obj, ::Val{name}, control) -> renderable
+
+The control a generated form ([`semantic_app`](@ref), [`operation_form`](@ref))
+renders for the input `name` of `obj`, the struct that declares it. `control`
+carries `name`, `label` (the docstring, else the humanized name), `value` (the
+current value), `param` (the input's descriptor) and `default`, the control the
+form would render. The default method returns `default`.
+
+Define a method for one input of your own struct to render it your way. Every
+generated form uses it, also when it re-renders the control after a change it
+depends on:
+
+    HTMXObjects.semantic_control(::SimApp, ::Val{:age}, c) =
+        ninput((; age = c.value); label = c.label, min = 0, step = "any")
+
+The control must submit the input's name and a value its type parses. A
+`@relevant` input stays hidden while it does not apply, whatever its control.
+"""
+semantic_control(_obj, ::Val, control) = control.default
+
+# --- `@relevant` on generated controls ---
+
+# The object along `obj`'s mount chain whose struct declares `@relevant(name)`,
+# with the condition as written; `nothing` when none does.
+function _relevance_source(obj, name::Symbol)
+    current = obj
+    while current !== nothing
+        condition = get(Base.invokelatest(_param_relevance, typeof(current)), name, nothing)
+        condition === nothing || return (; object=current, condition)
+        current = hasproperty(current, :__parent__) ? getproperty(current, :__parent__) : nothing
+    end
+    nothing
+end
+
+# Whether the `@param` `name` applies in the request `obj` answers; `true` for
+# one without a `@relevant` condition.
+function _param_relevant(obj, name::Symbol)
+    source = _relevance_source(obj, name)
+    source === nothing && return true
+    _checked_relevance(getproperty(source.object, _relevance_property(name)), name)
+end
+
+# A control of a `@relevant` input, shown while its condition holds: hidden
+# from the start when it does not apply to the request being answered, and
+# shown or hidden in the browser as the form changes (`show_when_script`). A
+# condition the browser cannot evaluate re-renders the control from the
+# server instead, when an input it reads changes
+# (`_semantic_param_dependencies`).
+function _relevance_wrapped(control, obj, param)
+    relevance = get(param, :relevance, nothing)
+    relevance === nothing && return control
+    hidden_attrs = _param_relevant(obj, param.name) ? (;) : (; hidden=true)
+    client_attrs = isnothing(relevance.client) ? (;) :
+        (; data_show_when=sprint(_schema_json_encode, relevance.client))
+    h.div(control; class="htmxo-relevant", data_htmxo_relevant=string(param.name),
+          hidden_attrs..., client_attrs...)
+end
+
+# The comparisons `_client_relevance` translates, by the predicate operator
+# `show_when_script` evaluates; `in`/`∉` are handled apart.
+const _CLIENT_COMPARISONS = Dict{Symbol,String}(
+    :(==) => "eq", :(!=) => "neq", :≠ => "neq",
+    :< => "lt", :<= => "le", :≤ => "le", :> => "gt", :>= => "ge", :≥ => "ge")
+const _FLIPPED_COMPARISONS = Dict("eq" => "eq", "neq" => "neq",
+    "lt" => "gt", "le" => "ge", "gt" => "lt", "ge" => "le")
+
+# A literal of a condition as the controls carry it: its wire string, and
+# whether the browser compares it as a number.
+_client_literal(x::AbstractString) = (String(x), false)
+_client_literal(x::Bool) = (_option_wire_string(x), false)
+_client_literal(x::Real) = (string(x), true)
+_client_literal(x::QuoteNode) = x.value isa Symbol ? (_option_wire_string(x.value), false) : nothing
+_client_literal(_) = nothing
+
+function _client_literals(ex)
+    Meta.isexpr(ex, :tuple) || Meta.isexpr(ex, :vect) || return nothing
+    literals = [_client_literal(x) for x in ex.args]
+    any(isnothing, literals) && return nothing
+    literals
+end
+
+"""
+    _client_relevance(condition, names) -> Union{Dict,Nothing}
+
+A `@relevant` condition the browser can evaluate from the form as it stands, as
+the predicate `show_when_script` reads (`data-show-when`); `nothing` for any
+other condition, which the page evaluates on the server instead. The browser
+evaluates comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `∉`) of one of
+`names` (the struct's `@param`s) with literals (strings, numbers, booleans,
+symbols, or a tuple or vector of them), a bare `Bool` parameter, and `!`, `&&`
+and `||` of those.
+"""
+_client_relevance(_, _names) = nothing
+_client_relevance(ex::Symbol, names) = ex in names ?
+    Dict{String,Any}("field" => string(ex), "op" => "eq", "value" => "true") : nothing
+function _client_relevance(ex::Expr, names)
+    if ex.head in (:&&, :||)
+        parts = [_client_relevance(arg, names) for arg in ex.args]
+        any(isnothing, parts) && return nothing
+        return Dict{String,Any}((ex.head === :&& ? "all" : "any") => parts)
+    end
+    Meta.isexpr(ex, :call) || return nothing
+    f = ex.args[1]
+    if f === :! && length(ex.args) == 2
+        inner = _client_relevance(ex.args[2], names)
+        return isnothing(inner) ? nothing : Dict{String,Any}("not" => inner)
+    end
+    length(ex.args) == 3 || return nothing
+    a, b = ex.args[2], ex.args[3]
+    if f in (:in, :∈, :∉)
+        a isa Symbol && a in names || return nothing
+        literals = _client_literals(b)
+        isnothing(literals) && return nothing
+        predicate = Dict{String,Any}("field" => string(a), "op" => "in",
+            "values" => first.(literals), "numeric" => all(last, literals))
+        return f === :∉ ? Dict{String,Any}("not" => predicate) : predicate
+    end
+    op = get(_CLIENT_COMPARISONS, f, nothing)
+    isnothing(op) && return nothing
+    if !(a isa Symbol && a in names)
+        b isa Symbol && b in names || return nothing
+        a, b, op = b, a, _FLIPPED_COMPARISONS[op]
+    end
+    literal = _client_literal(b)
+    isnothing(literal) && return nothing
+    Dict{String,Any}("field" => string(a), "op" => op, "value" => first(literal),
+                     "numeric" => last(literal))
+end
+
+# The `@param`s a `@relevant` condition reads, which re-render its control
+# from the server when the browser cannot evaluate the condition.
+function _relevance_dependencies(T::Type, name::Symbol)
+    closure = _dependency_closure(T, _relevance_property(name))
+    params = Set{Symbol}(Base.invokelatest(_param_names, T))
+    isnothing(closure) && return sort!(collect(setdiff(params, (name,))))
+    Symbol[n for n in closure if n in params && n !== name]
+end
+
+# `param` with what a generated control needs of its `@relevant` condition:
+# the struct declaring it, the browser predicate (or `nothing`), and the
+# inputs whose change re-renders the control when there is no predicate.
+function _with_relevance(obj, param)
+    param.source === :path && return param
+    source = _relevance_source(obj, param.name)
+    source === nothing && return param
+    T = typeof(source.object)
+    client = _client_relevance(source.condition, Set(Base.invokelatest(_param_names, T)))
+    dependencies = isnothing(client) ? _relevance_dependencies(T, param.name) : Symbol[]
+    merge(param, (; relevance=(; type=T, client, dependencies)))
+end
+
+# --- What an operation reads ---
+
+# DynamicObjects' dependency closure of `name` on `T` (the property and every
+# property it reads, transitively); `nothing` on a DynamicObjects without it.
+_dependency_closure(T::Type, name::Symbol) =
+    isdefined(DynamicObjects, :_semantic_dependency_closure) ?
+        Base.invokelatest(getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,)) :
+        nothing
+
+# The properties of `T` that hand `__self__` to other code, whose reads no
+# static scan follows.
+_opaque_properties(T::Type) = isdefined(DynamicObjects, :_remount_opaque_properties) ?
+    something(Base.invokelatest(getproperty(DynamicObjects, :_remount_opaque_properties), T), ()) :
+    nothing
+
+"""
+    _operation_reads(T, name) -> (; names, complete)
+
+What the operation `name` of `T` reads, as DynamicObjects sees its body: every
+property in its dependency closure (so a `@param` read through a property it
+calls counts, and so does the input of a `@relevant` condition). `complete` is
+`false` when that closure reaches a property handing `__self__` to other code
+or reading through `__parent__`, whose reads no static scan follows: the
+operation may then read anything. A `@param` is no such property: it reads the
+request through `__self__`, or its parent's value when it delegates, and
+nothing else.
+"""
+function _operation_reads(T::Type, name::Symbol)
+    closure = _dependency_closure(T, name)
+    opaque = _opaque_properties(T)
+    (isnothing(closure) || isnothing(opaque)) && return (; names=Set{Symbol}(), complete=false)
+    params = Set{Symbol}(Base.invokelatest(_param_names, T))
+    complete = all(closure) do n
+        n in params && return true
+        n in opaque && return false
+        descriptor = _property_descriptor(T, n)
+        isnothing(descriptor) || !(:__parent__ in get(descriptor, :dependencies, ()))
+    end
+    (; names=Set{Symbol}(closure), complete)
+end
+
+# --- Inputs lifted into request context ---
+
+# The object along `obj`'s mount chain that extracts the `@param` `name` from
+# the request itself (not by delegating to another struct); `nothing` when
+# none does.
+function _param_declaring_object(obj, name::Symbol)
+    current = obj
+    while current !== nothing
+        _reflect_local_param(typeof(current), name) === nothing || return current
+        current = hasproperty(current, :__parent__) ? getproperty(current, :__parent__) : nothing
+    end
+    nothing
+end
+
+"""
+    _semantic_lift_params(obj, route, names) -> route
+
+`route` with its request `@param`s among `names` lifted into request context:
+each becomes a visible control resolved from the struct that extracts it, as a
+`@param` with a declared domain already is, instead of a hidden input. The
+`:tabs` presentation of [`semantic_app`](@ref) shows every input its operations
+read this way; a controls refresh lifts the same names
+(`__htmxo_shared_context`, `__htmxo_lifted`), so a re-rendered control is the
+one the page showed.
+"""
+function _semantic_lift_params(obj, route, names)
+    isempty(names) && return route
+    params = map(route.params) do param
+        param.name in names && param.source !== :path &&
+            get(param, :kind, nothing) === nothing || return param
+        source = _param_declaring_object(obj, param.name)
+        source === nothing && return param
+        merge(param, (; kind=:context,
+            context_source=(type=typeof(source), property=param.name),
+            context_scope=:request))
+    end
+    merge(route, (params=NamedTuple[params...],))
+end
+
+"""
+    _semantic_tabs_route(obj, route, shared, own) -> route
+
+`route` as a `:tabs` page shows it: its `@param`s among `shared` (the sidebar)
+and `own` (its tab) lifted into visible controls, and every other request
+`@param` a hidden input carrying its value, a declared-domain one too, so a
+tab shows no input another tab owns.
+"""
+function _semantic_tabs_route(obj, route, shared, own)
+    route = _semantic_lift_params(obj, route, union(shared, own))
+    params = map(route.params) do param
+        get(param, :kind, nothing) === :context &&
+            get(param, :context_scope, :object) === :request &&
+            !(param.name in shared) && !(param.name in own) || return param
+        merge(param, (; kind=nothing))
+    end
+    # `lifted` rides every refresh this route renders, so the refresh lifts
+    # the same inputs (`_semantic_context_control`, `_operation_form_refresh`).
+    merge(route, (params=NamedTuple[params...], lifted=Set{Symbol}(own)))
+end
+
 # The control an input without a finite domain gets from its declared type.
 _typed_control(T, name, label, value, required_attrs) =
     linput(name; label, value=something(value, ""), required_attrs...)
+# A checked box submits "true", which a `Bool` input parses; the browser's
+# default "on" does not.
 _typed_control(::Type{Bool}, name, label, value, required_attrs) =
-    cinput(name; label, checked=something(value, false), required_attrs...)
+    cinput(name; label, checked=something(value, false), value="true", required_attrs...)
 _typed_control(::Type{T}, name, label, value, required_attrs) where {T<:Number} =
     ninput(name; label, value=something(value, 0), step=_number_step(T), required_attrs...)
 
@@ -26152,7 +26521,7 @@ function _semantic_runtime_route(obj, route)
         end
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
-    merge(route, (params=params,))
+    merge(route, (params=NamedTuple[_with_relevance(obj, param) for param in params],))
 end
 
 # A mounted `@include` child resolves parent-supplied params through `__parent__`
@@ -26219,9 +26588,22 @@ function _semantic_refresh_dependencies(params::AbstractVector)
     dependencies
 end
 
+# What one input's control reads, or `nothing` when it cannot change for a
+# given type: what its declared domain reads, and what its `@relevant`
+# condition reads when the browser cannot evaluate that condition.
+function _semantic_param_dependencies(param)
+    domain = _semantic_domain_dependencies(param)
+    # A hidden input (no kind) renders no control to show or hide.
+    relevance = get(param, :kind, nothing) === nothing ? nothing :
+                get(param, :relevance, nothing)
+    read = isnothing(relevance) || isempty(relevance.dependencies) ? nothing :
+           Set{Symbol}(relevance.dependencies)
+    isnothing(domain) ? read : isnothing(read) ? domain : union(domain, read)
+end
+
 # What one input's declared domain reads, or `nothing` when its options cannot
 # change for a given type: no declared domain, or a declaration reading nothing.
-function _semantic_param_dependencies(param)
+function _semantic_domain_dependencies(param)
     domain = get(param, :domain, nothing)
     domain === nothing && return nothing
     get(domain, :kind, :unrestricted) === :declared || return nothing
@@ -26273,9 +26655,11 @@ function _semantic_context_control(obj, route, param, current, action, shared_na
     control = _semantic_control(obj, route.owner, param, current)
     _semantic_context_refreshable(route, param) || return control
     dependencies = _semantic_param_dependencies(param)
+    lifted = get(route, :lifted, nothing)
     refresh_url = query_url(_operation_marker_url(string(action), "__htmxo_form");
         __htmxo_context_control=param.name,
         __htmxo_shared_context=_semantic_names_attr(shared_names, ','),
+        (isnothing(lifted) ? (;) : (; __htmxo_lifted=_semantic_names_attr(lifted, ',')))...,
         _semantic_hidden_values(route, current)...)
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     h.div(control; class="htmxo-semantic-context-control",
@@ -26333,6 +26717,14 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
         req::HTTP.Request, base::Int, n_params::Int)
     route = _operation_route(LeafT, name, _verb_symbol(verb_inst))
     route = _semantic_runtime_route(target.leaf, route)
+    shared_context = _semantic_context_names(
+        _operation_form_setting(req, :__htmxo_shared_context, ""))
+    lifted_setting = _operation_form_setting(req, :__htmxo_lifted)
+    lifted = isnothing(lifted_setting) ? nothing : _semantic_context_names(lifted_setting)
+    # The page lifted these `@param`s into visible controls; so does the
+    # refresh, so it re-renders the controls the page showed.
+    route = _semantic_lift_params(target.leaf, route, shared_context)
+    isnothing(lifted) || (route = _semantic_tabs_route(target.leaf, route, shared_context, lifted))
     extracted = _operation_refresh_values(req, route, base, n_params)
     # The operation context retains the external path through stripping proxies.
     request_path = target.context.route
@@ -26344,8 +26736,6 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
     presentation = Symbol(_operation_form_setting(req, :__htmxo_presentation, "auto"))
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
-    shared_context = _semantic_context_names(
-        _operation_form_setting(req, :__htmxo_shared_context, ""))
     controls_only = _operation_poll_marker(get(queryparams(req), "__htmxo_controls", nothing))
     context_control = _operation_form_setting(req, :__htmxo_context_control)
     value = if !isnothing(context_control)
@@ -26363,7 +26753,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
             radio_max, presentation, shared_names=shared_context, context_selector,
-            fragment=true))
+            fragment=true, lifted))
     else
         # Accept full-form refresh requests from pages rendered before the
         # controls-only protocol; new pages keep the form and button in place.
@@ -26371,7 +26761,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
                            target=request_path, target_id, swap, submit,
                            form_class, radio_max, navigate, presentation,
                            context_selector,
-                           shared_context)
+                           shared_context, lifted)
     end
     kw_pairs = Pair{Symbol,Any}[
         param.name => extracted.values[param.name] for param in route.params
@@ -26417,7 +26807,7 @@ _operation_control_params(route, shared_names) = [param for param in route.param
 
 function _operation_form_controls(obj, route, current, action;
         radio_max=4, presentation=:auto, shared_names=Set{Symbol}(),
-        context_selector=nothing, fragment=false)
+        context_selector=nothing, fragment=false, lifted=nothing)
     presentation in (:auto, :cards) || throw(ArgumentError(
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
     refresh_dependencies = _semantic_refresh_dependencies(route)
@@ -26426,6 +26816,10 @@ function _operation_form_controls(obj, route, current, action;
     presentation === :auto || (settings = merge(settings, (; __htmxo_presentation=presentation)))
     isempty(shared_names) || (settings = merge(settings, (;
         __htmxo_shared_context=join(string.(sort!(collect(shared_names))), ','))))
+    # A `:tabs` page's form names the `@param`s it lifted, possibly none, so
+    # a refresh renders it as the page did (`_semantic_tabs_route`).
+    isnothing(lifted) || (settings = merge(settings, (;
+        __htmxo_lifted=join(string.(sort!(collect(lifted))), ','))))
     isnothing(context_selector) || (settings = merge(settings, (;
         __htmxo_context_selector=context_selector)))
     # Static forms keep their existing layout, including a button-only form.
@@ -26448,7 +26842,10 @@ function _operation_form_controls(obj, route, current, action;
             push!(get(param, :kind, nothing) === :context ? context_controls : controls, control)
         end
     end
-    local_context = isempty(context_controls) ? Any[] : Any[
+    # A form whose `@param`s were lifted into it (the `:tabs` presentation)
+    # shows them as its own inputs, next to the others.
+    local_context = isempty(context_controls) ? Any[] :
+        !isnothing(lifted) ? context_controls : Any[
         h.fieldset(h.legend("Model inputs"), context_controls...;
                    class="htmxo-semantic-context")
     ]
@@ -26589,13 +26986,17 @@ function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
         submit="Run", submit_attrs=(;), target_id=nothing, swap="innerHTML", radio_max::Int=4,
         form_class="", navigate::Bool=false, presentation::Symbol=:auto,
-        shared_context=(),
+        shared_context=(), lifted=nothing,
         context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
     route.verb === :SSE && throw(ArgumentError(
         "operation_form does not submit SSE routes; render `sse_region` instead"))
     route = _semantic_runtime_route(obj, route)
+    # `lifted` (internal): the `@param`s a `:tabs` page shows in this form.
+    lifted_names = isnothing(lifted) ? nothing : _semantic_context_names(lifted)
+    isnothing(lifted_names) || (route = _semantic_tabs_route(obj, route,
+        _semantic_context_names(shared_context), lifted_names))
     _check_mounted_include_child(obj, route)
     presentation in (:auto, :cards) || throw(ArgumentError(
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
@@ -26622,7 +27023,7 @@ function operation_form(obj, route::NamedTuple; values=(;),
             "operation_form navigate=true does not support shared external context"))
     end
     controls = _operation_form_controls(obj, route, current, action;
-        radio_max, presentation, shared_names, context_selector)
+        radio_max, presentation, shared_names, context_selector, lifted=lifted_names)
     context_inputs = _semantic_context_inputs(route, current)
     form_attrs = if navigate
         merge((; class=form_class), (; kwargs...), (; method="get", action))
@@ -27141,6 +27542,248 @@ function _activate_semantic_root_provider!(obj)
     provider
 end
 
+# The shared context group of a surface, from `(object, route, current)` per
+# operation: one entry per mounted context source (among `names`, when given),
+# deduplicated across the operations that carry it.
+function _semantic_context_entries(items; names=nothing)
+    context_entries = Any[]
+    context_indices = Dict{Any,Int}()
+    context_names = Dict{Symbol,Any}()
+    for (object, route, current) in items, param in route.params
+        get(param, :kind, nothing) === :context || continue
+        isnothing(names) || param.name in names || continue
+        identity = _semantic_context_identity(object, param)
+        if haskey(context_names, param.name) && context_names[param.name] != identity
+            throw(ArgumentError(string(
+                "semantic_app found two mounted context sources named ",
+                "$(repr(param.name)); context control names must be unique within one graph")))
+        end
+        context_names[param.name] = identity
+        entry = (; object, route, param, current)
+        if haskey(context_indices, identity)
+            index = context_indices[identity]
+            prior = context_entries[index]
+            isequal(get(prior.current, param.name, nothing),
+                    get(current, param.name, nothing)) ||
+                throw(ArgumentError(string(
+                    "semantic_app received conflicting values for shared context input ",
+                    "$(repr(param.name))")))
+            # Every carrier resolves the same source; the control refreshes
+            # through the first GET carrying it, else the first HTTP one.
+            something(_semantic_refresh_carrier_rank(route.verb), 2) <
+                something(_semantic_refresh_carrier_rank(prior.route.verb), 2) &&
+                (context_entries[index] = entry)
+            continue
+        end
+        push!(context_entries, entry)
+        context_indices[identity] = length(context_entries)
+    end
+    context_entries
+end
+
+_semantic_context_controls(entries, shared_context) = Any[
+    _semantic_context_control(entry.object, entry.route, entry.param, entry.current,
+        _semantic_context_refreshable(entry.route, entry.param) ?
+            _operation_form_action(entry.route, entry.current,
+                _operation_form_target(entry.object, entry.route)) :
+            nothing,
+        shared_context)
+    for entry in entries]
+
+# --- The `:tabs` presentation ---
+
+# The inputs a `:tabs` page places in its sidebar or a tab: request `@param`s
+# and fixed-field context. An operation's own arguments stay in its tab.
+_semantic_placed_input(param) = param.source !== :path &&
+    (get(param, :kind, nothing) === nothing || get(param, :kind, nothing) === :context)
+
+# A fixed field reaches an operation as a context input only when the
+# operation reads it: DynamicObjects lists it from the same closure.
+_semantic_fixed_context(param) = get(param, :kind, nothing) === :context &&
+    get(param, :context_scope, :object) === :object
+
+# One tab per operation, named after its route; operations that share a route
+# name (two mounts, or a GET and a POST of one name) are named by verb and path.
+function _semantic_tab_names(specs)
+    names = [string(spec.base_entry.name) for spec in specs]
+    [count(==(name), names) == 1 ? name : _semantic_operation_slug(spec.base_entry)
+     for (name, spec) in zip(names, specs)]
+end
+
+# The tab the page opens on: the one the page address names (`?tab=`, which the
+# tabset keeps in the URL), else `active` (a tab's name or position), else the
+# first.
+function _semantic_open_tab(obj, names, active)
+    req = _req_of(obj)
+    requested = req isa HTTP.Request ? get(queryparams(req), "tab", nothing) : nothing
+    requested !== nothing && requested in names && return requested
+    isnothing(active) && return first(names)
+    if active isa Integer
+        1 <= active <= length(names) || throw(ArgumentError(
+            "semantic_app active=$active: the surface has $(length(names)) operations"))
+        return names[active]
+    end
+    name = string(active)
+    name in names || throw(ArgumentError(string(
+        "semantic_app active=", repr(active), " names no tab; the tabs are ",
+        join(repr.(names), ", "))))
+    name
+end
+
+# The address an operation's result first loads from: its mounted URL with the
+# current values of the inputs it is sent (`names`), leaving out a `@relevant`
+# input that does not apply, as the page's own requests do.
+function _semantic_follow_url(target, obj, route, current, names)
+    query = String[]
+    for param in route.params
+        param.source === :path && continue
+        param.name in names || continue
+        _param_relevant(obj, param.name) || continue
+        value = get(current, param.name, nothing)
+        value === nothing && continue
+        for v in (value isa AbstractVector ? value : (value,))
+            v isa Upload && continue
+            push!(query, HTTP.URIs.escapeuri(string(param.name)) * "=" *
+                         HTTP.URIs.escapeuri(_option_wire_string(v)))
+        end
+    end
+    isempty(query) ? string(target) : string(target, '?', join(query, '&'))
+end
+
+"""
+    _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
+                   render_operation, layout)
+
+`semantic_app(obj; presentation=:tabs)`: the inputs several operations read in
+a sidebar, one tab per operation with the inputs only it reads above its result,
+and every read's result following its inputs (`semantic_follow_script`).
+"""
+function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
+        render_operation, layout)
+    isempty(specs) && throw(ArgumentError(
+        "semantic_app presentation=:tabs needs at least one operation"))
+    # What each operation reads of the inputs the page places.
+    placed = Symbol[]
+    reads = Set{Symbol}[]
+    complete = Bool[]
+    for spec in specs
+        candidates = [param for param in spec.runtime_route.params
+                      if _semantic_placed_input(param)]
+        foreach(param -> param.name in placed || push!(placed, param.name), candidates)
+        found = _operation_reads(typeof(spec.mounted), spec.base_entry.name)
+        push!(reads, Set{Symbol}(param.name for param in candidates
+            if param.name in found.names || _semantic_fixed_context(param)))
+        push!(complete, found.complete)
+    end
+    counts = Dict(name => count(read -> name in read, reads) for name in placed)
+    sidebar = if isnothing(shared)
+        # What several operations read is shared. What none reads is left out,
+        # unless an operation may read more than its closure shows.
+        unread = !all(complete)
+        Set{Symbol}(name for name in placed
+                    if counts[name] >= 2 || (counts[name] == 0 && unread))
+    else
+        wanted = Set{Symbol}(Symbol(name) for name in shared)
+        unknown = setdiff(wanted, placed)
+        isempty(unknown) || throw(ArgumentError(string(
+            "semantic_app shared= names ", join(repr.(sort!(collect(unknown))), ", "),
+            ", which no operation of the surface takes; its inputs are ",
+            join(repr.(placed), ", "))))
+        wanted
+    end
+    own = [setdiff(read, sidebar) for read in reads]
+    routes = [_semantic_tabs_route(spec.mounted, spec.runtime_route, sidebar, own[i])
+              for (i, spec) in enumerate(specs)]
+
+    context_entries = _semantic_context_entries(
+        [(spec.mounted, routes[i], spec.current) for (i, spec) in enumerate(specs)];
+        names=sidebar)
+    shared_names = Set{Symbol}(entry.param.name for entry in context_entries)
+    sidebar_form = isempty(context_entries) ? nothing :
+        h.form(_semantic_context_controls(context_entries, shared_names)...;
+               id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
+               autocomplete="off", onsubmit="return false")
+    selector = isnothing(sidebar_form) ? nothing : "#" * context_id
+    refreshes = any(entry -> _semantic_context_refreshable(entry.route, entry.param),
+                    context_entries)
+
+    names = _semantic_tab_names(specs)
+    open = _semantic_open_tab(obj, names, active)
+    operations = map(enumerate(specs)) do (i, spec)
+        base = spec.base_entry
+        route = routes[i]
+        follows = base.verb === :GET && all(param -> param.source !== :path, route.params)
+        form, result = if follows
+            target = _operation_form_target(spec.mounted, spec.local_route)
+            controls = _operation_form_controls(spec.mounted, route, spec.current,
+                string(target); shared_names, context_selector=selector, lifted=own[i])
+            inputs_id = base.target_id * "-inputs"
+            form = isempty(_operation_control_params(route, shared_names)) ? nothing :
+                h.form(controls...; id=inputs_id,
+                       class="htmxo-semantic-operation-form htmxo-semantic-inputs",
+                       autocomplete="off", onsubmit="return false")
+            selectors = String[s for s in (selector, isnothing(form) ? nothing : "#" * inputs_id)
+                               if !isnothing(s)]
+            # Its own arguments are inputs of its tab, and it reads them all.
+            sent = union(shared_names, Set{Symbol}(param.name for param in
+                _operation_control_params(route, shared_names)))
+            key_reads = complete[i] ? union(reads[i], setdiff(sent, shared_names)) : nothing
+            initial = names[i] == open ?
+                Any[lazy(_semantic_follow_url(target, spec.mounted, route, spec.current, sent))] :
+                Any[]
+            form, h.div(initial...; id=base.target_id,
+                class="htmxo-semantic-operation-result", aria_live="polite",
+                data_htmxo_follow=string(target), data_htmxo_inputs=join(selectors, ' '),
+                (isnothing(key_reads) ? (;) :
+                    (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
+                data_htmxo_live="", hx_sync="this:replace")
+        else
+            form = base.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
+                spec.mounted, spec.local_route;
+                values=spec.operation_values,
+                target_id="#$(base.target_id)",
+                submit=something(spec.operation_submit, "Run"),
+                submit_attrs=spec.operation_submit_attrs,
+                form_class="htmxo-semantic-operation-form",
+                shared_context=shared_names, lifted=own[i], context_selector=selector)
+            form, h.div(; id=base.target_id, class="htmxo-semantic-operation-result",
+                aria_live="polite",
+                (refreshes ? (; data_htmxo_refreshes=context_id) : (;))...)
+        end
+        merge(base, (; form, result, tab=names[i], follows))
+    end
+
+    _activate_semantic_root_provider!(obj)
+    page_id = replace(context_id, "htmxo-semantic-context" => "htmxo-semantic-page"; count=1)
+    parts = (; object=obj, title, id=page_id, sidebar=sidebar_form, context=sidebar_form,
+               tabs=Pair[entry.title => render_operation(entry) for entry in operations],
+               tab_names=names, active=open, operations)
+    layout(parts)
+end
+
+# A tab: the operation's own inputs, then its result.
+function _default_semantic_tab(entry)
+    entry.form === nothing && entry.verb in (:WEBSOCKET, :SSE) && throw(ArgumentError(string(
+        "semantic_app has no default control for ",
+        entry.verb === :SSE ? "SSE" : "WebSocket", " operation ",
+        "$(entry.verb) $(entry.path); pass `render_operation` and render this ",
+        "entry explicitly")))
+    h.div((isnothing(entry.form) ? () : (entry.form,))..., entry.result;
+          class="htmxo-semantic-tab", data_operation=entry.name,
+          data_verb=entry.verb, data_path=entry.path)
+end
+
+# The page: the title, then the sidebar beside the tabs (the tabs alone when
+# no input is shared).
+function _default_semantic_tabs_layout(parts)
+    heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
+    tabs = tabset(parts.tabs...; id=parts.id * "-tabs", names=parts.tab_names,
+                  active=parts.active)
+    body = isnothing(parts.sidebar) ? tabs :
+        app_layout(h.aside(parts.sidebar), tabs; content_id=parts.id * "-content")
+    h.section(heading..., body; id=parts.id, class="htmxo-semantic-app htmxo-semantic-page")
+end
+
 """
     semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
                  render_operation=_default_semantic_operation, compact=false,
@@ -27288,9 +27931,24 @@ indexed child to compile that subtree.
 function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
         render_operation=_default_semantic_operation, compact::Bool=false,
         results::Symbol=:each, layout=_default_semantic_layout,
-        select=_select_every_operation)
+        select=_select_every_operation, presentation::Symbol=:stacked,
+        shared=nothing, active=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
+    presentation in (:stacked, :tabs) || throw(ArgumentError(
+        "semantic_app presentation must be :stacked or :tabs, got $(repr(presentation))"))
+    if presentation === :tabs
+        compact && throw(ArgumentError(
+            "semantic_app compact=true is a :stacked option; :tabs gives each operation a tab"))
+        results === :each || throw(ArgumentError(
+            "semantic_app results=:shared is a :stacked option; :tabs gives each operation " *
+            "its own result in its tab"))
+    else
+        isnothing(shared) || throw(ArgumentError(
+            "semantic_app shared= chooses the sidebar of presentation=:tabs"))
+        isnothing(active) || throw(ArgumentError(
+            "semantic_app active= chooses the open tab of presentation=:tabs"))
+    end
     descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
@@ -27334,42 +27992,17 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
                        current, operation_values, operation_submit, operation_submit_attrs))
     end
 
-    context_entries = Any[]
-    context_indices = Dict{Any,Int}()
-    context_names = Dict{Symbol,Any}()
-    for spec in specs, param in spec.runtime_route.params
-        get(param, :kind, nothing) === :context || continue
-        identity = _semantic_context_identity(spec.mounted, param)
-        if haskey(context_names, param.name) && context_names[param.name] != identity
-            throw(ArgumentError(string(
-                "semantic_app found two mounted context sources named ",
-                "$(repr(param.name)); context control names must be unique within one graph")))
-        end
-        context_names[param.name] = identity
-        entry = (; object=spec.mounted, route=spec.runtime_route, param,
-                   current=spec.current)
-        if haskey(context_indices, identity)
-            index = context_indices[identity]
-            prior = context_entries[index]
-            isequal(get(prior.current, param.name, nothing),
-                    get(spec.current, param.name, nothing)) ||
-                throw(ArgumentError(string(
-                    "semantic_app received conflicting values for shared context input ",
-                    "$(repr(param.name))")))
-            # Every carrier resolves the same source; the control refreshes
-            # through the first GET carrying it, else the first HTTP one.
-            something(_semantic_refresh_carrier_rank(spec.runtime_route.verb), 2) <
-                something(_semantic_refresh_carrier_rank(prior.route.verb), 2) &&
-                (context_entries[index] = entry)
-            continue
-        end
-        push!(context_entries, entry)
-        context_indices[identity] = length(context_entries)
-    end
-
     suffix = _semantic_selection_suffix(selected, length(descriptor.routes))
     context_id = _semantic_context_panel_id(obj) * suffix
-    shared_context = Set(keys(context_names))
+    presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
+        title, shared, active,
+        render_operation=render_operation === _default_semantic_operation ?
+            _default_semantic_tab : render_operation,
+        layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
+
+    context_entries = _semantic_context_entries(
+        [(spec.mounted, spec.runtime_route, spec.current) for spec in specs])
+    shared_context = Set(entry.param.name for entry in context_entries)
     # A group with a control whose options can change marks every result of
     # the surface, so the page runtime re-resolves it after a mutation.
     refreshes = any(entry -> _semantic_context_refreshable(entry.route, entry.param),
@@ -27377,15 +28010,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     context_panel = if isempty(context_entries)
         nothing
     else
-        controls = [_semantic_context_control(entry.object, entry.route, entry.param,
-                        entry.current,
-                        _semantic_context_refreshable(entry.route, entry.param) ?
-                            _operation_form_action(entry.route, entry.current,
-                                _operation_form_target(entry.object, entry.route)) :
-                            nothing,
-                        shared_context)
-                    for entry in context_entries]
-        h.fieldset(h.legend("Model inputs"), controls...;
+        h.fieldset(h.legend("Model inputs"),
+                   _semantic_context_controls(context_entries, shared_context)...;
                    id=context_id, class="htmxo-semantic-context")
     end
     result_attrs = refreshes ? (; data_htmxo_refreshes=context_id) : (;)
@@ -27463,7 +28089,8 @@ end
 
 Return a `<script>` that shows each `[data-show-when-field]` element (a widget
 built with `show_when=(field, op, value)`) exactly while its predicate holds.
-Include once per page (like [`loading_indicator_script`](@ref)). The element
+The [`htmx`](@ref) shell installs it; include it once yourself only in a
+hand-built `<head>`. The element
 is hidden with its `hidden` attribute, so a `<label>` hides on a Pico page
 too, where Pico gives every label `display: block`.
 
@@ -27482,6 +28109,14 @@ as `""`. For several values, `==`, `startswith` and `endswith` hold when one of
 them matches, `!=` when none equals the value. A field the scope does not
 contain leaves the element as it is.
 
+An element can instead carry a whole condition as JSON in `data-show-when`, as
+a generated control of a `@relevant` input does (`_client_relevance`): a
+comparison `{"field", "op", "value"}` with `op` one of `eq`, `neq`, `lt`, `le`,
+`gt`, `ge`, or `{"field", "op": "in", "values"}` (`"numeric": true` compares
+as numbers), and `{"all": […]}`, `{"any": […]}` and `{"not": …}` of those. Its
+fields are read in its scope as above, else anywhere on the page, so a control
+in a form can follow a field of a sidebar beside it.
+
 Visibility is evaluated on load, on every `change` anywhere on the page (one
 listener, so every radio of a group counts, and controls swapped in later need
 no binding), and after every htmx swap settles, since a swap can replace either
@@ -27489,6 +28124,8 @@ the element or the control it reads.
 """
 show_when_script() = h.script(Raw(raw"""
 (function() {
+  if (window.__htmxoShowWhen) return;
+  window.__htmxoShowWhen = true;
   // Controls that carry a value only when pressed never count.
   var PRESSED = /^(submit|reset|button|image)$/;
   function scopeOf(el) {
@@ -27527,8 +28164,43 @@ show_when_script() = h.script(Raw(raw"""
     });
     el.hidden = op === 'neq' ? hit : !hit;
   }
+  // A JSON condition: true or false, or null when a field it reads is on no
+  // form of the page.
+  function number(v) { return v === '' ? NaN : Number(v); }
+  function holds(p, el) {
+    var parts, i, r;
+    if (p.all || p.any) {
+      parts = p.all || p.any;
+      for (i = 0; i < parts.length; i++) {
+        r = holds(parts[i], el);
+        if (r === null) return null;
+        if (p.all ? !r : r) return !p.all;
+      }
+      return !!p.all;
+    }
+    if (p.not) { r = holds(p.not, el); return r === null ? null : !r; }
+    var values = fieldValues(scopeOf(el), p.field);
+    if (!values && scopeOf(el) !== document.body) values = fieldValues(document.body, p.field);
+    if (!values) return null;
+    var wanted = p.op === 'in' ? p.values : [p.value];
+    function same(v, w) { return p.numeric ? number(v) === number(w) : v === w; }
+    if (p.op === 'eq' || p.op === 'in') {
+      return values.some(function(v) { return wanted.some(function(w) { return same(v, w); }); });
+    }
+    if (p.op === 'neq') return !values.some(function(v) { return same(v, p.value); });
+    return values.some(function(v) {
+      var a = number(v), b = number(p.value);
+      return p.op === 'lt' ? a < b : p.op === 'le' ? a <= b : p.op === 'gt' ? a > b : a >= b;
+    });
+  }
+  function evalCondition(el) {
+    var r;
+    try { r = holds(JSON.parse(el.dataset.showWhen), el); } catch (e) { return; }
+    if (r !== null) el.hidden = !r;
+  }
   function evalAll() {
     document.querySelectorAll('[data-show-when-field]').forEach(evalShowWhen);
+    document.querySelectorAll('[data-show-when]').forEach(evalCondition);
   }
   document.addEventListener('change', function(e) {
     var name = e.target && e.target.name;
@@ -27536,6 +28208,7 @@ show_when_script() = h.script(Raw(raw"""
     document.querySelectorAll('[data-show-when-field]').forEach(function(el) {
       if (el.dataset.showWhenField === name) evalShowWhen(el);
     });
+    document.querySelectorAll('[data-show-when]').forEach(evalCondition);
   });
   document.addEventListener('htmx:afterSettle', evalAll);
   evalAll();
@@ -28788,6 +29461,164 @@ semantic_refresh_script() = h.script(Raw(raw"""
 })();
 """))
 
+"""
+    semantic_follow_script()
+
+Keep the results of a [`semantic_app`](@ref)`(…; presentation=:tabs)` page on
+their inputs. Each read's result region (`[data-htmxo-follow]`) names its
+address, the forms it is sent (`data-htmxo-inputs`: the sidebar and its tab's
+own inputs) and, where DynamicObjects can tell, the inputs it reads
+(`data-htmxo-reads`). The script asks for the result again, 300 ms after the
+last change:
+
+- when an input of those forms changes while the region is on screen, and when
+  the region comes into view (its tab is opened, or it is scrolled to);
+- only when the values it reads differ from the ones its shown result was asked
+  for. Opening a tab whose inputs did not change requests nothing, and a change
+  to an input it does not read, or to a `@relevant` input that does not apply
+  (its control is hidden), requests nothing either;
+- only while the forms are valid, so an empty required input waits.
+
+A hidden input is not sent, and an unchecked checkbox sends `false`. A new
+request replaces one still running (`hx-sync`), and the shown result stays on
+screen while the next one computes (`data-htmxo-live`); a result asked for the
+first time shows a `<progress>` until it arrives. After a mutation of
+the page finishes, every other result is asked for again when next shown.
+Automatic — no consumer wiring. The `htmx()` shell installs it; include it
+once per page when building a `<head>` by hand.
+"""
+semantic_follow_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoSemanticFollow) return;
+  window.__htmxoSemanticFollow = true;
+  var PRESSED = /^(submit|reset|button|image|file)$/;
+  var DELAY = 300;
+  function regions() {
+    return Array.prototype.slice.call(document.querySelectorAll('[data-htmxo-follow]'));
+  }
+  function formsOf(region) {
+    return (region.getAttribute('data-htmxo-inputs') || '').split(' ').filter(Boolean)
+      .map(function(s) { return document.querySelector(s); }).filter(Boolean);
+  }
+  function visible(el) {
+    if (!el.isConnected) return false;
+    if (el.checkVisibility) return el.checkVisibility();
+    return el.getClientRects().length > 0;
+  }
+  // The values a region's request carries: every named control of its forms,
+  // as the form would submit it, but a hidden one (a `@relevant` input that
+  // does not apply), and an unchecked checkbox as `false`.
+  function pairsOf(region) {
+    var pairs = [];
+    formsOf(region).forEach(function(form) {
+      Array.prototype.forEach.call(form.elements, function(c) {
+        if (!c.name || c.disabled || PRESSED.test(c.type)) return;
+        if (c.closest('[hidden]')) return;
+        if (c.type === 'radio') { if (c.checked) pairs.push([c.name, c.value]); return; }
+        if (c.type === 'checkbox') {
+          pairs.push([c.name, c.checked ? c.value : (c.value === 'true' ? 'false' : null)]);
+          if (pairs[pairs.length - 1][1] === null) pairs.pop();
+          return;
+        }
+        if (c.type === 'select-multiple') {
+          Array.prototype.forEach.call(c.selectedOptions, function(o) { pairs.push([c.name, o.value]); });
+          return;
+        }
+        pairs.push([c.name, c.value]);
+      });
+    });
+    return pairs;
+  }
+  // What the region's result depends on: the values of the inputs it reads,
+  // or of every input sent when the reads are not known.
+  function keyOf(region, pairs) {
+    var reads = region.getAttribute('data-htmxo-reads');
+    var wanted = reads === null ? null : reads.split(' ');
+    return JSON.stringify(pairs.filter(function(p) {
+      return wanted === null || wanted.indexOf(p[0]) >= 0;
+    }).sort());
+  }
+  function valid(region) {
+    return formsOf(region).every(function(f) { return !f.checkValidity || f.checkValidity(); });
+  }
+  function consider(region) {
+    if (!window.htmx || !visible(region) || !valid(region)) return;
+    var pairs = pairsOf(region);
+    var key = keyOf(region, pairs);
+    if (region.getAttribute('data-htmxo-shown') === key) return;
+    region.setAttribute('data-htmxo-shown', key);
+    // A result asked for the first time shows that it is coming.
+    if (!region.children.length) region.appendChild(document.createElement('progress'));
+    var url = region.getAttribute('data-htmxo-follow');
+    var query = new URLSearchParams(pairs).toString();
+    window.htmx.ajax('GET', query ? url + (url.indexOf('?') >= 0 ? '&' : '?') + query : url,
+                     {source: region, target: region, swap: 'innerHTML'});
+  }
+  var timers = new Map();
+  function later(region) {
+    clearTimeout(timers.get(region));
+    timers.set(region, setTimeout(function() { timers.delete(region); consider(region); }, DELAY));
+  }
+  function readers(form) {
+    return regions().filter(function(r) { return formsOf(r).indexOf(form) >= 0; });
+  }
+  var seen = new WeakSet();
+  var observer = 'IntersectionObserver' in window ? new IntersectionObserver(function(entries) {
+    entries.forEach(function(e) { if (e.isIntersecting) later(e.target); });
+  }) : null;
+  // A region the page rendered with its first answer under way was asked for
+  // with the values on the page: that is its shown key.
+  function arm(root) {
+    var found = root.matches && root.matches('[data-htmxo-follow]') ? [root] : [];
+    if (root.querySelectorAll) found = found.concat(Array.prototype.slice.call(
+      root.querySelectorAll('[data-htmxo-follow]')));
+    found.forEach(function(region) {
+      if (seen.has(region)) return;
+      seen.add(region);
+      if (region.children.length && !region.hasAttribute('data-htmxo-shown')) {
+        region.setAttribute('data-htmxo-shown', keyOf(region, pairsOf(region)));
+      }
+      if (observer) observer.observe(region);
+      else later(region);
+    });
+  }
+  document.addEventListener('change', function(e) {
+    var form = e.target && e.target.form;
+    if (!form) return;
+    readers(form).forEach(function(r) { if (visible(r)) later(r); });
+  });
+  document.addEventListener('htmx:load', function(e) { arm(e.target); });
+  // A control re-rendered in place (a dependent domain, a `@relevant` input
+  // the browser cannot evaluate) can change what the forms send.
+  document.addEventListener('htmx:afterSettle', function(e) {
+    var t = e.target, form = t && t.closest && t.closest('form');
+    if (form) readers(form).forEach(function(r) { if (visible(r)) later(r); });
+  });
+  function forget(e) {
+    var t = e.target;
+    if (t && t.matches && t.matches('[data-htmxo-follow]')) t.removeAttribute('data-htmxo-shown');
+  }
+  document.addEventListener('htmx:responseError', forget);
+  document.addEventListener('htmx:sendError', forget);
+  // A mutation's answer can change what every read of the page shows.
+  document.addEventListener('htmx:afterSwap', function(e) {
+    var config = e.detail && e.detail.requestConfig;
+    if (!config || !config.verb) return;
+    if (config.verb === 'get' && !/[?&]__htmxo_verb=/.test(config.path || '')) return;
+    var page = e.target && e.target.closest && e.target.closest('.htmxo-semantic-page');
+    if (!page) return;
+    page.querySelectorAll('[data-htmxo-follow]').forEach(function(r) {
+      r.removeAttribute('data-htmxo-shown');
+    });
+  });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { arm(document.body); });
+  } else {
+    arm(document.body);
+  }
+})();
+"""))
+
 # --- Theme ---
 
 """
@@ -29200,6 +30031,24 @@ htmxo_utility_styles() = h.style(Raw("""
     position: relative;
     z-index: 2;
 }
+
+/* A `presentation=:tabs` page: a tab's own inputs sit side by side above its
+   result, each as wide as a field rather than the whole column; a row of
+   pills takes its own width. */
+.htmxo-semantic-inputs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 1.5rem;
+    align-items: flex-start;
+}
+.htmxo-semantic-inputs > .htmxo-semantic-controls { display: contents; }
+.htmxo-semantic-inputs > *,
+.htmxo-semantic-inputs > .htmxo-semantic-controls > * {
+    flex: 0 1 16rem;
+    min-width: 0;
+}
+.htmxo-semantic-inputs fieldset,
+.htmxo-semantic-inputs .htmxo-relevant:has(> fieldset) { flex-basis: auto; }
 .htmxo-semantic-card[data-rich="true"] > label {
     position: absolute;
     inset: 0;
