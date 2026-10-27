@@ -8,8 +8,9 @@ using TestItemRunner
     import TOML
     root = pkgdir(HTMXObjects)
     version = VersionNumber(TOML.parsefile(joinpath(root, "Project.toml"))["version"])
-    changelog = read(joinpath(root, "CHANGELOG.md"), String)
-    headings = [VersionNumber(m[1]) for m in eachmatch(r"^## (\d+\.\d+\.\d+)[ \t]*$"m, changelog)]
+    # eachline strips "\n" and "\r\n" alike: a Windows checkout writes CRLF.
+    matches = (match(r"^## (\d+\.\d+\.\d+)\s*$", line) for line in eachline(joinpath(root, "CHANGELOG.md")))
+    headings = [VersionNumber(m[1]) for m in matches if m !== nothing]
     @test !isempty(headings)
     @test first(headings) == version
     @test allunique(headings)
