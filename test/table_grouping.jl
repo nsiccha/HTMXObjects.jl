@@ -2878,8 +2878,8 @@ end
     # Another grouping lists each leaf once, with its first row in the tree
     # (c2 as section 1.1 covers it), in leaf order; the tree waits beside it.
     status = html(outline_table(group_by=["Status"], searchable=true, id="o"))
-    @test ids(tbody(status)) == ["group--open", "group--open--c4", "group--shown", "group--shown--c1", "group--shown--c3",
-                                 "group--described", "group--described--c2"]
+    @test ids(tbody(status)) == ["o--group--open", "group--open--c4", "o--group--shown", "group--shown--c1", "group--shown--c3",
+                                 "o--group--described", "group--described--c2"]
     @test contains(tbody(status), "c2 in 1.1") && !contains(tbody(status), "c2 in 2") && contains(status, "4 of 4 rows shown")
     stash = match(r"<template data-htmxo-tree=\"\">.*?</template>"s, status).match
     @test ids(stash) == ids(tbody(tree)) && contains(stash, "c2 in 2")
@@ -2977,7 +2977,7 @@ end
             search('c3');
             check('search-tree', count('o') === '1 of 4 rows shown' && shown('o') === 's1,s1--1,c1--1-c3');
             pill('o', 'Status').click();
-            check('search-status', shown('o') === 'group--shown,group--shown--c3' && count('o') === '1 of 4 rows shown');
+            check('search-status', shown('o') === 'o--group--shown,group--shown--c3' && count('o') === '1 of 4 rows shown');
             search('');
             // A table that opens grouped: its tree comes from the page.
             check('p-first', await parity(w('p'), '/p?group_by=Status', true));
