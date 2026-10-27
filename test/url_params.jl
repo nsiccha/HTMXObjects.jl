@@ -1,8 +1,8 @@
 @testmodule UrlParamsFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
-    export UrlParamsApp, SlowUrlParamsApp, PickedUrlParamsApp, FollowUrlParamsApp, KS, PROBES, alarms_view,
-           bundle, bundle_name
+    export UrlParamsApp, SlowUrlParamsApp, PickedUrlParamsApp, FollowUrlParamsApp, ZoomUrlParamsApp, KS,
+           PROBES, alarms_view, bundle, bundle_name
 
     const KS = (3.0, 4.0, 5.0)
     const PROBES = ("a", "b", "c")
@@ -307,6 +307,80 @@
         @get index() = h.div(followed_controls()..., followed_view(3.0, "a"), h.script(Raw(FOLLOW_DRIVER)))
     end
 
+    # A part whose links load a value into it (an innerHTML swap) and push the
+    # page address, as a map's zoom links load a level into its frame.
+    zoomed_view(k) = h.div(h.p("k=$k"; class="k"),
+        (h.a("z$(Int(x))"; id="z$(Int(x))", href="#", hx_get="/zoomed?k=$x", hx_target="#zoom",
+             hx_swap="innerHTML", hx_push_url="/?k=$x") for x in KS)...)
+    zoom_frame(k) = h.div(; id="zoom", hx_get="/zoomed", hx_trigger="none",
+                          url_params(k = k; values = (k = KS,))...)(zoomed_view(k))
+
+    # Checks for the browser item over `ZoomUrlParamsApp`: two links load 4.0
+    # and 5.0, then Back and Forward step through them, restored from htmx's
+    # history cache (snag url-params-eleme-4feb3a12: each restore of a value a
+    # link had loaded requested it again).
+    const ZOOM_DRIVER = raw"""
+    window.addEventListener('load', async function () {
+      const checks = [];
+      const check = (name, ok) => checks.push([name, Boolean(ok)]);
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const wait = async cond => {
+        for (let n = 0; n < 200 && !cond(); n++) await sleep(20);
+        const ok = cond();
+        await sleep(60);
+        return ok;
+      };
+      const shows = k => (document.querySelector('#zoom .k') || {}).textContent === 'k=' + k &&
+        new URLSearchParams(location.search).get('k') === (k === '3.0' ? null : k) &&
+        JSON.parse(document.getElementById('zoom').getAttribute('data-htmxo-url-params'))[0][2] === k;
+      let failures = 0, settles = 0;
+      const restores = [];
+      document.body.addEventListener('htmx:responseError', () => failures++);
+      document.body.addEventListener('htmx:sendError', () => failures++);
+      document.addEventListener('htmx:afterSettle', () => { settles++; });
+      document.addEventListener('htmx:historyRestore', e => { restores.push(e.detail); });
+      // Click only once htmx has settled the previous swap.
+      const follow = async id => {
+        const before = settles;
+        document.getElementById(id).click();
+        return await wait(() => settles > before);
+      };
+      const step = async move => {
+        const before = restores.length;
+        move();
+        return await wait(() => restores.length > before);
+      };
+      try {
+        check('start', shows('3.0'));
+        check('link-4', await follow('z4') && shows('4.0'));
+        check('link-5', await follow('z5') && shows('5.0'));
+        check('back-4', await step(() => history.back()) && shows('4.0'));
+        check('back-start', await step(() => history.back()) && shows('3.0'));
+        check('forward-4', await step(() => history.forward()) && shows('4.0'));
+        check('forward-5', await step(() => history.forward()) && shows('5.0'));
+        check('from-cache', restores.length === 4 && restores.every(r => !r.cacheMiss));
+        // Nothing loads afterwards either.
+        await sleep(300);
+        check('kept', shows('5.0'));
+        check('no-failed-request', failures === 0);
+      } catch (err) {
+        check('error: ' + String(err), false);
+      }
+      const result = document.createElement('pre'); result.id = 'checks';
+      result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+      document.body.appendChild(result);
+    });
+    """
+
+    @htmx struct ZoomUrlParamsApp
+        __page__(content) = htmx(h.main(content); assets="/test-assets", sse_version=nothing,
+            ws_version=nothing, preload_version=nothing, hyperscript_version=nothing,
+            pico_version=nothing, feedback=false, compose=false, overlay=false)
+        "Zoomed"
+        @get zoomed(; k::Float64=3.0) = zoomed_view(k)
+        @get index() = h.div(zoom_frame(3.0), h.script(Raw(ZOOM_DRIVER)))
+    end
+
     # The bundle file of an app address, flat, query folded into the name.
     bundle_name(address) = address == "/" ? "index.html" :
         replace(lstrip(address, '/'), r"[?=&]" => "-") * ".html"
@@ -597,6 +671,68 @@ end
                 all(endswith(":true"), lines) && sort(requests) == sort(expected) ||
                     @info "url_params controls run" url checks=join(lines, "\n") requests=join(requests, "\n")
             end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "Back and Forward to a value a link loaded request nothing" setup=[UrlParamsFixture, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        files, _ = bundle(ZoomUrlParamsApp())
+        requests = String[]
+        missing_files = String[]
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        # The app, or the exported files as a static host serves them. Both at
+        # the root: htmx 2.0.8 files the snapshot of a relative pushed address
+        # (the export's `index.html?k=4.0`) under its path from the root, so
+        # below a prefix its Back misses the snapshot and reloads the page.
+        static = Ref(false)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            endswith(path, "/test-assets/htmx.min.js") &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if static[]
+                name = path[2:end]
+                push!(requests, name)
+                haskey(files, name) && return HTTP.Response(200, ["Content-Type" => "text/html"], files[name])
+                push!(missing_files, name)
+                return HTTP.Response(404)
+            end
+            push!(requests, String(req.target))
+            dispatch(req.method, String(req.target); headers=collect(req.headers))
+        end
+        # One request per link, none for Back or Forward.
+        runs = ((false, "", ["/", "/zoomed?k=4.0", "/zoomed?k=5.0"]),
+                (true, "index.html", ["index.html", "zoomed-k-4.0.html", "zoomed-k-5.0.html"]))
+        try
+            for (exported, url, expected) in runs
+                empty!(requests)
+                static[] = exported
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/$url`)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                isnothing(checks) && continue
+                lines = split(checks[1], '\n')
+                for line in lines
+                    @test endswith(line, ":true")
+                end
+                @test length(lines) == 10
+                @test requests == expected
+                all(endswith(":true"), lines) && requests == expected ||
+                    @info "url_params history run" url checks=join(lines, "\n") requests=join(requests, "\n")
+            end
+            @test isempty(missing_files)
         finally
             close(server)
         end
