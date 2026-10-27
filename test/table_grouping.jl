@@ -2254,6 +2254,107 @@ end
     end
 end
 
+@testitem "tally group summaries regroup in the browser browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        tally = ColumnSummary(:tally, t -> t.iban; order=["DE03", "DE01"])
+        # A tally in the IBAN column; a breakdown (pairs) in the first column
+        # of a German nested table, whose key and count move to the second.
+        flat(group_by; kw...) = regroup_table(; group_by, id="g", searchable=true,
+            group_summary=["IBAN" => tally, "Amount" => ColumnSummary(:sum, t -> t.amount; digits=1)], kw...)
+        nested(group_by) = regroup_table(; group_by, id="n", key=t -> "n" * t.id, texts=table_texts(:de),
+            group_summary=["Party" => ColumnSummary(:tally, t -> [t.iban => -t.amount, "all" => 1]; digits=1)])
+        # Rows an app builds itself (`summary_cell`) take the column's scale too.
+        own = sortable_table(["Name", "IBAN"], [h.tr(h.td(n), summary_cell(tally, TX[r])) for (n, r) in (("three", 1:3), ("one", 3:3))];
+            id="own")
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            let requests = 0;
+            document.body.addEventListener('htmx:beforeRequest', () => requests++);
+            const g = () => document.getElementById('g').closest('[data-htmxo-grouped]');
+            const n = () => document.getElementById('n').closest('[data-htmxo-grouped]');
+            const row = id => document.getElementById('row-' + id);
+            const value = (id, i) => row(id).querySelector('[data-htmxo-group-summary="' + i + '"] [data-htmxo-tally]');
+            const width = (id, i) => value(id, i).querySelector('.htmxo-tally-bar').getBoundingClientRect().width;
+            const levels = v => v === 'none' ? [] : [v];
+            const regroup = v => htmxoGroupRequest(g().querySelector('.htmxo-group-pills'), levels(v), null);
+            // Every grouping: the server's rows, tally cells included, built in the browser.
+            for (const v of ['iban', 'rule', 'media', 'none', 'party']) {
+                regroup(v);
+                check('parity-' + v, await parity(g(), '/flat?group_by=' + v));
+            }
+            check('label', value('group--Acme', 0).getAttribute('aria-label') === '3 (DE01: 2; DE02: 1)' &&
+                value('group--Acme', 0).closest('td').dataset.htmxoNumber === '3' &&
+                Array.from(value('group--Acme', 0).querySelectorAll('.htmxo-tally-bar > span'), s => s.title).join('|') === 'DE01: 2|DE02: 1');
+            // One scale per column and level: Acme's 3 is the longest, Bakery's 2 is two thirds of it.
+            const table = g().querySelector('table');
+            check('scale', table.style.getPropertyValue('--htmxo-tally-max-1-1') === '3' &&
+                Math.abs(width('group--Bakery', 0) / width('group--Acme', 0) - 2 / 3) < 0.03 &&
+                Math.abs(width('group--Acme--Prime', 0) / width('group--Acme', 0) - 1 / 3) < 0.03 || [width('group--Acme', 0), width('group--Bakery', 0)]);
+            regroup('rule');
+            check('rescaled', table.style.getPropertyValue('--htmxo-tally-max-1-1') === '6' &&
+                value('group--Shops', 0).getAttribute('aria-label') === '6 (DE03: 2; DE01: 3; DE02: 1)' &&
+                Math.abs(width('group--Media', 0) / width('group--Shops', 0) - 2 / 6) < 0.03);
+            // Segments as long as their counts, 2px apart: DE01's 3 of Shops' 6.
+            const parts = Array.from(value('group--Shops', 0).querySelectorAll('.htmxo-tally-bar > span'), s => s.getBoundingClientRect().width);
+            check('segments', parts.length === 3 && Math.abs(parts[1] / (width('group--Shops', 0) - 4) - 0.5) < 0.03 || parts);
+            // A row update rendered by the server fits the browser's rows and keeps the scale.
+            htmxoUpdateRows(await (await fetch('/flat?group_by=rule&update=p4')).text());
+            check('row-update', await parity(g(), '/flat?group_by=rule') === true && table.style.getPropertyValue('--htmxo-tally-max-1-1') === '6');
+            // Nested pills on the German table with the breakdown in its first column.
+            const pill = name => n().querySelector('[data-htmxo-group-name="' + name + '"] > button');
+            pill('iban').click();
+            check('nested-parity', await parity(n(), '/nested?group_by=party&group_by=iban', true));
+            check('nested-cell', row('group--Acme--DE01').querySelector('[data-htmxo-group-summary="0"] [data-htmxo-tally]').getAttribute('aria-label') ===
+                    '82,0 (DE01: 80,0; all: 2,0)' &&
+                row('group--Acme--DE01').cells[1].querySelector('[data-htmxo-group-label]').textContent === 'DE01');
+            const nt = n().querySelector('table');
+            check('nested-scale', nt.style.getPropertyValue('--htmxo-tally-max-0-1') === '103' && nt.style.getPropertyValue('--htmxo-tally-max-0-2') === '102');
+            check('toggle', row('group--Acme').cells[0].querySelector('button[data-htmxo-tree-toggle]').getAttribute('aria-label') !== null);
+            // The app's own rows: named into the column's scale on load.
+            const ot = document.getElementById('own').closest('table') || document.querySelector('#own table');
+            const ownValues = Array.from(document.querySelectorAll('[data-htmxo-tally]')).filter(v => v.closest('table') === ot);
+            check('own-scale', ot.style.getPropertyValue('--htmxo-tally-max-1-0') === '3' &&
+                ownValues.every(v => v.style.getPropertyValue('--htmxo-tally-max') === 'var(--htmxo-tally-max-1-0)') ||
+                [ot.getAttribute('style'), ownValues.map(v => v.getAttribute('style')).join(' | ')]);
+            check('no-requests', requests === 0);
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(flat(["party"]), nested("party"), own, driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", x))
+            q = HTTP.queryparams(uri)
+            uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
+            uri.path == "/flat" ? html(haskey(q, "update") ? flat(levels; update_rows=q["update"]) : flat(levels)) :
+            uri.path == "/nested" ? html(nested(levels)) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 16
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "group_order: the browser regroups in the server's order browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"

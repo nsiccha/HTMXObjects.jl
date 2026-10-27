@@ -20767,11 +20767,12 @@ function sortable_table_styles()
 /* A :tally group summary (`ColumnSummary(:tally, …)`): the total, then a
    stacked bar as long as the total on the scale the column's rows of one
    level share (`--htmxo-tally-max`, from `htmxoTallyScale`), one segment
-   per category, 2px of the row between segments. The track keeps one width
-   per column, so bars compare; it wraps under the total in a narrow column. */
+   per category, 2px of the row between segments. Every track has the same
+   width (`--htmxo-tally-width`, set it for a narrow column), so bars
+   compare; it wraps under the total where the cell is narrower. */
 .htmxo-tally { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .1em .4em; vertical-align: middle; }
 .htmxo-tally-total { font-variant-numeric: tabular-nums; }
-.htmxo-tally-track { display: block; inline-size: min(var(--htmxo-tally-width, 6rem), 100%); flex: none; }
+.htmxo-tally-track { display: block; flex: none; inline-size: var(--htmxo-tally-width, 5rem); }
 .htmxo-tally-bar { display: flex; gap: 2px; inline-size: calc(var(--htmxo-tally-total) / var(--htmxo-tally-max, var(--htmxo-tally-total)) * 100%); max-inline-size: 100%; block-size: .7em; }
 .htmxo-tally-bar > span { flex: var(--htmxo-tally-n, 1) 1 0; min-inline-size: 2px; background: var(--htmxo-tally-color, var(--htmxo-category-other)); }
 .htmxo-tally-bar > span:first-child { border-start-start-radius: 2px; border-end-start-radius: 2px; }
