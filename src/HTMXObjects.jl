@@ -5430,9 +5430,12 @@ const _PRIVATE_LABELS = (en = "not public", de = "nicht öffentlich")
 # of any encoding.
 _css_string(s) = string('"', join(isascii(c) ? (c in ('"', '\\') ? "\\" * c : string(c)) :
     "\\" * lpad(string(UInt32(c); base=16), 6, '0') for c in s), '"')
-_private_label(::Nothing) = _PRIVATE_LABELS.en
-_private_label(lang::AbstractString) =
-    get(_PRIVATE_LABELS, Symbol(lowercase(first(split(lang, '-')))), _PRIVATE_LABELS.en)
+_private_label(lang) = _lang_entry(_PRIVATE_LABELS, lang)
+# A table of words by language (`(en = …, de = …)`): the entry of `lang`'s
+# primary language, English for any other and outside a page.
+_lang_entry(table::NamedTuple, ::Nothing) = table.en
+_lang_entry(table::NamedTuple, lang::AbstractString) =
+    get(table, Symbol(lowercase(first(split(lang, '-')))), table.en)
 
 # Elements that must stay a direct child of their parent carry the mark
 # themselves; anything else sits in a `span` when it is phrasing content (text
@@ -18079,7 +18082,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     quarto::AbstractString="quarto", audience=:public,
                     glossary=_page_glossary())
     _check_audience(audience, "pdf_report") === :public && _check_public(markdown, "the report's Markdown")
-    markdown = _glossary_report(markdown, _check_glossary(glossary, "pdf_report"))
+    markdown = _glossary_report(markdown, _check_glossary(glossary, "pdf_report"); audience, lang)
     isempty(strip(title)) &&
         throw(ArgumentError("pdf_report: `title` is blank; PDF/UA-1 requires a document title"))
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
@@ -28878,6 +28881,14 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 .htmxo-terms .htmxo-term[data-htmxo-term-open] > .htmxo-term-def { display: block; position: fixed; }
 .htmxo-glossary > dt { font-weight: bold; }
 .htmxo-glossary > dt > dfn { font-style: normal; }
+/* A glossary entry's other names and its related entries sit on lines of
+   their own under the definition. The entry a link opens is highlighted. A
+   private entry's term and definition are both outlined; the term alone
+   carries the label. */
+.htmxo-glossary > dd > small { display: block; }
+.htmxo-glossary > dt:target,
+.htmxo-glossary > dt:target + dd { background: var(--pico-mark-background-color, Mark); }
+.htmxo-glossary > dt.htmxo-private + dd.htmxo-private::before { content: none; }
 }
 
 /* Unlayered so it beats Pico's unlayered link colour: a term's use reads as

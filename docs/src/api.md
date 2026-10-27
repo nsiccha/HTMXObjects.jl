@@ -3088,7 +3088,19 @@ end
   definition, unless the `ColumnSpec` has a `help` of its own.
 - **The glossary.** `glossary_section(g)` lists the terms alphabetically, each
   at `#term-<id>` (`id` defaults to the term in lower case, `ä` as `ae`). Mount
-  it at `href`.
+  it at `href`. A glossary given as `"topic" => terms` pairs lists each topic
+  under its own heading, topics and terms in the order written. The entry a
+  link opens is highlighted.
+- **Other names and related entries.** A term's `also` names show after its
+  definition (`Also:`, `Auch:` on a German page), a note in parentheses
+  (`"Verkehrsbezirk" => "so in der Leistungsbeschreibung"`); they are shown,
+  not matched, so list a name in `forms` too where its uses should link. `see`
+  names related entries by term or id; the entry ends with links to them
+  (`See also:`, `Siehe auch:`).
+- **Private terms.** `private=true` keeps a term out of public answers: its
+  entry, a topic whose terms are all private, the links to it from pages and
+  other entries, and its definition. A private reader (the live app) sees the
+  entry marked like other `private` content and the term's uses linked.
 - **Markdown and exports.** `?plain` writes a use as
   `[Registerzelle](/glossar#term-registerzelle)`; a static export rewrites the
   link to the exported glossary page. `pdf_report` points every term link into
