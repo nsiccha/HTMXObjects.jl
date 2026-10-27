@@ -187,6 +187,166 @@ end
     @test !contains(plain, "HtmlOnly") && !contains(plain, "Node(") && !contains(plain, "{#term-")
 end
 
+# A glossary by topic, with other names, related entries and private terms
+# (snag `moving-verkehrss-02fbe479`, reporter VerkehrsStrukturdaten:ux:modell;
+# design decision 16ra5z8, no preference on all three prongs = the recommended
+# ones: a list per topic, `"topic" => terms` pairs, other names shown only).
+@testmodule TopicGlossaryFixture begin
+    using HTMXObjects
+    import HTMXObjects: h
+    const GT = Glossary([
+        "Raum" => [
+            GlossaryTerm("Teilverkehrszelle", "Die Einheit der Schätzung."; forms=["Teilverkehrszellen", "TVZ"],
+                         also=["Verkehrsbezirk" => "so in der Leistungsbeschreibung", "TVZ"], see=["KBA-Gebiet", "bezirk"]),
+            GlossaryTerm("KBA-Gebiet", "Eine Ebene über den Teilverkehrszellen."; see=["Teilverkehrszelle"]),
+            "Bezirk" => "Einer der 12 Berliner Bezirke."],
+        "Sampler" => [
+            GlossaryTerm("R̂", "Vergleicht die Ketten."; id="rhat", private=true),
+            GlossaryTerm("ESS", "Die effektive Stichprobengröße."; private=true, see=["rhat"])],
+        "Ergebnisse" => [
+            GlossaryTerm("Schätzwert", "Der Mittelwert der Ziehungen."; also=["Mittelwert"], see=["R̂"]),
+            GlossaryTerm("Divergenz", "Ein Schritt, bei dem die Integration versagt."; private=true)],
+    ]; href="/glossar", title="Glossar")
+    html(x) = repr("text/html", x)
+    as(audience, f; lang="de") = HTMXObjects._with_page_lang(() -> with_audience(f, audience), lang)
+    links(s) = count("class=\"htmxo-term\"", s)
+    at(s, needle) = findfirst(needle, s).start
+end
+
+@testitem "a glossary by topic keeps its order, its other names and its related entries" setup=[TopicGlossaryFixture] tags=[:unit] begin
+    using HTMXObjects, Test
+    import HTMXObjects: h
+    (; GT, links, html) = TopicGlossaryFixture
+    @test first.(GT.topics) == ["Raum", "Sampler", "Ergebnisse"]
+    @test [t.term for t in last(GT.topics[1])] == ["Teilverkehrszelle", "KBA-Gebiet", "Bezirk"]   # as written
+    @test [t.term for t in GT.terms][1:3] == ["Bezirk", "Divergenz", "ESS"]                         # alphabetically
+    entry(id) = HTMXObjects._glossary_by_id(GT, id)
+    @test entry("teilverkehrszelle").see == ["kba-gebiet", "bezirk"]       # by term or by id, held by id
+    @test entry("schaetzwert").see == ["rhat"]
+    @test entry("teilverkehrszelle").also == ["Verkehrsbezirk" => "so in der Leistungsbeschreibung", "TVZ" => ""]
+    @test entry("rhat").private && !entry("schaetzwert").private
+    # An other name is shown, not matched; a form is matched.
+    @test links(html(link_terms(h.p("Der Verkehrsbezirk."), GT))) == 0
+    @test links(html(link_terms(h.p("Die TVZ."), GT))) == 1
+
+    @test_throws ArgumentError Glossary(["Raum" => [GlossaryTerm("A", "a"; see=["B"])]])            # undeclared
+    @test_throws ArgumentError Glossary([GlossaryTerm("A", "a"; see=["a"])])                       # itself
+    @test_throws ArgumentError Glossary(["Raum" => ["A" => "a"], "B" => "b"])                      # partly a topic
+    @test_throws ArgumentError Glossary(["Raum" => [], "Daten" => ["A" => "a"]])                   # an empty topic
+    @test_throws ArgumentError Glossary(["Raum" => ["A" => "a"], "Raum" => ["B" => "b"]])          # twice
+    @test_throws ArgumentError Glossary([" " => ["A" => "a"]])
+    @test_throws ArgumentError GlossaryTerm("A", "a"; also=[" "])
+    @test_throws ArgumentError GlossaryTerm("A", "a"; also=["B" => " "])
+    @test_throws ArgumentError GlossaryTerm("A", "a"; see=[""])
+end
+
+@testitem "glossary_section shows topics, other names, related entries and private entries by reader" setup=[TopicGlossaryFixture] tags=[:unit] begin
+    using HTMXObjects, Test
+    import HTMXObjects: to_markdown_string
+    (; GT, html, as, at) = TopicGlossaryFixture
+    section = glossary_section(GT)
+
+    inside = as(:private, () -> html(section))
+    @test contains(inside, "<h2>Glossar</h2>")
+    @test at(inside, "<h3>Raum</h3>") < at(inside, "<h3>Sampler</h3>") < at(inside, "<h3>Ergebnisse</h3>")
+    @test at(inside, "term-teilverkehrszelle\"") < at(inside, "term-kba-gebiet\"") < at(inside, "term-bezirk\"")
+    @test contains(inside, "<small>Auch: Verkehrsbezirk (so in der Leistungsbeschreibung), TVZ</small>")
+    @test contains(inside, "<small>Siehe auch: <a href=\"/glossar#term-kba-gebiet\">KBA-Gebiet</a>, " *
+                           "<a href=\"/glossar#term-bezirk\">Bezirk</a></small>")
+    # Private entries are there for a private reader, marked in place.
+    for id in ("rhat", "ess", "divergenz")
+        @test contains(inside, "id=\"term-$id\"")
+    end
+    @test contains(inside, "<!--htmxo-private-->")
+    @test count(r"<dt[^>]*class=\"htmxo-private\"", inside) == 1      # Divergenz; the Sampler topic is marked whole
+    @test contains(inside, "<a href=\"/glossar#term-rhat\">R̂</a>")      # Schätzwert's related entry
+    english = as(:private, () -> html(section); lang=nothing)
+    @test contains(english, "<small>Also: Verkehrsbezirk") && contains(english, "<small>See also: ")
+
+    # A public reader gets none of them: no entry, no topic, no link to one.
+    public = as(:public, () -> html(section))
+    for gone in ("term-rhat", "term-ess", "term-divergenz", "<h3>Sampler</h3>", "R̂", "htmxo-private")
+        @test !contains(public, gone)
+    end
+    @test contains(public, "<h3>Ergebnisse</h3>") && contains(public, "id=\"term-schaetzwert\"")
+    # Schätzwert's only related entry is private: no line of related entries.
+    @test contains(public, "<dd>Der Mittelwert der Ziehungen.<small>Auch: Mittelwert</small></dd>")
+
+    md = as(:private, () -> to_markdown_string(section))
+    @test contains(md, "## Glossar\n\n### Raum\n\n[**Teilverkehrszelle**]{#term-teilverkehrszelle} — Die Einheit der Schätzung.\\\n" *
+                       "*Auch:* Verkehrsbezirk (so in der Leistungsbeschreibung), TVZ\\\n" *
+                       "*Siehe auch:* [KBA-Gebiet](/glossar#term-kba-gebiet), [Bezirk](/glossar#term-bezirk)\n\n")
+    @test contains(md, "::: {.htmxo-private}")                          # the Sampler topic
+    @test contains(md, "*nicht öffentlich:* [**Divergenz**]{#term-divergenz}")
+    @test !contains(md, "*nicht öffentlich:* [**R̂**]")                 # marked once, by its topic
+    pmd = as(:public, () -> to_markdown_string(section))
+    @test !contains(pmd, "Sampler") && !contains(pmd, "term-rhat") && !contains(pmd, "Divergenz")
+    @test endswith(pmd, "[**Schätzwert**]{#term-schaetzwert} — Der Mittelwert der Ziehungen.\\\n*Auch:* Mittelwert")
+
+    plain = as(:public, () -> repr("text/plain", section))
+    @test contains(plain, "Teilverkehrszelle — Die Einheit der Schätzung.\nAuch: Verkehrsbezirk (so in der Leistungsbeschreibung), TVZ\n" *
+                          "Siehe auch: KBA-Gebiet, Bezirk")
+    @test !contains(plain, "R̂") && !contains(plain, "{#term-")
+end
+
+@testitem "a private term links for a private reader only" setup=[TopicGlossaryFixture] tags=[:unit] begin
+    using HTMXObjects, Test
+    import HTMXObjects: h, to_markdown_string
+    (; GT, html, as, links) = TopicGlossaryFixture
+    page = link_terms(h.p("R̂ und Schätzwert."), GT)
+    inside = as(:private, () -> html(page))
+    @test links(inside) == 2 && contains(inside, "Vergleicht die Ketten.")
+    public = as(:public, () -> html(page))
+    @test links(public) == 1
+    @test contains(public, "<p>R̂ und ") && !contains(public, "term-rhat") && !contains(public, "Vergleicht")
+    @test strip(as(:public, () -> to_markdown_string(page))) == "R̂ und [Schätzwert](/glossar#term-schaetzwert)."
+    @test contains(as(:private, () -> to_markdown_string(page)), "[R̂](/glossar#term-rhat)")
+    @test links(as(:public, () -> html(link_terms(h.p(term("R̂")), GT)))) == 0
+
+    # A column named after a private term is explained to a private reader only.
+    table = render_table([(ESS=1, Schätzwert=2)]; sortable=false)
+    @test contains(as(:private, () -> html(link_terms(table, GT))), "title=\"Die effektive Stichprobengröße.\"")
+    publictable = as(:public, () -> html(link_terms(table, GT)))
+    @test !contains(publictable, "Stichprobengröße") && contains(publictable, "title=\"Der Mittelwert der Ziehungen.\"")
+
+    # A report lists what its reader may see, and links a related entry only where it lists it.
+    used = h.p("R̂, Schätzwert und TVZ.")
+    report(audience) = HTMXObjects._glossary_report(as(audience, () -> to_markdown_string(link_terms(used, GT))), GT;
+                                                    audience, lang="de-DE")
+    inside = report(:private)
+    @test contains(inside, "*nicht öffentlich:* [**R̂**]{#term-rhat} — Vergleicht die Ketten.")
+    @test contains(inside, "*Siehe auch:* [R̂](#term-rhat)")                # listed in the report
+    @test contains(inside, "*Siehe auch:* KBA-Gebiet, Bezirk")             # not listed: no link
+    for m in eachmatch(r"\]\(#term-([a-z0-9-]+)\)", inside)
+        @test contains(inside, "{#term-$(m.captures[1])}")               # every link has a target
+    end
+    public = report(:public)
+    @test !contains(public, "term-rhat") && !contains(public, "nicht öffentlich")
+    @test contains(public, "[**Schätzwert**]{#term-schaetzwert} — Der Mittelwert der Ziehungen.\\\n*Auch:* Mittelwert\n")
+end
+
+@testitem "a root's glossary by topic: the live app shows private entries, a public export leaves them out" setup=[TopicGlossaryFixture] tags=[:unit] begin
+    using HTMXObjects, Test
+    import HTMXObjects: h
+    (; links) = TopicGlossaryFixture
+    @htmx struct GlossaryTopicApp
+        __glossary__ = TopicGlossaryFixture.GT
+        __lang__ = "de"
+        @get glossary_topic_glossar() = glossary_section(__glossary__)
+        @get glossary_topic_text() = h.p("R̂ und Schätzwert.")
+    end
+    route!(GlossaryTopicApp())
+    body(target; kw...) = String(HTMXObjects._message_body_bytes(dispatch(:GET, target; headers=["HX-Request" => "true"], kw...)))
+    live = body("/glossary_topic_glossar"; audience=:private)
+    @test contains(live, "id=\"term-rhat\"") && contains(live, "Siehe auch: ")
+    @test links(body("/glossary_topic_text"; audience=:private)) == 2
+    @test !contains(body("/glossary_topic_glossar"; audience=:public), "term-rhat")
+    exported = body("/glossary_topic_glossar"; static=StaticExport(; record_base="/base"))
+    @test !contains(exported, "term-rhat") && !contains(exported, "Sampler") && contains(exported, "id=\"term-schaetzwert\"")
+    text = body("/glossary_topic_text"; static=StaticExport(; record_base="/base"))
+    @test links(text) == 1 && !contains(text, "term-rhat")
+end
+
 @testitem "a root's __glossary__ links its answers and explains its columns" setup=[GlossaryFixture] tags=[:unit] begin
     using HTMXObjects, HTTP, Test
     import HTMXObjects: h
@@ -307,6 +467,29 @@ end
             text = read(`pdftotext -layout $out -`, String)
             @test contains(text, "Glossar")
             @test contains(text, "Die Erwartung des Modells")
+        end
+    end
+end
+
+@testitem "pdf_report appends other names and related entries, and private ones for a private reader" setup=[TopicGlossaryFixture] tags=[:quarto] begin
+    using HTMXObjects, Test
+    import HTMXObjects: h
+    if isnothing(Sys.which("quarto"))
+        @test_skip true
+    else
+        dir = mktempdir()
+        page = h.article(h.p("Die TVZ, der Schätzwert und R̂."))
+        texts = map((:private, :public)) do audience
+            out = pdf_report(page, joinpath(dir, "glossar-$audience.pdf"); title="Bericht", lang="de-DE",
+                             glossary=TopicGlossaryFixture.GT, audience)
+            @test isfile(out)
+            isnothing(Sys.which("pdftotext")) ? nothing : read(`pdftotext -layout $out -`, String)
+        end
+        if !any(isnothing, texts)
+            inside, public = texts
+            @test contains(inside, "Auch: Verkehrsbezirk") && contains(inside, "Siehe auch:")
+            @test contains(inside, "Vergleicht die Ketten.") && contains(inside, "nicht öffentlich")
+            @test !contains(public, "Vergleicht die Ketten.") && contains(public, "Auch: Mittelwert")
         end
     end
 end
