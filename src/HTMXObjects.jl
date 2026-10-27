@@ -7843,12 +7843,13 @@ to_response(r::HXResponse) = let resp = to_response(r.value)
 end
 
 # A route answer that is a finished response. An `HXResponse` is rendered
-# here, on the task answering the request, which holds that request's audience
-# and page language: a route body may run elsewhere (a `@queued` body runs in
-# DynamicObjects' job queue, which carries neither; snag
-# `queued-hx-respon-fb8c1312`).
+# here, on the task answering the request, which holds that request's audience,
+# page language and glossary: a route body may run elsewhere (a `@queued` body
+# runs in DynamicObjects' job queue, which carries none of them; snag
+# `queued-hx-respon-fb8c1312`). Its value links the glossary's terms first, as
+# any other answer does in `_resolve_response`.
 _answer_value(value) = value
-_answer_value(r::HXResponse) = to_response(r)
+_answer_value(r::HXResponse) = to_response(_glossary_answer(r))
 _finalized_response(r::HXResponse) = to_response(r)
 
 const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
