@@ -162,10 +162,23 @@ each entry is a paragraph opening with the term as a span carrying its address
 (`[**Registerzelle**]{#term-registerzelle} — …`), which Pandoc reads, so links
 to it resolve in a [`pdf_report`](@ref) too. Its text links no terms.
 """
-glossary_section(g::Glossary) = SemanticSection(g.title,
-    html_only(h.dl((x for t in g.terms for x in (h.dt(h.dfn(t.term); id="term-" * t.id), h.dd(t.definition)))...;
-                   class="htmxo-glossary", data_htmxo_no_terms="")),
-    markdown_only(_glossary_markdown(g.terms)))
+glossary_section(g::Glossary) = SemanticSection(g.title, _GlossaryEntries(g.terms))
+
+# The section's one child, written by each format in its own form; plain text
+# is the Markdown form without its markup. The walk leaves it alone (no
+# `_link_terms` method), so its text links no terms.
+struct _GlossaryEntries <: SemanticNode
+    terms::Vector{GlossaryTerm}
+end
+_semantic_html_node(entries::_GlossaryEntries) = h.dl(
+    (x for t in entries.terms for x in (h.dt(h.dfn(t.term); id="term-" * t.id), h.dd(t.definition)))...;
+    class="htmxo-glossary", data_htmxo_no_terms="")
+Base.show(io::IO, mime::MIME"text/html", entries::_GlossaryEntries) = show(io, mime, _semantic_html_node(entries))
+Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", entries::_GlossaryEntries) =
+    show(io, mime, _semantic_html_node(entries))
+Base.show(io::IO, ::MIME"text/markdown", entries::_GlossaryEntries) = print(io, _glossary_markdown(entries.terms))
+Base.show(io::IO, ::MIME"text/plain", entries::_GlossaryEntries) =
+    join(io, ("$(t.term) — $(t.definition)" for t in entries.terms), "\n\n")
 
 _glossary_markdown(terms) = join(("[**$(_md_escape_text(t.term))**]{#term-$(t.id)} — $(_md_escape_text(t.definition))"
                                   for t in terms), "\n\n")

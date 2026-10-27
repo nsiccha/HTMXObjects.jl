@@ -178,9 +178,13 @@ end
     @test findfirst("term-modell\"", out).start < findfirst("term-registerzelle", out).start
     @test links(html(link_terms(section, G))) == 0
     md = to_markdown_string(section)
-    @test contains(md, "## Glossar")
+    @test startswith(md, "## Glossar\n\n[**Modell**]{#term-modell} — ")      # one blank line, no empty child
     @test contains(md, "[**Registerzelle**]{#term-registerzelle} — Ein Bezirk × Abschnitt mit einem Wert im Unternehmensregister.")
     @test contains(md, "[**R̂**]{#term-r} — Der Konvergenzwert der Ketten.")
+    plain = repr("text/plain", section)
+    @test startswith(plain, "Glossar\n\nModell — Die Deklaration, die die Schätzung erzeugt.\n\n")
+    @test contains(plain, "Registerzelle — Ein Bezirk × Abschnitt mit einem Wert im Unternehmensregister.")
+    @test !contains(plain, "HtmlOnly") && !contains(plain, "Node(") && !contains(plain, "{#term-")
 end
 
 @testitem "a root's __glossary__ links its answers and explains its columns" setup=[GlossaryFixture] tags=[:unit] begin
