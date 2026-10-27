@@ -2225,21 +2225,23 @@ end
 
 @testitem "hx_response headers" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
     base = h.div("content")
-    resp = hx_response(base; trigger="myEvent")
+    # The value renders when HTMXObjects answers; `to_response` renders it here.
+    @test hx_response(base) isa HTMXObjects.HXResponse
+    resp = to_response(hx_response(base; trigger="myEvent"))
     @test HTTP.header(resp, "HX-Trigger") == "myEvent"
-    resp = hx_response(base; push_url="/new-path")
+    resp = to_response(hx_response(base; push_url="/new-path"))
     @test HTTP.header(resp, "HX-Push-Url") == "/new-path"
-    resp = hx_response(base; replace_url="/replaced")
+    resp = to_response(hx_response(base; replace_url="/replaced"))
     @test HTTP.header(resp, "HX-Replace-Url") == "/replaced"
-    resp = hx_response(base; redirect="/other")
+    resp = to_response(hx_response(base; redirect="/other"))
     @test HTTP.header(resp, "HX-Redirect") == "/other"
-    resp = hx_response(base; refresh=true)
+    resp = to_response(hx_response(base; refresh=true))
     @test HTTP.header(resp, "HX-Refresh") == "true"
-    resp = hx_response(base; retarget="#foo", reswap="outerHTML")
+    resp = to_response(hx_response(base; retarget="#foo", reswap="outerHTML"))
     @test HTTP.header(resp, "HX-Retarget") == "#foo"
     @test HTTP.header(resp, "HX-Reswap") == "outerHTML"
     @test contains(String(resp.body), "<div>")
-    resp0 = hx_response(base)
+    resp0 = to_response(hx_response(base))
     @test !any(startswith(p.first, "HX-") for p in resp0.headers)
 end
 
@@ -5524,7 +5526,7 @@ end
 end
 
 @testitem "hx_response with location" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
-    resp = hx_response(h.div("content"); location="/new")
+    resp = to_response(hx_response(h.div("content"); location="/new"))
     @test HTTP.header(resp, "HX-Location") == "/new"
     @test contains(String(resp.body), "<div>")
 end

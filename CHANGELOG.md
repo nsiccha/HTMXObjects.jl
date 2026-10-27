@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.3
+## 0.1.4
 
 - `master_detail_table(...; groupings)`: a group row's id carries the
   table's name, `row-<id>--group--<path>` (`row-t1--group--20--mg`), or
@@ -23,6 +23,19 @@ failing at render with a `MethodError`.
   lazy group's rows land in their own table. `id = nothing` is no id. Leaf
   ids are unchanged (`5da191b`). **Breaking:** a page script that finds a
   group row by `row-group--<path>` builds `row-<id>--group--<path>` instead.
+
+## 0.1.3
+
+- `hx_response(value; …)`'s value is rendered when HTMXObjects answers, for
+  that request's reader and in its page language. A `@queued` route that
+  answers with it now shows the live app's reader its `private` parts (they
+  were left out, and the page language was lost, because the body runs in the
+  job queue's task), and a memoized `hx_response` value renders for each
+  reader. Snag `queued-hx-respon-fb8c1312`.
+  **Breaking:** `hx_response` returns an `HTMXObjects.HXResponse`, not an
+  `HTTP.Response`. A route that returns it is unchanged. Code that reads its
+  status, headers or body, or returns it from a handler outside HTMXObjects'
+  routes, calls `to_response(hx_response(…))` first.
 
 ## 0.1.2
 
