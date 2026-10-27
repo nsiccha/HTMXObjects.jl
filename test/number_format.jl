@@ -18,10 +18,19 @@
     @test f(1234567) == "1.234.567" && f(-1234) == "-1.234" && f(42) == "42" && f(0) == "0"
     @test f(10^18) == "1.000.000.000.000.000.000" && f(typemin(Int)) == "-9.223.372.036.854.775.808"
     @test f(big(10)^20) == "100.000.000.000.000.000.000"
-    # Significant digits round first, as `round(x; sigdigits)` does.
+    # Significant digits round first, halves away from zero like fixed
+    # decimals (`round(x; sigdigits=2)` gives 2800 and 0.12), carrying into a
+    # new digit; then the rounded number is written as above.
     @test f(0.15623; sigdigits=3) == "0,156" && f(3.81234e-5; sigdigits=3) == "3,81·10⁻⁵"
     @test f(1234567; sigdigits=3) == "1.230.000" && f(1234567.25; sigdigits=2) == "1.200.000"
     @test f(9.9996e-5; sigdigits=3) == "0,0001"
+    @test f(2850; sigdigits=2) == "2.900" && f(2850.0; sigdigits=2) == "2.900" && f(-2850.0; sigdigits=2) == "-2.900"
+    @test f(0.125; sigdigits=2) == "0,13" && f(2.5; sigdigits=1) == "3" && f(29210.0; sigdigits=2) == "29.000"
+    @test f(9.96; sigdigits=2) == "10" && f(99.96; sigdigits=3) == "100" && f(-0.0; sigdigits=2) == "0"
+    @test f(1.5e15; sigdigits=1) == "2·10¹⁵" && f(999999999999999.0; sigdigits=15) == "999.999.999.999.999"
+    @test f(5e-324; sigdigits=2) == "4,9·10⁻³²⁴" && f(floatmax(); sigdigits=3) == "1,8·10³⁰⁸"
+    # An integer rounded to significant digits stays an integer: every digit.
+    @test f(10^16 + 5 * 10^14; sigdigits=2) == "11.000.000.000.000.000" && f(10^16; sigdigits=2) == "10.000.000.000.000.000"
     # Fixed decimals are the group sums' own: halves away from zero.
     @test f(0.15623; digits=2) == "0,16" && f(3.81e-5; digits=2) == "0,00" && f(1234.0; digits=2) == "1.234,00"
     @test f(1234; digits=2) == "1.234,00" && f(1234; digits=0) == "1.234" && f(1e15; digits=0) == "1.000.000.000.000.000"
@@ -33,11 +42,13 @@
     @test f(missing) == "–" && f(nothing) == "–" && f(missing; digits=2) == "–"
     @test f(Inf) == "∞" && f(-Inf) == "-∞" && f(NaN) == "NaN" && f(Inf; digits=2) == "∞"
     @test f(1 // 4) == "0,25" && f(Float32(0.1)) == "0,1" && f(Float16(0.5)) == "0,5" && f(π; sigdigits=3) == "3,14"
-    # Refused: digits outside the group sums' range, sigdigits below one,
-    # both at once, a Bool and a value that is not a number.
+    # Refused: digits outside the group sums' range, sigdigits outside 1 to
+    # 15 (the digits the browser's group sums round exactly), both at once,
+    # a Bool and a value that is not a number.
     @test_throws ArgumentError f(1.0; digits=11)
     @test_throws ArgumentError f(1.0; digits=-1)
     @test_throws ArgumentError f(1.0; sigdigits=0)
+    @test_throws ArgumentError f(1.0; sigdigits=16)
     @test_throws ArgumentError f(1.0; digits=2, sigdigits=3)
     @test_throws ArgumentError f(true)
     @test_throws ArgumentError f("1.5")
