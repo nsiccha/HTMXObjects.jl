@@ -198,6 +198,7 @@ end
             sortable_table(["Registerzelle", ColumnSpec("Modell"), ColumnSpec("Wert"; help="eigene Hilfe")],
                            [h.tr(h.td("a"), h.td("b"), h.td("c"))]))
         @get glossary_root_glossar() = glossary_section(__glossary__)
+        @get glossary_root_hx() = hx_response(h.p("Die Registerzelle gespeichert."); toast="Gespeichert")
     end
     @htmx struct GlossaryPlainApp
         @get glossary_plain_page() = h.p("Die Registerzelle im Text.")
@@ -224,6 +225,10 @@ end
     md = body("/glossary_root_page"; headers=["Accept" => "text/markdown"])
     @test contains(md, "Die [Registerzelle](/glossar#term-registerzelle) im Text.")
     @test contains(body("/glossary_root_glossar"), "id=\"term-registerzelle\"")
+    # An `hx_response` answer links its value and keeps its headers.
+    hx = dispatch(:GET, "/glossary_root_hx"; headers=["HX-Request" => "true"])
+    @test links(String(HTMXObjects._message_body_bytes(hx))) == 1
+    @test HTTP.header(hx, "X-HTMXO-Toast") == "Gespeichert"
 
     plain = body("/glossary_plain_page")
     @test links(plain) == 0

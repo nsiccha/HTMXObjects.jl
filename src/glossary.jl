@@ -267,6 +267,7 @@ _link_terms(xs::Tuple, w::_TermWalk) = map(x -> _link_child(x, w), xs)
 _link_terms((content, id)::Pair, w::_TermWalk) = _link_terms(content, w) => id
 _link_terms(doc::HTMLDocument, w::_TermWalk) = HTMLDocument(_link_terms(doc.root, w))
 _link_terms(x::HtmlOnly, w::_TermWalk) = HtmlOnly(_link_terms(x.content, w))
+_link_terms(r::HXResponse, w::_TermWalk) = HXResponse(_link_terms(r.value, w), r.headers)
 _link_terms(use::TermUse, w::_TermWalk) = _term_link(w, use.text, _glossary_entry(w.glossary, use))
 
 # Text that is a value of its own (a container's child, not a node's) keeps its
