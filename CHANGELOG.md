@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.7
+## 0.1.8
 
 - A glossary by topic, with other names, related entries and private terms
   (snag `moving-verkehrss-02fbe479`, design decision `16ra5z8`).
@@ -30,6 +30,22 @@ failing at render with a `MethodError`.
   The entry a link opens is highlighted. `pdf_report`'s appended glossary
   follows the report's audience and language, and links a related entry only
   where the report lists it.
+
+## 0.1.7
+
+- `ColumnSummary(:tally, item -> category; order, label, color)`: a group row
+  of a regroupable `master_detail_table` counts its leaves in each category of
+  a column (a status, a class), or adds up the `category => number` pairs a
+  leaf gives as its own breakdown. The cell shows the total and a small stacked
+  bar, one segment per category, on a scale the group rows of one level share;
+  Markdown and PDF write `5 (shown: 2; partly: 3)`. It is computed on the
+  server and again in the browser for every regroup, live and in a `record!`
+  bundle; it sorts by and exports its total. Colours: `color`, else the new
+  `--htmxo-category-1` … `-8` palette. Snag `group-summary-ta-fb04d13e`.
+- `summary_cell(summary, items; texts)`: the same group cell for a row an app
+  builds itself, such as a tree grouping's branch rows.
+- `group_summary` may name a table's first column: the group's key and count
+  move to the first column no summary names (before, it threw).
 
 ## 0.1.6
 

@@ -870,6 +870,36 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   that with `ColumnSummary(:sum, r -> r.estimate; sigdigits = 2)`: `29.000`,
   not `29.210`. Group rows sort among themselves by the same columns; leaves
   sort within their group.
+- **A column of categories: `ColumnSummary(:tally, …)`.** For a status, a
+  class or any other category, `ColumnSummary(:tally, item -> category;
+  order = [...], label = c -> "…", color = c -> "…")` counts the group's leaves
+  in each category. The cell shows the group's total, then a small stacked
+  bar: one segment per category, as long as its count, and the bar as long as
+  the total on a scale the group rows of one level share, so the groups
+  compare at a glance. Hovering a segment names its category and count; a
+  screen reader hears `5 (shown: 2; partly: 3)`, and that text is what the
+  Markdown view and a PDF write instead of the bar. `order` fixes the
+  segments' order (the categories it leaves out follow as they first appear),
+  `label` names a category (default `string`), `color` gives its CSS colour;
+  without `color` the first eight categories take the palette
+  `--htmxo-category-1` … `--htmxo-category-8` (light and dark mode), later
+  ones a grey. A leaf can instead give its own breakdown, `category => number`
+  pairs (`r -> [c => r.count_of(c) for c in classes]`), which the group adds
+  up per category; `digits`/`sigdigits` round those numbers. The cell sorts by
+  its total and the CSV download writes the total. Every track is
+  `--htmxo-tally-width` wide (default `5rem`); set it on a narrow column.
+
+  ```julia
+  group_summary = ["State" => ColumnSummary(:tally, r -> r.state;
+      order = [:shown, :partly, :open], label = s -> STATE_NAMES[s], color = s -> STATE_COLORS[s])]
+  ```
+
+  A summary may name the first column: the group's key and count then move
+  to the first column no summary names, and the row's ▸ toggle stays beside
+  the summary. A row your code builds itself that stands for a group of items
+  (a branch row of a [tree grouping](#table-tree-grouping)) shows the same
+  cell with `summary_cell(summary, items; texts)`, so a table never draws one
+  aggregate two ways.
 - **Group order.** `group_order` gives a grouping's groups an order of their
   own, so one table serves groupings that each need a different one. Each
   entry is a grouping name and either a list of keys (those groups first, in
