@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.14
+
+- A `show_when` widget hides on a Pico page too. It starts with the `hidden`
+  attribute and `show_when_script()` sets and clears that attribute, where
+  both used the `u-hidden` class. That class sits in `@layer htmxo`, and
+  Pico's unlayered `label { display: block }` beats every layered rule, so
+  `linput`, `ninput`, `sinput`, `sinput_custom`, `rinput`, `cinput` and
+  `tinput` stayed visible with Pico loaded; only `radio_group`'s fieldset hid.
+  Pico's `[hidden] { display: none !important }`, and the browser's own
+  `[hidden]` rule without Pico, now hide every widget kind. Code that looked
+  for `.u-hidden` on a `show_when` widget reads its `hidden` property instead.
+
 ## 0.1.13
 
 - `IntervalEstimate(estimate, lower, upper)`, `format_interval` and
