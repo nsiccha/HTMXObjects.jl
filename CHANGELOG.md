@@ -14,6 +14,19 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.3
+
+- `hx_response(value; …)`'s value is rendered when HTMXObjects answers, for
+  that request's reader and in its page language. A `@queued` route that
+  answers with it now shows the live app's reader its `private` parts (they
+  were left out, and the page language was lost, because the body runs in the
+  job queue's task), and a memoized `hx_response` value renders for each
+  reader. Snag `queued-hx-respon-fb8c1312`.
+  **Breaking:** `hx_response` returns an `HTMXObjects.HXResponse`, not an
+  `HTTP.Response`. A route that returns it is unchanged. Code that reads its
+  status, headers or body, or returns it from a handler outside HTMXObjects'
+  routes, calls `to_response(hx_response(…))` first.
+
 ## 0.1.2
 
 - `sortable_table(headers, rows; default_sort)`, and `render_table` and
