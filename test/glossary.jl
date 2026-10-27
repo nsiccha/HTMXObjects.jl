@@ -176,7 +176,7 @@ end
         __glossary__ = GlossaryFixture.G
         @get glossary_root_page() = h.article(h.p("Die Registerzelle im Text."),
             sortable_table(["Registerzelle", ColumnSpec("Modell"), ColumnSpec("Wert"; help="eigene Hilfe")],
-                           [["a", "b", "c"]]))
+                           [h.tr(h.td("a"), h.td("b"), h.td("c"))]))
         @get glossary_root_glossar() = glossary_section(__glossary__)
     end
     @htmx struct GlossaryPlainApp
