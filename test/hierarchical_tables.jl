@@ -44,6 +44,87 @@
         key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children)
 end
 
+@testitem "initially_open opens a branch's child rows, not its own detail" tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    tr(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>"), page).match
+    control(page, key) = match(Regex("<button[^>]*aria-controls=\"detail-$key\"[^>]*>"), page).match
+    leaf = (; key="clause", name="Clause", children=())
+    branch = (; key="section", name="Section", children=(leaf,))
+    tree(; kw...) = html(master_detail_table(["Name"], [branch];
+        key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children,
+        detail=x -> h.p("detail of $(x.key)"), id="tree", kw...))
+    # A section that starts expanded shows its clauses; its own detail (a live
+    # demo, say) stays closed, as after a click on its row or Expand all.
+    page = tree(initially_open=x -> x.key == "section")
+    @test contains(tr(page, "row-section"), "data-htmxo-tree-open=\"true\"")
+    @test contains(tr(page, "row-section"), "aria-expanded=\"true\"")
+    @test contains(tr(page, "row-section"), "data-htmxo-detail-open=\"false\"")
+    @test contains(control(page, "section"), "aria-expanded=\"false\"")
+    @test contains(tr(page, "detail-section"), "hidden")
+    @test !contains(tr(page, "row-clause"), "hidden") && contains(tr(page, "detail-clause"), "hidden")
+    # A leaf has nothing else to open: initially_open opens its detail.
+    every = tree(initially_open=true)
+    @test contains(tr(every, "detail-section"), "hidden")
+    @test contains(tr(every, "row-clause"), "data-htmxo-detail-open=\"true\"")
+    @test !contains(tr(every, "detail-clause"), "hidden")
+    # Branches that cannot collapse open their detail, which a click on their row opens.
+    fixed = tree(branches_collapsible=false, initially_open=x -> x.key == "section")
+    @test contains(tr(fixed, "row-section"), "data-htmxo-detail-open=\"true\"")
+    @test !contains(tr(fixed, "detail-section"), "hidden")
+    # A lazy branch detail loads only when asked for.
+    lazy = html(master_detail_table(["Name"], [branch];
+        key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children,
+        detail_url=x -> isempty(x.children) ? nothing : "/demo/$(x.key)", initially_open=true))
+    @test contains(lazy, "hx-get=\"/demo/section\"") && !contains(lazy, "htmxo-md-load consume, load")
+    @test contains(tr(lazy, "detail-section"), "hidden")
+    # A flat table opens its rows' details as before.
+    flat = html(master_detail_table(["Name"], ["a", "b"];
+        key=identity, master=x -> (h.td(x),), detail=x -> h.p(x), initially_open=x -> x == "a"))
+    @test !contains(tr(flat, "detail-a"), "hidden") && contains(tr(flat, "detail-b"), "hidden")
+end
+
+@testitem "initially_open_detail opens details apart from branches" tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    tr(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>"), page).match
+    leaf = (; key="clause", name="Clause", children=())
+    branch = (; key="section", name="Section", children=(leaf,))
+    tree(; kw...) = html(master_detail_table(["Name"], [branch];
+        key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children,
+        detail=x -> h.p("detail of $(x.key)"), id="tree", kw...))
+    # Every combination of a branch's child rows and its own detail.
+    for rows_open in (false, true), detail_open in (false, true)
+        page = tree(initially_open=x -> rows_open && x.key == "section",
+                    initially_open_detail=x -> detail_open && x.key == "section")
+        @test contains(tr(page, "row-section"), "data-htmxo-tree-open=\"$rows_open\"")
+        @test contains(tr(page, "row-section"), "data-htmxo-detail-open=\"$detail_open\"")
+        @test contains(tr(page, "detail-section"), "hidden") == !detail_open
+        @test contains(tr(page, "row-clause"), "hidden") == !rows_open
+    end
+    # Given, it decides every row's detail: a leaf that initially_open reveals keeps its detail closed.
+    shown = tree(initially_open=true, initially_open_detail=false)
+    @test !contains(tr(shown, "row-clause"), "hidden")
+    @test contains(tr(shown, "row-clause"), "data-htmxo-detail-open=\"false\"")
+    @test contains(tr(shown, "detail-clause"), "hidden")
+    # A Boolean opens every detail, a lazy one loading on first paint.
+    lazy = html(master_detail_table(["Name"], [branch];
+        key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children,
+        detail_url=x -> "/demo/$(x.key)", initially_open_detail=true))
+    @test !contains(tr(lazy, "detail-section"), "hidden") && contains(lazy, "htmxo-md-load consume, load")
+    # The predicate is asked only about rows with a detail.
+    asked = Any[]
+    html(master_detail_table(["Name"], [branch];
+        key=x -> x.key, master=x -> (h.td(x.name),), children=x -> x.children,
+        detail=x -> isempty(x.children) ? h.p("clause") : nothing,
+        initially_open_detail=x -> (push!(asked, x.key); false)))
+    @test asked == ["clause"]
+    # Flat tables take it too.
+    flat = html(master_detail_table(["Name"], ["a", "b"];
+        key=identity, master=x -> (h.td(x),), detail=x -> h.p(x), initially_open_detail=x -> x == "b"))
+    @test contains(tr(flat, "detail-a"), "hidden") && !contains(tr(flat, "detail-b"), "hidden")
+end
+
 @testitem "multilevel table headers" tags=[:unit] begin
     using HTMXObjects
     headers = ["Model", "Ratio", "Wren", "RKPPL", "Ratio", "Wren", "RKPPL"]

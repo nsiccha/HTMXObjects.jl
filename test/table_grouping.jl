@@ -232,6 +232,26 @@ end
     @test count_line(html(grouped(group_by="none", searchable=true))) == "7 of 7 rows shown"
 end
 
+@testitem "initially_open_detail: a grouped table opens leaf details apart from groups" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    tr(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>"), page).match
+    calls = Any[]
+    # initially_open reveals p1 and opens its group; the detail stays closed.
+    page = table_rows(html(grouped(group_by="party", initially_open=t -> t.id == "p1",
+        initially_open_detail=t -> (push!(calls, t); false))))
+    @test !isempty(calls) && all(c -> c in TX, calls)
+    @test contains(tr(page, "row-group--Acme"), "data-htmxo-tree-open=\"true\"")
+    @test !contains(tr(page, "row-group--Acme--p1"), "hidden")
+    @test contains(tr(page, "row-group--Acme--p1"), "data-htmxo-detail-open=\"false\"")
+    @test contains(tr(page, "detail-group--Acme--p1"), "hidden")
+    # A leaf whose detail opens in a closed group shows it once its group opens.
+    closed = table_rows(html(grouped(group_by="party", initially_open_detail=t -> t.id == "p4")))
+    @test contains(tr(closed, "row-group--Bakery"), "data-htmxo-tree-open=\"false\"")
+    @test contains(tr(closed, "row-group--Bakery--p4"), "data-htmxo-detail-open=\"true\"")
+    @test contains(tr(closed, "detail-group--Bakery--p4"), "hidden")
+end
+
 @testitem "initially_open: a predicate opens the groups of the leaves it opens" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
     html(x) = repr("text/html", x)
@@ -2697,6 +2717,11 @@ end
     # It opens as the tree, row for row the tree without `groupings`, with
     # what the browser regroups the leaves by.
     @test norm(tbody(tree)) == norm(tbody(html(plain_outline(searchable=true, id="o"))))
+    # initially_open and initially_open_detail see the tree's rows, as in a
+    # plain tree: every section shows its rows, and only c3's detail is open.
+    opened = (; initially_open = r -> r.kind === :section, initially_open_detail = r -> r.kind === :clause && r.id == "c3")
+    @test norm(tbody(html(outline_table(; opened..., id="o")))) == norm(tbody(html(plain_outline(; opened..., id="o"))))
+    @test count("data-htmxo-detail-open=\"true\"", tbody(html(outline_table(; opened...)))) == 1
     @test count("data-htmxo-leaf=\"c2\"", tree) == 2 && count("data-htmxo-branch=\"\"", tree) == 4
     # Both rows of c2 carry its first row's data: its place in leaf order
     # (c4, c1, c2, c3) and its keys under the other groupings.
