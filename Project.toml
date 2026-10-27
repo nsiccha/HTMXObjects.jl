@@ -1,7 +1,7 @@
 name = "HTMXObjects"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.1.3"
+version = "0.1.4"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
@@ -13,6 +13,7 @@ HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 LazyArtifacts = "4af54fe1-eca0-43a8-85a7-787d91b784e3"
 LibGit2 = "76f85450-5226-5b5a-8eaa-529ad045b433"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
 
@@ -35,6 +36,7 @@ HTMX = "1.1"
 HTTP = "1.8, 2.4"
 LazyArtifacts = "1"
 ReactiveKernelsPPL = "0.1"
+ScopedValues = "1.6"
 Sockets = "1"
 StanBlocks = "0.2"
 julia = "1"

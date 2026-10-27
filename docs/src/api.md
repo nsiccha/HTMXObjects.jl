@@ -228,9 +228,11 @@ The declared language also sets the language of Treebars' progress words: the
 "— 6 s bisher" rather than "Polling" and "— 6s so far" (Treebars ≥ `2386bb1`,
 whose renderers follow the page language unless given `texts=`). Code that
 writes words of its own reads the language with
-[`HTMXObjects.page_lang`](@ref), on the request's task while the route runs
-and its answer is rendered. A `dispatch(…; lang)` answers in the language it
-names instead of the declared one ([In-process dispatch](#In-process-dispatch)).
+[`HTMXObjects.page_lang`](@ref), while the route runs and its answer is
+rendered, and in the work the route runs on other tasks (an `:auto` or
+`@queued` operation's body, a task the route spawns). A `dispatch(…; lang)`
+answers in the language it names instead of the declared one
+([In-process dispatch](#In-process-dispatch)).
 
 A struct on the mount chain can also declare `__progress_pause__`. A
 visitor-facing app sets `__progress_pause__ = false` once on its root, and
@@ -3962,7 +3964,7 @@ stand-in such as a short summary.
 | `dispatch(...)` outside any request (a script assembling a PDF) | `:public`, unless it says `audience=` |
 | A `record!` recording | `:public` |
 | A value rendered outside any request (`to_markdown_string(x)`, `repr("text/html", x)` in library code, a script, the REPL) | `:public`, unless `to_markdown_string(x; audience=:private)` or `with_audience(f, :private)` |
-| Work HTMXObjects runs for a route in a task of its own (the `:auto` transport, a memoized compute) | the audience of that request |
+| Work a route runs in a task of its own (the `:auto` transport, a memoized compute, a `@queued` body, a task the route spawns) | the audience of that request |
 
 So an export call that forgets the keyword cannot publish anything marked
 private, and exports stay as they were until an app marks something. A
@@ -3972,10 +3974,9 @@ private, and exports stay as they were until an app marks something. A
 **Rendering a value yourself.** `to_markdown_string(x; audience)` renders `x`'s
 Markdown for `audience`, and `with_audience(f, audience)` (also
 `with_audience(audience) do … end`) renders everything `f` renders for it:
-HTML you build with `repr("text/html", x)`, an `HTMLSnapshot`, or work in a
-task you start yourself, which does not inherit the request's audience.
-Without them a value renders for the answer it is part of, and for the public
-outside any request. Pass the reader's audience whenever you assemble a
+HTML you build with `repr("text/html", x)`, or an `HTMLSnapshot`. Without them
+a value renders for the answer it is part of, in the request's own task and in
+the tasks it starts, and for the public outside any request. Pass the reader's audience whenever you assemble a
 document for someone other than the answer's reader, as library code building
 a public PDF inside a live request (which is `:private`) does.
 

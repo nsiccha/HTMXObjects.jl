@@ -110,8 +110,15 @@ using TestItemRunner
     Base.show(io::IO, ::MIME"text/html", ::LangMark) =
         print(io, "<i>lang=", something(HTMXObjects.page_lang(), "none"), "</i>")
 
-    # A `@queued` body runs in DynamicObjects' job queue, which carries neither
-    # the request's audience nor its page language (snag queued-hx-respon-fb8c1312).
+    # Bodies that render for themselves, in the task that runs them, and write
+    # the page language they see there.
+    self_md() = to_markdown_string(h.div(h.p("OPEN-SELF"), private(h.p("SECRET-SELF")))) *
+        "\nlang=" * something(HTMXObjects.page_lang(), "none")
+    self_html() = Raw(repr("text/html", h.div(h.p("OPEN-SELF"), private(h.p("SECRET-SELF")), LangMark())))
+
+    # A `@queued` body runs in DynamicObjects' job queue, an unqueued one under
+    # `:auto` in a task HTMXObjects starts. Both render for the request's reader
+    # in its page language (snag queued-hx-respon-fb8c1312, todo 0qm6sdu).
     const QUEUED_GATE = Ref(Base.Event())
     @htmx struct AudienceQueuedApp
         __lang__ = "de"
@@ -124,6 +131,12 @@ using TestItemRunner
         @queued @post aud_qd_hx()::HTTP.Response = hx_response(part(); toast="ok")
         @queued @post aud_q_slow() = (wait(QUEUED_GATE[]);
             hx_response(part(); toast="slow", retarget="#aud-q", reswap="outerHTML"))
+        @queued @post aud_q_md() = MIMEResponse("text/plain", self_md())
+        @queued @post aud_q_html() = self_html()
+        @post aud_p_md() = MIMEResponse("text/plain", self_md())
+        @get aud_g_html() = self_html()
+        # A task the route starts itself.
+        @get aud_spawned() = fetch(Threads.@spawn self_html())
     end
 end
 
@@ -330,6 +343,46 @@ end
         @test HTTP.header(terminal, "HX-Retarget") == "#aud-q"
         @test occursin("SECRET-QUEUED", body(terminal)) == (audience === :private)
         @test occursin("lang=de", body(terminal))
+    end
+end
+
+@testitem "a body that renders for itself does so for its reader in its language, in any task" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    route!(AudienceQueuedApp())
+    body(resp) = String(HTMXObjects._message_body_bytes(resp))
+    hx = ["HX-Request" => "true", "HTMXO-Swap" => "innerHTML"]
+    # The request's audience and page language reach every task that runs the
+    # route's work: DynamicObjects' job queue, HTMXObjects' own `:auto` task
+    # and a task the route spawns (todo 0qm6sdu).
+    for (verb, path) in ((:POST, "/aud_q_md"), (:POST, "/aud_q_html"), (:POST, "/aud_p_md"),
+                         (:GET, "/aud_g_html"), (:GET, "/aud_spawned")),
+            operation_policy in (:blocking, :auto)
+        private = body(dispatch(verb, path; headers=hx, operation_policy, audience=:private))
+        public = body(dispatch(verb, path; headers=hx, operation_policy, audience=:public))
+        @test occursin("SECRET-SELF", private) && occursin("lang=de", private)
+        @test occursin("OPEN-SELF", public) && !occursin("SECRET-SELF", public)
+        @test occursin("lang=de", public)
+    end
+    # Its Markdown labels private content in the page's language.
+    @test occursin("nicht öffentlich", body(dispatch(:POST, "/aud_q_md"; headers=hx, audience=:private)))
+    # A queued body that another job's end admits runs in its own requester's
+    # scope, not in the scope of the job that held the slot.
+    try
+        configure_job_queue!(; max_running=1)
+        QUEUED_GATE[] = Base.Event()
+        holder = Threads.@spawn dispatch(:POST, "/aud_q_slow"; headers=hx,
+                                         operation_policy=:blocking, audience=:public)
+        @test timedwait(() -> configure_job_queue!().running == 1, 10.0; pollint=0.01) === :ok
+        waiter = Threads.@spawn dispatch(:POST, "/aud_q_md"; headers=hx,
+                                         operation_policy=:blocking, audience=:private)
+        @test timedwait(() -> configure_job_queue!().queued == 1, 10.0; pollint=0.01) === :ok
+        notify(QUEUED_GATE[])
+        admitted = body(fetch(waiter))
+        @test occursin("SECRET-SELF", admitted) && occursin("lang=de", admitted)
+        @test !occursin("SECRET-QUEUED", body(fetch(holder)))
+    finally
+        notify(QUEUED_GATE[])
+        configure_job_queue!(; max_running=0)
     end
 end
 
