@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.11
+
+- `show_when` follows a radio group and a checkbox. `show_when_script()` read
+  the first control the field named, a radio group's first radio whatever was
+  checked, and listened to that one control alone, so a widget keyed on a
+  `radio_group` or a `cinput` never followed the reader's choice. It now reads
+  the field as the form submits it: the checked radio's value, a checkbox's
+  `value` while checked and `""` while unchecked, every chosen option of a
+  `<select multiple>`, including controls attached to the form with `form=`.
+  It re-evaluates on any `change` on the page and after every htmx swap, so a
+  group swapped in later needs no binding. For several values, `==`,
+  `startswith` and `endswith` hold when one matches, `!=` when none equals.
+- `linput` takes `show_when=` like the other labeled widgets. It passed the
+  keyword through to the `<input>` as a stray `show-when` attribute, so the
+  label never hid.
+- The `show_when` value is spelled with `option_wire_value`, so an option
+  object matches the radio or `<option>` that `radio_group` and `sinput`
+  render for it. Plain strings, symbols, numbers and booleans are spelled as
+  before. Snag `show-when-on-a-r-4239e3d1`.
+
 ## 0.1.10
 
 - `[compat] DynamicObjects = "0.5.1"`. DynamicObjects 0.5.1 is the first
