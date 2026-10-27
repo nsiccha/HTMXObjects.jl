@@ -21,8 +21,8 @@ failing at render with a `MethodError`.
   `Glossary`, `GlossaryTerm`, `glossary_section`, `term`, `link_terms` and
   `glossary_script`. An app declares `__glossary__ = Glossary(terms; href,
   title)` on its root and mounts `glossary_section(__glossary__)` at `href`.
-  Every answer under that root (a page, a fragment, `?plain`, a static export)
-  then links the first use of each term in each section, table, figure,
+  Every answer under that root (a page, a fragment, an `hx_response`, `?plain`,
+  a static export) then links the first use of each term in each section, table, figure,
   caption and disclosure to its entry, with the definition beside it on hover
   or keyboard focus. A `sortable_table` / `master_detail_table` column named
   after a term gets its definition as the column's ⓘ explanation.

@@ -89,8 +89,8 @@ const GLOSSAR = Glossary([
 end
 ```
 
-Every answer under that root (a page, a fragment, its `?plain` Markdown, a
-static export of it) then links the uses of the terms to their entries
+Every answer under that root (a page, a fragment, an [`hx_response`](@ref), its
+`?plain` Markdown, a static export of it) then links the uses of the terms to their entries
 ([`link_terms`](@ref)), and a sortable column whose header is a term explains
 it with the term's definition. A subtree declares its own `__glossary__`; the
 innermost declaration holds. Behind a path-stripping proxy, build `href` from
