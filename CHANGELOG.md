@@ -14,6 +14,19 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.9
+
+- The request's audience and page language reach every task that runs a
+  route's work: an `:auto` operation's body, a memoized compute, a `@queued`
+  body in DynamicObjects' job queue, and a task the route spawns. What such a
+  body renders itself (`to_markdown_string(x)`, `repr("text/html", x)`) is for
+  the request's reader, and `HTMXObjects.page_lang()` there is the route's
+  `__lang__`. Before, a `@queued` body rendered for the public, and every
+  background body saw `page_lang() === nothing`. The `@queued` half needs
+  DynamicObjects at or after `ffb9d70`, whose job queue carries the requester's
+  `ScopedValue`s. HTMXObjects now depends on ScopedValues.jl. Todo `0qm6sdu`,
+  from snag `queued-hx-respon-fb8c1312`.
+
 ## 0.1.8
 
 - A glossary by topic, with other names, related entries and private terms

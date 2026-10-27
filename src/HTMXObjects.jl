@@ -71,6 +71,10 @@ import Random
 import CommonMark
 # gzip for `serve`'s response compression. HTTP.jl depends on it already.
 import CodecZlib
+# The request contexts (audience, page language, heading level): a task
+# inherits its starter's, and DynamicObjects carries them into deferred and
+# `@queued` work. `Base.ScopedValues` from Julia 1.11, a backport on 1.10.
+import ScopedValues
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
@@ -3288,11 +3292,11 @@ _is_title_node(node) = node isa Node && HTMX.tag(node) === :title
 # response handler sets it around the whole answer, error page included.
 # `__progress_pause__` rides along for Treebars, which reads it while it
 # renders a poller or a live board (`page_progress_pause`).
-const _PAGE_META = :htmxo_page_meta
 const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing, glossary=nothing)
+const _PAGE_META = ScopedValues.ScopedValue{NamedTuple}(_NO_PAGE_META)
 
-_page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
-_with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
+_page_meta() = _PAGE_META[]
+_with_page_meta(f, meta) = ScopedValues.with(f, _PAGE_META => meta)
 
 """
     HTMXObjects.page_lang() -> Union{String,Nothing}
@@ -3304,13 +3308,11 @@ one the answer is asked for in. `dispatch(…; lang)` wins over the declaration;
 set it while they render. It is `nothing` when none of them sets one, as
 outside a route.
 
-It holds on the request's own task, while the route's property runs and while
-its answer is rendered (a poller, the page shell, an error page). So code that
-writes words of its own can write them in the page's language. Treebars'
-progress trees and the `:auto` pollers do, through `treebar_texts`. A
-computation that runs in the background (an `:auto` or `@queued` operation's
-body, a task the route spawns) runs on another task and sees `nothing`: read
-the value before handing work off.
+It holds while the route's property runs and while its answer is rendered (a
+poller, the page shell, an error page), and in the work the route runs on other
+tasks: an `:auto` or `@queued` operation's body and a task the route spawns. So
+code that writes words of its own can write them in the page's language.
+Treebars' progress trees and the `:auto` pollers do, through `treebar_texts`.
 """
 page_lang() = _page_meta().lang
 
@@ -3328,10 +3330,10 @@ on, which a visitor reads as a stuck page. Treebars' `:auto` pollers and live
 boards read the value and leave out their ❚❚ / Pause control; `nothing` shows
 it, as before.
 
-It holds where [`HTMXObjects.page_lang`](@ref) holds: on the request's own
-task, while the route's property runs and while its answer is rendered (an
-`:auto` poller and its poll answers, the page shell, an error page). A
-computation that runs in the background sees `nothing`.
+It holds where [`HTMXObjects.page_lang`](@ref) holds: while the route's
+property runs and while its answer is rendered (an `:auto` poller and its poll
+answers, the page shell, an error page), and in the work the route runs on
+other tasks.
 """
 page_progress_pause() = _page_meta().progress_pause
 
@@ -4778,13 +4780,13 @@ _semantic_artifact_icon() = h.svg(h.path(; d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 13
 # re-wraps an `IO` it is handed, splitting its stream state), into a table cell
 # rendered to a buffer of its own, and through the static-export walk, which
 # builds HTML peers with no `IO` at all.
-const _SEMANTIC_HEADING_LEVEL = :htmxo_semantic_heading_level
+const _SEMANTIC_HEADING_LEVEL = ScopedValues.ScopedValue{Int}(2)
 
-_semantic_heading_level() = get(task_local_storage(), _SEMANTIC_HEADING_LEVEL, 2)
+_semantic_heading_level() = _SEMANTIC_HEADING_LEVEL[]
 
 # Runs `f(level)` for a heading at `level`, with everything below it one deeper.
 _semantic_heading(f, level) =
-    task_local_storage(() -> f(level), _SEMANTIC_HEADING_LEVEL, level + 1)
+    ScopedValues.with(() -> f(level), _SEMANTIC_HEADING_LEVEL => level + 1)
 
 # A card's Markdown title sits at the level a section would open there, and at
 # `###` outside any section, below the page's `##` headings (an operation's
@@ -5364,12 +5366,13 @@ _built(build::Function) = build()
 # The audience of the answer being rendered: `:public` or `:private`, and
 # `:public` outside any request, export and `with_audience`, so a value
 # rendered without asking cannot show private content. A route handler sets it
-# to its request's `export_audience` for the whole request, and the tasks
-# HTMXObjects starts for it carry it on (`_spawn_operation`); `pdf_report` and
-# `to_markdown_string` set their own while they render a value.
-const _AUDIENCE = :htmxo_audience
-_ambient_audience() = get(task_local_storage(), _AUDIENCE, :public)
-_with_audience(f, audience::Symbol) = task_local_storage(f, _AUDIENCE, audience)
+# to its request's `export_audience` for the whole request, and every task
+# started for it inherits it: HTMXObjects' own and DynamicObjects' deferred and
+# `@queued` work; `pdf_report` and `to_markdown_string` set their own while
+# they render a value.
+const _AUDIENCE = ScopedValues.ScopedValue{Symbol}(:public)
+_ambient_audience() = _AUDIENCE[]
+_with_audience(f, audience::Symbol) = ScopedValues.with(f, _AUDIENCE => audience)
 
 _check_audience(audience, who) = audience in (:public, :private) ? audience :
     throw(ArgumentError("$who audience must be :public or :private (got $(repr(audience)))"))
@@ -5382,20 +5385,18 @@ Call `f()` and return its value, rendering everything it renders for
 stand-in, or nothing, for `:public`, and in full for `:private`.
 
 Rendering already follows the answer it is part of: a route renders for
-[`export_audience`](@ref)`(__req__)`, and so does the work HTMXObjects runs for
-it in other tasks. Outside any request it is for the public. Use
-`with_audience` where code renders for someone else: HTML it builds itself
-(`repr("text/html", x)`, an [`HTMLSnapshot`](@ref)) for a given reader, or work
-in a task it starts itself, since a new task does not inherit the request's
-audience. For Markdown, [`to_markdown_string`](@ref)`(x; audience)` does the
-same.
+[`export_audience`](@ref)`(__req__)`, and so does the work it runs in other
+tasks: an `:auto` or `@queued` operation's body and a task the route spawns.
+Outside any request it is for the public. Use `with_audience` where code
+renders for someone else: HTML it builds itself (`repr("text/html", x)`, an
+[`HTMLSnapshot`](@ref)) for a given reader. For Markdown,
+[`to_markdown_string`](@ref)`(x; audience)` does the same.
 
 ```julia
 html = with_audience(:private) do
     repr("text/html", page)          # everything, as the live app shows it
 end
-audience = export_audience(__req__)
-task = Threads.@spawn with_audience(() -> render_report(spec), audience)
+public_summary = with_audience(() -> repr("text/html", summary), :public)
 ```
 
 An `audience` other than `:public` and `:private` is an `ArgumentError`.
@@ -5416,9 +5417,9 @@ end
 
 # Inside marked content a private part is not marked again. The scope covers
 # rendering the content and every walk that rebuilds it for a later render.
-const _IN_PRIVATE_MARK = :htmxo_in_private_mark
-_in_private_mark() = get(task_local_storage(), _IN_PRIVATE_MARK, false)
-_in_private_mark(f) = task_local_storage(f, _IN_PRIVATE_MARK, true)
+const _IN_PRIVATE_MARK = ScopedValues.ScopedValue{Bool}(false)
+_in_private_mark() = _IN_PRIVATE_MARK[]
+_in_private_mark(f) = ScopedValues.with(f, _IN_PRIVATE_MARK => true)
 
 _marked(p::Private, ::Nothing) = nothing
 _marked(p::Private, content) = p.mark && !_in_private_mark() ? _PrivateMark(content) : content
@@ -6026,10 +6027,10 @@ unless asked otherwise), else the audience of the request it is made in, and
 `:public` outside any request. [`private`](@ref) content shows its public
 stand-in, or nothing, in a `:public` answer.
 
-A `dispatch` made while the route runs inherits it. Pass it on where that does
-not reach, so what the route embeds is for the same reader: work moved to
-another task, or a function with its own default, such as `pdf_report`
-(public unless asked otherwise):
+A `dispatch` made while the route runs inherits it, in the route's own task and
+in the tasks it starts. Pass it on to a function with its own default, so what
+the route embeds is for the same reader, such as `pdf_report` (public unless
+asked otherwise):
 
 ```julia
 @get concept() = pdf_report(concept_page(), "konzept.pdf"; title="Konzept",
@@ -12949,14 +12950,11 @@ function _pool_fetch(pool::Symbol)
 end
 
 # Every background start goes through here: a memoized compute (through
-# `_PoolExecutor`), a fresh invocation, and a preload. A task does not inherit
-# task-local storage, so the audience of the answer that starts it is carried
-# in: what a route body renders there is for the same reader (`private`).
+# `_PoolExecutor`), a fresh invocation, and a preload. The task inherits the
+# request contexts of the answer that starts it, so what a route body renders
+# there is for the same reader (`private`) in the same language (`page_lang`).
 # Literal pool symbols: `@spawn` only accepts a computed pool on newer Julia.
-_spawn_operation(f, pool::Symbol) = _spawn_operation(_carry_audience(f), Val(pool))
-_carry_audience(f) = let audience = _ambient_audience()
-    () -> _with_audience(f, audience)
-end
+_spawn_operation(f, pool::Symbol) = _spawn_operation(f, Val(pool))
 _spawn_operation(f, ::Val{:default}) = Threads.@spawn :default f()
 _spawn_operation(f, ::Val{:interactive}) = Threads.@spawn :interactive f()
 
