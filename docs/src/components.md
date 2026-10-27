@@ -719,7 +719,8 @@ label's line: the cell never wraps between a control and its label, only the
 label's own text wraps. To keep a label on one line, give its content
 `white-space: nowrap`, not the cell. Groups without a detail body or URL have
 no companion or request. Keys must be unique after sanitisation throughout the
-tree and page.
+tree and page. To offer the flat list and other groupings beside the tree, list
+it as one of the `groupings`; see [A tree as one grouping](#table-tree-grouping).
 
 `initially_open` accepts a Boolean or predicate and opens, on first paint, what
 a click on the row opens: a collapsible branch shows its child rows, and a leaf
@@ -1012,6 +1013,9 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
 - **Row actions.** A route that changes rows renders the same call with
   `update_rows` / `update_groups` instead of the whole table; see
   [Row updates](#table-row-updates).
+- **A tree of your own.** Rows that form a tree with branch rows of their own
+  (`children`) can be one of the groupings; see
+  [A tree as one grouping](#table-tree-grouping).
 
 ##### Nested levels and grouping pills {#table-grouping-levels}
 
@@ -1071,6 +1075,58 @@ document_table(self, group_by, q=""; kw...) = master_detail_table(headers, docum
   no longer exists leaves from the outermost level of its path that is gone.
 - **Markdown** marks each level below the first with `›`, since it has no
   indentation; the pills are left out like the other controls.
+
+##### A tree as one grouping {#table-tree-grouping}
+
+A table whose rows form a tree of their own, with branch rows that carry cells
+and details (an offer's sections over the clauses they answer, regions with
+their own figures over their units), opens as that tree and still offers the
+flat list and other groupings. List the tree `children` builds as one of the
+`groupings`, `name => :children`:
+
+```julia
+master_detail_table(["State", "Requirement", "How it is met"], sections;
+    key = row -> row.id, children = row -> row.children,
+    master = row -> cells(row), detail = row -> demo(row),
+    groupings = ["Outline" => :children,          # the tree `children` builds
+                 "None" => nothing,               # the flat list
+                 "State" => row -> row.state, "Criterion" => row -> row.criterion],
+    group_by = ["Outline"],                       # opens as the tree
+    leaf_key = row -> row isa ClauseRow ? row.requirement : nothing,
+    leaf_order = row -> row.order,                # the flat list in requirement order
+    group_summary = ["Points" => ColumnSummary(:sum, row -> row.points)],
+    searchable = true, id = "crosswalk")
+```
+
+- **The tree, as without `groupings`.** With *Outline* on, the rows are the
+  tree exactly as `children` renders it: branch rows with their own cells and
+  details, nested branches, branches without leaves, and a leaf under every
+  branch that lists it, with that branch's cells. `branches_collapsible`,
+  `detail_toggle`, `initially_open` and `initially_open_detail` apply to it as
+  to any tree; in the other groupings they see the leaves' first rows.
+- **Leaves.** `leaf_key(row)` names a row's leaf, or `nothing` for a row that
+  is no leaf. A leaf listed under several branches has a row under each, all
+  with the same `leaf_key`: they select together, light up together in a
+  [link group](#table-linking), and the search count counts the leaf once and
+  no branch ("12 of 40 requirements"). Without `leaf_key` every row without
+  children is a leaf under its own `key`. A row with children cannot be one.
+- **The other groupings list each leaf once,** with its first row in the tree
+  (its cells, detail and grouping keys), regrouped in the browser like any
+  regroupable table, with key, count and `group_summary` group rows and nested
+  levels. The flat view lists the leaves in `leaf_order` (default: the tree's
+  order). A leaf whose detail is open in its first row opens its group.
+- **The tree pill stands alone.** Turning it on turns the other levels off; a
+  pill turned on while the tree shows replaces it. Turning it on again brings
+  the tree back as the reader left it, open branches and details included,
+  with the search and the selection applied. While another grouping shows,
+  the tree's rows wait in the page (`template[data-htmxo-tree]`), so no
+  request is made, live or in a `record!` bundle. `group_by` may also open on
+  another grouping: the tree then waits until it is picked.
+- **Not with it (yet).** `group_order` cannot name the tree grouping (its
+  branches keep the tree's order). `group_master`, `group_by_url`,
+  `group_rows_url`, `group_rows`, `group_masters`, `update_rows`,
+  `update_groups` and levels nested in the tree are not built for tree
+  groupings; each throws an `ArgumentError`.
 
 ##### Row updates {#table-row-updates}
 

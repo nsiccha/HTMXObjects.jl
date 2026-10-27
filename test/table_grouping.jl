@@ -28,6 +28,36 @@
     group_row(html, path...) = "row-" * HTMXObjects.master_detail_safe_key(group_scope(html) * "group:" * join(path, "/"))
     export table_rows, group_scope, group_row
 
+    export OUTLINE, OUTLINE_GROUPINGS, outline_children, outline_key, outline_master, outline_table, plain_outline
+
+    # An offer's outline: nested sections, each with its own cells and detail,
+    # over the clauses they cover (the leaves). Clause c2 is covered by
+    # sections 1.1 and 2, so it has a row under each saying how that section
+    # covers it; section 3 covers none. The clauses' own order (`order`) is
+    # not the tree's.
+    oclause(section, id, status, points, order) = (; kind=:clause, section, id, status, points, order, note="$id in $section")
+    osection(id, title, children...) = (; kind=:section, id, title, children=Any[children...])
+    const OUTLINE = [
+        osection("1", "Approach", oclause("1", "c1", "shown", 2.0, 2),
+                osection("1.1", "Data", oclause("1.1", "c2", "described", 3.0, 3), oclause("1.1", "c3", "shown", 5.0, 4))),
+        osection("2", "Operation", oclause("2", "c2", "described", 3.0, 3), oclause("2", "c4", "open", 1.0, 1)),
+        osection("3", "Training")]
+    const OUTLINE_GROUPINGS = ["Outline" => :children, "None" => nothing, "Status" => r -> r.status]
+    outline_children(r) = r.kind === :section ? r.children : Any[]
+    # Row ids are page-wide: a second table on the page takes a prefix.
+    outline_key(prefix) = r -> r.kind === :section ? "$(prefix)s$(r.id)" : "$(prefix)c$(r.section)-$(r.id)"
+    outline_master(r) = r.kind === :section ? (h.td(r.title), h.td(""), h.td("")) :
+        (h.td(r.note), h.td(r.status), h.td(string(r.points); data_sort_value=string(r.points)))
+    outline_detail(r) = h.p("about " * (r.kind === :section ? r.title : r.note))
+    outline_table(; prefix="", groupings=OUTLINE_GROUPINGS, leaf_key=r -> r.kind === :clause ? prefix * r.id : nothing,
+                  leaf_order=r -> r.order, kw...) =
+        master_detail_table(["Item", "Status", "Points"], OUTLINE; key=outline_key(prefix), children=outline_children,
+            master=outline_master, detail=outline_detail, groupings, leaf_key, leaf_order,
+            group_summary=["Points" => ColumnSummary(:sum, r -> r.points)], kw...)
+    # The same tree without `groupings`.
+    plain_outline(; prefix="", kw...) = master_detail_table(["Item", "Status", "Points"], OUTLINE;
+        key=outline_key(prefix), children=outline_children, master=outline_master, detail=outline_detail, kw...)
+
     export MEDIA, SUMMARY, regroup_table, regroup_driver_prelude
 
     # "media" lists only the two Prime payments: the others wait beside the table.
@@ -2810,6 +2840,243 @@ end
             @test sent("/detail", "bp3") == (["iban"], String[])
         finally
             close(server)
+        end
+    end
+end
+
+@testitem "a tree grouping: the children tree as one grouping over its leaves" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string
+    html(x) = repr("text/html", x)
+    tbody(page) = match(r"<tbody[^>]*>.*?</tbody>"s, page).match
+    ids(rows) = [m[1] for m in eachmatch(r"<tr\b[^>]*?\sid=\"row-([^\"]+)\"", rows)]
+    # A tag's attributes in a fixed order, without the ones a tree grouping adds.
+    marks = r" data-htmxo-(leaf|leaf-keys|leaf-order|leaf-values|branch)=\"[^\"]*\""
+    norm(s) = replace(replace(s, marks => ""), r"<[a-z]+(?: [^\s=>]+=\"[^\"]*\")+>" => tag ->
+        "<" * match(r"^<([a-z]+)", tag)[1] * " " * join(sort([m.match for m in eachmatch(r"[^\s=>]+=\"[^\"]*\"", tag)]), " ") * ">")
+    tree = html(outline_table(searchable=true, id="o"))
+    # It opens as the tree, row for row the tree without `groupings`, with
+    # what the browser regroups the leaves by.
+    @test norm(tbody(tree)) == norm(tbody(html(plain_outline(searchable=true, id="o"))))
+    # initially_open and initially_open_detail see the tree's rows, as in a
+    # plain tree: every section shows its rows, and only c3's detail is open.
+    opened = (; initially_open = r -> r.kind === :section, initially_open_detail = r -> r.kind === :clause && r.id == "c3")
+    @test norm(tbody(html(outline_table(; opened..., id="o")))) == norm(tbody(html(plain_outline(; opened..., id="o"))))
+    @test count("data-htmxo-detail-open=\"true\"", tbody(html(outline_table(; opened...)))) == 1
+    @test count("data-htmxo-leaf=\"c2\"", tree) == 2 && count("data-htmxo-branch=\"\"", tree) == 4
+    # Both rows of c2 carry its first row's data: its place in leaf order
+    # (c4, c1, c2, c3) and its keys under the other groupings.
+    @test count("data-htmxo-leaf-order=\"3\"", tree) == 2 &&
+        count("data-htmxo-leaf-keys=\"{&quot;Status&quot;:[&quot;described&quot;]}\"", tree) == 2
+    # The search count counts the clauses, each once, not the sections.
+    @test contains(tree, "4 of 4 rows shown")
+    @test contains(tree, "data-htmxo-grouped=\"[&quot;Outline&quot;]\"") && contains(tree, "&quot;tree&quot;:&quot;Outline&quot;") &&
+        contains(tree, "<template data-htmxo-tree=\"\"></template>")
+    # The tree's pill stands alone: another pill replaces it.
+    @test contains(tree, "data-htmxo-group-tree=\"Outline\"") && contains(tree, "id=\"o-group-Outline\" aria-pressed=\"true\"") &&
+        contains(tree, "id=\"o-group-Status\" aria-pressed=\"false\" title=\"Group by Status\"")
+    # Another grouping lists each leaf once, with its first row in the tree
+    # (c2 as section 1.1 covers it), in leaf order; the tree waits beside it.
+    status = html(outline_table(group_by=["Status"], searchable=true, id="o"))
+    @test ids(tbody(status)) == ["group--open", "group--open--c4", "group--shown", "group--shown--c1", "group--shown--c3",
+                                 "group--described", "group--described--c2"]
+    @test contains(tbody(status), "c2 in 1.1") && !contains(tbody(status), "c2 in 2") && contains(status, "4 of 4 rows shown")
+    stash = match(r"<template data-htmxo-tree=\"\">.*?</template>"s, status).match
+    @test ids(stash) == ids(tbody(tree)) && contains(stash, "c2 in 2")
+    @test contains(status, "id=\"o-group-Outline\" aria-pressed=\"false\" title=\"Group by Outline\"")
+    @test ids(tbody(html(outline_table(group_by=["None"], id="o")))) == ["c4", "c1", "c2", "c3"]
+    # Markdown reads the tree as the tree without `groupings` does.
+    @test to_markdown_string(outline_table()) == to_markdown_string(plain_outline())
+    # A leaf's rows select and link as one item; a section by its own key.
+    sel = html(outline_table(selectable="req", link="o"))
+    @test count("data-htmxo-select-key=\"c2\"", sel) == 2 && count("data-htmxo-link-key=\"c2\"", sel) == 2 &&
+        contains(sel, "data-htmxo-link-key=\"s1\"")
+    # Without leaf_key a leaf is each row without children, under its own key:
+    # section 3 too (so the groupings here read no clause field).
+    default = html(master_detail_table(["Item", "Status", "Points"], OUTLINE; key=outline_key(""),
+        children=outline_children, master=outline_master, detail=r -> h.p("x"),
+        groupings=["Outline" => :children, "None" => nothing, "Kind" => r -> string(r.kind)]))
+    @test contains(default, "data-htmxo-leaf=\"s3\"") && contains(default, "data-htmxo-leaf=\"c2-c2\"") &&
+        count("data-htmxo-branch=\"\"", default) == 3
+    # A table without collapsible branches keeps its groups open, with no
+    # toggle: no master row is hidden (detail rows start hidden as always).
+    open_groups = tbody(html(outline_table(group_by=["Status"], branches_collapsible=false)))
+    masters = [m.match for m in eachmatch(r"<tr\b[^>]*\sid=\"row-[^>]*>", open_groups)]
+    @test length(masters) == 7 && !any(contains(" hidden="), masters) && !contains(open_groups, "data-htmxo-tree-toggle")
+    # refused: `=> :children` shows the tree `children` builds, and there is none
+    @test_throws ArgumentError master_detail_table(["Item"], OUTLINE; key=outline_key(""), master=r -> (h.td(""),),
+        detail=r -> "", groupings=OUTLINE_GROUPINGS)
+    # refused: two groupings of one tree are one view twice
+    @test_throws ArgumentError outline_table(groupings=[OUTLINE_GROUPINGS..., "Again" => :children])
+    # refused: a symbol other than :children names no grouping
+    @test_throws ArgumentError outline_table(groupings=["Outline" => :parents, "None" => nothing])
+    # refused: leaf_key and leaf_order name the leaves of a tree grouping
+    @test_throws ArgumentError grouped(leaf_key=t -> t.id)
+    @test_throws ArgumentError master_detail_table(["Item"], OUTLINE; key=outline_key(""), children=outline_children,
+        master=r -> (h.td(""),), detail=r -> "", leaf_order=r -> 1)
+    # refused: the other groupings list a leaf alone, so a leaf has no children
+    @test_throws ArgumentError outline_table(leaf_key=r -> r.id)
+    # refused: a tree's branches keep the tree's order
+    @test_throws ArgumentError outline_table(group_order=["Outline" => ["1"]])
+    # Not built yet (decision HTMXObjects:snag.tenderviews-tend-7a5a0baa/decisions/2026-10-26T15-39-47-852-0dwgr77
+    # left them for later): levels nested in the tree, and the hooks that ask
+    # the server for group rows or update rows.
+    @test_broken (outline_table(group_by=["Outline", "Status"]); true)
+    for hook in ((; group_master=(k, ms) -> (h.td(k), h.td(""), h.td(""))), (; group_by_url="/t"),
+                 (; group_rows_url=(k, ms) -> nothing), (; group_rows="[\"shown\"]"), (; group_masters=true), (; update_rows="c1"),
+                 (; update_groups="[\"shown\"]"))
+        @test_broken (outline_table(; group_by=["Status"], hook...); true)
+    end
+end
+
+@testitem "a tree grouping regroups in the browser and comes back browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # o opens as the tree; p opens grouped by Status, its tree waiting
+        # beside it; q keeps its branches and groups open.
+        tables = Dict("o" => levels -> outline_table(; group_by=levels, searchable=true, id="o"),
+                      "p" => levels -> outline_table(; prefix="p", group_by=levels, id="p"),
+                      "q" => levels -> outline_table(; prefix="q", group_by=levels, branches_collapsible=false, id="q"))
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            let requests = 0;
+            document.body.addEventListener('htmx:beforeRequest', () => requests++);
+            const w = id => document.getElementById(id).closest('[data-htmxo-grouped]');
+            const el = (id, rid) => w(id).querySelector('[id="' + rid + '"]');
+            const pill = (id, name) => w(id).querySelector('[data-htmxo-group-name="' + name + '"] > button');
+            const rows = id => Array.from(w(id).querySelector('tbody').rows);
+            const shown = id => rows(id).filter(r => !r.hidden && !r.id.startsWith('detail-')).map(r => r.id.slice(4)).join(',');
+            const count = id => w(id).querySelector('[data-htmxo-table-count]').textContent;
+            const search = v => { const i = w('o').querySelector('input[type="search"]'); i.value = v; i.dispatchEvent(new Event('input', {bubbles: true})); };
+            const first = rows('o').map(norm).join('\n');
+            check('first-paint', await parity(w('o'), '/o?group_by=Outline', true));
+            // Another pill leaves the tree; it builds the server's rows.
+            pill('o', 'Status').click();
+            check('to-status', w('o').dataset.htmxoGrouped === '["Status"]' && await parity(w('o'), '/o?group_by=Status', true) &&
+                count('o') === '4 of 4 rows shown');
+            pill('o', 'Status').click();
+            check('to-flat', w('o').dataset.htmxoGroupBy === '["None"]' && await parity(w('o'), '/o?group_by=None', true));
+            // The tree comes back as it was.
+            pill('o', 'Outline').click();
+            check('back', w('o').dataset.htmxoGrouped === '["Outline"]' && rows('o').map(norm).join('\n') === first &&
+                w('o').querySelector('template[data-htmxo-tree]').content.children.length === 0 &&
+                await parity(w('o'), '/o?group_by=Outline', true));
+            // An open detail goes along with the leaf's first row, and comes back.
+            el('o', 'row-s1').querySelector('[data-htmxo-tree-toggle]').click();
+            el('o', 'row-s1--1').querySelector('[data-htmxo-tree-toggle]').click();
+            el('o', 'row-c1--1-c2').querySelector('[data-htmxo-detail-toggle]').click();
+            pill('o', 'Status').click();
+            check('detail-goes-along', !el('o', 'detail-group--described--c2').hidden && el('o', 'row-o--group--described').dataset.htmxoTreeOpen === 'true');
+            pill('o', 'Outline').click();
+            check('tree-as-left', !el('o', 'detail-c1--1-c2').hidden && el('o', 'detail-c2-c2').hidden &&
+                shown('o') === 's1,c1-c1,s1--1,c1--1-c2,c1--1-c3,s2,s3');
+            // The search applies to the tree and to the groups, counting clauses.
+            search('c3');
+            check('search-tree', count('o') === '1 of 4 rows shown' && shown('o') === 's1,s1--1,c1--1-c3');
+            pill('o', 'Status').click();
+            check('search-status', shown('o') === 'group--shown,group--shown--c3' && count('o') === '1 of 4 rows shown');
+            search('');
+            // A table that opens grouped: its tree comes from the page.
+            check('p-first', await parity(w('p'), '/p?group_by=Status', true));
+            pill('p', 'Outline').click();
+            check('p-tree', w('p').dataset.htmxoGrouped === '["Outline"]' && await parity(w('p'), '/p?group_by=Outline', true));
+            pill('p', 'Status').click();
+            check('p-status', await parity(w('p'), '/p?group_by=Status', true));
+            // Branches and groups that do not collapse.
+            pill('q', 'Status').click();
+            check('q-status', await parity(w('q'), '/q?group_by=Status', true));
+            pill('q', 'Outline').click();
+            check('q-tree', await parity(w('q'), '/q?group_by=Outline', true));
+            check('no-requests', requests === 0);
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(tables["o"](["Outline"]), tables["p"](["Status"]), tables["q"](["Outline"]), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            uri.path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            table = get(tables, lstrip(uri.path, '/'), nothing)
+            isnothing(table) ? HTTP.Response(404) : HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", table(levels)))
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 14
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "a recorded tree grouping regroups with no server browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            const w = () => document.querySelector('[data-htmxo-grouped]');
+            const shown = () => Array.from(w().querySelector('tbody').rows).filter(r => !r.hidden && !r.id.startsWith('detail-')).map(r => r.id.slice(4)).join(',');
+            const pill = name => w().querySelector('[data-htmxo-group-name="' + name + '"] > button');
+            check('recorded', shown() === 's1,s2,s3');
+            pill('Status').click();
+            check('regrouped', w().dataset.htmxoGrouped === '["Status"]' && shown() === 'r--group--open,r--group--shown,r--group--described' &&
+                document.getElementById('row-r--group--shown').querySelector('[data-htmxo-group-summary="0"]').textContent === '7');
+            pill('Outline').click();
+            check('tree-back', w().dataset.htmxoGrouped === '["Outline"]' && shown() === 's1,s2,s3');
+            finish();
+        });
+        """))
+        @htmx struct RecordedTreeGroupingApp
+            @get index() = htmx(outline_table(; id="r", searchable=true), driver;
+                extra_head=(sortable_table_js(), sortable_table_styles()),
+                hyperscript_version=nothing, feedback=false, compose=false, overlay=false)
+        end
+        mktempdir() do dir
+            record!(RecordedTreeGroupingApp(); record_dir=dir, paths=["/"], hx=false, markdown=false)
+            recorded = read(joinpath(dir, "index.html"), String)
+            @test contains(recorded, "<template data-htmxo-tree") && contains(recorded, "data-htmxo-group-tree=\"Outline\"")
+            other = Ref(0)
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2]); close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+                HTTP.URI(req.target).path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], recorded)
+                other[] += 1
+                HTTP.Response(404)
+            end
+            try
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                if !isnothing(checks)
+                    for line in split(checks[1], '\n')
+                        @test endswith(line, ":true")
+                    end
+                    @test count(==('\n'), checks[1]) + 1 == 3
+                end
+                @test other[] <= 1   # at most the browser's own favicon request
+            finally
+                close(server)
+            end
         end
     end
 end
