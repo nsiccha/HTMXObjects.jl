@@ -23102,7 +23102,7 @@ function master_detail_table(headers, items;
     # them, and the details written after the table in the same order.
     ds = _resolve_default_sort(get(kwargs, :default_sort, nothing), headers)
     if !isnothing(ds)
-        rows = _default_sort_rows(rows, ds, headers; hierarchy=!isnothing(children))
+        rows = _default_sort_rows(rows, ds, headers; hierarchy=haskey(table_attrs, :data_htmxo_hierarchy))
         position = Dict(_row_id(r) => i for (i, r) in enumerate(rows))
         perm = sortperm(detail_rows; by=id -> get(position, id, typemax(Int)), alg=MergeSort)
         permute!(details, perm)
