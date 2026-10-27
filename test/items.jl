@@ -5429,9 +5429,22 @@ end
     end
 
     mktempdir() do dir
+        # Two queries of one path are two files, each named by its query.
+        record!(IndexedMountRoot(); record_dir=dir,
+                paths=["/item/same?view=one", "/item/same?view=two"],
+                full=true, hx=true, markdown=false)
+        for view in ("one", "two")
+            @test read(joinpath(dir, "item", "same@view=$view.html"), String) == "child same"
+            @test read(joinpath(dir, "hx", "item", "same@view=$view.html"), String) == "child same"
+        end
+    end
+
+    mktempdir() do dir
+        # Distinct addresses that still name one file are refused: a query's
+        # `/` is `%2F` in its file's name.
         err = try
             record!(IndexedMountRoot(); record_dir=dir,
-                    paths=["/item/same?view=one", "/item/same?view=two"],
+                    paths=["/item/same?view=a/b", "/item/same?view=a%2Fb"],
                     full=true, hx=false, markdown=false)
             nothing
         catch caught
@@ -5439,8 +5452,8 @@ end
         end
         @test err isa HTMXObjects._RecordDestinationCollision
         message = sprint(showerror, err)
-        @test contains(message, "/item/same?view=one")
-        @test contains(message, "/item/same?view=two")
+        @test contains(message, "/item/same?view=a/b")
+        @test contains(message, "/item/same?view=a%2Fb")
         @test contains(message, "same static destination")
     end
 end
