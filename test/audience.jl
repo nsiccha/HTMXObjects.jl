@@ -120,6 +120,8 @@ using TestItemRunner
         @queued @post aud_q_node() = part()
         @queued @get aud_qg_hx() = hx_response(part(); trigger="done")
         @post aud_p_hx() = hx_response(part(); toast="ok")
+        # A direct answer declares its type, as `docs/src/api.md` advises.
+        @queued @post aud_qd_hx()::HTTP.Response = hx_response(part(); toast="ok")
         @queued @post aud_q_slow() = (wait(QUEUED_GATE[]);
             hx_response(part(); toast="slow", retarget="#aud-q", reswap="outerHTML"))
     end
@@ -296,9 +298,10 @@ end
     hx = ["HX-Request" => "true", "HTMXO-Swap" => "innerHTML"]
     # `hx_response`'s value renders when HTMXObjects answers, not in the body's
     # task (snag queued-hx-respon-fb8c1312): queued, memoized, a plain node,
-    # and an unqueued route alike.
+    # an unqueued route and a declared direct one alike.
     for (verb, path) in ((:POST, "/aud_q_hx"), (:GET, "/aud_qg_hx"), (:POST, "/aud_q_node"),
-                         (:POST, "/aud_p_hx")), operation_policy in (:blocking, :auto)
+                         (:POST, "/aud_p_hx"), (:POST, "/aud_qd_hx")),
+            operation_policy in (:blocking, :auto)
         private = body(dispatch(verb, path; headers=hx, operation_policy, audience=:private))
         public = body(dispatch(verb, path; headers=hx, operation_policy, audience=:public))
         @test occursin("SECRET-QUEUED", private) && occursin("lang=de", private)
