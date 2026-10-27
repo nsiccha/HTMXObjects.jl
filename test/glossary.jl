@@ -144,6 +144,22 @@ end
     @test_throws ArgumentError link_terms(h.p(term("Zelle")), G)
     @test links(html(link_terms(h.p(term("x"; of="registerzelle")), G))) == 1   # by id
 
+    # Each detail of a master/detail table is opened on its own.
+    rows = [(id="a", name="Zeile a"), (id="b", name="Zeile b")]
+    mdt = link_terms(master_detail_table(["Name"], rows; key=r -> r.id, master=r -> (h.td(r.name),),
+                                         detail=r -> h.p("Registerzelle in ", r.id)), G)
+    @test links(html(mdt)) == 2
+    @test count("[Registerzelle](/glossar#term-registerzelle) in", to_markdown_string(mdt)) == 2
+
+    # Each tab is read on its own, in HTML and in Markdown.
+    tabs = link_terms(h.div(h.p("Registerzelle vorab."),
+        tabset("Eins" => h.p("Registerzelle eins"), "Zwei" => h.p("Registerzelle zwei"), "Registerzelle" => "/glossary-lazy-tab")), G)
+    @test links(html(tabs)) == 3
+    tmd = to_markdown_string(tabs)
+    @test contains(tmd, "**Eins**") && contains(tmd, "[Registerzelle](/glossar#term-registerzelle) eins")
+    @test contains(tmd, "[Registerzelle](/glossar#term-registerzelle) zwei")
+    @test contains(tmd, "**[Registerzelle](/glossary-lazy-tab)**")   # a lazy tab's own link stays
+
     # Private content is linked as each reader sees it.
     p = link_terms(h.div(private(h.p("Registerzelle privat"); public=h.p("Registerzelle öffentlich")),
                          h.p("Registerzelle danach")), G)

@@ -355,6 +355,18 @@ _link_private(content, w) = _link_terms(content, w)
 _link_private(build::Function, w) = () -> _term_scope(() -> _link_terms(build(), w), w, true)
 _link_terms(x::_PrivateMark, w::_TermWalk) = _PrivateMark(_link_terms(x.content, w))
 
+# A master/detail table's detail rows and their Markdown after the table: each
+# detail is opened on its own, so it links as a run of its own.
+_link_terms(c::_MDCompanionRow, w::_TermWalk) = _MDCompanionRow(_term_scope(() -> _link_terms(c.row, w), w, true))
+_link_terms(d::_MDDetailsMarkdown, w::_TermWalk) = _MDDetailsMarkdown(Pair{Vector{Any},Any}[
+    label => _term_scope(() -> _link_child(body, w), w, true) for (label, body) in d.details])
+
+# A tab's panel is read on its own, as a disclosure is: its HTML and its
+# Markdown (the label and the content it opens) each link as a run of their own.
+# A lazy tab's Markdown is a link already written as Markdown text, left as is.
+_link_terms(p::_TabsetPart, w::_TermWalk) = _TabsetPart(
+    _term_scope(() -> _link_terms(p.node, w), w, true), _term_scope(() -> _link_terms(p.markdown, w), w, true))
+
 # Prose renders its Markdown to nodes, which are linked like any others. Linked
 # prose keeps that HTML and writes its Markdown from it; prose that links
 # nothing is left as it was.

@@ -24433,8 +24433,6 @@ include("routes/structure_routes.jl")
 
 include("json_response.jl")
 
-include("glossary.jl")
-
 include("routes/openapi_routes.jl")
 
 include("python_service.jl")
@@ -30708,6 +30706,9 @@ function _tabset_markdown(label, url::AbstractString)
     name = _tabset_label_text(label)
     string("**[", isempty(name) ? url : name, "](", url, ")**")
 end
+
+# After the value types its walk sees through (`_TabsetPart` above).
+include("glossary.jl")
 
 include("comparison.jl")
 
