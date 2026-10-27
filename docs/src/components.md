@@ -297,6 +297,10 @@ named from the table's texts (`Schätzwert`, `Untergrenze`, `Obergrenze`,
   (col = "Beschäftigte", key = "Untergrenze", dir = :desc)` opens the table in
   that order, missing values last (see [Opening in a sort order](#table-default-sort)).
 
+Under an app's [glossary](api.md#glossary), a column whose header is one of its
+terms, a `String` or a `ColumnSpec` without `help`, is explained by the term's
+definition the same way.
+
 #### Multilevel headers {#table-header-groups}
 
 Use `header_groups` when adjacent columns share a heading. The ranges refer
@@ -922,6 +926,15 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   `detail_url` and `master_attrs` as in the flat view. A leaf in several groups
   (a shared IBAN, a rule matching several counterparties) gets one row per
   group, each with its own id.
+- **Several tables on one page.** A group row has no key of yours, so its id
+  carries the table's name: `row-tx--group--Acme` for `id = "tx"`. Two
+  regroupable tables whose groups share a key ("Tablet: 20 mg" in each) keep
+  their ids apart, and a row update or a lazy group's rows land in their own
+  table. Without an `id`, the table names itself from its leaves' keys, which
+  are unique on the page; rows the server renders after leaves were added or
+  removed carry another such name, and the runtime gives them the table's.
+  `id = nothing` is no id. Leaf ids keep your `key`, so keep keys unique on the
+  page (a per-table prefix for tables of the same items).
 - **Group by.** With two or more groupings the *Group by* pills join the tree
   controls, one per grouping, and the reader can nest, reorder and drag them
   (see [Nested levels](#table-grouping-levels)). A change regroups in the

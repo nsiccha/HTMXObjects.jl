@@ -957,7 +957,12 @@ Every response is saved to disk mirroring the URL path (`/post/42` →
 - Prefixes rooted `href`/`src` addresses with `record_base`.
 - Strips `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes.
 - Strips `hx-get` attributes whose URL contains `?` or points at a
-  kwargs-only route.
+  kwargs-only route. Under `record!`, an `hx-get` with a query whose address
+  the recording records — a query path in `paths`, or a value a
+  `url_params` element declares — names its fragment file instead,
+  `<record_base>/hx/<path>@<query>.html`, whatever the order of its
+  parameters. A query path in `paths` is saved under its query
+  (`/region?key=a` → `region@key=a.html`, `hx/region@key=a.html`).
 - Marks affected elements with `data-static-disabled` + `disabled`, and
   injects a `<style>` block dimming them.
 

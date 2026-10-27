@@ -151,14 +151,14 @@ end
             check('hover-announces', last() === 'probes:k3');
             check('hover-lights-itself', lit('flat') === '=row');
             // k3 sits in the collapsed Bayern group: that row lights up, with a note, and nothing opens.
-            check('collapsed-group-noted', lit('grouped') === 'row-group--Bayern=inside[↳ darin]');
-            check('nothing-opens', row('group--Bayern').getAttribute('aria-expanded') === 'false');
-            check('two-levels-down', lit('nested') === 'row-group--Sued=inside[↳ 2 levels down]');
+            check('collapsed-group-noted', lit('grouped') === 'row-grouped--group--Bayern=inside[↳ darin]');
+            check('nothing-opens', row('grouped--group--Bayern').getAttribute('aria-expanded') === 'false');
+            check('two-levels-down', lit('nested') === 'row-nested--group--Sued=inside[↳ 2 levels down]');
             check('other-group-untouched', lit('other') === '');
             // Moving to another row hands over without an end in between.
             const before = events.length;
             over(flatRow('k5').cells[1], flatRow('k3').cells[0]);
-            check('row-to-row', events.slice(before).join(',') === 'probes:k5' && lit('grouped') === 'row-group--Sachsen=inside[↳ darin]');
+            check('row-to-row', events.slice(before).join(',') === 'probes:k5' && lit('grouped') === 'row-grouped--group--Sachsen=inside[↳ darin]');
             // Leaving the rows ends the hover.
             over(document.body, flatRow('k5').cells[1]);
             check('leave-ends', last() === 'probes:null' && lit('grouped') === '' && lit('flat') === '' && lit('nested') === '');
@@ -173,7 +173,7 @@ end
             check('reveal-in-box', box.scrollTop > 0 && r.top >= b.top && r.bottom <= b.bottom + 1);
             check('page-not-scrolled', window.scrollY === 0);
             // Opening the group shows the leaf itself lit, the group row no longer.
-            row('group--Sachsen').querySelector('[data-htmxo-tree-toggle]').click();
+            row('grouped--group--Sachsen').querySelector('[data-htmxo-tree-toggle]').click();
             await wait(() => lit('grouped') === 'row-group--Sachsen--k8=row');
             check('opened-group-lights-leaf', lit('grouped') === 'row-group--Sachsen--k8=row');
             // A row the search hides lights up nothing.
@@ -184,45 +184,45 @@ end
             check('search-cleared-relit', lit('grouped') === 'row-group--Sachsen--k8=row');
             // Regrouping keeps the highlight.
             htmxoGroupRequest(document.querySelector('#grouped').closest('[data-htmxo-grouped]').querySelector('.htmxo-group-pills'), ['Region'], null);
-            await wait(() => lit('grouped') === 'row-group--Mitte=inside[↳ darin]');
-            check('regroup-relit', lit('grouped') === 'row-group--Mitte=inside[↳ darin]');
+            await wait(() => lit('grouped') === 'row-grouped--group--Mitte=inside[↳ darin]');
+            check('regroup-relit', lit('grouped') === 'row-grouped--group--Mitte=inside[↳ darin]');
             // A group row announces every item in it (`key` is null: it holds
             // several). The row and its open rows light up; a collapsed group
             // elsewhere notes how many of them it holds.
             htmxoLink('probes', null);
-            row('group--Mitte').querySelector('[data-htmxo-tree-toggle]').click();
+            row('grouped--group--Mitte').querySelector('[data-htmxo-tree-toggle]').click();
             await wait(() => row('group--Mitte--k2') && !row('group--Mitte--k2').hidden);
             over(row('group--Mitte--k2').cells[1]);
             check('leaf-hover', last() === 'probes:k2' && lastKeys() === 'k2' && lit('grouped') === 'row-group--Mitte--k2=row');
-            over(row('group--Mitte').cells[1], row('group--Mitte--k2').cells[1]);
+            over(row('grouped--group--Mitte').cells[1], row('group--Mitte--k2').cells[1]);
             check('group-row-keys', last() === 'probes:null' && lastKeys() === 'k2|k4|k5|k7|k8');
             check('group-row-lights-members', lit('grouped') ===
-                ['Mitte', 'Mitte--k2', 'Mitte--k4', 'Mitte--k5', 'Mitte--k7', 'Mitte--k8'].map(k => 'row-group--' + k + '=row').join(','));
-            check('group-row-elsewhere', litKeys('flat') === 'k2|k4|k5|k7|k8' && lit('nested') === 'row-group--Mitte=inside[↳ 5 inside]');
+                ['grouped--group--Mitte', 'group--Mitte--k2', 'group--Mitte--k4', 'group--Mitte--k5', 'group--Mitte--k7', 'group--Mitte--k8'].map(k => 'row-' + k + '=row').join(','));
+            check('group-row-elsewhere', litKeys('flat') === 'k2|k4|k5|k7|k8' && lit('nested') === 'row-nested--group--Mitte=inside[↳ 5 inside]');
             // Moving from the group row to one of its rows hands over without an end.
             let before2 = events.length;
-            over(row('group--Mitte--k4').cells[1], row('group--Mitte').cells[1]);
+            over(row('group--Mitte--k4').cells[1], row('grouped--group--Mitte').cells[1]);
             check('group-to-leaf', events.slice(before2).join(',') === 'probes:k4' && litKeys('flat') === 'k4');
             // The search narrows a group's items to the ones it shows; one item is its `key`.
             search('k2');
-            over(row('group--Mitte').cells[1], row('group--Mitte--k4').cells[1]);
+            over(row('grouped--group--Mitte').cells[1], row('group--Mitte--k4').cells[1]);
             check('search-narrows-group', last() === 'probes:k2' && lastKeys() === 'k2' && litKeys('flat') === 'k2');
             search('');
-            over(document.body, row('group--Mitte').cells[1]);
+            over(document.body, row('grouped--group--Mitte').cells[1]);
             check('group-leave-ends', last() === 'probes:null' && lastKeys() === '' && lit('flat') === '' && lit('grouped') === '');
             // A collapsed group two levels above its items lights up as itself;
             // the other tables light every item it holds.
-            over(rowIn('nested', 'group--Sued').cells[1]);
-            check('collapsed-group-keys', last() === 'probes:null' && lastKeys() === 'k1|k3|k6|k:9' && lit('nested') === 'row-group--Sued=row');
-            check('collapsed-group-elsewhere', litKeys('flat') === 'k1|k3|k6|k:9' && lit('grouped') === 'row-group--Sued=inside[↳ 4 darin]');
+            over(rowIn('nested', 'nested--group--Sued').cells[1]);
+            check('collapsed-group-keys', last() === 'probes:null' && lastKeys() === 'k1|k3|k6|k:9' && lit('nested') === 'row-nested--group--Sued=row');
+            check('collapsed-group-elsewhere', litKeys('flat') === 'k1|k3|k6|k:9' && lit('grouped') === 'row-grouped--group--Sued=inside[↳ 4 darin]');
             // A branch announces its own key first, then every item below it.
-            over(row('t-k1').cells[0], rowIn('nested', 'group--Sued').cells[1]);
+            over(row('t-k1').cells[0], rowIn('nested', 'nested--group--Sued').cells[1]);
             check('branch-keys', last() === 'probes:k1' && lastKeys() === 'k1|k3|k5');
             check('branch-lights', lit('tree') === 'row-t-k1=row' && litKeys('flat') === 'k1|k3|k5');
             // A selectable group row's selection key names the group, not an item.
-            over(rowIn('sel', 'group--Hessen').cells[1], row('t-k1').cells[0]);
+            over(rowIn('sel', 'sel--group--Hessen').cells[1], row('t-k1').cells[0]);
             check('select-key-not-item', last() === 'probes:null' && lastKeys() === 'k2|k4|k7' && litKeys('flat') === 'k2|k4|k7');
-            over(document.body, rowIn('sel', 'group--Hessen').cells[1]);
+            over(document.body, rowIn('sel', 'sel--group--Hessen').cells[1]);
             // A detail row stands for its master, the focus for the pointer.
             const toggle = row('group--Mitte--k2').querySelector('[data-htmxo-detail-toggle]');
             toggle.click();
@@ -310,34 +310,34 @@ end
             check('announces-link-key', last() === 'probes:k3');
             check('lights-itself', lit('trend') === 'row-trend-k3=row');
             check('lights-other-table', lit('main') === 'row-k3=row');
-            check('lights-lazy-group', lit('lazy') === 'row-group--Bayern=inside[↳ inside]');
+            check('lights-lazy-group', lit('lazy') === 'row-lazy--group--Bayern=inside[↳ inside]');
             // A row of the first table lights the second table's row.
             over(row('k8').cells[1], row('trend-k3').cells[1]);
-            check('row-to-row', last() === 'probes:k8' && lit('trend') === 'row-trend-k8=row' && lit('lazy') === 'row-group--Sachsen=inside[↳ inside]');
+            check('row-to-row', last() === 'probes:k8' && lit('trend') === 'row-trend-k8=row' && lit('lazy') === 'row-lazy--group--Sachsen=inside[↳ inside]');
             over(document.body, row('k8').cells[1]);
             check('leave-ends', last() === 'probes:null' && lit('main') === '' && lit('trend') === '' && lit('lazy') === '');
             // A lazy group whose rows have not loaded (and cannot: the page is
             // static, as in a `record!` bundle) announces its leaves by their link
             // key, and every table lights them.
-            over(row('group--Sachsen').cells[1]);
-            check('lazy-group-keys', last() === 'probes:null' && lastKeys() === 'k5|k8' && lit('lazy') === 'row-group--Sachsen=row');
+            over(row('lazy--group--Sachsen').cells[1]);
+            check('lazy-group-keys', last() === 'probes:null' && lastKeys() === 'k5|k8' && lit('lazy') === 'row-lazy--group--Sachsen=row');
             check('lazy-group-lights', lit('main') === 'row-k5=row,row-k8=row' && lit('trend') === 'row-trend-k5=row,row-trend-k8=row');
-            over(document.body, row('group--Sachsen').cells[1]);
+            over(document.body, row('lazy--group--Sachsen').cells[1]);
             // The search narrows an unloaded group's items too, and a hidden leaf lights nothing.
             const search = v => { const i = document.querySelector('#lazy').closest('.htmxo-searchable-table').querySelector('input[type="search"]'); i.value = v; i.dispatchEvent(new Event('input', {bubbles: true})); };
             search('k5');
-            over(row('group--Sachsen').cells[1]);
+            over(row('lazy--group--Sachsen').cells[1]);
             check('lazy-search-narrows', last() === 'probes:k5' && lastKeys() === 'k5' && lit('main') === 'row-k5=row');
-            over(document.body, row('group--Sachsen').cells[1]);
+            over(document.body, row('lazy--group--Sachsen').cells[1]);
             htmxoLink('probes', 'k8');
             check('lazy-search-hidden-unlit', lit('lazy') === '' && lit('main') === 'row-k8=row');
             search('');
-            check('lazy-search-cleared', lit('lazy') === 'row-group--Sachsen=inside[↳ inside]');
+            check('lazy-search-cleared', lit('lazy') === 'row-lazy--group--Sachsen=inside[↳ inside]');
             // Page script announces several items; a collapsed group notes how many it holds.
             htmxoLink('probes', ['k5', 'k8']);
-            check('set-from-script', last() === 'probes:null' && lastKeys() === 'k5|k8' && lit('lazy') === 'row-group--Sachsen=inside[↳ 2 inside]');
+            check('set-from-script', last() === 'probes:null' && lastKeys() === 'k5|k8' && lit('lazy') === 'row-lazy--group--Sachsen=inside[↳ 2 inside]');
             htmxoLink('probes', ['k1', 'k5']);
-            check('set-notes-one-each', lit('lazy') === 'row-group--Bayern=inside[↳ inside],row-group--Sachsen=inside[↳ inside]');
+            check('set-notes-one-each', lit('lazy') === 'row-lazy--group--Bayern=inside[↳ inside],row-lazy--group--Sachsen=inside[↳ inside]');
             htmxoLink('probes', ['k3']);
             check('single-array-is-key', last() === 'probes:k3' && lastKeys() === 'k3');
             // A hovered row that a swap replaces still ends its hover when left.
@@ -347,7 +347,7 @@ end
             check('replaced-row-ends', last() === 'probes:null' && lit('main') === '');
             // An announcement with `key` alone (an older plot runtime) still names it.
             document.dispatchEvent(new CustomEvent('htmxo:link', {detail: {group: 'probes', key: 'k4'}}));
-            check('key-only-event', lit('main') === 'row-k4=row' && lit('lazy') === 'row-group--Hessen=inside[↳ inside]');
+            check('key-only-event', lit('main') === 'row-k4=row' && lit('lazy') === 'row-lazy--group--Hessen=inside[↳ inside]');
             htmxoLink('probes', null);
             // Each table's detail is its own: the ids do not collide.
             row('trend-k5').querySelector('[data-htmxo-detail-toggle]').click();
@@ -355,7 +355,7 @@ end
             check('own-detail', !document.getElementById('detail-trend-k5').hidden && document.getElementById('detail-k5').hidden);
             // Page script announces a key that is not a CSS identifier.
             htmxoLink('probes', 'k:9');
-            check('any-key', lit('trend') === 'row-trend-k--9=row' && lit('main') === 'row-k--9=row' && lit('lazy') === 'row-group--Bayern=inside[↳ inside]');
+            check('any-key', lit('trend') === 'row-trend-k--9=row' && lit('main') === 'row-k--9=row' && lit('lazy') === 'row-lazy--group--Bayern=inside[↳ inside]');
             htmxoLink('probes', null);
             check('cleared', lit('main') === '' && lit('trend') === '' && lit('lazy') === '');
             const result = document.createElement('pre');
@@ -414,17 +414,17 @@ end
             const litKeys = id => Array.from(body(id).rows).filter(r => 'htmxoLinked' in r.dataset).map(r => r.dataset.htmxoLinkKey).join('|');
             const rowIn = (id, rid) => Array.from(body(id).rows).find(r => r.id === 'row-' + rid);
             const over = (to, from) => (to || document.body).dispatchEvent(new PointerEvent('pointerover', {bubbles: true, relatedTarget: from || null}));
-            over(rowIn('grouped', 'group--Hessen').cells[1]);
+            over(rowIn('grouped', 'grouped--group--Hessen').cells[1]);
             check('recorded-group', lastKeys() === 'k2|k4|k7' && litKeys('flat') === 'k2|k4|k7');
-            over(rowIn('lazy', 'group--Sachsen').cells[1], rowIn('grouped', 'group--Hessen').cells[1]);
+            over(rowIn('lazy', 'lazy--group--Sachsen').cells[1], rowIn('grouped', 'grouped--group--Hessen').cells[1]);
             check('recorded-lazy-group', lastKeys() === 'k5|k8' && litKeys('flat') === 'k5|k8');
-            over(document.body, rowIn('lazy', 'group--Sachsen').cells[1]);
+            over(document.body, rowIn('lazy', 'lazy--group--Sachsen').cells[1]);
             // Regrouped by its pills in the browser, a new group row announces its items.
             htmxoGroupRequest(document.querySelector('#grouped').closest('[data-htmxo-grouped]').querySelector('.htmxo-group-pills'), ['Region'], null);
-            await wait(() => rowIn('grouped', 'group--Mitte'));
-            over(rowIn('grouped', 'group--Mitte').cells[1]);
+            await wait(() => rowIn('grouped', 'grouped--group--Mitte'));
+            over(rowIn('grouped', 'grouped--group--Mitte').cells[1]);
             check('recorded-regrouped', lastKeys() === 'k2|k4|k5|k7|k8' && litKeys('flat') === 'k2|k4|k5|k7|k8');
-            over(document.body, rowIn('grouped', 'group--Mitte').cells[1]);
+            over(document.body, rowIn('grouped', 'grouped--group--Mitte').cells[1]);
             check('recorded-leave-ends', lastKeys() === '' && litKeys('flat') === '');
             const result = document.createElement('pre');
             result.id = 'checks';

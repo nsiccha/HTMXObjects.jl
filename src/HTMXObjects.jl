@@ -26,6 +26,7 @@ export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_style
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
     markdown_children, markdown_text_run, markdown_parser
 export decorated_link
+export Glossary, GlossaryTerm, glossary_section, term, link_terms, glossary_script
 export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
@@ -2902,6 +2903,7 @@ _runtime_blocks() = (
     semantic_refresh = (:js, semantic_refresh_script),
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
+    glossary = (:js, glossary_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
     syntax_styles = (:css, syntax_styles),
@@ -3215,6 +3217,9 @@ function htmx(args...;
         # The address's `#id` reaches an element an htmx swap inserts
         # after the page loaded; inert on an address without one.
         :url_anchor,
+        # A glossary term's definition opens beside it, kept on screen
+        # and outside scrolling tables; inert on pages without terms.
+        :glossary,
         # Markdown math (`render_markdown`) is typeset by KaTeX, which
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
@@ -3284,7 +3289,7 @@ _is_title_node(node) = node isa Node && HTMX.tag(node) === :title
 # `__progress_pause__` rides along for Treebars, which reads it while it
 # renders a poller or a live board (`page_progress_pause`).
 const _PAGE_META = :htmxo_page_meta
-const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing)
+const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing, glossary=nothing)
 
 _page_meta() = get(task_local_storage(), _PAGE_META, _NO_PAGE_META)
 _with_page_meta(f, meta) = task_local_storage(f, _PAGE_META, meta)
@@ -3333,7 +3338,7 @@ page_progress_pause() = _page_meta().progress_pause
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
-    lang = title = progress_pause = nothing
+    lang = title = progress_pause = glossary = nothing
     for obj in objects
         declared = _page_declaration(obj, :__lang__)
         isnothing(declared) || (lang = _page_lang_value(obj, declared))
@@ -3341,8 +3346,10 @@ function _page_meta_of(objects)
         isnothing(declared) || (title = _page_title_value(obj, declared))
         declared = _page_declaration(obj, :__progress_pause__)
         isnothing(declared) || (progress_pause = _page_progress_pause_value(obj, declared))
+        declared = _page_declaration(obj, :__glossary__)
+        isnothing(declared) || (glossary = _page_glossary_value(obj, declared))
     end
-    (; lang, title, progress_pause)
+    (; lang, title, progress_pause, glossary)
 end
 
 _page_declaration(obj, name) = hasproperty(obj, name) ? getproperty(obj, name) : nothing
@@ -5820,20 +5827,40 @@ end
 
 # Queues a `url_params` value a recording walk met (`_static_variant_target`)
 # for the running `record!`, which records its fragment after the requested
-# paths. `false` when no `record!` runs, so nothing will record it.
+# paths, and returns the address whose fragment file holds it: its own, or a
+# requested path or value recorded already with the same parameters in another
+# order. `nothing` when no `record!` runs, so nothing will record it.
 function _record_variant!(address::AbstractString)
     session = get(task_local_storage(), _RECORDING_SESSION_KEY, nothing)
-    isnothing(session) && return false
-    if !(address in session.variants_seen)
-        push!(session.variants_seen, address)
+    isnothing(session) && return nothing
+    get!(session.recorded, _record_query_identity(address)) do
         push!(session.variants, String(address))
+        String(address)
     end
-    true
 end
 
-# Where a recorded response is saved: its path without the query, except a
-# `url_params` value `record!` records, whose query names it.
-_record_save_path(req::HTTP.Request) = get(req.context, :htmxo_record_variant, false) ?
+# The address whose fragment file the running `record!` writes for an `hx-get`
+# with a query, or `nothing`: a requested path's or a declared value's, met so
+# far (a value counts once a response recorded before declared it, or the
+# same response did earlier in its markup).
+function _recorded_query_address(address::AbstractString)
+    session = get(task_local_storage(), _RECORDING_SESSION_KEY, nothing)
+    isnothing(session) && return nothing
+    get(session.recorded, _record_query_identity(address), nothing)
+end
+
+# What `record!` knows an address with a query by: its path and its
+# parameters in a fixed order, without a `#` fragment.
+function _record_query_identity(address::AbstractString)
+    path, query = _split_once(first(_split_once(address, '#')), '?')
+    isnothing(query) ? path : path * "?" * _sorted_query(query)
+end
+_sorted_query(query::AbstractString) = join(sort!(split(query, '&'; keepempty=false)), '&')
+
+# Where a recorded response is saved: its path without the query, except an
+# address with a query that `record!` drives (a requested path or a
+# `url_params` value), whose query names it.
+_record_save_path(req::HTTP.Request) = get(req.context, :htmxo_record_query, false) ?
     _record_variant_save_path(String(req.target)) : String(first(split(String(req.target), "?"; limit=2)))
 
 # Paths that use kwargs (query params) and thus can't vary by query string on static servers.
@@ -6091,7 +6118,8 @@ Walk a Node tree and make it static-safe under `rules`:
   recording, the fragment file it records, `<record_base>/hx/<path>.html`)
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
 - Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
-  routes) or names one of `rules.unservable` (kwargs routes)
+  routes; in a `record!` recording, unless it records that address,
+  `_static_query_hx_url`) or names one of `rules.unservable` (kwargs routes)
 - Mark affected elements with `data-static-disabled` and `disabled`, or —
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
 - Give a [`url_params`](@ref) element the file of each value it declares
@@ -6321,9 +6349,18 @@ _split_once(s, c) = (i = findfirst(c, s); isnothing(i) ? (String(s), nothing) : 
 _static_variant_target(rules::_StaticRules{<:StaticExport,_MappedVariants}, address) =
     _static_url_target(rules.spec, address, :fragment)
 _static_variant_target(rules::_StaticRules{<:StaticExport,_RecordedVariants}, address) =
-    _record_variant!(address) ?
-        _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address)) :
-        nothing
+    _recorded_query_url(rules, _record_variant!(address))
+
+# What an unmapped `hx-get` with a query becomes, or `nothing` (it is
+# disabled): for a recording, the file `record!` writes for its address, when
+# it records that address; a request-scoped export names files only through
+# its `url_map`.
+_static_query_hx_url(::_StaticRules{<:StaticExport,_MappedVariants}, url) = nothing
+_static_query_hx_url(rules::_StaticRules{<:StaticExport,_RecordedVariants}, url) =
+    _recorded_query_url(rules, _recorded_query_address(url))
+_recorded_query_url(rules, ::Nothing) = nothing
+_recorded_query_url(rules, address::AbstractString) =
+    _recorded_fragment_url(rules.spec.record_base, _record_variant_save_path(address))
 
 # The address of the fragment a recording saves for `save_path`: the file
 # `save_response` writes below `hx/`, under `record_base` (empty: the site
@@ -6423,14 +6460,17 @@ function _static_walk(node::Node, rules::_StaticRules)
         new_attrs[Symbol("data-htmxo-url-files")] = files
     end
 
-    # A mapped `hx-get` takes the caller's target verbatim. An unmapped one
-    # with a query string or pointing to a kwargs route is removed; otherwise
-    # it names its fragment under `record_base` (`_static_hx_url`).
+    # A mapped `hx-get` takes the caller's target verbatim, and an unmapped
+    # one with a query string the file a recording writes for its address
+    # (`_static_query_hx_url`). Any other with a query string or pointing to a
+    # kwargs route is removed; the rest name their fragment under
+    # `record_base` (`_static_hx_url`).
     if !isnothing(own)
         new_attrs[hx_get_sym] = own
     elseif haskey(new_attrs, hx_get_sym)
         url = new_attrs[hx_get_sym]
         target = _static_url_target(spec, url, :fragment)
+        isnothing(target) && occursin('?', url) && (target = _static_query_hx_url(rules, url))
         if !isnothing(target)
             new_attrs[hx_get_sym] = target
         elseif occursin('?', url) || url in rules.unservable
@@ -6784,7 +6824,7 @@ function _site_identity(address::AbstractString)
     path, query = _split_once(address, '?')
     path = isempty(path) || path == "/" ? "/" : rstrip(path, '/')
     isnothing(query) || !isnothing(_static_own_extension(path)) ? path :
-        path * "?" * join(sort!(split(query, '&'; keepempty=false)), '&')
+        path * "?" * _sorted_query(query)
 end
 
 # The address `url` names from the page at `base`, and the key of its entry
@@ -7803,12 +7843,13 @@ to_response(r::HXResponse) = let resp = to_response(r.value)
 end
 
 # A route answer that is a finished response. An `HXResponse` is rendered
-# here, on the task answering the request, which holds that request's audience
-# and page language: a route body may run elsewhere (a `@queued` body runs in
-# DynamicObjects' job queue, which carries neither; snag
-# `queued-hx-respon-fb8c1312`).
+# here, on the task answering the request, which holds that request's audience,
+# page language and glossary: a route body may run elsewhere (a `@queued` body
+# runs in DynamicObjects' job queue, which carries none of them; snag
+# `queued-hx-respon-fb8c1312`). Its value links the glossary's terms first, as
+# any other answer does in `_resolve_response`.
 _answer_value(value) = value
-_answer_value(r::HXResponse) = to_response(r)
+_answer_value(r::HXResponse) = to_response(_glossary_answer(r))
 _finalized_response(r::HXResponse) = to_response(r)
 
 const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
@@ -11670,7 +11711,7 @@ _save_recording(record_dir, path, resp; kwargs...) =
 
 function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing, record_base::String="")
     _private_page(req, val) && return _private_page_response()
-    val = _built_answer(req, val)
+    val = _glossary_answer(_built_answer(req, val))
     # Pre-finalized values (a route handler returning an `HTTP.Response`
     # or a `MIMEResponse` escape hatch for non-HTML bodies) bypass the
     # `__page__` wrap entirely — adding `<html>…</html>` around raw JS
@@ -15316,7 +15357,7 @@ _page_chain_to_apply(page_chain, req::HTTP.Request; root=nothing) =
 function _resolve_response_nested(page_chain, req, val; root=nothing,
         record_dir=nothing, save_path=nothing, record_base::String="")
     _private_page(req, val) && return _private_page_response()
-    val = _built_answer(req, val)
+    val = _glossary_answer(_built_answer(req, val))
     # Same finalized-value passthrough as `_resolve_response`. Routes
     # inside `@include`d substructs (e.g. `PipelineRoutes.aov_runtime_js`
     # returning `MIMEResponse("application/javascript", …)`) land here,
@@ -16819,6 +16860,9 @@ recorded page's path, `<record_base>/foo`: following one needs a host that
 serves `/foo` from `foo.html` (GitHub Pages does; `python -m http.server`
 does not).
 
+A requested path with a query is saved under it: `/region?key=a` at
+`<record_dir>/region@key=a.html`, `hx/region@key=a.html` and
+`md/region@key=a.md`, so several queries of one path are several files.
 Distinct requested paths that resolve to the same output file are rejected
 with an error before the later response can overwrite the earlier recording.
 
@@ -16826,6 +16870,14 @@ A recorded page or fragment holding a [`url_params`](@ref) element with
 declared `values` also gets the fragment of each of those values, recorded
 with `HX-Request: true` at `<record_dir>/hx/<path>@<query>.html` after the
 requested paths; that element's runtime loads them from the address.
+
+A recorded `hx-get` whose address has a query (a zoom link,
+`hx-get="/region?key=a"`) names the fragment file the recording writes for
+that address, a requested path's (with `hx=true`) or a declared value's,
+whatever the order of its parameters. A value counts once a response recorded
+before declared it, or the same response did earlier in its markup (a link
+inside the `url_params` element does). Any other `hx-get` with a query is
+disabled, since a static server cannot vary its answer by the query.
 
 Use this in place of the subprocess+HTTP recorder when you can drive an
 app from the same Julia process — much faster (no port, no warmup) and
@@ -16846,10 +16898,17 @@ function record!(app;
         record_dir=abspath(record_dir),
         source=Ref(""),
         destinations=Dict{String,String}(),
-        # `url_params` values the recorded responses declare (`_record_variant!`).
+        # `url_params` values the recorded responses declare, still to record
+        # (`_record_variant!`).
         variants=String[],
-        variants_seen=Set{String}(),
+        # The addresses with a query whose fragment the recording writes, by
+        # their parameters in any order: the requested paths, then each
+        # declared value (`_recorded_query_address`).
+        recorded=Dict{String,String}(),
     )
+    for path in paths
+        hx && occursin('?', path) && get!(session.recorded, _record_query_identity(path), String(path))
+    end
     storage[_RECORDING_SESSION_KEY] = session
     try
         route!(app; record_dir, record_base,
@@ -16866,7 +16925,7 @@ function record!(app;
         while !isempty(session.variants)
             address = popfirst!(session.variants)
             session.source[] = address
-            _drive_record_path(router, address, ["HX-Request" => "true"]; variant=true)
+            _drive_record_path(router, address, ["HX-Request" => "true"])
         end
     finally
         if had_session
@@ -16881,10 +16940,11 @@ end
 # In-process equivalent of an HTTP request: locate the registered handler
 # in the router's trie, invoke it with a synthesized Request. The
 # handler's normal save_response side effects still run.
-function _drive_record_path(router, path::AbstractString, headers; variant::Bool=false)
+function _drive_record_path(router, path::AbstractString, headers)
     req = HTTP.Request("GET", path, headers, UInt8[])
-    # A `url_params` value is saved under its query (`_record_save_path`).
-    variant && (req.context[:htmxo_record_variant] = true)
+    # An address with a query, a requested path's or a `url_params` value's,
+    # is saved under its query (`_record_save_path`).
+    occursin('?', path) && (req.context[:htmxo_record_query] = true)
     found = HTTP.Handlers.gethandler(router, req)
     handler = first(found)
     if handler === HTTP.Handlers.default404 || handler === nothing
@@ -17867,8 +17927,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
 end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto", audience=:public) -> pdf_path
-    pdf_report(value, pdf_path; audience=:public, kwargs...) -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto", audience=:public, glossary) -> pdf_path
+    pdf_report(value, pdf_path; audience=:public, glossary, kwargs...) -> pdf_path
 
 Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
 input is Markdown, typically a page's own projection: a `value` such as an
@@ -17946,6 +18006,14 @@ stays in the language it was rendered in. A public report refuses Markdown
 that holds private markup rendered for the live app, raw HTML carrying
 `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
 
+`glossary`, a [`Glossary`](@ref), is the app's glossary: by default the one a
+route's mount chain declares as `__glossary__` while `pdf_report` runs inside
+it, else none. A value's uses of its terms are linked as on a page
+([`link_terms`](@ref)), and so are those a Markdown string carries from a page
+answer. Every link to a term's entry then points into the report, which ends
+with a section headed `glossary.title` listing the terms it uses, unless the
+Markdown already holds an entry (a [`glossary_section`](@ref) of its own).
+
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
 `date_format` next to a text `date`, a `base_url` that is not an absolute URL,
@@ -18008,8 +18076,10 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     title::AbstractString, lang::AbstractString, metadata=(;),
                     base_url::Union{Nothing,AbstractString}=nothing, url_map=nothing,
                     resources::AbstractString=dirname(abspath(pdf_path)),
-                    quarto::AbstractString="quarto", audience=:public)
+                    quarto::AbstractString="quarto", audience=:public,
+                    glossary=_page_glossary())
     _check_audience(audience, "pdf_report") === :public && _check_public(markdown, "the report's Markdown")
+    markdown = _glossary_report(markdown, _check_glossary(glossary, "pdf_report"))
     isempty(strip(title)) &&
         throw(ArgumentError("pdf_report: `title` is blank; PDF/UA-1 requires a document title"))
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
@@ -18053,10 +18123,12 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
 end
 # The value renders in the report's language, which the words HTMXObjects
 # writes itself follow (`page_lang`: the label of private content).
-pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString, kwargs...) =
+pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString,
+           glossary=_page_glossary(), kwargs...) =
     pdf_report(_with_page_lang(lang) do
-                   to_markdown_string(value; audience=_check_audience(audience, "pdf_report"))
-               end, pdf_path; audience, lang, kwargs...)
+                   to_markdown_string(_glossary_answer(value, _check_glossary(glossary, "pdf_report"));
+                                      audience=_check_audience(audience, "pdf_report"))
+               end, pdf_path; audience, lang, glossary, kwargs...)
 
 # --- Captions ---
 
@@ -19045,6 +19117,8 @@ function htmxoLoadRows(row, expand) {
             const body = template.content.querySelector('tbody[data-htmxo-group-rows]');
             if (!body) throw new Error(htmxoText(row, 'rows_missing'));
             const rows = Array.from(body.rows);
+            const wrapper = row.closest('[data-htmxo-group-scope]');
+            if (wrapper) htmxoRescope(rows, body.dataset.htmxoGroupScope, wrapper.dataset.htmxoGroupScope);
             row.after(...rows);
             ['htmxoLazyRows', 'htmxoLazyLeaves', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
             delete row.htmxoMembers;
@@ -19128,7 +19202,13 @@ function htmxoUpdateRows(update, origin) {
     let tbody = update.dataset.htmxoRowUpdate ? document.getElementById(update.dataset.htmxoRowUpdate) : null;
     const named = [...incoming.flatMap(r => [r.id, r.dataset.htmxoParent]), ...ids, ...groups];
     for (let i = 0; !tbody && i < named.length; i++) tbody = bodyOf(named[i]);
-    if (!tbody && origin && origin.closest) { const t = origin.closest('table'); tbody = t && t.tBodies[0]; }
+    // The element that asked may sit beside the table, in its toolbar (the
+    // hidden element asking for `group_masters`).
+    if (!tbody && origin && origin.closest) {
+        const around = origin.closest('[data-htmxo-grouped]');
+        const t = origin.closest('table') || (around && around.querySelector('table'));
+        tbody = t && t.tBodies[0];
+    }
     // The group rows of a browser regroup (`group_masters`) have nothing to
     // do once their table has left the page, or the reader has regrouped
     // again: they are dropped, quietly.
@@ -19152,6 +19232,22 @@ function htmxoUpdateRows(update, origin) {
             const cfg = JSON.parse(wrapper.dataset.htmxoRegroup);
             cfg.order = JSON.parse(update.dataset.htmxoGroupOrder);
             wrapper.dataset.htmxoRegroup = JSON.stringify(cfg);
+        }
+    }
+    // Group rows rendered under another name than the table's (a table
+    // without an id whose leaves changed since it was rendered) take the
+    // table's name, and so do the groups the update speaks for and the
+    // siblings it places rows between.
+    if ('htmxoGroupScope' in update.dataset) {
+        const wrapper = tbody.closest('[data-htmxo-group-scope]');
+        if (wrapper) {
+            const rename = htmxoRescope(incoming, update.dataset.htmxoGroupScope, wrapper.dataset.htmxoGroupScope);
+            const renamed = [...groups].map(rename);
+            groups.clear();
+            renamed.forEach(g => groups.add(g));
+            const placed = update.getAttribute('data-htmxo-update-places');
+            if (placed) update.setAttribute('data-htmxo-update-places', JSON.stringify(Object.fromEntries(
+                Object.entries(JSON.parse(placed)).map(([id, around]) => [rename(id), around.map(rename)]))));
         }
     }
     const table = tbody.closest('table');
@@ -20082,6 +20178,24 @@ function htmxoRegroupConfig(wrapper) {
 }
 // `_md_safe_key` and `_md_json_list`, as the server writes them.
 function htmxoSafeKey(key) { return String(key).replace(/[^A-Za-z0-9_\-]/gu, '--'); }
+// A group row's id holds the name of its table (`data-htmxo-group-scope`,
+// see `_grouped_master_detail_table`). Give `rows`, rendered under the name
+// `from`, the name `to` of the table they join: their group rows' ids and
+// what names them (a row's `data-htmxo-parent`, a toggle's `aria-controls`).
+// Leaf ids (`row-group--<path>--<key>`) hold the caller's key and stay.
+// Returns the renaming of an id.
+function htmxoRescope(rows, from, to) {
+    if (!from || !to || from === to) return id => id;
+    const a = 'row-' + htmxoSafeKey(from + 'group:'), b = 'row-' + htmxoSafeKey(to + 'group:');
+    const rename = id => id.startsWith(a) ? b + id.slice(a.length) : id;
+    rows.forEach(r => {
+        r.id = rename(r.id);
+        if (r.dataset.htmxoParent) r.dataset.htmxoParent = rename(r.dataset.htmxoParent);
+        r.querySelectorAll('[data-htmxo-tree-toggle][aria-controls]').forEach(t => t.setAttribute('aria-controls',
+            t.getAttribute('aria-controls').split(' ').map(rename).join(' ')));
+    });
+    return rename;
+}
 function htmxoJsonString(s) {
     let out = '"';
     for (const c of String(s))
@@ -20324,7 +20438,7 @@ function htmxoRegroup(wrapper, levels) {
     };
     const group = (path, list, parent, level) => {
         const row = template.content.querySelector('tr').cloneNode(true), name = path[path.length - 1];
-        const gid = 'group:' + path.join('/'), id = 'row-' + htmxoSafeKey(gid), children = [];
+        const gid = 'group:' + path.join('/'), id = 'row-' + htmxoSafeKey(wrapper.dataset.htmxoGroupScope + gid), children = [];
         out.push(row);
         if (path.length < levels.length) {
             groupsAt(list, path.length).forEach(([k, ms]) => children.push(group([...path, k], ms, id, level + 1)));
@@ -22829,6 +22943,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   Leaves keep their own selection key in every group,
   so selecting one selects all its copies, and the selection survives
   regrouping; selectable group rows submit their key under `<selectable>_group`.
+  A group row's id carries the table's name (`row-<id>--group--<path>`; without
+  an `id`, a name from the leaves' keys), so two regroupable tables on one page
+  whose groups share a key keep their ids apart.
   An `initially_open` predicate is called with leaves only; each group holding
   a leaf it opens, at every level, renders open (and its rows eagerly, even
   with `group_rows_url`), so that leaf and its detail show on first paint. With
@@ -23041,6 +23158,9 @@ function master_detail_table(headers, items;
     # Refused: a link key with no link group would highlight nothing.
     isnothing(link) && !isnothing(link_key) && throw(ArgumentError(
         "master_detail_table: `link_key(item)` keys the rows of the link group `link`; give `link` too"))
+    # `id=nothing` is no id: no element is named after it, and the names a
+    # table without an id makes for itself are not overridden by it.
+    get(kwargs, :id, missing) === nothing && (kwargs = pairs(Base.structdiff(values(kwargs), NamedTuple{(:id,)})))
     if !isnothing(groupings)
         # A `name => :children` grouping regroups the leaves of the tree
         # `children` builds: the other groupings list each leaf once.
@@ -24250,7 +24370,18 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     browser = isnothing(group_rows_url)
     serve = !isnothing(group_by_url) && !browser
     refresh = !isnothing(group_by_url) && browser && !isnothing(group_master)
-    table_id = string(get(kwargs, :id, "htmxo-grouped-" * string(hash(names); base=36)))
+    # The table's name. A group row has no key of the caller's, so its row
+    # key (and so its id, `row-<name>--group--<path>`) and the pills' ids
+    # carry this name: two tables on one page whose groups share a key name
+    # their rows apart. It is the table's `id`; without one, it comes from
+    # the leaves' keys, which are unique on the page. A row update that adds
+    # or removes leaves renders under another such name, so the rows of an
+    # update or of a lazy group carry the name they were rendered under
+    # (`data-htmxo-group-scope`), and the runtime gives them the name of the
+    # table they arrive in (`htmxoRescope`).
+    table_id = string(something(get(kwargs, :id, nothing),
+        "htmxo-grouped-" * string(hash([_md_safe_key(key(item)) for item in items]); base=36)))
+    row_scope = table_id * ":"
     # The Group by control, pills that turn levels on and off and reorder
     # them, joins the tree controls; with a bulk form the grouping is also
     # submitted there, so a group selection arrives with its grouping.
@@ -24265,12 +24396,14 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     _open = initially_open isa Function ? initially_open : (_ -> initially_open)
     _open_detail = initially_open_detail isa Bool ? (_ -> initially_open_detail) : initially_open_detail
     # A group's key names it in callbacks, selections and requests; its
-    # row key (and so its row id) joins its level keys. A leaf's row key
-    # names the group it is listed under; the flat view lists each leaf once,
-    # under its own key.
+    # row key (and so its row id) joins its level keys under the table's
+    # name (`grow`). A leaf's row key names the group it is listed under
+    # (`gid`, the caller's key keeps it unique); the flat view lists each
+    # leaf once, under its own key.
     gkey(path) = _md_json_list(path)
     gpath(k) = group_path(string(k))
     gid(path) = "group:" * join(path, "/")
+    grow(path) = row_scope * gid(path)
     leaf_row_key(x) = isempty(x.group) ? string(key(x.item)) : x.group * "/" * string(key(x.item))
     # What the browser regroups a leaf by: its keys under every grouping, its
     # place among `items` (unranked groups keep first-appearance order) and its
@@ -24376,7 +24509,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     render!(x::_MDGroupLeaf) = string(key(x.item)) in leaf_set && push!(rendered, leaf_row_key(x))
     function render!(g::_MDGroup)
         keep(g) || return
-        push!(rendered, gid(g.path))
+        push!(rendered, grow(g.path))
         subs, direct = contents(g)
         foreach(render!, subs)
         append!(rendered, [gid(g.path) * "/" * string(key(m)) for m in direct if shown_leaf(g, m)])
@@ -24445,7 +24578,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             something(link_key, x -> something(outline.leaf(x), string(outline.key(x)))),
         _max_level = deepest, _rows_only = rows_only, _toolbar = toolbar, texts, kwargs...)
     tree(roots, children_of, group_row; rows_only=false) = master_detail_table(headers, roots;
-        key = x -> x isa _MDGroup ? gid(x.path) : leaf_row_key(x),
+        key = x -> x isa _MDGroup ? grow(x.path) : leaf_row_key(x),
         master = x -> x isa _MDGroup ? group_row(x.key, x.members) : master(x.item),
         children = children_of,
         detail = isnothing(detail) ? nothing : (x -> x isa _MDGroup ? nothing : detail(x.item)),
@@ -24466,7 +24599,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? true : select_submit(x.item)),
         _level_marks = nlevels > 1, _max_level = deepest,
         _sort_item = x -> x isa _MDGroup ? nothing : x.item,
-        _detail_key = x -> x isa _MDGroup ? gid(x.path) : string(key(x.item)),
+        _detail_key = x -> x isa _MDGroup ? grow(x.path) : string(key(x.item)),
         update_rows = update ? rendered : nothing,
         # A leaf is linked by its `link_key` (default: its own key), under
         # whichever group it is listed; a group row has none.
@@ -24474,17 +24607,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
         _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
-            groups=unique!(["row-" * _md_safe_key(gid(p)) for p in scope]),
-            order=browser ? order_json : nothing, group_masters))
+            groups=unique!(["row-" * _md_safe_key(grow(p)) for p in scope]),
+            order=browser ? order_json : nothing, group_masters, group_scope=row_scope))
     built = tree_active ? outline_rows(false) : tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
         end, gmaster)
     # The lazy-load response: the target group's rows (the rows of its
     # path and its own row dropped: each is one <tr>).
-    isnothing(target) || return h.tbody(; data_htmxo_group_rows=string(group_rows))(built[length(target)+1:end]...)
+    isnothing(target) || return h.tbody(; data_htmxo_group_rows=string(group_rows),
+        data_htmxo_group_scope=row_scope)(built[length(target)+1:end]...)
     update && return built
-    grouping = (; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values))
+    grouping = (; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values),
+        data_htmxo_group_scope=row_scope)
     browser || return h.div(; grouping..., scale_style...)(built)
     # The browser builds each group row from this one, rendered like the
     # rest, keeps the leaves this grouping leaves out (no key at its first
@@ -24597,11 +24732,13 @@ end
 # `_md_record_places!`) says where its rows go; `order`, the `group_order`
 # lists the table's browser regrouping goes by from now on. `group_masters`
 # marks the group rows of a browser regroup, which the runtime drops once the
-# reader has regrouped again.
+# reader has regrouped again. `group_scope`, the name the group rows were
+# rendered under, which the runtime swaps for the table's own.
 function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(),
-                        order=nothing, group_masters::Bool=false)
+                        order=nothing, group_masters::Bool=false, group_scope=nothing)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
+    isnothing(group_scope) || push!(attrs, :data_htmxo_group_scope => group_scope)
     isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
     group_masters && push!(attrs, :data_htmxo_group_masters => "")
     isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
@@ -29013,7 +29150,53 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
 .htmxo-private .htmxo-private { outline: none; }
 .htmxo-private .htmxo-private::before,
 .htmxo-private tr.htmxo-private > :first-child::before { content: none; }
+
+/* A glossary term's use (`link_terms`): its definition shows beside it while
+   the pointer is on the term or its box, or the link has keyboard focus. The
+   box stays out of the line's layout and of the link's accessible name; the
+   link names it as its description (`aria-describedby`). */
+.htmxo-term { position: relative; }
+.htmxo-term-def {
+    display: none;
+    position: absolute;
+    inset-inline-start: 0;
+    top: 100%;
+    z-index: 20;
+    width: max-content;
+    max-width: min(28rem, calc(100vw - 2rem));
+    padding: .4rem .6rem;
+    border: 1px solid var(--htmxo-muted, currentColor);
+    border-radius: .25rem;
+    background: var(--htmxo-bg, Canvas);
+    box-shadow: 0 .25rem .75rem rgb(0 0 0 / 15%);
+    font-size: .875rem;
+    font-style: normal;
+    font-weight: normal;
+    line-height: 1.4;
+    text-align: start;
+    text-indent: 0;
+    text-transform: none;
+    white-space: normal;
 }
+.htmxo-term:hover > .htmxo-term-def,
+.htmxo-term:focus-within > .htmxo-term-def { display: block; }
+/* With `glossary_script` the runtime opens it, in the window's coordinates,
+   so a scrolling table cannot clip it and it stays inside the window. */
+.htmxo-terms .htmxo-term:is(:hover, :focus-within) > .htmxo-term-def { display: none; }
+.htmxo-terms .htmxo-term[data-htmxo-term-open] > .htmxo-term-def { display: block; position: fixed; }
+.htmxo-glossary > dt { font-weight: bold; }
+.htmxo-glossary > dt > dfn { font-style: normal; }
+}
+
+/* Unlayered so it beats Pico's unlayered link colour: a term's use reads as
+   the surrounding text, marked by a dotted underline. */
+.htmxo-term > a {
+    color: inherit;
+    text-decoration: underline dotted;
+    text-underline-offset: .2em;
+}
+.htmxo-term > a:hover,
+.htmxo-term > a:focus-visible { text-decoration-style: solid; }
 
 /* While its request is in flight, htmx itself adds `htmx-request` to the
    triggering element (core `requestClass` — no HTMXObjects JS needed), so
@@ -30897,6 +31080,9 @@ function _tabset_markdown(label, url::AbstractString)
     name = _tabset_label_text(label)
     string("**[", isempty(name) ? url : name, "](", url, ")**")
 end
+
+# After the value types its walk sees through (`_TabsetPart` above).
+include("glossary.jl")
 
 include("comparison.jl")
 
