@@ -8369,11 +8369,89 @@ end
     @test contains(repr("text/markdown", SemanticArtifact("f.csv", "text/csv")),
         "(f.csv)")
     @test contains(repr("text/markdown", SemanticArtifact("f.csv", "text/csv")),
-        "`text/csv`")
+        "(CSV)")
 
     # A plot owns no markup — every format is its layer's own projection.
     @test repr("text/markdown", SemanticPlot("LAYER")) == "LAYER"
     @test repr("text/plain", SemanticPlot("LAYER")) == "LAYER"
+end
+
+@testitem "a SemanticArtifact names its label, format and size in every peer" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    table = SemanticArtifact("vs_2025.xlsx", xlsx; target="/datei/vs_2025.xlsx", size=1_468_006)
+    @test repr("text/markdown", table) == "[vs_2025.xlsx](/datei/vs_2025.xlsx) (XLSX, 1.4 MB)"
+    @test repr("text/plain", table) == "vs_2025.xlsx [XLSX, 1.4 MB] (/datei/vs_2025.xlsx)"
+    html = repr("text/html", table)
+    @test startswith(html, "<a ")
+    @test contains(html, "class=\"htmxo-semantic-artifact\"")
+    @test contains(html, "href=\"/datei/vs_2025.xlsx\"")
+    @test contains(html, "download=\"vs_2025.xlsx\"")
+    @test contains(html, "type=\"$xlsx\"")
+    @test contains(html, "<small>XLSX · 1.4 MB</small>")
+    # The icon is decoration: hidden from assistive technology, drawn in the
+    # text colour, and no emoji.
+    @test contains(html, "<svg") && contains(html, "aria-hidden=\"true\"")
+    @test contains(html, "stroke=\"currentColor\"")
+    @test !contains(html, "⬇")
+    # Without a label the name is the text, so no tooltip repeats it.
+    @test !contains(html, "title=")
+    # A page without the Pico bridge still separates the parts with spaces.
+    @test contains(html, "</svg> vs_2025.xlsx <small>")
+
+    # A label replaces the name as the text; the name stays the saved file name
+    # and becomes the tooltip.
+    report = SemanticArtifact("bericht_ap2.pdf", "application/pdf";
+        target="/bericht_ap2.pdf", label="Bericht als PDF", size=839_680)
+    @test repr("text/markdown", report) == "[Bericht als PDF](/bericht_ap2.pdf) (PDF, 820 KB)"
+    @test repr("text/plain", report) == "Bericht als PDF [PDF, 820 KB] (/bericht_ap2.pdf)"
+    html = repr("text/html", report)
+    @test contains(html, "</svg> Bericht als PDF <small>PDF · 820 KB</small>")
+    @test contains(html, "download=\"bericht_ap2.pdf\"")
+    @test contains(html, "title=\"bericht_ap2.pdf\"")
+
+    # The size's decimal mark follows `texts`.
+    de = SemanticArtifact("vs_2025.xlsx", xlsx; target="/x", size=1_468_006, texts=semantic_texts(:de))
+    @test repr("text/markdown", de) == "[vs_2025.xlsx](/x) (XLSX, 1,4 MB)"
+    @test contains(repr("text/html", de), "<small>XLSX · 1,4 MB</small>")
+    @test semantic_texts(:de).decimal == table_texts(:de).decimal == ","
+    @test semantic_texts().decimal == table_texts().decimal == "."
+
+    # Sizes are written short: bytes below a KB, one decimal below 10.
+    size_of(n) = repr("text/plain", SemanticArtifact("a.bin", "application/octet-stream"; size=n))
+    @test size_of(0) == "a.bin [BIN, 0 B]"
+    @test size_of(1023) == "a.bin [BIN, 1023 B]"
+    @test size_of(1024) == "a.bin [BIN, 1.0 KB]"
+    @test size_of(10 * 1024) == "a.bin [BIN, 10 KB]"
+    @test size_of(10 * 1024 - 30) == "a.bin [BIN, 10 KB]"
+    @test size_of(5 * 1024^3) == "a.bin [BIN, 5.0 GB]"
+    @test size_of(3 * 1024^5) == "a.bin [BIN, 3072 TB]"
+
+    # A payload the artifact holds has the size of its bytes; `size=` wins.
+    @test repr("text/plain", SemanticArtifact("t.csv", "text/csv", "x,y\n1,2\n")) == "t.csv [CSV, 8 B]"
+    @test repr("text/plain", SemanticArtifact("t.csv", "text/csv", "ä")) == "t.csv [CSV, 2 B]"
+    @test repr("text/plain", SemanticArtifact("b.zip", "application/zip", zeros(UInt8, 2048))) ==
+        "b.zip [ZIP, 2.0 KB]"
+    @test repr("text/plain", SemanticArtifact("t.csv", "text/csv", "x"; size=4096)) == "t.csv [CSV, 4.0 KB]"
+    @test SemanticArtifact("t.csv", "text/csv", :not_bytes).size === nothing
+
+    # A name without an extension has no format: the text peers name the MIME
+    # type instead, and HTML keeps it in `type` only.
+    plain_file = SemanticArtifact("README", "text/plain"; target="/r", size=100)
+    @test repr("text/markdown", plain_file) == "[README](/r) (`text/plain`, 100 B)"
+    @test repr("text/plain", plain_file) == "README [text/plain, 100 B] (/r)"
+    @test contains(repr("text/html", plain_file), "<small>100 B</small>")
+    @test repr("text/markdown", SemanticArtifact("README", "text/plain"; target="/r")) ==
+        "[README](/r) (`text/plain`)"
+    @test !contains(repr("text/html", SemanticArtifact("README", "text/plain"; target="/r")), "<small")
+    @test !contains(repr("text/html", SemanticArtifact(".env", "text/plain"; target="/e")), "<small")
+
+    # HXML reads the link as text with its facts; the icon draws nothing there.
+    hxml = repr("application/vnd.hyperview+xml", report)
+    @test contains(hxml, "Bericht als PDF") && contains(hxml, "PDF · 820 KB")
+    @test !contains(hxml, "<svg") && !contains(hxml, "<path")
+
+    @test_throws ArgumentError SemanticArtifact("a.csv", "text/csv"; size=-1)
+    @test_throws ArgumentError SemanticArtifact("a.csv", "text/csv"; size=1.5)
 end
 
 @testitem "a declined computation's marker word follows texts=semantic_texts(locale)" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
@@ -8388,7 +8466,7 @@ end
         "<text style=\"small\"> — no draws at this level</text></text>"
     @test all(repr(m, declined) == repr(m, SemanticUnavailable(
         "no draws at this level"; texts=semantic_texts(:en))) for m in formats)
-    @test semantic_texts() == semantic_texts(:en) == SemanticTexts("unavailable")
+    @test semantic_texts() == semantic_texts(:en) == SemanticTexts("unavailable", ".")
 
     # A German page states the refusal in German in every peer format; the
     # framework-owned class keeps its name, it is a styling hook, not text.
@@ -8421,6 +8499,54 @@ end
     # refused: a table's texts hold no marker word for the vocabulary — each
     # texts struct belongs to the words its own renderer writes.
     @test_throws TypeError SemanticUnavailable(reason; texts=table_texts(:de))
+end
+
+@testitem "a status keeps its state and glyph and shows the app's own label=" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
+    formats = ("text/html", "application/vnd.hyperview+xml", "text/markdown", "text/plain")
+
+    # Without `label=` the word is the state's name, byte-identical to before.
+    @test repr("text/html", SemanticStatus(:warn; detail="3 Ortsteile")) ==
+        "<span class=\"htmxo-semantic-status\" data-status=\"warn\">" *
+        "<strong>! warn</strong><small> 3 Ortsteile</small></span>"
+    @test repr("text/markdown", SemanticStatus(:fail; detail="boom")) == "✗ **fail** — boom"
+    @test repr("text/plain", SemanticStatus(:ok)) == "[ok]"
+    @test all(repr(m, SemanticStatus(:recorded)) ==
+              repr(m, SemanticStatus(:recorded; label="recorded")) for m in formats)
+
+    # A German page names a recognised state in its own words: the state keeps
+    # the glyph and `data-status`, the label is the word in every peer format.
+    status = SemanticStatus(:warn; label="im Projekt zu klären", detail="3 Ortsteile")
+    @test status.state === :warn
+    @test repr("text/html", status) ==
+        "<span class=\"htmxo-semantic-status\" data-status=\"warn\">" *
+        "<strong>! im Projekt zu klären</strong><small> 3 Ortsteile</small></span>"
+    hxml = repr("application/vnd.hyperview+xml", status)
+    @test contains(hxml, "! im Projekt zu klären") && !contains(hxml, "! warn")
+    @test repr("text/markdown", status) == "! **im Projekt zu klären** — 3 Ortsteile"
+    @test repr("text/plain", status) == "[im Projekt zu klären] 3 Ortsteile"
+    # Two outcomes on one glyph still read differently.
+    @test repr("text/markdown", SemanticStatus(:ok; label="unauffällig")) == "✓ **unauffällig**"
+    @test repr("text/markdown", SemanticStatus(:available; label="im Modell behandelt")) ==
+        "✓ **im Modell behandelt**"
+
+    # The label survives generated form chrome and a table cell.
+    page = h.div(h.form(h.input(; type="text", name="q"), status, h.button("Go")))
+    markdown = HTMXObjects.to_markdown_string(page)
+    @test contains(markdown, "! **im Projekt zu klären** — 3 Ortsteile")
+    @test !contains(markdown, "**warn**") && !contains(markdown, "<form")
+    checks = [(; id="a", name="Pendler", status=SemanticStatus(:ok; label="unauffällig")),
+              (; id="b", name="Betriebe", status=SemanticStatus(:warn; label="im Projekt zu klären"))]
+    table = repr("text/markdown", master_detail_table(["Prüfung", "Stand"], checks;
+        key=x -> x.id, master=x -> (h.td(x.name), h.td(x.status)), detail=x -> h.p(x.id)))
+    @test contains(table, "✓ **unauffällig**")
+    @test contains(table, "! **im Projekt zu klären**")
+    @test !contains(table, "**ok**") && !contains(table, "**warn**")
+
+    # refused: plain text shows no glyph, so a blank label would leave the
+    # status saying nothing there; the vocabulary's meaning survives into every
+    # peer format (docs/src/api.md, "The semantic element vocabulary").
+    @test_throws ArgumentError SemanticStatus(:ok; label="")
+    @test_throws ArgumentError SemanticStatus(:ok; label="  ")
 end
 
 @testitem "SemanticTable is gated by Tables.istable, never duck-typed" setup=[HTMXOTestImports] tags=[:unit, :semantic] begin
