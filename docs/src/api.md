@@ -3499,19 +3499,22 @@ python_service(ApiV1, "odl-service"; package = "odl_service", copyright = "2026 
 
   | Model | Artifacts | Runtime | Operations |
   |---|---|---|---|
-  | `@slic` (StanBlocks) | `model.stan`, `interface.json` (`stan_code`, `stan_interface`) | CmdStanPy | those `stan_descriptor` offers: fit, predict, log likelihood (pointwise) |
+  | `@slic` (StanBlocks) | `model.stan`, `interface.json` (`stan_code`, `stan_interface`) | BridgeStan, sampled with nutpie | those `stan_descriptor` offers: fit, predict, log likelihood (pointwise) |
   | bound `@rkppl` (ReactiveKernelsPPL) | `model.py` (`jax_source`) | NumPyro | fit, log likelihood (one sum per draw); the module draws no predictions |
 
   A Stan draw is the constrained value of each parameter; `predict` and
-  `log_likelihood` run the fixed-parameter sampler at each draw. A JAX draw
-  also carries its unconstrained vector.
+  `log_likelihood` evaluate the program at each draw with BridgeStan
+  (`param_constrain` with transformed parameters and generated quantities),
+  so every value is computed from the request's data. A JAX draw also carries
+  its unconstrained vector.
 - **Tested against the Julia model.** `tests/references/<name>.json` holds
   `reference_draws` (default 2) draws and the log likelihoods the Julia model
   gives at them; `tests/test_models.py` posts them to the service and compares.
   For a Stan model this compiles the program once with BridgeStan when the
   service is generated; `reference_draws = 0` skips the references.
-- **Packaging.** `pyproject.toml` adds `cmdstanpy` or `jax`/`numpyro`/`scipy`;
-  the `Dockerfile` installs CmdStan and compiles the Stan programs
+- **Packaging.** `pyproject.toml` adds `bridgestan` and `nutpie[stan]` (pinned;
+  Python 3.12 or later) or `jax`/`numpyro`/`scipy`; the `Dockerfile` installs
+  BridgeStan's C++ source and compiles the Stan programs
   (`python -m <package>.runtime`) while it builds the image.
 
 The extensions on StanBlocks and ReactiveKernelsPPL load with those packages;

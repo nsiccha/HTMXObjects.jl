@@ -6,13 +6,18 @@
 # log_likelihood}`, added to the shipped document, and a small Python runtime
 # (`<package>/runtime/`) that the hand-written backend methods can call as
 # `self.models.<name>`. The draws travel in the requests (stateless). A
-# model's Stan program runs through CmdStanPy, its JAX module through NumPyro.
+# model's Stan program runs through BridgeStan and is sampled with nutpie (no
+# CmdStan: user decisions `1g9p2nw`, `0i2b1wr`), its JAX module through NumPyro.
 # What each model gives (its artifacts, data, parameters and outputs) comes
 # from `_py_model`, which the StanBlocks and ReactiveKernelsPPL extensions
 # implement; neither package knows HTMXObjects.
 
-# The CmdStan release the Dockerfile installs for Stan programs.
-const _PY_CMDSTAN_VERSION = "2.40.0"
+# The BridgeStan release (its Python package and the C++ source the Dockerfile
+# installs, which must agree) and the nutpie release a Stan program runs with.
+# The runtime builds nutpie's model from the compiled library the way
+# `nutpie.compile_stan_model` does, so a new nutpie needs its runtime checked.
+const _PY_BRIDGESTAN_VERSION = "2.9.0"
+const _PY_NUTPIE_VERSION = "0.16.11"
 
 # One named value of a model: a data input, a parameter, an output. `schema`
 # is the JSON schema of one value (of one draw's, for parameters and outputs).
@@ -28,7 +33,8 @@ What `python_service` needs of a model, as `_py_model(model, name; reference_dra
 returns it (the StanBlocks and ReactiveKernelsPPL extensions):
 
 - `kind`: `"stan"` (a Stan program and its `stan_interface`, run through
-  CmdStanPy) or `"jax"` (a `jax_source` module, run through NumPyro);
+  BridgeStan and nutpie) or `"jax"` (a `jax_source` module, run through
+  NumPyro);
 - `files`: the artifacts, written into `<package>/runtime/<name>/`;
 - `inputs`: the data a request carries;
 - `parameters`: one draw's parameters, and `unconstrained` the length of the
@@ -185,48 +191,82 @@ _py_runtime_main(header) = [header; ""; _py_docstring("Prepare every model ahead
 
 const _PY_STAN_RUNTIME = raw"""
 \"\"\"Stan programs (StanBlocks' `stan_code` and `stan_interface`), run through
-CmdStanPy.
+BridgeStan and sampled with nutpie.
 
 A draw is the constrained value of each parameter. `predict` and
-`log_likelihood` run the program's fixed-parameter sampler started at each
-draw, so its generated quantities are computed at that draw.
+`log_likelihood` evaluate the program at each draw with BridgeStan, so its
+transformed parameters and generated quantities are computed from the
+request's data.
 \"\"\"
 
 import json
+import secrets
+import threading
 from pathlib import Path
 from typing import Any
 
-import cmdstanpy
+import bridgestan
+import nutpie
+import numpy as np
+from nutpie import _lib
+from nutpie.compile_stan import CompiledStanModel
 
-# Digits CmdStan writes of each value (its maximum).
-SIG_FIGS = 18
+# nutpie runs the chains in threads of one process.
+MAKE_ARGS = ["STAN_THREADS=true"]
 
 
 class StanModel:
     \"\"\"A Stan program and its interface, in `directory`.
 
     The program is compiled at first use (or by `prepare`), next to
-    `model.stan`.
+    `model.stan`; BridgeStan's make leaves an up-to-date library alone.
     \"\"\"
 
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         text = (self.directory / "interface.json").read_text(encoding="utf-8")
         self.interface = json.loads(text)
-        self._program: cmdstanpy.CmdStanModel | None = None
+        self._library: Path | None = None
+        self._nutpie_library: Any = None
+        self._lock = threading.Lock()
 
     @property
-    def program(self) -> cmdstanpy.CmdStanModel:
-        \"\"\"The compiled program.\"\"\"
-        if self._program is None:
-            self._program = cmdstanpy.CmdStanModel(
-                stan_file=str(self.directory / "model.stan")
-            )
-        return self._program
+    def library(self) -> Path:
+        \"\"\"The compiled program, a shared library.\"\"\"
+        with self._lock:
+            if self._library is None:
+                self._library = bridgestan.compile_model(
+                    self.directory / "model.stan", make_args=MAKE_ARGS
+                )
+            return self._library
 
     def prepare(self) -> None:
         \"\"\"Compile the program.\"\"\"
-        self.program
+        self.library
+
+    def instance(self, data: dict[str, Any]) -> bridgestan.StanModel:
+        \"\"\"The program with `data`, the program's data.\"\"\"
+        return bridgestan.StanModel(str(self.library), data, warn=False)
+
+    def sampled(self, data: dict[str, Any]) -> CompiledStanModel:
+        \"\"\"The program with `data`, as nutpie samples it.\"\"\"
+        library = self.library
+        with self._lock:
+            # `nutpie.compile_stan_model` would compile the program again
+            # in each process; this is the model it makes of the library
+            # (nutpie is pinned to the release this follows).
+            if self._nutpie_library is None:
+                self._nutpie_library = _lib.StanLibrary(str(library))
+        stan = self.directory / "model.stan"
+        return CompiledStanModel(
+            code=stan.read_text(encoding="utf-8"),
+            library=self._nutpie_library,
+            dims={},
+            _coords={},
+            model_name="model",
+            model=None,
+            data=data,
+        ).with_data()
 
     @property
     def parameters(self) -> list[str]:
@@ -263,19 +303,27 @@ class StanModel:
         warmup: int = 1000,
         seed: int | None = None,
     ) -> dict[str, list]:
-        \"\"\"Draws of the parameters given `data` (NUTS).\"\"\"
-        fit = self.program.sample(
-            data=self.data(data),
+        \"\"\"Draws of the parameters given `data` (nutpie's NUTS).\"\"\"
+        encoded = self.data(data)
+        trace = nutpie.sample(
+            self.sampled(encoded),
+            draws=samples,
+            tune=warmup,
             chains=chains,
-            iter_sampling=samples,
-            iter_warmup=warmup,
             seed=seed,
-            sig_figs=SIG_FIGS,
-            show_progress=False,
+            save_warmup=False,
+            progress_bar=False,
+            store_unconstrained=True,
         )
-        return {
-            name: fit.stan_variable(name).tolist() for name in self.parameters
-        }
+        model = self.instance(encoded)
+        unconstrained = np.asarray(trace.sample_stats["unconstrained_draw"])
+        columns = model.param_names()
+        found: dict[str, list] = {name: [] for name in self.parameters}
+        for theta in unconstrained.reshape(-1, model.param_unc_num()):
+            values = named(columns, model.param_constrain(theta))
+            for name in self.parameters:
+                found[name].append(values.get(name, []))
+        return found
 
     def predict(
         self,
@@ -301,27 +349,80 @@ class StanModel:
         seed: int | None,
     ) -> dict[str, list]:
         \"\"\"The `generative` outputs at each draw.\"\"\"
-        names = self.parameters
         outputs = self.outputs(generative)
-        count = len(draws[names[0]])
+        found: dict[str, list] = {name: [] for name in outputs}
+        count = len(draws[self.parameters[0]])
         if count == 0:
-            return {name: [] for name in outputs}
-        inits = [
-            {name: draws[name][k] for name in names} for k in range(count)
-        ]
-        fit = self.program.sample(
-            data=self.data(data),
-            fixed_param=True,
-            chains=count,
-            iter_warmup=0,
-            iter_sampling=1,
-            adapt_engaged=False,
-            inits=inits,
-            seed=seed,
-            sig_figs=SIG_FIGS,
-            show_progress=False,
-        )
-        return {name: fit.stan_variable(name).tolist() for name in outputs}
+            return found
+        model = self.instance(self.data(data))
+        if seed is None:
+            seed = secrets.randbits(31)
+        rng = model.new_rng(seed)
+        parameters = model.param_names()
+        columns = model.param_names(include_tp=True, include_gq=True)
+        for k in range(count):
+            theta = model.param_unconstrain(
+                np.array([at_draw(draws, name, k) for name in parameters])
+            )
+            values = named(
+                columns,
+                model.param_constrain(
+                    theta, include_tp=True, include_gq=True, rng=rng
+                ),
+            )
+            for name in outputs:
+                found[name].append(values.get(name, []))
+        return found
+
+
+def indices(column: str) -> tuple[str, list[int]]:
+    \"\"\"The value and the indices (from 1) of a column, `a.2.1`.\"\"\"
+    name, *rest = column.split(".")
+    if not all(part.isdigit() for part in rest):
+        raise ValueError(f"no Python value for the Stan output {column}")
+    return name, [int(part) for part in rest]
+
+
+def named(columns: list[str], flat: Any) -> dict[str, Any]:
+    \"\"\"The values of `flat` by name, arrays as nested lists.
+
+    A value of size zero has no columns, so it is missing here.
+    \"\"\"
+    shapes: dict[str, list[int]] = {}
+    cells = []
+    for column, value in zip(columns, flat):
+        name, place = indices(column)
+        shape = shapes.setdefault(name, [0] * len(place))
+        shapes[name] = [max(n, i) for n, i in zip(shape, place)]
+        cells.append((name, place, float(value)))
+    found: dict[str, Any] = {
+        name: filled(shape) for name, shape in shapes.items()
+    }
+    for name, place, value in cells:
+        if not place:
+            found[name] = value
+            continue
+        row = found[name]
+        for i in place[:-1]:
+            row = row[i - 1]
+        row[place[-1] - 1] = value
+    return found
+
+
+def filled(shape: list[int]) -> Any:
+    \"\"\"Nested lists of `shape`.\"\"\"
+    if not shape:
+        return None
+    return [filled(shape[1:]) for _ in range(shape[0])]
+
+
+def at_draw(draws: dict[str, list], column: str, k: int) -> float:
+    \"\"\"The value of the column `column` in the `k`-th draw.\"\"\"
+    name, place = indices(column)
+    value = draws[name][k]
+    for i in place:
+        value = value[i - 1]
+    return value
 
 
 def encode(entry: dict[str, Any], value: Any) -> Any:
@@ -472,8 +573,8 @@ function _py_models_test(header, package, models)
         The model endpoints, against the Julia models they were generated from.
 
         `references/<name>.json` holds draws and the log likelihoods the Julia
-        model gives at them. A model whose runtime is not installed (CmdStanPy
-        with CmdStan, or JAX with NumPyro) is skipped.""", 0)]
+        model gives at them. A model whose runtime is not installed (nutpie
+        with BridgeStan, or JAX with NumPyro) is skipped.""", 0)]
     append!(lines, [
         "",
         "import json",
@@ -493,11 +594,8 @@ function _py_models_test(header, package, models)
     append!(lines, _py_docstring("Skip unless the runtime of `kind` is installed.", 4))
     append!(lines, [
         "    if kind == \"stan\":",
-        "        cmdstanpy = pytest.importorskip(\"cmdstanpy\")",
-        "        try:",
-        "            cmdstanpy.cmdstan_path()",
-        "        except ValueError:",
-        "            pytest.skip(\"CmdStan is not installed\")",
+        "        pytest.importorskip(\"bridgestan\")",
+        "        pytest.importorskip(\"nutpie\")",
         "    else:",
         "        pytest.importorskip(\"jax\")",
         "        pytest.importorskip(\"numpyro\")",
@@ -588,7 +686,7 @@ function _py_models_readme(package, models)
     rows = String[]
     for (name, m) in models, method in _py_model_methods(m)
         push!(rows, "| `$name` | `POST /models/$name/$method` | " *
-                    (m.kind == "stan" ? "CmdStanPy" : "NumPyro") * " |")
+                    (m.kind == "stan" ? "BridgeStan, nutpie" : "NumPyro") * " |")
     end
     [
         "",
@@ -605,10 +703,11 @@ function _py_models_readme(package, models)
         "Your own backend methods reach the same models as `self.models.<name>`:",
         "`fit(data, chains=…, samples=…, warmup=…, seed=…)`, `predict(data, draws, seed=…)`",
         "and `log_likelihood(data, draws)`, with `data` the model's data by name. A Stan",
-        "program needs [CmdStan](https://mc-stan.org/cmdstanpy/installation.html)",
-        "(`python -m cmdstanpy.install_cmdstan`); `python -m $package.runtime` compiles",
-        "every program ahead of use, as the Dockerfile does. `tests/test_models.py` checks",
-        "each model against draws and log likelihoods of the Julia model it was generated",
-        "from.",
+        "program is compiled with [BridgeStan](https://roualdes.us/bridgestan/), which",
+        "needs a C++ toolchain and `make` and downloads its C++ source to `~/.bridgestan`",
+        "unless `BRIDGESTAN` names one; nutpie samples it. `python -m $package.runtime`",
+        "compiles every program ahead of use, as the Dockerfile does.",
+        "`tests/test_models.py` checks each model against draws and log likelihoods of",
+        "the Julia model it was generated from.",
     ]
 end

@@ -8,7 +8,7 @@ using TestItemRunner
 @testmodule PythonModelFixtures begin
     using HTMXObjects
     import HTMXObjects: _PyModel, _PyModelVar
-    export demo_models, normal_logpdf
+    export demo_models, normal_logpdf, STAN_PREDICT_CHECK
 
     normal_logpdf(v, m, s) = -0.5 * log(2pi) - log(s) - 0.5 * ((v - m) / s)^2
 
@@ -26,6 +26,9 @@ using TestItemRunner
           real alpha;
           real<lower=0> sigma;
         }
+        transformed parameters {
+          vector[x_n] mu = alpha * x;
+        }
         model {
           alpha ~ normal(0, 1);
           sigma ~ exponential(1);
@@ -39,6 +42,13 @@ using TestItemRunner
           vector[y_n] y_gen;
           vector[y_n] y_likelihood;
           vector[z_ends_n] z_likelihood;
+          vector[x_n] y_mean = mu;
+          matrix[2, 3] grid;
+          for (i in 1:2) {
+            for (j in 1:3) {
+              grid[i, j] = 10 * i + j;
+            }
+          }
           for (i in 1:y_n) {
             y_gen[i] = normal_rng(alpha * x[i], sigma);
             y_likelihood[i] = normal_lpdf(y[i] | alpha * x[i], sigma);
@@ -64,7 +74,8 @@ using TestItemRunner
                              merge(value("ends"), Dict{String,Any}("key" => "2"))])],
         "parameters" => ["alpha", "sigma"],
         "outputs" => [output("alpha", "posterior"), output("sigma", "posterior"),
-            output("y_gen", "draw"), output("y_likelihood", "pointwise_loglik"),
+            output("y_gen", "draw"), output("y_mean", "draw"), output("grid", "draw"),
+            output("y_likelihood", "pointwise_loglik"),
             output("z_likelihood", "pointwise_loglik")])
 
     const JAX = """
@@ -99,6 +110,24 @@ using TestItemRunner
             return {"alpha": unconstrained[0], "sigma": jnp.exp(unconstrained[1])}
         """
 
+    # `predict` evaluates the program on the request's data: a transformed
+    # parameter for other rows than the references' (four, not three), and a
+    # matrix row by row.
+    const STAN_PREDICT_CHECK = """
+        from ps_service.runtime import load_models
+
+        model = load_models().stanm
+        data = {"x": [1.0, 2.0, 3.0, 4.0], "y": [0.0, 0.0, 0.0, 0.0], "z": [[0.1], [0.2, 0.3]]}
+        draws = {"alpha": [0.5, -0.3], "sigma": [1.2, 0.8]}
+        found = model.predict(data, draws, seed=1)
+        assert found["y_mean"] == [[a * x for x in data["x"]] for a in draws["alpha"]], found["y_mean"]
+        assert found["grid"] == 2 * [[[11.0, 12.0, 13.0], [21.0, 22.0, 23.0]]], found["grid"]
+        assert [len(g) for g in found["y_gen"]] == [4, 4], found["y_gen"]
+        likelihood = model.log_likelihood(data, draws)
+        assert [len(v) for v in likelihood["y_likelihood"]] == [4, 4], likelihood
+        print("checked")
+        """
+
     number = Dict{String,Any}("type" => "number")
     numbers = Dict{String,Any}("type" => "array", "items" => number)
 
@@ -109,7 +138,8 @@ using TestItemRunner
             [_PyModelVar("x", numbers), _PyModelVar("y", numbers),
              _PyModelVar("z", Dict{String,Any}("type" => "array", "items" => numbers))],
             [_PyModelVar("alpha", number), _PyModelVar("sigma", number)], 0,
-            [_PyModelVar("y_gen", numbers)],
+            [_PyModelVar("y_gen", numbers), _PyModelVar("y_mean", numbers),
+             _PyModelVar("grid", Dict{String,Any}("type" => "array", "items" => numbers))],
             [_PyModelVar("y_likelihood", numbers), _PyModelVar("z_likelihood", numbers)], true,
             (; data=Dict{String,Any}("x" => x, "y" => y, "z" => z),
                draws=Dict{String,Any}("alpha" => alpha, "sigma" => sigma),
@@ -185,17 +215,24 @@ end
     @test occursin("self.jaxm = JaxModel(__package__ + \".jaxm.model\")", runtime)
     @test read_file("ps_service/runtime/stanm/model.stan") == PythonModelFixtures.STAN
     pyproject = read_file("pyproject.toml")
-    for dependency in ("cmdstanpy>=1.2", "jax>=0.4.30", "numpyro>=0.15", "scipy>=1.11")
+    for dependency in ("bridgestan==2.9.0", "nutpie[stan]==0.16.11", "jax>=0.4.30", "numpyro>=0.15", "scipy>=1.11")
         @test occursin("\"$dependency\"", pyproject)
     end
+    # Both runtimes need numpy; it is listed once.
+    @test count("\"numpy>=1.26\"", pyproject) == 1
+    @test occursin("requires-python = \">=3.12\"", pyproject)
     @test occursin("packages = [\"ps_service\", \"ps_service.runtime\", \"ps_service.runtime.jaxm\", \"ps_service.runtime.stanm\"]", pyproject)
     @test occursin("\"ps_service.runtime.stanm\" = [\"model.stan\", \"interface.json\"]", pyproject)
     dockerfile = read_file("Dockerfile")
-    @test occursin("ARG CMDSTAN_VERSION=2.40.0", dockerfile)
-    @test occursin("python -m cmdstanpy.install_cmdstan --dir /opt/cmdstan", dockerfile)
+    @test occursin("ARG BRIDGESTAN_VERSION=2.9.0", dockerfile)
+    @test occursin("ENV BRIDGESTAN=/opt/bridgestan/bridgestan-\${BRIDGESTAN_VERSION}", dockerfile)
+    @test occursin("releases/download/v\${BRIDGESTAN_VERSION}/bridgestan-\${BRIDGESTAN_VERSION}.tar.gz", dockerfile)
     @test occursin("python -m ps_service.runtime", dockerfile)
+    @test occursin("chmod -R a+rX /opt/bridgestan", dockerfile)
+    # No CmdStan anywhere (user decisions 1g9p2nw, 0i2b1wr).
+    @test !any(p -> occursin("cmdstan", lowercase(read(p, String))), written)
     readme = read_file("README.md")
-    @test occursin("| `stanm` | `POST /models/stanm/predict` | CmdStanPy |", readme)
+    @test occursin("| `stanm` | `POST /models/stanm/predict` | BridgeStan, nutpie |", readme)
     @test occursin("| `jaxm` | `POST /models/jaxm/fit` | NumPyro |", readme)
     tests = read_file("tests/test_models.py")
     @test occursin("def test_stanm_log_likelihood():", tests) && occursin("def test_jaxm_fit():", tests)
@@ -204,7 +241,11 @@ end
     # Without models nothing of this is written.
     plain = mktempdir()
     @test !any(p -> occursin("runtime", p) || endswith(p, "setup.cfg"), generate_service(plain))
-    @test !occursin("cmdstanpy", read(joinpath(plain, "pyproject.toml"), String))
+    plain_pyproject = read(joinpath(plain, "pyproject.toml"), String)
+    @test !occursin("nutpie", plain_pyproject) && !occursin("bridgestan", plain_pyproject)
+    @test occursin("requires-python = \">=3.10\"", plain_pyproject)
+    # Without a Stan model, no BridgeStan in the image either.
+    @test !occursin("bridgestan", lowercase(read(joinpath(plain, "Dockerfile"), String)))
 
     # refused: a model name is part of paths and Python names, so it must be a Python identifier (decision 17jp1li)
     @test_throws ArgumentError generate_service(mktempdir(); models=(; var"Bad-Name"=demo_models().stanm))
@@ -231,12 +272,28 @@ end
         @test result.ok
         result.ok || println(result.output)
         # With HTMXO_TEST_PYTHON_MODELS=1 the Python must run the models
-        # (CmdStanPy with CmdStan, JAX with NumPyro): no test may be skipped.
+        # (nutpie with BridgeStan, JAX with NumPyro): no test may be skipped.
         if get(ENV, "HTMXO_TEST_PYTHON_MODELS", "") == "1"
             @test !occursin("skipped", result.output)
             @test occursin("7 passed", result.output)
         end
+        if run_python(python, dir, "-c", "import bridgestan, nutpie").ok
+            check = run_python(python, dir, "-c", STAN_PREDICT_CHECK)
+            @test check.ok && occursin("checked", check.output)
+            check.ok || println(check.output)
+        else
+            @test get(ENV, "HTMXO_TEST_PYTHON_MODELS", "") != "1"
+        end
     end
+end
+
+@testitem "the models CI job installs the releases python_service pins" tags=[:unit] begin
+    using HTMXObjects
+    workflow = read(joinpath(pkgdir(HTMXObjects), ".github", "workflows", "test.yml"), String)
+    @test occursin("BRIDGESTAN_VERSION: '$(HTMXObjects._PY_BRIDGESTAN_VERSION)'", workflow)
+    @test occursin("NUTPIE_VERSION: '$(HTMXObjects._PY_NUTPIE_VERSION)'", workflow)
+    @test occursin("\"bridgestan==\$BRIDGESTAN_VERSION\" \"nutpie[stan]==\$NUTPIE_VERSION\"", workflow)
+    @test !occursin("cmdstan", lowercase(workflow))
 end
 
 # The extensions on StanBlocks and ReactiveKernelsPPL need those packages,

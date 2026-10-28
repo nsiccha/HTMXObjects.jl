@@ -1,8 +1,8 @@
 """
 A StanBlocks model in `python_service(T, dir; models = (; name = model))`: its
 Stan program (`stan_code`) and interface (`stan_interface`) run through
-CmdStanPy, with the operations `stan_descriptor` offers (`:fit`, `:predict`,
-`:pointwise_loglik` as `log_likelihood`).
+BridgeStan and nutpie, with the operations `stan_descriptor` offers (`:fit`,
+`:predict`, `:pointwise_loglik` as `log_likelihood`).
 """
 module HTMXObjectsStanBlocksExt
 
