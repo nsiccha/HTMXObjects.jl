@@ -6034,7 +6034,13 @@ alone, so concurrent ordinary requests are unaffected.
   address, which keeps its query.
 - `controls` — what happens to an element a static server cannot serve: one
   carrying `hx-post`/`hx-put`/`hx-patch`/`hx-delete`, or an unmapped `hx-get`
-  whose address has a query string. `:disable` (default; the recording
+  whose request carries a query string. That is one whose address has a
+  query, and one that sends values, which htmx puts in the query of a GET: a
+  `<form>` (its fields), a named `input`/`select`/`textarea`/`button` (its own
+  value), and an element with `hx-include`, `hx-vals` or `hx-vars` on it or
+  on an enclosing element, which it inherits (an `unset` value stops that).
+  A [`url_params`](@ref) element is not one of them: the export gives it the
+  file of each value it declares. `:disable` (default; the recording
   behaviour) strips those attributes and greys the element out
   (`data-static-disabled` + `disabled`, plus the dimming style in a full
   page's `<head>`). `:remove` drops the element and its subtree instead.
@@ -6171,15 +6177,59 @@ export_audience(req::HTTP.Request) = get(req.context, :htmxo_audience, :private)
 struct _MappedVariants end
 struct _RecordedVariants end
 
+# What htmx adds to the request of an element with one of these attributes,
+# and of every element inside it, which inherits it: the inputs an
+# `hx-include` names, and `hx-vals`/`hx-vars` values. An `unset` value stops
+# what the element would inherit.
+const _HX_INCLUDE_ATTRS = (Symbol("hx-include"), Symbol("data-hx-include"))
+const _HX_VALUES_ATTRS = (Symbol("hx-vals"), Symbol("hx-vars"),
+                          Symbol("data-hx-vals"), Symbol("data-hx-vars"))
+
+# Whether enclosing elements add inputs (`include`) or values (`vals`) to every
+# request inside them.
+struct _StaticSent
+    include::Bool
+    vals::Bool
+end
+const _STATIC_SENT_NOTHING = _StaticSent(false, false)
+
+# What an element with `attrs` and everything inside it inherit, given what
+# its enclosing elements add.
+_static_sent(sent::_StaticSent, attrs) = _StaticSent(
+    _static_inherits(sent.include, attrs, _HX_INCLUDE_ATTRS),
+    _static_inherits(sent.vals, attrs, _HX_VALUES_ATTRS))
+function _static_inherits(inherited::Bool, attrs, syms)
+    found = false
+    for sym in syms
+        value = get(attrs, sym, nothing)
+        isnothing(value) && continue
+        strip(string(value)) == "unset" || return true
+        found = true
+    end
+    found ? false : inherited
+end
+
+# Whether an element's `hx-get` request sends values besides its address, as
+# htmx builds a GET: a form's fields, a named control's own value, and what
+# an `hx-include` or `hx-vals`/`hx-vars` on it or an enclosing element adds.
+# They become the request's query, which a static file cannot answer.
+_static_sends_values(tag::Symbol, attrs, sent::_StaticSent) =
+    sent.include || sent.vals || tag === :form ||
+    tag in (:input, :select, :textarea, :button) && !isempty(string(get(attrs, :name, "")))
+
 # What a static walk consults: the spec, the rooted `hx-get` paths a static
 # server cannot vary by query — `route!`'s recording registry for the recording
-# form of `static_transform`, nothing for a request-scoped export — and who
-# names the files of a declared URL parameter's values and of fragments.
+# form of `static_transform`, nothing for a request-scoped export — who
+# names the files of a declared URL parameter's values and of fragments, and
+# what the elements enclosing the walked one add to its requests.
 struct _StaticRules{S<:StaticExport,V}
     spec::S
     unservable::Set{String}
     variants::V
+    sent::_StaticSent
 end
+_StaticRules(spec, unservable, variants) =
+    _StaticRules(spec, unservable, variants, _STATIC_SENT_NOTHING)
 
 # Returned by the walker for an element `controls=:remove` drops; containers
 # filter it out of their children.
@@ -6244,7 +6294,10 @@ Walk a Node tree and make it static-safe under `rules`:
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
 - Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
   routes; in a `record!` recording, unless it records that address,
-  `_static_query_hx_url`) or names one of `rules.unservable` (kwargs routes)
+  `_static_query_hx_url`), whose element sends values that become the query
+  (a form, a named control, an inherited `hx-include`/`hx-vals`/`hx-vars`;
+  `_static_sends_values`), or that name one of `rules.unservable` (kwargs
+  routes)
 - Mark affected elements with `data-static-disabled` and `disabled`, or —
   under `controls=:remove` — drop them (`_STATIC_REMOVED`)
 - Give a [`url_params`](@ref) element the file of each value it declares
@@ -6561,8 +6614,10 @@ function _static_walk(node::Node, rules::_StaticRules)
     # whose address is then rewritten below like any other.
     runtime = get(HTMX.attrs(node), Symbol("data-htmxo-runtime"), nothing)
     isnothing(runtime) || spec.runtime === :linked || return _runtime_block(Symbol(runtime))
-    _static_links_private(spec, HTMX.attrs(node)) && return _STATIC_REMOVED
-    new_attrs = copy(HTMX.attrs(node))
+    attrs = HTMX.attrs(node)
+    _static_links_private(spec, attrs) && return _STATIC_REMOVED
+    new_attrs = copy(attrs)
+    sent = _static_sent(rules.sent, attrs)
     # Set when the element carries a request a static server cannot answer.
     unservable = false
 
@@ -6587,18 +6642,21 @@ function _static_walk(node::Node, rules::_StaticRules)
 
     # A mapped `hx-get` takes the caller's target verbatim, and an unmapped
     # one with a query string the file a recording writes for its address
-    # (`_static_query_hx_url`). Any other with a query string or pointing to a
+    # (`_static_query_hx_url`). Any other with a query string, sending values
+    # that become its query (`_static_sends_values`; a `url_params` element's
+    # runtime loads its declared values' files instead) or pointing to a
     # kwargs route is removed; the rest name their fragment under
     # `record_base` (`_static_hx_url`).
     if !isnothing(own)
         new_attrs[hx_get_sym] = own
     elseif haskey(new_attrs, hx_get_sym)
         url = new_attrs[hx_get_sym]
+        sends = isnothing(declared) && _static_sends_values(HTMX.tag(node), attrs, sent)
         target = _static_url_target(spec, url, :fragment)
-        isnothing(target) && occursin('?', url) && (target = _static_query_hx_url(rules, url))
+        isnothing(target) && !sends && occursin('?', url) && (target = _static_query_hx_url(rules, url))
         if !isnothing(target)
             new_attrs[hx_get_sym] = target
-        elseif occursin('?', url) || url in rules.unservable
+        elseif sends || occursin('?', url) || url in rules.unservable
             delete!(new_attrs, hx_get_sym)
             unservable = true
         else
@@ -6627,11 +6685,14 @@ function _static_walk(node::Node, rules::_StaticRules)
         new_attrs[:disabled] = "true"                        # renders as boolean attribute
     end
 
-    # Recurse into children; private content shown as several values takes
-    # its place among them.
+    # Recurse into children, which inherit what this element adds to their
+    # requests; private content shown as several values takes its place
+    # among them.
+    inner = sent === rules.sent ? rules :
+        _StaticRules(spec, rules.unservable, rules.variants, sent)
     new_children = Any[]
     for child in HTMX.children(node)
-        _static_append!(new_children, _static_walk_child(child, rules))
+        _static_append!(new_children, _static_walk_child(child, inner))
     end
 
     Node(HTMX.tag(node), new_attrs, new_children)
@@ -7547,9 +7608,8 @@ function _prestart_walk(items::Union{AbstractVector,Tuple}, walk, blocked)
     changed === nothing ? nothing : (items isa Tuple ? Tuple(changed) : changed)
 end
 
-const _PRESTART_INHERITED = Symbol.(["hx-vals", "hx-vars", "hx-include",
-    "hx-headers", "hx-request", "data-hx-vals", "data-hx-vars",
-    "data-hx-include", "data-hx-headers", "data-hx-request"])
+const _PRESTART_INHERITED = (_HX_VALUES_ATTRS..., _HX_INCLUDE_ATTRS...,
+    Symbol.(("hx-headers", "hx-request", "data-hx-headers", "data-hx-request"))...)
 
 function _prestart_walk(node::Node, walk::_PrestartWalk, blocked::Bool)
     attrs = HTMX.attrs(node)
