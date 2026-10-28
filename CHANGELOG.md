@@ -14,6 +14,32 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.23
+
+- `HTMXObjects.pico_page` draws a site frame: `brand` (the header's home link,
+  `label => href`), `nav` (the main navigation: `label => href` links,
+  `private(label => href)` links, or elements placed as they are), `nav_label`,
+  `footer` and `skip_link`. The link to the page being read carries
+  `aria-current="page"` with nothing passed for it: the shell reads the
+  request's address, forwarded prefix included. The entry whose `href` is that
+  address or the longest one above it is marked; the app's home only on
+  itself. The nav's name and the skip link's text follow the page's language
+  ("Hauptnavigation", "Zum Inhalt springen" on a German page). The skip link
+  shows once the keyboard reaches it and moves to `<main id="main">`. Without
+  `brand` and `nav` the page is unchanged. Before, apps built this frame on
+  `htmx()` themselves (ArbeitsplatzAtlas, VerkehrsStrukturdaten, ODLPlaus,
+  PFIVergleich, MietspiegelBayes, DBSVergleich, RegionExplorer's
+  `explorer_page`).
+- `pico_page`'s `pico_version` defaults to Pico's pinned release under vendor
+  assets (`assets=:vendor` or a mount path), so `pico_page(content;
+  assets=:vendor)` works without `pico_version=HTMXObjects._PICO_VERSION`. The
+  CDN default stays `"2"`.
+- `pico_page` passes every keyword it does not name itself to `htmx`
+  (`katex_version`, `prism_version`, `feedback`, …), not only `extra_head`,
+  `assets`, `runtime`, `tables`, `error_texts`, `lang` and `title`.
+- `htmxo_utility_styles` hides `.htmxo-skip-link` until it has focus and sets
+  a header nav link with `aria-current="page"` in bold.
+
 ## 0.1.22
 
 - A static export (`dispatch(...; static=StaticExport(...))`, `static_transform`,

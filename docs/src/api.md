@@ -261,6 +261,73 @@ HTMXObjects.page_lang
 HTMXObjects.page_progress_pause
 ```
 
+### The site frame — header, navigation and footer {#site-frame}
+
+`pico_page` draws the frame most apps build around their pages: a header with
+the app's home link and its main navigation, the content in `<main>`, and a
+footer. The navigation marks the link to the page being read with
+`aria-current="page"` by itself, from the request's address:
+
+```julia
+@htmx struct App
+    __lang__ = "de"
+    __page__(content) = let base = __prefix__
+        HTMXObjects.pico_page(content; brand="Strukturdaten Berlin" => base * "/",
+            nav=["Karte" => base * "/", "Methodik" => base * "/modell",
+                 private("Angebot" => base * "/angebot")],
+            footer=h.small("Datenbasis: …"))
+    end
+    # ...
+end
+```
+
+renders this body on `/modell/annahmen` in the live app (line breaks added; a
+public answer leaves out the private entry and its comments):
+
+```html
+<a href="#main" class="htmxo-skip-link">Zum Inhalt springen</a>
+<header class="container"><nav aria-label="Hauptnavigation">
+<ul><li><a href="/"><strong>Strukturdaten Berlin</strong></a></li></ul>
+<ul><li><a href="/">Karte</a></li><li><a href="/modell" aria-current="page">Methodik</a></li>
+<!--htmxo-private--><li class="htmxo-private"><a href="/angebot">Angebot</a></li><!--/htmxo-private--></ul>
+</nav></header>
+<main class="container" id="main"><p>Annahmen</p></main>
+<footer class="container"><small>Datenbasis: …</small></footer>
+```
+
+- `brand` is the home link, `label => href` (the label in bold), or an element
+  placed as it is.
+- `nav` entries are `label => href` links, [`private`](@ref) links that public
+  answers leave out (with their stand-in, if any), or elements such as an
+  `h.li` of the app's own, placed as they are.
+- The marked entry is the one whose `href` is the request's address or an
+  address above it (`/modell` on `/modell/annahmen`), the longest of several.
+  The app's home (`/`, or the mount prefix a proxy forwards) is marked only on
+  itself, so a page the navigation does not list marks nothing. The `href` is
+  compared without its query and with percent-encoding undone; one with a
+  `#fragment`, a relative one or another site's is never marked. The address
+  includes the forwarded prefix, as `__prefix__` does, so links built on
+  `__prefix__` match behind a path-stripping proxy. A static export keeps the
+  mark of the page it writes.
+- `nav_label` is the navigation's accessible name, "Main navigation" by
+  default and "Hauptnavigation" on a German page (`lang`, or the route's
+  `__lang__`).
+- `skip_link=true` puts a "Skip to content" / "Zum Inhalt springen" link
+  first on a page with a header. It stays out of sight until the keyboard
+  reaches it, then shows above the header and moves to `<main id="main">`. A
+  string is its text instead; `false` leaves it out.
+- `footer` is placed in `<footer class="container">`, or as it is when it is
+  an `h.footer` itself. `class` (default `"container"`) is the class of the
+  header, `main` and footer.
+
+Without `brand` and `nav` the page has no header and no skip link and is the
+same as before. The stylesheet every page carries ([`htmxo_utility_styles`](@ref))
+hides the skip link until it has focus and sets the marked entry in bold;
+Pico underlines it as on hover. Every keyword `pico_page` does not name itself
+(`extra_head`, `runtime`, `tables`, `error_texts`, `title`, the library
+versions) goes to `htmx`, so an app's own shell function can pass its
+keywords through.
+
 ### Tables on every page — `tables=true` {#page-tables}
 
 The shell also carries the tables' runtime, so a table from `render_table`,
@@ -424,8 +491,9 @@ __page__(content) = htmx(content; assets=:vendor)
 ```
 
 Vendor mode serves each library solely at its pinned version (a different
-version errors loudly); `pico_page` needs its pin spelled out, since its
-floating `"2"` default is not the pin. A custom mount pairs with a matching
+version errors loudly). `pico_page` takes Pico's pin by itself under vendor
+assets (`pico_page(content; assets=:vendor)`); `htmx` needs it spelled out,
+`pico_version=HTMXObjects._PICO_VERSION`. A custom mount pairs with a matching
 prefix: `vendorfiles("static/vendor")` + `assets="/static/vendor"`.
 
 A static bundle has no routes to serve the files from, so copy them instead:

@@ -3383,8 +3383,11 @@ _is_title_node(node) = node isa Node && HTMX.tag(node) === :title
 # function that the root's `__page__` calls, and neither sees the leaf; the
 # response handler sets it around the whole answer, error page included.
 # `__progress_pause__` rides along for Treebars, which reads it while it
-# renders a poller or a live board (`page_progress_pause`).
-const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing, glossary=nothing)
+# renders a poller or a live board (`page_progress_pause`). `route` and
+# `prefix` are the request's own address and mount prefix, which `pico_page`
+# reads to mark the nav entry of the page being read.
+const _NO_PAGE_META = (; lang=nothing, title=nothing, progress_pause=nothing, glossary=nothing,
+    route=nothing, prefix=nothing)
 const _PAGE_META = ScopedValues.ScopedValue{NamedTuple}(_NO_PAGE_META)
 
 _page_meta() = _PAGE_META[]
@@ -3479,13 +3482,17 @@ _page_meta_of(objects, req::HTTP.Request) =
     _page_meta_with_lang(_page_meta_of(objects), get(req.context, :htmxo_lang, nothing))
 _page_meta_with_lang(meta, ::Nothing) = meta
 _page_meta_with_lang(meta, lang::String) = (; meta..., lang)
+# Beside the declarations, the address the request names: its route with the
+# mount prefix (`__route__`) and the prefix itself.
+_page_meta_of(objects, req::HTTP.Request, context) =
+    (; _page_meta_of(objects, req)..., route=context.route, prefix=context.prefix)
 
 """
-    pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline, tables=true, error_texts=nothing, lang=nothing, title=nothing)
+    pico_page(content; brand=nothing, nav=(), nav_label=nothing, footer=nothing, skip_link=true, class="container", assets=:cdn, pico_version=<"2" from the CDN, the pinned release under vendor assets>, lang=nothing, kwargs...)
 
-Thin wrapper around [`htmx`](@ref) for the canonical `__page__` pattern:
-wrap `content` in `h.main(class=class)(content)` and assemble a full
-Pico-CSS HTML page. Replaces the repeated boilerplate
+The page frame of a Pico-CSS app on [`htmx`](@ref): a header with the app's
+home link and its main navigation, `content` in `<main class="container">`,
+and a footer. Replaces the repeated boilerplate
 
     __page__(content) = htmx(h.main(class="container")(content); pico_version="2")
 
@@ -3495,17 +3502,91 @@ with
     # or with a title:
     __page__(content) = pico_page(content; title="My App")
 
-`assets`, `runtime`, `tables`, `error_texts`, `lang` and `title` forward to [`htmx`](@ref): `pico_page(content;
-assets=:vendor, pico_version=HTMXObjects._PICO_VERSION)` renders the offline
-page (vendor mode needs pico at its exact pin, not the floating `"2"`
-default), and adding `runtime=:linked` makes its whole head cacheable.
-`pico_page(content; lang="de", error_texts=__error_texts__)` is a German page.
-Left out, `lang` and `title` come from the route's `__lang__` / `__title__`
-declarations, as for [`htmx`](@ref).
+and a whole site frame with
+
+    __page__(content) = let base = __prefix__
+        pico_page(content; brand="Strukturdaten Berlin" => base * "/",
+                  nav=["Karte" => base * "/", "Methodik" => base * "/modell",
+                       private("Angebot" => base * "/angebot")],
+                  footer=h.small("Datenbasis: …"))
+    end
+
+`brand` is the header's home link, `label => href` (the label in bold), or
+an element placed as it is. `nav` lists the main navigation: each
+`label => href` pair is a link, a [`private`](@ref) pair a link that public
+answers leave out, and any other element (an `h.li` of the app's own) is
+placed as it is. Together they form
+`<header class="container"><nav aria-label="Main navigation"><ul>brand</ul><ul>nav</ul></nav></header>`;
+without either, the page has no header.
+
+The link to the page being read carries `aria-current="page"`, which a
+screen reader announces and the page shows (bold and underlined). Nothing is
+passed for it: the shell reads the request's address, including the prefix a
+proxy forwards. An entry is the page being read when its `href` is that
+address or an address below it (`/modell` on `/modell/annahmen`), and of
+several such entries the longest; the app's home (`/`, or the mount prefix)
+only on itself. Its `href` is compared without a query and with
+percent-encoding undone; an `href` with a `#fragment`, a relative one or
+another site's never is. Outside a request no entry is marked.
+
+`nav_label` names the navigation for screen readers: "Main navigation" by
+default, "Hauptnavigation" on a German page (the `lang` keyword or the
+route's `__lang__`). `skip_link=true` puts a "Skip to content" ("Zum Inhalt
+springen") link first on a page with a header: it shows when the keyboard
+reaches it and moves to `<main id="main">`. A string is its text instead,
+and `false` leaves it out. `footer` is placed in `<footer class="container">`,
+or as it is when it is an `h.footer` itself. `class` is the class of the
+header, `main` and footer.
+
+`pico_version` defaults to Pico's floating `"2"` from the CDN and to the
+pinned release under vendor assets (`assets=:vendor` or a mount path), which
+serve only that pin. Every other keyword (`extra_head`, `runtime`, `tables`,
+`error_texts`, `title`, the library versions, …) goes to [`htmx`](@ref):
+`pico_page(content; assets=:vendor, runtime=:linked)` is an offline page
+with a cacheable head, and `pico_page(content; lang="de",
+error_texts=__error_texts__)` a German one. Left out, `lang` and `title` come
+from the route's `__lang__` / `__title__` declarations, as for
+[`htmx`](@ref).
 """
-pico_page(content; pico_version="2", class="container", extra_head=(), assets=:cdn, runtime=:inline,
-        tables=true, error_texts=nothing, lang=nothing, title=nothing) =
-    htmx(h.main(class=class)(content); pico_version, extra_head, assets, runtime, tables, error_texts, lang, title)
+function pico_page(content; brand=nothing, nav=(), nav_label=nothing, footer=nothing,
+        skip_link=true, class="container", assets=:cdn, pico_version=_pico_page_version(assets),
+        lang=nothing, kwargs...)
+    texts_lang = isnothing(lang) ? _page_meta().lang : lang
+    header = _site_header(brand, nav, nav_label, class, texts_lang)
+    skip = isempty(header) ? () : _skip_link(skip_link, texts_lang)
+    main = isempty(skip) ? h.main(class=class)(content) : h.main(class=class, id=_MAIN_ID)(content)
+    htmx(skip..., header..., main, _site_footer(footer, class)...;
+        pico_version, assets, lang, kwargs...)
+end
+
+# Vendor assets serve Pico only at its pin; the CDN keeps the floating "2".
+_pico_page_version(assets) = assets === :cdn ? "2" : _PICO_VERSION
+
+# The words of the page frame, by the page's language (`_lang_entry`).
+const _NAV_LABELS = (en = "Main navigation", de = "Hauptnavigation")
+const _SKIP_LINK_TEXTS = (en = "Skip to content", de = "Zum Inhalt springen")
+# The skip link's target.
+const _MAIN_ID = "main"
+
+# The header: the brand's home link and the main navigation. None without either.
+function _site_header(brand, nav, nav_label, class, lang)
+    isnothing(brand) && isempty(nav) && return ()
+    label = isnothing(nav_label) ? _lang_entry(_NAV_LABELS, lang) : nav_label
+    lists = (_brand_list(brand)..., (isempty(nav) ? () : (h.ul(_site_nav_items(nav)...),))...)
+    (h.header(class=class)(h.nav(lists...; aria_label=label)),)
+end
+
+_brand_list(::Nothing) = ()
+_brand_list(brand::Pair) = (h.ul(h.li(h.a(h.strong(first(brand)); href=last(brand)))),)
+_brand_list(brand) = (h.ul(h.li(brand)),)
+
+_skip_link(on::Bool, lang) = on ? _skip_link(_lang_entry(_SKIP_LINK_TEXTS, lang), lang) : ()
+_skip_link(text::AbstractString, lang) = (h.a(text; href="#" * _MAIN_ID, class="htmxo-skip-link"),)
+
+_site_footer(::Nothing, class) = ()
+_site_footer(footer::Node, class) =
+    HTMX.tag(footer) === :footer ? (footer,) : (h.footer(class=class)(footer),)
+_site_footer(footer, class) = (h.footer(class=class)(footer),)
 
 # --- Route registration and recording ---
 
@@ -5483,6 +5564,57 @@ private(content; public=nothing, mark::Bool=true) = Private(content, public, mar
 # Content a function builds is built when it is shown.
 _built(content) = content
 _built(build::Function) = build()
+
+# --- The navigation of `pico_page`'s header ---
+#
+# Here, after `Private`, because a private entry stays private.
+
+# The nav entries as list items, the link to the page being read marked.
+function _site_nav_items(nav)
+    meta = _page_meta()
+    current = _site_nav_current(nav, get(meta, :route, nothing), get(meta, :prefix, nothing))
+    Any[_site_nav_item(entry, current) for entry in nav]
+end
+
+_site_nav_item(entry::Pair, current) = h.li(h.a(first(entry); href=last(entry),
+    (!isnothing(current) && _site_nav_path(last(entry)) == current ? (; aria_current="page") : (;))...))
+# A private entry stays private: its content, built when it is shown, and its
+# stand-in are entries too.
+_site_nav_item(entry::Private, current) =
+    Private(_site_nav_item(entry.content, current), _site_nav_item(entry.public, current), entry.mark)
+_site_nav_item(build::Function, current) = () -> _site_nav_item(build(), current)
+_site_nav_item(entry, current) = entry
+
+# The path of the entry that names the page being read: of the entries whose
+# path is `route` or above it, the longest; the app's home (its mount prefix,
+# `/` without one) names only itself. `nothing` outside a request.
+_site_nav_current(nav, ::Nothing, prefix) = nothing
+function _site_nav_current(nav, route::AbstractString, prefix)
+    here = _site_nav_path(route)
+    home = rstrip(something(prefix, ""), '/')
+    best = nothing
+    for path in _site_nav_paths(nav)
+        path == here || (path != home && startswith(here, path * "/")) || continue
+        (isnothing(best) || length(path) > length(best)) && (best = path)
+    end
+    best
+end
+
+_site_nav_paths(nav) = String[p for entry in nav for p in _site_nav_entry_paths(entry) if !isnothing(p)]
+_site_nav_entry_paths(entry::Pair) = (_site_nav_path(last(entry)),)
+_site_nav_entry_paths(entry::Private) = (_site_nav_entry_paths(entry.content)..., _site_nav_entry_paths(entry.public)...)
+# Content built when it is shown is not built to find the page being read.
+_site_nav_entry_paths(entry) = ()
+
+# An address as the nav compares it: a path on this site, without its query
+# and trailing slash, percent-encoding undone (`""` is the site's root).
+# `nothing` for an address with a fragment, a relative one or another site's.
+_site_nav_path(href) = nothing
+function _site_nav_path(href::AbstractString)
+    (startswith(href, "/") && !startswith(href, "//") && !occursin('#', href)) || return nothing
+    path = first(split(href, '?'; limit=2))
+    rstrip(_percent_decode_lenient(path), '/')
+end
 
 # The audience of the answer being rendered: `:public` or `:private`, and
 # `:public` outside any request, export and `with_audience`, so a value
@@ -15124,7 +15256,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             # The root's `__lang__` / `__title__` hold for an answer whose mount
             # chain cannot be walked; the full chain refines them below. A
             # `dispatch(…; lang)` wins over both.
-            page_meta = _page_meta_of(Any[root], req)
+            page_meta = _page_meta_of(Any[root], req, context)
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
@@ -15146,7 +15278,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         try
             objects = isempty(chain) ? Any[root] :
                       _chain_steps(root, chain, req, root_segs)
-            page_meta = _page_meta_of(objects, req)
+            page_meta = _page_meta_of(objects, req, context)
             target = merge(root_target, (; leaf, objects, chain,
                                            root_segs, request=req))
             # In-process callers (`dispatch`) thread a Treebars progress
@@ -31208,6 +31340,10 @@ a `role` keeps Pico's look. A choice among many options ([`choice_list`](@ref))
 is a field styled as an input whose list opens beside it, its chosen row filled
 like a pill.
 
+It draws [`pico_page`](@ref)'s frame: the skip link (`.htmxo-skip-link`) is
+out of sight until the keyboard reaches it, and the header's link to the page
+being read (`aria-current="page"`) is bold.
+
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
 - `u-text-*`      semantic text colors mapped to `--htmxo-*` tokens
@@ -31535,6 +31671,16 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
     color: var(--htmxo-muted, currentColor);
 }
 .htmxo-back-link:hover { text-decoration: underline; }
+
+/* `pico_page`'s frame. The skip link is out of sight until the keyboard
+   reaches it, then sits above the header. The header's link to the page
+   being read is bold; Pico underlines it as on hover. */
+.htmxo-skip-link:not(:focus, :focus-visible) {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+}
+.htmxo-skip-link { display: inline-block; margin: 0.5rem 1rem; }
+body > header nav a[aria-current="page"] { font-weight: 600; }
 
 /* `private` content as a private reader sees it (the live app, a private
    export): outlined and labelled, so the reader can tell what no public
