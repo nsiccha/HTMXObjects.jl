@@ -78,13 +78,41 @@ reaches it and the arrow keys choose. The rule keys off the markup (a
 and a hand-written fieldset look the same; a `fieldset` with a `role` keeps
 Pico's look.
 
+### `choice_list` — a choice among many options
+
+```julia
+choice_list((; compound="c3"), ["c$i" => "Compound $i" for i in 1:40]; label="Compound")
+choice_list((; compound="c3"), compounds; texts=__error_texts__)   # the app's language
+```
+
+A field, styled as an input, shows the chosen option. A click, a tap, ↓ or a
+typed letter opens a list of the options under it, with a search field on top:
+typing filters the list (ignoring case and accents, and searching an option's
+help too), the arrow keys move through it and Enter or a click chooses and
+closes it; Escape or a click elsewhere closes it unchanged. The list opens as a
+popover, so no scroll box or table clips it. Every `htmx()` / `pico_page` shell
+carries its script (`choice_list_script()`) and styles; the chosen row is filled
+in the text colour like a pill.
+
+The list holds one radio per option, so the choice submits with its form,
+validates, refreshes dependent controls and drives `show_when=` exactly like a
+radio group; the search field has no name and its own events stop at it, so no
+form or htmx trigger sees the search. A `?plain` read shows the label and the
+chosen option, as for a `<select>`. The search field's words are
+`choice_search` and `choice_no_match` of `ErrorTexts` (English and German
+built in).
+
+Generated forms (`semantic_app`, `operation_form`) render a single choice as
+`radio_group`'s pills up to `radio_max` options (default 8) and as this list
+past it, so an app does not offer a choice through a native `<select>`.
+
 ### `Long`
 
 A marker type that turns a `Symbol` field name into a human-readable label (`(:plot_height_mm,)` → `"Plot height (mm)"`). Most widgets accept `label=Long(nv)` as a default — pass an explicit string to override.
 
 ### `show_when=` kwarg
 
-Every labeled widget (`linput`, `sinput`, `sinput_custom`, `rinput`, `ninput`, `cinput`, `tinput`, `radio_group`) accepts `show_when=(field, op, value)` — emits `data-show-when-*` attributes that the client-side script (`show_when_script()`) reads to hide the widget until another widget's value matches. Supported ops: `==`, `!=`, `startswith`, `endswith`. The [`htmx`](@ref) page shell installs `show_when_script()`; include it once yourself only in a hand-built `<head>`. The widget is hidden with its `hidden` attribute, so it hides with or without Pico, whatever element it renders.
+Every labeled widget (`linput`, `sinput`, `sinput_custom`, `rinput`, `ninput`, `cinput`, `tinput`, `radio_group`, `choice_list`) accepts `show_when=(field, op, value)` — emits `data-show-when-*` attributes that the client-side script (`show_when_script()`) reads to hide the widget until another widget's value matches. Supported ops: `==`, `!=`, `startswith`, `endswith`. The [`htmx`](@ref) page shell installs `show_when_script()`; include it once yourself only in a hand-built `<head>`. The widget is hidden with its `hidden` attribute, so it hides with or without Pico, whatever element it renders.
 
 The field is read the way the form submits it: a radio group by its checked radio, a checkbox by its `value` while checked (nothing while unchecked), a `<select multiple>` by every chosen option. A field that carries nothing reads as `""`. The value is spelled as the controls spell their options ([`option_wire_value`](@ref)), so it matches an option object passed to `radio_group` or `sinput`.
 

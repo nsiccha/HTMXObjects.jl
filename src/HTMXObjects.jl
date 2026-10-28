@@ -36,7 +36,7 @@ export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
 export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
-export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
@@ -2986,6 +2986,7 @@ _runtime_blocks() = (
     semantic_refresh = (:js, semantic_refresh_script),
     semantic_follow = (:js, semantic_follow_script),
     show_when = (:js, show_when_script),
+    choice_list = (:js, choice_list_script),
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
     glossary = (:js, glossary_script),
@@ -3302,6 +3303,9 @@ function htmx(args...;
         # Widgets built with `show_when=` and the controls of `@relevant`
         # inputs show only while they apply; inert on pages without one.
         :show_when,
+        # A `choice_list` (a generated choice among many options) opens,
+        # searches and chooses; inert on pages without one.
+        :choice_list,
         # `url_params` elements follow the page address and write
         # their values into it; inert on pages without one.
         :url_params,
@@ -11227,16 +11231,21 @@ status without one, and ending in `error_id`), the framework's own caller-fault
 messages, a stalled operation's terminal (`run_again`, `progress`) and the page
 shell's
 failed-request toasts (`request_failed`, `no_response`, `timed_out`,
-`dismiss`, and `reasons` again), and the status line over a part of the page
+`dismiss`, and `reasons` again), the status line over a part of the page
 that a running request will replace (`loading`, `loading_named`; see
-[`request_feedback_script`](@ref)). Build one with [`error_texts`](@ref).
+[`request_feedback_script`](@ref)), and the search field of a long choice
+list (`choice_search`, its placeholder, and `choice_no_match`, shown when no
+option matches; see [`choice_list`](@ref)). Build one with
+[`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
 `@htmx` threads `__error_texts__` down the `__parent__` chain like
 `__on_error__`, so every `@include`d struct, `safely` panel and polled
 operation of the app answers in it. Pass the same value to the page shell,
 `htmx(...; error_texts)` or `pico_page(...; error_texts)`, for the toasts and
-the loading status line.
+the loading status line. The controls [`semantic_app`](@ref) and
+[`operation_form`](@ref) generate take their words from the same
+`__error_texts__`.
 
 A text in braces is a placeholder the framework fills in: `server_fault` and
 `error_id` take `{id}`, the recorded error id, and must keep it;
@@ -11274,6 +11283,8 @@ struct ErrorTexts
     dismiss::String                    # accessible name of a toast's × button
     loading::String                    # status line: a part is being replaced
     loading_named::String              # ... by the option or link the reader chose
+    choice_search::String              # a long choice list's search field
+    choice_no_match::String            # ... when no option matches the search
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -11309,6 +11320,8 @@ const _ERROR_TEXT_LOCALES = (
         dismiss = "Dismiss",
         loading = "Loading…",
         loading_named = "Loading {label}…",
+        choice_search = "Search…",
+        choice_no_match = "No matching option",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -11334,6 +11347,8 @@ const _ERROR_TEXT_LOCALES = (
         dismiss = "Schließen",
         loading = "Wird geladen…",
         loading_named = "{label} wird geladen…",
+        choice_search = "Suchen…",
+        choice_no_match = "Keine passende Auswahl",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -17717,6 +17732,7 @@ starts with a space, so a value never runs into the label before it.
 | toggle: `aria-pressed` | `label (pressed)`, `label (not pressed)`, `label (mixed)` |
 | toggle: `aria-checked` | `label (checked)`, `label (not checked)`, `label (mixed)` |
 | `<select>` | the chosen option's label (several: comma-separated) |
+| a choice list ([`choice_list`](@ref)) | its legend and the chosen option's label |
 | checkbox / radio `<input>` | `☑` / `☐`, `◉` / `○` |
 | value `<input>` (text, number, date, search, …) | its `value` |
 
@@ -17783,6 +17799,34 @@ function _md_control(node::Node, ::Val{:select})
     end
     isempty(chosen) && return h.span()
     _md_mark(" " * join(_md_option_label.(chosen), ", "))
+end
+
+# A choice list (`choice_list`) reads as its legend and the chosen option's
+# label, as a `<select>` reads, not as one ◉/○ per option.
+_md_control(node::Node, ::Val{:fieldset}) =
+    _md_has(node, "data-htmxo-choice-list") ? _md_choice_list(node) : _md_toggle(node)
+
+# The first node at or under `node` for which `pred` holds, or `nothing`.
+function _md_find(pred, node::Node)
+    pred(node) && return node
+    for child in HTMX.children(node)
+        child isa Node || continue
+        found = _md_find(pred, child)
+        isnothing(found) || return found
+    end
+    nothing
+end
+
+function _md_choice_list(node::Node)
+    legend = _md_find(n -> _md_tag(n) === :legend, node)
+    checked = n -> _md_tag(n) === :input && _md_has(n, "checked")
+    option = _md_find(n -> _md_tag(n) === :label && !isnothing(_md_find(checked, n)), node)
+    label = isnothing(option) ? nothing : _md_find(n -> "htmxo-choice-label" in
+        split(something(_md_attr(n, "class"), "")), option)
+    head = isnothing(legend) ? Any[] : _strip_md_chrome_children(HTMX.children(legend))
+    value = isnothing(label) ? Any[] :
+        Any[_md_mark(" " * strip(to_markdown_string(Any[HTMX.children(label)...])))]
+    Node(:p, empty(HTMX.attrs(node)), Any[head..., value...])
 end
 
 function _strip_md_chrome(node::Node)
@@ -25936,6 +25980,42 @@ radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, k
     )
 end
 
+"""
+    choice_list(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
+                required=false, texts=error_texts())
+
+A single choice among many options: a field showing the chosen option that
+opens a list of them with a search field. Typing filters the list (ignoring
+case and accents), the arrow keys move through it, and Enter or a click
+chooses and closes it; Escape or a click elsewhere closes it unchanged. Options
+can be plain values or `value => label` pairs, as for [`radio_group`](@ref).
+
+The list holds one radio button per option, so the choice submits with its
+form, validates and drives `show_when` exactly like a radio group, and a
+`?plain` read shows the chosen option's label. The list opens as a popover, so
+no scroll box or table clips it. `texts` gives the search field's words
+(`choice_search`, `choice_no_match` of [`ErrorTexts`](@ref)); pass the app's
+`__error_texts__` for a page in another language:
+
+    choice_list((; compound), compounds; label="Compound", texts=__error_texts__)
+
+Every [`htmx`](@ref) page carries its script and styles
+([`choice_list_script`](@ref), [`htmxo_utility_styles`](@ref)). A choice among
+a few options reads better as [`radio_group`](@ref)'s row of pills; generated
+forms ([`semantic_app`](@ref), [`operation_form`](@ref)) switch to this control
+past `radio_max` options.
+"""
+choice_list(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
+        required::Bool=false, texts::ErrorTexts=_EN_ERROR_TEXTS) = begin
+    entries = map(options) do option
+        opt_value, opt_label = _option_pair(option)
+        (; value=_option_wire_string(opt_value), label=string(opt_label))
+    end
+    selected = isnothing(value) ? nothing : _option_wire_string(value)
+    _choice_list(_aname(nv), label, entries, selected; required, texts,
+                 attrs=isnothing(show_when) ? (;) : _show_when_attrs(show_when))
+end
+
 _semantic_values(values::NamedTuple) = Dict{Symbol,Any}(pairs(values))
 _semantic_values(values::AbstractDict) =
     Dict{Symbol,Any}(Symbol(name) => value for (name, value) in pairs(values))
@@ -26061,6 +26141,78 @@ function _semantic_select(name, label, domain, selected; required=false)
                  required_attrs..., multiple_attrs...))
 end
 
+# How many options a generated single choice shows as a row of pills; past
+# it, the choice is a searchable drop-down (`_choice_list`).
+const _RADIO_MAX = 8
+
+const _CHOICE_LIST_SERIAL = Base.Threads.Atomic{UInt}(0)
+
+"""
+    _choice_list(name, label, options, selected; required=false, texts, attrs=(;))
+
+A single choice among many options: a field showing the chosen option that
+opens a searchable list of them (`choice_list_script`). `options` are
+`(; value, label)` with optional `disabled`, `help` and `group`, as a resolved
+domain lists them. The list holds one radio per option, so the choice submits,
+validates and refreshes like any radio group; it opens as a popover, so no
+scroll box clips it. `texts` gives the search field's words.
+"""
+function _choice_list(name, label, options, selected; required=false,
+        texts::ErrorTexts=_EN_ERROR_TEXTS, attrs=(;))
+    required_attrs = required ? (; required="true") : (;)
+    serial = Base.Threads.atomic_add!(_CHOICE_LIST_SERIAL, UInt(1)) + UInt(1)
+    panel_id = "htmxo-choice-$(serial)"
+    chosen = findfirst(option -> _is_selected(option.value, selected), options)
+    option_node(option) = begin
+        checked = _is_selected(option.value, selected)
+        disabled = get(option, :disabled, false)
+        help = get(option, :help, nothing)
+        h.label(
+            h.input(; type="radio", name=string(name),
+                    value=_option_wire_string(option.value),
+                    (checked ? (; checked="true") : (;))...,
+                    (disabled ? (; disabled="true") : (;))..., required_attrs...),
+            h.span(option.label; class="htmxo-choice-label"),
+            (isnothing(help) ? () : (h.small(help),))...;
+            class="htmxo-choice-option")
+    end
+    ungrouped = Any[]
+    grouped = Dict{Any,Vector{Any}}()
+    group_order = Any[]
+    for option in options
+        group = get(option, :group, nothing)
+        if isnothing(group)
+            push!(ungrouped, option_node(option))
+        else
+            haskey(grouped, group) || (grouped[group] = Any[]; push!(group_order, group))
+            push!(grouped[group], option_node(option))
+        end
+    end
+    groups = [h.div(h.div(string(group); class="htmxo-choice-heading"), grouped[group]...;
+                    class="htmxo-choice-group") for group in group_order]
+    h.fieldset(
+        h.legend(label),
+        h.button(
+            h.span(isnothing(chosen) ? "" : options[chosen].label; class="htmxo-choice-current"),
+            h.span("▾"; class="htmxo-choice-caret", aria_hidden="true");
+            type="button", class="htmxo-choice-field", popovertarget=panel_id,
+            aria_haspopup="dialog", aria_expanded="false"),
+        h.div(
+            h.input(; type="search", class="htmxo-choice-search",
+                    placeholder=texts.choice_search, aria_label=texts.choice_search,
+                    autocomplete="off", spellcheck="false",
+                    oninput="htmxoChoiceFilter(this);event.stopPropagation()",
+                    onchange="event.stopPropagation()"),
+            h.div(ungrouped..., groups...; class="htmxo-choice-options"),
+            h.p(texts.choice_no_match; class="htmxo-choice-empty", hidden=true);
+            id=panel_id, class="htmxo-choice-panel", popover="auto",
+            role="dialog", aria_label=string(label));
+        class="htmxo-choice-list", data_htmxo_choice_list="", attrs...)
+end
+
+_semantic_choice_list(name, label, domain, selected; required=false, texts=_EN_ERROR_TEXTS) =
+    _choice_list(name, label, get(domain, :options, NamedTuple[]), selected; required, texts)
+
 function _semantic_radio(name, label, domain, selected; required=false)
     required_attrs = required ? (; required="true") : (;)
     h.fieldset(
@@ -26126,7 +26278,7 @@ function _semantic_cards(name, label, domain, selected; required=false)
 end
 
 function _semantic_control(obj, owner, param, values;
-        radio_max::Int=4, presentation::Symbol=:auto)
+        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
     value = get(values, param.name, nothing)
     label = isnothing(param.doc) ? Long(param.name) : param.doc
     control_obj, ControlT = if get(param, :kind, nothing) === :context
@@ -26143,7 +26295,7 @@ function _semantic_control(obj, owner, param, values;
 end
 
 function _semantic_default_control(control_obj, ControlT, param, label, value, values;
-        radio_max::Int=4, presentation::Symbol=:auto)
+        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
     input = (name=param.name, domain=get(param, :domain, nothing))
     domain = _resolved_input_domain(control_obj, ControlT, input, values)
 
@@ -26159,6 +26311,10 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
         elseif !get(domain, :multiple, false) && length(options) <= radio_max
             return _semantic_radio(param.name, label, domain, value;
                                    required=param.required)
+        elseif !get(domain, :multiple, false)
+            return _semantic_choice_list(param.name, label, domain, value;
+                                         required=param.required,
+                                         texts=_error_texts(control_obj))
         else
             return _semantic_select(param.name, label, domain, value;
                                     required=param.required)
@@ -26669,8 +26825,9 @@ changes and after a mutation of the surface finishes. The request includes the
 whole group, and the operation's hidden request context rides the URL, so the
 domain is evaluated exactly as the operation's own form would evaluate it.
 """
-function _semantic_context_control(obj, route, param, current, action, shared_names)
-    control = _semantic_control(obj, route.owner, param, current)
+function _semantic_context_control(obj, route, param, current, action, shared_names;
+        radio_max::Int=_RADIO_MAX)
+    control = _semantic_control(obj, route.owner, param, current; radio_max)
     _semantic_context_refreshable(route, param) || return control
     dependencies = _semantic_param_dependencies(param)
     lifted = get(route, :lifted, nothing)
@@ -26678,6 +26835,7 @@ function _semantic_context_control(obj, route, param, current, action, shared_na
         __htmxo_context_control=param.name,
         __htmxo_shared_context=_semantic_names_attr(shared_names, ','),
         (isnothing(lifted) ? (;) : (; __htmxo_lifted=_semantic_names_attr(lifted, ',')))...,
+        (radio_max == _RADIO_MAX ? (;) : (; __htmxo_radio_max=radio_max))...,
         _semantic_hidden_values(route, current)...)
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     h.div(control; class="htmxo-semantic-context-control",
@@ -26750,7 +26908,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     swap = _operation_form_setting(req, :__htmxo_swap, "innerHTML")
     submit = _operation_form_setting(req, :__htmxo_submit, "Run")
     form_class = _operation_form_setting(req, :__htmxo_form_class, "")
-    radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, "4"))
+    radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, string(_RADIO_MAX)))
     navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
     presentation = Symbol(_operation_form_setting(req, :__htmxo_presentation, "auto"))
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
@@ -26766,7 +26924,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
             "$(LeafT).$(name) carries no shared context input $(repr(name)) to refresh"))
         current = _semantic_form_values(target.leaf, route, extracted.values)
         _semantic_context_control(target.leaf, route, route.params[index], current,
-                                  request_path, shared_context)
+                                  request_path, shared_context; radio_max)
     elseif controls_only
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
@@ -26824,13 +26982,13 @@ _operation_control_params(route, shared_names) = [param for param in route.param
        !(get(param, :kind, nothing) === :context && param.name in shared_names)]
 
 function _operation_form_controls(obj, route, current, action;
-        radio_max=4, presentation=:auto, shared_names=Set{Symbol}(),
+        radio_max=_RADIO_MAX, presentation=:auto, shared_names=Set{Symbol}(),
         context_selector=nothing, fragment=false, lifted=nothing)
     presentation in (:auto, :cards) || throw(ArgumentError(
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
     refresh_dependencies = _semantic_refresh_dependencies(route)
     settings = (; __htmxo_controls=1)
-    radio_max == 4 || (settings = merge(settings, (; __htmxo_radio_max=radio_max)))
+    radio_max == _RADIO_MAX || (settings = merge(settings, (; __htmxo_radio_max=radio_max)))
     presentation === :auto || (settings = merge(settings, (; __htmxo_presentation=presentation)))
     isempty(shared_names) || (settings = merge(settings, (;
         __htmxo_shared_context=join(string.(sort!(collect(shared_names))), ','))))
@@ -26909,7 +27067,8 @@ end
 
 """
     operation_form(obj, name::Symbol; verb=:GET, values=(;), submit="Run",
-                   submit_attrs=(;), navigate=false, presentation=:auto, kwargs...)
+                   submit_attrs=(;), navigate=false, presentation=:auto,
+                   radio_max=8, kwargs...)
     operation_form(obj, route::NamedTuple; values=(;), target=obj/route.path, kwargs...)
 
 Generate an HTMX form from a merged semantic route descriptor. Static domains
@@ -26975,7 +27134,11 @@ that would compete with the radio. An associated label overlays the card, so
 the whole visual surface selects the radio without JavaScript while the native
 input remains focusable for keyboard use. Those structural styles live in
 [`htmxo_utility_styles`](@ref), which [`htmx`](@ref) includes automatically.
-The default `:auto` policy retains the existing radio/select/custom heuristic.
+The default `:auto` policy picks the control from the domain: a single choice
+among at most `radio_max` options (default 8) is a row of pills, a single
+choice among more is a searchable drop-down ([`choice_list`](@ref)), a
+`multiple` domain is a `<select multiple>`, and an `allow_custom` domain is
+[`sinput_custom`](@ref).
 
 Carrying the context is not the same as the child *owning* it. `@param`
 inheritance is resolved at macro expansion, so only an inline child gets the
@@ -27002,7 +27165,7 @@ re-uploaded when a dependency changes.
 """
 function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
-        submit="Run", submit_attrs=(;), target_id=nothing, swap="innerHTML", radio_max::Int=4,
+        submit="Run", submit_attrs=(;), target_id=nothing, swap="innerHTML", radio_max::Int=_RADIO_MAX,
         form_class="", navigate::Bool=false, presentation::Symbol=:auto,
         shared_context=(), lifted=nothing,
         context_selector=nothing, kwargs...)
@@ -27599,13 +27762,13 @@ function _semantic_context_entries(items; names=nothing)
     context_entries
 end
 
-_semantic_context_controls(entries, shared_context) = Any[
+_semantic_context_controls(entries, shared_context; radio_max::Int=_RADIO_MAX) = Any[
     _semantic_context_control(entry.object, entry.route, entry.param, entry.current,
         _semantic_context_refreshable(entry.route, entry.param) ?
             _operation_form_action(entry.route, entry.current,
                 _operation_form_target(entry.object, entry.route)) :
             nothing,
-        shared_context)
+        shared_context; radio_max)
     for entry in entries]
 
 # --- The `:tabs` presentation ---
@@ -27677,7 +27840,7 @@ a sidebar, one tab per operation with the inputs only it reads above its result,
 and every read's result following its inputs (`semantic_follow_script`).
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
-        render_operation, layout)
+        render_operation, layout, radio_max::Int=_RADIO_MAX)
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places.
@@ -27718,7 +27881,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         names=sidebar)
     shared_names = Set{Symbol}(entry.param.name for entry in context_entries)
     sidebar_form = isempty(context_entries) ? nothing :
-        h.form(_semantic_context_controls(context_entries, shared_names)...;
+        h.form(_semantic_context_controls(context_entries, shared_names; radio_max)...;
                id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
                autocomplete="off", onsubmit="return false")
     selector = isnothing(sidebar_form) ? nothing : "#" * context_id
@@ -27734,7 +27897,8 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         form, result = if follows
             target = _operation_form_target(spec.mounted, spec.local_route)
             controls = _operation_form_controls(spec.mounted, route, spec.current,
-                string(target); shared_names, context_selector=selector, lifted=own[i])
+                string(target); shared_names, context_selector=selector, lifted=own[i],
+                radio_max)
             inputs_id = base.target_id * "-inputs"
             form = isempty(_operation_control_params(route, shared_names)) ? nothing :
                 h.form(controls...; id=inputs_id,
@@ -27763,7 +27927,8 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 submit=something(spec.operation_submit, "Run"),
                 submit_attrs=spec.operation_submit_attrs,
                 form_class="htmxo-semantic-operation-form",
-                shared_context=shared_names, lifted=own[i], context_selector=selector)
+                shared_context=shared_names, lifted=own[i], context_selector=selector,
+                radio_max)
             form, h.div(; id=base.target_id, class="htmxo-semantic-operation-result",
                 aria_live="polite",
                 (refreshes ? (; data_htmxo_refreshes=context_id) : (;))...)
@@ -27806,7 +27971,7 @@ end
     semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
                  render_operation=_default_semantic_operation, compact=false,
                  results=:each, layout=_default_semantic_layout,
-                 select=entry -> true)
+                 select=entry -> true, presentation=:stacked, radio_max=8)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -27833,6 +27998,11 @@ made valid is offered without a reload. A generated form whose controls read a
 lifted value refreshes its controls when that value changes. Each result then
 carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
 (installed by the `htmx()` shell) sends the refreshes.
+
+A single choice among at most `radio_max` options (default 8) is a row of
+pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
+cutoff applies to every control of the surface, the shared ones included, and
+survives their refreshes.
 
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` and `submit_attrs` may likewise be values or
@@ -27950,7 +28120,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         render_operation=_default_semantic_operation, compact::Bool=false,
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
-        shared=nothing, active=nothing)
+        shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -28013,7 +28183,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     suffix = _semantic_selection_suffix(selected, length(descriptor.routes))
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
-        title, shared, active,
+        title, shared, active, radio_max,
         render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
@@ -28029,7 +28199,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         nothing
     else
         h.fieldset(h.legend("Model inputs"),
-                   _semantic_context_controls(context_entries, shared_context)...;
+                   _semantic_context_controls(context_entries, shared_context; radio_max)...;
                    id=context_id, class="htmxo-semantic-context")
     end
     result_attrs = refreshes ? (; data_htmxo_refreshes=context_id) : (;)
@@ -28057,6 +28227,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             form_class="htmxo-semantic-operation-form",
             shared_context,
             context_selector=selector,
+            radio_max,
             _semantic_form_include_reset(compiled.attrs, selector)...,
         )
         result = isnothing(host_id) ?
@@ -28231,6 +28402,206 @@ show_when_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:afterSettle', evalAll);
   evalAll();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', evalAll);
+})();
+"""))
+
+"""
+    choice_list_script()
+
+`<script>` that runs every [`choice_list`](@ref) on the page, the generated
+long-choice controls of [`semantic_app`](@ref) and [`operation_form`](@ref)
+included. Every [`htmx`](@ref) page carries it; place it yourself only on a
+page with a shell of its own. One set of page-wide listeners serves every list,
+so lists that htmx swaps in later need no binding.
+
+The field opens its list as a popover (`popovertarget`): the browser closes it
+on Escape or a click elsewhere. The script places it under the field (above it
+when there is more room there), keeps it there while the page scrolls, and puts
+the focus in the search field (not on a touch screen, where that would raise
+the keyboard). Typing filters the options by their text, ignoring case and
+accents; the arrow keys move the highlight through what is left and Enter
+chooses it. Typing on the closed field opens it with that letter searched, and
+↓ or ↑ opens it. A click or Enter checks the option's radio, sends `input` and
+`change` from it as a click on a radio does, closes the list and returns the
+focus to the field, which then shows the chosen label. The search field's own
+`input` and `change` events stop at it, so forms and htmx triggers never see
+the search.
+"""
+choice_list_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoChoiceList) return;
+  window.__htmxoChoiceList = true;
+  function fold(s) {
+    return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  }
+  function listOf(el) {
+    return el && el.closest ? el.closest('.htmxo-choice-list') : null;
+  }
+  function partsOf(list) {
+    return {list: list, field: list.querySelector('.htmxo-choice-field'),
+            panel: list.querySelector('.htmxo-choice-panel'),
+            search: list.querySelector('.htmxo-choice-search')};
+  }
+  function optionsOf(p) {
+    return Array.prototype.slice.call(p.panel.querySelectorAll('.htmxo-choice-option'));
+  }
+  function radioOf(option) { return option.querySelector('input[type="radio"]'); }
+  // The options a reader can reach: left by the search, and not disabled.
+  function reachable(p) {
+    return optionsOf(p).filter(function(o) {
+      return !o.classList.contains('htmxo-choice-out') && !radioOf(o).disabled;
+    });
+  }
+  function checkedOption(p) {
+    var radio = p.panel.querySelector('input[type="radio"]:checked');
+    return radio ? radio.closest('.htmxo-choice-option') : null;
+  }
+  function activeOption(p) {
+    return p.panel.querySelector('.htmxo-choice-option.htmxo-choice-active');
+  }
+  function highlight(p, option) {
+    optionsOf(p).forEach(function(o) { o.classList.toggle('htmxo-choice-active', o === option); });
+    if (option && p.panel.matches(':popover-open')) option.scrollIntoView({block: 'nearest'});
+  }
+  // The search narrows the list. A filtered-out option is hidden by a class,
+  // not the `hidden` attribute: the page runtimes skip controls inside
+  // `[hidden]`, and the chosen radio still counts while the search hides it.
+  window.htmxoChoiceFilter = function(search) {
+    var list = listOf(search);
+    if (!list) return;
+    var p = partsOf(list), q = fold(search.value.trim()), shown = 0;
+    optionsOf(p).forEach(function(o) {
+      var out = q !== '' && fold(o.textContent).indexOf(q) < 0;
+      o.classList.toggle('htmxo-choice-out', out);
+      if (!out) shown++;
+    });
+    p.panel.querySelectorAll('.htmxo-choice-group').forEach(function(g) {
+      g.classList.toggle('htmxo-choice-out',
+        !g.querySelector('.htmxo-choice-option:not(.htmxo-choice-out)'));
+    });
+    p.panel.querySelector('.htmxo-choice-empty').hidden = shown > 0;
+    var left = reachable(p), checked = checkedOption(p);
+    highlight(p, q === '' && checked && left.indexOf(checked) >= 0 ? checked : (left[0] || null));
+  };
+  // Under the field, or above it when there is more room there.
+  function place(p) {
+    var r = p.field.getBoundingClientRect(), panel = p.panel;
+    var below = window.innerHeight - r.bottom - 6, above = r.top - 6;
+    var downward = below >= 240 || below >= above;
+    panel.style.minWidth = r.width + 'px';
+    panel.style.maxHeight = Math.max(120, Math.min(352, downward ? below : above)) + 'px';
+    panel.style.left = Math.max(4, Math.min(r.left, window.innerWidth - panel.offsetWidth - 4)) + 'px';
+    panel.style.top = (downward ? r.bottom + 2 : r.top - 2 - panel.offsetHeight) + 'px';
+  }
+  function coarse() {
+    return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  }
+  var shown = null;
+  function follow() { if (shown) place(shown); }
+  document.addEventListener('beforetoggle', function(e) {
+    var panel = e.target;
+    if (!panel.classList || !panel.classList.contains('htmxo-choice-panel')) return;
+    if (e.newState !== 'open') return;
+    var p = partsOf(listOf(panel));
+    p.search.value = '';
+    window.htmxoChoiceFilter(p.search);
+    // Where it opens, before it is first drawn; `toggle` corrects the side.
+    place(p);
+  }, true);
+  document.addEventListener('toggle', function(e) {
+    var panel = e.target;
+    if (!panel.classList || !panel.classList.contains('htmxo-choice-panel')) return;
+    var p = partsOf(listOf(panel)), open = e.newState === 'open';
+    p.field.setAttribute('aria-expanded', open ? 'true' : 'false');
+    window.removeEventListener('scroll', follow, true);
+    window.removeEventListener('resize', follow);
+    if (!open) {
+      if (shown && shown.panel === panel) shown = null;
+      return;
+    }
+    shown = p;
+    place(p);
+    window.addEventListener('scroll', follow, true);
+    window.addEventListener('resize', follow);
+    highlight(p, activeOption(p));
+    if (!coarse() && !panel.contains(document.activeElement)) p.search.focus();
+  }, true);
+  // Opened by script, the list is placed now rather than when `toggle` fires.
+  function open(p) {
+    if (p.panel.matches(':popover-open')) return;
+    p.panel.showPopover();
+    place(p);
+  }
+  function close(p, refocus) {
+    if (p.panel.matches(':popover-open')) p.panel.hidePopover();
+    if (refocus) p.field.focus();
+  }
+  function choose(p, option) {
+    var radio = radioOf(option);
+    if (!radio.disabled && !radio.checked) {
+      radio.checked = true;
+      radio.dispatchEvent(new Event('input', {bubbles: true}));
+      radio.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+    close(p, true);
+  }
+  // The field shows the chosen option's label.
+  function sync(list) {
+    var p = partsOf(list), option = checkedOption(p);
+    p.field.querySelector('.htmxo-choice-current').textContent =
+      option ? option.querySelector('.htmxo-choice-label').textContent : '';
+  }
+  document.addEventListener('change', function(e) {
+    var t = e.target, list = t && t.type === 'radio' ? listOf(t) : null;
+    if (list) sync(list);
+  });
+  // A click on an option chooses it; the list closes once the radio is checked.
+  document.addEventListener('click', function(e) {
+    var option = e.target && e.target.closest ? e.target.closest('.htmxo-choice-option') : null;
+    var list = option ? listOf(option) : null;
+    if (!list || radioOf(option).disabled) return;
+    var p = partsOf(list);
+    setTimeout(function() { close(p, true); }, 0);
+  });
+  document.addEventListener('keydown', function(e) {
+    var t = e.target, list = t && t.classList ? listOf(t) : null;
+    if (!list) return;
+    var p = partsOf(list);
+    if (t === p.search) {
+      var options = reachable(p), at = options.indexOf(activeOption(p));
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        at = e.key === 'ArrowDown' ? Math.min(options.length - 1, at + 1) : Math.max(0, at - 1);
+        highlight(p, options[at] || null);
+      } else if (e.key === 'Enter') {
+        // Enter in a form's field would submit the form.
+        e.preventDefault();
+        var pick = at >= 0 ? options[at] : options.length === 1 ? options[0] : null;
+        if (pick) choose(p, pick);
+      }
+    } else if (t === p.field && !e.ctrlKey && !e.metaKey) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        open(p);
+      } else if (e.key.length === 1 && e.key !== ' ' && !e.altKey) {
+        e.preventDefault();
+        open(p);
+        p.search.value = e.key;
+        window.htmxoChoiceFilter(p.search);
+        p.search.focus();
+      }
+    }
+  });
+  // A required choice left empty: the browser can show its message only on
+  // a radio it can focus, so the list opens.
+  document.addEventListener('invalid', function(e) {
+    var list = listOf(e.target);
+    if (list) open(partsOf(list));
+  }, true);
+  // A page restored from the back/forward cache keeps its checked radios.
+  window.addEventListener('pageshow', function() {
+    document.querySelectorAll('.htmxo-choice-list').forEach(sync);
+  });
 })();
 """))
 
@@ -30026,7 +30397,9 @@ A choice among a few options, a `fieldset` whose labels wrap radios (as
 row of pills with the chosen one filled in the text colour. The radios stay in
 the labels, invisible: the group submits with its form, Tab reaches it, the
 arrow keys choose, and the focused pill shows a focus ring. A `fieldset` with
-a `role` keeps Pico's look.
+a `role` keeps Pico's look. A choice among many options ([`choice_list`](@ref))
+is a field styled as an input whose list opens beside it, its chosen row filled
+like a pill.
 
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
@@ -30067,6 +30440,9 @@ htmxo_utility_styles() = h.style(Raw("""
 }
 .htmxo-semantic-inputs fieldset,
 .htmxo-semantic-inputs .htmxo-relevant:has(> fieldset) { flex-basis: auto; }
+/* A long choice list is one field wide, as the select it replaces was. */
+.htmxo-semantic-inputs .htmxo-choice-list,
+.htmxo-semantic-inputs .htmxo-relevant:has(> .htmxo-choice-list) { flex-basis: 16rem; }
 .htmxo-semantic-card[data-rich="true"] > label {
     position: absolute;
     inset: 0;
@@ -30533,6 +30909,124 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
     opacity: .5;
     cursor: not-allowed;
 }
+
+/* A choice among many options (`choice_list`, and a generated single choice
+   past `radio_max`): a field showing the chosen option, styled as an input,
+   that opens a popover with a search field and one row per option, the
+   chosen row filled in the text colour like a pill. The rows hold the radios,
+   invisible, as the pills do. UNLAYERED: Pico styles buttons, labels, radios
+   and search fields unlayered. The field reads Pico's form-element tokens,
+   which Pico does not rewrite on buttons (it rewrites `--pico-color` and the
+   background ones), and sets every property Pico's button rules set through
+   those. Without Pico it takes the page's colours. */
+.htmxo-choice-list > .htmxo-choice-field {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    width: 100%;
+    margin: 0;
+    padding: var(--pico-form-element-spacing-vertical, .4em) var(--pico-form-element-spacing-horizontal, .75em);
+    border: var(--pico-border-width, 1px) solid var(--pico-form-element-border-color, color-mix(in srgb, currentColor 35%, transparent));
+    border-radius: var(--pico-border-radius, .25rem);
+    background: var(--pico-form-element-background-color, Canvas);
+    color: var(--pico-form-element-color, CanvasText);
+    font: inherit;
+    line-height: var(--pico-line-height, 1.5);
+    text-align: start;
+    box-shadow: none;
+    cursor: pointer;
+}
+.htmxo-choice-list > .htmxo-choice-field:focus-visible {
+    outline: 2px solid var(--pico-contrast, currentColor);
+    outline-offset: 2px;
+}
+.htmxo-choice-list > .htmxo-choice-field > .htmxo-choice-current {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 1.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.htmxo-choice-list > .htmxo-choice-field > .htmxo-choice-caret { flex: none; opacity: .6; }
+.htmxo-choice-panel {
+    position: fixed;
+    inset: auto;
+    box-sizing: border-box;
+    max-width: min(28rem, calc(100vw - 8px));
+    margin: 0;
+    padding: .5rem;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: var(--pico-border-radius, .375rem);
+    background: var(--pico-background-color, Canvas);
+    color: var(--pico-color, CanvasText);
+    box-shadow: 0 .25rem 1rem rgb(0 0 0 / .2);
+}
+.htmxo-choice-panel:popover-open { display: flex; flex-direction: column; }
+.htmxo-choice-panel > .htmxo-choice-search { flex: none; width: 100%; margin: 0 0 .4rem; }
+.htmxo-choice-panel > .htmxo-choice-options {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+.htmxo-choice-panel .htmxo-choice-option {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: .5em;
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0;
+    padding: .3em .6em;
+    border-radius: .3rem;
+    color: inherit;
+    font-weight: inherit;
+    cursor: pointer;
+}
+.htmxo-choice-panel .htmxo-choice-option > input[type="radio"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    pointer-events: none;
+}
+.htmxo-choice-panel .htmxo-choice-option > small { flex-basis: 100%; opacity: .75; }
+.htmxo-choice-panel .htmxo-choice-option:hover,
+.htmxo-choice-panel .htmxo-choice-option.htmxo-choice-active {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.htmxo-choice-panel .htmxo-choice-option.htmxo-choice-active {
+    outline: 2px solid color-mix(in srgb, currentColor 45%, transparent);
+    outline-offset: -2px;
+}
+.htmxo-choice-panel .htmxo-choice-option:has(> input[type="radio"]:checked) {
+    background: var(--pico-contrast-background, CanvasText);
+    color: var(--pico-contrast-inverse, Canvas);
+}
+.htmxo-choice-panel .htmxo-choice-option:has(> input[type="radio"]:focus-visible) {
+    outline: 2px solid var(--pico-contrast, currentColor);
+    outline-offset: -2px;
+}
+.htmxo-choice-panel .htmxo-choice-option:has(> input[type="radio"]:disabled) {
+    opacity: .5;
+    cursor: not-allowed;
+}
+.htmxo-choice-panel .htmxo-choice-out { display: none; }
+.htmxo-choice-panel .htmxo-choice-heading {
+    padding: .4em .6em .1em;
+    font-size: .85em;
+    font-weight: 600;
+    opacity: .75;
+}
+.htmxo-choice-panel > .htmxo-choice-empty { margin: .3em .6em; opacity: .75; }
 
 /* sortable_table header labels are native <button>s: read as heading text on
    every shell. Unlayered to beat Pico's `button`; no --pico-* colour tokens

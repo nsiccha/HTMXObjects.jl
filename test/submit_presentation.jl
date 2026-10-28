@@ -73,9 +73,11 @@ end
         @test startswith(html, "<div class=\"htmxo-semantic-controls\">")
         @test contains(html, "value=\"c\"")
         @test !contains(html, "value=\"a\"")
-        @test contains(html, "<select")
+        # Two options past `radio_max=1`: a choice list, whose field is a
+        # `type="button"`; the fragment carries no submit button.
+        @test contains(html, "class=\"htmxo-choice-list\"")
         @test !contains(html, "<form")
-        @test !contains(html, "<button")
+        @test !contains(html, "type=\"submit\"")
         @test !contains(html, "token:long:")
     end
     response = dispatch(:GET, "/rows/7/read?mode=long&choice=c&session_key=token")
