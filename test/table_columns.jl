@@ -48,6 +48,16 @@ using TestItemRunner
             master_detail_table(headers, items; key=t -> p * "s-" * t.id, master=cells, detail,
                 searchable=true, id=p * "search"))
         unheld(x) = replace(repr("text/html", x), "data-htmxo-columns" => "data-control-columns")
+        # Snag held-table-colum-cdf2c38e: a table in a zoomed tile (Bruno's
+        # report viewer scales each tile with `transform: scale()`) was held at
+        # the zoom times its widths. One that fills its room (shares) and one
+        # wider than its room (pixels: an unbreakable description), each also
+        # in a tile at half and at 0.37 of its size.
+        wide = [(; t..., desc=t.id == "t3" ? repeat("Verwendungszweck", 12) : t.desc) for t in items]
+        zoomable(p) = (
+            master_detail_table(headers, items; key=t -> p * "zf-" * t.id, master=cells, detail, id=p * "zfill"),
+            master_detail_table(headers, wide; key=t -> p * "zw-" * t.id, master=cells, detail, id=p * "zwide"))
+        tile(p, scale) = h.div(; id=p * "tile", style="transform: scale($scale); transform-origin: 0 0")(zoomable(p)...)
         driver = h.script(Raw(raw"""
         const pause = ms => new Promise(r => setTimeout(r, ms));
         // A lazy load lands, or the step reports that it never did.
@@ -77,9 +87,23 @@ using TestItemRunner
           tree: tb => { branch(tb).click(); return pause(300); },
           search: tb => { htmxoTableSearch(tb, 'Kanzlei'); return pause(300); },
         };
+        // The width a table holds and the widths of its columns, the same at
+        // any zoom; 1e9 where a unit differs (shares against pixels).
+        const holding = id => { const t = document.getElementById(id).closest('table');
+          return [t.style.width, ...Array.from(t.querySelectorAll(':scope > colgroup > col')).map(c => c.style.width)]; };
+        const apart = (a, b) => a.length !== b.length || a.length < 2 ? 1e9 : Math.max(...a.map((x, i) =>
+          x.replace(/[-\d.]/g, '') === b[i].replace(/[-\d.]/g, '') ? Math.abs(parseFloat(x) - parseFloat(b[i])) : 1e9));
         window.addEventListener('load', async () => {
           await pause(300);
           const out = {}, atLoad = columns('grouped');
+          out.fills = holding('zfill')[0] === '100%' ? 0 : 1;
+          out.overflows = holding('zwide')[0].endsWith('px') ? 0 : 1;
+          for (const p of ['half-', 'tiny-']) for (const t of ['zfill', 'zwide']) out[p + t] = apart(holding(t), holding(p + t));
+          // Sized again at another zoom (as a regroup sizes it), the same widths.
+          const tile = document.getElementById('half-tile');
+          tile.style.transform = 'scale(0.8)';
+          tile.querySelectorAll('table[data-htmxo-columns]').forEach(t => htmxoColumnsMeasure(t, true));
+          for (const t of ['zfill', 'zwide']) out['rezoomed-' + t] = apart(holding(t), holding('half-' + t));
           for (const prefix of ['', 'c-']) for (const [name, act] of Object.entries(actions)) {
             const id = prefix + name;
             try {
@@ -127,7 +151,8 @@ using TestItemRunner
             Raw(join(unheld.(tables("c-")))))
         # Any swap on the page puts a dropped hold back.
         ping = h.div(; id="ping", hx_get="/ping", hx_trigger="ping", hx_swap="innerHTML")
-        content = h.main(; class="container-fluid")(tables("")..., control, ping, driver)
+        content = h.main(; class="container-fluid")(tables("")..., control, zoomable("")...,
+            tile("half-", 0.5), tile("tiny-", 0.37), ping, driver)
         page = repr("text/html", htmx(content; assets="/vendor", pico_version=HTMXObjects._PICO_VERSION,
             sse_version=nothing, ws_version=nothing, hyperscript_version=nothing, preload_version=nothing,
             katex_version=nothing))
@@ -190,5 +215,13 @@ using TestItemRunner
         @test moved["morph"] <= 0.5
         @test moved["narrowed"] == 0
         @test moved["resized"] == 1
+        # A zoomed tile holds the widths the unzoomed table holds, up to the
+        # last digit Chrome writes in a style length (six significant digits:
+        # 0.01 px past 1000 px).
+        @test moved["fills"] == 0
+        @test moved["overflows"] == 0
+        for p in ("half-", "tiny-", "rezoomed-"), t in ("zfill", "zwide")
+            @test moved[p * t] <= 0.011
+        end
     end
 end
