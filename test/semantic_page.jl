@@ -3,7 +3,7 @@ using TestItemRunner
 @testmodule SemanticPageFixtures begin
     using HTMXObjects
     using HTMXObjects.DynamicObjects: option_domain
-    export SimPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
+    export SimPage, FitsPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
 
     const UPLOADS = String[]
 
@@ -49,6 +49,20 @@ using TestItemRunner
         @post upload(; name::String) = (push!(UPLOADS, name); h.p("added:", name; class="result"))
         @get index() = semantic_app(__self__; presentation=:tabs,
             title="Simulator", select=entry -> entry.name !== :index)
+    end
+
+    # Defaults computed from other properties, as Bruno's web-sim's are.
+    @htmx struct FitsPage
+        fits = ["x", "y"]
+        "Fit"
+        @param fit::String = isempty(fits) ? "" : first(fits)
+        @options(fit) = option_domain(fits)
+        "Subjects"
+        @param n::Int = length(fits) + 1
+        "Profile"
+        @get profile() = h.p("profile:", fit, ":", n)
+        "Summary"
+        @get summary() = h.p("summary:", fit, ":", n)
     end
 
     # The sidebar form, and one tab's content, of a rendered page.
@@ -413,6 +427,198 @@ end
                     # showing dose_response asked again.
                     @test counts["/dose_response"] == before + 1
                     @test UPLOADS == ["third"]
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "a tabs page keeps its inputs in the page address" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    route!(SimPage(); operation_policy=:blocking)
+    page(url="/") = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
+    form_attrs(html) = tag_attrs(html, r"<form[^>]*>")
+    html = page()
+    # Each form of inputs names those the address keeps and what each shows
+    # when the address names nothing, as its control sends it.
+    @test form_attrs(sidebar_of(html))["data-htmxo-address"] ==
+          """{"basis":["typical"],"doses":["5, 10"],"fit":["one"],"male":["false"],"output":["a"],"subjects":["100"]}"""
+    @test form_attrs(tab_of(html, "timecourse"))["data-htmxo-address"] ==
+          """{"dose":["60.0"],"scale":["value"]}"""
+    @test form_attrs(tab_of(html, "fraction"))["data-htmxo-address"] == """{"threshold":["-50.0"]}"""
+    # A mutation's own inputs are not page state.
+    @test !haskey(form_attrs(tab_of(html, "upload")), "data-htmxo-address")
+
+    # The page shows the values its address names: the sidebar's, a tab's own
+    # `@param`s and its arguments; the open tab's result starts with them.
+    opened = page("/?basis=cohort&subjects=7&dose=30&scale=change&threshold=-30&tab=fraction")
+    sidebar = sidebar_of(opened)
+    @test contains(sidebar, "<input type=\"radio\" name=\"basis\" value=\"cohort\" checked=\"true\">")
+    @test contains(sidebar, r"<input[^>]* name=\"subjects\"[^>]* value=\"7\"")
+    @test contains(tab_of(opened, "timecourse"), r"<input[^>]* name=\"dose\"[^>]* value=\"30.0\"")
+    @test contains(tab_of(opened, "timecourse"),
+                   "<input type=\"radio\" name=\"scale\" value=\"change\" checked=\"true\">")
+    @test contains(tab_of(opened, "fraction"), r"<input[^>]* name=\"threshold\"[^>]* value=\"-30.0\"")
+    first_load = tag_attrs(opened, r"<div hx-get=\"/fraction[^\"]*\" hx-trigger=\"load\"[^>]*>")
+    query = Dict(HTTP.URIs.queryparams(HTTP.URI(first_load["hx-get"])))
+    @test query["basis"] == "cohort" && query["subjects"] == "7" && query["threshold"] == "-30.0"
+    @test result_text(dispatch(:GET, first_load["hx-get"]; headers=["HX-Request" => "true"])) ==
+          "fraction:one/cohort/7/false:5, 10:a:-30.0"
+    # A value the address does not name keeps the page's default.
+    @test contains(tab_of(page("/?tab=fraction"), "fraction"),
+                   r"<input[^>]* name=\"threshold\"[^>]* value=\"-50.0\"")
+
+    # `values=` gives an input the value it shows without the address; the
+    # address still wins over it.
+    app = SimPage()
+    valued = repr("text/html", semantic_app(app; presentation=:tabs,
+        values=(; threshold=-40.0), select=entry -> entry.name !== :index))
+    @test form_attrs(tab_of(valued, "fraction"))["data-htmxo-address"] == """{"threshold":["-40.0"]}"""
+
+    # A default computed from other properties is the value it computes.
+    computed = repr("text/html", semantic_app(FitsPage(); presentation=:tabs))
+    @test form_attrs(sidebar_of(computed))["data-htmxo-address"] == """{"fit":["x"],"n":["3"]}"""
+
+    # `url_state=false` leaves the address to the tab.
+    off = repr("text/html", semantic_app(app; presentation=:tabs, url_state=false,
+        select=entry -> entry.name !== :index))
+    @test !contains(off, "data-htmxo-address")
+    # refused: the stacked surface has no page address to keep.
+    @test_throws "url_state= keeps the inputs of presentation=:tabs" semantic_app(app; url_state=true)
+    @test_throws "url_state must be true or false" semantic_app(app; presentation=:tabs, url_state=1,
+        select=entry -> entry.name !== :index)
+end
+
+@testitem "a tabs page writes its inputs into the page address in a browser" setup=[SemanticPageFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(SimPage(); operation_policy=:blocking)
+        assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
+            "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
+        receipt = Channel{String}(1)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label + ' at ' + location.search);
+              await sleep(25);
+            }
+          }
+          const shown = name => document.querySelector('[id$="-get-' + name.replace('_', '-') + '-result"]').textContent;
+          const relevant = name => !document.querySelector('[data-htmxo-relevant="' + name + '"]').hidden;
+          const tab = name => document.querySelector('a[data-tab-name="' + name + '"]').click();
+          const param = name => new URLSearchParams(location.search).get(name);
+          const control = name => document.querySelector('input[name="' + name + '"]');
+          const choose = (name, value) => document.querySelector('input[name="' + name + '"][value="' + value + '"]').click();
+          function type(name, value) {
+            const input = control(name);
+            input.value = value;
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+          try {
+            const before = sessionStorage.getItem('htmxo-test-address');
+            if (before !== null) {
+              // Reloaded: the page shows what its address names.
+              if (location.search !== before) throw new Error('reload changed the address: ' + location.search);
+              await until(() => shown('fraction') === 'fraction:one/cohort/7/false:5, 10:a:-30.0', 'reloaded result');
+              if (!document.querySelector('input[name="basis"][value="cohort"]').checked) throw new Error('reloaded basis');
+              if (control('subjects').value !== '7' || !relevant('subjects')) throw new Error('reloaded subjects');
+              if (control('threshold').value !== '-30.0') throw new Error('reloaded threshold: ' + control('threshold').value);
+              await fetch('/complete?status=passed&search=' + encodeURIComponent(location.search));
+              return;
+            }
+            await until(() => shown('timecourse') === 'timecourse:one/typical/100/false:60.0:value', 'first');
+            await sleep(300);
+            if (location.search !== '') throw new Error('the first load wrote the address: ' + location.search);
+            // A sidebar input, and one that applies once it is set.
+            choose('basis', 'cohort');
+            await until(() => param('basis') === 'cohort', 'basis');
+            type('subjects', '7');
+            await until(() => param('subjects') === '7', 'subjects');
+            // The open tab stays in the address beside them; a tab's own input.
+            tab('fraction');
+            await until(() => param('tab') === 'fraction', 'tab');
+            type('threshold', '-30');
+            await until(() => param('threshold') === '-30', 'threshold');
+            if (param('basis') !== 'cohort' || param('tab') !== 'fraction') throw new Error('kept: ' + location.search);
+            // Back at its default, an input is left out.
+            type('threshold', '-50.0');
+            await until(() => param('threshold') === null, 'threshold default');
+            // An input that stops applying is left out, a checkbox is written.
+            choose('basis', 'typical');
+            await until(() => param('basis') === null && param('subjects') === null, 'typical');
+            control('male').click();
+            await until(() => param('male') === 'true', 'male');
+            control('male').click();
+            await until(() => param('male') === null, 'male default');
+            // A condition the server evaluates: the output leaves the address
+            // once its re-rendered control is hidden.
+            choose('fit', 'two');
+            await until(() => relevant('output'), 'output applies');
+            type('output', 'b');
+            await until(() => param('output') === 'b' && param('fit') === 'two', 'output');
+            choose('fit', 'one');
+            await until(() => !relevant('output'), 'output hidden');
+            await until(() => param('output') === null && param('fit') === null, 'output left out');
+            // A value the reader set before comes back with its input.
+            choose('basis', 'cohort');
+            await until(() => param('subjects') === '7', 'subjects back');
+            type('threshold', '-30');
+            await until(() => param('threshold') === '-30', 'threshold again');
+            if (location.search !== '?tab=fraction&basis=cohort&subjects=7&threshold=-30')
+              throw new Error('address: ' + location.search);
+            sessionStorage.setItem('htmxo-test-address', location.search);
+            location.reload();
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        render(target) = repr("text/html", htmx(Raw(String(dispatch(:GET, target;
+                headers=["HX-Request" => "true"]).body)), driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, pico_version=nothing,
+            feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], render(req.target))
+            haskey(assets, path) &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            dispatch(req.method, req.target; headers=collect(req.headers),
+                     body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                    @test startswith(outcome, "/complete?status=passed")
+                    @test HTTP.URIs.unescapeuri(outcome) ==
+                          "/complete?status=passed&search=?tab=fraction&basis=cohort&subjects=7&threshold=-30"
                 finally
                     process_exited(process) || kill(process)
                     wait(process)
