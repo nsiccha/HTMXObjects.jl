@@ -1321,9 +1321,9 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select, presentation, shared, active)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface. `presentation=:tabs` makes it an app page: shared inputs in a sidebar, one tab per operation, results that follow their inputs (see [An app page](@ref semantic-tabs)) |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select, presentation, shared, active, url_state)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface. `presentation=:tabs` makes it an app page: shared inputs in a sidebar, one tab per operation, results that follow their inputs, inputs kept in the page address (see [An app page](@ref semantic-tabs)) |
 | `semantic_control(obj, ::Val{name}, control)` | Hook: define a method to render one input of your struct your own way in every generated form |
-| `semantic_follow_script()` | The page runtime that keeps a `presentation=:tabs` page's results on their inputs (the `htmx()` shell installs it) |
+| `semantic_follow_script()` | The page runtime that keeps a `presentation=:tabs` page's results on their inputs and its inputs in the page address (the `htmx()` shell installs it) |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
 | `semantic_card(value)` | Option-value hook returning its reusable `SemanticCard` |
@@ -1430,6 +1430,21 @@ and button.
   sent with the sidebar; once it finishes, the other results are asked for
   again when next shown. [`semantic_follow_script`](@ref) does this, and the
   `htmx()` shell installs it.
+- **The page address keeps the inputs** (from 0.1.20). After the reader
+  changes an input of the sidebar or of a read's tab, every such input whose
+  value differs from its default (its `values=` entry, if given; a default
+  computed from other properties, such as `@param fit = first(fits)`, is the
+  value it computes) is in the page address beside `?tab=`: choosing New subjects and 40 subjects above
+  reads `/?tab=dose_response&basis=cohort&subjects=40`. An input back at
+  its default, an empty one, and one `@relevant` hides are left out, so the
+  address stays short, and other parameters of the address stay. The history
+  entry is replaced, not added. The page shows the values its address names,
+  in the sidebar and in each tab, and the open tab's result starts with them,
+  so a reload or a shared link reopens the same inputs and results. Names are
+  the request's own (`?threshold=-30` is Fraction responding's `threshold`);
+  arguments of two tabs that share a name share one address parameter. A
+  mutation's own inputs, a fixed field and a file are not kept.
+  `url_state=false` leaves the address to the tab alone.
 
 Everything is overridable: `layout(parts)` composes the page (`parts` carries
 `object`, `title`, `id`, `sidebar`, the sidebar form or `nothing`; `tabs`,

@@ -27970,16 +27970,108 @@ function _semantic_follow_url(target, obj, route, current, names)
     isempty(query) ? string(target) : string(target, '?', join(query, '&'))
 end
 
+# A visible input of a `:tabs` page that its address keeps (`url_state`): a
+# request input, not fixed object context (which the page's address cannot
+# set) and not a file.
+_semantic_address_input(param) = param.source !== :path &&
+    get(param, :kind, nothing) !== nothing && !_semantic_fixed_context(param) &&
+    !_is_upload_type(param.type)
+
+# The value the page's address gives the input `param` of `obj`'s route, or
+# `_NO_DEFAULT` when the address names none. A request context input reads it
+# as its property does; an operation argument through its declared options.
+function _semantic_address_value(obj, param)
+    req = _req_of(obj)
+    req isa HTTP.Request || return _NO_DEFAULT
+    query = queryparams(req)
+    _submitted_raw(query, nothing, param.name) === _NO_DEFAULT && return _NO_DEFAULT
+    get(param, :context_source, nothing) isa NamedTuple &&
+        return _semantic_context_value(obj, param)
+    src = _kwargs_source(req, req.method)
+    fallback = req.method in _queryparams_verbs ? nothing : query
+    if isdefined(DynamicObjects, :has_option_declaration) &&
+            Base.invokelatest(getproperty(DynamicObjects, :has_option_declaration),
+                              typeof(obj), param.name)
+        _lookup_option_param(getproperty(obj, :__options__), src, fallback,
+                             param.name, param.type)
+    else
+        _lookup_param(src, fallback, param.name, param.type)
+    end
+end
+
+# `current` with the values the page's address names for the inputs of
+# `route` it keeps (only those in `names`, unless `nothing`). The address wins
+# over `semantic_app(…; values)`: it is the reader's last choice.
+function _semantic_address_current(obj, route, current, names)
+    current = copy(current)
+    for param in route.params
+        _semantic_address_input(param) || continue
+        isnothing(names) || param.name in names || continue
+        value = _semantic_address_value(obj, param)
+        value === _NO_DEFAULT || (current[param.name] = value)
+    end
+    current
+end
+
+# What an input shows when the address names nothing: its `values=` entry,
+# else its default, as its control sends it; `nothing` when there is none to
+# leave out (a required input, an argument whose default is an expression).
+# The first operation that takes an input defines it.
+function _semantic_address_defaults(specs, routes)
+    defaults = Dict{Symbol,Any}()
+    bare = IdDict{Any,Any}()
+    for (spec, route) in zip(specs, routes)
+        provided = _semantic_values(spec.operation_values)
+        for param in route.params
+            _semantic_address_input(param) && !haskey(defaults, param.name) || continue
+            default = haskey(provided, param.name) ? provided[param.name] :
+                param.required ? _NO_DEFAULT : _semantic_input_default(spec.mounted, param, bare)
+            defaults[param.name] = default === _NO_DEFAULT ? nothing :
+                _semantic_address_wire(default)
+        end
+    end
+    defaults
+end
+
+# A request `@param`'s default is what its property reads without a request:
+# the declaring object remounted with none, so a default computed from other
+# properties (`@param fit = first(fits)`) is evaluated, and the work it reads
+# stays shared. An operation argument's is its declared default value.
+function _semantic_input_default(obj, param, bare)
+    source = _param_declaring_object(obj, param.name)
+    if source !== nothing && isdefined(DynamicObjects, :remount)
+        unbound = get!(bare, source) do
+            Base.invokelatest(getproperty(DynamicObjects, :remount), source; __req__=nothing)
+        end
+        return getproperty(unbound, param.name)
+    end
+    param.default isa Expr ? _NO_DEFAULT : param.default
+end
+_semantic_address_wire(::Nothing) = String[]
+_semantic_address_wire(value::AbstractVector) = String[_option_wire_string(v) for v in value]
+_semantic_address_wire(value) = String[_option_wire_string(value)]
+
+# A form's inputs the page's address keeps, with their defaults
+# (`semantic_follow_script` writes them).
+function _semantic_address_attrs(defaults, params)
+    isnothing(defaults) && return (;)
+    kept = Dict{String,Any}(string(param.name) => defaults[param.name]
+                            for param in params if haskey(defaults, param.name))
+    isempty(kept) ? (;) : (; data_htmxo_address=sprint(_schema_json_encode, kept))
+end
+
 """
     _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
-                   render_operation, layout)
+                   render_operation, layout, url_state)
 
 `semantic_app(obj; presentation=:tabs)`: the inputs several operations read in
 a sidebar, one tab per operation with the inputs only it reads above its result,
-and every read's result following its inputs (`semantic_follow_script`).
+and every read's result following its inputs (`semantic_follow_script`). With
+`url_state`, the page's address keeps every input the reader set: the page
+shows the values it names, and the script writes the inputs into it.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
-        render_operation, layout, radio_max::Int=_RADIO_MAX)
+        render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true)
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places.
@@ -28014,15 +28106,28 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     own = [setdiff(read, sidebar) for read in reads]
     routes = [_semantic_tabs_route(spec.mounted, spec.runtime_route, sidebar, own[i])
               for (i, spec) in enumerate(specs)]
+    follows = [spec.base_entry.verb === :GET &&
+               all(param -> param.source !== :path, routes[i].params)
+               for (i, spec) in enumerate(specs)]
+    # A page that keeps its inputs in its address shows the values the address
+    # names: the sidebar's, and a following tab's own.
+    currents = map(enumerate(specs)) do (i, spec)
+        url_state || return spec.current
+        _semantic_address_current(spec.mounted, routes[i], spec.current,
+                                  follows[i] ? nothing : sidebar)
+    end
+    defaults = url_state ? _semantic_address_defaults(specs, routes) : nothing
 
     context_entries = _semantic_context_entries(
-        [(spec.mounted, routes[i], spec.current) for (i, spec) in enumerate(specs)];
+        [(spec.mounted, routes[i], currents[i]) for (i, spec) in enumerate(specs)];
         names=sidebar)
     shared_names = Set{Symbol}(entry.param.name for entry in context_entries)
     sidebar_form = isempty(context_entries) ? nothing :
         h.form(_semantic_context_controls(context_entries, shared_names; radio_max)...;
                id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
-               autocomplete="off", onsubmit="return false")
+               autocomplete="off", onsubmit="return false",
+               _semantic_address_attrs(defaults,
+                   [entry.param for entry in context_entries])...)
     selector = isnothing(sidebar_form) ? nothing : "#" * context_id
     refreshes = any(entry -> _semantic_context_refreshable(entry.route, entry.param),
                     context_entries)
@@ -28032,25 +28137,26 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     operations = map(enumerate(specs)) do (i, spec)
         base = spec.base_entry
         route = routes[i]
-        follows = base.verb === :GET && all(param -> param.source !== :path, route.params)
-        form, result = if follows
+        current = currents[i]
+        form, result = if follows[i]
             target = _operation_form_target(spec.mounted, spec.local_route)
-            controls = _operation_form_controls(spec.mounted, route, spec.current,
+            controls = _operation_form_controls(spec.mounted, route, current,
                 string(target); shared_names, context_selector=selector, lifted=own[i],
                 radio_max)
             inputs_id = base.target_id * "-inputs"
-            form = isempty(_operation_control_params(route, shared_names)) ? nothing :
+            own_params = _operation_control_params(route, shared_names)
+            form = isempty(own_params) ? nothing :
                 h.form(controls...; id=inputs_id,
                        class="htmxo-semantic-operation-form htmxo-semantic-inputs",
-                       autocomplete="off", onsubmit="return false")
+                       autocomplete="off", onsubmit="return false",
+                       _semantic_address_attrs(defaults, own_params)...)
             selectors = String[s for s in (selector, isnothing(form) ? nothing : "#" * inputs_id)
                                if !isnothing(s)]
             # Its own arguments are inputs of its tab, and it reads them all.
-            sent = union(shared_names, Set{Symbol}(param.name for param in
-                _operation_control_params(route, shared_names)))
+            sent = union(shared_names, Set{Symbol}(param.name for param in own_params))
             key_reads = complete[i] ? union(reads[i], setdiff(sent, shared_names)) : nothing
             initial = names[i] == open ?
-                Any[lazy(_semantic_follow_url(target, spec.mounted, route, spec.current, sent))] :
+                Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
                 Any[]
             form, h.div(initial...; id=base.target_id,
                 class="htmxo-semantic-operation-result", aria_live="polite",
@@ -28072,7 +28178,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 aria_live="polite",
                 (refreshes ? (; data_htmxo_refreshes=context_id) : (;))...)
         end
-        merge(base, (; form, result, tab=names[i], follows))
+        merge(base, (; form, result, tab=names[i], follows=follows[i]))
     end
 
     _activate_semantic_root_provider!(obj)
@@ -28110,7 +28216,8 @@ end
     semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_attrs=(;),
                  render_operation=_default_semantic_operation, compact=false,
                  results=:each, layout=_default_semantic_layout,
-                 select=entry -> true, presentation=:stacked, radio_max=8)
+                 select=entry -> true, presentation=:stacked, radio_max=8,
+                 shared=nothing, active=nothing, url_state=true)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -28137,6 +28244,14 @@ made valid is offered without a reload. A generated form whose controls read a
 lifted value refreshes its controls when that value changes. Each result then
 carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
 (installed by the `htmx()` shell) sends the refreshes.
+
+`presentation=:tabs` makes it an app page: the inputs several operations
+read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
+the one it opens on), and results that follow their inputs. Its page address
+keeps the open tab and every input the reader set away from its default, and
+the page shows the values its address names, so a reload or a shared link
+reopens the same page; `url_state=false` keeps only the tab. The contract is
+the API reference's *An app page*.
 
 A single choice among at most `radio_max` options (default 8) is a row of
 pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
@@ -28259,7 +28374,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         render_operation=_default_semantic_operation, compact::Bool=false,
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
-        shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX)
+        shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -28275,7 +28390,11 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app shared= chooses the sidebar of presentation=:tabs"))
         isnothing(active) || throw(ArgumentError(
             "semantic_app active= chooses the open tab of presentation=:tabs"))
+        isnothing(url_state) || throw(ArgumentError(
+            "semantic_app url_state= keeps the inputs of presentation=:tabs in the page address"))
     end
+    isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
+        "semantic_app url_state must be true or false, got $(repr(url_state))"))
     descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
@@ -28322,7 +28441,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     suffix = _semantic_selection_suffix(selected, length(descriptor.routes))
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
-        title, shared, active, radio_max,
+        title, shared, active, radio_max, url_state=something(url_state, true),
         render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
@@ -30018,6 +30137,16 @@ request replaces one still running (`hx-sync`), and the shown result stays on
 screen while the next one computes (`data-htmxo-live`); a result asked for the
 first time shows a `<progress>` until it arrives. After a mutation of
 the page finishes, every other result is asked for again when next shown.
+
+It also keeps the page's inputs in the page address (`semantic_app(…;
+url_state=true)`, the default). Each form marked `data-htmxo-address` names
+the inputs it keeps, with what each shows when the address names nothing.
+After the reader changes an input, each kept input whose value differs from
+that is written into the address (`history.replaceState`, no new history
+entry); one back at it, an empty one, and one that does not apply (its
+control is hidden) are left out. Other parameters, such as the tab's `?tab=`,
+stay. The page shows the values its address names, so a reload or a shared
+link reopens the same inputs and results.
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
 once per page when building a `<head>` by hand.
 """
@@ -30116,10 +30245,69 @@ semantic_follow_script() = h.script(Raw(raw"""
       else later(region);
     });
   }
+  // The page's address keeps the inputs the reader set. Each form marked
+  // `data-htmxo-address` names the inputs it keeps and what each shows when
+  // the address names nothing. After the reader changes one, every kept input
+  // that differs from that is written into the address; one at it, an empty
+  // one and one that does not apply (hidden) are left out. Other parameters
+  // (`tab`) stay. The entry is replaced, keeping htmx's history state.
+  function valuesOf(form, name) {
+    var values = null;
+    Array.prototype.forEach.call(form.elements, function(c) {
+      if (c.name !== name || c.disabled || PRESSED.test(c.type) || c.closest('[hidden]')) return;
+      values = values || [];
+      if (c.type === 'radio') { if (c.checked) values.push(c.value); return; }
+      if (c.type === 'checkbox') {
+        if (c.checked) values.push(c.value); else if (c.value === 'true') values.push('false');
+        return;
+      }
+      if (c.type === 'select-multiple') {
+        Array.prototype.forEach.call(c.selectedOptions, function(o) { values.push(o.value); });
+        return;
+      }
+      if (c.value !== '') values.push(c.value);
+    });
+    return values;
+  }
+  function numeric(form, name) {
+    var c = form.elements.namedItem(name);
+    return !!c && c.type === 'number';
+  }
+  function same(a, b, number) {
+    if (!b || a.length !== b.length) return false;
+    var x = a.slice().sort(), y = b.slice().sort();
+    return x.every(function(v, i) {
+      return number ? Number(v) === Number(y[i]) : v === y[i];
+    });
+  }
+  var touched = false;
+  function writeAddress(last) {
+    var forms = Array.prototype.slice.call(document.querySelectorAll('form[data-htmxo-address]'));
+    if (!forms.length) return;
+    // The changed form last, so its value wins a name two forms keep.
+    if (last && forms.indexOf(last) >= 0) forms.splice(forms.indexOf(last), 1), forms.push(last);
+    var url = new URL(location.href);
+    forms.forEach(function(form) {
+      var defaults;
+      try { defaults = JSON.parse(form.getAttribute('data-htmxo-address')); } catch (_) { return; }
+      Object.keys(defaults).forEach(function(name) {
+        url.searchParams.delete(name);
+        var values = valuesOf(form, name);
+        if (!values || !values.length || same(values, defaults[name], numeric(form, name))) return;
+        values.forEach(function(v) { url.searchParams.append(name, v); });
+      });
+    });
+    if (url.href === location.href) return;
+    history.replaceState(history.state, '', url);
+    try { sessionStorage.setItem('htmx-current-path-for-history', url.pathname + url.search); } catch (_) {}
+  }
+  function kept(form) { return form && form.hasAttribute && form.hasAttribute('data-htmxo-address'); }
   document.addEventListener('change', function(e) {
     var form = e.target && e.target.form;
     if (!form) return;
     readers(form).forEach(function(r) { if (visible(r)) later(r); });
+    // After the page's own listeners, which show and hide inputs that apply.
+    if (kept(form)) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
   });
   document.addEventListener('htmx:load', function(e) { arm(e.target); });
   // A control re-rendered in place (a dependent domain, a `@relevant` input
@@ -30127,6 +30315,7 @@ semantic_follow_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:afterSettle', function(e) {
     var t = e.target, form = t && t.closest && t.closest('form');
     if (form) readers(form).forEach(function(r) { if (visible(r)) later(r); });
+    if (touched && kept(form)) writeAddress(form);
   });
   function forget(e) {
     var t = e.target;

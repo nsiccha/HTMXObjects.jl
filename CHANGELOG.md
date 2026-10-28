@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.20
+
+- A `semantic_app(…; presentation=:tabs)` page keeps its inputs in the page
+  address. After the reader changes an input of the sidebar or of a read's
+  tab, every such input whose value differs from its default is a parameter
+  of the address beside `?tab=` (`/?tab=dose_response&basis=cohort&subjects=40`),
+  written with `history.replaceState`; an input at its default, an empty one
+  and one `@relevant` hides are left out. The page shows the values its
+  address names, a tab's own arguments included, so a reload or a shared link
+  reopens the same inputs and results. Before, only `?tab=` was kept and a
+  reload reset every input. `url_state=false` turns it off for one page.
+
 ## 0.1.19
 
 - `export_site` writes one file for a page that applies its address in the
