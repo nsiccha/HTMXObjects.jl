@@ -88,15 +88,19 @@ jobs:
         with:
           fail_ci_if_error: false
   # python_service(…; models=): the StanBlocks and ReactiveKernelsPPL
-  # extensions, and the generated CmdStanPy/NumPyro runtimes checked against
-  # the Julia models (test/python_models.jl). The matrix skips both: they need
-  # a Julia project with the two packages (HTMXO_TEST_MODELS) and a Python
-  # with the model runtimes (HTMXO_TEST_PYTHON_MODELS=1 makes a skip fail).
+  # extensions, and the generated nutpie/BridgeStan and NumPyro runtimes
+  # checked against the Julia models (test/python_models.jl). The matrix skips
+  # both: they need a Julia project with the two packages (HTMXO_TEST_MODELS)
+  # and a Python with the model runtimes (HTMXO_TEST_PYTHON_MODELS=1 makes a
+  # skip fail).
   models:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CMDSTAN_VERSION: '2.40.0'
+      # The releases python_service pins (src/python_models.jl); a :unit item
+      # of test/python_models.jl checks that these agree.
+      BRIDGESTAN_VERSION: '2.9.0'
+      NUTPIE_VERSION: '0.16.11'
     steps:
       - uses: actions/checkout@v4
       - name: Configure git for private repos
@@ -117,8 +121,10 @@ jobs:
           git clone -q -b pre-inference https://github.com/nsiccha/DynamicObjects.jl "$deps/DynamicObjects.jl"
           git clone -q https://github.com/nsiccha/OutputSignatures.jl "$deps/OutputSignatures.jl"
           # The revision HTMXObjects' [sources] pins (Julia 1.10 ignores [sources]).
-          git clone -q https://github.com/nsiccha/Treebars.jl "$deps/Treebars.jl"
-          git -C "$deps/Treebars.jl" checkout -q de253533c2e6d4884815100988630746c6801017
+          treebars=$(julia --startup-file=no -e 'import TOML; s = TOML.parsefile("Project.toml")["sources"]["Treebars"]; print(s["url"], " ", s["rev"])')
+          read -r treebars_url treebars_rev <<< "$treebars"
+          git clone -q "$treebars_url" "$deps/Treebars.jl"
+          git -C "$deps/Treebars.jl" checkout -q "$treebars_rev"
           git clone -q -b main https://github.com/nsiccha/ReactiveKernels.jl "$deps/ReactiveKernels.jl"
           git clone -q -b devibe https://github.com/nsiccha/StanBlocks.jl "$deps/StanBlocks.jl"
           julia --project="$RUNNER_TEMP/models-env" -e '
@@ -141,20 +147,16 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install the generated service's dependencies and the model runtimes
-        run: ${{ steps.python.outputs.python-path }} -m pip install fastapi pydantic uvicorn python-multipart httpx pytest pycodestyle cmdstanpy jax numpyro scipy
+        run: ${{ steps.python.outputs.python-path }} -m pip install fastapi pydantic uvicorn python-multipart httpx pytest pycodestyle "bridgestan==$BRIDGESTAN_VERSION" "nutpie[stan]==$NUTPIE_VERSION" jax numpyro scipy
+      # BridgeStan's C++ source with the Stan compiler and the libraries its
+      # first compile builds; the runtime downloads it there when it is missing.
       - uses: actions/cache@v4
-        id: cmdstan
         with:
-          path: ~/cmdstan
-          key: cmdstan-${{ env.CMDSTAN_VERSION }}-${{ runner.os }}
-      - name: Install CmdStan
-        if: steps.cmdstan.outputs.cache-hit != 'true'
-        run: ${{ steps.python.outputs.python-path }} -m cmdstanpy.install_cmdstan --dir ~/cmdstan --version "$CMDSTAN_VERSION" --cores 4
+          path: ~/.bridgestan
+          key: bridgestan-${{ env.BRIDGESTAN_VERSION }}-${{ runner.os }}
       - name: Run test/python_models.jl
         env:
           HTMXO_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
           HTMXO_TEST_PYTHON_MODELS: "1"
           HTMXO_TEST_MODELS: ${{ runner.temp }}/models-env
-        run: |
-          export CMDSTAN="$HOME/cmdstan/cmdstan-$CMDSTAN_VERSION"
-          julia --project=. --color=no test/select.jl --file=test/python_models.jl
+        run: julia --project=. --color=no test/select.jl --file=test/python_models.jl

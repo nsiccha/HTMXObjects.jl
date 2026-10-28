@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.18
+
+- `python_service(…; models)` runs a `@slic` model's Stan program through
+  BridgeStan and samples it with nutpie; CmdStanPy and CmdStan are gone from
+  the generated service (user decisions `1g9p2nw` and `0i2b1wr`).
+  - `fit` samples with nutpie (pinned `0.16.11`) over the BridgeStan library
+    of the program.
+  - `predict` and `log_likelihood` evaluate the program at each posted draw
+    with BridgeStan's `param_constrain(…, include_tp=True, include_gq=True)`,
+    so its transformed parameters and generated quantities are computed from
+    the request's data. CmdStan's standalone generated quantities answered a
+    transformed parameter with the fitted values instead.
+  - The requests and responses are unchanged: a draw is still the
+    constrained value of each parameter.
+  - **Breaking** for a deployment of a generated service with a Stan model:
+    `pyproject.toml` depends on `bridgestan==2.9.0` and `nutpie[stan]==0.16.11`
+    instead of `cmdstanpy` and needs Python 3.12 or later (nutpie), and the
+    `Dockerfile` installs BridgeStan's C++ source (`BRIDGESTAN`) and `curl`
+    instead of CmdStan. Regenerate the service.
+
 ## 0.1.17
 
 - A generated single choice is never a native `<select>`
