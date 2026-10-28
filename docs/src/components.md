@@ -508,6 +508,10 @@ fixed column widths, no script.
   once web fonts have loaded. A table filling its room keeps its columns' shares
   of it, so a scrollbar appearing narrows them all a little instead of
   re-sizing them.
+- **Zooming keeps them.** A table inside a zoomed box (an ancestor's
+  `transform: scale()`, `scale` or `zoom`, such as a report tile scaled to
+  fit) holds the widths it holds unzoomed, at any zoom: the runtime measures
+  in the page's layout pixels, not on screen.
 
 The table carries `data-htmxo-columns` (`"held"` once sized, with a
 `<colgroup>` of the widths and `table-layout: fixed`); a morph swap that
