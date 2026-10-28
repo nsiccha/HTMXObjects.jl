@@ -26190,13 +26190,15 @@ function _choice_list(name, label, options, selected; required=false,
     end
     groups = [h.div(h.div(string(group); class="htmxo-choice-heading"), grouped[group]...;
                     class="htmxo-choice-group") for group in group_order]
+    current = isnothing(chosen) ? "" : string(options[chosen].label)
     h.fieldset(
         h.legend(label),
+        # `title` shows a label the field's width cuts short in full.
         h.button(
-            h.span(isnothing(chosen) ? "" : options[chosen].label; class="htmxo-choice-current"),
+            h.span(current; class="htmxo-choice-current"),
             h.span("▾"; class="htmxo-choice-caret", aria_hidden="true");
             type="button", class="htmxo-choice-field", popovertarget=panel_id,
-            aria_haspopup="dialog", aria_expanded="false"),
+            aria_haspopup="dialog", aria_expanded="false", title=current),
         h.div(
             h.input(; type="search", class="htmxo-choice-search",
                     placeholder=texts.choice_search, aria_label=texts.choice_search,
@@ -28415,7 +28417,8 @@ page with a shell of its own. One set of page-wide listeners serves every list,
 so lists that htmx swaps in later need no binding.
 
 The field opens its list as a popover (`popovertarget`): the browser closes it
-on Escape or a click elsewhere. The script places it under the field (above it
+on a click elsewhere or Escape, and so does the script on Escape in the search
+field, where the browser's own Escape only clears the text. The script places it under the field (above it
 when there is more room there), keeps it there while the page scrolls, and puts
 the focus in the search field (not on a touch screen, where that would raise
 the keyboard). Typing filters the options by their text, ignoring case and
@@ -28548,8 +28551,9 @@ choice_list_script() = h.script(Raw(raw"""
   // The field shows the chosen option's label.
   function sync(list) {
     var p = partsOf(list), option = checkedOption(p);
-    p.field.querySelector('.htmxo-choice-current').textContent =
-      option ? option.querySelector('.htmxo-choice-label').textContent : '';
+    var label = option ? option.querySelector('.htmxo-choice-label').textContent : '';
+    p.field.querySelector('.htmxo-choice-current').textContent = label;
+    p.field.title = label;
   }
   document.addEventListener('change', function(e) {
     var t = e.target, list = t && t.type === 'radio' ? listOf(t) : null;
@@ -28578,6 +28582,10 @@ choice_list_script() = h.script(Raw(raw"""
         e.preventDefault();
         var pick = at >= 0 ? options[at] : options.length === 1 ? options[0] : null;
         if (pick) choose(p, pick);
+      } else if (e.key === 'Escape') {
+        // A search field's own Escape only clears its text.
+        e.preventDefault();
+        close(p, true);
       }
     } else if (t === p.field && !e.ctrlKey && !e.metaKey) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -30919,6 +30927,10 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
    which Pico does not rewrite on buttons (it rewrites `--pico-color` and the
    background ones), and sets every property Pico's button rules set through
    those. Without Pico it takes the page's colours. */
+/* As wide as its container, as a field is, whatever option is chosen (a
+   fieldset is otherwise as wide as its widest content); a long label ends
+   in an ellipsis. */
+.htmxo-choice-list { min-inline-size: 0; }
 .htmxo-choice-list > .htmxo-choice-field {
     display: flex;
     align-items: center;

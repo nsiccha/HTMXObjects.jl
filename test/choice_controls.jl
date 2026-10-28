@@ -108,7 +108,7 @@ end
     node = choice_list((; fruit="b"), ["a" => "Äpfel", "b" => "Birnen", "c" => "Kirschen"]; label="Obst")
     html = repr("text/html", node)
     @test startswith(html, "<fieldset class=\"htmxo-choice-list\" data-htmxo-choice-list=\"\"><legend>Obst</legend>")
-    field = match(r"<button type=\"button\" class=\"htmxo-choice-field\" popovertarget=\"([\w-]+)\" aria-haspopup=\"dialog\" aria-expanded=\"false\">", html)
+    field = match(r"<button type=\"button\" class=\"htmxo-choice-field\" popovertarget=\"([\w-]+)\" aria-haspopup=\"dialog\" aria-expanded=\"false\" title=\"Birnen\">", html)
     @test !isnothing(field)
     @test contains(html, "<div id=\"$(field.captures[1])\" class=\"htmxo-choice-panel\" popover=\"auto\" role=\"dialog\" aria-label=\"Obst\">")
     @test contains(html, "<span class=\"htmxo-choice-current\">Birnen</span>")
@@ -243,7 +243,8 @@ end
                     key(search, 'Enter');
                     await sleep(50);
                     out.enter = String(first === 'd' && second === 'f' && !open() && document.activeElement === field &&
-                        field.textContent.includes('Datteln') && new FormData(form).get('fruit') === 'd' &&
+                        field.textContent.includes('Datteln') && field.title === 'Datteln' &&
+                        new FormData(form).get('fruit') === 'd' &&
                         JSON.stringify(heard) === '["input:fruit","change:fruit"]' &&
                         field.getAttribute('aria-expanded') === 'false');
                     // A letter typed on the closed field opens it, searched; the search
