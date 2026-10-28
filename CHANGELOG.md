@@ -14,6 +14,23 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.19
+
+- `export_site` writes one file for a page that applies its address in the
+  browser, with no `file_name` of the app's. A page address with a query
+  (`/?region=09&jahr=2024`, a region explorer's zoom link) shares the file of
+  its page when that page is in the bundle too and its `url_params` elements
+  declare every parameter of the query with `values` holding the query's
+  value: links to it name `index.html?region=09&jahr=2024`, and the page's
+  runtime loads the view from the fragment written for it. Before, every such
+  address was a page file of its own (`index-jahr-2024-region-09.html`)
+  unless the app passed a `file_name` that named it with its query
+  (RegionExplorer apps, ArbeitsplatzAtlas, VerkehrsStrukturdaten). A page
+  address whose query the page does not apply that way (a parameter no
+  element declares, or declares without `values`, a value outside them) is
+  still a file of its own; a `file_name` that names an address with its query
+  works as before.
+
 ## 0.1.18
 
 - `python_service(…; models)` runs a `@slic` model's Stan program through

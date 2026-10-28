@@ -4121,9 +4121,22 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   for a parameter that only places a view on the page:
   `file_name = (a; kw...) -> static_file_name(drop_ort(a); kw...)`. A name
   with a query (`"lieferflaechen.html?ortsteil=0101"`) names the file before
-  the `?`, and links to that address keep the query, so a page that applies
-  its parameters in the browser (`url_params`) is one file; list its plain
-  address in `pages` so that one is rendered.
+  the `?`, and links to that address keep the query; list its plain address
+  in `pages` so that one is rendered.
+- **A page that applies its address in the browser is one file**, with no
+  `file_name` of yours. A page address with a query (`/?region=09&jahr=2024`,
+  a zoom link) shares the file of its page (`/`) when that page is in the
+  bundle too and its `url_params` elements ([Page address parameters](#page-address-parameters))
+  declare every parameter of the query, with `values` that hold the query's
+  value. Links to it name the page's file with the query
+  (`index.html?region=09&jahr=2024`); the page's runtime loads the view the
+  query names from the fragment written for it, and the rest of the page is
+  as its own address renders it. Any other page address with a query is a
+  file of its own, rendered with that query: a parameter no element declares,
+  or declares without `values`, a value outside them, a parameter named
+  twice. These addresses are decided once nothing else is left to render, so
+  their page has been met if anything links it; list the page in `pages`
+  when only its addresses with a query are.
 - **Controls** a static site cannot serve are removed (`controls=:remove`,
   the default) or greyed out (`:disable`). A linked runtime stays linked.
 - **Everything linked is rendered**, blocking, and every distinct address is a
