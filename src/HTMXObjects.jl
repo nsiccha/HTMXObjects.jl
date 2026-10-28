@@ -56,7 +56,7 @@ export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_explorer_styles, navigation
 export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
-export OperationContext, RootProvider, RootRetention, OperationPolicy
+export OperationContext, RootProvider, RootRetention, OperationPolicy, send_ahead
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
@@ -2983,6 +2983,7 @@ _runtime_blocks() = (
     auto_terminal = (:js, auto_terminal_script),
     mutation_poll = (:js, mutation_poll_script),
     operation_stream = (:js, operation_stream_script),
+    sent_ahead = (:js, sent_ahead_script),
     semantic_refresh = (:js, semantic_refresh_script),
     semantic_follow = (:js, semantic_follow_script),
     show_when = (:js, show_when_script),
@@ -7763,12 +7764,18 @@ _operation_stream_push(req::HTTP.Request) = _OPERATION_PUSH_APP[] !== nothing &&
 # does not hold it (answered, expired, never started here); otherwise, on a
 # pushing stream, its running answer every `_OPERATION_PUSH_INTERVAL` and its
 # final answer once its computation has ended (`_operation_push!`), and on any
-# other stream `ready <token>` once it has ended. The body returns, closing the
-# stream, when every operation has been sent.
+# other stream `ready <token>` once it has ended. Parts the operation sends
+# ahead (`send_ahead`) go out as `ahead` events on either stream: every part so
+# far when the stream opens, then each one as it is added (`_send_ahead!`). The
+# body returns, closing the stream, when every operation has been sent.
 function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=false)
     # A token: that operation's computation ended. `""`: the push clock.
+    # `+<token>`: that operation sent a part ahead.
     events = Channel{String}(Inf)
     waiting = String[]
+    # The parts list of each operation that has one, and how many of its parts
+    # this stream has sent.
+    ahead = Dict{String,Tuple{_SentAhead,Int}}()
     for token in tokens
         handle = _operation_stream_handle(token)
         if handle === nothing
@@ -7776,6 +7783,9 @@ function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=fal
         else
             push!(waiting, token)
             _operation_stream_watch(handle, token, events)
+            sink = _sent_ahead_of(something(handle))
+            sink === nothing ||
+                (ahead[token] = (_watch_sent_ahead!(sink, events, "+" * token), 0))
         end
     end
     # A write to a page that has left fails at the latest with the keep-alive
@@ -7796,6 +7806,9 @@ function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=fal
         end
     end : nothing
     try
+        for token in keys(ahead)
+            _send_ahead!(sse, ahead, token) || return nothing
+        end
         while !isempty(waiting)
             token = try
                 take!(events)
@@ -7803,7 +7816,10 @@ function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=fal
                 err isa InvalidStateException && return nothing
                 rethrow()
             end
-            if isempty(token)
+            if startswith(token, '+')
+                sent = token[2:end]
+                sent in waiting && (_send_ahead!(sse, ahead, sent) || return nothing)
+            elseif isempty(token)
                 ticked[] = false
                 for running in copy(waiting)
                     outcome = _operation_push!(sse, req, running; final=false)
@@ -7820,8 +7836,24 @@ function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=fal
     finally
         close(left)
         clock === nothing || close(clock)
+        for (sink, _) in values(ahead)
+            _unwatch_sent_ahead!(sink, events)
+        end
     end
     nothing
+end
+
+# Send the parts of `token`'s operation this stream has not sent yet, each as
+# an `ahead` event: the token, the part's number and its HTML, a line each.
+# `false` once the page has left.
+function _send_ahead!(sse, ahead, token::String)
+    sink, sent = ahead[token]
+    for (i, html) in _sent_ahead_parts(sink, sent)
+        HTTP.WebSockets.send(sse, string(token, '\n', i, '\n', html);
+                             event="ahead") || return false
+        ahead[token] = (sink, i)
+    end
+    true
 end
 
 # Push the answer the page's poll of `token` would get now, rendered by
@@ -13250,6 +13282,239 @@ function _start_fresh_operation(compute, parent_progress,
     op[] = _FreshOperation(task, root)
 end
 
+# --- Parts sent ahead ---
+#
+# A running `:auto` operation's answer is its progress poller until the route
+# returns. `send_ahead(content)` puts finished parts in front of the reader
+# before that: each part lands once, in the order sent, in a region above the
+# progress tree, and the finished answer replaces them (design decision
+# `036a5ea`, the fourth stage of "send ahead").
+#
+# Each background computation the operation layer starts
+# (`_execute_materialization` with a background `fetch`) is bound to one
+# `_SentAhead` list through a scoped value, which DynamicObjects carries into
+# deferred and `@queued` work like the request contexts. The list belongs to
+# the computation, so every page that follows it (a memoized read several
+# requests coalesce on) gets the same parts. A part reaches a page two ways:
+# on the page's operation stream as an `ahead` event the moment it is added
+# (`_operation_stream_body`), and inside the running poller's answer as hidden
+# carriers for the parts the page has not applied yet (`_sent_ahead_carriers`,
+# from the count the page's script sends with each poll). `sent_ahead_script()`
+# lands each part once, in order, whichever way it came.
+
+mutable struct _SentAhead
+    const lock::ReentrantLock
+    const parts::Vector{String}
+    bytes::Int
+    # The list this one hands its parts to: the computation's own, when this
+    # one was bound for a start that joined it (`_sent_ahead_register!`).
+    forward::Union{Nothing,_SentAhead}
+    # The operation streams that follow it: each is told its key when a part
+    # is added.
+    const watchers::Vector{Pair{Channel{String},String}}
+    refused::Int
+end
+_SentAhead() = _SentAhead(ReentrantLock(), String[], 0, nothing,
+                          Pair{Channel{String},String}[], 0)
+
+const _SENT_AHEAD = ScopedValues.ScopedValue{Union{Nothing,_SentAhead}}(nothing)
+
+# What one operation keeps of the parts it sent. Past either bound a part is
+# refused, the first refusal is recorded, and the finished answer still lands.
+const _SENT_AHEAD_PART_LIMIT = 4096
+const _SENT_AHEAD_BYTE_LIMIT = 32 * 2^20
+
+# The count of parts a page has applied for the poller a poll comes from.
+const _SENT_AHEAD_HEADER = "HTMXO-Sent-Ahead"
+
+"""
+    send_ahead(content)
+
+Put `content` in front of the reader while the route that calls it is still
+running. Under the default `:auto` [`OperationPolicy`](@ref) a route that takes
+longer than its grace period answers with a progress poller; each part sent
+ahead lands once, in the order sent, in a region above that poller's progress
+tree, and the route's finished answer replaces the parts together with the
+poller. `content` is anything a route may return (a `Node`, a string, a vector
+of them), rendered to HTML when `send_ahead` is called.
+
+A part lands the way htmx swaps an answer at the end of the region: a script in
+it runs once (AlgebraOfVega's `append_data` / `replace_data` / `update_spec`
+updates of a figure an earlier part drew), and an element marked
+`hx-swap-oob` replaces its target instead (a status line, a table row).
+
+```julia
+@fresh @get dose_response() = begin
+    send_ahead(dose_response_view(doses, []))      # typed-empty figure, empty table
+    results = map(doses) do d
+        r = simulate(d)
+        send_ahead(append_data("dose-response", rows(d, r)))   # this dose's points
+        r
+    end
+    dose_response_view(doses, results)             # the finished answer
+end
+```
+
+Only a running poller shows parts. A Markdown or `?plain` read, a
+[`dispatch`](@ref) with `operation_policy=:blocking`, a static export
+([`record!`](@ref)), and an answer that finishes within the grace period get
+the finished answer alone, so the route needs no branch for them: there
+`send_ahead` does nothing.
+
+`send_ahead` reaches the operation from anywhere in its computation: the route
+body, the helpers it calls, the tasks it spawns, and the property computations
+it starts. A memoized property computes once for every reader, so its parts go
+to the read that started it. Every page following the same computation gets
+every part sent so far, then the rest. On a retained root ([`RootProvider`](@ref)
+with a [`RootRetention`](@ref), or `semantic_app`'s automatic store) a reader
+who reloads a memoized read while it runs, or opens it in a second tab, joins
+its computation and sees the same parts; a `@fresh` read, and any read on the
+default fresh-per-request root, starts afresh.
+
+When the poller sits beside a result already on the screen (a refresh of a
+`data-htmxo-live` target, such as a [`semantic_app`](@ref) tab whose inputs
+changed), the first part replaces that result, so parts for the new inputs
+never sit beside the old ones; a route that sends nothing keeps the old result
+on the screen until the new one is done, as before. When the route fails, the
+parts sent so far stay above the failure.
+
+Parts reach the page on its operation stream the moment they are sent
+(`serve(; operation_stream=true)`, the default), and otherwise with its next
+poll. One operation keeps at most $(_SENT_AHEAD_PART_LIMIT) parts and
+$(_SENT_AHEAD_BYTE_LIMIT ÷ 2^20) MiB; past that a part is refused, the first
+refusal is recorded like a caught error ([`record_error`](@ref)), and the
+finished answer still lands. The page applies parts with the `htmx()` shell's
+`sent_ahead_script()`, installed with the Treebars assets.
+"""
+function send_ahead(content)
+    sink = _SENT_AHEAD[]
+    sink === nothing && return nothing
+    _add_part!(sink, String(_message_body_bytes(to_response(content))))
+    nothing
+end
+
+struct _SentAheadRefused <: Exception
+    parts::Int
+    bytes::Int
+end
+
+Base.showerror(io::IO, e::_SentAheadRefused) = print(io,
+    "send_ahead refused a part: this operation already sent ", e.parts,
+    " parts (", e.bytes, " bytes), and one operation keeps at most ",
+    _SENT_AHEAD_PART_LIMIT, " parts and ", _SENT_AHEAD_BYTE_LIMIT,
+    " bytes. This part and every later one are not shown; the finished answer ",
+    "still replaces the parts sent. Send fewer, larger parts, or update a ",
+    "figure in place (AlgebraOfVega's `update_data`) instead of sending it again.")
+
+function _add_part!(sink::_SentAhead, html::String)
+    refused = nothing
+    lock(sink.lock) do
+        sink.forward === nothing || return _add_part!(sink.forward, html)
+        if length(sink.parts) >= _SENT_AHEAD_PART_LIMIT ||
+                sink.bytes + ncodeunits(html) > _SENT_AHEAD_BYTE_LIMIT
+            sink.refused += 1
+            sink.refused == 1 &&
+                (refused = _SentAheadRefused(length(sink.parts), sink.bytes))
+            return nothing
+        end
+        push!(sink.parts, html)
+        sink.bytes += ncodeunits(html)
+        filter!(sink.watchers) do (events, key)
+            try
+                put!(events, key)
+                true
+            catch err
+                # That stream's page has left.
+                err isa InvalidStateException || rethrow()
+                false
+            end
+        end
+        nothing
+    end
+    refused === nothing || record_error(refused, backtrace(), nothing)
+    nothing
+end
+
+# The parts of `sink` after its first `after`, as `(number, html)` pairs.
+function _sent_ahead_parts(sink::_SentAhead, after::Integer)
+    lock(sink.lock) do
+        sink.forward === nothing || return _sent_ahead_parts(sink.forward, after)
+        [(i, sink.parts[i]) for i in (max(after, 0) + 1):length(sink.parts)]
+    end
+end
+
+# Follow `sink` on an operation stream: `key` goes into `events` with every
+# part added. Returns the list actually followed.
+function _watch_sent_ahead!(sink::_SentAhead, events::Channel{String}, key::String)
+    lock(sink.lock) do
+        sink.forward === nothing || return _watch_sent_ahead!(sink.forward, events, key)
+        push!(sink.watchers, events => key)
+        sink
+    end
+end
+
+_unwatch_sent_ahead!(sink::_SentAhead, events::Channel{String}) =
+    lock(() -> (filter!(w -> first(w) !== events, sink.watchers); nothing), sink.lock)
+
+# The computations that have a parts list: by the computation's identity
+# (`_runtime_handle_key`, since requests that join one in-flight memoized
+# computation each get a `Pending` of their own), its handle and its list.
+const _sent_ahead_lock = ReentrantLock()
+const _sent_ahead_lists = IdDict{Any,Pair{Any,_SentAhead}}()
+
+# Bind a parts list for a computation `start()` starts, and return what it
+# returns. A list belongs to its computation: a start that joined a running
+# memoized computation (another request started it, or the two starts raced)
+# hands what its own list holds to that computation's, so whichever list the
+# body was bound to, its parts reach the one pages read. Computations that
+# have finished leave the registry here.
+function _with_sent_ahead(start)
+    mine = _SentAhead()
+    started = ScopedValues.with(start, _SENT_AHEAD => mine)
+    started isa _OperationHandle || return started
+    key = _runtime_handle_key(started)
+    lock(_sent_ahead_lock) do
+        filter!(((_, (handle, _)),) -> !isready(handle), _sent_ahead_lists)
+        kept = last(get!(_sent_ahead_lists, key, started => mine))
+        if kept !== mine
+            lock(mine.lock) do
+                foreach(html -> _add_part!(kept, html), mine.parts)
+                empty!(mine.parts)
+                mine.bytes = 0
+                mine.forward = kept
+            end
+        end
+    end
+    started
+end
+
+# The parts list of the computation behind `started`, or `nothing`.
+function _sent_ahead_of(started)
+    started isa _OperationHandle || return nothing
+    kept = lock(() -> get(_sent_ahead_lists, _runtime_handle_key(started), nothing),
+                _sent_ahead_lock)
+    kept === nothing ? nothing : last(kept)
+end
+
+# What a running answer for `req` carries of `started`'s parts: one hidden
+# element holding the parts after the count the page says it applied
+# (`HTMXO-Sent-Ahead`), each in a carrier whose attribute holds its HTML, so
+# htmx neither runs its scripts nor swaps its out-of-band elements on every
+# poll. None in an answer the page's stream pushes: the stream sends each part
+# itself, as an `ahead` event. The Treebars extension puts it inside the
+# polling element, which every poll and pushed answer replaces.
+function _sent_ahead_carriers(req::HTTP.Request, started)
+    get(req.context, :htmxo_push, false) === true && return ()
+    sink = _sent_ahead_of(started)
+    sink === nothing && return ()
+    after = something(tryparse(Int, HTTP.header(req, _SENT_AHEAD_HEADER, "0")), 0)
+    parts = _sent_ahead_parts(sink, after)
+    isempty(parts) && return ()
+    (h.div(; hidden=true, class="htmxo-sent-ahead-parts")(
+        (h.span(; data_htmxo_part=string(i), data_htmxo_part_html=html)
+         for (i, html) in parts)...),)
+end
+
 # Grace fast-path shared by the polling transport (via the Treebars extension
 # seam) and the direct-page initial request: wait up to `grace_period` for
 # `started`, following nested in-flight handles inside the one budget — a route
@@ -14030,8 +14295,17 @@ _with_dispatch_parent(f, node) = _with_dispatch_parent_impl[](f, node)
 # us keep this framework-only keyword out of the authored call, and `start`
 # names where (and whether through the queue) its background invocation runs.
 # Only the spawned branch makes polling transport real — see
-# `_execute_operation`.
+# `_execute_operation`. A computation started in the background gets the list
+# its body sends parts ahead to (`send_ahead`, `_with_sent_ahead`); one run
+# here, on the request's task, has no poller to show them.
 function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
+        fetch=Base.fetch, kwargs...)
+    materialize() = _materialize_route(target, name, verb_inst, idx_vals,
+                                       kw_pairs; fetch, kwargs...)
+    fetch === Base.fetch ? materialize() : _with_sent_ahead(materialize)
+end
+
+function _materialize_route(target, name, verb_inst, idx_vals, kw_pairs;
         fetch=Base.fetch, start::_OperationStart=_OperationStart(),
         parent_progress=nothing, declared_fresh::Bool=false)
     # A `@queued` route's computation is enqueued from here: mark it as the
@@ -14040,7 +14314,7 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
     if _operation_start_queued(start) &&
             !haskey(task_local_storage(), _ROUTE_QUEUE_SCOPE)
         return _route_queue_scope(start.tracker, nothing, fetch !== Base.fetch) do
-            _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
+            _materialize_route(target, name, verb_inst, idx_vals, kw_pairs;
                 fetch, start, parent_progress, declared_fresh)
         end
     end
@@ -14317,6 +14591,7 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         stalled=_operation_stall(entry, age, descriptor, name, verb_inst, req,
                                  prefix),
         stream=_operation_stream_wanted(req),
+        sent_ahead=() -> _sent_ahead_carriers(req, entry.started),
     )
     entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
@@ -14416,7 +14691,8 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  cleanup=() -> _delete_operation_poll!(token),
                  ended=outcome -> _record_operation_end!(entry, outcome),
                  failed=(err, uid) -> _note_operation_failure!(req, err, uid),
-                 stream=_operation_stream_wanted(req))
+                 stream=_operation_stream_wanted(req),
+                 sent_ahead=() -> _sent_ahead_carriers(req, started))
     entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -14604,7 +14880,8 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      cleanup=() -> _delete_operation_poll!(token),
                      ended=outcome -> _record_operation_end!(entry, outcome),
                      failed=(err, uid) -> _note_operation_failure!(req, err, uid),
-                     stream=_operation_stream_wanted(req))
+                     stream=_operation_stream_wanted(req),
+                     sent_ahead=() -> _sent_ahead_carriers(req, started))
         entry.poll_url = transport.poll_url
         value = _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
@@ -29759,7 +30036,7 @@ function _operation_page_blocks(treebars_assets::Bool)
     treebars_assets || return ()
     isempty(_polling_page_assets()) ? () :
         (:treebars_styles, :treebars_script, :live_refresh, :auto_terminal,
-         :mutation_poll, :operation_stream)
+         :mutation_poll, :operation_stream, :sent_ahead)
 end
 
 """
@@ -29822,7 +30099,9 @@ poll at once (`htmx.ajax` with the polling element as its source, the request
 its own timer would send), so the answer is swapped, ended and recorded as any
 poll's is. While a stream that pushes nothing covers a poller, that poller's
 timer polls go out at most once a second, for its progress tree; an
-operation the stream reports `gone` polls as before. A poller that appears later reopens the stream with the
+operation the stream reports `gone` polls as before. Parts an operation sends ahead ([`send_ahead`](@ref)) arrive as
+`ahead` events, which [`sent_ahead_script`](@ref) lands in the poller's
+region. A poller that appears later reopens the stream with the
 new set. A dropped stream leaves the pollers polling at their own pace while the
 browser reconnects; a refused one is reported to `htmxoStreamProbe` and
 reopened with the backoff of [`live_region`](@ref)'s discover streams. The
@@ -29973,6 +30252,15 @@ operation_stream_script() = h.script(Raw(raw"""
     source.addEventListener('result', function(e) {
       if (state.source === source) apply(e.data, true);
     });
+    // A part the operation sent ahead (`send_ahead`), `<token>\n<number>\n<html>`:
+    // the page's `sent_ahead_script` lands it in its poller's region.
+    source.addEventListener('ahead', function(e) {
+      if (state.source !== source || !window.htmxoSentAhead) return;
+      var a = e.data.indexOf('\n'), b = a < 0 ? -1 : e.data.indexOf('\n', a + 1);
+      if (b < 0) return;
+      var token = e.data.slice(0, a), n = +e.data.slice(a + 1, b), html = e.data.slice(b + 1);
+      pollers(token).forEach(function(el) { window.htmxoSentAhead.land(el, n, html); });
+    });
     // A result the page applies through its own request (or the end of an
     // operation on a stream that pushes nothing).
     source.addEventListener('ready', function(e) {
@@ -30033,6 +30321,131 @@ operation_stream_script() = h.script(Raw(raw"""
   } else {
     schedule();
   }
+})();
+"""))
+
+"""
+    sent_ahead_script()
+
+Land the parts a running operation sends ahead ([`send_ahead`](@ref)) in its
+poller: each part once, in the order sent, at the end of a region the script
+puts first in the poller (`div.htmxo-sent-ahead`), however often and by
+whichever way it arrives. Parts come as `ahead` events on the page's operation
+stream (`operation_stream_script()`) and as hidden carriers in the
+running poller's answers (`[data-htmxo-part]`): a first paint holds every part
+so far, and each poll sends the count the page has applied
+(`HTMXO-Sent-Ahead`) so its answer carries only newer ones. A part lands
+through `htmx.swap` at the region's end, so its scripts run once and an
+`hx-swap-oob` element in it replaces its target.
+
+A poller that a live refresh diverted beside a result already on the screen
+(`data-htmxo-live`, `live_refresh_script()`) moves its region into that
+element at its first part, replacing the old result, so new parts never sit
+beside old figures or rows with the same ids; a table row, table section or
+list keeps its content and the parts stay with the poller. The finished answer
+replaces the parts: a bare `:auto` terminal replaces the whole poller, and a
+kept progress tree's terminal removes the region. A failure keeps them above
+the error.
+
+Automatic — no consumer wiring. The `htmx()` shell installs it alongside the
+Treebars assets; include it once per page when building a `<head>` by hand.
+"""
+sent_ahead_script() = h.script(Raw(raw"""
+(function() {
+  if (window.htmxoSentAhead) return;
+  var APPLIED = 'data-htmxo-sent-ahead-applied';
+  var POLL = /[?&]__htmxo_poll=1(&|#|$)/;
+  function count(r) { return +(r.getAttribute(APPLIED) || 0); }
+  // The region of the running poller `el` is in, made for its first part. It
+  // stays the poller's when it moves into a live element.
+  function regionOf(el, make) {
+    var p = el && el.closest && el.closest('.treebar-poller');
+    if (!p) return null;
+    var r = p.__htmxoSentAhead;
+    if (r && r.isConnected) return r;
+    r = p.querySelector(':scope > .htmxo-sent-ahead');
+    if (!r && make) {
+      r = document.createElement('div');
+      r.className = 'htmxo-sent-ahead';
+      p.insertBefore(r, p.firstChild);
+    }
+    if (r) p.__htmxoSentAhead = r;
+    return r;
+  }
+  // A poller a live refresh diverted beside the result on the screen: its
+  // first part replaces that result, whose figures and rows the parts that
+  // follow address by the same ids.
+  var STRUCTURAL = /^(TABLE|THEAD|TBODY|TFOOT|TR|COLGROUP|DL|UL|OL|SELECT|DATALIST)$/;
+  function placeLive(r, p) {
+    var rep = p.closest('.htmxo-live-reporter'), live = rep && rep.__htmxoLiveTarget;
+    if (!live || !live.isConnected || STRUCTURAL.test(live.tagName)) return;
+    live.replaceChildren(r);
+  }
+  // Part `n` of the operation whose poller `el` is in: parts land in order,
+  // once each; one that arrives early waits for those before it.
+  function land(el, n, html) {
+    var p = el && el.closest && el.closest('.treebar-poller');
+    if (!p || !(n >= 1) || typeof html !== 'string') return;
+    var r = regionOf(p, true);
+    if (n <= count(r)) return;
+    var waiting = r.__htmxoWaiting || (r.__htmxoWaiting = {});
+    waiting[n] = html;
+    for (var k = count(r) + 1; waiting[k] !== undefined; k++) {
+      var part = waiting[k];
+      delete waiting[k];
+      if (k === 1) placeLive(r, p);
+      r.setAttribute(APPLIED, String(k));
+      try {
+        if (window.htmx && htmx.swap) {
+          htmx.swap(r, part, { swapStyle: 'beforeend' }, { contextElement: r });
+        } else {
+          r.insertAdjacentHTML('beforeend', part);
+        }
+      } catch (err) {
+        console.error('htmxo: a part sent ahead failed to land', err);
+      }
+    }
+  }
+  // Carriers in an inserted subtree: land their parts, then drop them.
+  function scan(node) {
+    if (!node || node.nodeType !== 1) return;
+    var holders = node.classList.contains('htmxo-sent-ahead-parts') ? [node] :
+      Array.prototype.slice.call(node.getElementsByClassName('htmxo-sent-ahead-parts'));
+    holders.forEach(function(holder) {
+      Array.prototype.slice.call(holder.children).forEach(function(c) {
+        land(c, +c.getAttribute('data-htmxo-part'), c.getAttribute('data-htmxo-part-html'));
+      });
+      holder.remove();
+    });
+  }
+  new MutationObserver(function(records) {
+    for (var i = 0; i < records.length; i++) {
+      var added = records[i].addedNodes;
+      for (var j = 0; j < added.length; j++) scan(added[j]);
+    }
+  }).observe(document.documentElement, { childList: true, subtree: true });
+  scan(document.documentElement);
+  // A poll says how many parts its poller applied, so its answer carries
+  // only the ones after them.
+  document.addEventListener('htmx:configRequest', function(e) {
+    var d = e.detail || {};
+    if (!POLL.test(d.path || '')) return;
+    var r = regionOf(d.elt, false);
+    if (r && d.headers) d.headers['HTMXO-Sent-Ahead'] = String(count(r));
+  });
+  // A kept progress tree's terminal keeps the poller's element (Treebars turns
+  // it into `.treebar-terminal`): the finished answer replaces the parts. A
+  // failure, which always arrives as a poll answer carrying its error id,
+  // keeps them.
+  document.addEventListener('htmx:afterSwap', function(e) {
+    var d = e.detail || {}, el = d.elt;
+    if (!el || !el.classList || !el.classList.contains('treebar-terminal-content')) return;
+    if (d.xhr && d.xhr.getResponseHeader && d.xhr.getResponseHeader('X-HTMXO-Error-Id')) return;
+    var p = el.parentElement, r = p && p.__htmxoSentAhead;
+    if (!r && p && p.querySelector) r = p.querySelector(':scope > .htmxo-sent-ahead');
+    if (r && r.parentNode === p) r.remove();
+  });
+  window.htmxoSentAhead = { land: land };
 })();
 """))
 
