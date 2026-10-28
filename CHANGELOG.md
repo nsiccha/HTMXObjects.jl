@@ -14,6 +14,22 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.22
+
+- A static export (`dispatch(...; static=StaticExport(...))`, `static_transform`,
+  `record!`) treats an `hx-get` whose request sends values as a control a
+  static server cannot serve, like one whose address has a query: htmx puts
+  those values in the query of a GET. They are a `<form>`'s fields, a named
+  `input`/`select`/`textarea`/`button`'s own value, and what an `hx-include`,
+  `hx-vals` or `hx-vars` on the element or an enclosing element adds (an
+  `unset` value stops what an element inherits). Unless `url_map` maps its
+  address, such an element is disabled, or removed under `controls=:remove`.
+  Before, only the address was looked at, so a pager form
+  (`<form hx-get="/qt/fit/ppc">`) kept live controls whose requests 404 on a
+  static host. A `url_params` element keeps its `hx-get`, since the export
+  gives it the file of each value it declares. `export_site` is unchanged: its
+  crawl maps every address of the app.
+
 ## 0.1.21
 
 - `send_ahead(content)` puts finished parts in front of the reader while a
