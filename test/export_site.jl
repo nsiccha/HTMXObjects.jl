@@ -9,7 +9,7 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
-        InlineSiteApp, bundle_files, subdirectory_misses
+        InlineSiteApp, QueriedSiteApp, bundle_files, subdirectory_misses
 
     const KS = (3.0, 4.0)
     # The mount prefix the apps' links start from (they are mounted at the root).
@@ -88,6 +88,43 @@ using TestItemRunner
             h.a("3"; href=base * "/placed_page"), h.a("4"; href=base * "/placed_page?k=4"))
         @get placed_probe(; kenn::String="", ort::String="") = (PLACED_CALLS[] += 1; h.p("probe $kenn"))
         @get placed_page(; k::Int=3) = (PLACED_CALLS[] += 10; h.p("k=$k"))
+    end
+
+    # A page that applies its address in the browser, as a region explorer's
+    # does: its frame declares the level and the measure, and zoom links name
+    # page addresses with a query (snag `export-site-need-5ad5b8cd`).
+    const REGIONS = ("a", "b", "c", "a b")
+    const MEASURES = ("x", "y")
+    queried_frame(region, measure) =
+        h.div(; id="frame", hx_get=base * "/queried_region?key=$region&measure=$measure",
+              hx_trigger="none", hx_swap="outerHTML",
+              url_params(region = region => :key, measure = measure;
+                         values = (region = REGIONS, measure = MEASURES))...)(
+            queried_level(region, measure))
+    queried_level(region, measure) = h.div(
+        h.p("level $region $measure"),
+        h.a("Start"; href=base * "/"),
+        (h.a(r; href=base * "/?region=$r&measure=$measure") for r in ("b", "c"))...)
+    @htmx struct QueriedSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index(; region::String="a", measure::String="x", hinweis::String="") = h.div(
+            h.p("asked $region $hinweis"),
+            queried_frame(region in REGIONS ? region : "a", measure),
+            h.a("y"; href=base * "/?region=b&measure=y"),
+            h.a("Karte"; href=base * "/?region=c#karte"),
+            h.a("a b"; href=base * "/?region=a+b"),
+            # A value outside the declared ones, a parameter none declares.
+            h.a("zz"; href=base * "/?region=zz"),
+            h.a("hinweis"; href=base * "/?region=b&hinweis=1"),
+            # A page that declares nothing, one that is not in the bundle itself.
+            h.a("other"; href=base * "/queried_other?k=1"),
+            h.a("lone"; href=base * "/queried_lone?k=2"),
+            h.script(Raw("window.zoom = " * repr(static_url(__req__, base * "/?region=c&measure=y")) * ";")))
+        @get queried_region(; key::String="a", measure::String="x") = queried_frame(key, measure)
+        @get queried_other(; k::Int=0) = h.p("other $k")
+        @get queried_lone(; k::String="1") = h.div(; hx_get=base * "/queried_other?k=$k", hx_trigger="none",
+            url_params(k = k; values = (k = ("1", "2"),))...)("lone $k")
     end
 
     # Every file of the bundle, relative to its root, with `/` between
@@ -284,4 +321,47 @@ end
     @test occursin("href=\"placed_page.html\"", index) && occursin("href=\"placed_page.html?k=4\"", index)
     @test occursin("k=3", read(joinpath(dir, "placed_page.html"), String))
     @test !any(f -> occursin('?', f), bundle_files(dir))
+end
+
+@testitem "export_site writes one file for a page that applies its address in the browser" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    using Treebars
+    route!(QueriedSiteApp())
+    vendorfiles()
+    dir = joinpath(mktempdir(), "site")
+    r = export_site(dir; pages=["/"])
+    files = bundle_files(dir)
+    @test r.files == length(files) - 1
+    index = read(joinpath(dir, "index.html"), String)
+
+    # Every view the frame declares is a fragment of its own.
+    for region in ("a", "b", "c", "a_b"), measure in ("x", "y")
+        @test "hx/queried_region-key-$region-measure-$measure.html" in files
+    end
+    # Addresses whose query the page applies link the page's file with it.
+    @test occursin("href=\"index.html?region=b&amp;measure=y\"", index)
+    @test occursin("href=\"index.html?region=b&amp;measure=x\"", index)
+    @test occursin("href=\"index.html?region=c#karte\"", index)
+    @test occursin("href=\"index.html?region=a+b\"", index)
+    # A script's text keeps the query as it is.
+    @test occursin("window.zoom = \"index.html?region=c&measure=y\";", index)
+    # So do the links of the fragments the page loads.
+    @test occursin("href=\"index.html?region=c&amp;measure=y\"",
+                   read(joinpath(dir, "hx/queried_region-key-b-measure-y.html"), String))
+    @test occursin("href=\"index.html\"", read(joinpath(dir, "hx/queried_region-key-b-measure-y.html"), String))
+    # Every other page address with a query is a file of its own, rendered
+    # with its query.
+    @test filter(f -> startswith(f, "index"), files) == ["index-hinweis-1-region-b.html", "index-region-zz.html", "index.html"]
+    @test occursin("href=\"index-region-zz.html\"", index) && occursin("href=\"index-hinweis-1-region-b.html\"", index)
+    @test occursin("asked zz", read(joinpath(dir, "index-region-zz.html"), String))
+    @test occursin("asked b 1", read(joinpath(dir, "index-hinweis-1-region-b.html"), String))
+    @test occursin("href=\"queried_other-k-1.html\"", index) && "queried_other-k-1.html" in files
+    @test occursin("href=\"queried_lone-k-2.html\"", index) && "queried_lone-k-2.html" in files
+    @test isempty(subdirectory_misses(dir))
+
+    # A query address listed before its page waits for it.
+    listed = joinpath(mktempdir(), "site")
+    export_site(listed; pages=["/?region=b&measure=y", "/"])
+    @test filter(f -> startswith(f, "index"), bundle_files(listed)) ==
+          ["index-hinweis-1-region-b.html", "index-region-zz.html", "index.html"]
+    @test occursin("href=\"index.html?region=b&amp;measure=y\"", read(joinpath(listed, "index.html"), String))
 end

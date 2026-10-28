@@ -7074,8 +7074,22 @@ can run inside a serving app (it renders in process with
   one name share one file, rendered once from the first one reached (list the
   plain address in `pages` to render that one). A name with a query
   (`"lieferflaechen.html?ortsteil=0101"`) names the file before the `?`, and
-  links to that address keep the query: a page that applies its parameters in
-  the browser ([`url_params`](@ref)) is then one file.
+  links to that address keep the query.
+- **A page that applies its address in the browser is one file.** A page
+  address with a query (`/?region=09&jahr=2024`, a zoom link) shares the file
+  of its page (`/`) when that page is in the bundle too and its
+  [`url_params`](@ref) elements declare every parameter of the query with
+  `values` that hold the query's value. Links to the address name the page's
+  file with the query (`index.html?region=09&jahr=2024`); the page's runtime
+  loads the view the query names from the fragment written for it, and the
+  rest of the page is as its own address renders it. Any other page address
+  with a query is a file of its own, rendered with that query: one with a
+  parameter no element declares, or declares without `values`, a value
+  outside them, or a parameter named twice. These addresses are decided once
+  nothing else is left to render, so their page has been met if anything
+  links it; list the page in `pages` when only its addresses with a query
+  are. A `file_name` that names such an address with a query has named it
+  already.
 - **Controls** a static site cannot serve (a non-GET `hx-*`, an unmapped
   `hx-get` with a query) follow `controls`: `:remove` (default) leaves them
   out, `:disable` greys them out ([`StaticExport`](@ref)). A page's linked
@@ -7135,10 +7149,21 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     foreach(p -> _site_target!(crawl, "/", p, :full), pages)
     written = _SiteWritten(root)
     i = 0
+    # Page addresses with a query wait until nothing else is left, so the page
+    # whose file they may share is written by then (`_site_shares_page!`). One
+    # whose page the crawl has not met waits for the others, which may reach it.
+    queried = Int[]
     while true
-        while i < length(crawl.entries)
-            i += 1
-            _site_write!(crawl, written, i, controls, parent, audience)
+        while i < length(crawl.entries) || !isempty(queried)
+            if i < length(crawl.entries)
+                i += 1
+                _site_query_page(crawl, i) ? push!(queried, i) :
+                    _site_write!(crawl, written, i, controls, parent, audience)
+            else
+                k = popat!(queried, something(findfirst(k -> !isnothing(_site_page_entry(crawl, k)), queried), 1))
+                _site_shares_page!(crawl, written, k) ||
+                    _site_write!(crawl, written, k, controls, parent, audience)
+            end
         end
         # A file rendered before a page it refers to answered as private still
         # refers to it; rendered again, the walk leaves those references out.
@@ -7156,9 +7181,10 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     failed = Set(first(_split_once(a, '?')) for (a, _) in crawl.failed)
     unmarked(m) = (k = parse(Int, m[length(crawl.marker)+1:end-1]);
                    get(() -> first(_split_once(crawl.entries[k].address, '?')), written.links, k))
+    marker = Regex(crawl.marker * "[0-9]+x")
     for k in written.marked
         file = written.paths[k]
-        write(file, replace(read(file, String), Regex(crawl.marker * "[0-9]+x") => unmarked))
+        write(file, _site_unmark(read(file, String), marker, unmarked, endswith(file, ".html")))
     end
     touch(joinpath(root, ".nojekyll"))
     unresolved = _site_unresolved(root, failed)
@@ -7179,9 +7205,67 @@ struct _SiteWritten
     rendered::Dict{Int,Int}
     marked::Set{Int}
     owners::Dict{String,Int}  # file → entry
+    declared::Dict{Int,Vector{Any}}  # page → the parameters its url_params elements declare
 end
 _SiteWritten(root) = _SiteWritten(root, Dict{Int,String}(), Dict{Int,String}(), Dict{Int,Int}(),
-                                  Set{Int}(), Dict{String,Int}())
+                                  Set{Int}(), Dict{String,Int}(), Dict{Int,Vector{Any}}())
+
+# Whether entry `i` is a page address with a query that `file_name` names
+# without one, and so may share its page's file.
+function _site_query_page(crawl::_SiteCrawl, i::Int)
+    e = crawl.entries[i]
+    path, query = _split_once(e.address, '?')
+    !e.fragment && !isnothing(query) && !isempty(query) && isnothing(_static_own_extension(path)) &&
+        isnothing(last(_split_once(crawl.file_name(e.address; fragment=false, ext=".html"), '?')))
+end
+
+# The entry of the page of entry `i` (its address without the query), or
+# `nothing` while the crawl has not met that page.
+function _site_page_entry(crawl::_SiteCrawl, i::Int)
+    key = _site_address(crawl, "/", first(_split_once(crawl.entries[i].address, '?')), :full).key
+    j = lock(() -> get(crawl.keys, key, nothing), crawl.lock)
+    isnothing(j) || crawl.entries[j].fragment ? nothing : j
+end
+
+# Entry `i`, a page address with a query, shares the file of its page when
+# that page is in the bundle and applies the query in the browser
+# (`_site_applies`): links to it name the page's file with the query.
+function _site_shares_page!(crawl::_SiteCrawl, written::_SiteWritten, i::Int)
+    j = _site_page_entry(crawl, i)
+    (isnothing(j) || !haskey(written.paths, j)) && return false
+    query = last(_split_once(crawl.entries[i].address, '?'))
+    declared = get!(written.declared, j) do
+        file = written.paths[j]
+        endswith(file, ".html") ? _site_url_params(read(file, String)) : Any[]
+    end
+    _site_applies(declared, query) || return false
+    written.links[i] = written.links[j] * "?" * _static_query_link(query)
+    true
+end
+
+# Whether a page whose `url_params` elements declare `declared` shows, from its
+# own file, what the address query `query` names: each parameter, named once,
+# is declared with values (the export wrote a fragment for each), and the
+# query's value is among them in every element that declares it. The runtime
+# reads the address as `URLSearchParams` does (`+` is a space).
+function _site_applies(declared, query::AbstractString)
+    names = String[]
+    for part in split(query, '&'; keepempty=false)
+        name, value = (_static_unescape(replace(something(s, ""), '+' => ' ')) for s in _split_once(part, '='))
+        name in names && return false
+        push!(names, name)
+        ps = filter(p -> p.name == name, declared)
+        !isempty(ps) && all(p -> !isnothing(p.values) && value in p.values, ps) || return false
+    end
+    !isempty(names)
+end
+
+# A query as a link keeps it: each character a URL cannot carry as it is, or
+# that would end a quoted string around it, percent-escaped (the page's
+# runtime decodes it back); `%` escapes stay as they are.
+_static_query_link(query::AbstractString) =
+    replace(query, r"[^A-Za-z0-9\-._~!$&()*+,;=:@/?%]" =>
+                   c -> join('%' * uppercase(string(b; base=16, pad=2)) for b in codeunits(c)))
 
 # Fetch entry `i` and write its file, or record why not.
 function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls, parent, audience)
@@ -7218,6 +7302,7 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls
     written.paths[i] = file
     written.links[i] = _static_link(name)
     written.rendered[i] = known
+    delete!(written.declared, i)
     _body_contains(body, crawl.marker) ? push!(written.marked, i) : delete!(written.marked, i)
     ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
     endswith(path, "/" * _PRISM_AUTOLOADER) && _site_follow_autoloader!(crawl, e.address)
@@ -7279,22 +7364,61 @@ const _SITE_RAW_TEXT = r"<!--.*?-->|<(script|style)\b((?:[^>\"']|\"[^\"]*\"|'[^'
 # runtime's styles) is not one.
 function _site_references(html::AbstractString)
     references = String[]
-    markup(text) = for m in eachmatch(_SITE_ATTRIBUTE, text)
-        push!(references, replace(m[1], "&quot;" => "\"", "&#39;" => "'",
-                                  "&lt;" => "<", "&gt;" => ">", "&amp;" => "&"))
-    end
+    _site_scan(text -> for m in eachmatch(_SITE_ATTRIBUTE, text)
+                           push!(references, _site_attribute_text(m[1]))
+                       end,
+               text -> foreach(u -> push!(references, u[1]), eachmatch(_SITE_SCRIPT_URL, text)),
+               html)
+    references
+end
+
+# Calls `markup` with each stretch of `html` that holds elements and `script`
+# with the text of each `<script>`, in order. An HTML comment and the text of
+# a `<script>` or `<style>` hold no elements; the tag's own attributes do.
+function _site_scan(markup, script, html::AbstractString)
     at = 1
     for m in eachmatch(_SITE_RAW_TEXT, html)
         markup(SubString(html, at, prevind(html, m.offset)))
         if !isnothing(m[1])
             markup(m[2])
-            lowercase(m[1]) == "script" &&
-                foreach(u -> push!(references, u[1]), eachmatch(_SITE_SCRIPT_URL, m[3]))
+            lowercase(m[1]) == "script" && script(m[3])
         end
         at = m.offset + ncodeunits(m.match)
     end
     markup(SubString(html, at))
-    references
+    nothing
+end
+
+# An attribute's value as the element holds it: its character references decoded.
+_site_attribute_text(s::AbstractString) =
+    replace(s, "&quot;" => "\"", "&#39;" => "'", "&lt;" => "<", "&gt;" => ">", "&amp;" => "&")
+
+const _SITE_URL_PARAMS = r"\bdata-htmxo-url-params=\"([^\"]*)\""
+
+# The parameters the `url_params` elements of an HTML file declare.
+function _site_url_params(html::AbstractString)
+    declared = Any[]
+    _site_scan(text -> for m in eachmatch(_SITE_URL_PARAMS, text)
+                           append!(declared, _url_params_decode(_site_attribute_text(m[1])))
+                       end,
+               _ -> nothing, html)
+    declared
+end
+
+# `text` with each `marker` replaced by `link(marker)`: as an attribute value
+# where an HTML file holds elements (a link that keeps a query writes `&amp;`),
+# as it is elsewhere (a script's text, a JSON file).
+function _site_unmark(text::AbstractString, marker::Regex, link, html::Bool)
+    html || return replace(text, marker => link)
+    io = IOBuffer()
+    at = 1
+    for m in eachmatch(_SITE_RAW_TEXT, text)
+        print(io, replace(SubString(text, at, prevind(text, m.offset)), marker => escape_html ∘ link))
+        print(io, replace(m.match, marker => link))
+        at = m.offset + ncodeunits(m.match)
+    end
+    print(io, replace(SubString(text, at), marker => escape_html ∘ link))
+    String(take!(io))
 end
 
 # Every reference in the bundle's HTML that names no file of it, as
