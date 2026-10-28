@@ -3010,6 +3010,70 @@ browser reconnects (Treebars' `treebarPollerLost` hands them back); a refused
 one is retried with backoff. Pass `serve(; operation_stream=false)` to leave
 every poller to its polls.
 
+#### Parts sent ahead while the operation runs
+
+A slow read's poller shows its progress tree until the route returns. A route
+body that has finished parts of its answer earlier puts them in front of the
+reader with `send_ahead`: each part lands once, in the order sent, in a region
+above the progress tree, and the finished answer replaces the parts with the
+poller. A figure drawn empty by the first part fills as the later parts update
+it, with no redraw:
+
+```julia
+@fresh @get dose_response() = begin
+    send_ahead(dose_response_view(doses, []))       # figures with typed-empty data
+    results = map(doses) do d
+        r = simulate(d)
+        send_ahead(append_data("dose-response", rows(d, r)))   # this dose's points
+        r
+    end
+    dose_response_view(doses, results)              # the finished answer
+end
+```
+
+- A part lands through `htmx.swap` at the region's end, so its scripts run
+  once (AlgebraOfVega's `append_data`, `replace_data` and `update_spec`) and an
+  element marked `hx-swap-oob` replaces its target instead (a status line, a
+  table row).
+- The parts belong to the computation, not the request: every page that
+  follows it gets every part sent so far, then the rest. On a retained root
+  (`RootProvider` with `RootRetention`, or `semantic_app`'s automatic store) a
+  reader who reloads a memoized read while it runs joins its computation and
+  sees the same figure filling; a `@fresh` read, and any read on the default
+  fresh-per-request root, starts afresh.
+- `send_ahead` reaches the operation from the route body, the helpers it
+  calls, the tasks it spawns and the property computations it starts. A
+  memoized property computes once for all its readers, so its parts go to the
+  read that started it.
+- Only a running poller shows parts. A Markdown or `?plain` read, a `dispatch`
+  with `operation_policy=:blocking`, `record!` and an answer within the grace
+  period get the finished answer alone; there `send_ahead` does nothing, so the
+  route needs no branch.
+- On a page `serve` answers, each part goes out on the page's operation stream
+  as an `ahead` event the moment it is sent (`<token>`, the part's number and
+  its HTML, a line each), whether or not the stream pushes answers. A poller's
+  first answer, and every poll, also carries the parts the page has not
+  applied yet as hidden carriers: the page's script sends the count it applied
+  as `HTMXO-Sent-Ahead`. Pushed answers carry none.
+- A poller diverted beside a result already on the screen (a refresh of a
+  `data-htmxo-live` target, such as a [`semantic_app`](@ref) tab whose inputs
+  changed) moves its region into that element at its first part, replacing the
+  old result, so the new parts never sit beside figures with the same ids. A
+  table row or section, or a list, keeps its content, and the parts stay with
+  the poller. A refresh that sends nothing keeps the old result until the new
+  one is done.
+- A bare `:auto` terminal replaces the poller and its parts; a kept progress
+  tree's terminal (`keep_terminal_tree=true`) removes the region. When the
+  route fails, the parts stay above the failure.
+- One operation keeps at most 4096 parts and 32 MiB. Past that a part is
+  refused, the first refusal is recorded like a caught error
+  ([`record_error`](@ref)), and the finished answer still lands.
+
+```@docs
+send_ahead
+HTMXObjects.sent_ahead_script
+```
+
 #### How long operations took
 
 The access log writes one line per request, and a polled operation is many

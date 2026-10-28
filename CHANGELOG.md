@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.21
+
+- `send_ahead(content)` puts finished parts in front of the reader while a
+  slow `:auto` read is still running. Each part lands once, in the order
+  sent, in a region above the running poller's progress tree, and the route's
+  finished answer replaces the parts with the poller. A part's scripts run
+  once (AlgebraOfVega's `append_data` / `replace_data` / `update_spec` for a
+  figure an earlier part drew) and its `hx-swap-oob` elements replace their
+  targets, so a figure fills dose by dose without being drawn again. Parts
+  reach the page on its operation stream (`ahead` events) the moment they are
+  sent, and with the next poll otherwise. Every page that follows the same
+  computation gets the same parts. A Markdown or `?plain` read, a blocking
+  `dispatch`, a static export and an answer within the grace period get the
+  finished answer alone; there `send_ahead` does nothing. A refresh of a
+  `data-htmxo-live` target (a `semantic_app` tab whose inputs changed) shows
+  the old result until its first part arrives, which replaces it. The `htmx()`
+  shell installs the new `sent_ahead_script()` with the Treebars assets.
+  Before, a running read showed only its progress tree until it returned
+  (snag `an-auto-read-on-8585ef04`, design decision `036a5ea`).
+
 ## 0.1.20
 
 - A `semantic_app(…; presentation=:tabs)` page keeps its inputs in the page
