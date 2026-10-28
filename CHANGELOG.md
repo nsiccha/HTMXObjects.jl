@@ -14,6 +14,36 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.17
+
+- A generated single choice is never a native `<select>`
+  (`semantic_app`, `operation_form`):
+  - Up to `radio_max` options it is a row of pills. **The default `radio_max`
+    is now 8** (it was 4), so a choice among 5 to 8 options that rendered as a
+    `<select>` now renders as pills.
+  - Past `radio_max` it is a searchable drop-down, `choice_list`, instead of
+    a `<select>`. A required choice without a default now starts with no
+    option chosen, as pills do; the `<select>` silently submitted its first
+    option.
+  - A `multiple` domain stays a `<select multiple>`, and an `allow_custom`
+    domain stays `sinput_custom`.
+- `semantic_app(…; radio_max)` sets the cutoff for every control of the
+  surface, `presentation = :stacked` or `:tabs`, the shared sidebar's
+  included. A refreshed shared control keeps the cutoff, which it also does
+  now for `operation_form(…; radio_max)`.
+- `choice_list(nv, options; label, value, show_when, required, texts)`: a single
+  choice among many options for an app's own forms.
+  - It is a field, styled as an input, that opens the options as a popover
+    under it, with a search field. Typing filters the list, ignoring case and
+    accents; the arrow keys move, Enter or a click chooses, and Escape or a
+    click elsewhere closes it.
+  - The options are radios, so it submits, validates and drives `show_when`
+    like `radio_group`. A `?plain` read shows its label and the chosen option.
+  - `choice_list_script()` is its script; every `htmx()` shell carries it.
+- `ErrorTexts` gains `choice_search` ("Search…" / "Suchen…") and
+  `choice_no_match` ("No matching option" / "Keine passende Auswahl"). A
+  generated list reads them from the object's `__error_texts__`.
+
 ## 0.1.16
 
 - Touch screens reach every explanation a mouse reaches by hovering, without

@@ -10312,13 +10312,16 @@ end
     custom_app = SemanticNodeParamApp()
     custom_html = repr("text/html", operation_form(custom_app, :index))
     @test count("class=\"htmxo-semantic-context\"", custom_html) == 1
-    @test count("name=\"model\"", custom_html) == 1
-    @test count("<option", custom_html) == 13
+    # Thirteen options, past `radio_max`: one searchable choice list, one
+    # radio per option (snag moved-bruno-s-we-59d19444).
+    @test count("class=\"htmxo-choice-list\"", custom_html) == 1
+    @test count("type=\"radio\" name=\"model\"", custom_html) == 13
+    @test count("name=\"model\"", custom_html) == 13
     @test contains(custom_html, "value=\"model_1\"")
     @test contains(custom_html, "value=\"model_13\"")
-    @test contains(custom_html, ">Model 1</option>")
-    @test contains(custom_html, ">Model 13</option>")
-    @test !contains(custom_html, ">model_1</option>")
+    @test contains(custom_html, ">Model 1</span>")
+    @test contains(custom_html, ">Model 13</span>")
+    @test !contains(custom_html, ">model_1</span>")
     @test !contains(custom_html, "type=\"hidden\" name=\"model\"")
     @test !contains(custom_html, "hx-include=")
     @test !contains(custom_html, "hx-push-url=")
@@ -10378,8 +10381,8 @@ end
     navigating_html = repr("text/html", operation_form(
         custom_app, :index; navigate=true))
     @test count("class=\"htmxo-semantic-context\"", navigating_html) == 1
-    @test count("<option", navigating_html) == 13
-    @test contains(navigating_html, ">Model 1</option>")
+    @test count("type=\"radio\" name=\"model\"", navigating_html) == 13
+    @test contains(navigating_html, ">Model 1</span>")
     @test contains(navigating_html, "value=\"model_13\"")
     @test contains(navigating_html, "method=\"get\"")
     @test contains(navigating_html, "action=\"/\"")

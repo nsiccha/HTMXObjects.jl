@@ -2318,13 +2318,19 @@ when it changes, instead of executing the operation.
 
 Each option carries `value` and `label`, plus optional `disabled` (rendered
 disabled and excluded from validation), `help` (a `title=` tooltip on a
-`<option>`, an inline suffix on a radio label) and `group` (groups options into
-an `<optgroup>`).
+`<option>`, an inline suffix on a radio label, a second line in a choice list)
+and `group` (groups options into an `<optgroup>`, or under a heading in a choice
+list).
 
 Given a resolved domain the control is picked by this rule, in order:
 `allow_custom` → `sinput_custom`; otherwise not `multiple` and at most
-`radio_max` options (default 4) → a radio `fieldset`, drawn as a row of pills;
-otherwise a `<select>`.
+`radio_max` options (default 8) → a radio `fieldset`, drawn as a row of pills;
+otherwise not `multiple` → a searchable drop-down ([`choice_list`](@ref)), whose
+search field reads `choice_search` / `choice_no_match` of the object's
+`__error_texts__`; otherwise (`multiple`) a `<select multiple>`. Both
+`operation_form` and `semantic_app` take `radio_max`; `semantic_app` applies it
+to every control of the surface, the shared sidebar's included, and their
+refreshes keep it.
 Only with no domain, or `kind=:unrestricted`, does the input fall back to the
 type-driven control: `Bool` renders a checkbox, a `Number` a number input
 (an `Integer` keeps the browser's whole-number step; any other number, such as
@@ -2332,6 +2338,11 @@ type-driven control: `Bool` renders a checkbox, a `Number` a number input
 validation), [`MultilineText`](@ref) a `<textarea>`, [`Upload`](@ref) a file input
 (`Vector{Upload}` a `multiple` one), and anything else — `String` included —
 a single-line text input.
+
+```@docs
+choice_list
+choice_list_script
+```
 
 A `String` cannot carry a line break through a single-line input, so declare
 free-form prose as `MultilineText`. The documented argument below renders as a
@@ -3156,14 +3167,14 @@ See the [Components catalog](components.md) for the full list with examples.
 | `hidden_inputs(; key=val, …)`   | A `Vector{Node}` of `<input type="hidden">` elements    |
 | `query_url(path; …)` / `@query_url`  | URL with encoded query string, type-safe                |
 | `route_url(self, :name, args…; …)` | An own GET route's address, checked when it is built (a missing route or a bad argument throws) |
-| `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group` | Form input widgets (label, select, radio, number, checkbox, textarea, autocomplete, …) |
+| `linput`, `sinput`, `sinput_custom`, `soption`, `rinput`, `ninput`, `cinput`, `tinput`, `ainput`, `radio_group`, `choice_list` | Form input widgets (label, select, radio, searchable choice list, number, checkbox, textarea, autocomplete, …) |
 | `Long`                          | Label humanizer (`Long(:max_draws) == "max draws"`); the fallback label for an undocumented argument |
 | `MultilineText`                 | Route-argument type for free-form prose; generated forms render it as a `<textarea>` |
 | `Upload`                        | Route-argument type for an uploaded file (`Vector{Upload}` for several); generated forms render a file input and submit multipart |
 | `tabset`, `tabset_styles`, `tabset_script`, `htmx_tabset` | Tab navigation widgets; a `tabset` keeps its open tab in the page URL |
 | `comparison_view`, `comparison_js`, `comparison_styles` | Selectable comparison columns, either inline tabs with a Compare dialog or shown directly inline, independently loaded and scrolling; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
-| `loading_indicator_script`, `request_feedback_*`, `show_when_script` | UX scripts injected into the page |
+| `loading_indicator_script`, `request_feedback_*`, `show_when_script`, `choice_list_script` | UX scripts injected into the page |
 
 ## A glossary of the app's terms {#glossary}
 
