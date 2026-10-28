@@ -1215,6 +1215,77 @@ end
     end
 end
 
+@testitem "active grouping pills are filled in the text colour, never Pico's azure browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', function() {
+                const out = document.body.dataset, css = e => getComputedStyle(e);
+                const pico = document.documentElement.dataset.pico === '1';
+                const probe = (prop, value) => { const p = document.getElementById('probe'); p.style[prop] = value; return css(p)[prop]; };
+                const filled = () => probe('backgroundColor', pico ? 'var(--pico-contrast-background)' : 'CanvasText');
+                const inverse = () => probe('color', pico ? 'var(--pico-contrast-inverse)' : 'Canvas');
+                const marker = () => probe('color', pico ? 'var(--pico-contrast)' : 'CanvasText');
+                const azure = () => probe('backgroundColor', 'var(--pico-primary-background)');
+                const pills = Array.from(document.querySelectorAll('.htmxo-group-pill'));
+                const active = pills.filter(p => p.hasAttribute('data-htmxo-group-level'));
+                const inactive = pills.filter(p => !p.hasAttribute('data-htmxo-group-level'));
+                // Positive control: two active pills and one inactive one (the flat grouping has
+                // no pill), and Pico's primary is its azure.
+                out.control = String(active.length === 2 && inactive.length === 1 &&
+                    (!pico || azure() === 'rgb(1, 114, 173)'));
+                // An active pill is filled in the text colour, its buttons in the page colour; an inactive one is not filled.
+                const look = () => active.every(p => css(p).backgroundColor === filled() && css(p).borderTopColor === filled() &&
+                        Array.from(p.querySelectorAll('button')).every(b => css(b).backgroundColor === 'rgba(0, 0, 0, 0)' && css(b).color === inverse())) &&
+                    inactive.every(p => css(p).backgroundColor === 'rgba(0, 0, 0, 0)');
+                out.filled = String(look());
+                out.azure = String(!pico || active.every(p => css(p).backgroundColor !== azure()));
+                // Pico points a focused button's colours at its azure: the toggle keeps the pill's look.
+                const toggle = active[1].querySelector('button');
+                toggle.focus();
+                out.focus = String(document.activeElement === toggle && look());
+                // The drop marker beside a pill is drawn in the text colour.
+                active[0].dataset.htmxoDrop = 'before';
+                inactive[0].dataset.htmxoDrop = 'after';
+                out.drop = String(css(active[0]).boxShadow === marker() + ' -3px 0px 0px 0px' &&
+                    css(inactive[0]).boxShadow === marker() + ' 3px 0px 0px 0px');
+                if (pico) {
+                    const light = css(active[0]).backgroundColor, lightText = css(toggle).color;
+                    document.documentElement.dataset.theme = 'dark';
+                    out.dark = String(look() && css(active[0]).backgroundColor !== light && css(toggle).color !== lightText &&
+                        active.every(p => css(p).backgroundColor !== azure()));
+                } else {
+                    out.dark = 'true';
+                }
+                out.done = '1';
+            });
+            """))
+        # Transitions off, so colours read their new values right after the theme switch.
+        app = h.style(Raw("*, *::before, *::after { transition: none !important; }"))
+        for pico in (true, false)
+            marked = h.script(Raw(pico ? "document.documentElement.dataset.pico = '1';" : ""))
+            dom = mktempdir() do directory
+                copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+                fixture = joinpath(directory, "page.html")
+                write(fixture, repr("text/html", htmx(h.main(; class="container")(grouped(; group_by=["party", "iban"], id="g"),
+                        h.div(; id="probe")("probe"), driver); assets="vendor",
+                    pico_version=pico ? HTMXObjects._PICO_VERSION : nothing, htmx_version=nothing,
+                    hyperscript_version=nothing, preload_version=nothing, extra_head=(app, marked))))
+                profile = joinpath(directory, "profile")
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,900 --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`)
+            end
+            @test contains(dom, "data-done=\"1\"")
+            for marker in ("control", "filled", "azure", "focus", "drop", "dark")
+                @test contains(dom, "data-$marker=\"true\"")
+            end
+        end
+    end
+end
+
 @testitem "row updates put new and moved rows where the table renders them browser" setup=[ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     import HTMXObjects: h

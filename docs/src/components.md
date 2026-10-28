@@ -1184,7 +1184,8 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
 `group_by` lists the levels that nest the groups, the first outermost. The
 *Group by* control is a row of pills, one per grouping: a pill turns its level
 on (as the innermost) or off, and the active pills reorder by dragging, by
-their ‹ › buttons, or with ←/→ on a focused pill.
+their ‹ › buttons, or with ←/→ on a focused pill. The active pills are filled
+in the text colour, like the chosen pill of a `radio_group`.
 No active pill is the flat view. Each change regroups in the browser, at
 every level. A table whose group rows or lazy groups need the server also
 re-renders through `group_by_url`, sending the levels as repeated `group_by`
