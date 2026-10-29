@@ -461,10 +461,10 @@ end
     sidebar = sidebar_of(opened)
     @test contains(sidebar, "<input type=\"radio\" name=\"basis\" value=\"cohort\" checked=\"true\">")
     @test contains(sidebar, r"<input[^>]* name=\"subjects\"[^>]* value=\"7\"")
-    @test contains(tab_of(opened, "timecourse"), r"<input[^>]* name=\"dose\"[^>]* value=\"30.0\"")
+    @test contains(tab_of(opened, "timecourse"), r"<input[^>]* name=\"dose\"[^>]* value=\"30\"")
     @test contains(tab_of(opened, "timecourse"),
                    "<input type=\"radio\" name=\"scale\" value=\"change\" checked=\"true\">")
-    @test contains(tab_of(opened, "fraction"), r"<input[^>]* name=\"threshold\"[^>]* value=\"-30.0\"")
+    @test contains(tab_of(opened, "fraction"), r"<input[^>]* name=\"threshold\"[^>]* value=\"-30\"")
     first_load = tag_attrs(opened, r"<div hx-get=\"/fraction[^\"]*\" hx-trigger=\"load\"[^>]*>")
     query = Dict(HTTP.URIs.queryparams(HTTP.URI(first_load["hx-get"])))
     @test query["basis"] == "cohort" && query["subjects"] == "7" && query["threshold"] == "-30.0"
@@ -472,7 +472,10 @@ end
           "fraction:one/cohort/7/false:5, 10:a:-30.0"
     # A value the address does not name keeps the page's default.
     @test contains(tab_of(page("/?tab=fraction"), "fraction"),
-                   r"<input[^>]* name=\"threshold\"[^>]* value=\"-50.0\"")
+                   r"<input[^>]* name=\"threshold\"[^>]* value=\"-50\"")
+    # A float field shows the number as written, not `string`'s `10000.0`.
+    @test contains(tab_of(page("/?tab=fraction&threshold=10000"), "fraction"),
+                   r"<input[^>]* name=\"threshold\"[^>]* value=\"10000\"")
 
     # `values=` gives an input the value it shows without the address; the
     # address still wins over it.
@@ -536,7 +539,8 @@ end
               await until(() => shown('fraction') === 'fraction:one/cohort/7/false:5, 10:a:-30.0', 'reloaded result');
               if (!document.querySelector('input[name="basis"][value="cohort"]').checked) throw new Error('reloaded basis');
               if (control('subjects').value !== '7' || !relevant('subjects')) throw new Error('reloaded subjects');
-              if (control('threshold').value !== '-30.0') throw new Error('reloaded threshold: ' + control('threshold').value);
+              // The field shows the number as the reader typed it, not `-30.0`.
+              if (control('threshold').value !== '-30') throw new Error('reloaded threshold: ' + control('threshold').value);
               await fetch('/complete?status=passed&search=' + encodeURIComponent(location.search));
               return;
             }

@@ -42,7 +42,7 @@ end
         @test contains(input, "type=\"number\"")
         @test contains(input, "step=\"any\"")
     end
-    @test contains(number_input(html, "seconds"), "value=\"1.0\"")
+    @test contains(number_input(html, "seconds"), "value=\"1\"")
     @test contains(number_input(html, "factor"), "required=\"true\"")
     # An integer keeps the browser's whole-number step.
     @test contains(number_input(html, "points"), "type=\"number\"")
@@ -60,6 +60,43 @@ end
     checked = dispatch(:GET, "/checks/check?plain=1&tolerance=0.125")
     @test checked.status == 200
     @test String(checked.body) == "check:0.125"
+end
+
+@testitem "a number control shows a float as its shortest round-trip text" setup=[NumberControlFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    text = HTMXObjects._number_control_value
+    # Positional where `format_number` is, with `.` and no grouping; an `e`
+    # exponent where it writes a power of ten.
+    for (x, shown) in (10000.0 => "10000", -50.0 => "-50", 0.5 => "0.5", 1.0e6 => "1000000",
+                       1234567.25 => "1234567.25", 0.1 + 0.2 => "0.30000000000000004",
+                       0.001 => "0.001", 1.5e-5 => "1.5e-5", -2.0e20 => "-2e20", 0.0 => "0",
+                       -0.0 => "0", 0.5f0 => "0.5", Float32(0.1) => "0.1", 1.0f6 => "1000000")
+        @test text(x) == shown
+    end
+    # Every finite float reads back as itself, in the form a number input
+    # accepts (the HTML "valid floating-point number").
+    valid = r"^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$"
+    for x in (float(pi), -exp(1), 1/3, 2.0^60, 2.0^-60, nextfloat(1.0), floatmax(), floatmin(), 5e-324, 123.456e7)
+        @test contains(text(x), valid)
+        @test parse(Float64, text(x)) === x
+    end
+    # A value no number input can show, and other values, as given.
+    @test text(NaN) == "NaN" && text(-Inf) == "-Inf"
+    @test text(7) === 7 && text("10000.0") == "10000.0" && text(nothing) === nothing
+
+    html(x) = repr("text/html", x)
+    @test contains(html(ninput((; threshold=10000.0))), "value=\"10000\"")
+    @test contains(html(ninput((; threshold=-50.0); step="any")), "value=\"-50\"")
+    @test contains(html(ninput((; draws=100))), "value=\"100\"")
+    slider = html(rinput((; spread=0.5); min=0, max=1, step="any"))
+    @test contains(slider, "value=\"0.5\"") && contains(slider, "<output>0.5</output>")
+    @test contains(html(rinput((; spread=50.0))), "<output>50</output>")
+    # A generated form's float fields show their defaults so.
+    page = repr("text/html", semantic_app(MeasureHost()))
+    @test contains(number_input(page, "seconds"), "value=\"1\"")
+    @test contains(number_input(page, "ratio"), "value=\"0.5\"")
+    @test contains(number_input(page, "tolerance"), "value=\"0.25\"")
 end
 
 @testitem "a browser submits a fractional value for a float argument" setup=[NumberControlFixtures, ChromeDump] tags=[:browser, :semantic] begin

@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.24
+
+- A number control shows a float as the shortest text that reads back as the
+  same number: `10000`, `-50`, `0.5`, `1000000`, `1.5e-5`, not `string`'s
+  `10000.0` or `1.0e6`. It is written as `format_number` writes it, with `.`,
+  no grouping and an `e` exponent for a power of ten, the form
+  `<input type="number">` reads. This covers `ninput`'s value, `rinput`'s value
+  and its `<output>`, and so the float fields `semantic_app` and
+  `operation_form` generate, with their defaults and the values a page's
+  address or a submitted form names (`?threshold=10000` shows `10000`).
+  Integer values and strings are unchanged.
+
 ## 0.1.23
 
 - `HTMXObjects.pico_page` draws a site frame: `brand` (the header's home link,
