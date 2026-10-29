@@ -24951,17 +24951,18 @@ end
 _float_sci(point) = point <= -4 || point >= 16
 
 # The number ±0.`ds` × 10^`point` (`ds` without leading or trailing zeros;
-# zero has none) written with `decimal` and `thousands`: as a power of ten with
-# superscript digits (`sci`), else positionally. `htmxoDigitsText` writes the
-# same text in the browser.
-function _format_digits(negative::Bool, ds::AbstractString, point::Int, decimal, thousands, sci::Bool)
+# zero has none) written with `decimal` and `thousands`: as a power of ten
+# (`sci`), written by `exponent` (superscript digits by default), else
+# positionally. `htmxoDigitsText` writes the same text in the browser.
+function _format_digits(negative::Bool, ds::AbstractString, point::Int, decimal, thousands, sci::Bool;
+                        exponent=_superscript_exponent)
     isempty(ds) && return "0"
     io = IOBuffer()
     negative && print(io, '-')
     if sci
         print(io, ds[1])
         length(ds) > 1 && print(io, decimal, ds[2:end])
-        print(io, "·10", _superscript(point - 1))
+        print(io, exponent(point - 1))
     elseif point <= 0
         print(io, '0', decimal, repeat('0', -point), ds)
     elseif point >= length(ds)
@@ -25018,6 +25019,10 @@ end
 
 const _SUPERSCRIPT_DIGITS = ('⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹')
 _superscript(n::Int) = string(n < 0 ? "⁻" : "", join(_SUPERSCRIPT_DIGITS[d - '0' + 1] for d in string(abs(n))))
+# The power of ten a number is written with: `·10⁻⁵` in text, `e-5` where a
+# machine reads it (`<input type="number">`).
+_superscript_exponent(n::Int) = string("·10", _superscript(n))
+_e_exponent(n::Int) = string("e", n)
 
 # A number's exact value as the sort key and the ⬇ CSV write it: Julia's
 # shortest round-trip form, which the browser's `parseFloat`, spreadsheets
@@ -26486,14 +26491,27 @@ soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
     selected=string(_is_selected(value, selected_value)), kwargs...
 )
 
+# The text a number control (`ninput`, `rinput`) shows for `value`. A float is
+# written as `format_number` writes it, in the form `<input type="number">`
+# reads: its shortest round-trip digits (`10000`, `-50`, `0.5`, never
+# `10000.0`), `.` for the decimal point, no grouping, and an `e` exponent where
+# `format_number` writes a power of ten (`1.5e-5`). Other values as given.
+_number_control_value(value) = value
+_number_control_value(x::AbstractFloat) = isfinite(x) ?
+    let (negative, ds, point) = _shortest_digits(x)
+        _format_digits(negative, ds, point, ".", "", _float_sci(point); exponent=_e_exponent)
+    end : string(x)
+
 """
     rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_when=nothing, kwargs...)
 
 A labeled range slider `<input type="range">` with a live `<output>` display.
+A float `value` shows as its shortest round-trip text, as in [`ninput`](@ref).
 Extra `kwargs` go on the `<input>`.
 """
 rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_when=nothing, kwargs...) = begin
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    value = _number_control_value(value)
     h.label(
         label,
         h.span(
@@ -26511,13 +26529,20 @@ end
 
 A labeled number `<input type="number">`. Only `min`, `max`, `step` that are
 not `nothing` are included as attributes. Extra `kwargs` go on the `<input>`.
+
+A float `value` shows as the shortest text that reads back as the same number,
+as [`format_number`](@ref) writes it but with `.`, no grouping and an `e`
+exponent: `10000`, `-50`, `0.5`, `1000000`, `1.5e-5`, not `string`'s
+`10000.0` or `1.0e6`. The fields [`semantic_app`](@ref) generates for float
+inputs are `ninput`s, so their defaults and the values a page's address names
+show so too.
 """
 ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...) = begin
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     num_attrs = filter(((_, v),) -> !isnothing(v), pairs((; min, max, step)))
     h.label(
         label,
-        ainput(nv; type="number", value, num_attrs..., kwargs...);
+        ainput(nv; type="number", value=_number_control_value(value), num_attrs..., kwargs...);
         show_attrs...
     )
 end
