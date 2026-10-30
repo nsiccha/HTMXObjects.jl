@@ -647,8 +647,21 @@ function _request_threadpool(parallel, interactive::Integer, default::Integer, h
 end
 
 # `parallel=true`/`:interactive`: handle each request on a task spawned on `pool`.
-_spawning_stream_handler(handle, pool::Symbol) =
-    stream -> wait(Threads.@spawn pool handle(stream))
+# `wait` reports the task's failure as a `TaskFailedException`; HTTP.jl gets the
+# task's own error instead, as it does without the task, because that error is
+# how it tells a client that hung up (logged at Debug) from a server fault.
+# Thrown inside the `catch`, it keeps the wrapper, and with it the task's
+# backtrace, beneath it on the exception stack.
+function _spawning_stream_handler(handle, pool::Symbol)
+    function (stream)
+        try
+            wait(Threads.@spawn pool handle(stream))
+        catch err
+            err isa TaskFailedException && throw(err.task.exception)
+            rethrow()
+        end
+    end
+end
 
 # --- Access log ------------------------------------------------------------
 
