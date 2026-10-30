@@ -19427,7 +19427,9 @@ so multiple sortable tables can coexist on the same page. A cell sorts by its
 `data-sort-value`, else by its `data-htmxo-number` (the exact number a
 [`number_cell`](@ref) or a group sum carries), else by its text (a
 master/detail row's label, without its controls). Two values that both start
-with a number sort numerically; everything else uses `localeCompare`. Rows
+with a number sort numerically, and when it is the same number by their whole
+texts, each run of digits read as its number (`2 x 5` before `2 x 10`);
+everything else uses `localeCompare`. Rows
 marked `data-htmxo-pinned` stay ahead of the others in either direction.
 `sortable_table(...; default_sort)` writes its rows in the same order on the
 server.
@@ -19525,6 +19527,9 @@ function sortTable(col, th) {
         if (!keyed.has(row)) keyed.set(row, htmxoSortValue(row.cells[col], key, keys.length, sortKey));
         return keyed.get(row);
     };
+    // Two texts that start with the same number compare as whole texts, each
+    // run of digits read as its number: '2 x 5' before '2 x 10'.
+    const natural = new Intl.Collator(undefined, {numeric: true}).compare;
     const byValue = keys ? (a, b) => {
         const av = keyOf(a), bv = keyOf(b);
         if (av === null || bv === null) return av === bv ? 0 : av === null ? 1 : -1;
@@ -19534,8 +19539,9 @@ function sortTable(col, th) {
         const av = sortKey(a.cells[col]);
         const bv = sortKey(b.cells[col]);
         const an = parseFloat(av), bn = parseFloat(bv);
-        if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
-        return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+        // `an - bn` is 0 for the same number and NaN for two infinities: both tie.
+        const c = !isNaN(an) && !isNaN(bn) ? (an - bn) || natural(av, bv) : av.localeCompare(bv);
+        return asc ? c : -c;
     };
     // A pinned row (`data-htmxo-pinned`) stays ahead of the others in every
     // sort; pinned rows sort among themselves.
@@ -22370,12 +22376,20 @@ end
 # The browser compares texts with `localeCompare`. This approximates its
 # default collation: letters first without case or accents, then by accent,
 # then lower case before upper case; spaces and punctuation come before
-# digits, and digits before letters.
-function _collation_key(s::AbstractString)
+# digits, and digits before letters. `numeric=true` approximates
+# `Intl.Collator`'s `numeric` option: a run of the digits 0-9 compares as the
+# number it spells, its leading zeros aside (`5` before `10`, `05` equal to `5`).
+function _collation_key(s::AbstractString; numeric::Bool=false)
     class(c) = isletter(c) ? 2 : isdigit(c) || Base.Unicode.category_code(c) == Base.Unicode.UTF8PROC_CATEGORY_ND ? 1 : 0
     swapcase(c) = islowercase(c) ? uppercase(c) : isuppercase(c) ? lowercase(c) : c
+    numeric && (s = replace(s, r"(?<![0-9])0+(?=[0-9])" => ""))
     base = Base.Unicode.normalize(s; casefold=true, stripmark=true)
-    (Tuple{Int,Char}[(class(c), c) for c in base], Base.Unicode.normalize(s; casefold=true), map(swapcase, s))
+    primary = Tuple{Int,Char}[(class(c), c) for c in base]
+    # A run of digits leads with its length, so a shorter number comes first.
+    numeric && for m in Iterators.reverse(collect(eachmatch(r"[0-9]+", base)))
+        insert!(primary, length(base, 1, m.offset), (1, Char(length(m.match))))
+    end
+    (primary, Base.Unicode.normalize(s; casefold=true), map(swapcase, s))
 end
 _compare_numbers(a, b) = a < b ? -1 : a > b ? 1 : 0
 # `String(x)` in the browser, for a number compared with a text.
@@ -22389,6 +22403,7 @@ struct _RowSortKey
     number::Float64      # one order: the number the text starts with, else NaN
     text::Union{Nothing,String}  # the value as the text `localeCompare` reads
     text_key::Any        # its collation key, once a text is compared (`_collated`)
+    tie_key::Any         # its numeric collation key, once its number ties another's (`_tie_collated`)
 end
 function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
     cells = _row_cells(row)
@@ -22396,26 +22411,37 @@ function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
     cell = has_cell ? cells[col] : nothing
     if nkeys == 0
         text = has_cell ? _cell_sort_text(cell) : ""
-        _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), text, nothing)
+        _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), text, nothing, nothing)
     else
         value = has_cell ? _cell_sort_value(cell, key, nkeys) : nothing
         text = value isa Float64 ? _js_number_string(value) : value
-        _RowSortKey(_row_pinned(row), has_cell, value, NaN, text, nothing)
+        _RowSortKey(_row_pinned(row), has_cell, value, NaN, text, nothing, nothing)
     end
 end
 # A row compares by text unless its value is a number on both sides.
 _compares_text(k::_RowSortKey, nkeys::Int) = k.has_cell && (nkeys == 0 ? isnan(k.number) : k.value isa String)
 _collated(k::_RowSortKey) = isnothing(k.text) ? k :
-    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.text, _collation_key(k.text))
+    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.text, _collation_key(k.text), k.tie_key)
+# Texts that start with the same number compare as `Intl.Collator`'s `numeric` does.
+_tie_collated(k::_RowSortKey) = isnan(k.number) ? k :
+    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.text, k.text_key, _collation_key(k.text; numeric=true))
+# Whether two of these rows start with the same number (`-0` is `0`).
+_numbers_tie(ks) = !allunique(k.number + 0.0 for k in ks if !isnan(k.number))
 
 # `sortTable`'s comparison of two rows, `asc` or not, as -1, 0 or 1: pinned
 # rows first; with one order, numbers by value when both texts start with
-# one, else texts; with several, a missing value last in either direction.
+# one, the same number by the whole texts with each run of digits read as its
+# number, else texts; with several, a missing value last in either direction.
 function _compare_rows(a::_RowSortKey, b::_RowSortKey, asc::Bool, nkeys::Int)
     pin = Int(b.pinned) - Int(a.pinned)
     pin == 0 || return pin
     c = if nkeys == 0
-        !isnan(a.number) && !isnan(b.number) ? _compare_numbers(a.number, b.number) : cmp(a.text_key, b.text_key)
+        if !isnan(a.number) && !isnan(b.number)
+            n = _compare_numbers(a.number, b.number)
+            n == 0 ? cmp(a.tie_key, b.tie_key) : n
+        else
+            cmp(a.text_key, b.text_key)
+        end
     else
         (isnothing(a.value) || isnothing(b.value)) &&
             return isnothing(a.value) == isnothing(b.value) ? 0 : isnothing(a.value) ? 1 : -1
@@ -22444,9 +22470,11 @@ function _default_sort_rows(rows, ds, headers; hierarchy::Bool)
         isnothing(dash) ? nothing : get(detail_at, "detail-" * ids[i][nextind(ids[i], dash):end], nothing)
     end
     # Each row's key, read once; texts get their collation keys only when
-    # some row of the column compares by text.
+    # some row of the column compares by text, and their numeric ones only
+    # when two rows start with the same number.
     sort_keys = Dict(i => _RowSortKey(rows[i], col, key, nkeys) for i in eachindex(rows) if is_tr(rows[i]) && !companion[i])
     any(k -> _compares_text(k, nkeys), values(sort_keys)) && map!(_collated, values(sort_keys))
+    nkeys == 0 && _numbers_tie(values(sort_keys)) && map!(_tie_collated, values(sort_keys))
     sort_key(i) = sort_keys[i]
     order = Int[]
     placed = Set{Int}()

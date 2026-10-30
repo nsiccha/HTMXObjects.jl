@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.25
+
+- A table column whose texts start with the same number now sorts by the
+  rest of the text: `2 x 5`, `2 x 10`, `2 x 15` in that order, and reversed
+  when sorted descending. Before, two such texts compared equal, so a click
+  on the header turned its arrow and left the rows where they were. Texts
+  with the same leading number compare as whole texts with each run of
+  digits read as its number, as `Intl.Collator`'s `numeric` option does
+  (`2 x 05` equals `2 x 5`). This holds for a click (`sortTable`) and for the
+  order `sortable_table(...; default_sort)` writes on the server. Different
+  leading numbers, and texts that do not start with a number, sort as before.
+
 ## 0.1.24
 
 - A number control shows a float as the shortest text that reads back as the
