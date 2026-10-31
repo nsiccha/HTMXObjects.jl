@@ -497,3 +497,103 @@ end
         end
     end
 end
+
+@testitem "pdf_panel browser: opening and closing keep the reference in place" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        pdf = tiny_pdf(PDF_PAGES)
+        # Rows that wrap anew when the table narrows or widens, under the
+        # table's sticky control line and header.
+        words = "Every provider makes sure that everyone who works with children in its care knows these requirements"
+        rows = [h.tr(h.td("Requirement $i"),
+                     h.td(repeat(words * " ", 1 + i % 3),
+                          pdf_ref("(p. $(1 + i % 2))", "/doc.pdf"; page=1 + i % 2, panel="orig", id="ref-$i",
+                                  quoted=isodd(i) ? "reported to the youth office" : "the task of every provider")),
+                     h.td(repeat("The offer meets it. ", 1 + (i + 1) % 4)))
+                for i in 1:60]
+        content = h.div(; id="content")(sortable_table(["Requirement", "Text", "Offer"], rows; id="reqs"),
+                                        h.div(; style="height: 1500px"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+            const checks = [];
+            const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
+            const tick = () => fetch('/tick').then(r => r.text());
+            const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
+            const aside = document.getElementById('orig');
+            const top = el => el.getBoundingClientRect().top;
+            const columns = () => [...document.querySelectorAll('colgroup[data-htmxo-columns] > col')].map(c => c.style.width).join();
+            // `act`, then where `el` is at once and once the table has sized its columns for its new width
+            async function kept(name, el, act) {
+                const before = top(el), held = columns();
+                act();
+                const now = top(el);
+                for (let i = 0; i < 8; i++) await tick();
+                const settled = top(el);
+                check(name + '-at-once', Math.abs(now - before) < 1, {before, now});
+                check(name + '-settled', Math.abs(settled - before) < 1, {before, settled});
+                check(name + '-wrapped-anew', columns() !== held, {held});   // the content did move under it
+            }
+            try {
+                await wait(() => columns() !== '');
+                // a reference clicked in the middle of the window stays there, opening and closing
+                const ref = document.getElementById('ref-30');
+                ref.closest('tr').scrollIntoView({block: 'center'});
+                await tick();
+                await kept('open', ref, () => ref.click());
+                await wait(() => aside.querySelector('.htmxo-pdf-page[data-htmxo-pdf-drawn]'));
+                aside.querySelector('[data-htmxo-pdf-step="1"]').click();
+                await tick();
+                await kept('close', ref, () => aside.querySelector('[data-htmxo-pdf-close]').click());
+                check('closed', aside.hidden);
+                // the toggle: the first row shown below the table's sticky header stays
+                scrollBy(0, 300);
+                await tick();
+                const x = document.getElementById('content').getBoundingClientRect().left + 24;
+                check('header-stuck', document.elementFromPoint(x, 4).closest('thead, .htmxo-table-toolbar'));
+                let cell = null;
+                for (let y = 4; !cell && y < innerHeight; y += 4) cell = document.elementFromPoint(x, y).closest('tbody td');
+                await kept('toggle-open', cell, () => document.getElementById('toggle').click());
+                await kept('toggle-close', cell, () => document.getElementById('toggle').click());
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(h.main(pdf_toggle("orig"; id="toggle"),
+                pdf_beside(content, pdf_panel(["Fixture" => "/doc.pdf"]; id="orig"))), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) :
+            path == "/doc.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) :
+            path == "/tick" ? (sleep(0.05); HTTP.Response(200, "ok")) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,1200 --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; timeout=180)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                    endswith(line, ":true") || println("pdf_panel keep browser: ", line)
+                end
+                @test count(==('\n'), checks[1]) + 1 == 14
+            end
+        finally
+            close(server)
+        end
+    end
+end

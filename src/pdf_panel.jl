@@ -324,8 +324,9 @@ open the two share the width (the panel 40 %, at least 22rem; set
 content scrolls by, below a page's own sticky header (`--htmxo-sticky-top`).
 Closed, the content has the whole width. On a narrow screen the open panel
 lies over the lower part of the window. Opening or closing it keeps the
-reference clicked (else the content at the top of the window) where it was
-on screen while the content wraps anew.
+reference clicked last (else the content at the top of the window, below
+a table's sticky header) where it was on screen while the content wraps
+anew.
 """
 pdf_beside(content, panel; class::AbstractString="") =
     h.div(; class=isempty(class) ? "htmxo-pdf-beside" : "htmxo-pdf-beside " * class, data_htmxo_pdf_beside="")(
@@ -575,14 +576,30 @@ pdf_panel_script() = h.script(Raw(raw"""
     var r = el.getBoundingClientRect();
     return r.bottom > 0 && r.top < window.innerHeight;
   }
+  // The sticky or fixed element `el` sits in, inside `box`: it stays where it
+  // is on screen whatever the scroll, so it cannot hold the content in place.
+  function pinned(el, box) {
+    for (; el && el !== box; el = el.parentElement) {
+      var p = getComputedStyle(el).position;
+      if (p === 'sticky' || p === 'fixed') return el;
+    }
+    return null;
+  }
+  // The reference, else the first content at the top of the window below
+  // what stays in view there (a table's sticky control line and header).
   function anchor(aside, ref) {
     var box = content(aside);
     if (!box) return null;
     if (ref && box.contains(ref) && onScreen(ref)) return ref;
-    var r = box.getBoundingClientRect(), y = Math.max(r.top, stickyTop()) + 4;
-    if (y >= Math.min(r.bottom, window.innerHeight)) return null;
-    var at = document.elementFromPoint(r.left + Math.min(24, r.width / 2), y);
-    return at && at !== box && box.contains(at) ? at : null;
+    var r = box.getBoundingClientRect(), x = r.left + Math.min(24, r.width / 2), y = Math.max(r.top, stickyTop()) + 4;
+    for (var i = 0; i < 8 && y < Math.min(r.bottom, window.innerHeight); i++) {
+      var at = document.elementFromPoint(x, y);
+      if (!at || at === box || !box.contains(at)) return null;
+      var over = pinned(at, box);
+      if (!over) return at;
+      y = Math.max(y, over.getBoundingClientRect().bottom) + 4;
+    }
+    return null;
   }
   // The content is sized again in the tasks after the change (tables measure
   // their columns anew): keep the anchor in place while it settles, at most a
@@ -608,9 +625,12 @@ pdf_panel_script() = h.script(Raw(raw"""
     aside.htmxoPdfHold = stop;
   }
   function open(aside, state, ref) {
-    if (ref) aside.htmxoPdfRef = ref;
+    if (ref) aside.htmxoPdfRef = aside.htmxoPdfKeep = ref;
     if (state !== aside.hidden) return;
-    var wrap = beside(aside), held = anchor(aside, ref), top = held && held.getBoundingClientRect().top;
+    // Closing keeps the reference clicked last while the panel was open.
+    var keep = state ? ref : aside.htmxoPdfKeep;
+    if (state && !ref) aside.htmxoPdfKeep = null;
+    var wrap = beside(aside), held = anchor(aside, keep), top = held && held.getBoundingClientRect().top;
     aside.hidden = !state;
     if (wrap) wrap.toggleAttribute('data-htmxo-pdf-open', state);
     document.querySelectorAll('[data-htmxo-pdf-toggle="' + CSS.escape(aside.id) + '"]').forEach(function (b) {
