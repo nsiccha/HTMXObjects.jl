@@ -9,7 +9,7 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
-        InlineSiteApp, QueriedSiteApp, bundle_files, subdirectory_misses
+        InlineSiteApp, QueriedSiteApp, TypedSiteApp, bundle_files, subdirectory_misses
 
     const KS = (3.0, 4.0)
     # The mount prefix the apps' links start from (they are mounted at the root).
@@ -125,6 +125,23 @@ using TestItemRunner
         @get queried_other(; k::Int=0) = h.p("other $k")
         @get queried_lone(; k::String="1") = h.div(; hx_get=base * "/queried_other?k=$k", hx_trigger="none",
             url_params(k = k; values = (k = ("1", "2"),))...)("lone $k")
+    end
+
+    # Extensionless downloads whose Content-Type the export's own table does
+    # not name: one the media-type database lists (an Xfig sketch), one it
+    # does not, and one the table names differently from the database
+    # (snag `export-custom-mi-904ff844`, reporter ODLPlaus:review).
+    @htmx struct TypedSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div(
+            h.a("Skizze"; href=base * "/typed_skizze?zone=nah&kenn=a", download="skizze.fig"),
+            h.a("Eigen"; href=base * "/typed_eigen?kenn=a"),
+            h.a("Foto"; href=base * "/typed_foto"))
+        @direct @get typed_skizze(; kenn::String="", zone::String="") =
+            MIMEResponse("application/x-xfig", "#FIG 3.2 $kenn $zone")
+        @direct @get typed_eigen(; kenn::String="") = MIMEResponse("application/vnd.htmxo-test", "eigen $kenn")
+        @direct @get typed_foto() = MIMEResponse("image/jpeg", "jpeg")
     end
 
     # Every file of the bundle, relative to its root, with `/` between
@@ -364,4 +381,56 @@ end
     @test filter(f -> startswith(f, "index"), bundle_files(listed)) ==
           ["index-hinweis-1-region-b.html", "index-region-zz.html", "index.html"]
     @test occursin("href=\"index.html?region=b&amp;measure=y\"", read(joinpath(listed, "index.html"), String))
+end
+
+@testitem "export_site names the file of any Content-Type, and file_name one no database lists" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    using Treebars
+    route!(TypedSiteApp())
+    vendorfiles()
+    failure(f) = try
+        f(); nothing
+    catch e
+        e
+    end
+
+    # The default names give a type the media-type database lists its
+    # extension, keep the table's names, and fail on a type neither lists,
+    # saying what to do.
+    dir = mktempdir()
+    err = failure(() -> export_site(dir; pages=["/"]))
+    @test err isa StaticSiteIncomplete
+    @test only(err.failed) == ("/typed_eigen?kenn=a" =>
+        "no file extension for its Content-Type \"application/vnd.htmxo-test\"; give the address one, " *
+        "or pass export_site a file_name that names its file with one (it is asked with ext=\"\")")
+    @test isempty(err.unresolved)
+    @test read(joinpath(dir, "typed_skizze-kenn-a-zone-nah.fig"), String) == "#FIG 3.2 a nah"
+    @test read(joinpath(dir, "typed_foto.jpg"), String) == "jpeg"
+    index = read(joinpath(dir, "index.html"), String)
+    @test occursin("href=\"typed_skizze-kenn-a-zone-nah.fig\"", index)
+    @test occursin("href=\"typed_foto.jpg\"", index)
+
+    # An app's own file_name, asked with ext="", names the file with an
+    # extension of its choosing; links name that file.
+    named(a; fragment=false, ext=".html") =
+        static_file_name(a; fragment, ext=startswith(a, "/typed_eigen") ? ".htmxo" : ext)
+    dir = joinpath(mktempdir(), "site")
+    export_site(dir; pages=["/"], file_name=named)
+    @test read(joinpath(dir, "typed_eigen-kenn-a.htmxo"), String) == "eigen a"
+    @test isfile(joinpath(dir, "typed_skizze-kenn-a-zone-nah.fig"))
+    index = read(joinpath(dir, "index.html"), String)
+    @test occursin("href=\"typed_eigen-kenn-a.htmxo\"", index)
+    @test isempty(subdirectory_misses(dir))
+
+    # One that passes the "" on gives a name without an extension: the answer
+    # fails, naming the name it gave.
+    err = failure(() -> export_site(mktempdir(); pages=["/"], file_name=(a; kw...) -> static_file_name(a; kw...)))
+    @test err isa StaticSiteIncomplete
+    @test only(err.failed) == ("/typed_eigen?kenn=a" =>
+        "no file extension for its Content-Type \"application/vnd.htmxo-test\", and file_name, asked with " *
+        "ext=\"\", named it \"typed_eigen-kenn-a\" without one (a `.` and up to 8 letters or digits, the " *
+        "first a letter); give the address one, or have file_name name its file with one")
+    # A longer suffix is not a file extension, as it is not in an address.
+    err = failure(() -> export_site(mktempdir(); pages=["/"],
+        file_name=(a; kw...) -> startswith(a, "/typed_eigen") ? "typed_eigen.htmxotest" : static_file_name(a; kw...)))
+    @test occursin("named it \"typed_eigen.htmxotest\" without one (a `.` and up to 8", only(err.failed).second)
 end

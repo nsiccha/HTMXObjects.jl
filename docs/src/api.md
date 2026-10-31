@@ -4249,9 +4249,15 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   in the bundle's root, fragments below `hx/`, query parameters folded in
   alphabetical order, escapes decoded and other characters as `_`; an address
   with a file extension keeps its path, and an extensionless data address gets
-  the extension its `Content-Type` calls for. Every link is written relative to
-  the root, which is why every page lives there: a fragment's links resolve
-  against the page that loads it, so they are right in all of them.
+  the extension its `Content-Type` calls for: any type the media-type database
+  (mime-db) lists, so an Xfig download is a `.fig`. For a type it does not
+  list (`application/vnd.myapp`) `file_name` is asked with `ext=""`: the
+  default names have none to give, so that answer fails, and your own
+  `file_name` names its file with an extension of its choosing
+  (`static_file_name(a; fragment, ext=".myapp")`). Every link is written
+  relative to the root, which is why every page lives there: a fragment's
+  links resolve against the page that loads it, so they are right in all of
+  them.
 
   | Address | File |
   |---|---|

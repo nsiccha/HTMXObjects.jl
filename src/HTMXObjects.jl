@@ -72,6 +72,9 @@ import Random
 import CommonMark
 # gzip for `serve`'s response compression. HTTP.jl depends on it already.
 import CodecZlib
+# The file extension `export_site` gives an answer whose `Content-Type` its own
+# table does not name (mime-db, the media-type database).
+import MIMEs
 # The request contexts (audience, page language, heading level): a task
 # inherits its starter's, and DynamicObjects carries them into deferred and
 # `@queued` work. `Base.ScopedValues` from Julia 1.11, a backport on 1.10.
@@ -7033,10 +7036,13 @@ bundle.
   a static server ignores it (`/vendor/htmx.min.js?v=2.0.8` →
   `vendor/htmx.min.js`).
 - `ext` is the extension of a page, fragment or extensionless data address;
-  `export_site` passes the one the answer's `Content-Type` calls for.
+  `export_site` passes the one the answer's `Content-Type` calls for, or `""`
+  for a type with none (`static_file_name` then gives a name without one).
 
 An app that names files itself passes its own function with this signature as
-`export_site(...; file_name)`, usually wrapping this one.
+`export_site(...; file_name)`, usually wrapping this one. Asked with `ext=""`,
+it names the file with an extension of its choosing
+(`static_file_name(address; fragment, ext=".fig")`), or the answer fails.
 """
 function static_file_name(address::AbstractString; fragment::Bool=false, ext::AbstractString=".html")
     path, query = _split_once(first(_split_once(address, '#')), '?')
@@ -7205,7 +7211,10 @@ function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractStr
     _site_marker(crawl, i) * (isnothing(kept) ? "" : "?" * kept) * (isnothing(id) ? "" : "#" * id)
 end
 
-# The file extension an answer's `Content-Type` calls for, or `nothing`.
+# The file extension an answer's `Content-Type` calls for, or `nothing`: the
+# one this table names (the names bundles have always had, whatever version
+# of the database resolves), otherwise the first one the media-type database
+# lists (mime-db, through MIMEs.jl: `application/x-xfig` → `.fig`).
 const _SITE_EXTENSIONS = Dict(
     "text/html" => ".html", "application/json" => ".json", "application/geo+json" => ".geojson",
     "text/markdown" => ".md", "text/plain" => ".txt", "text/csv" => ".csv", "text/css" => ".css",
@@ -7213,8 +7222,12 @@ const _SITE_EXTENSIONS = Dict(
     "application/pdf" => ".pdf", "application/zip" => ".zip", "image/svg+xml" => ".svg",
     "image/png" => ".png", "image/jpeg" => ".jpg", "image/webp" => ".webp",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx")
-_site_extension(resp::HTTP.Response) =
-    get(_SITE_EXTENSIONS, lowercase(strip(first(split(HTTP.header(resp, "Content-Type"), ';')))), nothing)
+function _site_extension(resp::HTTP.Response)
+    type = lowercase(strip(first(split(HTTP.header(resp, "Content-Type"), ';'))))
+    isempty(type) && return nothing
+    ext = get(() -> MIMEs.extension_from_mime(MIME(type)), _SITE_EXTENSIONS, type)
+    isempty(ext) ? nothing : ext
+end
 
 # Why an answer must not go into the bundle, or `nothing`. Under htmx a failed
 # fragment still answers 200 with its error article (so htmx swaps it in);
@@ -7276,7 +7289,11 @@ can run inside a serving app (it renders in process with
   flat names in the bundle's root for pages, below `hx/` for fragments, the
   path for an address with a file extension, and otherwise the extension the
   answer's `Content-Type` calls for (`/insitu/raster` answering GeoJSON →
-  `insitu-raster.geojson`). Every link is written relative to the bundle's
+  `insitu-raster.geojson`; any type the media-type database lists, an Xfig
+  download → `.fig`). For a type it does not list (`application/vnd.myapp`),
+  `file_name` is asked with `ext=""`: the default names have no extension to
+  give, so the answer fails, and an app's own `file_name` names the file with
+  an extension of its choosing. Every link is written relative to the bundle's
   root. Under the default names two addresses never silently share a file: a
   collision is a failure naming both. Addresses an app's own `file_name` gives
   one name share one file, rendered once from the first one reached (list the
@@ -7475,6 +7492,24 @@ _static_query_link(query::AbstractString) =
     replace(query, r"[^A-Za-z0-9\-._~!$&()*+,;=:@/?%]" =>
                    c -> join('%' * uppercase(string(b; base=16, pad=2)) for b in codeunits(c)))
 
+# The file entry `e` is written to, from `ext` (its address's own extension or
+# the one its answer's `Content-Type` calls for), and `nothing`; or `""` and
+# why it has none. With no `ext` the default names have no extension to give,
+# so the answer fails; an app's own `file_name` is asked with `ext=""` and
+# names the file with an extension of its choosing (`.fig` for an Xfig
+# download), which a name without one has not done.
+function _site_file_name(crawl::_SiteCrawl, e::_SiteEntry, ext::AbstractString, resp::HTTP.Response)
+    type = repr(HTTP.header(resp, "Content-Type"))
+    isempty(ext) && crawl.strict && return "", "no file extension for its Content-Type $type; give the " *
+        "address one, or pass export_site a file_name that names its file with one (it is asked with ext=\"\")"
+    name = first(_split_once(crawl.file_name(e.address; fragment=e.fragment, ext), '?'))
+    isempty(ext) && isnothing(_static_own_extension(name)) && return "", "no file extension for its " *
+        "Content-Type $type, and file_name, asked with ext=\"\", named it $(repr(name)) without one " *
+        "(a `.` and up to 8 letters or digits, the first a letter); give the address one, or have " *
+        "file_name name its file with one"
+    name, nothing
+end
+
 # Fetch entry `i` and write its file, or record why not.
 function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls, parent, audience)
     e = crawl.entries[i]
@@ -7490,12 +7525,8 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls
     end
     reason = _site_failure(resp)
     path = first(_split_once(e.address, '?'))
-    ext = isnothing(reason) ? something(_static_own_extension(path), _site_extension(resp), Some(nothing)) : nothing
-    if isnothing(reason) && isnothing(ext)
-        reason = "no file extension for its Content-Type $(repr(HTTP.header(resp, "Content-Type"))); " *
-                 "give the address one, or pass export_site a file_name"
-    end
-    name = isnothing(reason) ? first(_split_once(crawl.file_name(e.address; fragment=e.fragment, ext), '?')) : ""
+    ext = something(_static_own_extension(path), _site_extension(resp), "")
+    name, reason = isnothing(reason) ? _site_file_name(crawl, e, ext, resp) : ("", reason)
     file = normpath(joinpath(written.root, name))
     if isnothing(reason) && (isabspath(name) || !startswith(file, joinpath(written.root, "")))
         reason = "its file name $(repr(name)) leaves the bundle"
