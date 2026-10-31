@@ -14,6 +14,20 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.30
+
+- `export_site`: an extensionless data address whose `Content-Type` the
+  export's own table does not name takes the first extension the media-type
+  database lists for it (mime-db, through the new dependency MIMEs.jl): an
+  Xfig download (`application/x-xfig`) is written as `.fig`, a GIF as `.gif`.
+  The types the table names keep the names they had (`image/jpeg` → `.jpg`).
+  For a type the database does not list either (`application/vnd.myapp`),
+  `file_name` is asked with `ext=""`: an app's own `file_name` names the file
+  with an extension of its choosing, and the answer fails only when the name
+  it gives has none. Before, such an answer failed before `file_name` was
+  asked, although the failure told the app to pass one. Snag
+  `export-custom-mi-904ff844`.
+
 ## 0.1.29
 
 - `pdf_panel`: a document chosen in the chooser opens at its first page,
