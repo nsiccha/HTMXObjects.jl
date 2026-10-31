@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.26
+
+- `compose_box(name; submit=:modifier)` makes Enter and Shift+Enter insert a
+  new line in the box and Ctrl+Enter or Cmd+Enter send its form. The form's
+  submit button sends as before. Use it where readers write several lines or
+  do not expect Enter to send. `submit=:enter`, the default, keeps the
+  existing behaviour: Enter sends and Shift+Enter inserts a new line. A box's
+  markup is unchanged unless it passes `:modifier`, which adds
+  `data-htmxo-submit="modifier"` to the textarea. A hand-written
+  `htmxo-compose-textarea` opts in with that attribute too. Any other `submit`
+  value throws an `ArgumentError`.
+
 ## 0.1.25
 
 - A table column whose texts start with the same number now sorts by the
