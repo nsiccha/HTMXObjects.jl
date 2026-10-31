@@ -1734,6 +1734,13 @@ The panel carries its own style and script (`assets=false` and
 HTML only, so a Markdown answer leaves it out. A runnable demo is
 [`examples/pdf_panel.jl`](examples.md#pdf-panel).
 
+In a static export ([`export_site`](api.md#whole-site-export), a `StaticExport`
+`dispatch`, `record!`) every file the panel and its references load is
+rewritten as their links are: each reference's file, the lone document's and
+each chooser document's address. The panel shows the file the export wrote,
+from the bundle's root or a subdirectory, and a document keeps its live title.
+PDF.js still comes from `pdfjs` (by default jsDelivr), which is not rewritten.
+
 ### `loading_indicator_script()` and `request_feedback_*` {#request-feedback}
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.

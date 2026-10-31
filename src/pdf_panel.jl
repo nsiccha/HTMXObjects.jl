@@ -196,6 +196,15 @@ yourself (to open the collapsed group a table row sits in, say).
 
 The panel is HTML only: a Markdown answer leaves it out.
 
+**In a static export** ([`export_site`](@ref), a [`StaticExport`](@ref)
+`dispatch`, `record!`) every file the panel and its references load is
+rewritten as their links are: each reference's file, the lone document's and
+each chooser document's address. The panel therefore shows the file the
+export wrote, served from the bundle's root or a subdirectory, and
+`export_site` follows every one of them. A document keeps the title the live
+page gives it. PDF.js still comes from `pdfjs` (by default jsDelivr), which is
+not rewritten.
+
 ```julia
 @get bericht() = pdf_beside(
     h.article(h.p("Der Träger sichert den Kinderschutz ",
@@ -283,7 +292,8 @@ file itself. Its Markdown is the link, `[text](url#page=12)`.
   keeps its colour wherever it is quoted. Give neighbouring references
   different hues (`hue=mod1(i, 8)`) where they stand in a list.
 - `document`: the file's title in the panel's chooser when the panel does not
-  list it; by default its file name.
+  list it; by default its file name (as `url` names it, so a static export
+  that gives the file another address titles it alike).
 - `attrs` go on the link (`class`, `title`, `id`, …).
 
 A reference inside a table row of the panel's link group takes the row's key:
@@ -304,10 +314,12 @@ function pdf_ref(text, url::AbstractString; page::Integer=1, panel::AbstractStri
     key = key === nothing ? (quoted === nothing ? nothing : _thread_digest(string(file, "#page=", page, "\n", quoted))) :
         string(key)
     hue = hue === nothing ? (key === nothing ? nothing : Int(_fnv1a(key) % _TALLY_PALETTE) + 1) : Int(hue)
+    # The title is named here, from the address the app serves, so a static
+    # export (which gives the file another address) titles it as the live page.
     h.a(; href=string(file, "#page=", page), data_htmxo_pdf_ref="", data_htmxo_pdf_panel=panel,
         data_htmxo_pdf_url=file, data_htmxo_pdf_page=string(page), data_htmxo_pdf_quote=quoted,
         data_htmxo_pdf_key=key, data_htmxo_pdf_hue=hue === nothing ? nothing : string(hue),
-        data_htmxo_pdf_document=document === nothing ? nothing : string(document),
+        data_htmxo_pdf_document=document === nothing ? _pdf_file_name(file) : string(document),
         aria_controls=panel, attrs...)(text)
 end
 

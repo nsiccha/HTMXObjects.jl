@@ -4165,7 +4165,7 @@ write(joinpath(bundle, "embeds", "qoi.html"), resp.body)
 
 | `StaticExport` keyword | Meaning |
 |------------------------|---------|
-| `url_map` | `nothing`, or `address -> target`. Called with the full value of every `hx-get`, `href`, and `src` (query included) — semantic elements' too: a `SemanticLink`'s `href`, `external=true` included (an address outside the app gets `nothing` back and stays as given), and a `SemanticAction`'s `hx-get` — with every address a route body passes to `static_url`, with the address of every value a `url_params` element declares, and with the path of an `hx-push-url`/`hx-replace-url` address, which keeps its query (see [Page address parameters](#page-address-parameters)). A `String` replaces the attribute verbatim — relative targets such as `"embeds/qoi.html"` are emitted as given — and the element stays live; `nothing` takes the default rules; anything else throws. |
+| `url_map` | `nothing`, or `address -> target`. Called with the full value of every `hx-get`, `href`, and `src` (query included) — semantic elements' too: a `SemanticLink`'s `href`, `external=true` included (an address outside the app gets `nothing` back and stays as given), and a `SemanticAction`'s `hx-get` — with every document a [`pdf_panel`](components.md#pdf-panel) and its references load (a reference's and the lone document's `data-htmxo-pdf-url`, each chooser radio's value), with every address a route body passes to `static_url`, with the address of every value a `url_params` element declares, and with the path of an `hx-push-url`/`hx-replace-url` address, which keeps its query (see [Page address parameters](#page-address-parameters)). A `String` replaces the attribute verbatim — relative targets such as `"embeds/qoi.html"` are emitted as given — and the element stays live; `nothing` takes the default rules; anything else throws. |
 | `controls` | `:disable` (default) strips `hx-post`/`hx-put`/`hx-patch`/`hx-delete` and every unmapped `hx-get` whose request carries a query string, and greys the element out, as recording does. Such an `hx-get` has a query in its address, or sends values that htmx puts in the query of a GET: a `<form>`'s fields, a named `input`/`select`/`textarea`/`button`'s own value, and what an `hx-include`, `hx-vals` or `hx-vars` on the element or an enclosing one adds (`unset` stops what it inherits). A `url_params` element keeps its `hx-get`: the export gives it the file of each value it declares. `:remove` drops those elements with their subtree, so the output carries no non-GET attribute and no greyed element. |
 | `record_base` | Prefix the default rules prepend to rooted addresses an unmapped attribute keeps (`hx-get` under `<record_base>/hx`). Empty by default: unchanged. |
 | `runtime` | `:inline` (default) puts a `runtime=:linked` page's runtime back inline, so each file stands alone. `:linked` keeps the links, rewritten by `url_map`/`record_base` like any `src`/`href`, for a bundle that carries the runtime once: `copy_vendorfiles(dir)` writes it next to the libraries, so the page's `assets` prefix addresses both. |
@@ -4232,8 +4232,10 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
 
 - **What is written.** Starting from `pages`, every address the written
   answers reference, until nothing new turns up: links, `hx-get` fragments,
-  each value a `url_params` element declares, each address a route passes to
-  `static_url`, `hx-push-url` pages, and the head's script and style links —
+  each value a `url_params` element declares, the documents a
+  [`pdf_panel`](components.md#pdf-panel) and its references load, each address
+  a route passes to `static_url`, `hx-push-url` pages, and the head's script
+  and style links —
   so the libraries and the linked runtime are fetched from the app's own
   `vendorfiles`/`staticfiles` routes, with the files a stylesheet loads
   (KaTeX's fonts). Other sites, `#id`s and `?query` links of the page itself
@@ -4311,8 +4313,9 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   content](#private-content).
 - **Failures.** An answer other than 200, or one carrying `X-HTMXO-Error-Id`
   (a failed fragment answers 200 under htmx), is not written; the crawl carries
-  on, then every `href`, `src`, `hx-get`, `hx-push-url` and Vega `"url"` in the
-  written HTML is checked to name a file of the bundle (which also catches an
+  on, then every `href`, `src`, `hx-get`, `hx-push-url`, PDF document address
+  (`data-htmxo-pdf-url`) and Vega `"url"` in the written HTML is checked to
+  name a file of the bundle (which also catches an
   address in raw markup the walk never saw), and `StaticSiteIncomplete` lists
   every failed address and unresolved reference. `.nojekyll` is written, since
   GitHub Pages otherwise drops `_`-prefixed files such as `_hyperscript.min.js`.

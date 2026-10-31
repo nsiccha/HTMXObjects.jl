@@ -6171,9 +6171,11 @@ alone, so concurrent ordinary requests are unaffected.
   value, query included: `"/report/figure?doc=a&name=b"`) to a static target
   `String` or `nothing`. It is consulted for every `hx-get`, `href`, and `src`,
   semantic elements' included (a [`SemanticLink`](@ref)'s `href`, `external=true`
-  too, and a [`SemanticAction`](@ref)'s `hx-get`), and for every address a
-  route body passes to [`static_url`](@ref) (one inside a script or a JSON
-  payload, which the walk cannot see).
+  too, and a [`SemanticAction`](@ref)'s `hx-get`), for every document a
+  [`pdf_panel`](@ref) and its [`pdf_ref`](@ref)s load (a reference's and the
+  lone document's `data-htmxo-pdf-url`, each chooser radio's value), and for
+  every address a route body passes to [`static_url`](@ref) (one inside a
+  script or a JSON payload, which the walk cannot see).
   A `String` replaces the attribute verbatim — relative targets such as
   `"embeds/fig-a.html"` are emitted as given — and the element stays live.
   `nothing` falls back to the default rules below. Any other return value
@@ -6369,16 +6371,32 @@ _static_sends_values(tag::Symbol, attrs, sent::_StaticSent) =
 # What a static walk consults: the spec, the rooted `hx-get` paths a static
 # server cannot vary by query — `route!`'s recording registry for the recording
 # form of `static_transform`, nothing for a request-scoped export — who
-# names the files of a declared URL parameter's values and of fragments, and
-# what the elements enclosing the walked one add to its requests.
+# names the files of a declared URL parameter's values and of fragments,
+# what the elements enclosing the walked one add to its requests, and whether
+# the walked element sits in a list of documents whose radios' values are
+# addresses (`_STATIC_ADDRESS_VALUES`).
 struct _StaticRules{S<:StaticExport,V}
     spec::S
     unservable::Set{String}
     variants::V
     sent::_StaticSent
+    address_values::Bool
 end
 _StaticRules(spec, unservable, variants) =
-    _StaticRules(spec, unservable, variants, _STATIC_SENT_NOTHING)
+    _StaticRules(spec, unservable, variants, _STATIC_SENT_NOTHING, false)
+
+# The attributes besides `hx-get` whose value is an address a static site
+# loads as a full answer: links and sources, and the file a `pdf_ref` and a
+# `pdf_panel`'s lone document name, which the panel's script loads. The walk
+# maps each of them, the private check reads them, and `export_site`'s
+# reference check reads them in the written HTML. LOCKSTEP: `pdf_ref`,
+# `_pdf_chooser` in `src/pdf_panel.jl`.
+const _STATIC_LINK_ATTRS = (:href, :src, Symbol("data-htmxo-pdf-url"))
+# An element with one of these attributes holds a list of documents, each a
+# radio whose value is the document's address: a `pdf_panel`'s chooser (pills
+# or a searchable list). Inside it, a radio's `value` is mapped like an `href`.
+# (A `pdf_ref`'s attribute of the same name is a title and holds no radio.)
+const _STATIC_ADDRESS_VALUES = (Symbol("data-htmxo-pdf-document"),)
 
 # Returned by the walker for an element `controls=:remove` drops; containers
 # filter it out of their children.
@@ -6437,9 +6455,11 @@ html_escape(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;"
     _static_walk(val, rules::_StaticRules) -> val
 
 Walk a Node tree and make it static-safe under `rules`:
-- `hx-get`, `href`, `src`: a `url_map` target replaces the value verbatim;
-  otherwise rooted addresses gain `record_base` (`hx-get` under `/hx`; in a
-  recording, the fragment file it records, `<record_base>/hx/<path>.html`)
+- `hx-get`, `href`, `src`, and a PDF panel's documents
+  (`_STATIC_LINK_ATTRS`, and inside its chooser a radio's `value`): a
+  `url_map` target replaces the value verbatim; otherwise rooted addresses
+  gain `record_base` (`hx-get` under `/hx`; in a recording, the fragment file
+  it records, `<record_base>/hx/<path>.html`)
 - Strip `hx-post`, `hx-put`, `hx-patch`, `hx-delete` attributes
 - Strip unmapped `hx-get` attributes whose URL contains `?` (query-param
   routes; in a `record!` recording, unless it records that address,
@@ -6513,7 +6533,8 @@ end
 The address a response should embed for `address` where a static export
 cannot rewrite it: inside a JSON payload, an inline script, or a Vega spec's
 `data.url` (an AlgebraOfVega `geoshape(url)` or `data(url)`). A static export
-rewrites only the `hx-get`, `href` and `src` attributes it walks.
+rewrites only the attributes it walks: `hx-get`, `href`, `src`, and the
+documents of a [`pdf_panel`](@ref) and its [`pdf_ref`](@ref)s.
 
 For a `dispatch(...; static=spec)` request this is what an `href` or `src`
 with that value becomes: the target `spec.url_map(address)` returns, or else
@@ -6816,10 +6837,16 @@ function _static_walk(node::Node, rules::_StaticRules)
     # Rewrite `<a href="/foo">` to `record_base * /foo` so links from a
     # recorded page land on the matching full-page recording (not the
     # `/hx/` fragment subtree — full pages link to other full pages).
-    # A mapped address takes the caller's target instead.
-    for sym in (:href, :src)
+    # A mapped address takes the caller's target instead. A PDF panel's
+    # documents and references (`data-htmxo-pdf-url`, its chooser's radios)
+    # follow the same rule, so the panel loads the file the link names.
+    for sym in _STATIC_LINK_ATTRS
         haskey(new_attrs, sym) || continue
         new_attrs[sym] = _static_url(spec, new_attrs[sym])
+    end
+    if rules.address_values && HTMX.tag(node) === :input && get(new_attrs, :type, "") == "radio" &&
+       haskey(new_attrs, :value)
+        new_attrs[:value] = _static_url(spec, new_attrs[:value])
     end
     # A page address htmx writes into the address bar keeps its query, which
     # the page reads in the browser (`_static_page_url`).
@@ -6835,10 +6862,11 @@ function _static_walk(node::Node, rules::_StaticRules)
     end
 
     # Recurse into children, which inherit what this element adds to their
-    # requests; private content shown as several values takes its place
-    # among them.
-    inner = sent === rules.sent ? rules :
-        _StaticRules(spec, rules.unservable, rules.variants, sent)
+    # requests and whether they sit in a list of documents; private content
+    # shown as several values takes its place among them.
+    address_values = rules.address_values || any(sym -> haskey(attrs, sym), _STATIC_ADDRESS_VALUES)
+    inner = sent === rules.sent && address_values === rules.address_values ? rules :
+        _StaticRules(spec, rules.unservable, rules.variants, sent, address_values)
     new_children = Any[]
     for child in HTMX.children(node)
         _static_append!(new_children, _static_walk_child(child, inner))
@@ -6854,7 +6882,7 @@ _static_append!(out, children::AbstractVector) =
 # An element that loads or links an address the export leaves out as a private
 # page (`export_site` knows them) goes, whatever `controls` says: a disabled
 # link would still name the page.
-const _STATIC_ADDRESS_ATTRS = (Symbol("hx-get") => :fragment, :href => :full, :src => :full,
+const _STATIC_ADDRESS_ATTRS = (Symbol("hx-get") => :fragment, (_STATIC_LINK_ATTRS .=> :full)...,
     Symbol("hx-push-url") => :full, Symbol("hx-replace-url") => :full)
 _static_links_private(spec::StaticExport, attrs) = any(_STATIC_ADDRESS_ATTRS) do (sym, kind)
     address = get(attrs, sym, nothing)
@@ -7270,8 +7298,10 @@ can run inside a serving app (it renders in process with
 
 - **What is written.** Starting from `pages` (app addresses), every address
   the written answers reference, until nothing new turns up: links (`href`),
-  `hx-get` fragments, each value a [`url_params`](@ref) element declares, each
-  address a route passes to [`static_url`](@ref) (a Vega spec's `data.url`),
+  `hx-get` fragments, each value a [`url_params`](@ref) element declares, the
+  documents a [`pdf_panel`](@ref) and its [`pdf_ref`](@ref)s load (so the
+  panel shows the file the link names), each address a route passes to
+  [`static_url`](@ref) (a Vega spec's `data.url`),
   `hx-push-url` pages, and the head's script and style links, so the browser
   libraries and the linked HTMXObjects runtime come from the app's own
   [`vendorfiles`](@ref) or `staticfiles` routes, with every file a stylesheet
@@ -7337,9 +7367,10 @@ can run inside a serving app (it renders in process with
   [`export_audience`](@ref)`(__req__)`.
 
 `.nojekyll` is written too (GitHub Pages otherwise drops `_`-prefixed files
-such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get` and
-`hx-push-url`/`hx-replace-url` of an element in the written HTML, and every
-Vega `"url"` in its scripts, is checked to name a file of the bundle, which
+such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get`,
+`hx-push-url`/`hx-replace-url` and PDF document address
+(`data-htmxo-pdf-url`) of an element in the written HTML, and every Vega
+`"url"` in its scripts, is checked to name a file of the bundle, which
 also catches an address a route wrote into raw markup the walk never sees. The
 text of a `<style>` or `<script>` and an HTML comment are not markup, so an
 `href="…"` there (a CSS comment of the inline runtime) is not checked. An
@@ -7589,18 +7620,20 @@ end
 _body_contains(body::AbstractString, s::AbstractString) = occursin(s, body)
 _body_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(findfirst(codeunits(s), body))
 
-const _SITE_ATTRIBUTE = r"\b(?:href|src|hx-get|hx-push-url|hx-replace-url)=\"([^\"]*)\""
+# The attributes the walk maps (`_STATIC_ADDRESS_ATTRS`), as they stand in
+# the written HTML.
+const _SITE_ATTRIBUTE = Regex("\\b(?:" * join(string.(first.(_STATIC_ADDRESS_ATTRS)), '|') * ")=\"([^\"]*)\"")
 const _SITE_SCRIPT_URL = r"\"url\":\"([^\"]*)\""
 # An HTML comment, or a `<script>`/`<style>` element: its tag's attributes,
 # then its text, which ends at the first closing tag (as a browser reads it).
 const _SITE_RAW_TEXT = r"<!--.*?-->|<(script|style)\b((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>(.*?)</\1\b[^>]*>"si
 
 # The addresses an HTML file names, in order: each `href`, `src`, `hx-get`,
-# `hx-push-url` and `hx-replace-url` attribute of an element (its character
-# references decoded), and each `"url"` in a script (a Vega spec's
-# `data.url`). The text of a `<script>` or `<style>` and an HTML comment hold
-# no elements, so an `href="…"` written there (a comment of the inline
-# runtime's styles) is not one.
+# `hx-push-url`, `hx-replace-url` and `data-htmxo-pdf-url` attribute of an
+# element (its character references decoded), and each `"url"` in a script
+# (a Vega spec's `data.url`). The text of a `<script>` or `<style>` and an
+# HTML comment hold no elements, so an `href="…"` written there (a comment
+# of the inline runtime's styles) is not one.
 function _site_references(html::AbstractString)
     references = String[]
     _site_scan(text -> for m in eachmatch(_SITE_ATTRIBUTE, text)
