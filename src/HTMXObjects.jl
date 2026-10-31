@@ -33170,8 +33170,10 @@ compose_box_styles() = h.style(Raw(raw"""
     compose_box_script()
 
 JS driving [`compose_box`](@ref): auto-grow (no-op when the browser supports
-`field-sizing: content`, JS fallback otherwise), Enter-to-send /
-Shift+Enter-newline, localStorage draft persistence for `.htmxo-compose-draft`
+`field-sizing: content`, JS fallback otherwise), the send key (Enter sends and
+Shift+Enter inserts a new line; on a box with `data-htmxo-submit="modifier"`
+Enter inserts a new line and Ctrl/Cmd+Enter sends, see `compose_box`'s
+`submit`), localStorage draft persistence for `.htmxo-compose-draft`
 elements (keyed by `data-draft-key`), and a submit guard on
 `.htmxo-compose-form` forms (clear drafts + reset on success; on a failure,
 network error or timeout, one toast saying the text is preserved, in place of
@@ -33218,13 +33220,20 @@ compose_box_script() = h.script(Raw(raw"""
             autoGrow(el);
             el.addEventListener('input', function() { autoGrow(el); });
             el.addEventListener('keydown', function(e) {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    var f = el.closest('form');
-                    if (!f) return;
-                    if (f.requestSubmit) f.requestSubmit();
-                    else f.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-                }
+                if (e.key !== 'Enter') return;
+                // data-htmxo-submit="modifier": Enter and Shift+Enter keep
+                // their new line and Ctrl/Cmd+Enter sends. Otherwise Enter
+                // sends and Shift+Enter keeps its new line. Read on every
+                // press, so a box re-rendered in another mode needs no rebind.
+                var send = el.getAttribute('data-htmxo-submit') === 'modifier'
+                    ? (e.ctrlKey || e.metaKey)
+                    : !e.shiftKey;
+                if (!send) return;
+                e.preventDefault();
+                var f = el.closest('form');
+                if (!f) return;
+                if (f.requestSubmit) f.requestSubmit();
+                else f.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
             });
         });
     }
@@ -33561,12 +33570,22 @@ toast_script() = h.script(Raw(raw"""
 """))
 
 """
-    compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="")
+    compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="", submit=:enter)
 
 Emit an auto-growing `<textarea>` compose box: it sizes to its content (one row
 when empty via `rows=1`, growing with each wrapped/entered line, no scrollbar
-or drag handle), and submits its enclosing `<form>` on Enter (Shift+Enter
-inserts a newline).
+or drag handle), and submits its enclosing `<form>` from the keyboard.
+
+`submit` chooses the key that sends:
+
+- `:enter` (the default): Enter sends, Shift+Enter inserts a new line.
+- `:modifier`: Enter and Shift+Enter insert a new line; Ctrl+Enter or
+  Cmd+Enter sends. The form's own submit button sends either way. Use it where
+  readers write several lines or do not expect Enter to send. The box carries
+  `data-htmxo-submit="modifier"`; a hand-written `htmxo-compose-textarea`
+  opts in with the same attribute.
+
+Any other value throws an `ArgumentError`.
 
 For the draft-persistence and submit-feedback behaviour, the surrounding form
 should carry the `htmxo-compose-form` class — then a 2xx submit clears drafts +
@@ -33576,13 +33595,18 @@ preserving the typed text. Pass `draft_key` to persist the in-progress text to
 class). All behaviour is driven by [`compose_box_assets`](@ref), injected by
 `htmx(...; compose=true)` by default.
 """
-function compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="")
+function compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, class="",
+                     submit=:enter)
+    submit in (:enter, :modifier) || throw(ArgumentError(
+        "compose_box: submit must be :enter or :modifier, got $(repr(submit))"))
     cls = "htmxo-compose-textarea"
     isnothing(draft_key) || (cls *= " htmxo-compose-draft")
     isempty(class)       || (cls *= " " * class)
-    isnothing(draft_key) ?
-        h.textarea(value; name, rows, placeholder, class=cls) :
-        h.textarea(value; name, rows, placeholder, class=cls, data_draft_key=draft_key)
+    attrs = (; name, rows, placeholder, class=cls)
+    isnothing(draft_key) || (attrs = (; attrs..., data_draft_key=draft_key))
+    # `:enter` is the script's default, so it adds nothing to the markup.
+    submit === :modifier && (attrs = (; attrs..., data_htmxo_submit="modifier"))
+    h.textarea(value; attrs...)
 end
 
 include("live_thread.jl")
