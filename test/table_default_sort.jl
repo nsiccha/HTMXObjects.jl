@@ -1,7 +1,7 @@
 @testmodule DefaultSortFixtures begin
     using HTMXObjects
     import HTMXObjects: h
-    export row_ids, value_row, pinned_pairs, TREE, tree_table, ITEMS, grouped_table, keyed_rows, keyed_table
+    export row_ids, value_row, pinned_pairs, TREE, tree_table, ITEMS, grouped_table, keyed_rows, keyed_table, regimen_rows
 
     # The ids of a rendered table's rows, in document order; the group-row
     # `<template>` a regroupable table carries is no row.
@@ -47,6 +47,10 @@
                     for (k, est, lo, hi) in (("x", 5, 4, 6), ("y", 3, 1, 9), ("z", 4, missing, 5))]
     keyed_table(; kw...) = sortable_table(["Zone", ColumnSpec("Estimate"; sort_keys=["Estimate", "Lower", "Upper"])],
         keyed_rows(); kw...)
+
+    # Dosing regimens as the snag reported them: every text starts with 2.
+    regimen_rows() = [h.tr(id="row-$k")(h.td(t)) for (k, t) in
+                      (("a", "2 x 10"), ("b", "2 x 15"), ("c", "2 x 25"), ("d", "2 x 35"), ("e", "2 x 45"), ("f", "2 x 5"))]
 end
 
 @testitem "default_sort writes the rows in the order its header shows" setup=[DefaultSortFixtures] tags=[:unit] begin
@@ -85,6 +89,31 @@ end
     @test HTMXObjects._js_parse_float("12 Tsd.") == 12 && HTMXObjects._js_parse_float(".5x") == 0.5 &&
         HTMXObjects._js_parse_float("1e400") == Inf && isnan(HTMXObjects._js_parse_float("–3")) &&
         HTMXObjects._js_parse_float("-Infinity") == -Inf
+end
+
+@testitem "default_sort orders texts that start with the same number by their texts" setup=[DefaultSortFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    order(ds) = row_ids(repr("text/html", sortable_table(["Regimen"], regimen_rows(); default_sort=ds)))
+    # All start with 2: the rest decides, its numbers by value.
+    @test order(1) == ["row-f", "row-a", "row-b", "row-c", "row-d", "row-e"]
+    @test order(1 => :desc) == ["row-e", "row-d", "row-c", "row-b", "row-a", "row-f"]
+    # The leading number still comes first.
+    mixed = [h.tr(id="row-$k")(h.td(t)) for (k, t) in (("a", "10 x 1"), ("b", "2 x 10"), ("c", "2 x 5"), ("d", "x 5"))]
+    @test row_ids(repr("text/html", sortable_table(["Regimen"], mixed; default_sort=1))) == ["row-c", "row-b", "row-a", "row-d"]
+    # What the browser's `Intl.Collator(undefined, {numeric: true}).compare`
+    # answers (node 24, ICU 78.3): a run of digits compares as its number,
+    # leading zeros aside.
+    numeric(a, b) = cmp(HTMXObjects._collation_key(a; numeric=true), HTMXObjects._collation_key(b; numeric=true))
+    for (a, b, c) in (("2 x 5", "2 x 10", -1), ("2 x 45", "2 x 5", 1), ("01", "1", 0), ("2 x 05", "2 x 5", 0),
+                      ("00", "0", 0), ("001 a", "1 b", -1), ("2.5", "2.50", -1), ("2 x 1.5", "2 x 1.25", -1),
+                      ("a10", "a9", 1), ("10", "1e1", 1), ("x-5", "x-10", -1), ("1 10a", "1 9b", 1),
+                      ("1,000", "1,5", -1), ("1 99999999999999999999", "1 100000000000000000000", -1),
+                      ("2 x5", "2 x 5", 1), ("2 mg", "2 Mg", -1), ("1 ab", "1 Ab", -1), ("1 é", "1 e", 1))
+        @test numeric(a, b) == c
+    end
+    # Without `numeric`, digits compare one by one as before.
+    @test cmp(HTMXObjects._collation_key("2 x 5"), HTMXObjects._collation_key("2 x 10")) == 1
 end
 
 @testitem "default_sort keeps detail rows, pins and rows without the cell" setup=[DefaultSortFixtures] tags=[:unit] begin
@@ -150,6 +179,8 @@ end
                 [value_row(l, v) for (l, v) in (("B", 0.0), ("C", 0.0), ("D", 0.047), ("E", 0.0), ("F", 46.5))];
                 id="flat", default_sort=2 => :desc),
             sortable_table(["Name"], texts; id="text", default_sort=1),
+            sortable_table(["Regimen"], regimen_rows(); id="regimen", default_sort=1),
+            sortable_table(["Regimen"], regimen_rows(); id="regimen-desc", default_sort=1 => :desc),
             sortable_table(["Name", "Value"], pinned_pairs(); id="pins", default_sort=2 => :desc),
             keyed_table(; id="keyed", default_sort=(col="Estimate", key="Lower", dir=:asc)),
             tree_table(; id="tree", default_sort=2 => :desc),
@@ -162,7 +193,7 @@ end
         window.addEventListener('load', function() {
             const checks = [];
             const rows = id => Array.from(document.getElementById(id).rows).map(r => r.id || r.textContent.trim()).join(',');
-            for (const id of ['flat', 'text', 'pins', 'keyed', 'tree', 'g', 'e']) {
+            for (const id of ['flat', 'text', 'regimen', 'regimen-desc', 'pins', 'keyed', 'tree', 'g', 'e']) {
                 const before = rows(id);
                 htmxoResort(document.getElementById(id).closest('table'));
                 const after = rows(id);
@@ -197,7 +228,7 @@ end
                 for line in lines
                     @test endswith(line, ":true")
                 end
-                @test length(lines) == 9
+                @test length(lines) == 11
             end
         finally
             close(server)
