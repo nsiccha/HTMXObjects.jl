@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.27
+
+- `pdf_panel(documents; id, link, texts)`: a side panel that shows a PDF
+  beside the content quoting it, every page one below the other, each drawn
+  by PDF.js as it comes into view, with the passage of every reference marked
+  on its page in the reference's colour. `pdf_ref(text, url; page, panel,
+  quoted, key, hue)` is the reference: a chip that links to `url#page=N`
+  (its Markdown) and on a page with the panel opens it at the passage.
+  Every reference and mark is always lightly highlighted; pointing at one
+  shows it and its counterparts more strongly and scrolls nothing; only a
+  click moves: a reference's click opens the panel at its passage, a mark's
+  click goes to its reference. References, marks and linked table rows share
+  one hover-link group (`htmxo:link`). `pdf_toggle(panel)` shows and hides
+  the panel, `pdf_beside(content, panel)` pins it beside the content, and
+  `pdf_panel_texts(:en | :de; texts...)` gives its words (by default in the
+  page's language). `window.htmxoPdf.show`/`.toggle`, and the events
+  `htmxo:pdf-toggle` and `htmxo:pdf-goto`, serve page scripts. Lifted from
+  TenderViews' crosswalk originals panel; `examples/pdf_panel.jl` is a
+  runnable demo.
+
 ## 0.1.26
 
 - `compose_box(name; submit=:modifier)` makes Enter and Shift+Enter insert a
