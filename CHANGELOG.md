@@ -14,6 +14,20 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.31
+
+- A static export (`export_site`, a `StaticExport` `dispatch`, `record!`)
+  rewrites the files a `pdf_panel` and its `pdf_ref`s load as it rewrites
+  their links: a reference's and the lone document's `data-htmxo-pdf-url`,
+  and each chooser document's radio value. `export_site` follows them, and
+  its reference check reads `data-htmxo-pdf-url` too. Before, only the
+  `href` was rewritten, so an exported panel fetched the live address
+  (`/unterlagen/lb`, a 404 outside the bundle) and showed "missing PDF".
+  `pdf_ref` now always carries its document's title (`data-htmxo-pdf-document`,
+  by default the file name of the address it was given), so a referenced file
+  the panel does not list keeps its live title in an export. Snag
+  `pdf-panel-static-81f73b0d`.
+
 ## 0.1.30
 
 - `export_site`: an extensionless data address whose `Content-Type` the

@@ -1,7 +1,7 @@
 @testmodule PdfFixtures begin
     using HTMXObjects
     import HTMXObjects: h
-    export tiny_pdf, PDF_PAGES, html
+    export tiny_pdf, PDF_PAGES, html, PDF3, PdfExportApp
 
     # A PDF of text lines in Helvetica, one page per entry, each line its own
     # text run: enough for PDF.js to draw the pages and read their words.
@@ -42,8 +42,31 @@
         ["Section 2: Reporting",
          "A suspected case is reported to the youth office within one day.",
          "The report names the facts observed and the steps taken."]]
+    const PDF3 = tiny_pdf([PDF_PAGES; [["Section 3: Records",
+                                        "Every report is kept for ten years in the provider's records."]]])
 
     html(x) = repr("text/html", x)
+
+    # A panel in an app, for its static export (snag pdf-panel-static-81f73b0d):
+    # its files come from routes without an extension, as a tender app's do. A
+    # page with one document, with references to it and to a file it does not
+    # list, one with pills and one with a searchable list.
+    @htmx struct PdfExportApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = pdf_beside(
+            h.article(
+                h.p("Records ", pdf_ref("(LB, p. 3)", "/pdfx_datei/lb"; page=3, panel="orig", id="r3",
+                                        quoted="kept for ten years in the provider's records"), "."),
+                h.p("Reports ", pdf_ref("(annex, p. 2)", "/pdfx_datei/anlage"; page=2, panel="orig", id="r2",
+                                        quoted="reported to the youth office"), "."),
+                pdf_toggle("orig", "Originale"; id="toggle"),
+                h.p(h.a("Pills"; href="/pdfx_pills"), " ", h.a("List"; href="/pdfx_list"))),
+            pdf_panel(["Leistungsbeschreibung" => "/pdfx_datei/lb"]; id="orig"))
+        @get pdfx_pills() = pdf_panel(["LB" => "/pdfx_datei/lb", "Anlage" => "/pdfx_datei/anlage"]; id="pills")
+        @get pdfx_list() = pdf_panel(["Teil $i" => "/pdfx_datei/teil$i" for i in 1:9]; id="list")
+        @direct @get pdfx_datei(name::String) = MIMEResponse("application/pdf", PDF3)
+    end
 end
 
 @testitem "pdf_ref is a link to the page that names its passage" setup=[PdfFixtures] tags=[:unit] begin
@@ -170,6 +193,163 @@ end
     @test strip(to_markdown_string(h.div(h.p("a"), pdf_toggle("orig")))) == "a"
     b = html(pdf_beside(h.p("content"), pdf_panel(; id="orig", assets=false)))
     @test occursin(r"^<div class=\"htmxo-pdf-beside\" data-htmxo-pdf-beside=\"\"><div class=\"htmxo-pdf-beside-content\"><p>content</p></div><aside id=\"orig\"", b)
+end
+
+@testitem "pdf_panel in a static export loads the files the export wrote" setup=[PdfFixtures] tags=[:unit] begin
+    # Snag pdf-panel-static-81f73b0d (ODLPlaus:review): export_site rewrote a
+    # reference's href, but its data-htmxo-pdf-url, the lone document's and the
+    # chooser's radio values kept the live address, so the exported panel fetched
+    # /unterlagen/lb (a 404 outside the bundle) and said the PDF was missing.
+    using HTMXObjects, Treebars
+    route!(PdfExportApp())
+    vendorfiles()
+    dir = joinpath(mktempdir(), "site")
+    export_site(dir; pages=["/"])
+    for f in ("pdfx_datei-lb.pdf", "pdfx_datei-anlage.pdf", "pdfx_datei-teil1.pdf", "pdfx_datei-teil9.pdf",
+              "pdfx_pills.html", "pdfx_list.html")
+        @test isfile(joinpath(dir, f))
+    end
+    @test read(joinpath(dir, "pdfx_datei-lb.pdf")) == PDF3
+    index = read(joinpath(dir, "index.html"), String)
+    tag(s, id) = match(Regex("<a [^>]*id=\"$id\"[^>]*>"), s).match
+    # a reference: its link and its file name the written file
+    r3 = tag(index, "r3")
+    @test occursin("href=\"pdfx_datei-lb.pdf#page=3\"", r3) && occursin("data-htmxo-pdf-url=\"pdfx_datei-lb.pdf\"", r3)
+    # a file the panel does not list keeps the title the live page gives it
+    r2 = tag(index, "r2")
+    @test occursin("data-htmxo-pdf-url=\"pdfx_datei-anlage.pdf\"", r2) && occursin("data-htmxo-pdf-document=\"anlage\"", r2)
+    # the lone document and the "open file" link
+    @test occursin("<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"pdfx_datei-lb.pdf\">Leistungsbeschreibung</span>", index)
+    @test occursin(r"<a [^>]*data-htmxo-pdf-file=\"\"[^>]*>", index) &&
+          occursin("href=\"pdfx_datei-lb.pdf\"", match(r"<a [^>]*data-htmxo-pdf-file=\"\"[^>]*>", index).match)
+    # pills and a searchable list: each document's radio names its written file
+    pills = read(joinpath(dir, "pdfx_pills.html"), String)
+    @test occursin("value=\"pdfx_datei-lb.pdf\" checked=\"true\">LB</label>", pills)
+    @test occursin("value=\"pdfx_datei-anlage.pdf\">Anlage</label>", pills)
+    list = read(joinpath(dir, "pdfx_list.html"), String)
+    @test count(r"<input type=\"radio\" name=\"htmxo-pdf-document-list\" value=\"pdfx_datei-teil\d\.pdf\"", list) == 9
+    # no panel is left with an address of the live app
+    for page in (index, pills, list)
+        @test !occursin("data-htmxo-pdf-url=\"/", page) && !occursin("value=\"/pdfx", page)
+    end
+    # the reference check reads a panel's addresses, so one that escaped the walk fails the export
+    @test "pdfx_datei-lb.pdf" in HTMXObjects._site_references(index)
+    @test HTMXObjects._site_references("<span data-htmxo-pdf-url=\"/x\">x</span>") == ["/x"]
+    # a request-scoped export puts its record_base before them, as before a link
+    spec = StaticExport(; record_base="/odl")
+    page = String(dispatch(:GET, "/"; static=spec).body)
+    @test occursin("data-htmxo-pdf-url=\"/odl/pdfx_datei/lb\"", tag(page, "r3")) &&
+          occursin("href=\"/odl/pdfx_datei/lb#page=3\"", tag(page, "r3"))
+    @test occursin("data-htmxo-pdf-url=\"/odl/pdfx_datei/lb\">Leistungsbeschreibung</span>", page)
+    @test occursin("value=\"/odl/pdfx_datei/anlage\">Anlage</label>",
+                   String(dispatch(:GET, "/pdfx_pills"; static=spec).body))
+    # the live page keeps the app's addresses
+    live = String(dispatch(:GET, "/").body)
+    @test occursin("data-htmxo-pdf-url=\"/pdfx_datei/lb\">Leistungsbeschreibung</span>", live)
+    @test occursin("data-htmxo-pdf-url=\"/pdfx_datei/anlage\"", tag(live, "r2"))
+    @test occursin("value=\"/pdfx_datei/anlage\">Anlage</label>", String(dispatch(:GET, "/pdfx_pills").body))
+end
+
+@testitem "pdf_panel browser: an exported panel served from a subdirectory shows the files the export wrote" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    # Snag pdf-panel-static-81f73b0d: served from /odl/, the exported panel
+    # fetched the live /unterlagen/lb outside the bundle and showed no page.
+    using HTMXObjects, HTTP, Sockets, Treebars
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        route!(PdfExportApp())
+        vendorfiles()
+        dir = joinpath(mktempdir(), "site")
+        export_site(dir; pages=["/"])
+        driver = raw"""<script>
+        window.addEventListener('load', async function () {
+            const checks = [];
+            const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
+            const tick = () => fetch('/tick').then(r => r.text());
+            const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
+            const aside = document.getElementById('orig'), view = aside.querySelector('[data-htmxo-pdf-pages]');
+            const line = () => aside.querySelector('[data-htmxo-pdf-page-info]').textContent;
+            const note = () => aside.querySelector('[data-htmxo-pdf-note]').textContent;
+            const href = () => aside.querySelector('[data-htmxo-pdf-file]').getAttribute('href');
+            const page = n => aside.querySelector('.htmxo-pdf-page[data-htmxo-pdf-page="' + n + '"]');
+            const drawn = n => page(n) && page(n).hasAttribute('data-htmxo-pdf-drawn');
+            const busy = () => view.getAttribute('aria-busy') === 'true';
+            const shown = () => aside.htmxoPdfFile && aside.htmxoPdfFile.url;
+            const radios = () => aside.querySelectorAll('[data-htmxo-pdf-document] input[type="radio"]');
+            const radio = url => aside.querySelector('[data-htmxo-pdf-document] input[value="' + url + '"]');
+            const seen = () => ({line: line(), note: note(), href: href(), busy: busy(), shown: shown(),
+                                 hidden: aside.hidden, radios: Array.from(radios(), r => r.value)});
+            const settled = (url, n) => wait(() => !busy() && shown() === url && drawn(n) && line() === 'page ' + n + ' of 3');
+            try {
+                // the toggle opens the lone document: the file the export wrote
+                document.getElementById('toggle').click();
+                await settled('pdfx_datei-lb.pdf', 1);
+                check('toggle-shows-written-file', !aside.hidden && shown() === 'pdfx_datei-lb.pdf' &&
+                      line() === 'page 1 of 3' && note() === '', seen());
+                // a reference goes to its passage in that file, and marks it
+                document.getElementById('r3').click();
+                await settled('pdfx_datei-lb.pdf', 3);
+                await wait(() => aside.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-active]'));
+                check('ref-marks-passage', line() === 'page 3 of 3' && href() === 'pdfx_datei-lb.pdf#page=3' &&
+                      aside.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-active]'), seen());
+                // a reference to a file the panel does not list adds it, titled as the live page titles it
+                document.getElementById('r2').click();
+                await settled('pdfx_datei-anlage.pdf', 2);
+                const added = radio('pdfx_datei-anlage.pdf');
+                check('unlisted-added', radios().length === 2 && added && added.checked &&
+                      added.closest('label').textContent.trim() === 'anlage', seen());
+                // the first document's pill: the same file, not a second entry for it
+                radio('pdfx_datei-lb.pdf').closest('label').click();
+                await settled('pdfx_datei-lb.pdf', 1);
+                check('pill-back', radios().length === 2 && radio('pdfx_datei-lb.pdf').checked && note() === '', seen());
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        </script>"""
+        index = joinpath(dir, "index.html")
+        write(index, replace(read(index, String), "</body>" => driver * "</body>"))
+        types = Dict(".html" => "text/html; charset=utf-8", ".js" => "text/javascript", ".css" => "text/css",
+                     ".pdf" => "application/pdf", ".woff2" => "font/woff2", ".svg" => "image/svg+xml")
+        requested = String[]
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        # The bundle below /odl/, as a static server holds it; nothing else is there.
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.unescapeuri(HTTP.URI(req.target).path)
+            path == "/tick" && return (sleep(0.05); HTTP.Response(200, "ok"))
+            push!(requested, path)
+            file = startswith(path, "/odl/") ? joinpath(dir, path[6:end]) : ""
+            isfile(file) || return HTTP.Response(404)
+            HTTP.Response(200, ["Content-Type" => get(types, last(splitext(file)), "application/octet-stream")], read(file))
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/odl/index.html`; timeout=180)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                    endswith(line, ":true") || println("pdf_panel export browser: ", line)
+                end
+                @test count(==('\n'), checks[1]) + 1 == 4
+            end
+            # every file the page asked for is in the bundle, the PDFs among them
+            outside = filter(p -> !startswith(p, "/odl/") && p != "/favicon.ico", requested)
+            @test isempty(outside)
+            isempty(outside) || println("pdf_panel export browser: requests outside the bundle: ", outside)
+            @test "/odl/pdfx_datei-lb.pdf" in requested && "/odl/pdfx_datei-anlage.pdf" in requested
+        finally
+            close(server)
+        end
+    end
 end
 
 @testitem "pdf_panel browser: hover lights, only a click moves" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
