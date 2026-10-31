@@ -498,6 +498,111 @@ end
     end
 end
 
+@testitem "pdf_panel browser: a document chosen in the chooser opens at its first page" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    # Snag pdf-panel-choose-708af86e (TenderViews): after a pill's click the
+    # panel went on showing the other file's pages and page line ("page 3 of
+    # 3") under the new file's name until the new file had loaded, so the
+    # page read depended on how fast it loaded.
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        pdf = tiny_pdf([PDF_PAGES; [["Section 3: Records",
+                                     "Every report is kept for ten years in the provider's records."]]])
+        content = h.div(; id="content")(
+            h.p("Records ", pdf_ref("(LB, p. 3)", "/lb.pdf"; page=3, panel="orig", id="r3",
+                                    quoted="kept for ten years in the provider's records"), "."),
+            h.p("Reports ", pdf_ref("(LB 2, p. 2)", "/lb2.pdf"; page=2, panel="orig", id="r2",
+                                    quoted="reported to the youth office"), "."),
+            h.div(; style="height: 1500px"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+            const checks = [];
+            const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
+            const tick = () => fetch('/tick').then(r => r.text());
+            const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
+            const aside = document.getElementById('orig'), view = aside.querySelector('[data-htmxo-pdf-pages]');
+            const line = () => aside.querySelector('[data-htmxo-pdf-page-info]').textContent;
+            const href = () => aside.querySelector('[data-htmxo-pdf-file]').getAttribute('href');
+            const page = n => aside.querySelector('.htmxo-pdf-page[data-htmxo-pdf-page="' + n + '"]');
+            const drawn = n => page(n) && page(n).hasAttribute('data-htmxo-pdf-drawn');
+            const busy = () => view.getAttribute('aria-busy') === 'true';
+            const radio = url => aside.querySelector('[data-htmxo-pdf-document] input[value="' + url + '"]');
+            const shown = () => aside.htmxoPdfFile && aside.htmxoPdfFile.url;
+            // page n's top in the panel's upper third: the panel is at that page
+            const at = n => { const top = page(n).getBoundingClientRect().top - aside.getBoundingClientRect().top;
+                              return top >= 0 && top < aside.clientHeight / 3; };
+            const seen = () => ({line: line(), href: href(), busy: busy(), pages: view.children.length,
+                                 scrollTop: aside.scrollTop, shown: shown(), drawn1: drawn(1)});
+            const settled = (url, n) => wait(() => !busy() && shown() === url && drawn(n) && line() === 'page ' + n + ' of 3');
+            try {
+                // the first file, gone to its third page by a reference
+                document.getElementById('r3').click();
+                await settled('/lb.pdf', 3);
+                check('lb-page-3', line() === 'page 3 of 3' && at(3) && aside.scrollTop > 0 && drawn(1), seen());
+                // the other file's pill: at once the old pages, page line and place are gone
+                radio('/lb2.pdf').closest('label').click();
+                check('switch-at-once', radio('/lb2.pdf').checked && href() === '/lb2.pdf#page=1' && line() === '' &&
+                    view.children.length === 0 && aside.scrollTop === 0 && busy(), seen());
+                // what the reporter waited for holds only once the new file is shown, at page 1
+                await wait(() => href() === '/lb2.pdf#page=1' && line().startsWith('page') && drawn(1));
+                check('reporter-wait', line() === 'page 1 of 3' && shown() === '/lb2.pdf' && !busy(), seen());
+                await settled('/lb2.pdf', 1);
+                check('lb2-first-page', at(1) && !busy(), seen());
+                // back to the first file: its first page, not the third it was at
+                radio('/lb.pdf').closest('label').click();
+                check('back-at-once', line() === '' && view.children.length === 0 && busy(), seen());
+                await settled('/lb.pdf', 1);
+                check('lb-first-page', at(1) && radio('/lb.pdf').checked, seen());
+                // a reference to the other file goes to its own page
+                document.getElementById('r2').click();
+                await settled('/lb2.pdf', 2);
+                await wait(() => aside.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-active]'));
+                check('ref-own-page', line() === 'page 2 of 3' && aside.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-active]'), seen());
+                check('ref-chooses', radio('/lb2.pdf').checked && href() === '/lb2.pdf#page=2', seen());
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(h.main(pdf_beside(content,
+                pdf_panel(["LB" => "/lb.pdf", "LB 2" => "/lb2.pdf"]; id="orig"))), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) :
+            path == "/lb.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) :
+            # the other file takes a while: the switch is seen before it is shown
+            path == "/lb2.pdf" ? (sleep(1); HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf)) :
+            path == "/tick" ? (sleep(0.05); HTTP.Response(200, "ok")) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; timeout=180)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                    endswith(line, ":true") || println("pdf_panel switch browser: ", line)
+                end
+                @test count(==('\n'), checks[1]) + 1 == 8
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "pdf_panel browser: opening and closing keep the reference in place" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     import HTMXObjects: h
