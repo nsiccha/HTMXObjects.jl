@@ -1697,12 +1697,21 @@ const PLAN = "/files/plan.pdf"
   (40 %, at least 22rem; `--htmxo-pdf-width`), below a page's own sticky
   header (`--htmxo-sticky-top`). Opening or closing it keeps the clicked
   reference where it was on screen.
-- The bar has the document chooser (a reference to an unlisted file adds
-  it), the page line with previous and next, **Colours** (off: only the
-  passages pointed at and gone to, in a marker's yellow), **Open file** and
-  close. Its words follow the page's language (`pdf_panel_texts(:de)`
-  under `__lang__ = "de"`); override any with
+- The bar has the document chooser, the page line with previous and next,
+  **Colours** (off: only the passages pointed at and gone to, in a marker's
+  yellow), **Open file** and close. Its words follow the page's language
+  (`pdf_panel_texts(:de)` under `__lang__ = "de"`); override any with
   `texts=pdf_panel_texts(:de; label="Originale")`.
+- **The document chooser is never a native select box.** One document is
+  its title, as text. Two to eight are a row of pills, the one shown filled
+  (the look of `radio_group`, above). More are a field that opens a
+  searchable list (`choice_list`, above). A reference to an
+  unlisted file adds it, and the chooser takes the form its new number of
+  documents calls for. It stays on its line beside the controls while it
+  fits, else takes a line of its own; the page line never splits from its
+  buttons. A browser test finds it as `[data-htmxo-pdf-document]`: each
+  document is a radio whose value is the file's address, and a lone title
+  carries it as `data-htmxo-pdf-url`.
 - The passage is found where the page holds the quoted words, or the longest
   beginning of them (24 letters at least), comparing letters and digits
   only. Where neither is on the page the panel goes to the page's top and

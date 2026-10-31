@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.28
+
+- `pdf_panel`'s document chooser is never a native select box any more. One
+  document is its title, as text; two to eight are a row of pills
+  (`radio_group`'s look); more are a field that opens a searchable list
+  (`choice_list`). A reference to an unlisted file adds it and draws the
+  chooser again in the form its new number of documents calls for. The
+  chooser keeps the `data-htmxo-pdf-document` mark; each document in it is a
+  radio whose value is the file's address, and a lone title carries it as
+  `data-htmxo-pdf-url`. The bar's controls stay together, the page line
+  between its buttons, and the chooser takes a line of its own when it does
+  not fit beside them. `pdf_panel_texts` gains `search` and `no_match`, the
+  long list's search field and its no-match line. Snag
+  `pdf-panel-docume-fcc431e2`.
+- **Breaking:** a page script or browser test that read the chooser as a
+  `<select>` (`select.value`, its `<option>`s) reads the checked radio in
+  `[data-htmxo-pdf-document]` instead, or calls `window.htmxoPdf.show`.
+
 ## 0.1.27
 
 - `pdf_panel(documents; id, link, texts)`: a side panel that shows a PDF
