@@ -3321,6 +3321,7 @@ See the [Components catalog](components.md) for the full list with examples.
 | `tabset`, `tabset_styles`, `tabset_script`, `htmx_tabset` | Tab navigation widgets; a `tabset` keeps its open tab in the page URL |
 | `comparison_view`, `comparison_js`, `comparison_styles` | Selectable comparison columns, either inline tabs with a Compare dialog or shown directly inline, independently loaded and scrolling; see [components](components.md#comparison-view) |
 | `nav_sidebar`, `status_badge`, `lazy` | Layout/state widgets                                  |
+| `pdf_panel`, `pdf_ref`, `pdf_toggle`, `pdf_beside`, `pdf_panel_texts` | A PDF beside the text that quotes it, each reference's passage marked on its page; see [components](components.md#pdf-panel) |
 | `loading_indicator_script`, `request_feedback_*`, `show_when_script`, `choice_list_script` | UX scripts injected into the page |
 
 ## A glossary of the app's terms {#glossary}

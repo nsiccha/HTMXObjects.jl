@@ -87,6 +87,17 @@ run it locally.
 
 [View source](https://github.com/nsiccha/HTMXObjects.jl/blob/main/examples/chat.jl)
 
+## PDF panel {#pdf-panel}
+
+A report that quotes a PDF, built on [`pdf_panel`](components.md#pdf-panel):
+each reference is a coloured chip, and its passage is marked in the same
+colour on its page of the PDF beside the report. Pointing at a reference, a
+requirement's row or a marked passage shows its counterparts more strongly
+without scrolling anything; a click on a reference opens the panel at its
+passage, a click on a passage goes back to its reference.
+
+[View source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/pdf_panel.jl)
+
 ## Shared settings in a large table
 
 The [standalone source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/shared_settings.jl)

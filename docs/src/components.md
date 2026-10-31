@@ -1656,6 +1656,67 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
+### `pdf_panel` — a PDF beside the text, its quoted passages marked {#pdf-panel}
+
+A side panel for a PDF the page quotes: every page of the file one below the
+other, each drawn by [PDF.js](https://mozilla.github.io/pdf.js/) (loaded from
+jsDelivr the first time the panel opens) as it comes into view. Each
+reference in the text, a `pdf_ref`, names the file, the page and the quoted
+words, and its passage is marked on that page in the reference's colour.
+
+```julia
+const PLAN = "/files/plan.pdf"
+@get bericht() = pdf_beside(
+    h.article(
+        h.p("A suspicion reaches the youth office within a day ",
+            pdf_ref("(plan, p. 3)", PLAN; page=3, panel="plan",
+                    quoted="reported to the youth office within one day"), "."),
+        pdf_toggle("plan", "Show the plan")),
+    pdf_panel(["Child protection plan" => PLAN]; id="plan"))
+```
+
+- **Every reference and its mark are always lightly highlighted**, in a
+  colour of the categorical palette (`hue=1…8`; by default one picked from
+  the passage, so it keeps its colour wherever it is quoted).
+- **Pointing shows, never moves.** Pointing at a reference shows it and its
+  mark more strongly, pointing at a mark shows its references, and nothing
+  scrolls.
+- **Only a click moves.** A reference's click opens the panel at its passage,
+  scrolled a third of the way down, and marks it most strongly. A mark's
+  click goes to its reference. A modified click (new tab) and a page
+  without the panel open the file itself (`url#page=3`), which is also the
+  reference's Markdown.
+- **Tables join in.** References, marks and the rows of a table with the
+  same `link=` group are one hover-link group (`htmxo:link`): give a
+  reference the `key=` its row's link key has, and the row lights the
+  passage while the passage lights the row.
+- **New content is marked as it arrives**: a reference that an htmx swap
+  or a `live_thread` item
+  brings is marked on the pages already drawn.
+- `pdf_beside(content, panel)` pins the open panel beside the content
+  (40 %, at least 22rem; `--htmxo-pdf-width`), below a page's own sticky
+  header (`--htmxo-sticky-top`). Opening or closing it keeps the clicked
+  reference where it was on screen.
+- The bar has the document chooser (a reference to an unlisted file adds
+  it), the page line with previous and next, **Colours** (off: only the
+  passages pointed at and gone to, in a marker's yellow), **Open file** and
+  close. Its words follow the page's language (`pdf_panel_texts(:de)`
+  under `__lang__ = "de"`); override any with
+  `texts=pdf_panel_texts(:de; label="Originale")`.
+- The passage is found where the page holds the quoted words, or the longest
+  beginning of them (24 letters at least), comparing letters and digits
+  only. Where neither is on the page the panel goes to the page's top and
+  says so.
+- Page scripts: `window.htmxoPdf.show(panel, {url, page, key})`,
+  `window.htmxoPdf.toggle(panel, open)`, and the events `htmxo:pdf-toggle`
+  (`{open}`) and `htmxo:pdf-goto` (`{key, group}`, cancelable, before a mark's
+  click goes to its reference).
+
+The panel carries its own style and script (`assets=false` and
+`pdf_panel_assets()` in the head for a page that wants them there). It is
+HTML only, so a Markdown answer leaves it out. A runnable demo is
+[`examples/pdf_panel.jl`](examples.md#pdf-panel).
+
 ### `loading_indicator_script()` and `request_feedback_*` {#request-feedback}
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.

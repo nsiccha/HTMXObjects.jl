@@ -215,13 +215,14 @@ function _thread_item_nodes(items)
 end
 
 # FNV-1a (64-bit): stable across processes and Julia versions, unlike `hash`.
-function _thread_digest(s::AbstractString)
+function _fnv1a(s::AbstractString)
     d = 0xcbf29ce484222325
     for b in codeunits(s)
         d = (d ⊻ b) * 0x00000100000001b3
     end
-    string(d; base=36)
+    d
 end
+_thread_digest(s::AbstractString) = string(_fnv1a(s); base=36)
 
 _thread_poll_ms(::Nothing) = 0
 _thread_poll_ms(seconds::Real) = seconds > 0 ? round(Int, 1000seconds) :
