@@ -1712,6 +1712,14 @@ const PLAN = "/files/plan.pdf"
   buttons. A browser test finds it as `[data-htmxo-pdf-document]`: each
   document is a radio whose value is the file's address, and a lone title
   carries it as `data-htmxo-pdf-url`.
+- **A document chosen in the chooser opens at its first page**, whatever
+  page the panel was at in the file before; a reference opens its own page.
+  The moment another file is chosen or referenced, the pages, the page line
+  and the place of the one shown go, and the panel says it is loading until
+  the new file is shown: it never shows one file's pages under another's
+  name. While the panel goes to a page, its pages (`[data-htmxo-pdf-pages]`)
+  carry `aria-busy="true"`; a browser test waits for that to go before it
+  reads the page line.
 - The passage is found where the page holds the quoted words, or the longest
   beginning of them (24 letters at least), comparing letters and digits
   only. Where neither is on the page the panel goes to the page's top and

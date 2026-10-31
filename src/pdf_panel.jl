@@ -172,7 +172,15 @@ script from the page ([`htmxo_utility_styles`](@ref),
   scrolls;
 - a click on a reference opens the panel at its passage, scrolled a third of
   the way down, and marks it most strongly until another is clicked; a click
-  on a mark goes to its reference.
+  on a mark goes to its reference;
+- a document chosen in the chooser opens at its first page, whatever page
+  the panel was at in the file before. The moment another file is chosen or
+  referenced, the pages, the page line and the place of the one shown go,
+  and the panel says it is loading until the new file is shown.
+
+While the panel goes to a page, its pages (the element marked
+`data-htmxo-pdf-pages`) carry `aria-busy="true"`: a browser test waits for
+that to go before it reads the page line.
 
 The passage is found where the page holds the quoted words, or the longest
 beginning of them (at least 24 letters), comparing letters and digits only, so
@@ -758,6 +766,21 @@ pdf_panel_script() = h.script(Raw(raw"""
       return path.replace(/\/+$/, '').split('/').pop() || url;
     } catch (e) { return url; }
   }
+  // Another file is to be shown: the pages, the page line and the place of
+  // the one shown go at once, so the panel never shows one file's pages
+  // under another's name while the other loads.
+  function clear(aside) {
+    var file = aside.htmxoPdfFile;
+    if (file) {
+      if (file.observer) file.observer.disconnect();
+      file.boxes.forEach(function (entry, i) { release(file, i + 1); });
+    }
+    aside.htmxoPdfFile = null;
+    aside.htmxoPdfPinned = null;
+    aside.querySelector('[data-htmxo-pdf-pages]').replaceChildren();
+    aside.querySelector('[data-htmxo-pdf-page-info]').textContent = '';
+    aside.scrollTop = 0;
+  }
   // The file's pages laid out at the panel's width, a box of its final size
   // each, so nothing moves as they are drawn; each drawn once it comes near
   // the panel's view and let go again far from it.
@@ -765,7 +788,8 @@ pdf_panel_script() = h.script(Raw(raw"""
     var view = aside.querySelector('[data-htmxo-pdf-pages]');
     var width = Math.max(200, view.clientWidth), file = aside.htmxoPdfFile;
     if (file && file.url === url && file.width === width) return file.ready;
-    if (file && file.observer) file.observer.disconnect();
+    if (file && file.url !== url) { clear(aside); width = Math.max(200, view.clientWidth); }
+    else if (file && file.observer) file.observer.disconnect();
     file = {url: url, width: width, boxes: []};
     aside.htmxoPdfFile = file;
     file.ready = load(aside.dataset.htmxoPdfjs, url).then(function (loaded) {
@@ -963,7 +987,8 @@ pdf_panel_script() = h.script(Raw(raw"""
     setTimeout(function () { ref.removeAttribute('data-htmxo-pdf-flash'); }, 1600);
   }
   // Show file `url` at the passage `key` on page `page`, or at the page's top
-  // without one, opening the panel.
+  // without one, opening the panel. Until it is there, the pages are marked
+  // `aria-busy`.
   function show(aside, o) {
     if (!o || !o.url) return;
     wire(aside);
@@ -975,6 +1000,9 @@ pdf_panel_script() = h.script(Raw(raw"""
     light(aside);
     var token = (aside.htmxoPdfToken || 0) + 1;
     aside.htmxoPdfToken = token;
+    var view = aside.querySelector('[data-htmxo-pdf-pages]');
+    view.setAttribute('aria-busy', 'true');
+    function done() { if (token === aside.htmxoPdfToken) view.removeAttribute('aria-busy'); }
     var file = aside.htmxoPdfFile;
     if (!file || file.url !== o.url || !file.boxes.length) note(aside, text(aside, 'Loading'));
     layout(aside, o.url).then(function (file) {
@@ -989,8 +1017,9 @@ pdf_panel_script() = h.script(Raw(raw"""
         aside.htmxoPdfPinned = n;
         reach(aside, hit || box, o.smooth);
         info(aside);
+        done();
       });
-    }).catch(function (error) { if (token === aside.htmxoPdfToken) failed(aside, error); });
+    }).catch(function (error) { if (token === aside.htmxoPdfToken) { failed(aside, error); done(); } });
   }
   // Lay the pages out again at the panel's new width, at the same place.
   function refresh(aside) {

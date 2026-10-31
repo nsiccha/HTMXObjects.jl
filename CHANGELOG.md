@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.29
+
+- `pdf_panel`: a document chosen in the chooser opens at its first page,
+  whatever page the panel was at in the file before, and a reference at its
+  own page. The moment another file is chosen or referenced, the pages, the
+  page line and the place of the one shown go, and the panel says it is
+  loading until the new file is shown; before, it went on showing the old
+  file's pages and page line under the new file's name while that loaded.
+  While the panel goes to a page, its pages (`data-htmxo-pdf-pages`) carry
+  `aria-busy="true"`, which a browser test waits for to go. Snag
+  `pdf-panel-choose-708af86e`.
+
 ## 0.1.28
 
 - `pdf_panel`'s document chooser is never a native select box any more. One
