@@ -15,14 +15,18 @@
 
 The words of a [`pdf_panel`](@ref): its accessible name and
 [`pdf_toggle`](@ref)'s text (`label`), the document chooser's name
-(`documents`), the page line (`page`, with `{page}` and `{pages}`), the bar's
-buttons (`previous_page`, `next_page`, `colours`, `colours_help`, `open_file`,
-`close`) and the status line (`loading`, `failed`, `not_found`, `empty`).
+(`documents`) and, for a long list of documents, its search field (`search`,
+and `no_match` when no document matches), the page line (`page`, with
+`{page}` and `{pages}`), the bar's buttons (`previous_page`, `next_page`,
+`colours`, `colours_help`, `open_file`, `close`) and the status line
+(`loading`, `failed`, `not_found`, `empty`).
 Build one with [`pdf_panel_texts`](@ref).
 """
 struct PdfPanelTexts
     label::String           # the panel's accessible name; pdf_toggle's text
     documents::String       # the document chooser's accessible name
+    search::String          # a long chooser's search field
+    no_match::String        # ... when no document matches the search
     page::String            # the page line: "{page}" of "{pages}"
     previous_page::String
     next_page::String
@@ -42,6 +46,8 @@ const _PDF_TEXT_LOCALES = (
     en = (
         label = "Document",
         documents = "Documents",
+        search = "Search…",
+        no_match = "No matching document",
         page = "page {page} of {pages}",
         previous_page = "Previous page",
         next_page = "Next page",
@@ -57,6 +63,8 @@ const _PDF_TEXT_LOCALES = (
     de = (
         label = "Dokument",
         documents = "Dokumente",
+        search = "Suchen…",
+        no_match = "Kein passendes Dokument",
         page = "Seite {page} von {pages}",
         previous_page = "Vorige Seite",
         next_page = "Nächste Seite",
@@ -144,6 +152,18 @@ content, pinned while the content scrolls by.
 - `assets=false` leaves out the panel's style and script, for a page that
   carries [`pdf_panel_assets`](@ref) itself.
 
+**The document chooser** is never a native select box. One document is its
+title, as text. Two to eight are a row of pills, one per document, the one
+shown filled ([`radio_group`](@ref)'s look). More are a field showing the
+document shown that opens a searchable list of them ([`choice_list`](@ref)).
+A reference that adds a file draws it again in the form its new number of
+documents takes. The chooser is the element marked `data-htmxo-pdf-document`;
+each document in it is a radio whose value is the file's address (a browser
+test checks it, or clicks its label), and the lone title carries the address
+as `data-htmxo-pdf-url`. The pills and the list take their look and their
+script from the page ([`htmxo_utility_styles`](@ref),
+[`choice_list_script`](@ref)), which every [`htmx`](@ref) page carries.
+
 **How it behaves** (the same for every reference and mark):
 
 - every reference and its mark is always lightly highlighted, in its colour;
@@ -190,20 +210,45 @@ function pdf_panel(documents=(); id::AbstractString, link::AbstractString=id, te
                     data_htmxo_pdfjs=endswith(pdfjs, '/') ? pdfjs : pdfjs * "/",
                     data_htmxo_pdf_hues="on",
                     data_text_page=t.page, data_text_loading=t.loading, data_text_failed=t.failed,
-                    data_text_not_found=t.not_found, data_text_empty=t.empty)(
+                    data_text_not_found=t.not_found, data_text_empty=t.empty,
+                    data_text_documents=t.documents, data_text_search=t.search, data_text_no_match=t.no_match)(
         (assets ? pdf_panel_assets() : ())...,
         h.div(; class="htmxo-pdf-bar")(
-            h.select(; data_htmxo_pdf_document="", aria_label=t.documents)(
-                (h.option(title; value=url) for (title, url) in docs)...),
-            h.button(; type="button", data_htmxo_pdf_step="-1", aria_label=t.previous_page, title=t.previous_page)("‹"),
-            h.span(; class="htmxo-pdf-page-info", data_htmxo_pdf_page_info="")(),
-            h.button(; type="button", data_htmxo_pdf_step="1", aria_label=t.next_page, title=t.next_page)("›"),
-            h.button(; type="button", data_htmxo_pdf_colours="", aria_pressed="true", title=t.colours_help)(t.colours),
-            h.a(; data_htmxo_pdf_file="", href=first_url, target="_blank", rel="noopener")(t.open_file * " ↗"),
-            h.button(; type="button", data_htmxo_pdf_close="", aria_label=t.close, title=t.close)("✕")),
+            _pdf_chooser(id, docs, t),
+            # The controls stay together, the page line between its buttons:
+            # a long title or many pills take a line of their own instead.
+            h.div(; class="htmxo-pdf-controls")(
+                h.span(; class="htmxo-pdf-pager")(
+                    h.button(; type="button", data_htmxo_pdf_step="-1", aria_label=t.previous_page, title=t.previous_page)("‹"),
+                    h.span(; class="htmxo-pdf-page-info", data_htmxo_pdf_page_info="")(),
+                    h.button(; type="button", data_htmxo_pdf_step="1", aria_label=t.next_page, title=t.next_page)("›")),
+                h.button(; type="button", data_htmxo_pdf_colours="", aria_pressed="true", title=t.colours_help)(t.colours),
+                h.a(; data_htmxo_pdf_file="", href=first_url, target="_blank", rel="noopener")(t.open_file * " ↗"),
+                h.button(; type="button", data_htmxo_pdf_close="", aria_label=t.close, title=t.close)("✕"))),
         h.p(; class="htmxo-pdf-note", data_htmxo_pdf_note="", role="status")(),
         h.div(; class="htmxo-pdf-pages", data_htmxo_pdf_pages="")())
     html_only(panel)
+end
+
+# The radios of a panel's chooser share a name of their own, so two panels
+# never uncheck each other's documents. LOCKSTEP: `redraw` in the script.
+_pdf_choice_name(id::AbstractString) = "htmxo-pdf-document-" * id
+
+# The document chooser, never a native select box (the user's rule, decision
+# `VerkehrsStrukturdaten:ux/19mny0l`): one document is its title, a few a row
+# of pills (`radio_group`), a long list a searchable list (`_choice_list`, past
+# `_RADIO_MAX` as for generated forms). The first document is the one chosen.
+# The script draws it again in these forms when a reference adds a file
+# (`redraw`), reading the threshold from `data-htmxo-pdf-pills`.
+function _pdf_chooser(id::AbstractString, docs, t::PdfPanelTexts)
+    name, n = _pdf_choice_name(id), length(docs)
+    first_url = n == 0 ? nothing : last(first(docs))
+    form = n == 0 ? () :
+        n == 1 ? (h.span(first(only(docs)); class="htmxo-pdf-title", data_htmxo_pdf_url=first_url),) :
+        n <= _RADIO_MAX ? (radio_group(name, [url => title for (title, url) in docs]; label=t.documents, value=first_url),) :
+        (_choice_list(name, t.documents, [(; value=url, label=title) for (title, url) in docs], first_url;
+                      texts=error_texts(:en; choice_search=t.search, choice_no_match=t.no_match)),)
+    h.div(; class="htmxo-pdf-documents", data_htmxo_pdf_document="", data_htmxo_pdf_pills=string(_RADIO_MAX))(form...)
 end
 
 """
@@ -306,6 +351,14 @@ pdf_panel_styles() = h.style(Raw(raw"""
     position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem;
     padding: .5rem 0; background: var(--pico-background-color, Canvas);
 }
+/* The chooser stays beside the controls while all of it fits there, else it
+   takes a line of its own, where pills flow and a title too long for the line
+   wraps rather than being cut off; the controls stay together, the page line
+   between its buttons. */
+.htmxo-pdf-documents { flex: 1 1 auto; min-width: 0; }
+.htmxo-pdf-title { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.htmxo-pdf-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-left: auto; }
+.htmxo-pdf-pager { display: inline-flex; align-items: center; gap: .35rem; white-space: nowrap; }
 .htmxo-pdf-page-info { white-space: nowrap; }
 .htmxo-pdf-note { margin: 0 0 .35rem; color: var(--htmxo-muted, GrayText); }
 .htmxo-pdf-note:empty { display: none; }
@@ -337,9 +390,19 @@ pdf_panel_styles() = h.style(Raw(raw"""
     }
 }
 }
-.htmxo-pdf-bar select { width: auto; flex: 1 1 7rem; min-width: 0; height: auto; margin: 0; padding: .2rem 2rem .2rem .5rem; font-size: inherit; }
-.htmxo-pdf-bar button { width: auto; margin: 0; padding: .15rem .55rem; font-size: inherit; line-height: 1.4; }
-.htmxo-pdf-bar [data-htmxo-pdf-close] { margin-left: auto; }
+.htmxo-pdf-controls button { width: auto; margin: 0; padding: .15rem .55rem; font-size: inherit; line-height: 1.4; }
+.htmxo-pdf-controls [data-htmxo-pdf-close] { margin-left: auto; }
+/* The chooser's pills and list (the page's own look for them) sized to the
+   bar; its name is for assistive technology only. */
+.htmxo-pdf-documents > fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.htmxo-pdf-documents > fieldset > legend {
+    position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; border: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.htmxo-pdf-documents > fieldset:not([role]) > label:has(> input[type="radio"]) {
+    max-width: 100%; margin: .1rem .3rem .1rem 0; padding: .1em .7em; line-height: 1.4;
+}
+.htmxo-pdf-bar .htmxo-pdf-documents .htmxo-choice-field { padding: .15rem .55rem; line-height: 1.4; }
 .htmxo-pdf-bar [data-htmxo-pdf-colours][aria-pressed="true"] {
     --pico-background-color: var(--pico-secondary-background); --pico-color: var(--pico-secondary-inverse);
 }
@@ -565,9 +628,90 @@ pdf_panel_script() = h.script(Raw(raw"""
     if (state == null) state = aside.hidden;
     if (!state) return open(aside, false);
     if (aside.htmxoPdfFile) { open(aside, true); refresh(aside); return; }
-    var select = aside.querySelector('[data-htmxo-pdf-document]');
-    if (select.value) show(aside, {url: select.value, page: 1});
+    var url = chosen(aside);
+    if (url) show(aside, {url: url, page: 1});
     else { open(aside, true); note(aside, text(aside, 'Empty')); }
+  }
+
+  // --- The document chooser, as pdf_panel's `_pdf_chooser` draws it, never a
+  // native select box: one document is its title, a few a row of pills
+  // (radio_group's markup), a long list a searchable list (choice_list's
+  // markup, which the page's choice_list script drives). Each document is a
+  // radio whose value is its address; the lone title carries its address.
+  function chooser(aside) { return aside.querySelector('[data-htmxo-pdf-document]'); }
+  function choiceTitle(radio) {
+    var label = radio.closest('label'), name = label.querySelector('.htmxo-choice-label');
+    return (name || label).textContent.trim();
+  }
+  function documents(box) {
+    var one = box.querySelector('[data-htmxo-pdf-url]');
+    if (one) return [{url: one.dataset.htmxoPdfUrl, title: one.textContent}];
+    return Array.prototype.map.call(box.querySelectorAll('input[type="radio"]'), function (radio) {
+      return {url: radio.value, title: choiceTitle(radio)};
+    });
+  }
+  // The document chosen: the lone one, the radio checked, else the first.
+  function chosen(aside) {
+    var box = chooser(aside), one = box.querySelector('[data-htmxo-pdf-url]');
+    var radio = box.querySelector('input[type="radio"]:checked') || box.querySelector('input[type="radio"]');
+    return one ? one.dataset.htmxoPdfUrl : radio ? radio.value : null;
+  }
+  function make(tag, attrs, children) {
+    var el = document.createElement(tag);
+    Object.keys(attrs).forEach(function (name) { el.setAttribute(name, attrs[name]); });
+    (children || []).forEach(function (child) { el.append(child); });
+    return el;
+  }
+  // The chooser drawn again for `docs`, `url` chosen, in the form their
+  // number takes. LOCKSTEP: `_pdf_chooser`, `_pdf_choice_name`, and
+  // `_choice_list`'s markup in HTMXObjects.jl.
+  function redraw(aside, docs, url) {
+    var box = chooser(aside), name = 'htmxo-pdf-document-' + aside.id, label = text(aside, 'Documents');
+    function radio(d) {
+      var input = make('input', d.url === url ? {type: 'radio', name: name, value: d.url, checked: ''} :
+                                                {type: 'radio', name: name, value: d.url});
+      input.checked = d.url === url;
+      return input;
+    }
+    var title = (docs.filter(function (d) { return d.url === url; })[0] || {title: ''}).title, form;
+    if (docs.length === 1) form = make('span', {'class': 'htmxo-pdf-title', 'data-htmxo-pdf-url': docs[0].url}, [docs[0].title]);
+    else if (docs.length <= Number(box.dataset.htmxoPdfPills)) form = make('fieldset', {},
+      [make('legend', {}, [label])].concat(docs.map(function (d) { return make('label', {}, [radio(d), d.title]); })));
+    else {
+      var list = name + '-list', search = text(aside, 'Search');
+      form = make('fieldset', {'class': 'htmxo-choice-list', 'data-htmxo-choice-list': ''}, [
+        make('legend', {}, [label]),
+        make('button', {type: 'button', 'class': 'htmxo-choice-field', popovertarget: list,
+                        'aria-haspopup': 'dialog', 'aria-expanded': 'false', title: title}, [
+          make('span', {'class': 'htmxo-choice-current'}, [title]),
+          make('span', {'class': 'htmxo-choice-caret', 'aria-hidden': 'true'}, ['▾'])]),
+        make('div', {id: list, 'class': 'htmxo-choice-panel', popover: 'auto', role: 'dialog', 'aria-label': label}, [
+          make('input', {type: 'search', 'class': 'htmxo-choice-search', placeholder: search, 'aria-label': search,
+                         autocomplete: 'off', spellcheck: 'false',
+                         oninput: 'htmxoChoiceFilter(this);event.stopPropagation()', onchange: 'event.stopPropagation()'}),
+          make('div', {'class': 'htmxo-choice-options'}, docs.map(function (d) {
+            return make('label', {'class': 'htmxo-choice-option'}, [radio(d), make('span', {'class': 'htmxo-choice-label'}, [d.title])]);
+          })),
+          make('p', {'class': 'htmxo-choice-empty', hidden: ''}, [text(aside, 'NoMatch')])])]);
+    }
+    box.replaceChildren(form);
+  }
+  // The chooser names file `url` as the one shown, adding it (titled `title`,
+  // else by its file name) when it is not listed. No event is sent: the
+  // chooser's own change is the reader's choice.
+  function pick(aside, url, title) {
+    var box = chooser(aside), docs = documents(box);
+    if (!docs.some(function (d) { return d.url === url; })) {
+      docs.push({url: url, title: title || fileName(url)});
+      return redraw(aside, docs, url);
+    }
+    box.querySelectorAll('input[type="radio"]').forEach(function (radio) { if (radio.value === url) radio.checked = true; });
+    var current = box.querySelector('.htmxo-choice-current');
+    if (current) {
+      var shown = docs.filter(function (d) { return d.url === url; })[0].title;
+      current.textContent = shown;
+      current.parentNode.title = shown;
+    }
   }
 
   // --- The pages. Letters and digits only, lower case: a quote matches its
@@ -803,11 +947,8 @@ pdf_panel_script() = h.script(Raw(raw"""
   function show(aside, o) {
     if (!o || !o.url) return;
     wire(aside);
-    var select = aside.querySelector('[data-htmxo-pdf-document]');
-    if (!Array.prototype.some.call(select.options, function (opt) { return opt.value === o.url; }))
-      select.add(new Option(o.title || fileName(o.url), o.url));
+    pick(aside, o.url, o.title);
     open(aside, true, o.ref || null);
-    select.value = o.url;
     var page = Math.max(1, Number(o.page) || 1), key = o.key == null ? null : String(o.key);
     aside.querySelector('[data-htmxo-pdf-file]').href = o.url + '#page=' + page;
     aside.htmxoPdfActive = key;
@@ -886,10 +1027,13 @@ pdf_panel_script() = h.script(Raw(raw"""
       aside.dataset.htmxoPdfHues = on ? 'on' : 'off';
     }
   }, true);
+  // A document chosen in the chooser (a pill, or a row of the list) is shown
+  // from its first page.
   document.addEventListener('change', function (event) {
-    var select = event.target.closest && event.target.closest('[data-htmxo-pdf-document]');
-    var aside = select && select.closest('[data-htmxo-pdf-viewer]');
-    if (aside) show(aside, {url: select.value, page: 1});
+    var radio = event.target;
+    if (!(radio && radio.type === 'radio' && radio.checked && radio.closest)) return;
+    var box = radio.closest('[data-htmxo-pdf-document]'), aside = box && box.closest('[data-htmxo-pdf-viewer]');
+    if (aside) show(aside, {url: radio.value, page: 1});
   });
   // New content (an htmx swap, a thread's new item) may bring references:
   // mark their passages on the pages drawn, and show them lit or gone to.

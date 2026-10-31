@@ -91,8 +91,8 @@ end
     s = html(p)
     @test occursin(r"<aside id=\"orig\" class=\"htmxo-pdf-panel\" hidden", s)
     @test occursin("data-htmxo-pdf-viewer=\"\"", s) && occursin("data-htmxo-pdf-link=\"orig\"", s)   # its group is its id
-    @test occursin("<option value=\"/files/k.pdf\">Konzept</option>", s)
-    @test occursin("<option value=\"/code/raw?path=docs/a%20b/plan.pdf\">plan.pdf</option>", s)       # named by its file
+    @test occursin("<label><input type=\"radio\" name=\"htmxo-pdf-document-orig\" value=\"/files/k.pdf\" checked=\"true\">Konzept</label>", s)
+    @test occursin("value=\"/code/raw?path=docs/a%20b/plan.pdf\">plan.pdf</label>", s)               # named by its file
     @test occursin("href=\"/files/k.pdf\"", s)                                                       # "open file", the first
     @test occursin("aria-label=\"Document\"", s) && occursin("data-text-page=\"page {page} of {pages}\"", s)
     @test occursin("data-htmxo-pdfjs=\"https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/\"", s)
@@ -100,7 +100,7 @@ end
     @test occursin("window.htmxoPdf", html(pdf_panel(; id="x")))                                     # carried by default
     @test occursin("data-htmxo-pdf-link=\"crosswalk\"", html(pdf_panel(; id="x", link="crosswalk", pdfjs="/vendor/pdfjs")))
     @test occursin("data-htmxo-pdfjs=\"/vendor/pdfjs/\"", html(pdf_panel(; id="x", pdfjs="/vendor/pdfjs", assets=false)))
-    @test occursin("<option value=\"/one.pdf\">one.pdf</option>", html(pdf_panel("/one.pdf"; id="x", assets=false)))
+    @test occursin("<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"/one.pdf\">one.pdf</span>", html(pdf_panel("/one.pdf"; id="x", assets=false)))
     # Markdown leaves it out
     @test strip(to_markdown_string(h.div(h.p("Text"), p))) == "Text"
     # the page's language, or texts of one's own
@@ -110,6 +110,7 @@ end
     own = html(pdf_panel(; id="x", assets=false, texts=pdf_panel_texts(:de; label="Originale")))
     @test occursin("aria-label=\"Originale\"", own) && occursin(">Farben</button>", own)
     @test pdf_panel_texts(:de).not_found == "Die zitierten Worte stehen nicht auf dieser Seite"
+    @test pdf_panel_texts(:de).search == "Suchen…" && pdf_panel_texts(:de).no_match == "Kein passendes Dokument"
     @test_throws ArgumentError pdf_panel_texts(:fr)
     @test_throws ArgumentError pdf_panel_texts(; page="Seite {seite}")
     @test_throws ArgumentError pdf_panel_texts(; label_typo="x")
@@ -117,6 +118,45 @@ end
     @test_throws ArgumentError pdf_panel(["/a.pdf", "A" => "/a.pdf#page=2"]; id="x")                # listed twice
     @test_throws ArgumentError pdf_panel([42]; id="x")
     @test_throws ArgumentError pdf_panel(; id="")
+end
+
+@testitem "pdf_panel: the document chooser is never a native select box" setup=[PdfFixtures] tags=[:unit] begin
+    # User rule (VerkehrsStrukturdaten:ux/decisions/2026-10-26T14-07-45-293-19mny0l, snag
+    # pdf-panel-docume-fcc431e2): one document is its title, a few a row of pills, a long
+    # list a searchable list; never a <select>.
+    using HTMXObjects
+    docs(n) = ["Document $i" => "/d$i.pdf" for i in 1:n]
+    panel(n; kw...) = html(pdf_panel(docs(n); id="p", assets=false, kw...))
+    chooser(s) = match(r"<div class=\"htmxo-pdf-documents\" data-htmxo-pdf-document=\"\" data-htmxo-pdf-pills=\"8\">(.*?)</div><div class=\"htmxo-pdf-controls\">"s, s)[1]
+    @test all(n -> !occursin("<select", panel(n)) && !occursin("<option", panel(n)), 0:12)
+    # none yet: an empty chooser, which a reference fills
+    @test chooser(panel(0)) == ""
+    # one: its title as text, carrying its address; no control
+    one = html(pdf_panel(["Leistungsbeschreibung, Stand März 2026" => "/unterlagen/lb"]; id="p", link="g", assets=false))
+    @test chooser(one) == "<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"/unterlagen/lb\">Leistungsbeschreibung, Stand März 2026</span>"
+    @test !occursin("type=\"radio\"", one)
+    # two to eight: radio_group's pills, named for the panel, the first chosen
+    for n in (2, 8)
+        c = chooser(panel(n))
+        @test startswith(c, "<fieldset><legend>Documents</legend><label><input type=\"radio\" name=\"htmxo-pdf-document-p\" value=\"/d1.pdf\" checked=\"true\">Document 1</label>")
+        @test count("type=\"radio\"", c) == n && count("checked", c) == 1 && !occursin("htmxo-choice", c)
+    end
+    # more: the searchable list, its field showing the first, its words the panel's
+    many = chooser(panel(9))
+    @test occursin("<fieldset class=\"htmxo-choice-list\" data-htmxo-choice-list=\"\"><legend>Documents</legend>", many)
+    @test occursin("<span class=\"htmxo-choice-current\">Document 1</span>", many)
+    @test occursin("placeholder=\"Search…\"", many) && occursin(">No matching document</p>", many)
+    @test count("<input type=\"radio\" name=\"htmxo-pdf-document-p\"", many) == 9 && count("checked", many) == 1
+    de = HTMXObjects._with_page_lang(() -> chooser(panel(9)), "de")
+    @test occursin("<legend>Dokumente</legend>", de) && occursin("placeholder=\"Suchen…\"", de) && occursin(">Kein passendes Dokument</p>", de)
+    own = chooser(panel(9; texts=pdf_panel_texts(; search="Find a file", no_match="None")))
+    @test occursin("placeholder=\"Find a file\"", own) && occursin(">None</p>", own)
+    # the words a reference's added document is drawn with
+    s = panel(2)
+    @test occursin("data-text-documents=\"Documents\"", s) && occursin("data-text-search=\"Search…\"", s) &&
+          occursin("data-text-no-match=\"No matching document\"", s)
+    # the controls stay together, the page line between its buttons
+    @test occursin(r"<div class=\"htmxo-pdf-controls\"><span class=\"htmxo-pdf-pager\"><button type=\"button\" data-htmxo-pdf-step=\"-1\"[^>]*>‹</button><span class=\"htmxo-pdf-page-info\" data-htmxo-pdf-page-info=\"\"></span><button type=\"button\" data-htmxo-pdf-step=\"1\"[^>]*>›</button></span>", s)
 end
 
 @testitem "pdf_toggle and pdf_beside" setup=[PdfFixtures] tags=[:unit] begin
@@ -335,6 +375,122 @@ end
                     endswith(line, ":true") || println("pdf_panel browser: ", line)
                 end
                 @test count(==('\n'), checks[1]) + 1 == 45
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "pdf_panel browser: the document chooser grows from a title to pills to a searchable list" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    # Snag pdf-panel-docume-fcc431e2: never a native select box (user rule
+    # VerkehrsStrukturdaten:ux/decisions/2026-10-26T14-07-45-293-19mny0l).
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        pdf = tiny_pdf(PDF_PAGES)
+        long = "Leistungsbeschreibung, Stand März 2026, mit allen Anlagen, Nachträgen und Antworten auf die Bieterfragen"
+        content = h.div(; id="content")(
+            h.p(pdf_toggle("one"; id="tone"), " ", pdf_ref("(Konzept)", "/b.pdf"; panel="one", id="rb", document="Konzept")),
+            h.p(pdf_ref("(Ninth)", "/d9.pdf"; panel="eight", id="r9", document="Ninth"), " ",
+                pdf_ref("(Later)", "/m13.pdf"; panel="many", id="r13")),
+            h.div(; style="height: 1500px"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const LONG = document.getElementById('long').textContent;
+            const panel = id => document.getElementById(id), ref = id => document.getElementById(id);
+            const box = id => panel(id).querySelector('[data-htmxo-pdf-document]');
+            const radios = id => [...box(id).querySelectorAll('input[type="radio"]')];
+            const checkedUrl = id => (radios(id).find(r => r.checked) || {}).value;
+            const shown = id => panel(id).htmxoPdfFile && panel(id).htmxoPdfFile.url;
+            const field = id => box(id).querySelector('.htmxo-choice-current').textContent;
+            const titles = id => radios(id).map(r => r.closest('label').textContent.trim());
+            const oneLine = id => { const bar = panel(id).querySelector('.htmxo-pdf-bar');
+                const a = bar.querySelector('[data-htmxo-pdf-step="-1"]').getBoundingClientRect();
+                const b = bar.querySelector('[data-htmxo-pdf-step="1"]').getBoundingClientRect();
+                return Math.abs(a.top - b.top) < 2 && bar.scrollWidth <= bar.clientWidth + 1; };
+            try {
+                check('no-select', document.querySelectorAll('select').length === 0);
+                // one document: its title, no control; the toggle opens it
+                const title = box('one').querySelector('.htmxo-pdf-title');
+                check('one-title', title && title.textContent === LONG && radios('one').length === 0);
+                ref('tone').click();
+                check('one-opens', !panel('one').hidden && shown('one') === '/a.pdf');
+                check('one-fits', oneLine('one') && title.scrollWidth <= title.clientWidth + 1);
+                // a reference to a file not listed: a row of pills, the new file chosen
+                ref('rb').click();
+                check('one-to-pills', radios('one').length === 2 && box('one').querySelector('fieldset > legend').textContent === 'Documents' &&
+                    checkedUrl('one') === '/b.pdf' && shown('one') === '/b.pdf');
+                check('pill-titles', titles('one').join('|') === LONG + '|Konzept');
+                const pill = radios('one')[1].closest('label');
+                check('pill-look', getComputedStyle(pill).borderTopLeftRadius !== '0px' && getComputedStyle(radios('one')[1]).opacity === '0');
+                check('pills-fit', oneLine('one'));
+                // a pill's click shows its document
+                radios('one')[0].closest('label').click();
+                check('pill-chooses', checkedUrl('one') === '/a.pdf' && shown('one') === '/a.pdf');
+                // eight documents are pills; a ninth makes them a searchable list
+                check('eight-pills', radios('eight').length === 8 && !box('eight').querySelector('.htmxo-choice-list'));
+                ref('r9').click();
+                check('eight-to-list', box('eight').querySelector('.htmxo-choice-list') && radios('eight').length === 9 &&
+                    checkedUrl('eight') === '/d9.pdf' && field('eight') === 'Ninth' && shown('eight') === '/d9.pdf');
+                const list = box('eight').querySelector('.htmxo-choice-panel');
+                box('eight').querySelector('.htmxo-choice-field').click();
+                check('list-opens', list.matches(':popover-open'));
+                const search = list.querySelector('.htmxo-choice-search');
+                search.value = 'D3';
+                search.dispatchEvent(new Event('input', {bubbles: true}));
+                check('list-filters', [...list.querySelectorAll('.htmxo-choice-option')].filter(o => !o.classList.contains('htmxo-choice-out')).length === 1);
+                search.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+                check('list-chooses', checkedUrl('eight') === '/d3.pdf' && shown('eight') === '/d3.pdf' && field('eight') === 'D3' &&
+                    !list.matches(':popover-open'));
+                // a list drawn by the server: a row's click shows its document; a reference adds a row
+                box('many').querySelector('.htmxo-choice-field').click();
+                box('many').querySelector('input[value="/m5.pdf"]').closest('label').click();
+                check('many-chooses', checkedUrl('many') === '/m5.pdf' && shown('many') === '/m5.pdf' && field('many') === 'Many 5');
+                ref('r13').click();
+                check('many-adds-row', radios('many').length === 13 && checkedUrl('many') === '/m13.pdf' && field('many') === 'm13.pdf' &&
+                    shown('many') === '/m13.pdf');
+                // each panel keeps its own choice
+                check('own-choice', checkedUrl('one') === '/a.pdf' && checkedUrl('eight') === '/d3.pdf');
+                check('still-no-select', document.querySelectorAll('select').length === 0);
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(h.main(h.div(; id="long", hidden=true)(long),
+                pdf_beside(content, pdf_panel([long => "/a.pdf"]; id="one")),
+                pdf_panel(["D$i" => "/d$i.pdf" for i in 1:8]; id="eight"),
+                pdf_panel(["Many $i" => "/m$i.pdf" for i in 1:12]; id="many")), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) :
+            endswith(path, ".pdf") ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; timeout=120)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                    endswith(line, ":true") || println("pdf_panel chooser browser: ", line)
+                end
+                @test count(==('\n'), checks[1]) + 1 == 18
             end
         finally
             close(server)
