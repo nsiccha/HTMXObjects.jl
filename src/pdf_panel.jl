@@ -351,10 +351,11 @@ pdf_panel_styles() = h.style(Raw(raw"""
     position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem;
     padding: .5rem 0; background: var(--pico-background-color, Canvas);
 }
-/* The chooser takes the room the controls leave, and a line of its own when
-   that is under 12rem; the controls stay together, the page line between its
-   buttons. A title too long for the line wraps rather than being cut off. */
-.htmxo-pdf-documents { flex: 1 1 12rem; min-width: 0; }
+/* The chooser stays beside the controls while all of it fits there, else it
+   takes a line of its own, where pills flow and a title too long for the line
+   wraps rather than being cut off; the controls stay together, the page line
+   between its buttons. */
+.htmxo-pdf-documents { flex: 1 1 auto; min-width: 0; }
 .htmxo-pdf-title { display: block; font-weight: 600; overflow-wrap: anywhere; }
 .htmxo-pdf-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-left: auto; }
 .htmxo-pdf-pager { display: inline-flex; align-items: center; gap: .35rem; white-space: nowrap; }
