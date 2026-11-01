@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.35
+
+- A flat `master_detail_table` passes axe-core's `aria-conditional-attr`. ARIA
+  allows `aria-expanded` on a row only inside a `treegrid`, so its rows no longer
+  carry it: the row's native detail control (▸/▾, or the label with
+  `detail_toggle=:label`) carries `aria-expanded` and `aria-controls`, and the row
+  carries `data-htmxo-detail-open="true"|"false"`. Hierarchy and grouped tables
+  are `treegrid`s and keep `aria-expanded` on their rows. **Breaking:** CSS or
+  script that reads `tr[aria-expanded]` on a flat `master_detail_table` row reads
+  `tr[data-htmxo-detail-open]` instead. Rows built with `master_detail_pair`
+  directly are unchanged, and still fail that rule in a `sortable_table`.
+
 ## 0.1.34
 
 - A `tabset` follows the ARIA tabs pattern. Its tab bar is a `tablist`, each tab

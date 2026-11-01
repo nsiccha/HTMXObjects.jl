@@ -818,3 +818,87 @@ end
         end
     end
 end
+
+@testitem "a flat table's detail state sits on its control, a tree row's on the row too" tags=[:unit] begin
+    using HTMXObjects
+    row_tag(html, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>"), html).match
+    items = [(; id="a", children=()), (; id="b", children=())]
+    cells(x) = (h.td(x.id),)
+    for kw in ((;), (; detail_toggle=:label), (; selectable="x"))
+        html = repr("text/html", master_detail_table(["Name"], items; key=x -> x.id, master=cells,
+            detail=x -> "body", initially_open=x -> x.id == "b", kw...))
+        @test contains(html, "role=\"grid\"")
+        for (id, open) in (("a", "false"), ("b", "true"))
+            @test !contains(row_tag(html, "row-$id"), "aria-expanded")
+            @test contains(row_tag(html, "row-$id"), "data-htmxo-detail-open=\"$open\"")
+            @test !isnothing(match(Regex("<button[^>]*aria-controls=\"detail-$id\"[^>]*aria-expanded=\"$open\""), html))
+        end
+    end
+    # A treegrid allows the attribute on its rows.
+    tree = repr("text/html", master_detail_table(["Name"], items; key=x -> x.id, master=cells,
+        children=x -> x.children, detail=x -> "body"))
+    @test contains(tree, "role=\"treegrid\"") && contains(row_tag(tree, "row-a"), "aria-expanded=\"false\"")
+    grouped = repr("text/html", master_detail_table(["Name"], items; key=x -> x.id, master=cells, detail=x -> "body",
+        groupings=["None" => nothing, "Id" => x -> x.id], group_by=["None"]))
+    @test contains(grouped, "role=\"treegrid\"") && contains(row_tag(grouped, "row-a"), "aria-expanded=\"false\"")
+    # A hand-built pair has no control of its own, so its row keeps the state.
+    master, _ = master_detail_pair("a", (h.td("a"),), "body", 1)
+    @test contains(repr("text/html", master), "aria-expanded=\"false\"")
+end
+
+@testitem "a browser keeps a flat row free of aria-expanded while its detail opens and closes" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        items = [(; id="a"), (; id="b")]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const checks = [];
+            const check = (name, ok) => checks.push(name + ':' + Boolean(ok));
+            const row = document.getElementById('row-a'), detail = document.getElementById('detail-a');
+            const control = row.querySelector('[data-htmxo-detail-toggle]');
+            const state = (open) => detail.hidden === !open && row.dataset.htmxoDetailOpen === String(open) &&
+                control.getAttribute('aria-expanded') === String(open) && !row.hasAttribute('aria-expanded');
+            // Positive control: the tree row of this page does take the attribute.
+            const treeRow = document.getElementById('row-t');
+            const treeControl = treeRow.querySelector('[data-htmxo-detail-toggle]');
+            check('starts-closed', state(false));
+            control.click();
+            check('control-opens', state(true));
+            control.click();
+            check('control-closes', state(false));
+            row.click();
+            check('row-click-opens', state(true));
+            row.click();
+            check('row-click-closes', state(false));
+            treeControl.click();
+            check('tree-row-mirrors', treeRow.getAttribute('aria-expanded') === 'true');
+            const out = document.createElement('pre');
+            out.id = 'checks';
+            out.textContent = checks.join('\n');
+            document.body.appendChild(out);
+        });
+        """))
+        page = repr("text/html", h.html(h.head(sortable_table_js()), h.body(
+            master_detail_table(["Name"], items; key=x -> x.id, master=x -> (h.td(x.id),), detail=x -> "body", id="flat"),
+            master_detail_table(["Name"], [(; id="t", children=())]; key=x -> x.id, master=x -> (h.td(x.id),),
+                children=x -> x.children, detail=x -> "body", id="tree"),
+            driver)))
+        mktempdir() do dir
+            file = joinpath(dir, "page.html")
+            write(file, page)
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$(joinpath(dir, "profile")) file://$file`)
+            checks = match(r"<pre id=\"checks\">([^<]*)</pre>", dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                lines = split(checks[1], '\n')
+                @test length(lines) == 6
+                for line in lines
+                    @test endswith(line, ":true")
+                end
+            end
+        end
+    end
+end

@@ -855,7 +855,11 @@ text) keeps its own behaviour: it neither toggles nor selects the row. Only
 controls inside the row count, so a table inside a `<form>` or a `<details>`
 still toggles. Every branch and detail control is a native button carrying
 `aria-controls`/`aria-expanded`, so it supports keyboard activation, as do
-auto-wired sort headers. Sorting, search and CSV export read the cell's content,
+auto-wired sort headers. ARIA allows `aria-expanded` on a row only inside a
+`treegrid`, so a flat `master_detail_table` row carries
+`data-htmxo-detail-open="true"|"false"` and its button tells assistive
+technology; key a row's open look off that attribute. A hierarchy or grouped
+table is a `treegrid`, and its rows carry `aria-expanded` too. Sorting, search and CSV export read the cell's content,
 not its controls. However narrow the first column, its controls stay on their
 label's line: the cell never wraps between a control and its label, only the
 label's own text wraps. To keep a label on one line, give its content

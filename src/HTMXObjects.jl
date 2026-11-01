@@ -23285,7 +23285,9 @@ function htmxoRowControl(row, target) {
 function htmxoMdToggle(row, event, key, slot) {
     if (htmxoRowControl(row, event.target)) return;
     var d = document.getElementById('detail-' + key); if (!d) return;
-    var show = row.dataset.htmxoDetailOpen === undefined ? d.hidden : row.dataset.htmxoDetailOpen !== 'true';
+    // A flat row's detail says whether it is open; a tree row's may be hidden
+    // only because a search or a closed branch hides it.
+    var show = row.dataset.htmxoParent === undefined ? d.hidden : row.dataset.htmxoDetailOpen !== 'true';
     htmxoMdShow(row, d, show);
     if (show && slot) {
         var s = document.getElementById(slot === 1 ? 'detail-slot-' + key : slot);
@@ -23295,10 +23297,15 @@ function htmxoMdToggle(row, event, key, slot) {
 }
 // Open or close a row's detail `d`, mirroring the state on the row and on its
 // detail control. A row update re-applies it to the rows it replaces.
+// `aria-expanded` is valid on a row only inside a treegrid, so a flat table's
+// row (`data-htmxo-detail-open` without `data-htmxo-parent`) keeps its state in
+// the data attribute, and its detail control tells assistive technology.
 function htmxoMdShow(row, d, show) {
     d.hidden = !show;
     if (row.dataset.htmxoDetailOpen !== undefined) row.dataset.htmxoDetailOpen = String(show);
-    if (row.dataset.htmxoTreeOpen === undefined) row.setAttribute('aria-expanded', show);
+    if (row.dataset.htmxoTreeOpen === undefined &&
+        (row.dataset.htmxoDetailOpen === undefined || row.dataset.htmxoParent !== undefined))
+        row.setAttribute('aria-expanded', show);
     var control = row.querySelector('[data-htmxo-detail-toggle]');
     if (control) {
         control.setAttribute('aria-expanded', show);
@@ -23432,7 +23439,9 @@ pair. The snippet ignores clicks on the row's own controls (`a`, `button`,
 its `<summary>`, editable text) — only those inside the row, so a table inside
 a `<form>` or `<details>` still toggles — toggles the
 `#detail-<safe_key>` row's `hidden` attribute, and mirrors the open state
-to `aria-expanded` on the master. `safe_key` MUST already be CSS-safe
+to the master row and to its detail control (`aria-expanded` on the control,
+and on the row where ARIA allows it: see [`master_detail_table`](@ref)).
+`safe_key` MUST already be CSS-safe
 (see [`master_detail_safe_key`](@ref)).
 
 The snippet is a short call into the page's master/detail runtime
@@ -23660,7 +23669,8 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             initially_open::Bool=false,
                             detail_url=nothing,
                             row_toggle::Bool=true,
-                            texts::TableTexts=_EN_TABLE_TEXTS)
+                            texts::TableTexts=_EN_TABLE_TEXTS,
+                            _row_expanded::Bool=true)
     safe = _md_safe_key(key)
     lazy = !isnothing(detail_url)
     tr_kwargs = Dict{Symbol,Any}(:id => "row-$safe")
@@ -23669,15 +23679,13 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     row_toggle && (tr_kwargs[:onclick] = lazy ?
         master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
         master_detail_toggle_js(safe))
-    # Every master row is expandable, so it always carries aria-expanded
-    # reflecting state: "true" open, "false" collapsed. This matches what
-    # master_detail_toggle_js sets on click (so the initial render and the
-    # post-click DOM agree) and is the a11y-correct shape. Collapsed-look
-    # CSS can key off `[aria-expanded="false"]` or the equivalent
-    # `:not([aria-expanded="true"])`. (Pre-HTMX-116ab2c the `h` builder
-    # dropped every string `"false"`, forcing a no-attr + `:not(...)`
-    # workaround; that drop is now scoped to true boolean attrs.)
-    tr_kwargs[:aria_expanded] = initially_open ? "true" : "false"
+    # A row built here on its own has no native control, so it carries
+    # aria-expanded reflecting state: "true" open, "false" collapsed, which
+    # is what master_detail_toggle_js sets on click. ARIA allows that only on
+    # a treegrid's row, so a flat `master_detail_table` passes
+    # `_row_expanded=false`: its row writes `data-htmxo-detail-open` and its
+    # native detail control carries aria-expanded instead.
+    _row_expanded && (tr_kwargs[:aria_expanded] = initially_open ? "true" : "false")
     isnothing(master_class) || (tr_kwargs[:class] = master_class)
     cells, row_attrs = _md_master_row(master_cells, texts)
     given = _md_merge_row_attrs!(Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(master_attrs)),
@@ -23763,6 +23771,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 
 # Keyword arguments
 - `key(item)`: function returning the row key (sanitised internally).
+- A flat table's row shows its state as `data-htmxo-detail-open="true"|"false"`;
+  key CSS off that. `aria-expanded` sits on the row's native detail control
+  (and on a row only in a hierarchy or grouped table, whose `role="treegrid"`
+  allows it). HTMXObjects ≥ 0.1.35.
 - `master(item)`: function returning the master row's `<td>` cells
   (vector or tuple of nodes), or one `<tr>` holding them. A bare float among
   them becomes a [`number_cell`](@ref) in the table's language (`texts`). A row's attributes
@@ -24269,7 +24281,7 @@ function master_detail_table(headers, items;
             end
         end
         if has_detail
-            isnothing(children) || (attrs[:data_htmxo_detail_open] = string(detail_open))
+            attrs[:data_htmxo_detail_open] = string(detail_open)
             # Plain hierarchy leaves use their label as the keyboard detail
             # control. Linked leaves and branches with their own details keep
             # a separate icon, so links and child-row expansion remain distinct.
@@ -24304,7 +24316,7 @@ function master_detail_table(headers, items;
             (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
                                     initially_open=detail_open && ancestors_open, detail_url=url,
-                                    row_toggle=!selecting, texts)
+                                    row_toggle=!selecting, texts, _row_expanded=!isnothing(children))
             push!(rows, m, d)
         end
         visit_children(descendants, safe, level, ancestors_open && branch_open)
