@@ -14,6 +14,25 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.32
+
+- `card_deck(cards; id, view=:grid, search=true, group_filter=true,
+  view_param="view", card_param="card", texts=nothing, class="", assets=true)`:
+  a deck of cards the reader sees as a grid (each group under its heading) or
+  as a carousel (one card at a time, previous/next, its position, the arrow
+  keys), and switches between the two. A search box filters the cards by their
+  words (every word, any order, no case or accents) with a count of matches,
+  and a group filter (pills, or a searchable list past seven groups) filters
+  them by group; the carousel pages over the cards left. The view and the
+  current card ride the page address (`?view=carousel&card=<id>`, or `#<id>`),
+  so a link opens the deck at a card. The deck carries its style and script
+  (`card_deck_assets`, `card_deck_styles`, `card_deck_script`) and needs no
+  route, so a static export works as live. Its words follow the page's
+  language (`card_deck_texts`, `CardDeckTexts`: English and German). Hooks:
+  `window.htmxoDeck.show` / `.view` and the `htmxo:deck-change` event. In
+  Markdown the controls are left out. Example: `examples/card_deck.jl`.
+  Todo `0r7kj9c`, for the KB's flashcards.
+
 ## 0.1.31
 
 - A static export (`export_site`, a `StaticExport` `dispatch`, `record!`)

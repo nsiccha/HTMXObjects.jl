@@ -98,14 +98,9 @@ pdf_panel_texts(locale::Symbol=:en; texts...) =
     _locale_texts(PdfPanelTexts, :pdf_panel_texts, _PDF_TEXT_LOCALES, _PDF_TEXT_PLACEHOLDERS, locale; texts...)
 
 # The texts of the page's language: German under `__lang__ = "de"`, else English.
-_pdf_texts(::Nothing) = pdf_panel_texts(_pdf_locale(page_lang()))
+_pdf_texts(::Nothing) = pdf_panel_texts(_lang_locale(_PDF_TEXT_LOCALES, page_lang()))
 _pdf_texts(texts::PdfPanelTexts) = texts
 _pdf_texts(texts) = throw(ArgumentError("pdf_panel: `texts` takes a PdfPanelTexts (pdf_panel_texts(…)), got $(repr(texts))"))
-_pdf_locale(::Nothing) = :en
-function _pdf_locale(lang::AbstractString)
-    primary = Symbol(lowercase(first(split(lang, '-'))))
-    haskey(_PDF_TEXT_LOCALES, primary) ? primary : :en
-end
 
 # PDF.js, loaded from jsDelivr the first time a panel shows a file.
 const _PDFJS_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/"
