@@ -1476,6 +1476,38 @@ host page and is left alone. `htmx()` pages carry the script that does
 this, `tabset_script()`; a page with its own `<head>` adds it next to
 `tabset_styles()`.
 
+#### Tabs for the keyboard and assistive technology {#tabset-accessibility}
+
+A `tabset` follows the ARIA tabs pattern, so a screen reader announces each tab,
+whether it is selected and which panel it controls:
+
+| Element | Carries |
+|---|---|
+| the tab bar's `<ul>` | `role="tablist"`, and `aria-label` from `label=` |
+| each tab's `<a>` | `role="tab"`, `aria-selected`, `aria-controls` naming its panel, `id="<tabset id>-tablink-<n>"` |
+| each panel | `role="tabpanel"`, `aria-labelledby` naming its tab, `tabindex="0"` |
+
+```julia
+# names the tab bar, for a page where several need telling apart
+tabset("K-40" => "/k40", "Cs-137" => "/cs137"; id="insitu-tabs", label="Auswertungen")
+```
+
+| Key | With focus on a tab |
+|---|---|
+| Tab | leaves the tab bar for the open panel; Shift+Tab comes back to the open tab |
+| Left, Right | moves the focus to the previous or next tab, wrapping around |
+| Home, End | moves the focus to the first or last tab |
+| Enter, Space | opens the tab in focus |
+
+Moving the focus opens nothing. Opening each tab on the way would fetch every lazy
+panel it passes and rewrite the URL at each step, so a lazy tab still loads only
+when it is opened. Keys held with Alt, Ctrl, Cmd or Shift stay the browser's, such
+as Alt+Left for Back.
+
+The arrow keys, Home, End and Space come from `tabset_script()`. On a page with its
+own `<head>` that has not added it, every tab stays a stop in the page's Tab order
+and opens with Enter.
+
 #### Tabs in Markdown {#tabset-markdown}
 
 A `?plain` reader and a PDF ([`pdf_report`](api.md#pdf-report)) have no tab

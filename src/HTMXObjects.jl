@@ -33786,16 +33786,20 @@ tabset_styles() = h.style(Raw("""
 """
     tabset_script()
 
-JS that keeps a [`tabset`](@ref)'s open tab in the page URL. A tab click
-replaces the tabset's URL parameter with the tab's name, and a page opened
-with that parameter — reloaded, reached with Back, or a shared link — shows the
-named tab. Auto-included by `htmx()`; inject manually via `extra_head` (next to
-[`tabset_styles`](@ref)) if you're building your own `<head>`.
+JS that keeps a [`tabset`](@ref)'s open tab in the page URL and operates its tabs
+from the keyboard. A tab click replaces the tabset's URL parameter with the
+tab's name, and a page opened with that parameter — reloaded, reached with Back,
+or a shared link — shows the named tab. The arrow keys, Home and End move the
+focus along the tabs, and Enter or Space opens the focused one. Auto-included by
+`htmx()`; inject manually via `extra_head` (next to [`tabset_styles`](@ref)) if
+you're building your own `<head>`.
 """
 tabset_script() = h.script(Raw("""
 (() => {
     if (window.htmxoTabset) return;
     const links = ts => Array.from(ts.querySelectorAll(':scope > nav a[data-tab-name]'));
+    const tabs = ts => Array.from(ts.querySelectorAll(':scope > nav [role=tab]'));
+    const tabOf = e => e.target instanceof Element ? e.target.closest('.tabset > nav [role=tab]') : null;
     const panelOf = (ts, a) => ts.querySelector(':scope > .tab-panel[data-panel="' + a.dataset.panel + '"]');
     const recording = ts => Boolean(ts.dataset.tabParam) && !ts.closest('.htmxo-embed');
 
@@ -33821,9 +33825,13 @@ tabset_script() = h.script(Raw("""
             target.setAttribute('hx-swap', 'innerHTML');
             ['hx-get', 'hx-target', 'hx-swap', 'hx-trigger', 'preload'].forEach(n => a.removeAttribute(n));
         }
-        links(ts).forEach(l => { l.classList.remove('contrast'); l.classList.add('secondary'); });
-        a.classList.remove('secondary');
-        a.classList.add('contrast');
+        links(ts).forEach(l => {
+            const on = l === a;
+            l.classList.toggle('contrast', on);
+            l.classList.toggle('secondary', !on);
+            l.setAttribute('aria-selected', String(on));
+            l.setAttribute('tabindex', on ? '0' : '-1');
+        });
         ts.querySelectorAll(':scope > .tab-panel').forEach(p => p.classList.add('u-hidden'));
         target.classList.remove('u-hidden');
     };
@@ -33850,17 +33858,19 @@ tabset_script() = h.script(Raw("""
         }, 0);
     };
 
-    // A tab click records its name. Capture phase, because the tab's hyperscript
-    // halts the click. The history entry is replaced, not pushed, and keeps its
+    // A tab click makes it the tabset's one stop in the page's Tab order, and
+    // records its name. Capture phase, because the tab's hyperscript halts the
+    // click. The history entry is replaced, not pushed, and keeps its
     // state: htmx 2 restores an entry on Back/Forward only when that state says
     // `htmx`. htmx files its Back snapshot of this page under the path it keeps
     // in sessionStorage (`saveCurrentPageToHistory`), so that path follows the
     // address too; where storage is blocked htmx keeps the path in memory and
     // refetches the page on Back instead, which shows the same tab.
     document.addEventListener('click', e => {
-        const a = e.target instanceof Element ? e.target.closest('.tabset > nav a[data-tab-name]') : null;
+        const a = tabOf(e);
         if (!a) return;
         const ts = a.closest('.tabset');
+        tabs(ts).forEach(t => t.setAttribute('tabindex', t === a ? '0' : '-1'));
         if (!recording(ts)) return;
         const url = new URL(location.href);
         url.searchParams.set(ts.dataset.tabParam, a.dataset.tabName);
@@ -33868,10 +33878,29 @@ tabset_script() = h.script(Raw("""
         history.replaceState(history.state, '', url);
         if (window.htmx) try { sessionStorage.setItem('htmx-current-path-for-history', url.pathname + url.search); } catch (_) {}
     }, true);
+
+    // The arrow keys, Home and End move the focus; Enter (a link's own click)
+    // or Space opens the focused tab. Moving the focus opens nothing: it would
+    // fetch every lazy panel on the way and rewrite the URL at each step. A key
+    // held with a modifier is the browser's, such as Alt+Left for Back.
+    document.addEventListener('keydown', e => {
+        const a = tabOf(e);
+        if (!a || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        if (e.key === ' ') { e.preventDefault(); a.click(); return; }
+        const all = tabs(a.closest('.tabset')), at = all.indexOf(a), n = all.length;
+        const next = {ArrowRight: (at + 1) % n, ArrowLeft: (at - 1 + n) % n, Home: 0, End: n - 1}[e.key];
+        if (next === undefined) return;
+        e.preventDefault();
+        all[next].focus();
+    });
 })();
 """))
 
 _tabset_panel_id(id, i) = "$id-tab-$i"
+_tabset_tab_id(id, i) = "$id-tablink-$i"
+# What ties a panel to its tab for assistive technology; `tabindex` puts a panel
+# with no control in it on the keyboard's way too.
+_tabset_panel_role(id, i) = (; role="tabpanel", aria_labelledby=_tabset_tab_id(id, i), tabindex="0")
 
 # String content = URL → lazy. The initially active panel loads itself once it
 # is actually visible; every other panel is filled by its tab's first click
@@ -33883,6 +33912,7 @@ function _tabset_panel(content::AbstractString, i, active, id)
         id=_tabset_panel_id(id, i),
         class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
+        _tabset_panel_role(id, i)...,
         (i == active ?
             (hx_get=content, hx_trigger="intersect once", hx_swap="innerHTML") :
             (;))...,
@@ -33894,6 +33924,7 @@ function _tabset_panel(content, i, active, id)
         id=_tabset_panel_id(id, i),
         class=i == active ? "tab-panel u-w-full" : "tab-panel u-w-full u-hidden",
         data_panel="tab-$i",
+        _tabset_panel_role(id, i)...,
     )
 end
 
@@ -33961,12 +33992,14 @@ _tabset_name_attrs(::Nothing, names, i) = (;)
 _tabset_name_attrs(url_param, names, i) = (; data_tab_name=names[i])
 
 # Runs while the tabset is inserted — during parsing, or on an htmx swap
-# before htmx and hyperscript process it (`tabset_script`).
-const _TABSET_URL_RESTORE = "(window.htmxoTabset || (ts => ts.closest('.htmxo-embed') || " *
-    "console.warn('tabset: tabset_script() is not on this page, so the open tab is not kept in the URL')))" *
-    "(document.currentScript.parentElement)"
-_tabset_url_restore(::Nothing) = ()
-_tabset_url_restore(url_param) = (h.script(Raw(_TABSET_URL_RESTORE)),)
+# before htmx and hyperscript process it (`tabset_script`). A page without the
+# script cannot move the focus along the tabs, so there every tab stays a stop
+# in the page's Tab order, opened with Enter.
+const _TABSET_INSERTED = "(window.htmxoTabset || (ts => {" *
+    "ts.querySelectorAll(':scope > nav [tabindex]').forEach(a => a.removeAttribute('tabindex'));" *
+    "ts.dataset.tabParam && !ts.closest('.htmxo-embed') && " *
+    "console.warn('tabset: tabset_script() is not on this page, so the open tab is not kept in the URL');" *
+    "}))(document.currentScript.parentElement)"
 
 # The tab bar or one panel of a `tabset`, in every format. HTML and HXML write
 # the node as the browser shows it. Markdown, which a `?plain` reader or a PDF
@@ -34023,7 +34056,7 @@ include("comparison.jl")
 
 """
     tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))", preload=nothing,
-           url_param="tab", names=nothing)
+           url_param="tab", names=nothing, label=nothing)
 
 Client-side tabs using Pico CSS nav + hyperscript.
 
@@ -34068,6 +34101,16 @@ load after the page, and scrolls to a tabset that arrives in a fragment
 (`active="sonden"`). Keeping the tab in the URL needs [`tabset_script`](@ref),
 which [`htmx`](@ref) pages carry.
 
+Assistive technology reads the tabs as tabs: the tab bar is a `tablist`, each
+tab a `tab` that says whether it is selected and which panel it controls, and
+each panel a `tabpanel` named by its tab. `label="Auswertungen"` names the tab
+bar when several tabs on a page need telling apart. The keyboard reaches the open
+tab with Tab; the arrow keys, Home and End move along the tabs, and Enter or
+Space opens the one in focus. Moving along them opens nothing, so a lazy tab is
+fetched only when it is opened. A page with its own `<head>` adds
+[`tabset_script`](@ref) for this; without it every tab is a stop in the page's
+Tab order and opens with Enter.
+
 Markdown (`?plain`, [`to_markdown_string`](@ref), [`pdf_report`](@ref)) has no
 tab to click, so it writes no tab bar: every tab follows in order, its label in
 bold and then its content, as a [`SemanticDisclosure`](@ref) writes its label
@@ -34076,14 +34119,14 @@ content read publicly, with no stand-in) is left out with its label, and a lazy
 tab is its label as a link to its address (`**[Details](/api/details)**`).
 """
 function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing,
-                url_param="tab", names=nothing)
+                url_param="tab", names=nothing, label::Union{Nothing,AbstractString}=nothing)
     tab_names = isnothing(url_param) && isnothing(names) && active isa Integer ? nothing :
         _tabset_checked_names(_tabset_names(tabs, names))
     active = _tabset_active_index(active, tab_names)
     h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload)...)(
-        _TabsetPart(h.nav(
-            h.ul([
-                h.li(h.a(label;
+        _TabsetPart(h.nav(; role="none")(
+            h.ul(; role="tablist", aria_label=label)([
+                h.li(h.a(tab_label;
                     href="#",
                     class = i == active ? "contrast" : "secondary",
                     _="on click
@@ -34092,20 +34135,26 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
                         add .secondary to <a/> in closest <nav/>
                         remove .secondary from me
                         add .contrast to me
-                        set panel to my @data-panel
-                        add .u-hidden to <div.tab-panel/> in closest <div/>
-                        remove .u-hidden from <div.tab-panel[data-panel='\${panel}']/> in closest <div/>
+                        add @aria-selected='false' to <a/> in closest <nav/>
+                        add @aria-selected='true' to me
+                        add .u-hidden to <:scope > .tab-panel/> in closest <.tabset/>
+                        remove .u-hidden from #{my @aria-controls}
                     ",
                     data_panel="tab-$i",
                     _tabset_name_attrs(url_param, tab_names, i)...,
                     _tabset_lazy_link_attrs(content, i, active, id, preload)...,
-                ))
-                for (i, (label, content)) in enumerate(tabs)
+                    id=_tabset_tab_id(id, i),
+                    role="tab",
+                    aria_selected=string(i == active),
+                    aria_controls=_tabset_panel_id(id, i),
+                    tabindex=i == active ? "0" : "-1",
+                ); role="presentation")
+                for (i, (tab_label, content)) in enumerate(tabs)
             ]...)
         ), nothing),
-        [_TabsetPart(_tabset_panel(content, i, active, id), _tabset_markdown(label, content))
-         for (i, (label, content)) in enumerate(tabs)]...,
-        _tabset_url_restore(url_param)...
+        [_TabsetPart(_tabset_panel(content, i, active, id), _tabset_markdown(tab_label, content))
+         for (i, (tab_label, content)) in enumerate(tabs)]...,
+        h.script(Raw(_TABSET_INSERTED)),
     )
 end
 

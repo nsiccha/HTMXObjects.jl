@@ -33,9 +33,10 @@
     @test contains(s3, "data-tab-param=\"insitu\" data-tab-preload=\"mouseover\"")
     @test !contains(html(tabset("A" => "/a", "B" => "/b")), "data-tab-preload")
 
-    # `url_param=nothing` renders the tabset as before: no names, no script.
+    # `url_param=nothing` keeps it out of the URL: no parameter and no names.
+    # Its inline call stays, for a page without `tabset_script` (`test/tabset_a11y.jl`).
     off = html(tabset("A" => h.p("a"), "A" => h.p("b"); url_param=nothing))
-    @test !contains(off, "data-tab") && !contains(off, "<script")
+    @test !contains(off, "data-tab")
     @test contains(html(tabset("A" => h.p("a"), "B" => h.p("b"); url_param=nothing, active="b", id="t5")),
         "<div id=\"t5-tab-2\" class=\"tab-panel u-w-full\"")
 
