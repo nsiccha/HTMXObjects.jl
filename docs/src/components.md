@@ -486,6 +486,12 @@ each `.table-wrap` `data-htmxo-width="fits"` or `"wide"`. Without the runtime
 the table keeps its sideways scroll and its header scrolls away. Markdown and
 PDF output are unchanged: the line is HTML only.
 
+Only the table's own width decides this, so opening a row never turns a table
+that fits into a box. A block in a row that is wider than the column runs past
+it, and the page scrolls sideways; give such a block its own scroll box
+(`overflow-x: auto`). A wide table in a detail row needs nothing: it is that
+box already.
+
 #### Columns keep their widths {#table-columns}
 
 A reader opening a row's detail, a lazy detail or lazy group rows arriving,

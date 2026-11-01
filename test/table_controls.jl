@@ -641,6 +641,78 @@ end
     @test contains(styles, ":is(td, th) .table-wrap[data-htmxo-width=\"wide\"] { max-height:")
 end
 
+@testitem "a table that fits its column stays in the page when something in a row pokes out" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', () => setTimeout(() => {
+                const out = document.body.dataset;
+                const box = e => e.getBoundingClientRect();
+                const wrapOf = id => document.querySelector('#' + id + ' .table-wrap');
+                const master = key => document.getElementById('detail-' + key).previousElementSibling;
+                // Open one row 40 rows down the way a reader does, with the row in the
+                // window, and report what that did to the page.
+                const openRow = (name, key, then) => {
+                    const wrap = wrapOf('s-' + name), row = master(key);
+                    window.scrollTo(0, box(row).top + scrollY - 400);
+                    const before = {top: box(row).top, height: document.documentElement.scrollHeight};
+                    out[name + 'FitsBefore'] = String(wrap.dataset.htmxoWidth === 'fits');
+                    row.querySelector('td').click();
+                    // A one-shot `--dump-dom` run renders no frames, so the ResizeObserver
+                    // that measures after a row opens never fires. A settle measures the same way.
+                    document.body.dispatchEvent(new CustomEvent('htmx:afterSettle', {bubbles: true}));
+                    setTimeout(() => {
+                        out[name + 'Fits'] = String(wrap.dataset.htmxoWidth === 'fits' && getComputedStyle(wrap).overflowY === 'visible');
+                        // The clicked row does not move and the page only grows.
+                        out[name + 'RowStays'] = String(Math.abs(box(row).top - before.top) <= 1);
+                        out[name + 'PageGrows'] = String(document.documentElement.scrollHeight >= before.height);
+                        // Control: the content really does stick out of the wrapper.
+                        out[name + 'PokesOut'] = String(wrap.scrollWidth > wrap.clientWidth + 1);
+                        then();
+                    }, 50);
+                };
+                openRow('poke', 'p40', () => {
+                    openRow('block', 'b40', () => {
+                        // Control: a table wider than its column is still that box.
+                        const w = wrapOf('s-wide');
+                        out.wideBoxed = String(w.dataset.htmxoWidth === 'wide' && getComputedStyle(w).overflowY === 'auto' &&
+                            w.querySelector(':scope > table').offsetWidth > w.clientWidth + 1);
+                        out.done = '1';
+                    });
+                });
+            }, 100));
+            """))
+        items = [(; id=i, name="Item $i") for i in 1:60]
+        rows(prefix, detail) = master_detail_table(["Name"], items; key=x -> "$prefix$(x.id)",
+            master=x -> (h.td(x.name),), detail=detail, searchable=true)
+        # A few pixels past the column's edge, and a block far wider than it.
+        poke = rows("p", x -> h.div(; style="margin-right:-12px")("Detail $(x.id)"))
+        block = rows("b", x -> h.div(; style="width:3000px")("Detail $(x.id)"))
+        wide = render_table((; (Symbol("column_$j") => ["value $i/$j" for i in 1:60] for j in 1:30)...);
+            download=false, searchable=true)
+        content = h.main(; class="container")(h.section(; id="s-poke")(poke),
+            h.section(; id="s-block")(block), h.section(; id="s-wide")(wide), driver)
+        dom = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, repr("text/html", htmx(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION, htmx_version=nothing,
+                hyperscript_version=nothing, preload_version=nothing)))
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,900 --virtual-time-budget=3000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        @test contains(dom, "data-done=\"1\"")
+        for section in ("poke", "block"), marker in ("fits-before", "fits", "row-stays", "page-grows", "pokes-out")
+            @test contains(dom, "data-$section-$marker=\"true\"")
+        end
+        @test contains(dom, "data-wide-boxed=\"true\"")
+    end
+end
+
 @testitem "table controls and headers stay in view while the rows scroll" setup=[ChromeDump] tags=[:browser] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"

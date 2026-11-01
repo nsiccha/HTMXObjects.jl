@@ -390,7 +390,9 @@ button summaries (`summary[role=button]`) keep Pico's looks. The box's rules
 are no stronger than Pico's own, so a component that uses `<details>` for
 something else, such as a menu badge, keeps whatever its own class rules set
 (`border: 0`, its own summary padding). `--htmxo-disclosure-padding` (default
-`1rem`) sets the box's inner spacing.
+`1rem`) sets the inner spacing of the bar and the content. Padding a component
+sets on its `<details>` insets both, inside its box; set
+`--htmxo-disclosure-padding: 0` as well to drop the inner spacing.
 
 ### Success toasts {#success-toasts}
 

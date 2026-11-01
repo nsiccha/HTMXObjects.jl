@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.33
+
+- A `sortable_table` that fits its column stays in the page when something in
+  a row sticks out past the column. The table runtime judged `fits` or `wide`
+  from `wrap.scrollWidth`, which counts every descendant's overflow, so a few
+  pixels in one open row turned a long table into a window-tall box, shortened
+  the page and moved the clicked row off screen. It now reads the table's own
+  width. A block in a row that really is wider than the column runs past it,
+  and the page scrolls sideways; give it its own scroll box (`overflow-x: auto`).
+- **Breaking** for a component that sets `padding` on its own `<details>`:
+  `pico_bridge` no longer pulls a disclosure's `summary` out past the box's
+  padding, which left it sticking out of any box whose padding had changed. The
+  box has no padding of its own: the inner spacing, still
+  `--htmxo-disclosure-padding`, sits on the bar and on `::details-content`.
+  Default boxes render the same. A component's own `padding` now insets its
+  bar and content inside its box, on top of that inner spacing. To keep the
+  earlier inset, add `--htmxo-disclosure-padding: 0` to the component. A browser
+  without `::details-content` (before Chrome 131, Safari 18.4, Firefox 143)
+  draws the content flush with the box's border.
+
 ## 0.1.32
 
 - `card_deck(cards; id, view=:grid, search=true, group_filter=true,
