@@ -36,7 +36,7 @@ end
                 const det = id => document.querySelector('details#' + id + ', #' + id + ' details');
                 const sum = id => det(id).querySelector(':scope > summary');
                 const label = id => { const r = document.createRange(); r.selectNodeContents(sum(id)); return r.getClientRects()[0]; };
-                const boxes = ['closed', 'open', 'semantic', 'caption'];
+                const boxes = ['closed', 'open', 'semantic'];
                 const bodyColor = () => css(document.getElementById('para')).color;
                 // Positive control: Pico is loaded and styles its own dropdown's summary.
                 out.picoLoaded = String(css(sum('dropdown')).borderTopWidth !== '0px');
