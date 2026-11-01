@@ -316,7 +316,7 @@ end
             check('linked-control-focus', document.activeElement === control && control.tabIndex === 0 && control.tagName === 'BUTTON');
             check('linked-control-closed', detailB.hidden && control.getAttribute('aria-expanded') === 'false' && control.textContent === '▸');
             control.click();
-            check('linked-control-opens', !detailB.hidden && control.getAttribute('aria-expanded') === 'true' && row('linked-B').getAttribute('aria-expanded') === 'true' && control.textContent === '▾');
+            check('linked-control-opens', !detailB.hidden && control.getAttribute('aria-expanded') === 'true' && row('linked-B').dataset.htmxoDetailOpen === 'true' && !row('linked-B').hasAttribute('aria-expanded') && control.textContent === '▾');
             check('linked-control-extension', window.__ext === 1);
             row('linked-B').querySelector('a').click();
             check('linked-link-keeps-detail', !detailB.hidden && window.__ext === 1);
